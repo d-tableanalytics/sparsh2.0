@@ -1,0 +1,134 @@
+import React, { useState, useEffect } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
+import { 
+  Users, UserPlus, Search, Filter, 
+  MoreVertical, Shield, Mail, Phone,
+  ChevronRight, BadgeCheck, XCircle, Clock,
+  ArrowUpRight, Building2, UserCircle2
+} from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
+import api from '../services/api';
+
+const UserManagement = () => {
+    const navigate = useNavigate();
+    const [users, setUsers] = useState([]);
+    const [loading, setLoading] = useState(true);
+    const [searchTerm, setSearchTerm] = useState('');
+    const [filterRole, setFilterRole] = useState('All');
+
+    const fetchData = async () => {
+        try {
+            const res = await api.get('/users');
+            // Filter only Staff roles
+            const staffRoles = ['superadmin', 'admin', 'coach'];
+            const staff = res.data.filter(u => staffRoles.includes(u.role?.toLowerCase()));
+            setUsers(staff);
+        } catch (err) {
+            console.error("Fetch staff error:", err);
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    useEffect(() => { fetchData(); }, []);
+
+    const filteredUsers = users.filter(u => {
+        const matchesSearch = (u.full_name || u.name || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
+                             (u.email || '').toLowerCase().includes(searchTerm.toLowerCase());
+        const matchesRole = filterRole === 'All' || u.role?.toLowerCase() === filterRole.toLowerCase();
+        return matchesSearch && matchesRole;
+    });
+
+    return (
+        <div className="space-y-8 pb-10">
+            {/* Header section */}
+            <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+                <div>
+                   <h1 className="text-3xl font-black text-[var(--text-main)] tracking-tight">Staff Management</h1>
+                   <p className="text-[14px] text-[var(--text-muted)] font-bold italic">Oversee core team members, coaches, and system administrators.</p>
+                </div>
+                <button className="flex items-center gap-2 px-6 py-3 bg-[var(--btn-primary)] text-white rounded-2xl text-[14px] font-black shadow-xl shadow-indigo-500/20 hover:opacity-90 transition-all">
+                    <UserPlus size={18}/> Add New Staff
+                </button>
+            </div>
+
+            {/* Filters Bar */}
+            <div className="flex flex-col md:flex-row items-center gap-4 bg-[var(--bg-card)] p-4 rounded-[24px] border border-[var(--border)] shadow-sm">
+                <div className="relative flex-1 group">
+                    <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-[var(--text-muted)] transition-colors group-focus-within:text-[var(--accent-indigo)]" size={18} />
+                    <input 
+                        placeholder="Search by name or email..." 
+                        className="w-full pl-12 pr-4 py-3 bg-[var(--input-bg)] border border-[var(--border)] rounded-xl text-[14px] font-bold text-[var(--text-main)] focus:border-[var(--accent-indigo)] outline-none transition-all"
+                        value={searchTerm} onChange={e => setSearchTerm(e.target.value)}
+                    />
+                </div>
+                <div className="flex items-center gap-2 overflow-x-auto no-scrollbar">
+                    {['All', 'Superadmin', 'Admin', 'Coach'].map(role => (
+                        <button key={role} onClick={() => setFilterRole(role)}
+                            className={`px-6 py-2.5 rounded-xl text-[12px] font-black transition-all border ${filterRole === role ? 'bg-[var(--accent-indigo)] text-white border-[var(--accent-indigo)] shadow-lg shadow-indigo-200' : 'bg-[var(--bg-card)] text-[var(--text-muted)] border-[var(--border)] hover:border-[var(--accent-indigo)]'}`}>
+                            {role}
+                        </button>
+                    ))}
+                </div>
+            </div>
+
+            {/* Staff Grid */}
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                <AnimatePresence>
+                    {filteredUsers.map((u, i) => (
+                        <motion.div 
+                            layout initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }}
+                            key={u._id} onClick={() => navigate(`/admin/users/${u._id}`)}
+                            className="bg-[var(--bg-card)] rounded-[28px] border border-[var(--border)] p-6 hover:shadow-2xl hover:shadow-black/5 hover:-translate-y-1 transition-all cursor-pointer group relative overflow-hidden"
+                        >
+                            <div className="absolute top-0 right-0 w-24 h-24 bg-gradient-to-br from-[var(--accent-indigo)] to-transparent opacity-0 group-hover:opacity-10 transition-opacity rounded-bl-full" />
+                            
+                            <div className="flex items-start justify-between mb-6">
+                                <div className="flex items-center gap-4">
+                                    <div className="w-14 h-14 rounded-2xl bg-[var(--input-bg)] border border-[var(--border)] flex items-center justify-center text-[var(--accent-indigo)] group-hover:scale-110 transition-all overflow-hidden relative">
+                                        <UserCircle2 size={32} />
+                                        <div className={`absolute bottom-0 right-0 w-3 h-3 rounded-full border-2 border-white ${u.is_active !== false ? 'bg-green-500' : 'bg-red-500'}`} />
+                                    </div>
+                                    <div>
+                                        <h3 className="text-[16px] font-black text-[var(--text-main)] group-hover:text-[var(--accent-indigo)] transition-colors">{u.full_name || u.name}</h3>
+                                        <div className="flex items-center gap-1.5 p-0.5 rounded-lg text-[var(--accent-indigo)] text-[9px] font-black uppercase tracking-widest bg-[var(--accent-indigo-bg)] w-fit mt-1 px-2 border border-[var(--accent-indigo-border)]">
+                                            <Shield size={10}/> {u.role}
+                                        </div>
+                                    </div>
+                                </div>
+                                <button className="p-2 text-[var(--text-muted)] hover:bg-[var(--input-bg)] rounded-xl transition-all"> <MoreVertical size={18}/> </button>
+                            </div>
+
+                            <div className="space-y-3 pt-4 border-t border-[var(--border)] border-dashed">
+                                <div className="flex items-center gap-3 text-[var(--text-muted)] group-hover:text-[var(--text-main)] transition-colors">
+                                    <Mail size={16} /> <span className="text-[12px] font-bold truncate">{u.email}</span>
+                                </div>
+                                <div className="flex items-center gap-3 text-[var(--text-muted)] group-hover:text-[var(--text-main)] transition-colors">
+                                    <Phone size={16} /> <span className="text-[12px] font-bold">{u.mobile || 'No contact set'}</span>
+                                </div>
+                            </div>
+
+                            <div className="mt-6 flex items-center justify-between">
+                                <div className="flex items-center gap-1.5 text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest">
+                                    <Clock size={12}/> Joined {new Date(u.created_at || Date.now()).toLocaleDateString([], { month: 'short', year: 'numeric' })}
+                                </div>
+                                <div className="p-2 bg-[var(--input-bg)] rounded-xl text-[var(--text-muted)] group-hover:text-[var(--accent-indigo)] group-hover:bg-[var(--accent-indigo-bg)] transition-all">
+                                    <ChevronRight size={18} />
+                                </div>
+                            </div>
+                        </motion.div>
+                    ))}
+                </AnimatePresence>
+            </div>
+
+            {loading && (
+                <div className="flex flex-col items-center justify-center py-20 gap-4 opacity-50">
+                    <div className="w-10 h-10 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin" />
+                    <p className="font-black uppercase text-[12px] tracking-widest animate-pulse">Syncing Staff Records...</p>
+                </div>
+            )}
+        </div>
+    );
+};
+
+export default UserManagement;

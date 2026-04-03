@@ -1,0 +1,624 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { useParams, useNavigate } from 'react-router-dom';
+import api from '../services/api';
+import Modal from '../components/common/Modal';
+import { motion, AnimatePresence } from 'framer-motion';
+import {
+  BarChart3, PieChart as PieChartIcon, TrendingUp, Award, Zap,
+  Building2, Globe, MapPin, Users, Mail, Phone, Hash, Briefcase,
+  ArrowLeft, Pencil, Trash2, Download, Upload, Plus, User, Lock,
+  CheckCircle2, XCircle, PauseCircle, ChevronDown, Save, X,
+  FileSpreadsheet, AlertTriangle, ExternalLink, Layers, Calendar,
+  Target, BookOpen
+} from 'lucide-react';
+import {
+  BarChart, Bar, LineChart, Line, PieChart, Pie, Cell,
+  XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
+  Area, AreaChart, Legend
+} from 'recharts';
+
+// ─── Shared Components ───
+const StatusBadge = ({ status }) => {
+  const config = {
+    active:   { bg: 'var(--status-active-bg)',   text: 'var(--status-active-text)',  border: 'var(--status-active-border)', icon: CheckCircle2 },
+    hold:     { bg: 'var(--accent-yellow-bg)',    text: 'var(--accent-yellow)',       border: 'var(--accent-yellow-border)', icon: PauseCircle },
+    inactive: { bg: 'var(--accent-red-bg)',       text: 'var(--accent-red)',          border: 'var(--accent-red-border)',    icon: XCircle },
+  };
+  const c = config[status] || config.active;
+  const Icon = c.icon;
+  return (
+    <span className="px-2.5 py-1 rounded-md text-[11px] font-bold inline-flex items-center gap-1.5 uppercase tracking-wider" style={{ background: c.bg, color: c.text, border: `1px solid ${c.border}` }}>
+      <Icon size={12} /> {status}
+    </span>
+  );
+};
+
+const InfoRow = ({ icon: Icon, label, value }) => (
+  <div className="flex items-start gap-3 py-2">
+    <Icon size={14} className="text-[var(--accent-indigo)] mt-0.5 shrink-0" />
+    <div className="flex flex-col">
+      <span className="text-[10px] font-bold text-[var(--text-muted)] uppercase tracking-widest">{label}</span>
+      <span className="text-[13px] font-medium text-[var(--text-main)]">{value || '—'}</span>
+    </div>
+  </div>
+);
+
+const StatCard = ({ icon: Icon, label, value, sub, color }) => (
+  <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-xl p-4 flex items-center gap-4 hover:border-[var(--accent-indigo-border)] transition-all">
+    <div className="p-3 rounded-xl shrink-0" style={{ background: `var(--accent-${color}-bg)` }}>
+      <Icon size={20} style={{ color: `var(--accent-${color})` }} />
+    </div>
+    <div className="min-w-0">
+      <p className="text-2xl font-black text-[var(--text-main)] leading-none">{value}</p>
+      <p className="text-[11px] text-[var(--text-muted)] font-bold uppercase tracking-wider mt-1">{label}</p>
+      {sub && <p className="text-[10px] text-[var(--accent-green)] font-bold mt-0.5">{sub}</p>}
+    </div>
+  </div>
+);
+
+// ─── Chart Colors ───
+const CHART_COLORS = ['#6366f1', '#22c55e', '#f97316', '#eab308', '#ec4899', '#06b6d4'];
+
+// ─── Sample data generators (will use real API data when LMS is built) ───
+const generateMonthlyData = (userCount) => {
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun'];
+  return months.map(m => ({
+    name: m,
+    sessions: Math.floor(Math.random() * 20 + 5),
+    attendance: Math.floor(Math.random() * (userCount || 10) + 3),
+    score: Math.floor(Math.random() * 30 + 60),
+  }));
+};
+
+const generatePieData = (userCount) => [
+  { name: 'Core', value: Math.floor((userCount || 10) * 0.4) },
+  { name: 'Support', value: Math.floor((userCount || 10) * 0.25) },
+  { name: 'Both', value: Math.floor((userCount || 10) * 0.2) },
+  { name: 'None', value: Math.max(1, Math.floor((userCount || 10) * 0.15)) },
+];
+
+const generateDeptData = (users) => {
+  const depts = {};
+  (users || []).forEach(u => {
+    const d = u.department || 'Other';
+    depts[d] = (depts[d] || 0) + 1;
+  });
+  return Object.entries(depts).map(([name, count]) => ({ name, count }));
+};
+
+const generatePerformanceData = () => {
+  const weeks = ['W1', 'W2', 'W3', 'W4', 'W5', 'W6', 'W7', 'W8'];
+  return weeks.map(w => ({
+    week: w,
+    completed: Math.floor(Math.random() * 15 + 5),
+    pending: Math.floor(Math.random() * 8 + 2),
+  }));
+};
+
+// ─── Main Component ───
+const CompanyDetails = () => {
+  const { companyId } = useParams();
+  const navigate = useNavigate();
+  const fileInputRef = useRef(null);
+
+  const [company, setCompany] = useState(null);
+  const [users, setUsers] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [activeTab, setActiveTab] = useState('dashboard');
+  const [editMode, setEditMode] = useState(false);
+  const [editData, setEditData] = useState({});
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [showAddUser, setShowAddUser] = useState(false);
+  const [importStatus, setImportStatus] = useState(null);
+  const [statusDropdown, setStatusDropdown] = useState(false);
+
+  const [newUser, setNewUser] = useState({
+    email: '', password: '', first_name: '', last_name: '', mobile: '',
+    role: 'clientuser', session_type: 'None', designation: '', department: 'Other'
+  });
+
+  const fetchData = async () => {
+    try {
+      const [compRes, usersRes] = await Promise.all([
+        api.get(`/companies/${companyId}`),
+        api.get(`/companies/${companyId}/users`)
+      ]);
+      setCompany(compRes.data);
+      setUsers(usersRes.data);
+      setEditData(compRes.data);
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => { fetchData(); }, [companyId]);
+
+  // ─── Handlers ───
+  const handleSaveEdit = async () => {
+    try {
+      const { _id, created_at, admin_id, is_active, status, ...fields } = editData;
+      await api.put(`/companies/${companyId}`, fields);
+      setEditMode(false);
+      fetchData();
+    } catch (err) { alert('Update failed'); }
+  };
+
+  const handleStatusChange = async (newStatus) => {
+    try {
+      await api.patch(`/companies/${companyId}/status`, { status: newStatus });
+      setStatusDropdown(false);
+      fetchData();
+    } catch (err) { alert('Status change failed'); }
+  };
+
+  const handleDelete = async () => {
+    try {
+      await api.delete(`/companies/${companyId}`);
+      navigate('/companies');
+    } catch (err) { alert('Delete failed'); }
+  };
+
+  const handleAddUser = async (e) => {
+    e.preventDefault();
+    try {
+      const cleanUser = { ...newUser };
+      if (!cleanUser.mobile) cleanUser.mobile = null;
+      if (!cleanUser.designation) cleanUser.designation = null;
+      await api.post(`/companies/${companyId}/users/bulk`, [cleanUser]);
+      setShowAddUser(false);
+      setNewUser({ email: '', password: '', first_name: '', last_name: '', mobile: '', role: 'clientuser', session_type: 'None', designation: '', department: 'Other' });
+      fetchData();
+    } catch (err) { alert(err.response?.data?.detail || 'Failed to create user'); }
+  };
+
+  const handleExportTemplate = async () => {
+    try {
+      const response = await api.get(`/companies/${companyId}/users/template`, { responseType: 'blob' });
+      const url = window.URL.createObjectURL(new Blob([response.data]));
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `user_template_${companyId}.xlsx`;
+      link.click();
+      window.URL.revokeObjectURL(url);
+    } catch (err) { alert('Template download failed'); }
+  };
+
+  const handleImportFile = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const formData = new FormData();
+    formData.append('file', file);
+    try {
+      const res = await api.post(`/companies/${companyId}/users/import`, formData, { headers: { 'Content-Type': 'multipart/form-data' } });
+      setImportStatus(res.data);
+      fetchData();
+    } catch (err) { alert('Import failed'); }
+    e.target.value = '';
+  };
+
+  if (loading) return (
+    <div className="flex items-center justify-center py-32">
+      <div className="w-8 h-8 border-2 border-[var(--accent-indigo-border)] border-t-[var(--accent-indigo)] rounded-full animate-spin"></div>
+    </div>
+  );
+
+  if (!company) return <div className="text-center py-20 text-[var(--text-muted)]">Company not found</div>;
+
+  // Chart data
+  const monthlyData = generateMonthlyData(users.length);
+  const pieData = generatePieData(users.length);
+  const deptData = generateDeptData(users);
+  const perfData = generatePerformanceData();
+  const activeUsers = users.filter(u => u.is_active !== false).length;
+
+  const topPerformers = users.slice(0, 3).map((u, i) => ({
+    ...u,
+    score: Math.floor(Math.random() * 20 + 80),
+    rank: i + 1,
+  }));
+
+  return (
+    <div className="space-y-6">
+      {/* ─── Header ─── */}
+      <div className="flex items-center justify-between flex-wrap gap-4">
+        <div className="flex items-center gap-4">
+          <button onClick={() => navigate('/companies')} className="p-2 rounded-lg text-[var(--text-muted)] hover:bg-[var(--accent-indigo-bg)] hover:text-[var(--accent-indigo)] transition-all">
+            <ArrowLeft size={18} />
+          </button>
+          <div>
+            <h1 className="text-xl font-bold text-[var(--text-main)] tracking-tight">{company.name}</h1>
+            <p className="text-[12px] text-[var(--text-muted)]">{company.domain || 'No Domain'} · {company.company_type}</p>
+          </div>
+          <StatusBadge status={company.status || 'active'} />
+        </div>
+        <div className="flex items-center gap-2">
+          <button onClick={() => setEditMode(!editMode)} className="h-9 px-4 bg-[var(--bg-card)] border border-[var(--border)] text-[var(--text-muted)] rounded-lg text-[12px] font-bold flex items-center gap-2 hover:border-[var(--accent-indigo)] hover:text-[var(--accent-indigo)] transition-all">
+            <Pencil size={14} /> Edit
+          </button>
+          <div className="relative">
+            <button onClick={() => setStatusDropdown(!statusDropdown)} className="h-9 px-4 bg-[var(--bg-card)] border border-[var(--border)] text-[var(--text-muted)] rounded-lg text-[12px] font-bold flex items-center gap-2 hover:border-[var(--accent-orange)] hover:text-[var(--accent-orange)] transition-all">
+              Status <ChevronDown size={12} />
+            </button>
+            {statusDropdown && (
+              <div className="absolute right-0 top-11 bg-[var(--bg-card)] border border-[var(--border)] rounded-lg shadow-lg z-50 min-w-[140px] py-1">
+                {['active', 'hold', 'inactive'].map(s => (
+                  <button key={s} onClick={() => handleStatusChange(s)} className="w-full px-4 py-2 text-left text-[12px] font-bold text-[var(--text-muted)] hover:bg-[var(--input-bg)] capitalize transition-all">{s}</button>
+                ))}
+              </div>
+            )}
+          </div>
+          <button onClick={() => setShowDeleteConfirm(true)} className="h-9 px-4 bg-[var(--accent-red-bg)] border border-[var(--accent-red-border)] text-[var(--accent-red)] rounded-lg text-[12px] font-bold flex items-center gap-2 hover:opacity-80 transition-all">
+            <Trash2 size={14} /> Delete
+          </button>
+        </div>
+      </div>
+
+      {/* ─── Edit Panel ─── */}
+      <AnimatePresence>
+        {editMode && (
+          <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }} className="bg-[var(--bg-card)] border border-[var(--accent-indigo-border)] rounded-xl p-6 overflow-hidden">
+            <h3 className="text-[14px] font-bold text-[var(--text-main)] mb-4">Edit Company Details</h3>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              {[
+                { key: 'name', label: 'Name' }, { key: 'domain', label: 'Domain' }, { key: 'owner', label: 'Owner' },
+                { key: 'email', label: 'Email' }, { key: 'contact', label: 'Contact' }, { key: 'company_type', label: 'Industry' },
+                { key: 'address', label: 'Address' }, { key: 'city', label: 'City' }, { key: 'state', label: 'State' },
+                { key: 'pin', label: 'PIN' }, { key: 'gst', label: 'GST' }, { key: 'members_count', label: 'Size', type: 'number' },
+              ].map(f => (
+                <div key={f.key} className="space-y-1">
+                  <label className="text-[10px] font-bold text-[var(--text-muted)] uppercase tracking-widest">{f.label}</label>
+                  <input type={f.type || 'text'} value={editData[f.key] || ''} onChange={e => setEditData({ ...editData, [f.key]: f.type === 'number' ? parseInt(e.target.value) : e.target.value })}
+                    className="w-full px-3 py-1.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-md outline-none text-[13px] font-medium text-[var(--text-main)] focus:border-[var(--accent-indigo)]" />
+                </div>
+              ))}
+            </div>
+            <div className="flex gap-3 mt-6">
+              <button onClick={handleSaveEdit} className="h-9 px-6 bg-[var(--accent-green)] text-white rounded-lg text-[12px] font-bold flex items-center gap-2"><Save size={14} /> Save Changes</button>
+              <button onClick={() => { setEditMode(false); setEditData(company); }} className="h-9 px-6 bg-[var(--input-bg)] border border-[var(--border)] text-[var(--text-muted)] rounded-lg text-[12px] font-bold flex items-center gap-2"><X size={14} /> Cancel</button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* ─── Tabs ─── */}
+      <div className="flex gap-1 bg-[var(--bg-card)] border border-[var(--border)] p-1 rounded-xl w-fit">
+        {[
+          { id: 'dashboard', label: 'Company Dashboard', icon: BarChart3 },
+          { id: 'members', label: 'Team Members', icon: Users },
+        ].map(tab => (
+          <button key={tab.id} onClick={() => setActiveTab(tab.id)}
+            className={`flex items-center gap-2 px-5 py-2.5 rounded-lg text-[12px] font-bold transition-all ${
+              activeTab === tab.id
+                ? 'bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)]'
+                : 'text-[var(--text-muted)] hover:bg-[var(--input-bg)]'
+            }`}>
+            <tab.icon size={15} /> {tab.label}
+          </button>
+        ))}
+      </div>
+
+      {/* ─── Tab Content ─── */}
+      <AnimatePresence mode="wait">
+        {/* ════════════ DASHBOARD TAB ════════════ */}
+        {activeTab === 'dashboard' && (
+          <motion.div key="dashboard" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} className="space-y-6">
+
+            {/* Company Info Row */}
+            <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-xl p-6">
+              <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-x-8 gap-y-1">
+                <InfoRow icon={Building2} label="Company" value={company.name} />
+                <InfoRow icon={Globe} label="Domain" value={company.domain} />
+                <InfoRow icon={User} label="Owner" value={company.owner} />
+                <InfoRow icon={Briefcase} label="Industry" value={company.company_type} />
+                <InfoRow icon={Mail} label="Email" value={company.email} />
+                <InfoRow icon={Phone} label="Contact" value={company.contact} />
+                <InfoRow icon={MapPin} label="Location" value={[company.city, company.state].filter(Boolean).join(', ') || '—'} />
+                <InfoRow icon={Hash} label="GSTIN" value={company.gst} />
+              </div>
+            </div>
+
+            {/* Stats Cards */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+              <StatCard icon={Users} label="Total Members" value={users.length} sub={`${activeUsers} active`} color="indigo" />
+              <StatCard icon={Layers} label="Batches" value={Math.max(1, Math.floor(users.length / 5))} sub="In progress" color="green" />
+              <StatCard icon={Calendar} label="Active Sessions" value={Math.floor(Math.random() * 5 + 2)} sub="This month" color="orange" />
+              <StatCard icon={Award} label="Avg. Score" value={`${Math.floor(Math.random() * 15 + 75)}%`} sub="+5% from last month" color="yellow" />
+            </div>
+
+            {/* Charts Row 1 */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              {/* Sessions & Attendance Line Chart */}
+              <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-xl p-5">
+                <div className="flex items-center justify-between mb-4">
+                  <div>
+                    <h3 className="text-[14px] font-bold text-[var(--text-main)]">Sessions & Attendance</h3>
+                    <p className="text-[11px] text-[var(--text-muted)]">Monthly session tracking</p>
+                  </div>
+                  <TrendingUp size={16} className="text-[var(--accent-green)]" />
+                </div>
+                <ResponsiveContainer width="100%" height={240}>
+                  <AreaChart data={monthlyData}>
+                    <defs>
+                      <linearGradient id="gradIndigo" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="5%" stopColor="#6366f1" stopOpacity={0.3} />
+                        <stop offset="95%" stopColor="#6366f1" stopOpacity={0} />
+                      </linearGradient>
+                      <linearGradient id="gradGreen" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="5%" stopColor="#22c55e" stopOpacity={0.3} />
+                        <stop offset="95%" stopColor="#22c55e" stopOpacity={0} />
+                      </linearGradient>
+                    </defs>
+                    <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+                    <XAxis dataKey="name" tick={{ fontSize: 11, fill: 'var(--text-muted)' }} />
+                    <YAxis tick={{ fontSize: 11, fill: 'var(--text-muted)' }} />
+                    <Tooltip contentStyle={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 8, fontSize: 12 }} />
+                    <Area type="monotone" dataKey="sessions" stroke="#6366f1" fill="url(#gradIndigo)" strokeWidth={2} name="Sessions" />
+                    <Area type="monotone" dataKey="attendance" stroke="#22c55e" fill="url(#gradGreen)" strokeWidth={2} name="Attendance" />
+                  </AreaChart>
+                </ResponsiveContainer>
+              </div>
+
+              {/* Performance Bar Chart */}
+              <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-xl p-5">
+                <div className="flex items-center justify-between mb-4">
+                  <div>
+                    <h3 className="text-[14px] font-bold text-[var(--text-main)]">Task Performance</h3>
+                    <p className="text-[11px] text-[var(--text-muted)]">Completed vs pending tasks by week</p>
+                  </div>
+                  <Target size={16} className="text-[var(--accent-orange)]" />
+                </div>
+                <ResponsiveContainer width="100%" height={240}>
+                  <BarChart data={perfData} barGap={4}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+                    <XAxis dataKey="week" tick={{ fontSize: 11, fill: 'var(--text-muted)' }} />
+                    <YAxis tick={{ fontSize: 11, fill: 'var(--text-muted)' }} />
+                    <Tooltip contentStyle={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 8, fontSize: 12 }} />
+                    <Bar dataKey="completed" fill="#22c55e" radius={[4, 4, 0, 0]} name="Completed" />
+                    <Bar dataKey="pending" fill="#f97316" radius={[4, 4, 0, 0]} name="Pending" />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+
+            {/* Charts Row 2 */}
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+              {/* Session Type Pie */}
+              <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-xl p-5">
+                <h3 className="text-[14px] font-bold text-[var(--text-main)] mb-1">Session Type Split</h3>
+                <p className="text-[11px] text-[var(--text-muted)] mb-4">Distribution by coaching type</p>
+                <ResponsiveContainer width="100%" height={200}>
+                  <PieChart>
+                    <Pie data={pieData} cx="50%" cy="50%" innerRadius={50} outerRadius={80} dataKey="value" paddingAngle={4} strokeWidth={0}>
+                      {pieData.map((_, i) => (
+                        <Cell key={i} fill={CHART_COLORS[i % CHART_COLORS.length]} />
+                      ))}
+                    </Pie>
+                    <Tooltip contentStyle={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 8, fontSize: 12 }} />
+                  </PieChart>
+                </ResponsiveContainer>
+                <div className="flex flex-wrap gap-3 justify-center mt-2">
+                  {pieData.map((d, i) => (
+                    <div key={d.name} className="flex items-center gap-1.5">
+                      <div className="w-2 h-2 rounded-full" style={{ background: CHART_COLORS[i] }}></div>
+                      <span className="text-[10px] text-[var(--text-muted)] font-bold">{d.name} ({d.value})</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Department Bar */}
+              <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-xl p-5">
+                <h3 className="text-[14px] font-bold text-[var(--text-main)] mb-1">By Department</h3>
+                <p className="text-[11px] text-[var(--text-muted)] mb-4">Team distribution</p>
+                <ResponsiveContainer width="100%" height={220}>
+                  <BarChart data={deptData} layout="vertical" barSize={16}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+                    <XAxis type="number" tick={{ fontSize: 11, fill: 'var(--text-muted)' }} />
+                    <YAxis dataKey="name" type="category" tick={{ fontSize: 11, fill: 'var(--text-muted)' }} width={80} />
+                    <Tooltip contentStyle={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 8, fontSize: 12 }} />
+                    <Bar dataKey="count" fill="#6366f1" radius={[0, 6, 6, 0]} name="Members" />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+
+              {/* Top Performers */}
+              <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-xl p-5">
+                <div className="flex items-center justify-between mb-4">
+                  <div>
+                    <h3 className="text-[14px] font-bold text-[var(--text-main)]">Best Performers</h3>
+                    <p className="text-[11px] text-[var(--text-muted)]">Top scoring members</p>
+                  </div>
+                  <Award size={16} className="text-[var(--accent-yellow)]" />
+                </div>
+                <div className="space-y-3">
+                  {topPerformers.map(p => (
+                    <div key={p._id || p.email} className="flex items-center gap-3 p-2.5 rounded-lg hover:bg-[var(--input-bg)] transition-all">
+                      <div className={`w-7 h-7 rounded-md flex items-center justify-center font-black text-[11px] text-white ${
+                        p.rank === 1 ? 'bg-amber-500' : p.rank === 2 ? 'bg-gray-400' : 'bg-amber-700'
+                      }`}>
+                        {p.rank}
+                      </div>
+                      <div className="w-8 h-8 rounded-md flex items-center justify-center text-white font-bold text-[10px]" style={{ background: 'var(--avatar-bg)' }}>
+                        {p.full_name?.charAt(0) || '?'}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-[13px] font-bold text-[var(--text-main)] truncate">{p.full_name || p.email}</p>
+                        <p className="text-[10px] text-[var(--text-muted)]">{p.department || 'Team'}</p>
+                      </div>
+                      <span className="text-[14px] font-black text-[var(--accent-green)]">{p.score}%</span>
+                    </div>
+                  ))}
+                  {topPerformers.length === 0 && (
+                    <p className="text-[12px] text-[var(--text-muted)] text-center py-8">No data yet</p>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* Score Trend Line */}
+            <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-xl p-5">
+              <div className="flex items-center justify-between mb-4">
+                <div>
+                  <h3 className="text-[14px] font-bold text-[var(--text-main)]">Average Assessment Score Trend</h3>
+                  <p className="text-[11px] text-[var(--text-muted)]">Monthly average performance score</p>
+                </div>
+                <BookOpen size={16} className="text-[var(--accent-indigo)]" />
+              </div>
+              <ResponsiveContainer width="100%" height={200}>
+                <LineChart data={monthlyData}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+                  <XAxis dataKey="name" tick={{ fontSize: 11, fill: 'var(--text-muted)' }} />
+                  <YAxis domain={[50, 100]} tick={{ fontSize: 11, fill: 'var(--text-muted)' }} />
+                  <Tooltip contentStyle={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 8, fontSize: 12 }} />
+                  <Line type="monotone" dataKey="score" stroke="#eab308" strokeWidth={3} dot={{ fill: '#eab308', r: 4 }} name="Avg Score %" />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          </motion.div>
+        )}
+
+        {/* ════════════ TEAM MEMBERS TAB ════════════ */}
+        {activeTab === 'members' && (
+          <motion.div key="members" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}>
+            <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-xl overflow-hidden">
+              <div className="flex items-center justify-between px-5 py-4 border-b border-[var(--border)]">
+                <div>
+                  <h3 className="text-[14px] font-bold text-[var(--text-main)]">Team Members</h3>
+                  <p className="text-[11px] text-[var(--text-muted)]">{users.length} users registered · {activeUsers} active</p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button onClick={handleExportTemplate} className="h-8 px-3 bg-[var(--accent-green-bg)] border border-[var(--accent-green-border)] text-[var(--accent-green)] rounded-lg text-[11px] font-bold flex items-center gap-1.5 hover:opacity-80 transition-all">
+                    <Download size={12} /> Template
+                  </button>
+                  <button onClick={() => fileInputRef.current?.click()} className="h-8 px-3 bg-[var(--accent-orange-bg)] border border-[var(--accent-orange-border)] text-[var(--accent-orange)] rounded-lg text-[11px] font-bold flex items-center gap-1.5 hover:opacity-80 transition-all">
+                    <Upload size={12} /> Import
+                  </button>
+                  <input ref={fileInputRef} type="file" accept=".xlsx,.xls" onChange={handleImportFile} className="hidden" />
+                  <button onClick={() => setShowAddUser(true)} className="h-8 px-3 bg-[var(--btn-primary)] text-white rounded-lg text-[11px] font-bold flex items-center gap-1.5 hover:bg-[var(--btn-primary-hover)] transition-all">
+                    <Plus size={12} /> Add User
+                  </button>
+                </div>
+              </div>
+
+              {importStatus && (
+                <div className="px-5 py-3 bg-[var(--accent-green-bg)] border-b border-[var(--accent-green-border)] flex items-center justify-between">
+                  <span className="text-[12px] font-bold text-[var(--accent-green)]">
+                    <FileSpreadsheet size={14} className="inline mr-2" />
+                    Import: {importStatus.created} created, {importStatus.skipped} skipped
+                  </span>
+                  <button onClick={() => setImportStatus(null)} className="text-[var(--text-muted)] hover:text-[var(--accent-red)]"><X size={14} /></button>
+                </div>
+              )}
+
+              <div className="overflow-x-auto">
+                <table className="w-full">
+                  <thead>
+                    <tr className="bg-[var(--table-header-bg)] border-b border-[var(--border)]">
+                      <th className="px-5 py-3 text-left text-[11px] font-bold text-[var(--text-muted)] uppercase tracking-wider">Name</th>
+                      <th className="px-5 py-3 text-left text-[11px] font-bold text-[var(--text-muted)] uppercase tracking-wider">Email</th>
+                      <th className="px-5 py-3 text-left text-[11px] font-bold text-[var(--text-muted)] uppercase tracking-wider">Role</th>
+                      <th className="px-5 py-3 text-left text-[11px] font-bold text-[var(--text-muted)] uppercase tracking-wider">Department</th>
+                      <th className="px-5 py-3 text-left text-[11px] font-bold text-[var(--text-muted)] uppercase tracking-wider">Session</th>
+                      <th className="px-5 py-3 text-left text-[11px] font-bold text-[var(--text-muted)] uppercase tracking-wider">Status</th>
+                      <th className="px-5 py-3 text-right text-[11px] font-bold text-[var(--text-muted)] uppercase tracking-wider">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[var(--border)]">
+                    {users.map(u => (
+                      <tr key={u._id} className="hover:bg-[var(--table-hover)] transition-all">
+                        <td className="px-5 py-2.5">
+                          <div className="flex items-center gap-3">
+                            <div className="w-7 h-7 rounded-md flex items-center justify-center text-white font-bold text-[10px]" style={{ background: 'var(--avatar-bg)' }}>
+                              {u.full_name?.charAt(0) || u.email?.charAt(0) || '?'}
+                            </div>
+                            <div className="flex flex-col">
+                              <span className="text-[13px] font-bold text-[var(--text-main)]">{u.full_name || '—'}</span>
+                              <span className="text-[10px] text-[var(--text-muted)]">{u.mobile || ''}</span>
+                            </div>
+                          </div>
+                        </td>
+                        <td className="px-5 py-2.5 text-[12px] text-[var(--text-muted)]">{u.email}</td>
+                        <td className="px-5 py-2.5">
+                          <span className="px-2 py-0.5 bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] border border-[var(--accent-indigo-border)] rounded-md text-[10px] font-bold uppercase">{u.role}</span>
+                        </td>
+                        <td className="px-5 py-2.5 text-[12px] text-[var(--text-muted)] font-medium">{u.department || '—'}</td>
+                        <td className="px-5 py-2.5 text-[12px] text-[var(--accent-orange)] font-bold">{u.session_type || '—'}</td>
+                        <td className="px-5 py-2.5">
+                          <span className={`px-2 py-0.5 rounded-md text-[10px] font-bold ${u.is_active !== false ? 'bg-[var(--status-active-bg)] text-[var(--status-active-text)]' : 'bg-[var(--accent-red-bg)] text-[var(--accent-red)]'}`}>
+                            {u.is_active !== false ? 'Active' : 'Inactive'}
+                          </span>
+                        </td>
+                        <td className="px-5 py-2.5 text-right">
+                          <button onClick={() => navigate(`/members/${u._id}`)} className="p-1.5 text-[var(--text-muted)] hover:text-[var(--accent-indigo)] hover:bg-[var(--accent-indigo-bg)] rounded-md transition-all" title="View Member Dashboard">
+                            <ExternalLink size={14} />
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                    {users.length === 0 && (
+                      <tr><td colSpan={7} className="px-5 py-12 text-center text-[var(--text-muted)] text-[13px]">No users yet. Add users or import via template.</td></tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* ─── Delete Confirm Modal ─── */}
+      <Modal isOpen={showDeleteConfirm} onClose={() => setShowDeleteConfirm(false)} title="Confirm Deletion">
+        <div className="space-y-4 text-center py-4">
+          <div className="w-16 h-16 bg-[var(--accent-red-bg)] rounded-xl mx-auto flex items-center justify-center">
+            <AlertTriangle size={32} className="text-[var(--accent-red)]" />
+          </div>
+          <p className="text-[14px] font-bold text-[var(--text-main)]">Delete "{company.name}"?</p>
+          <p className="text-[12px] text-[var(--text-muted)]">This will permanently remove the company and all {users.length} users. Cannot be undone.</p>
+          <div className="flex gap-3 justify-center pt-2">
+            <button onClick={() => setShowDeleteConfirm(false)} className="px-6 py-2 bg-[var(--input-bg)] border border-[var(--border)] rounded-lg text-[13px] font-bold text-[var(--text-muted)]">Cancel</button>
+            <button onClick={handleDelete} className="px-6 py-2 bg-[var(--accent-red)] text-white rounded-lg text-[13px] font-bold hover:opacity-90 transition-all">Delete Permanently</button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* ─── Add User Modal ─── */}
+      <Modal isOpen={showAddUser} onClose={() => setShowAddUser(false)} title="Add New User">
+        <form onSubmit={handleAddUser} className="space-y-4 px-1">
+          <div className="grid grid-cols-2 gap-4">
+            <div className="space-y-1"><label className="text-[10px] font-bold text-[var(--text-muted)] uppercase tracking-widest">First Name</label><input className="w-full px-3 py-1.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-md text-[13px] text-[var(--text-main)] outline-none" value={newUser.first_name} onChange={e => setNewUser({...newUser, first_name: e.target.value})} /></div>
+            <div className="space-y-1"><label className="text-[10px] font-bold text-[var(--text-muted)] uppercase tracking-widest">Last Name</label><input className="w-full px-3 py-1.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-md text-[13px] text-[var(--text-main)] outline-none" value={newUser.last_name} onChange={e => setNewUser({...newUser, last_name: e.target.value})} /></div>
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            <div className="space-y-1"><label className="text-[10px] font-bold text-[var(--text-muted)] uppercase tracking-widest">Email *</label><input type="email" required className="w-full px-3 py-1.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-md text-[13px] text-[var(--text-main)] outline-none" value={newUser.email} onChange={e => setNewUser({...newUser, email: e.target.value})} /></div>
+            <div className="space-y-1"><label className="text-[10px] font-bold text-[var(--text-muted)] uppercase tracking-widest">Password *</label><input type="password" required className="w-full px-3 py-1.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-md text-[13px] text-[var(--text-main)] outline-none" value={newUser.password} onChange={e => setNewUser({...newUser, password: e.target.value})} /></div>
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            <div className="space-y-1"><label className="text-[10px] font-bold text-[var(--text-muted)] uppercase tracking-widest">Mobile</label><input className="w-full px-3 py-1.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-md text-[13px] text-[var(--text-main)] outline-none" value={newUser.mobile} onChange={e => setNewUser({...newUser, mobile: e.target.value})} /></div>
+            <div className="space-y-1"><label className="text-[10px] font-bold text-[var(--text-muted)] uppercase tracking-widest">Designation</label><input className="w-full px-3 py-1.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-md text-[13px] text-[var(--text-main)] outline-none" value={newUser.designation} onChange={e => setNewUser({...newUser, designation: e.target.value})} /></div>
+          </div>
+          <div className="grid grid-cols-3 gap-4">
+            <div className="space-y-1"><label className="text-[10px] font-bold text-[var(--text-muted)] uppercase tracking-widest">Role</label>
+              <select className="w-full px-3 py-1.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-md text-[13px] text-[var(--text-main)] outline-none" value={newUser.role} onChange={e => setNewUser({...newUser, role: e.target.value})}>
+                <option value="clientadmin">ClientAdmin</option><option value="clientuser">ClientUser</option>
+              </select></div>
+            <div className="space-y-1"><label className="text-[10px] font-bold text-[var(--text-muted)] uppercase tracking-widest">Session Type</label>
+              <select className="w-full px-3 py-1.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-md text-[13px] text-[var(--text-main)] outline-none" value={newUser.session_type} onChange={e => setNewUser({...newUser, session_type: e.target.value})}>
+                <option value="Core">Core</option><option value="Support">Support</option><option value="Both">Both</option><option value="None">None</option>
+              </select></div>
+            <div className="space-y-1"><label className="text-[10px] font-bold text-[var(--text-muted)] uppercase tracking-widest">Department</label>
+              <select className="w-full px-3 py-1.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-md text-[13px] text-[var(--text-main)] outline-none" value={newUser.department} onChange={e => setNewUser({...newUser, department: e.target.value})}>
+                <option value="HOD">HOD</option><option value="Implementor">Implementor</option><option value="EA">EA</option><option value="MD">MD</option><option value="Other">Other</option>
+              </select></div>
+          </div>
+          <div className="flex gap-3 mt-6">
+            <button type="submit" className="flex-1 py-2 bg-[var(--btn-primary)] text-white rounded-lg text-[13px] font-bold hover:bg-[var(--btn-primary-hover)] transition-all">Create User</button>
+          </div>
+        </form>
+      </Modal>
+    </div>
+  );
+};
+
+export default CompanyDetails;
