@@ -8,13 +8,16 @@ import interactionPlugin from '@fullcalendar/interaction';
 import { motion, AnimatePresence } from 'framer-motion';
 import api from '../services/api';
 import { useAuth } from '../context/AuthContext';
-import { 
-  ChevronLeft, ChevronRight, Clock, X, UserCircle2, 
-  Zap, ListChecks, Users2, Activity, CalendarDays, Building2, 
-  Layers, Trash2, AlertCircle, Link, Check, UserPlus2, ShieldCheck,
-  Edit2, CheckCircle, ArrowRightLeft, Ban, PlayCircle, MoreHorizontal,
-  PlusCircle, LayoutGrid, Calendar as CalendarIcon, Briefcase, Video
+import { useMemo } from 'react';
+
+import {
+    ChevronLeft, ChevronRight, Clock, X, UserCircle2,
+    Zap, ListChecks, Users2, Activity, CalendarDays, Building2,
+    Layers, Trash2, AlertCircle, Link, Check, UserPlus2, ShieldCheck,
+    Edit2, CheckCircle, ArrowRightLeft, Ban, PlayCircle, MoreHorizontal,
+    PlusCircle, LayoutGrid, Calendar as CalendarIcon, Briefcase, Video, Bell
 } from 'lucide-react';
+import ReminderModal from '../components/calendar/ReminderModal';
 
 const CalendarPage = () => {
     const calendarRef = useRef(null);
@@ -22,12 +25,14 @@ const CalendarPage = () => {
     const [events, setEvents] = useState([]);
     const [loading, setLoading] = useState(true);
     const [viewName, setViewName] = useState('dayGridMonth');
-    
+
     const [batches, setBatches] = useState([]);
     const [quarters, setQuarters] = useState([]);
     const [templates, setTemplates] = useState([]);
     const [allUsers, setAllUsers] = useState([]);
-    
+    const [statFilter, setStatFilter] = useState(null);
+    const [backdateSettings, setBackdateSettings] = useState({ allow_backdate: false, exception_users: [] });
+
     const [showSummary, setShowSummary] = useState(false);
     const [summaryDate, setSummaryDate] = useState(null);
     const [dayEvents, setDayEvents] = useState([]);
@@ -35,6 +40,7 @@ const CalendarPage = () => {
     const [showModal, setShowModal] = useState(false);
     const [isEdit, setIsEdit] = useState(false);
     const [currentEventId, setCurrentEventId] = useState(null);
+    const [showReminderModal, setShowReminderModal] = useState(false);
 
     const initialForm = {
         title: '', type: 'event', start: '', end: '', all_day: true,
@@ -42,8 +48,10 @@ const CalendarPage = () => {
         batch_id: '', quarter_id: '', status: 'schedule', meeting_link: '',
         assigned_departments: [], assigned_member_ids: [], coach_ids: [],
         additional_details: '', category: 'General', repeat: 'Does not repeat',
-        repeat_end_date: '', repeat_interval: 1, assigned_to: 'myself', target_staff_id: ''
+        repeat_end_date: '', repeat_interval: 1, assigned_to: 'myself', target_staff_id: [],
+        reminders: [], status_remark: ''
     };
+
     const [eventForm, setEventForm] = useState(initialForm);
 
     const departments = ['HOD', 'EA', 'MD', 'Implementor', 'HR', 'Other'];
@@ -51,10 +59,10 @@ const CalendarPage = () => {
     const fetchData = async () => {
         setLoading(true);
         try {
-            const [evRes, bRes, qRes, tRes, uRes] = await Promise.all([
+            const [evRes, bRes, qRes, tRes, uRes, sRes] = await Promise.all([
                 api.get('/calendar/events'), api.get('/batches'),
                 api.get('/quarters'), api.get('/session-templates'),
-                api.get('/users')
+                api.get('/users'), api.get('/settings/backdate-control')
             ]);
             setEvents(evRes.data.map(e => ({
                 id: e.id, title: e.title, start: e.start, end: e.end,
@@ -63,6 +71,7 @@ const CalendarPage = () => {
                 extendedProps: { ...e.extendedProps, id: e.id, dotColor: e.color || 'var(--accent-indigo)' }
             })));
             setBatches(bRes.data); setQuarters(qRes.data); setTemplates(tRes.data); setAllUsers(uRes.data);
+            setBackdateSettings(sRes.data);
         } catch (err) { console.error(err); }
         finally { setLoading(false); }
     };
@@ -76,13 +85,64 @@ const CalendarPage = () => {
         });
     };
 
+    // ─── Stats Calculation ───
+    const currentMonthStats = useMemo(() => {
+        const now = new Date();
+        const currentYear = now.getFullYear();
+        const currentMonth = now.getMonth();
+
+        const data = events.filter(e => {
+            const d = new Date(e.start);
+            return d.getFullYear() === currentYear && d.getMonth() === currentMonth;
+        });
+
+        const getCount = (type, status) => {
+            return data.filter(e => {
+                const eType = e.extendedProps?.type || e.type;
+                const eStatus = e.extendedProps?.status || e.status || "schedule";
+                if (type && eType !== type) return false;
+                if (status === 'pending') return eStatus === 'schedule';
+                if (status && eStatus !== status) return false;
+                return true;
+            }).length;
+        };
+
+        return [
+            { id: 'ev_total', label: 'Total Sessions', count: getCount('event', null), color: 'indigo', icon: <Activity size={14} />, filter: { type: 'event', status: null } },
+            { id: 'ev_com', label: 'Completed', count: getCount('event', 'completed'), color: 'emerald', icon: <CheckCircle size={14} />, filter: { type: 'event', status: 'completed' } },
+            { id: 'ev_pen', label: 'Pending', count: getCount('event', 'pending'), color: 'amber', icon: <Clock size={14} />, filter: { type: 'event', status: 'pending' } },
+            { id: 'ev_res', label: 'Rescheduled', count: getCount('event', 'reschedule'), color: 'orange', icon: <ArrowRightLeft size={14} />, filter: { type: 'event', status: 'reschedule' } },
+            { id: 'tk_total', label: 'Total Tasks', count: getCount('task', null), color: 'slate', icon: <ListChecks size={14} />, filter: { type: 'task', status: null } },
+            { id: 'tk_com', label: 'Task Complete', count: getCount('task', 'completed'), color: 'emerald', icon: <CheckCircle size={14} />, filter: { type: 'task', status: 'completed' } },
+            { id: 'tk_pen', label: 'Task Pending', count: getCount('task', 'pending'), color: 'rose', icon: <AlertCircle size={14} />, filter: { type: 'task', status: 'pending' } },
+        ];
+    }, [events]);
+
+    const activeFilter = statFilter;
+    const filteredEvents = useMemo(() => {
+        if (!activeFilter) return events;
+        return events.filter(e => {
+            const eType = e.extendedProps?.type || e.type;
+            const eStatus = e.extendedProps?.status || e.status || "schedule";
+            if (activeFilter.type && eType !== activeFilter.type) return false;
+            if (activeFilter.status === 'pending') return eStatus === 'schedule';
+            if (activeFilter.status && eStatus !== activeFilter.status) return false;
+            return true;
+        });
+    }, [events, activeFilter]);
+
     // ─── Summary Logic ───
     const handleDateSelect = (info) => {
-        const selectedDate = info.startStr;
+        const selectedDate = info.startStr.split('T')[0];
         const eventsForDay = events.filter(e => {
-            const eStart = e.start.split('T')[0];
-            return eStart === selectedDate && !['batch', 'quarter'].includes(e.extendedProps.type);
+            const d = new Date(e.start);
+            if (isNaN(d.getTime())) return false;
+            const eStart = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+            return eStart === selectedDate && !['batch', 'quarter'].includes(e.extendedProps?.type || e.type);
         });
+
+
+
         setSummaryDate(selectedDate);
         setDayEvents(eventsForDay);
         setShowSummary(true);
@@ -111,14 +171,19 @@ const CalendarPage = () => {
             repeat_end_date: props.repeat_end_date || '',
             repeat_interval: props.repeat_interval || 1,
             assigned_to: props.assigned_to || 'myself',
-            target_staff_id: props.target_staff_id || ''
+            target_staff_id: props.target_staff_id || [],
+            reminders: props.reminders || [],
+            status_remark: props.status_remark || '',
+            isCreator: props.isCreator,
+            isAssigned: props.isAssigned
         });
+
         setShowModal(true);
     };
 
     const handleQuickAction = async (id, action) => {
         try {
-            if (action === 'delete') { if(!confirm('Delete?')) return; await api.delete(`/calendar/events/${id}`); }
+            if (action === 'delete') { if (!confirm('Delete?')) return; await api.delete(`/calendar/events/${id}`); }
             else if (action === 'complete') await api.put(`/calendar/events/${id}`, { status: 'completed' });
             fetchData();
             // If in summary modal, refresh current day list
@@ -134,33 +199,78 @@ const CalendarPage = () => {
 
     const handleSave = async () => {
         if (!eventForm.title) return alert("Add a title");
+
+        const eventStart = new Date(eventForm.start);
+        const now = new Date();
+        const isBackdated = eventStart < now;
+        const canBackdate = backdateSettings.allow_backdate || backdateSettings.exception_users.includes(user?.email);
+
+        if (isBackdated && !canBackdate && eventForm.status === 'schedule') {
+            console.warn("RESTRICTED: Backdated attempt blocked in UI.");
+            return alert("Operation Blocked: You do not have permission to schedule tasks or events in the past.");
+        }
+
+
+        // ─── CONFLICT DETECTION WARNING ───
+        try {
+            const conflictCheck = await api.post('/calendar/events/validate-conflict', { 
+                ...eventForm, id: currentEventId 
+            });
+            if (conflictCheck.data.has_conflict) {
+                const names = conflictCheck.data.conflicts.map(c => c.title).join(", ");
+                if (!confirm(`This schedule conflicts with another task or event: ${names}.\n\nContinue anyway?`)) {
+                    return;
+                }
+            }
+        } catch (e) { console.error("Conflict check failed", e); }
+
         try {
             if (isEdit) await api.put(`/calendar/events/${currentEventId}`, eventForm);
             else await api.post('/calendar/events', eventForm);
-            fetchData(); setShowModal(false); setShowSummary(false); // Close both on save
+            fetchData(); setShowModal(false); setShowSummary(false); 
         } catch (err) { console.error(err); }
     };
 
     const role = user?.role?.toLowerCase();
-    const isStaff = ['superadmin', 'admin', 'coach'].includes(role);
-    const isClient = ['clientadmin', 'clientdoer'].includes(role);
+    const isStaff = ['superadmin', 'admin', 'coach', 'staff'].includes(role);
+    const isLearner = ['learner', 'clientadmin', 'clientdoer', 'clientuser'].includes(role);
 
-    const visibleMembers = allUsers.filter(u => {
+    // List of Staff users (Coaching side) for coaching team & task delegation
+    const staffMembers = allUsers.filter(u => ['superadmin', 'admin', 'coach', 'staff'].includes(u.role?.toLowerCase()));
+
+    // List of internal company members for Learner users
+    const companyMembers = allUsers.filter(u => u.company_id === user?.company_id && u._id !== user?._id);
+
+    // List of Learners for Staff Assignment (filtered by batch/department & session type compatibility)
+    const assignableLearners = allUsers.filter(u => {
         const uRole = u.role?.toLowerCase();
-        const isL = ['learner', 'clientadmin', 'clientdoer'].includes(uRole);
-        if (!isL) return false;
-        
-        if (isStaff) {
-            return !eventForm.batch_id || u.batch_id === eventForm.batch_id;
+        const isL = !['superadmin', 'admin', 'coach', 'staff', 'clinetadmin'].includes(uRole);
+        // Note: some systems use 'clinetadmin' or 'clientadmin'. Let's just use the inverse.
+        if (['superadmin', 'admin', 'coach', 'staff'].includes(uRole)) return false;
+
+        // 1. Batch & Company Linkage
+        if (eventForm.batch_id) {
+            const batch = batches.find(b => b._id === eventForm.batch_id || b.id === eventForm.batch_id);
+            if (batch) {
+                const belongsToBatch = u.batch_id === eventForm.batch_id || batch.companies?.includes(u.company_id);
+                if (!belongsToBatch) return false;
+            }
         }
-        return u.company_id === user?.company_id;
+
+        // 2. Session Type Compatibility (Both means they see everything)
+        if (eventForm.session_type === 'Core' && !['Core', 'Both'].includes(u.session_type)) return false;
+        if (eventForm.session_type === 'Support' && !['Support', 'Both'].includes(u.session_type)) return false;
+
+        return true;
     });
+
+    const visibleMembers = isStaff ? assignableLearners : companyMembers;
 
     const handleDeptToggle = (dept) => {
         const currentDepts = [...eventForm.assigned_departments];
         const idx = currentDepts.indexOf(dept);
         let newDepts = []; let newMemberIds = [...eventForm.assigned_member_ids];
-        
+
         const isMatch = (userDept, targetDept) => userDept?.toString().toUpperCase() === targetDept?.toUpperCase();
 
         if (idx > -1) {
@@ -184,46 +294,60 @@ const CalendarPage = () => {
                 <div className="flex items-start justify-between mb-4">
                     <div className="space-y-1">
                         <div className="flex items-center gap-2 text-[9px] font-black uppercase tracking-widest text-[var(--text-muted)]">
-                            {type === 'task' ? <CheckCircle size={12} className="text-orange-500"/> : <Activity size={12} className="text-[var(--accent-indigo)]"/>}
+                            {type === 'task' ? <CheckCircle size={12} className="text-orange-500" /> : <Activity size={12} className="text-[var(--accent-indigo)]" />}
                             {type} • {s || 'scheduled'}
                         </div>
                         <h4 className="text-[16px] font-black text-[var(--text-main)] group-hover:text-[var(--accent-indigo)] transition-colors pr-20">{ev.title}</h4>
                     </div>
                 </div>
-                <div className="flex items-center flex-wrap gap-4 text-[11px] font-bold text-[var(--text-muted)] mt-2">
-                    <div className="flex items-center gap-1.5"> <Clock size={14}/> {new Date(ev.start).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true })} </div>
-                    {ev.extendedProps.assigned_to === 'other' && (
-                        <div className="flex items-center gap-1.5 text-[var(--accent-indigo)] bg-indigo-500/5 px-2 py-0.5 rounded-lg border border-indigo-500/10"> 
-                            <UserCircle2 size={14}/> {allUsers.find(u => u._id === ev.extendedProps.target_staff_id)?.full_name || "Delegated Duty"} 
+                <div className="flex flex-col gap-2 text-[11px] font-bold text-[var(--text-muted)] mt-4 border-t border-[var(--border)] pt-4 border-dashed">
+                    <div className="flex items-center justify-between">
+                        <span className="flex items-center gap-1.5 opacity-60"> <Clock size={13} /> Deadline: </span>
+                        <span className="text-[var(--text-main)]">{new Date(ev.start).toLocaleDateString([], { day: 'numeric', month: 'short' })} • {new Date(ev.start).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true })}</span>
+                    </div>
+                    {ev.extendedProps.completed_at && (
+                        <div className="flex items-center justify-between text-emerald-600 bg-emerald-500/5 px-2 py-1 rounded-lg">
+                            <span className="flex items-center gap-1.5 uppercase text-[9px] font-black"> <CheckCircle size={13} /> Completed: </span>
+                            <span className="font-black italic">{new Date(ev.extendedProps.completed_at).toLocaleString([], { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', hour12: true })}</span>
                         </div>
                     )}
-                    {ev.extendedProps.meeting_link && <span className="flex items-center gap-1 text-[var(--accent-indigo)]"> <Video size={14}/> Linked </span>}
+                    <div className="flex items-center gap-3 mt-1">
+                        {ev.extendedProps.target_staff_id?.length > 0 && (
+                            <div className="flex items-center gap-1.5 text-orange-600 bg-orange-500/5 px-2 py-0.5 rounded-lg border border-orange-500/10">
+                                <UserCircle2 size={13} /> {ev.extendedProps.target_staff_id.map(id => allUsers.find(u => u._id === id || u.id === id)?.full_name).filter(Boolean).join(", ") || "Delegated Duty"}
+                            </div>
+                        )}
+
+                        {ev.extendedProps.meeting_link && <span className="flex items-center gap-1 text-[var(--accent-indigo)]"> <Video size={13} /> Linked </span>}
+                    </div>
                 </div>
-                
+
+
                 <div className="mt-8 flex items-center justify-between border-t border-dashed border-gray-200 pt-4">
                     <div className="flex items-center gap-2">
                         <button onClick={() => handleQuickAction(ev.id, 'complete')} className={`flex items-center gap-2 px-4 py-2 rounded-xl text-[11px] font-black transition-all ${s === 'completed' ? 'bg-green-100/10 text-green-600 border border-green-200' : 'bg-[var(--bg-main)] text-[var(--text-muted)] hover:bg-green-500 hover:text-white border border-[var(--border)]'}`}>
-                            {s === 'completed' ? <Check size={14}/> : <CheckCircle size={14}/>} {s === 'completed' ? 'Finished' : 'Complete'}
+                            {s === 'completed' ? <Check size={14} /> : <CheckCircle size={14} />} {s === 'completed' ? 'Finished' : 'Complete'}
                         </button>
-                        <button onClick={() => openEditModal(ev)} className="p-2 bg-[var(--bg-main)] border border-[var(--border)] text-[var(--text-muted)] hover:text-[var(--accent-indigo)] hover:bg-indigo-500/10 rounded-xl transition-all"> <Edit2 size={16}/> </button>
+                        <button onClick={() => openEditModal(ev)} className="p-2 bg-[var(--bg-main)] border border-[var(--border)] text-[var(--text-muted)] hover:text-[var(--accent-indigo)] hover:bg-indigo-500/10 rounded-xl transition-all"> <Edit2 size={16} /> </button>
                     </div>
-                    <button onClick={() => handleQuickAction(ev.id, 'delete')} className="p-2 text-gray-300 hover:text-red-500 hover:bg-red-500/10 rounded-xl transition-all opacity-0 group-hover:opacity-100"> <Trash2 size={16}/> </button>
+                    <button onClick={() => handleQuickAction(ev.id, 'delete')} className="p-2 text-gray-300 hover:text-red-500 hover:bg-red-500/10 rounded-xl transition-all opacity-0 group-hover:opacity-100"> <Trash2 size={16} /> </button>
                 </div>
             </motion.div>
         );
     };
 
     return (
-        <div className="space-y-6 flex flex-col h-[calc(100vh-100px)]">
+        <div className="space-y-6 flex flex-col min-h-screen pb-20">
+
             <div className="flex items-center justify-between px-2">
                 <div>
-                   <h1 className="text-xl font-black text-[var(--text-main)] tracking-tight">Organization Calendar</h1>
-                   <p className="text-[12px] text-[var(--text-muted)] font-bold italic tracking-wide">Elite session governance & operational accountability engine.</p>
+                    <h1 className="text-xl font-black text-[var(--text-main)] tracking-tight">Organization Calendar</h1>
+                    <p className="text-[12px] text-[var(--text-muted)] font-bold italic tracking-wide">Elite session governance & operational accountability engine.</p>
                 </div>
                 <div className="flex items-center gap-3">
                     <div className="flex items-center bg-[var(--bg-card)] border border-[var(--border)] rounded-xl p-1 shadow-sm">
                         {['dayGridMonth', 'timeGridWeek', 'timeGridDay', 'multiMonthYear'].map((view) => (
-                            <button 
+                            <button
                                 key={view}
                                 onClick={() => {
                                     setViewName(view);
@@ -245,20 +369,68 @@ const CalendarPage = () => {
             </div>
 
             <div className="flex-1 bg-[var(--bg-card)] border border-[var(--border)] rounded-[40px] overflow-hidden shadow-2xl p-6 fc-theme-orlando relative">
-                {loading && ( <div className="absolute inset-0 flex items-center justify-center bg-[var(--bg-card)]/80 backdrop-blur-sm z-[100]"> <div className="w-12 h-12 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin"></div> </div> )}
-                <FullCalendar ref={calendarRef} plugins={[dayGridPlugin, timeGridPlugin, listPlugin, multiMonthPlugin, interactionPlugin]}
-                    initialView="dayGridMonth" headerToolbar={false} events={events} height="100%" selectable={true}
-                    select={handleDateSelect} eventClick={(info) => {
-                         const eStart = info.event.startStr.split('T')[0];
-                         const eventsForDay = events.filter(e => e.start.split('T')[0] === eStart && !['batch', 'quarter'].includes(e.extendedProps.type));
-                         setSummaryDate(eStart); setDayEvents(eventsForDay); setShowSummary(true);
-                    }} 
-                    dayMaxEvents={4} eventContent={(info) => {
-                        const s = info.event.extendedProps.status;
+                {loading && (<div className="absolute inset-0 flex items-center justify-center bg-[var(--bg-card)]/80 backdrop-blur-sm z-[100]"> <div className="w-12 h-12 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin"></div> </div>)}
+                {/* ─── Stats Dashboard Row ─── */}
+                <div className="flex flex-nowrap items-center gap-3 mb-6 p-1 overflow-x-auto no-scrollbar scroll-smooth">
+
+                    {currentMonthStats.map(s => {
+                        const isActive = statFilter?.type === s.filter.type && statFilter?.status === s.filter.status;
+                        const colorMap = {
+                            indigo: 'bg-indigo-50 border-indigo-100 text-indigo-700 active:bg-indigo-500 active:text-white',
+                            emerald: 'bg-emerald-50 border-emerald-100 text-emerald-700 active:bg-emerald-500 active:text-white',
+                            amber: 'bg-amber-50 border-amber-100 text-amber-700 active:bg-amber-500 active:text-white',
+                            orange: 'bg-orange-50 border-orange-100 text-orange-700 active:bg-orange-500 active:text-white',
+                            slate: 'bg-slate-50 border-slate-100 text-slate-700 active:bg-slate-500 active:text-white',
+                            rose: 'bg-rose-50 border-rose-100 text-rose-700 active:bg-rose-500 active:text-white',
+                        };
+                        const activeColorMap = {
+                            indigo: 'bg-indigo-600 border-indigo-600 text-white ring-4 ring-indigo-100',
+                            emerald: 'bg-emerald-600 border-emerald-600 text-white ring-4 ring-emerald-100',
+                            amber: 'bg-amber-600 border-amber-600 text-white ring-4 ring-amber-100',
+                            orange: 'bg-orange-600 border-orange-600 text-white ring-4 ring-orange-100',
+                            slate: 'bg-slate-700 border-slate-700 text-white ring-4 ring-slate-100',
+                            rose: 'bg-rose-600 border-rose-600 text-white ring-4 ring-rose-100',
+                        };
+
                         return (
-                            <div className={`flex items-center gap-1.5 px-2 py-0.5 max-w-full overflow-hidden group/ev rounded-md transition-all ${s === 'completed' ? 'opacity-40 grayscale line-through' : ''}`}>
-                                <div className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: info.event.extendedProps.dotColor }}></div>
-                                <span className="text-[10px] font-black truncate">{info.event.title}</span>
+                            <button key={s.id} onClick={() => setStatFilter(isActive ? null : s.filter)}
+                                className={`flex flex-col min-w-[130px] p-4 rounded-[24px] border-2 transition-all duration-300 transform active:scale-95 text-left grow basis-0 ${isActive ? activeColorMap[s.color] : colorMap[s.color]}`}>
+                                <div className="flex items-center justify-between mb-2">
+                                    <div className={`p-1.5 rounded-lg ${isActive ? 'bg-white/20' : 'bg-white shadow-sm'}`}>{s.icon}</div>
+                                    <span className="text-[18px] font-black leading-none">{s.count}</span>
+                                </div>
+                                <span className={`text-[10px] font-black uppercase tracking-widest opacity-80 ${isActive ? 'text-white' : ''}`}>{s.label}</span>
+                            </button>
+                        );
+                    })}
+                </div>
+
+                <FullCalendar
+                    ref={calendarRef} plugins={[dayGridPlugin, timeGridPlugin, listPlugin, multiMonthPlugin, interactionPlugin]}
+                    initialView="dayGridMonth" headerToolbar={false} events={filteredEvents} height="auto" selectable={true}
+
+                    select={handleDateSelect} eventClick={(info) => {
+                        const eStart = info.event.startStr.split('T')[0];
+                        const eventsForDay = events.filter(e => e.start.split('T')[0] === eStart && !['batch', 'quarter'].includes(e.extendedProps.type));
+                        setSummaryDate(eStart); setDayEvents(eventsForDay); setShowSummary(true);
+                    }}
+                    dayMaxEvents={3} eventContent={(info) => {
+                        const s = info.event.extendedProps.status;
+                        const type = info.event.extendedProps.type;
+                        const isTask = type === 'task';
+                        const isSpanning = info.isStart || info.isEnd || info.isMirror; // Simplified check
+                        
+                        return (
+                            <div className={`flex items-center gap-1.5 px-2 py-0.5 max-w-full overflow-hidden group/ev transition-all border border-transparent hover:border-indigo-200/50 ${s === 'completed' ? 'opacity-40 grayscale' : ''} ${info.isStart ? 'rounded-l-lg' : ''} ${info.isEnd ? 'rounded-r-lg' : ''} ${!info.isStart && !info.isEnd ? '' : 'rounded-lg'}`}
+                                 style={{ 
+                                     background: isTask ? 'rgba(249, 115, 22, 0.08)' : 'rgba(99, 102, 241, 0.08)',
+                                     marginLeft: info.isStart ? '0' : '-8px',
+                                     marginRight: info.isEnd ? '0' : '-8px',
+                                 }}>
+                                <div className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ background: info.event.extendedProps.dotColor || (isTask ? '#f97316' : '#6366f1') }}></div>
+                                <span className={`text-[10px] font-black truncate ${isTask ? 'text-orange-700' : 'text-indigo-700'}`} style={{ textDecoration: s === 'completed' ? 'line-through' : 'none' }}>
+                                    {info.event.title}
+                                </span>
                             </div>
                         );
                     }}
@@ -275,11 +447,14 @@ const CalendarPage = () => {
                         >
                             <div className="flex px-10 py-8 items-center justify-between border-b border-[var(--border)] bg-[var(--table-header-bg)]">
                                 <div className="flex items-center gap-4">
-                                     <div className="p-3 bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] rounded-2xl shadow-inner"> <CalendarIcon size={24}/> </div>
-                                     <div>
+                                    <div className="p-3 bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] rounded-2xl shadow-inner"> <CalendarIcon size={24} /> </div>
+                                    <div>
                                         <h2 className="text-2xl font-black text-[var(--text-main)] tracking-tight">Day Summary</h2>
-                                        <p className="text-[12px] font-black text-[var(--text-muted)] uppercase tracking-wider">{new Date(summaryDate).toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}</p>
-                                     </div>
+                                        <p className="text-[12px] font-black text-[var(--text-muted)] uppercase tracking-wider">
+                                            {new Date(summaryDate).toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}
+                                            {(summaryDate && new Date(summaryDate + "T23:59:59") < new Date()) && <span className="ml-2 text-red-500">[ARCHIVED / PAST]</span>}
+                                        </p>
+                                    </div>
                                 </div>
                                 <button onClick={() => setShowSummary(false)} className="p-3 text-[var(--text-muted)] hover:bg-gray-100 rounded-2xl transition-all"> <X size={24} /> </button>
                             </div>
@@ -288,8 +463,10 @@ const CalendarPage = () => {
                                 {/* ─── Section 1: Corporate Sessions ─── */}
                                 <div className="space-y-6">
                                     <div className="flex items-center justify-between border-b border-[var(--border)] pb-4">
-                                        <h3 className="text-[14px] font-black text-[var(--accent-indigo)] uppercase tracking-[0.2em] flex items-center gap-2"> <Activity size={18}/> Corporate Sessions ({dayEvents.filter(e => e.extendedProps.type === 'event').length}) </h3>
-                                        <button onClick={() => openCreateModal('event')} className="flex items-center gap-2 px-5 py-2.5 bg-[var(--accent-indigo)] text-white rounded-xl text-[11px] font-black shadow-lg shadow-indigo-200/40 hover:opacity-90 transition-all"> <PlusCircle size={14}/> NEW SESSION </button>
+                                        <h3 className="text-[14px] font-black text-[var(--accent-indigo)] uppercase tracking-[0.2em] flex items-center gap-2"> <Activity size={18} /> Corporate Sessions ({dayEvents.filter(e => e.extendedProps.type === 'event').length}) </h3>
+                                        {(!summaryDate || new Date(summaryDate + "T23:59:59") >= new Date() || backdateSettings.allow_backdate || backdateSettings.exception_users.includes(user?.email)) && (
+                                            <button onClick={() => openCreateModal('event')} className="flex items-center gap-2 px-5 py-2.5 bg-[var(--accent-indigo)] text-white rounded-xl text-[11px] font-black shadow-lg shadow-indigo-200/40 hover:opacity-90 transition-all"> <PlusCircle size={14} /> NEW SESSION </button>
+                                        )}
                                     </div>
                                     <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                                         {dayEvents.filter(e => e.extendedProps.type === 'event').map(ev => renderEventTile(ev))}
@@ -304,8 +481,10 @@ const CalendarPage = () => {
                                 {/* ─── Section 2: Strategic Tasks ─── */}
                                 <div className="space-y-6">
                                     <div className="flex items-center justify-between border-b border-[var(--border)] pb-4">
-                                        <h3 className="text-[14px] font-black text-orange-500 uppercase tracking-[0.2em] flex items-center gap-2"> <CheckCircle size={18}/> Strategic Tasks ({dayEvents.filter(e => e.extendedProps.type === 'task').length}) </h3>
-                                        <button onClick={() => openCreateModal('task')} className="flex items-center gap-2 px-5 py-2.5 bg-[var(--input-bg)] border border-[var(--border)] text-[var(--text-main)] rounded-xl text-[11px] font-black hover:bg-gray-100 transition-all"> <PlusCircle size={14}/> ADD TASK </button>
+                                        <h3 className="text-[14px] font-black text-orange-500 uppercase tracking-[0.2em] flex items-center gap-2"> <CheckCircle size={18} /> Strategic Tasks ({dayEvents.filter(e => e.extendedProps.type === 'task').length}) </h3>
+                                        {(!summaryDate || new Date(summaryDate + "T23:59:59") >= new Date() || backdateSettings.allow_backdate || backdateSettings.exception_users.includes(user?.email)) && (
+                                            <button onClick={() => openCreateModal('task')} className="flex items-center gap-2 px-5 py-2.5 bg-[var(--input-bg)] border border-[var(--border)] text-[var(--text-main)] rounded-xl text-[11px] font-black hover:bg-gray-100 transition-all"> <PlusCircle size={14} /> ADD TASK </button>
+                                        )}
                                     </div>
                                     <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                                         {dayEvents.filter(e => e.extendedProps.type === 'task').map(ev => renderEventTile(ev))}
@@ -337,15 +516,15 @@ const CalendarPage = () => {
                         >
                             <div className="flex px-10 py-8 items-center justify-between border-b border-[var(--border)] bg-[var(--bg-main)]">
                                 <div className="flex items-center gap-3">
-                                   <div className={`w-3 h-3 rounded-full animate-pulse ${eventForm.status === 'completed' ? 'bg-green-500' : 'bg-indigo-500'}`} />
-                                   <span className="text-[11px] font-black uppercase tracking-widest text-[var(--accent-indigo)]"> {isEdit ? `Edit Operation [${eventForm.status}]` : 'Architect New Session'} </span>
+                                    <div className={`w-3 h-3 rounded-full animate-pulse ${eventForm.status === 'completed' ? 'bg-green-500' : 'bg-indigo-500'}`} />
+                                    <span className="text-[11px] font-black uppercase tracking-widest text-[var(--accent-indigo)]"> {isEdit ? `Edit Operation [${eventForm.status}]` : 'Architect New Session'} </span>
                                 </div>
                                 <div className="flex items-center gap-3">
                                     {isEdit && (
                                         <div className="flex items-center bg-[var(--input-bg)] border border-[var(--border)] rounded-2xl p-1 shadow-inner">
-                                             <button onClick={() => setEventForm({...eventForm, status: 'completed'})} className={`p-3 rounded-xl transition-all ${eventForm.status === 'completed' ? 'bg-green-500 text-white shadow-lg' : 'text-gray-400 hover:text-green-500'}`}> <CheckCircle size={20}/> </button>
-                                             <button onClick={() => setEventForm({...eventForm, status: 'canceled'})} className={`p-3 rounded-xl transition-all ${eventForm.status === 'canceled' ? 'bg-red-500 text-white shadow-lg' : 'text-gray-400 hover:text-red-500'}`}> <Ban size={20}/> </button>
-                                             <button onClick={() => handleQuickAction(currentEventId, 'delete')} className="p-3 text-gray-400 hover:text-red-500 hover:bg-red-500/10 rounded-xl"> <Trash2 size={20}/> </button>
+                                            <button onClick={() => setEventForm({ ...eventForm, status: 'completed' })} className={`p-3 rounded-xl transition-all ${eventForm.status === 'completed' ? 'bg-green-500 text-white shadow-lg' : 'text-gray-400 hover:text-green-500'}`}> <CheckCircle size={20} /> </button>
+                                            <button onClick={() => setEventForm({ ...eventForm, status: 'canceled' })} className={`p-3 rounded-xl transition-all ${eventForm.status === 'canceled' ? 'bg-red-500 text-white shadow-lg' : 'text-gray-400 hover:text-red-500'}`}> <Ban size={20} /> </button>
+                                            <button onClick={() => handleQuickAction(currentEventId, 'delete')} className="p-3 text-gray-400 hover:text-red-500 hover:bg-red-500/10 rounded-xl"> <Trash2 size={20} /> </button>
                                         </div>
                                     )}
                                     <button onClick={() => setShowModal(false)} className="p-3 text-[var(--text-muted)] hover:bg-gray-800 rounded-full transition-all"> <X size={24} /> </button>
@@ -354,60 +533,76 @@ const CalendarPage = () => {
 
                             <div className="p-10 overflow-y-auto no-scrollbar space-y-12">
                                 <div className="space-y-4">
-                                    <input autoFocus placeholder={eventForm.type === 'task' ? "Task Name" : "Session Title"} className="w-full text-4xl font-black bg-transparent border-b-2 border-dashed border-gray-200 focus:border-[var(--accent-indigo)] outline-none pb-3 text-[var(--text-main)] transition-colors" 
-                                        value={eventForm.title} onChange={e => setEventForm({...eventForm, title: e.target.value})} />
-                                    
+                                    <input autoFocus placeholder={eventForm.type === 'task' ? "Task Name" : "Session Title"} className="w-full text-4xl font-black bg-transparent border-b-2 border-dashed border-gray-200 focus:border-[var(--accent-indigo)] outline-none pb-3 text-[var(--text-main)] transition-colors"
+                                        value={eventForm.title} onChange={e => setEventForm({ ...eventForm, title: e.target.value })} />
+
                                     <div className="flex flex-wrap items-center gap-4">
-                                        <div className="flex items-center gap-2 px-3 py-1.5 bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] text-[10px] font-black uppercase tracking-widest rounded-lg"> <Clock size={14}/> IST • {formatIST(eventForm.start)} </div>
+                                        <div className="flex items-center gap-2 px-3 py-1.5 bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] text-[10px] font-black uppercase tracking-widest rounded-lg"> <Clock size={14} /> IST • {formatIST(eventForm.start)} </div>
                                         {isEdit && (
                                             <div className="flex items-center gap-1.5">
-                                                 <label className="text-[10px] font-black text-gray-400 uppercase">Operational Status:</label>
-                                                 <select value={eventForm.status} onChange={e => setEventForm({...eventForm, status: e.target.value})}
-                                                    className="bg-[var(--input-bg)] border border-[var(--border)] rounded-lg px-3 py-1 text-[11px] font-black text-[var(--accent-indigo)] uppercase outline-none">
-                                                    <option value="schedule">Scheduled</option>
-                                                    <option value="reschedule">Rescheduled</option>
-                                                    <option value="canceled">Canceled</option>
-                                                    <option value="completed">Completed</option>
-                                                 </select>
+                                                <label className="text-[10px] font-black text-gray-400 uppercase">Operational Status:</label>
+                                                {(eventForm.isCreator || user.role === 'superadmin' || user.role === 'admin' || eventForm.isAssigned) ? (
+                                                    <select value={eventForm.status} onChange={e => setEventForm({ ...eventForm, status: e.target.value })}
+                                                        className="bg-[var(--input-bg)] border border-[var(--border)] rounded-lg px-3 py-1 text-[11px] font-black text-[var(--accent-indigo)] uppercase outline-none focus:border-[var(--accent-indigo)]">
+                                                        <option value="schedule">Scheduled</option>
+                                                        <option value="reschedule">Rescheduled</option>
+                                                        <option value="canceled">Canceled</option>
+                                                        <option value="completed">Completed</option>
+                                                    </select>
+                                                ) : (
+                                                    <span className="px-3 py-1 bg-gray-100 rounded-lg text-[10px] font-black uppercase text-gray-500">{eventForm.status}</span>
+                                                )}
                                             </div>
                                         )}
                                     </div>
+
+                                    {isEdit && eventForm.status === 'reschedule' && (
+                                        <div className="p-4 bg-orange-50 border border-orange-200 rounded-2xl space-y-2">
+                                            <label className="text-[10px] font-black text-orange-600 uppercase flex items-center gap-2 underline">Reason for Rescheduling / Handover Note:</label>
+                                            <textarea placeholder="Ex: Client not available, request April 10 delay..."
+                                                className="w-full bg-white border-none p-4 rounded-xl text-sm font-bold outline-none text-orange-800"
+                                                value={eventForm.status_remark} onChange={e => setEventForm({ ...eventForm, status_remark: e.target.value })}
+                                            />
+                                        </div>
+                                    )}
                                 </div>
 
-                                <div className="grid grid-cols-1 md:grid-cols-2 gap-10">
+                                <div className={`grid grid-cols-1 md:grid-cols-2 gap-10 ${(isEdit && !eventForm.isCreator && user.role !== 'superadmin' && user.role !== 'admin' && eventForm.isAssigned) ? 'opacity-40 pointer-events-none' : ''}`}>
+
                                     {isStaff ? (
                                         eventForm.type === 'event' ? (
+                                            /* --- STAFF EVENT SCHEDULING --- */
                                             <>
                                                 <div className="space-y-6">
                                                     <div className="space-y-1.5">
-                                                        <label className="text-[10px] font-black text-[var(--text-muted)] uppercase flex items-center gap-2"><Zap size={14}/> Session Strategy</label>
-                                                        <select className="w-full px-4 py-3 bg-[var(--input-bg)] border border-[var(--border)] rounded-xl text-[13px] font-bold" value={eventForm.session_type} onChange={e => setEventForm({...eventForm, session_type: e.target.value})}><option>Core</option><option>Support</option></select>
+                                                        <label className="text-[10px] font-black text-[var(--text-muted)] uppercase flex items-center gap-2"><Zap size={14} /> Session Strategy</label>
+                                                        <select className="w-full px-4 py-3 bg-[var(--input-bg)] border border-[var(--border)] rounded-xl text-[13px] font-bold" value={eventForm.session_type} onChange={e => setEventForm({ ...eventForm, session_type: e.target.value })}><option>Core</option><option>Support</option></select>
                                                     </div>
                                                     <div className="space-y-1.5">
-                                                        <label className="text-[10px] font-black text-[var(--text-muted)] uppercase flex items-center gap-2"><Building2 size={14}/> Organizational Batch</label>
-                                                        <select className="w-full px-4 py-3 bg-[var(--input-bg)] border border-[var(--border)] rounded-xl text-[13px] font-bold" value={eventForm.batch_id} onChange={e => setEventForm({...eventForm, batch_id: e.target.value})}><option value="">Select Batch</option>{batches.map(b => <option key={b._id} value={b._id}>{b.name}</option>)}</select>
+                                                        <label className="text-[10px] font-black text-[var(--text-muted)] uppercase flex items-center gap-2"><LayoutGrid size={14} /> Session Template</label>
+                                                        <select className="w-full px-4 py-3 bg-[var(--input-bg)] border border-[var(--border)] rounded-xl text-[13px] font-bold" value={eventForm.session_template_id} onChange={e => setEventForm({ ...eventForm, session_template_id: e.target.value })}><option value="">None / Custom</option>{templates.map(t => <option key={t._id} value={t._id}>{t.title}</option>)}</select>
                                                     </div>
                                                     <div className="space-y-1.5">
-                                                        <label className="text-[10px] font-black text-[var(--text-muted)] uppercase flex items-center gap-2"><Layers size={14}/> Quarter Selection</label>
-                                                        <select className="w-full px-4 py-3 bg-[var(--input-bg)] border border-[var(--border)] rounded-xl text-[13px] font-bold" value={eventForm.quarter_id} onChange={e => setEventForm({...eventForm, quarter_id: e.target.value})}><option value="">Select Quarter</option>{quarters.map(q => <option key={q._id} value={q._id}>{q.name}</option>)}</select>
+                                                        <label className="text-[10px] font-black text-[var(--text-muted)] uppercase flex items-center gap-2"><Building2 size={14} /> Organizational Batch</label>
+                                                        <select className="w-full px-4 py-3 bg-[var(--input-bg)] border border-[var(--border)] rounded-xl text-[13px] font-bold" value={eventForm.batch_id} onChange={e => setEventForm({ ...eventForm, batch_id: e.target.value, quarter_id: '' })}><option value="">Select Batch</option>{batches.map(b => <option key={b._id} value={b._id}>{b.name}</option>)}</select>
                                                     </div>
                                                 </div>
                                                 <div className="space-y-6">
                                                     <div className="space-y-1.5">
-                                                        <label className="text-[10px] font-black text-[var(--text-muted)] uppercase flex items-center gap-2"><LayoutGrid size={14}/> Session Template</label>
-                                                        <select className="w-full px-4 py-3 bg-[var(--input-bg)] border border-[var(--border)] rounded-xl text-[13px] font-bold" value={eventForm.session_template_id} onChange={e => setEventForm({...eventForm, session_template_id: e.target.value})}><option value="">None / Custom</option>{templates.map(t => <option key={t._id} value={t._id}>{t.title}</option>)}</select>
+                                                        <label className="text-[10px] font-black text-[var(--text-muted)] uppercase flex items-center gap-2"><Link size={14} /> Meeting URL</label>
+                                                        <input placeholder="Zoom / Meet URL" className="w-full px-4 py-3 bg-[var(--input-bg)] border border-[var(--border)] rounded-xl text-[13px] font-bold" value={eventForm.meeting_link} onChange={e => setEventForm({ ...eventForm, meeting_link: e.target.value })} />
                                                     </div>
                                                     <div className="space-y-1.5">
-                                                        <label className="text-[10px] font-black text-[var(--text-muted)] uppercase flex items-center gap-2"><Link size={14}/> Meeting URL</label>
-                                                        <input placeholder="Zoom / Meet URL" className="w-full px-4 py-3 bg-[var(--input-bg)] border border-[var(--border)] rounded-xl text-[13px] font-bold" value={eventForm.meeting_link} onChange={e => setEventForm({...eventForm, meeting_link: e.target.value})} />
+                                                        <label className="text-[10px] font-black text-[var(--text-muted)] uppercase flex items-center gap-2"><Layers size={14} /> Quarter Selection</label>
+                                                        <select className="w-full px-4 py-3 bg-[var(--input-bg)] border border-[var(--border)] rounded-xl text-[13px] font-bold" value={eventForm.quarter_id} onChange={e => setEventForm({ ...eventForm, quarter_id: e.target.value })}><option value="">Select Quarter</option>{quarters.filter(q => !eventForm.batch_id || q.batch_id === eventForm.batch_id).map(q => <option key={q._id} value={q._id}>{q.name}</option>)}</select>
                                                     </div>
                                                     <div className="space-y-2">
-                                                        <label className="text-[10px] font-black text-[var(--text-muted)] uppercase flex items-center gap-2"><UserPlus2 size={14}/> Coaching Team</label>
-                                                        <div className="flex flex-wrap gap-1.5 p-2 bg-[var(--input-bg)] rounded-2xl border border-[var(--border)] min-h-[50px]">
-                                                            {allUsers.filter(u => ['superadmin', 'admin', 'coach'].includes(u.role?.toLowerCase())).map(c => (
+                                                        <label className="text-[10px] font-black text-[var(--text-muted)] uppercase flex items-center gap-2"><UserCircle2 size={14} /> Coaching Team (All Staff)</label>
+                                                        <div className="flex flex-wrap gap-1.5 p-2 bg-[var(--input-bg)] rounded-2xl border border-[var(--border)] min-h-[50px] max-h-[140px] overflow-y-auto no-scrollbar">
+                                                            {staffMembers.map(c => (
                                                                 <div key={c._id} onClick={() => {
-                                                                    const current = [...eventForm.coach_ids];
-                                                                    setEventForm({...eventForm, coach_ids: current.includes(c._id) ? current.filter(id => id !== c._id) : [...current, c._id]})
+                                                                    const current = [...(eventForm.coach_ids || [])];
+                                                                    setEventForm({ ...eventForm, coach_ids: current.includes(c._id) ? current.filter(id => id !== c._id) : [...current, c._id] })
                                                                 }}
                                                                     className={`px-3 py-1.5 rounded-lg text-[11px] font-black cursor-pointer transition-all flex items-center gap-2 ${eventForm.coach_ids?.includes(c._id) ? 'bg-[var(--accent-indigo)] text-white shadow-lg' : 'bg-[var(--bg-card)] text-[var(--text-muted)] border border-[var(--border)]'}`}>
                                                                     {c.full_name || c.name}
@@ -418,58 +613,103 @@ const CalendarPage = () => {
                                                 </div>
                                             </>
                                         ) : (
+                                            /* --- STAFF TASK CREATION --- */
                                             <>
                                                 <div className="space-y-6">
-                                                    <div className="space-y-1.5"><label className="text-[10px] font-black text-[var(--text-muted)] uppercase flex items-center gap-2"><Briefcase size={14}/> Task Category</label>
-                                                        <select className="w-full px-4 py-3 bg-[var(--input-bg)] border border-[var(--border)] rounded-xl" value={eventForm.category} onChange={e => setEventForm({...eventForm, category: e.target.value})}><option>General</option><option>Feedback</option><option>Administrative</option></select>
+                                                    <div className="space-y-1.5"><label className="text-[10px] font-black text-[var(--text-muted)] uppercase flex items-center gap-2"><Briefcase size={14} /> Task Category</label>
+                                                        <select className="w-full px-4 py-3 bg-[var(--input-bg)] border border-[var(--border)] rounded-xl" value={eventForm.category} onChange={e => setEventForm({ ...eventForm, category: e.target.value })}><option>General</option><option>Feedback</option><option>Administrative</option></select>
                                                     </div>
-                                                    <div className="space-y-1.5"><label className="text-[10px] font-black text-[var(--text-muted)] uppercase">Strategic Repetition</label>
-                                                        <div className="space-y-3">
-                                                            <select className="w-full px-4 py-3 bg-[var(--input-bg)] border border-[var(--border)] rounded-xl" value={eventForm.repeat} onChange={e => setEventForm({...eventForm, repeat: e.target.value})}><option>Does not repeat</option><option>Daily</option><option>Weekly</option><option>Monthly</option><option value="periodic">Periodically</option></select>
-                                                            {eventForm.repeat !== 'Does not repeat' && (
-                                                                <div className="flex gap-2">
-                                                                    <input type="date" className="flex-1 px-4 py-2 bg-[var(--input-bg)] border border-[var(--border)] rounded-lg text-[12px] font-bold text-white" value={eventForm.repeat_end_date} onChange={e => setEventForm({...eventForm, repeat_end_date: e.target.value})} />
-                                                                    {eventForm.repeat === 'periodic' && <input type="number" placeholder="Days" className="w-[80px] px-4 py-2 bg-[var(--input-bg)] border border-[var(--border)] rounded-lg text-[12px] font-bold text-white" value={eventForm.repeat_interval} onChange={e => setEventForm({...eventForm, repeat_interval: e.target.value})} />}
-                                                                </div>
-                                                            )}
-                                                        </div>
+                                                    <div className="space-y-1.5"><label className="text-[10px] font-black text-[var(--text-muted)] uppercase flex items-center gap-2"><AlertCircle size={14} /> Critical Level</label>
+                                                        <div className="flex gap-2 p-1 bg-[var(--input-bg)] rounded-xl border border-[var(--border)]">{['Normal', 'High', 'Urgent'].map(p => <button key={p} onClick={() => setEventForm({ ...eventForm, priority: p })} className={`flex-1 py-2 rounded-lg text-[10px] font-black transition-all ${eventForm.priority === p ? 'bg-[var(--accent-indigo)] text-white shadow-lg' : 'text-[var(--text-muted)] hover:text-white'}`}>{p.toUpperCase()}</button>)}</div>
+                                                    </div>
+                                                    <div className="space-y-1.5"><label className="text-[10px] font-black text-[var(--text-muted)] uppercase flex items-center gap-2"><ArrowRightLeft size={14} /> Strategic Repetition</label>
+                                                        <select className="w-full px-4 py-3 bg-[var(--input-bg)] border border-[var(--border)] rounded-xl" value={eventForm.repeat} onChange={e => setEventForm({ ...eventForm, repeat: e.target.value })}><option>Does not repeat</option><option>Daily</option><option>Weekly</option><option>Monthly</option><option value="periodic">Periodically</option></select>
                                                     </div>
                                                 </div>
                                                 <div className="space-y-6">
-                                                    <div className="space-y-1.5"><label className="text-[10px] font-black text-[var(--text-muted)] uppercase">Criticality Level</label>
-                                                        <div className="flex gap-2 p-1 bg-[var(--input-bg)] rounded-xl border border-[var(--border)]">{['Normal', 'High', 'Urgent'].map(p => <button key={p} onClick={() => setEventForm({...eventForm, priority: p})} className={`flex-1 py-2 rounded-lg text-[10px] font-black transition-all ${eventForm.priority === p ? 'bg-[var(--accent-indigo)] text-white shadow-lg' : 'text-[var(--text-muted)] hover:text-white'}`}>{p.toUpperCase()}</button>)}</div>
-                                                    </div>
-                                                    <div className="space-y-1.5"><label className="text-[10px] font-black text-[var(--text-muted)] uppercase">Assignment Delegation</label>
+                                                    <div className="space-y-1.5"><label className="text-[10px] font-black text-[var(--text-muted)] uppercase flex items-center gap-2"><UserPlus2 size={14} /> Assignment Delegation</label>
                                                         <div className="space-y-3">
-                                                            <div className="flex gap-2 p-1 bg-[var(--input-bg)] rounded-xl border border-[var(--border)]"><button onClick={() => setEventForm({...eventForm, assigned_to: 'myself'})} className={`flex-1 py-1.5 rounded-lg text-[10px] font-black ${eventForm.assigned_to === 'myself' ? 'bg-[var(--accent-indigo)] text-white' : 'text-gray-500'}`}>MYSELF</button><button onClick={() => setEventForm({...eventForm, assigned_to: 'other'})} className={`flex-1 py-1.5 rounded-lg text-[10px] font-black ${eventForm.assigned_to === 'other' ? 'bg-[var(--accent-indigo)] text-white' : 'text-gray-500'}`}>OTHER</button></div>
-                                                            {eventForm.assigned_to === 'other' && <select className="w-full px-4 py-3 bg-[var(--input-bg)] border border-[var(--border)] rounded-xl text-[12px] font-bold text-white" value={eventForm.target_staff_id} onChange={e => setEventForm({...eventForm, target_staff_id: e.target.value})}><option value="">Select Professional</option>{allUsers.filter(u => ['superadmin', 'admin', 'coach'].includes(u.role?.toLowerCase())).map(s => <option key={s._id} value={s._id}>{s.full_name || s.name}</option>)}</select>}
+                                                            <div className="flex gap-2 p-1 bg-[var(--input-bg)] rounded-xl border border-[var(--border)]"><button onClick={() => setEventForm({ ...eventForm, assigned_to: 'myself', target_staff_id: [] })} className={`flex-1 py-1.5 rounded-lg text-[10px] font-black ${eventForm.assigned_to === 'myself' ? 'bg-[var(--accent-indigo)] text-white' : 'text-gray-500'}`}>MYSELF</button><button onClick={() => setEventForm({ ...eventForm, assigned_to: 'other' })} className={`flex-1 py-1.5 rounded-lg text-[10px] font-black ${eventForm.assigned_to === 'other' ? 'bg-[var(--accent-indigo)] text-white' : 'text-gray-500'}`}>OTHER STAFF</button></div>
+                                                            {eventForm.assigned_to === 'other' && (
+                                                                <div className="flex flex-wrap gap-1.5 p-2 bg-[var(--input-bg)] rounded-xl border border-[var(--border)] max-h-[140px] overflow-y-auto no-scrollbar">
+                                                                    {staffMembers.map(s => (
+                                                                        <div key={s._id} onClick={() => {
+                                                                            const current = [...(eventForm.target_staff_id || [])];
+                                                                            setEventForm({ ...eventForm, target_staff_id: current.includes(s._id) ? current.filter(id => id !== s._id) : [...current, s._id] })
+                                                                        }}
+                                                                            className={`px-3 py-1.5 rounded-lg text-[10px] font-black cursor-pointer transition-all ${eventForm.target_staff_id?.includes(s._id) ? 'bg-[var(--accent-indigo)] text-white' : 'bg-[var(--bg-card)] text-[var(--text-muted)]'}`}>
+                                                                            {s.full_name || s.name}
+                                                                        </div>
+                                                                    ))}
+                                                                </div>
+                                                            )}
                                                         </div>
                                                     </div>
                                                 </div>
                                             </>
                                         )
                                     ) : (
-                                        <div className="md:col-span-2 space-y-6">
-                                            <div className="grid grid-cols-1 md:grid-cols-2 gap-10">
-                                                <div className="space-y-1.5">
-                                                    <label className="text-[11px] font-black text-[var(--text-muted)] uppercase tracking-wider flex items-center gap-2"><Link size={14}/> Secure Meeting Link</label>
-                                                    <input placeholder="Zoom / Meet URL" className="w-full px-6 py-4 bg-[var(--input-bg)] border border-[var(--border)] rounded-2xl text-[14px] font-bold shadow-inner focus:border-[var(--accent-indigo)] transition-all" value={eventForm.meeting_link} onChange={e => setEventForm({...eventForm, meeting_link: e.target.value})} />
+                                        eventForm.type === 'event' ? (
+                                            /* --- LEARNER EVENT SCHEDULING --- */
+                                            <>
+                                                <div className="space-y-6">
+                                                    <div className="space-y-1.5">
+                                                        <label className="text-[10px] font-black text-[var(--text-muted)] uppercase flex items-center gap-2"><Link size={14} /> Meeting URL</label>
+                                                        <input placeholder="Zoom / Meet URL" className="w-full px-4 py-3 bg-[var(--input-bg)] border border-[var(--border)] rounded-xl text-[13px] font-bold" value={eventForm.meeting_link} onChange={e => setEventForm({ ...eventForm, meeting_link: e.target.value })} />
+                                                    </div>
                                                 </div>
-                                                <div className="space-y-1.5">
-                                                     <label className="text-[11px] font-black text-[var(--text-muted)] uppercase tracking-wider flex items-center gap-2"><CalendarIcon size={14}/> Operation Horizon</label>
-                                                     <div className="px-6 py-4 bg-[var(--input-bg)] border border-[var(--border)] rounded-2xl text-[14px] font-bold text-[var(--accent-indigo)]"> {new Date(eventForm.start).toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long' })} </div>
+                                                <div className="space-y-6">
+                                                    <div className="space-y-1.5">
+                                                        <label className="text-[10px] font-black text-[var(--text-muted)] uppercase flex items-center gap-2"><CalendarIcon size={14} /> Selection Overview</label>
+                                                        <div className="px-6 py-4 bg-[var(--input-bg)] border border-[var(--border)] rounded-2xl text-[14px] font-bold text-[var(--accent-indigo)]"> {new Date(eventForm.start).toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long' })} </div>
+                                                    </div>
                                                 </div>
-                                            </div>
-                                        </div>
+                                            </>
+                                        ) : (
+                                            /* --- LEARNER TASK CREATION --- */
+                                            <>
+                                                <div className="space-y-6">
+                                                    <div className="space-y-1.5"><label className="text-[10px] font-black text-[var(--text-muted)] uppercase flex items-center gap-2"><Briefcase size={14} /> Task Category</label>
+                                                        <select className="w-full px-4 py-3 bg-[var(--input-bg)] border border-[var(--border)] rounded-xl" value={eventForm.category} onChange={e => setEventForm({ ...eventForm, category: e.target.value })}><option>General</option><option>Feedback</option><option>Administrative</option></select>
+                                                    </div>
+                                                    <div className="space-y-1.5"><label className="text-[10px] font-black text-[var(--text-muted)] uppercase flex items-center gap-2"><AlertCircle size={14} /> Critical Level</label>
+                                                        <div className="flex gap-2 p-1 bg-[var(--input-bg)] rounded-xl border border-[var(--border)]">{['Normal', 'High', 'Urgent'].map(p => <button key={p} onClick={() => setEventForm({ ...eventForm, priority: p })} className={`flex-1 py-2 rounded-lg text-[10px] font-black transition-all ${eventForm.priority === p ? 'bg-[var(--accent-indigo)] text-white shadow-lg' : 'text-[var(--text-muted)] hover:text-white'}`}>{p.toUpperCase()}</button>)}</div>
+                                                    </div>
+                                                    <div className="space-y-1.5"><label className="text-[10px] font-black text-[var(--text-muted)] uppercase flex items-center gap-2"><ArrowRightLeft size={14} /> Strategic Repetition</label>
+                                                        <select className="w-full px-4 py-3 bg-[var(--input-bg)] border border-[var(--border)] rounded-xl" value={eventForm.repeat} onChange={e => setEventForm({ ...eventForm, repeat: e.target.value })}><option>Does not repeat</option><option>Daily</option><option>Weekly</option><option>Monthly</option><option value="periodic">Periodically</option></select>
+                                                    </div>
+                                                </div>
+                                                <div className="space-y-6">
+                                                    <div className="space-y-1.5"><label className="text-[10px] font-black text-[var(--text-muted)] uppercase flex items-center gap-2"><UserPlus2 size={14} /> Assignment Delegation</label>
+                                                        <div className="space-y-3">
+                                                            <div className="flex gap-2 p-1 bg-[var(--input-bg)] rounded-xl border border-[var(--border)]"><button onClick={() => setEventForm({ ...eventForm, assigned_to: 'myself', target_staff_id: [] })} className={`flex-1 py-1.5 rounded-lg text-[10px] font-black ${eventForm.assigned_to === 'myself' ? 'bg-[var(--accent-indigo)] text-white' : 'text-gray-500'}`}>MYSELF</button><button onClick={() => setEventForm({ ...eventForm, assigned_to: 'other' })} className={`flex-1 py-1.5 rounded-lg text-[10px] font-black ${eventForm.assigned_to === 'other' ? 'bg-[var(--accent-indigo)] text-white' : 'text-gray-500'}`}>OTHER MEMBER</button></div>
+                                                            {eventForm.assigned_to === 'other' && (
+                                                                <div className="flex flex-wrap gap-1.5 p-2 bg-[var(--input-bg)] rounded-xl border border-[var(--border)] max-h-[140px] overflow-y-auto no-scrollbar">
+                                                                    {companyMembers.map(s => (
+                                                                        <div key={s._id} onClick={() => {
+                                                                            const current = [...(eventForm.target_staff_id || [])];
+                                                                            setEventForm({ ...eventForm, target_staff_id: current.includes(s._id) ? current.filter(id => id !== s._id) : [...current, s._id] })
+                                                                        }}
+                                                                            className={`px-3 py-1.5 rounded-lg text-[10px] font-black cursor-pointer transition-all ${eventForm.target_staff_id?.includes(s._id) ? 'bg-[var(--accent-indigo)] text-white' : 'bg-[var(--bg-card)] text-[var(--text-muted)]'}`}>
+                                                                            {s.full_name || s.name}
+                                                                        </div>
+                                                                    ))}
+                                                                </div>
+                                                            )}
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            </>
+                                        )
                                     )}
                                 </div>
 
                                 <div className="space-y-6 p-8 bg-[var(--input-bg)] rounded-[40px] border border-[var(--border)] shadow-sm">
                                     <div className="space-y-4">
-                                        <label className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-wider flex items-center gap-2"> 
-                                            <Users2 size={16}/> {isStaff ? `Active Assignment: ${eventForm.assigned_departments.join(", ") || "None"}` : "Participant Management"} 
+                                        <label className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-wider flex items-center gap-2">
+                                            <Users2 size={16} /> {isStaff ? (eventForm.type === 'event' ? `Active Assignment: ${eventForm.assigned_departments.join(", ") || "None"}` : "Participant Scope") : "Participant Management"}
                                         </label>
-                                        {isStaff && (
+                                        {(isStaff && eventForm.type === 'event') && (
                                             <div className="flex flex-wrap gap-2">
                                                 {departments.map(dept => (
                                                     <button key={dept} onClick={() => handleDeptToggle(dept)}
@@ -481,31 +721,31 @@ const CalendarPage = () => {
                                         )}
                                     </div>
                                     <div className="flex flex-wrap gap-1.5 p-3 min-h-[60px] max-h-[180px] overflow-y-auto no-scrollbar">
-                                        {visibleMembers.filter(u => !isStaff || eventForm.assigned_departments.some(dept => u.department?.toString().toUpperCase() === dept.toUpperCase())).map(m => (
+                                        {visibleMembers.filter(u => !isStaff || eventForm.type !== 'event' || eventForm.assigned_departments.some(dept => u.department?.toString().toUpperCase() === dept.toUpperCase())).map(m => (
                                             <div key={m._id} onClick={() => {
-                                                const ids = [...eventForm.assigned_member_ids];
-                                                setEventForm({...eventForm, assigned_member_ids: ids.includes(m._id) ? ids.filter(id => id !== m._id) : [...ids, m._id]})
+                                                const ids = [...(eventForm.assigned_member_ids || [])];
+                                                setEventForm({ ...eventForm, assigned_member_ids: ids.includes(m._id) ? ids.filter(id => id !== m._id) : [...ids, m._id] })
                                             }}
                                                 className={`px-3 py-2 rounded-xl text-[11px] font-bold cursor-pointer transition-all flex items-center gap-2 ${eventForm.assigned_member_ids?.includes(m._id) ? 'bg-[var(--accent-indigo)] text-white shadow-lg border border-[var(--accent-indigo-border)]' : 'bg-[var(--bg-card)] text-[var(--text-muted)] opacity-50 border border-dashed border-gray-500'}`}>
-                                                {m.full_name || m.name} <X size={10} className={`${eventForm.assigned_member_ids?.includes(m._id) ? 'text-red-200' : 'block'}`}/>
+                                                {m.full_name || m.name} <X size={10} className={`${eventForm.assigned_member_ids?.includes(m._id) ? 'text-red-200' : 'block'}`} />
                                             </div>
                                         ))}
                                     </div>
                                 </div>
 
                                 <div className="space-y-6">
-                                     <div className="flex items-center gap-6 flex-wrap">
-                                         <div className="flex items-center gap-3 bg-[var(--input-bg)] px-6 py-3.5 rounded-2xl border border-[var(--border)]">
-                                             <CalendarDays size={22} className="text-[var(--accent-indigo)]" />
-                                             <span className="text-[15px] font-black">{new Date(eventForm.start).toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long' })}</span>
-                                         </div>
-                                         <label className="flex items-center gap-4 cursor-pointer bg-[var(--input-bg)] border border-[var(--border)] px-6 py-3.5 rounded-2xl shadow-inner group">
-                                            <input type="checkbox" checked={eventForm.all_day} onChange={e => setEventForm({...eventForm, all_day: e.target.checked})} className="w-5 h-5 accent-[var(--accent-indigo)]" />
+                                    <div className="flex items-center gap-6 flex-wrap">
+                                        <div className="flex items-center gap-3 bg-[var(--input-bg)] px-6 py-3.5 rounded-2xl border border-[var(--border)]">
+                                            <CalendarDays size={22} className="text-[var(--accent-indigo)]" />
+                                            <span className="text-[15px] font-black">{new Date(eventForm.start).toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long' })}</span>
+                                        </div>
+                                        <label className="flex items-center gap-4 cursor-pointer bg-[var(--input-bg)] border border-[var(--border)] px-6 py-3.5 rounded-2xl shadow-inner group">
+                                            <input type="checkbox" checked={eventForm.all_day} onChange={e => setEventForm({ ...eventForm, all_day: e.target.checked })} className="w-5 h-5 accent-[var(--accent-indigo)]" />
                                             <span className="text-[13px] font-black uppercase text-[var(--text-muted)] group-hover:text-white transition-colors">Full Day Block</span>
-                                         </label>
-                                         {!eventForm.all_day && (
-                                             <div className="flex items-center gap-3 bg-[var(--accent-indigo-bg)] p-1.5 rounded-2xl border border-[var(--border)] shadow-inner">
-                                                <input type="time" className="bg-transparent px-4 py-2 text-[14px] font-black text-[var(--accent-indigo)] outline-none" 
+                                        </label>
+                                        {!eventForm.all_day && (
+                                            <div className="flex items-center gap-3 bg-[var(--accent-indigo-bg)] p-1.5 rounded-2xl border border-[var(--border)] shadow-inner">
+                                                <input type="time" className="bg-transparent px-4 py-2 text-[14px] font-black text-[var(--accent-indigo)] outline-none"
                                                     value={new Date(eventForm.start).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })}
                                                     onChange={(e) => {
                                                         const [hours, minutes] = e.target.value.split(':');
@@ -514,8 +754,8 @@ const CalendarPage = () => {
                                                         setEventForm({ ...eventForm, start: newDate.toISOString() });
                                                     }}
                                                 />
-                                                <ArrowRightLeft size={14} className="text-[var(--accent-indigo)] opacity-40"/>
-                                                <input type="time" className="bg-transparent px-4 py-2 text-[14px] font-black text-[var(--accent-indigo)] outline-none" 
+                                                <ArrowRightLeft size={14} className="text-[var(--accent-indigo)] opacity-40" />
+                                                <input type="time" className="bg-transparent px-4 py-2 text-[14px] font-black text-[var(--accent-indigo)] outline-none"
                                                     value={new Date(eventForm.end).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })}
                                                     onChange={(e) => {
                                                         const [hours, minutes] = e.target.value.split(':');
@@ -524,13 +764,43 @@ const CalendarPage = () => {
                                                         setEventForm({ ...eventForm, end: newDate.toISOString() });
                                                     }}
                                                 />
-                                             </div>
-                                         )}
-                                     </div>
-                                     <textarea placeholder={eventForm.type === 'task' ? "Task description or specific action items..." : "Instructions for AI (Checker) or session curriculum notes..."} rows={4} className="w-full bg-[var(--input-bg)] p-6 rounded-[32px] text-[14px] font-medium border border-[var(--border)] outline-none focus:bg-white transition-all shadow-inner"
-                                            value={eventForm.additional_details} onChange={e => setEventForm({...eventForm, additional_details: e.target.value})} />
+                                            </div>
+                                        )}
+                                    </div>
                                 </div>
+                                <div className="space-y-6 p-8 bg-orange-50/30 rounded-[40px] border border-orange-100 border-dashed">
+                                    <div className="flex items-center justify-between">
+                                        <div className="flex items-center gap-2">
+                                            <Bell size={18} className="text-orange-500" />
+                                            <span className="text-[11px] font-black uppercase text-orange-600 tracking-widest">Active Reminders ({eventForm.reminders?.length || 0})</span>
+                                        </div>
+                                        <button type="button" onClick={() => setShowReminderModal(true)} className="px-4 py-2 bg-white border border-orange-200 text-orange-600 rounded-xl text-[10px] font-black hover:bg-orange-500 hover:text-white transition-all">
+                                            {eventForm.reminders?.length > 0 ? 'MANAGE REMINDERS' : 'ADD REMINDER'}
+                                        </button>
+                                    </div>
+                                    {eventForm.reminders?.length > 0 && (
+                                        <div className="flex flex-wrap gap-2">
+                                            {eventForm.reminders.map((r, i) => (
+                                                <div key={i} className="px-3 py-1.5 bg-white border border-gray-100 rounded-lg text-[10px] font-bold text-gray-500 flex items-center gap-2">
+                                                    {r.reminder_type === 'whatsapp' ? '💬' : r.reminder_type === 'email' ? '📧' : '⚡'}
+                                                    {r.offset_minutes}m {r.timing_type}
+                                                </div>
+                                            ))}
+                                        </div>
+                                    )}
+                                </div>
+
+                                <textarea placeholder={eventForm.type === 'task' ? "Task description or specific action items..." : "Instructions for AI (Checker) or session curriculum notes..."} rows={4} className="w-full bg-[var(--input-bg)] p-6 rounded-[32px] text-[14px] font-medium border border-[var(--border)] outline-none focus:bg-white transition-all shadow-inner"
+                                    value={eventForm.additional_details} onChange={e => setEventForm({ ...eventForm, additional_details: e.target.value })} />
                             </div>
+
+                            <ReminderModal
+                                isOpen={showReminderModal}
+                                onClose={() => setShowReminderModal(false)}
+                                reminders={eventForm.reminders}
+                                onApply={(reminders) => setEventForm({ ...eventForm, reminders })}
+                            />
+
 
                             <div className="p-10 border-t border-[var(--border)] flex justify-between items-center bg-[var(--table-header-bg)]">
                                 <div className="flex items-center gap-4">

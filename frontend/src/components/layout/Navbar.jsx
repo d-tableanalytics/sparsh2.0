@@ -1,8 +1,9 @@
 import React from 'react';
 import { useTheme } from '../../context/ThemeContext';
 import { useAuth } from '../../context/AuthContext';
+import { Link } from 'react-router-dom';
 import { 
-  Sun, Moon, Bell, Search, ChevronDown 
+  Sun, Moon, Bell, Search, ChevronDown, Settings 
 } from 'lucide-react';
 
 const Navbar = () => {
@@ -42,6 +43,12 @@ const Navbar = () => {
           <Bell size={18} />
           <span className="absolute top-2 right-2 w-1.5 h-1.5 bg-[var(--accent-red)] border border-[var(--bg-card)] rounded-full"></span>
         </button>
+
+        {user?.role === 'superadmin' && (
+          <Link to="/admin/settings" className="p-2 text-[var(--text-muted)] hover:text-[var(--accent-indigo)] hover:bg-[var(--accent-indigo-bg)] rounded-lg transition-all">
+            <Settings size={18} />
+          </Link>
+        )}
 
         <div className="h-6 w-px bg-[var(--border)] mx-1"></div>
 

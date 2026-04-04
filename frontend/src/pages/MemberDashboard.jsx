@@ -8,13 +8,21 @@ import {
   Pencil, Trash2, Save, X,
   BookOpen, CalendarCheck, Clock, Activity,
   CheckCircle2, XCircle, AlertTriangle, Building2,
-  TrendingUp, Target, Award, Zap, BarChart3
+  TrendingUp, Target, Award, Zap, BarChart3,
+  LayoutGrid, Table as TableIcon, Download, Search, Filter, List
 } from 'lucide-react';
+
 import {
   BarChart, Bar, LineChart, Line, PieChart, Pie, Cell,
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
-  Area, AreaChart, RadialBarChart, RadialBar
+  Area, AreaChart, RadialBarChart, RadialBar, Line as ReLine
 } from 'recharts';
+import FullCalendar from '@fullcalendar/react';
+import dayGridPlugin from '@fullcalendar/daygrid';
+import timeGridPlugin from '@fullcalendar/timegrid';
+import interactionPlugin from '@fullcalendar/interaction';
+import listPlugin from '@fullcalendar/list';
+
 
 // ─── Theme Colors ───
 const CHART_COLORS = ['#6366f1', '#22c55e', '#f97316', '#eab308', '#ec4899', '#06b6d4'];
@@ -113,6 +121,12 @@ const MemberDashboard = () => {
   const [editData, setEditData] = useState({});
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [activeTab, setActiveTab] = useState('overview');
+  const [userEvents, setUserEvents] = useState([]);
+  const [calendarLoading, setCalendarLoading] = useState(false);
+  const [calView, setCalView] = useState('calendar'); // 'calendar', 'cards', 'table'
+  const [calFilter, setCalFilter] = useState('all'); // 'all', 'task', 'event'
+
+
 
   const fetchData = async () => {
     try {
@@ -131,6 +145,49 @@ const MemberDashboard = () => {
   };
 
   useEffect(() => { fetchData(); }, [userId]);
+
+  useEffect(() => {
+    if (activeTab === 'calendar') {
+      fetchUserEvents();
+    }
+  }, [activeTab, userId]);
+
+  const fetchUserEvents = async () => {
+    setCalendarLoading(true);
+    try {
+      const res = await api.get(`/calendar/events?target_user_id=${userId}`);
+      setUserEvents(res.data);
+    } catch (err) {
+      console.error("Failed to fetch user events", err);
+    } finally {
+      setCalendarLoading(false);
+    }
+  };
+
+  const downloadReport = () => {
+    const filtered = userEvents.filter(e => calFilter === 'all' || e.type === calFilter);
+    const headers = ["Title", "Type", "Start", "End", "Status"];
+    const csvRows = [headers.join(",")];
+    
+    filtered.forEach(e => {
+        const row = [
+            `"${e.title}"`,
+            `"${e.type}"`,
+            `"${e.start}"`,
+            `"${e.end || ''}"`,
+            `"${e.extendedProps?.status || ''}"`
+        ];
+        csvRows.push(row.join(","));
+    });
+    
+    const blob = new Blob([csvRows.join("\n")], { type: 'text/csv' });
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `Report_${member.full_name}_${calFilter}.csv`;
+    a.click();
+  };
+
 
   const handleSaveEdit = async () => {
     try {
@@ -176,11 +233,13 @@ const MemberDashboard = () => {
   const attendanceRate = Math.round((totalPresent / (totalPresent + totalAbsent)) * 100);
 
   const tabs = [
-    { id: 'overview', label: 'Overview & Analytics', icon: BarChart3 },
+    { id: 'overview', label: 'Overview', icon: BarChart3 },
     { id: 'learnings', label: 'Learnings', icon: BookOpen },
-    { id: 'attendance', label: 'Attendance', icon: CalendarCheck },
+    { id: 'calendar', label: 'Calendar', icon: CalendarCheck },
+    { id: 'attendance', label: 'Attendance', icon: CheckCircle2 },
     { id: 'history', label: 'Activity Log', icon: Clock },
   ];
+
 
   return (
     <div className="space-y-6">
@@ -581,7 +640,157 @@ const MemberDashboard = () => {
             </div>
           </motion.div>
         )}
+        {/* ════════ CALENDAR TAB ════════ */}
+        {activeTab === 'calendar' && (
+          <motion.div key="calendar" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} className="space-y-6">
+            <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-[32px] p-8 shadow-sm relative min-h-[600px] fc-theme-orlando">
+              {calendarLoading && (
+                <div className="absolute inset-0 flex items-center justify-center bg-[var(--bg-card)]/60 backdrop-blur-sm z-50 rounded-[32px]">
+                  <div className="w-10 h-10 border-4 border-[var(--accent-indigo)] border-t-transparent rounded-full animate-spin"></div>
+                </div>
+              )}
+              
+              {/* Header Controls */}
+              <div className="flex items-center justify-between flex-wrap gap-4 mb-8">
+                <div>
+                  <h3 className="text-xl font-black text-[var(--text-main)] tracking-tight">Member Roadmap</h3>
+                  <p className="text-[12px] text-[var(--text-muted)] font-medium">Schedule & Actions for {member.full_name}</p>
+                </div>
+                
+                <div className="flex items-center gap-3 flex-wrap">
+                   {/* Type Filter */}
+                   <div className="flex items-center bg-[var(--input-bg)] p-1 rounded-xl border border-[var(--border)]">
+                      <button onClick={() => setCalFilter('all')} className={`px-4 py-1.5 rounded-lg text-[10px] font-black uppercase transition-all ${calFilter === 'all' ? 'bg-white text-[var(--accent-indigo)] shadow-sm' : 'text-[var(--text-muted)]'}`}>All Types</button>
+                      <button onClick={() => setCalFilter('event')} className={`px-4 py-1.5 rounded-lg text-[10px] font-black uppercase transition-all ${calFilter === 'event' ? 'bg-white text-[var(--accent-indigo)] shadow-sm' : 'text-[var(--text-muted)]'}`}>Sessions</button>
+                      <button onClick={() => setCalFilter('task')} className={`px-4 py-1.5 rounded-lg text-[10px] font-black uppercase transition-all ${calFilter === 'task' ? 'bg-white text-[var(--accent-indigo)] shadow-sm' : 'text-[var(--text-muted)]'}`}>Tasks</button>
+                   </div>
+
+                   {/* View Switcher */}
+                   <div className="flex items-center bg-[var(--input-bg)] p-1 rounded-xl border border-[var(--border)]">
+                      <button onClick={() => setCalView('calendar')} className={`p-2 rounded-lg transition-all ${calView === 'calendar' ? 'bg-white text-[var(--accent-indigo)] shadow-sm' : 'text-[var(--text-muted)]'}`} title="Calendar View"><CalendarCheck size={16} /></button>
+                      <button onClick={() => setCalView('table')} className={`p-2 rounded-lg transition-all ${calView === 'table' ? 'bg-white text-[var(--accent-indigo)] shadow-sm' : 'text-[var(--text-muted)]'}`} title="Table View"><TableIcon size={16} /></button>
+                      <button onClick={() => setCalView('cards')} className={`p-2 rounded-lg transition-all ${calView === 'cards' ? 'bg-white text-[var(--accent-indigo)] shadow-sm' : 'text-[var(--text-muted)]'}`} title="Card View"><LayoutGrid size={16} /></button>
+                   </div>
+
+                   {/* Download Button */}
+                   <button onClick={downloadReport} className="h-10 px-6 bg-[var(--accent-indigo)] text-white rounded-xl text-[11px] font-black uppercase tracking-widest flex items-center gap-2 shadow-lg shadow-indigo-500/20 hover:scale-[1.02] active:scale-[0.98] transition-all">
+                      <Download size={14} /> Report
+                   </button>
+                </div>
+              </div>
+
+              {/* View Content */}
+              {calView === 'calendar' ? (
+                <div className="fc-theme-orlando">
+                  <FullCalendar
+                    plugins={[dayGridPlugin, timeGridPlugin, interactionPlugin, listPlugin]}
+                    initialView="dayGridMonth"
+                    headerToolbar={{ left: 'prev,next today', center: 'title', right: 'dayGridMonth,timeGridWeek,listMonth' }}
+                    events={userEvents.filter(e => calFilter === 'all' || e.type === calFilter)}
+                    height="auto"
+                    dayMaxEvents={3}
+                    eventContent={(info) => {
+                      const type = info.event.extendedProps.type;
+                      const isTask = type === 'task';
+                      return (
+                        <div className={`px-2 py-0.5 flex items-center gap-1.5 truncate text-[10px] font-black uppercase tracking-tight transition-all ${isTask ? 'bg-orange-50 text-orange-700' : 'bg-indigo-50 text-indigo-700'} ${info.isStart ? 'rounded-l-md' : ''} ${info.isEnd ? 'rounded-r-md' : ''} ${!info.isStart && !info.isEnd ? '' : 'rounded-md'}`}
+                             style={{ 
+                               marginLeft: info.isStart ? '0' : '-8px',
+                               marginRight: info.isEnd ? '0' : '-8px',
+                             }}>
+                          <div className={`w-1.5 h-1.5 rounded-full shrink-0 ${isTask ? 'bg-orange-500' : 'bg-indigo-500'}`} />
+                          {info.event.title}
+                        </div>
+                      );
+                    }}
+                  />
+                </div>
+              ) : calView === 'table' ? (
+                <div className="overflow-x-auto rounded-2xl border border-[var(--border)]">
+                  <table className="w-full text-left">
+                    <thead className="bg-[var(--table-header-bg)] border-b border-[var(--border)]">
+                      <tr>
+                        <th className="px-6 py-4 text-[11px] font-black text-[var(--text-muted)] uppercase tracking-[0.15em]">Details</th>
+                        <th className="px-6 py-4 text-[11px] font-black text-[var(--text-muted)] uppercase tracking-[0.15em]">Category</th>
+                        <th className="px-6 py-4 text-[11px] font-black text-[var(--text-muted)] uppercase tracking-[0.15em]">Timeline</th>
+                        <th className="px-6 py-4 text-[11px] font-black text-[var(--text-muted)] uppercase tracking-[0.15em]">Status</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-[var(--border)]">
+                      {userEvents.filter(e => calFilter === 'all' || e.type === calFilter).map(e => (
+                        <tr key={e.id} className="hover:bg-[var(--table-hover)] transition-all">
+                          <td className="px-6 py-4">
+                            <span className="text-[13px] font-bold text-[var(--text-main)] block">{e.title}</span>
+                            <span className="text-[10px] text-[var(--text-muted)] uppercase font-black">{e.extendedProps?.category || 'General'}</span>
+                          </td>
+                          <td className="px-6 py-4">
+                            <span className={`px-3 py-1 rounded-lg text-[10px] font-black uppercase tracking-widest ${e.type === 'task' ? 'bg-orange-100 text-orange-700' : 'bg-indigo-100 text-indigo-700'}`}>
+                              {e.type}
+                            </span>
+                          </td>
+                          <td className="px-6 py-4">
+                            <span className="text-[12px] font-medium text-[var(--text-main)] block">{new Date(e.start).toLocaleDateString()}</span>
+                            <span className="text-[10px] text-[var(--text-muted)]">{new Date(e.start).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                          </td>
+                          <td className="px-6 py-4">
+                            <span className={`px-2.5 py-1 rounded-md text-[10px] font-black uppercase tracking-widest ${
+                              e.extendedProps?.status === 'completed' ? 'bg-green-100 text-green-700' : 
+                              e.extendedProps?.status === 'schedule' ? 'bg-blue-100 text-blue-700' : 
+                              'bg-gray-100 text-gray-700'
+                            }`}>
+                              {e.extendedProps?.status || 'Scheduled'}
+                            </span>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                  {userEvents.filter(e => calFilter === 'all' || e.type === calFilter).map(e => (
+                    <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} key={e.id} className="bg-[var(--input-bg)] border border-[var(--border)] p-6 rounded-[24px] hover:border-[var(--accent-indigo)] transition-all group">
+                       <div className="flex items-center justify-between mb-4">
+                          <span className={`px-2 py-0.5 rounded text-[8px] font-black uppercase tracking-[0.2em] ${e.type === 'task' ? 'bg-orange-500 text-white' : 'bg-indigo-500 text-white'}`}>
+                            {e.type}
+                          </span>
+                          <span className="text-[10px] text-[var(--text-muted)] font-black uppercase tracking-widest opacity-60">#{e.id.slice(-4)}</span>
+                       </div>
+                       <h4 className="text-[15px] font-black text-[var(--text-main)] mb-3 leading-snug group-hover:text-[var(--accent-indigo)] transition-colors">{e.title}</h4>
+                       <div className="space-y-3 pt-3 border-t border-[var(--border)]">
+                          <div className="flex items-center justify-between">
+                            <span className="text-[10px] text-[var(--text-muted)] font-black uppercase tracking-widest">Date:</span>
+                            <span className="text-[12px] font-bold">{new Date(e.start).toLocaleDateString()}</span>
+                          </div>
+                          <div className="flex items-center justify-between">
+                            <span className="text-[10px] text-[var(--text-muted)] font-black uppercase tracking-widest">Timing:</span>
+                            <span className="text-[12px] font-bold text-[var(--accent-indigo)]">{new Date(e.start).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                          </div>
+                          <div className="flex items-center justify-between pt-2">
+                             <div className="flex items-center gap-2">
+                               <div className={`w-2 h-2 rounded-full ${e.extendedProps?.status === 'completed' ? 'bg-green-500' : 'bg-blue-500 animate-pulse'}`} />
+                               <span className="text-[11px] font-black uppercase tracking-widest">{e.extendedProps?.status || 'Scheduled'}</span>
+                             </div>
+                             <button onClick={() => setActiveTab('overview')} className="p-2 bg-white rounded-lg border border-[var(--border)] text-[var(--text-muted)] hover:text-[var(--accent-indigo)]"><Search size={14} /></button>
+                          </div>
+                       </div>
+                    </motion.div>
+                  )) }
+                </div>
+              )}
+
+              {userEvents.filter(e => calFilter === 'all' || e.type === calFilter).length === 0 && !calendarLoading && (
+                <div className="flex flex-col items-center justify-center py-20 opacity-40">
+                   <Target size={48} className="text-[var(--text-muted)] mb-4" />
+                   <p className="text-[14px] font-black text-[var(--text-muted)] uppercase tracking-widest">No items found matching your filters.</p>
+                </div>
+              )}
+            </div>
+          </motion.div>
+        )}
+
       </AnimatePresence>
+
 
       {/* ─── Delete Confirmation ─── */}
       <Modal isOpen={showDeleteConfirm} onClose={() => setShowDeleteConfirm(false)} title="Delete Member">

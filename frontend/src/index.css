@@ -128,3 +128,85 @@ h1, h2, h3, h4 {
     scrollbar-width: none;
   }
 }
+
+/* ─── FullCalendar Theme Overrides ─── */
+.fc {
+  --fc-button-bg-color: var(--bg-card);
+  --fc-button-border-color: var(--border);
+  --fc-button-hover-bg-color: var(--accent-indigo-bg);
+  --fc-button-hover-border-color: var(--accent-indigo);
+  --fc-button-active-bg-color: var(--accent-indigo);
+  --fc-button-active-border-color: var(--accent-indigo);
+  --fc-event-bg-color: transparent;
+  --fc-event-border-color: transparent;
+  --fc-page-bg-color: var(--bg-card);
+  --fc-border-color: var(--border);
+  --fc-today-bg-color: rgba(99, 102, 241, 0.05);
+}
+
+.fc .fc-toolbar-title {
+  font-size: 1.5rem !important;
+  font-weight: 900 !important;
+  text-transform: capitalize;
+  letter-spacing: -0.025em;
+  color: var(--text-main);
+}
+
+.fc .fc-col-header-cell-cushion {
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-muted);
+  padding: 12px 4px !important;
+}
+
+.fc .fc-daygrid-day-number {
+  font-size: 13px;
+  font-weight: 900;
+  color: var(--text-muted);
+  padding: 8px 12px !important;
+}
+
+.fc .fc-daygrid-day.fc-day-today .fc-daygrid-day-number {
+  color: var(--accent-indigo);
+}
+
+.fc-theme-orlando .fc-scrollgrid {
+  border-radius: 24px;
+  border: 1px solid var(--border) !important;
+}
+
+.fc .fc-daygrid-event-harness {
+  margin: 1px 4px !important;
+}
+
+.fc .fc-daygrid-day-frame {
+  min-height: 140px !important;
+}
+
+.fc .fc-daygrid-event {
+  border-radius: 8px !important;
+}
+
+.fc-v-event, .fc-h-event {
+  background: none !important;
+  border: none !important;
+}
+
+/* Event Popover (More + link) */
+.fc-popover {
+  background: var(--bg-card) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: 16px !important;
+  box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04) !important;
+  z-index: 1000 !important;
+}
+
+.fc-popover-header {
+  background: var(--table-header-bg) !important;
+  font-weight: 800 !important;
+  font-size: 11px !important;
+  text-transform: uppercase !important;
+  color: var(--text-main) !important;
+}

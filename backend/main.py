@@ -4,15 +4,20 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
 from app.db.mongodb import connect_to_mongo, close_mongo_connection
-from app.routes import auth, user, company, batch, quarter, session_template, calendar_events
+from app.routes import auth, user, company, batch, quarter, session_template, calendar_events, settings
+
+from app.services.reminder_scheduler import start_reminder_scheduler
+import asyncio
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup logic
     try:
         await connect_to_mongo()
+        # Start the background scheduler
+        asyncio.create_task(start_reminder_scheduler())
     except Exception as e:
-        print(f"CRITICAL: Application started but database connection is pending: {e}")
+        print(f"CRITICAL: Application started but background tasks failed: {e}")
     yield
     # Shutdown logic
     await close_mongo_connection()
@@ -46,6 +51,7 @@ app.include_router(batch.router, prefix="/api")
 app.include_router(quarter.router, prefix="/api")
 app.include_router(session_template.router, prefix="/api")
 app.include_router(calendar_events.router, prefix="/api")
+app.include_router(settings.router, prefix="/api")
 
 @app.get("/")
 async def root():
