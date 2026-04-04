@@ -20,7 +20,6 @@ const Sidebar = () => {
     { name: 'User Management', path: '/admin/users', icon: Users, roles: ['superadmin', 'admin'] },
     { name: 'Tasks', path: '/tasks', icon: CheckSquare, roles: ['clientadmin', 'clientuser'] },
     { name: 'Calendar', path: '/calendar', icon: Calendar, roles: ['superadmin', 'admin', 'clientadmin', 'clientuser'] },
-    { name: 'Settings', path: '/settings', icon: Settings, roles: ['superadmin', 'admin', 'clientadmin', 'clientuser'] },
   ];
 
   const filteredLinks = links.filter(link => link.roles.includes(user?.role));

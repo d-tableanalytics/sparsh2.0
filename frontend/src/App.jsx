@@ -15,6 +15,7 @@ import SessionTemplateDetails from './pages/SessionTemplateDetails';
 import CalendarPage from './pages/CalendarPage';
 import UserManagement from './pages/UserManagement';
 import UserDetails from './pages/UserDetails';
+import SettingsPage from './pages/SettingsPage';
 import PrivateRoute from './components/common/PrivateRoute';
 import './index.css';
 import { useAuth } from './context/AuthContext';
@@ -42,6 +43,7 @@ const AppRoutes = () => {
       {/* Admin Side: Staff Management */}
       <Route path="/admin/users" element={<PrivateRoute><UserManagement /></PrivateRoute>} />
       <Route path="/admin/users/:userId" element={<PrivateRoute><UserDetails /></PrivateRoute>} />
+      <Route path="/admin/settings" element={<PrivateRoute><SettingsPage /></PrivateRoute>} />
 
       {/* Catch-all */}
       <Route path="*" element={<Navigate to={user ? "/" : "/login"} />} />

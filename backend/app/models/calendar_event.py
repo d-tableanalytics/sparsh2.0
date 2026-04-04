@@ -2,6 +2,15 @@ from pydantic import BaseModel, Field
 from typing import Optional, List
 from datetime import datetime
 
+class Reminder(BaseModel):
+    id: str = Field(default_factory=lambda: str(datetime.utcnow().timestamp()))
+    parent_type: str # task | event
+    reminder_type: str # email | whatsapp | both
+    timing_type: str # before | after
+    offset_minutes: int
+    sent: bool = False
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
 class CalendarEventBase(BaseModel):
     title: str
     type: str = "event" # event, task
@@ -20,7 +29,9 @@ class CalendarEventBase(BaseModel):
     assigned_member_ids: Optional[List[str]] = []
     coach_ids: Optional[List[str]] = []
     additional_details: Optional[str] = None
+    status_remark: Optional[str] = None # Added for handover/reschedule notes
     meeting_link: Optional[str] = None
+
     
     # Task specific
     category: Optional[str] = None
@@ -34,7 +45,10 @@ class CalendarEventBase(BaseModel):
     
     # Delegation
     assigned_to: str = "myself" # myself, other
-    target_staff_id: Optional[str] = None
+    target_staff_id: Optional[List[str]] = []
+    
+    # Reminders
+    reminders: List[Reminder] = []
     
     color: str = "var(--accent-indigo)"
     bg: str = "var(--accent-indigo-bg)"

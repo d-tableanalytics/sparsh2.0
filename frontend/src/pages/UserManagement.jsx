@@ -15,6 +15,17 @@ const UserManagement = () => {
     const [loading, setLoading] = useState(true);
     const [searchTerm, setSearchTerm] = useState('');
     const [filterRole, setFilterRole] = useState('All');
+    const [showAddModal, setShowAddModal] = useState(false);
+    const [isSaving, setIsSaving] = useState(false);
+    
+    const initialStaffForm = {
+        first_name: '', last_name: '', email: '', password: '',
+        mobile: '', role: 'coach', is_active: true,
+        session_type: 'Both', department: 'Other',
+        permissions: [] // Access management
+    };
+    const [staffForm, setStaffForm] = useState(initialStaffForm);
+
 
     const fetchData = async () => {
         try {
@@ -39,6 +50,23 @@ const UserManagement = () => {
         return matchesSearch && matchesRole;
     });
 
+    const handleAddStaff = async (e) => {
+        e.preventDefault();
+        setIsSaving(true);
+        try {
+            await api.post('/auth/register', staffForm);
+            alert("Staff registration successful. Email dispatched.");
+            setShowAddModal(false);
+            setStaffForm(initialStaffForm);
+            fetchData();
+        } catch (err) {
+            alert(err.response?.data?.detail || "Registration failed");
+        } finally {
+            setIsSaving(false);
+        }
+    };
+
+
     return (
         <div className="space-y-8 pb-10">
             {/* Header section */}
@@ -47,7 +75,7 @@ const UserManagement = () => {
                    <h1 className="text-3xl font-black text-[var(--text-main)] tracking-tight">Staff Management</h1>
                    <p className="text-[14px] text-[var(--text-muted)] font-bold italic">Oversee core team members, coaches, and system administrators.</p>
                 </div>
-                <button className="flex items-center gap-2 px-6 py-3 bg-[var(--btn-primary)] text-white rounded-2xl text-[14px] font-black shadow-xl shadow-indigo-500/20 hover:opacity-90 transition-all">
+                <button onClick={() => setShowAddModal(true)} className="flex items-center gap-2 px-6 py-3 bg-[var(--btn-primary)] text-white rounded-2xl text-[14px] font-black shadow-xl shadow-indigo-500/20 hover:scale-[1.02] transition-all active:scale-95">
                     <UserPlus size={18}/> Add New Staff
                 </button>
             </div>
@@ -127,6 +155,92 @@ const UserManagement = () => {
                     <p className="font-black uppercase text-[12px] tracking-widest animate-pulse">Syncing Staff Records...</p>
                 </div>
             )}
+
+            {/* Registration Modal */}
+            <AnimatePresence>
+                {showAddModal && (
+                    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+                        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setShowAddModal(false)} className="absolute inset-0 bg-black/40 backdrop-blur-[2px]" />
+                        <motion.div initial={{ opacity: 0, scale: 0.9, y: 30 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.9, y: 30 }}
+                            className="bg-[var(--bg-card)] w-full max-w-[650px] rounded-[40px] shadow-2xl relative overflow-hidden flex flex-col border border-[var(--border)] max-h-[90vh]"
+                        >
+                            <div className="flex px-8 py-6 items-center justify-between border-b border-[var(--border)] bg-[var(--bg-main)]">
+                                 <h2 className="text-xl font-black text-[var(--text-main)]">Register New Team Member</h2>
+                                 <button onClick={() => setShowAddModal(false)} className="p-2 text-[var(--text-muted)] hover:bg-gray-100 rounded-xl transition-all"> <XCircle size={24} /> </button>
+                            </div>
+
+                            <form onSubmit={handleAddStaff} className="p-8 overflow-y-auto no-scrollbar space-y-6">
+                                <div className="grid grid-cols-2 gap-4">
+                                    <div className="space-y-1.5">
+                                        <label className="text-[10px] font-black text-[var(--text-muted)] uppercase px-2">First Name</label>
+                                        <input required className="w-full bg-[var(--input-bg)] px-4 py-2.5 rounded-xl border border-[var(--border)] text-[13px] font-bold" value={staffForm.first_name} onChange={e => setStaffForm({...staffForm, first_name: e.target.value})} />
+                                    </div>
+                                    <div className="space-y-1.5">
+                                        <label className="text-[10px] font-black text-[var(--text-muted)] uppercase px-2">Last Name</label>
+                                        <input required className="w-full bg-[var(--input-bg)] px-4 py-2.5 rounded-xl border border-[var(--border)] text-[13px] font-bold" value={staffForm.last_name} onChange={e => setStaffForm({...staffForm, last_name: e.target.value})} />
+                                    </div>
+                                </div>
+
+                                <div className="grid grid-cols-2 gap-4">
+                                    <div className="space-y-1.5">
+                                        <label className="text-[10px] font-black text-[var(--text-muted)] uppercase px-2">Email Identity</label>
+                                        <input required type="email" className="w-full bg-[var(--input-bg)] px-4 py-2.5 rounded-xl border border-[var(--border)] text-[13px] font-bold" value={staffForm.email} onChange={e => setStaffForm({...staffForm, email: e.target.value})} />
+                                    </div>
+                                    <div className="space-y-1.5">
+                                        <label className="text-[10px] font-black text-[var(--text-muted)] uppercase px-2">Security Passcode</label>
+                                        <input required type="password" placeholder="Min 8 characters" className="w-full bg-[var(--input-bg)] px-4 py-2.5 rounded-xl border border-[var(--border)] text-[13px] font-bold" value={staffForm.password} onChange={e => setStaffForm({...staffForm, password: e.target.value})} />
+                                    </div>
+                                </div>
+
+                                <div className="grid grid-cols-2 gap-4">
+                                    <div className="space-y-1.5">
+                                        <label className="text-[10px] font-black text-[var(--text-muted)] uppercase px-2">Direct Contact</label>
+                                        <input type="tel" className="w-full bg-[var(--input-bg)] px-4 py-2.5 rounded-xl border border-[var(--border)] text-[13px] font-bold" value={staffForm.mobile} onChange={e => setStaffForm({...staffForm, mobile: e.target.value})} />
+                                    </div>
+                                    <div className="space-y-1.5">
+                                        <label className="text-[10px] font-black text-[var(--text-muted)] uppercase px-2">Strategic Role</label>
+                                        <select className="w-full bg-[var(--input-bg)] px-4 py-2.5 rounded-xl border border-[var(--border)] text-[13px] font-black uppercase" value={staffForm.role} onChange={e => setStaffForm({...staffForm, role: e.target.value})}>
+                                            <option value="coach">Coach</option>
+                                            <option value="admin">Admin</option>
+                                            <option value="staff">Team Staff</option>
+                                            <option value="superadmin">SuperAdmin</option>
+                                        </select>
+                                    </div>
+                                </div>
+
+                                <div className="space-y-3 bg-gray-50/50 p-6 rounded-[28px] border border-dashed border-gray-200">
+                                    <label className="text-[10px] font-black text-[var(--text-muted)] uppercase flex items-center gap-2 group"> <BadgeCheck size={14} className="text-[var(--accent-indigo)]"/> Access Management (Scope)</label>
+                                    <div className="grid grid-cols-2 gap-3">
+                                        {['Batch Access', 'Calendar Admin', 'User Management', 'Company Oversight', 'Log Access', 'Template Designer'].map(perm => (
+                                            <label key={perm} className="flex items-center gap-3 cursor-pointer p-1 group">
+                                                <input type="checkbox" checked={staffForm.permissions?.includes(perm)} 
+                                                    onChange={e => {
+                                                        const p = [...(staffForm.permissions || [])];
+                                                        setStaffForm({...staffForm, permissions: e.target.checked ? [...p, perm] : p.filter(x => x !== perm)});
+                                                    }}
+                                                    className="w-4 h-4 accent-[var(--accent-indigo)]"
+                                                />
+                                                <span className="text-[11px] font-bold text-[var(--text-muted)] group-hover:text-[var(--text-main)] transition-colors">{perm}</span>
+                                            </label>
+                                        ))}
+                                    </div>
+                                </div>
+
+                                <div className="flex items-center justify-between pt-4 border-t border-[var(--border)]">
+                                    <div className="flex items-center gap-3">
+                                        <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+                                        <span className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest">Auto-set to Active Status</span>
+                                    </div>
+                                    <button disabled={isSaving} className={`bg-[var(--btn-primary)] text-white px-10 py-3 rounded-2xl text-[13px] font-black shadow-2xl transition-all ${isSaving ? 'opacity-50' : 'hover:scale-[1.02] active:scale-[0.98]'}`}>
+                                        {isSaving ? 'AUTHORIZING...' : 'AUTHORIZE REGISTRATION'}
+                                    </button>
+                                </div>
+                            </form>
+                        </motion.div>
+                    </div>
+                )}
+            </AnimatePresence>
+
         </div>
     );
 };

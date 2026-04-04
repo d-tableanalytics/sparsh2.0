@@ -40,7 +40,7 @@ async def onboard_company(request: CompanyOnboardingRequest, current_user: dict 
     if current_user.get("role") != "superadmin":
         raise HTTPException(status_code=403, detail="Not authorized to onboard companies")
     
-    users_collection = get_collection("users")
+    users_collection = get_collection("learners")
     companies_collection = get_collection("companies")
     
     existing_user = await users_collection.find_one({"email": request.admin.email})
@@ -149,7 +149,7 @@ async def delete_company(company_id: str, current_user: dict = Depends(get_curre
         raise HTTPException(status_code=403, detail="Not authorized")
     
     companies_collection = get_collection("companies")
-    users_collection = get_collection("users")
+    users_collection = get_collection("learners")
     
     company = await companies_collection.find_one({"_id": ObjectId(company_id)})
     if not company:
@@ -167,7 +167,7 @@ async def get_company_users(company_id: str, current_user: dict = Depends(get_cu
     if current_user.get("role") != "superadmin" and current_user.get("company_id") != company_id:
         raise HTTPException(status_code=403, detail="Not authorized")
     
-    users_collection = get_collection("users")
+    users_collection = get_collection("learners")
     users = await users_collection.find({"company_id": company_id}).to_list(500)
     for u in users:
         u["_id"] = str(u["_id"])
@@ -180,7 +180,7 @@ async def bulk_create_users(company_id: str, users: List[UserCreate], current_us
     if current_user.get("role") != "superadmin":
         raise HTTPException(status_code=403, detail="Not authorized")
     
-    users_collection = get_collection("users")
+    users_collection = get_collection("learners")
     created = 0
     skipped = 0
     
@@ -262,7 +262,7 @@ async def import_users_xlsx(company_id: str, file: UploadFile = File(...), curre
     ws = wb.active
     
     headers = [cell.value for cell in ws[1]]
-    users_collection = get_collection("users")
+    users_collection = get_collection("learners")
     created = 0
     skipped = 0
     errors = []
