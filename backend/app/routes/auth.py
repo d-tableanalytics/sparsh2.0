@@ -77,7 +77,13 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
     
     access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
-        data={"sub": user["email"], "role": user["role"]}, 
+        data={
+            "sub": user["email"], 
+            "role": user["role"],
+            "full_name": user.get("full_name") or f"{user.get('first_name', '')} {user.get('last_name', '')}".strip() or "User",
+            "_id": str(user["_id"]),
+            "company_id": user.get("company_id")
+        }, 
         expires_delta=access_token_expires
     )
     await log_activity(user, "User Login", "auth", "Logged in via Token")

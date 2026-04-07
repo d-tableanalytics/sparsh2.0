@@ -3,14 +3,14 @@ import { NavLink } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { 
   LayoutDashboard, Users, Briefcase, CheckSquare, 
-  Settings, ChevronLeft, ChevronRight, Building2,
-  PieChart, MessageSquare, LogOut, Layers, Copy, Calendar
+  Settings, Building2,
+  PieChart, MessageSquare, LogOut, Layers, Copy, Calendar, Sparkles, PlayCircle
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 
 const Sidebar = () => {
   const { user, logout } = useAuth();
-  const [isCollapsed, setIsCollapsed] = useState(false);
+  const [isCollapsed, setIsCollapsed] = useState(true);
 
   const links = [
     { name: 'Dashboard', path: '/', icon: LayoutDashboard, roles: ['superadmin', 'admin', 'clientadmin', 'clientuser'] },
@@ -18,8 +18,9 @@ const Sidebar = () => {
     { name: 'Batches', path: '/batches', icon: Layers, roles: ['superadmin', 'admin'] },
     { name: 'Session Templates', path: '/session-templates', icon: Copy, roles: ['superadmin', 'admin'] },
     { name: 'User Management', path: '/admin/users', icon: Users, roles: ['superadmin', 'admin'] },
-    { name: 'Tasks', path: '/tasks', icon: CheckSquare, roles: ['clientadmin', 'clientuser'] },
+    { name: 'Sessions', path: '/sessions', icon: PlayCircle, roles: ['clientadmin', 'clientuser'] },
     { name: 'Calendar', path: '/calendar', icon: Calendar, roles: ['superadmin', 'admin', 'clientadmin', 'clientuser'] },
+    { name: 'GPT', path: '/gpt', icon: Sparkles, roles: ['superadmin', 'admin', 'clientadmin', 'clientuser'] },
   ];
 
   const filteredLinks = links.filter(link => link.roles.includes(user?.role));
@@ -28,7 +29,10 @@ const Sidebar = () => {
     <motion.aside 
       initial={false}
       animate={{ width: isCollapsed ? 72 : 240 }}
-      className="h-screen sticky top-0 bg-[var(--sidebar-bg)] border-r border-[var(--sidebar-border)] flex flex-col z-40 transition-all duration-300"
+      transition={{ type: 'spring', stiffness: 400, damping: 40 }}
+      onMouseEnter={() => setIsCollapsed(false)}
+      onMouseLeave={() => setIsCollapsed(true)}
+      className="h-screen fixed left-0 top-0 bg-[var(--sidebar-bg)] border-r border-[var(--sidebar-border)] flex flex-col z-50 overflow-hidden"
     >
       <div className={`p-5 py-6 flex items-center ${isCollapsed ? 'justify-center' : 'justify-between'}`}>
         <AnimatePresence mode="wait">
@@ -59,14 +63,6 @@ const Sidebar = () => {
           )}
         </AnimatePresence>
         
-        {!isCollapsed && (
-          <button 
-            onClick={() => setIsCollapsed(true)}
-            className="p-1 text-[var(--text-muted)] hover:text-[var(--accent-indigo)] hover:bg-[var(--accent-indigo-bg)] rounded-md transition-all"
-          >
-            <ChevronLeft size={16} />
-          </button>
-        )}
       </div>
 
       <nav className="flex-1 px-3 space-y-1 overflow-y-auto no-scrollbar">
@@ -75,9 +71,9 @@ const Sidebar = () => {
             key={link.path} 
             to={link.path} 
             className={({ isActive }) => `
-              group flex items-center gap-3 p-2.5 rounded-lg transition-all relative
+              group flex items-center gap-3 p-2.5 rounded-lg transition-colors relative
               ${isActive 
-                ? 'bg-[var(--sidebar-active-bg)] text-[var(--sidebar-active-text)] font-bold' 
+                ? 'bg-[var(--sidebar-active-bg)] text-[var(--sidebar-active-text)] font-bold shadow-sm' 
                 : 'text-[var(--text-muted)] hover:bg-[var(--input-bg)] hover:text-[var(--text-main)]'}
               ${isCollapsed ? 'justify-center' : ''}
             `}
@@ -110,14 +106,6 @@ const Sidebar = () => {
           {!isCollapsed && <span className="text-[13px] font-bold tracking-tight">Logout</span>}
         </button>
         
-        {isCollapsed && (
-          <button 
-            onClick={() => setIsCollapsed(false)}
-            className="w-full mt-2 flex items-center justify-center p-2.5 bg-[var(--btn-primary)] text-white rounded-lg shadow-sm hover:bg-[var(--btn-primary-hover)] transition-all font-bold"
-          >
-            <ChevronRight size={14} />
-          </button>
-        )}
       </div>
     </motion.aside>
   );

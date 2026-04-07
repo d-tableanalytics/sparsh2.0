@@ -23,6 +23,15 @@ class Settings(BaseSettings):
     MAYTAPI_PHONE_ID: Optional[str] = None
     MAYTAPI_TOKEN: Optional[str] = None
 
+    # OpenAI
+    OPENAI_API_KEY: Optional[str] = None
+
+    # AWS
+    AWS_ACCESS_KEY_ID: Optional[str] = None
+    AWS_SECRET_ACCESS_KEY: Optional[str] = None
+    AWS_REGION: Optional[str] = None
+    S3_BUCKET_NAME: Optional[str] = None
+
     model_config = {
         "env_file": ".env",
         "extra": "ignore"

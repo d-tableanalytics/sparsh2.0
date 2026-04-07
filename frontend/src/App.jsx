@@ -12,10 +12,16 @@ import BatchDetails from './pages/BatchDetails';
 import QuarterDetails from './pages/QuarterDetails';
 import SessionTemplateManagement from './pages/SessionTemplateManagement';
 import SessionTemplateDetails from './pages/SessionTemplateDetails';
+import SessionDetails from './pages/SessionDetails';
+import ContentViewer from './pages/ContentViewer';
 import CalendarPage from './pages/CalendarPage';
 import UserManagement from './pages/UserManagement';
 import UserDetails from './pages/UserDetails';
 import SettingsPage from './pages/SettingsPage';
+import GptProjects from './pages/GptProjects';
+import GptEditor from './pages/GptEditor';
+import GptChat from './pages/GptChat';
+import LearnerSessions from './pages/LearnerSessions';
 import PrivateRoute from './components/common/PrivateRoute';
 import './index.css';
 import { useAuth } from './context/AuthContext';
@@ -38,12 +44,21 @@ const AppRoutes = () => {
       <Route path="/quarters/:quarterId" element={<PrivateRoute><QuarterDetails /></PrivateRoute>} />
       <Route path="/session-templates" element={<PrivateRoute><SessionTemplateManagement /></PrivateRoute>} />
       <Route path="/session-templates/:templateId" element={<PrivateRoute><SessionTemplateDetails /></PrivateRoute>} />
+      <Route path="/sessions/:sessionId" element={<PrivateRoute><SessionDetails /></PrivateRoute>} />
+      <Route path="/sessions/:sessionId/resource/:resourceId" element={<PrivateRoute><ContentViewer /></PrivateRoute>} />
       <Route path="/calendar" element={<PrivateRoute><CalendarPage /></PrivateRoute>} />
+      <Route path="/sessions" element={<PrivateRoute><LearnerSessions /></PrivateRoute>} />
       
       {/* Admin Side: Staff Management */}
       <Route path="/admin/users" element={<PrivateRoute><UserManagement /></PrivateRoute>} />
       <Route path="/admin/users/:userId" element={<PrivateRoute><UserDetails /></PrivateRoute>} />
       <Route path="/admin/settings" element={<PrivateRoute><SettingsPage /></PrivateRoute>} />
+
+      {/* GPT Module */}
+      <Route path="/gpt" element={<PrivateRoute><GptProjects /></PrivateRoute>} />
+      <Route path="/gpt/new" element={<PrivateRoute><GptEditor /></PrivateRoute>} />
+      <Route path="/gpt/edit/:id" element={<PrivateRoute><GptEditor /></PrivateRoute>} />
+      <Route path="/gpt/chat/:id" element={<PrivateRoute><GptChat /></PrivateRoute>} />
 
       {/* Catch-all */}
       <Route path="*" element={<Navigate to={user ? "/" : "/login"} />} />

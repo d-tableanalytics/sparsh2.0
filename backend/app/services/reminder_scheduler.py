@@ -7,6 +7,8 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+from app.utils.calendar_utils import CALENDAR_COLLECTIONS, find_user_by_id
+
 async def start_reminder_scheduler():
     logger.info("Starting reminder scheduler background worker...")
     while True:
@@ -17,47 +19,50 @@ async def start_reminder_scheduler():
         await asyncio.sleep(60) # Check every minute
 
 async def check_and_trigger_reminders():
-    col = get_collection("calendar_events")
     now = datetime.utcnow()
+    collections_to_search = CALENDAR_COLLECTIONS + ["calendar_events"]
     
-    # We find events that have reminders that are not sent
-    query = {"reminders": {"$elemMatch": {"sent": False}}}
-    events = await col.find(query).to_list(1000)
-    
-    for event in events:
-        reminders = event.get("reminders", [])
-        event_time_str = event.get("start")
-        if not event_time_str: continue
+    for col_name in collections_to_search:
+        col = get_collection(col_name)
+        # We find events that have reminders that are not sent
+        query = {"reminders": {"$elemMatch": {"sent": False}}}
+        events = await col.find(query).to_list(1000)
         
-        try:
-            # Robust ISO parsing
-            clean_time = event_time_str.replace("Z", "+00:00").replace(" ", "T")
-            event_time = datetime.fromisoformat(clean_time).replace(tzinfo=None)
-        except Exception as e:
-            logger.error(f"Date Parse Error for event {event.get('_id')}: {e}")
-            continue
+        for event in events:
+            reminders = event.get("reminders", [])
+            event_time_str = event.get("start")
+            if not event_time_str: continue
+            
+            try:
+                # Robust ISO parsing
+                clean_time = event_time_str.replace("Z", "+00:00").replace(" ", "T")
+                event_time = datetime.fromisoformat(clean_time).replace(tzinfo=None)
+            except Exception as e:
+                logger.error(f"Date Parse Error for event {event.get('_id')}: {e}")
+                continue
 
-        updated = False
-        for reminder in reminders:
-            if reminder.get("sent"): continue
+            updated = False
+            for reminder in reminders:
+                if reminder.get("sent"): continue
+                
+                offset = int(reminder.get("offset_minutes", 0))
+                timing = reminder.get("timing_type", "before")
+                
+                if timing == "before":
+                    trigger_time = event_time - timedelta(minutes=offset)
+                else:
+                    trigger_time = event_time + timedelta(minutes=offset)
+                
+                # If trigger time reached or passed
+                if trigger_time <= now:
+                    # Trigger notification to relevant parties
+                    await trigger_reminder_notification(event, reminder)
+                    reminder["sent"] = True
+                    updated = True
             
-            offset = int(reminder.get("offset_minutes", 0))
-            timing = reminder.get("timing_type", "before")
-            
-            if timing == "before":
-                trigger_time = event_time - timedelta(minutes=offset)
-            else:
-                trigger_time = event_time + timedelta(minutes=offset)
-            
-            # If trigger time reached or passed
-            if trigger_time <= now:
-                # Trigger notification to relevant parties
-                await trigger_reminder_notification(event, reminder)
-                reminder["sent"] = True
-                updated = True
-        
-        if updated:
-            await col.update_one({"_id": event["_id"]}, {"$set": {"reminders": reminders}})
+            if updated:
+                await col.update_one({"_id": event["_id"]}, {"$set": {"reminders": reminders}})
+
 
 async def trigger_reminder_notification(event, reminder):
     user_ids = set()
