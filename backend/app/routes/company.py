@@ -1,10 +1,11 @@
-from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, BackgroundTasks
 from fastapi.responses import StreamingResponse
 from typing import List, Optional
 from app.db.mongodb import get_db, get_collection
 from app.models.company import CompanyCreate, CompanyResponse
 from app.models.user import UserCreate
 from app.controllers.auth_controller import get_current_user, get_password_hash
+from app.services.notification_service import send_notification_from_template, send_company_registration_email
 from bson import ObjectId
 from datetime import datetime
 from pydantic import BaseModel
@@ -35,8 +36,8 @@ class CompanyEditRequest(BaseModel):
     members_count: Optional[int] = None
 
 # ─── Onboard Company ───
-@router.post("/", response_model=CompanyResponse, status_code=status.HTTP_201_CREATED)
-async def onboard_company(request: CompanyOnboardingRequest, current_user: dict = Depends(get_current_user)):
+@router.post("", response_model=CompanyResponse, status_code=status.HTTP_201_CREATED)
+async def onboard_company(request: CompanyOnboardingRequest, background_tasks: BackgroundTasks, current_user: dict = Depends(get_current_user)):
     if current_user.get("role") != "superadmin":
         raise HTTPException(status_code=403, detail="Not authorized to onboard companies")
     
@@ -72,12 +73,20 @@ async def onboard_company(request: CompanyOnboardingRequest, current_user: dict 
         {"$set": {"admin_id": admin_id}}
     )
     
+    # ─── Trigger Welcome Email ───
+    background_tasks.add_task(
+        send_company_registration_email,
+        admin_obj=admin_dict,
+        company_name=company_dict.get("name"),
+        raw_password=request.admin.password
+    )
+    
     company_dict["_id"] = company_id
     company_dict["admin_id"] = admin_id
     return company_dict
 
 # ─── List Companies ───
-@router.get("/", response_model=List[CompanyResponse])
+@router.get("", response_model=List[CompanyResponse])
 async def list_companies(current_user: dict = Depends(get_current_user)):
     if current_user.get("role") != "superadmin":
         raise HTTPException(status_code=403, detail="Not authorized to list companies")
@@ -176,11 +185,12 @@ async def get_company_users(company_id: str, current_user: dict = Depends(get_cu
 
 # ─── Bulk Create Users (JSON) ───
 @router.post("/{company_id}/users/bulk")
-async def bulk_create_users(company_id: str, users: List[UserCreate], current_user: dict = Depends(get_current_user)):
+async def bulk_create_users(company_id: str, users: List[UserCreate], background_tasks: BackgroundTasks, current_user: dict = Depends(get_current_user)):
     if current_user.get("role") != "superadmin":
         raise HTTPException(status_code=403, detail="Not authorized")
     
     users_collection = get_collection("learners")
+    from app.services.notification_service import send_notification_from_template
     created = 0
     skipped = 0
     
@@ -189,6 +199,9 @@ async def bulk_create_users(company_id: str, users: List[UserCreate], current_us
         if existing:
             skipped += 1
             continue
+        
+        # Save raw password before hashing for the email
+        raw_password = user_data.password
         
         user_dict = user_data.model_dump()
         user_dict["password"] = get_password_hash(user_dict["password"])
@@ -199,7 +212,23 @@ async def bulk_create_users(company_id: str, users: List[UserCreate], current_us
         if not user_dict.get("full_name"):
             user_dict["full_name"] = f"{user_dict.get('first_name', '')} {user_dict.get('last_name', '')}".strip()
         
-        await users_collection.insert_one(user_dict)
+        res = await users_collection.insert_one(user_dict)
+        user_dict["_id"] = str(res.inserted_id)
+        
+        # Trigger Welcome Email
+        background_tasks.add_task(
+            send_notification_from_template,
+            user_obj=user_dict,
+            template_slug="user_creation",
+            context={
+                "name": user_dict.get("first_name", "Learner"),
+                "email": user_dict["email"],
+                "password": raw_password,
+                "role": "Learner",
+                "login_url": "http://localhost:5173/login"
+            },
+            delivery_type="email"
+        )
         created += 1
     
     return {"message": f"Created {created} users, skipped {skipped} duplicates"}
@@ -248,7 +277,7 @@ async def download_user_template(company_id: str, current_user: dict = Depends(g
 
 # ─── Import XLSX Users ───
 @router.post("/{company_id}/users/import")
-async def import_users_xlsx(company_id: str, file: UploadFile = File(...), current_user: dict = Depends(get_current_user)):
+async def import_users_xlsx(company_id: str, background_tasks: BackgroundTasks, file: UploadFile = File(...), current_user: dict = Depends(get_current_user)):
     if current_user.get("role") != "superadmin":
         raise HTTPException(status_code=403, detail="Not authorized")
     
@@ -263,6 +292,7 @@ async def import_users_xlsx(company_id: str, file: UploadFile = File(...), curre
     
     headers = [cell.value for cell in ws[1]]
     users_collection = get_collection("learners")
+    from app.services.notification_service import send_notification_from_template
     created = 0
     skipped = 0
     errors = []
@@ -279,9 +309,12 @@ async def import_users_xlsx(company_id: str, file: UploadFile = File(...), curre
             skipped += 1
             continue
         
+        # Plain text password for email
+        raw_password = str(row_data["password"])
+        
         user_dict = {
             "email": row_data["email"],
-            "password": get_password_hash(str(row_data["password"])),
+            "password": get_password_hash(raw_password),
             "first_name": row_data.get("first_name", ""),
             "last_name": row_data.get("last_name", ""),
             "full_name": f"{row_data.get('first_name', '')} {row_data.get('last_name', '')}".strip(),
@@ -295,7 +328,23 @@ async def import_users_xlsx(company_id: str, file: UploadFile = File(...), curre
             "created_at": datetime.utcnow()
         }
         
-        await users_collection.insert_one(user_dict)
+        res = await users_collection.insert_one(user_dict)
+        user_dict["_id"] = str(res.inserted_id)
+        
+        # Trigger Welcome Email
+        background_tasks.add_task(
+            send_notification_from_template,
+            user_obj=user_dict,
+            template_slug="user_creation",
+            context={
+                "name": user_dict.get("first_name", "Learner"),
+                "email": user_dict["email"],
+                "password": raw_password,
+                "role": "Learner",
+                "login_url": "http://localhost:5173/login"
+            },
+            delivery_type="email"
+        )
         created += 1
     
     return {"created": created, "skipped": skipped, "errors": errors}

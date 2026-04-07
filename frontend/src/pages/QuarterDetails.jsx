@@ -7,7 +7,7 @@ import {
   ArrowLeft, Clock, FileText, Calendar,
   Pencil, Trash2, Save, X, CheckCircle2, PauseCircle,
   PlayCircle, ChevronDown, Plus, AlertTriangle, 
-  LayoutDashboard, TrendingUp, Users, Target
+  LayoutDashboard, TrendingUp, Users, Target, Eye
 } from 'lucide-react';
 
 const statusConfig = {
@@ -45,6 +45,7 @@ const QuarterDetails = () => {
   const navigate = useNavigate();
 
   const [quarter, setQuarter] = useState(null);
+  const [sessions, setSessions] = useState([]);
   const [loading, setLoading] = useState(true);
   const [editMode, setEditMode] = useState(false);
   const [editData, setEditData] = useState({});
@@ -53,9 +54,17 @@ const QuarterDetails = () => {
 
   const fetchData = async () => {
     try {
-      const res = await api.get(`/quarters/${quarterId}`);
+      const [res, evRes] = await Promise.all([
+        api.get(`/quarters/${quarterId}`),
+        api.get('/calendar/events')
+      ]);
       setQuarter(res.data);
       setEditData(res.data);
+
+      const quarterSessions = evRes.data.filter(e => 
+          e.extendedProps?.quarter_id === quarterId && e.type === 'event'
+      );
+      setSessions(quarterSessions);
     } catch (err) { console.error(err); }
     finally { setLoading(false); }
   };
@@ -183,23 +192,54 @@ const QuarterDetails = () => {
           <StatCard icon={Target} label="Tasks Done" value="86%" color="red" />
       </div>
 
-      {/* ─── Placeholder for Quarter Content ─── */}
-      <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-xl p-12 text-center shadow-sm">
-          <div className="w-16 h-16 bg-[var(--accent-orange-bg)] rounded-2xl mx-auto flex items-center justify-center mb-4">
-              <Clock size={32} className="text-[var(--accent-orange)]" />
-          </div>
-          <h3 className="text-lg font-bold text-[var(--text-main)]">Quarter Operations Hub</h3>
-          <p className="text-[13px] text-[var(--text-muted)] max-w-md mx-auto mt-2">
-              Step inside the quarter to manage specific sessions, track weekly attendance, and monitor company-wise progress milestones for this phase.
-          </p>
-          <div className="flex gap-3 justify-center mt-8">
-              <button disabled className="h-9 px-5 bg-[var(--input-bg)] border border-[var(--border)] rounded-lg text-[12px] font-bold text-[var(--text-muted)] flex items-center gap-2 opacity-50 cursor-not-allowed">
-                <Plus size={14} /> Schedule Session
-              </button>
-              <button disabled className="h-9 px-5 bg-[var(--btn-primary)] text-white rounded-lg text-[12px] font-bold flex items-center gap-2 shadow-sm opacity-50 cursor-not-allowed">
-                View Milestones
-              </button>
-          </div>
+      {/* ─── Sessions List ─── */}
+      <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-xl p-6 shadow-sm">
+        <div className="flex items-center justify-between mb-6">
+            <h3 className="text-lg font-bold text-[var(--text-main)] flex items-center gap-2"><Clock size={16} className="text-[var(--accent-indigo)]"/> Scheduled Sessions</h3>
+        </div>
+        
+        {sessions.length > 0 ? (
+            <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse">
+                    <thead>
+                        <tr className="border-b border-[var(--border)] text-[10px] font-bold text-[var(--text-muted)] uppercase tracking-wider bg-[var(--input-bg)]">
+                            <th className="p-3 font-medium rounded-tl-lg">Session Title</th>
+                            <th className="p-3 font-medium">Date & Time</th>
+                            <th className="p-3 font-medium">Status</th>
+                            <th className="p-3 font-medium text-right rounded-tr-lg">Action</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {sessions.map(session => (
+                            <tr key={session.id} className="border-b border-[var(--border)] hover:bg-[var(--input-bg)] transition-colors">
+                                <td className="p-3 text-[13px] font-bold text-[var(--text-main)]">{session.title}</td>
+                                <td className="p-3 text-[12px] font-medium text-[var(--text-muted)]">
+                                    {new Date(session.start).toLocaleString('en-IN', {
+                                        timeZone: 'Asia/Kolkata', weekday: 'short', day: 'numeric', month: 'short',
+                                        hour: '2-digit', minute: '2-digit', hour12: true
+                                    })}
+                                </td>
+                                <td className="p-3">
+                                    <span className={`px-2 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider ${session.extendedProps.status === 'completed' ? 'bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)]' : 'bg-orange-50 text-orange-600'}`}>
+                                        {session.extendedProps.status || 'scheduled'}
+                                    </span>
+                                </td>
+                                <td className="p-3 text-right">
+                                    <button onClick={() => navigate(`/sessions/${session.id}`)} className="p-2 text-[var(--text-muted)] hover:text-[var(--accent-indigo)] hover:bg-[var(--accent-indigo-bg)] rounded-lg transition-all" title="View Session Details">
+                                        <Eye size={16} />
+                                    </button>
+                                </td>
+                            </tr>
+                        ))}
+                    </tbody>
+                </table>
+            </div>
+        ) : (
+            <div className="py-12 flex flex-col items-center justify-center border border-dashed border-[var(--border)] bg-[var(--input-bg)] rounded-xl opacity-70">
+                <Calendar size={28} className="text-[var(--text-muted)] mb-3" />
+                <p className="text-[12px] font-bold text-[var(--text-muted)] uppercase">No Sessions Scheduled For This Quarter</p>
+            </div>
+        )}
       </div>
 
       {/* ─── Delete Confirm Modal ─── */}

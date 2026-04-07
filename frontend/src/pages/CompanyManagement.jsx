@@ -72,24 +72,43 @@ const CompanyManagement = () => {
 
   const handleOnboard = async (e) => {
     e.preventDefault();
-    try {
-      // Clean data: convert empty strings to null for optional fields
-      const cleanCompany = { ...formData.company };
-      if (!cleanCompany.email) cleanCompany.email = null;
-      if (!cleanCompany.domain) cleanCompany.domain = null;
-      if (!cleanCompany.owner) cleanCompany.owner = null;
-      if (!cleanCompany.contact) cleanCompany.contact = null;
-      if (!cleanCompany.address) cleanCompany.address = null;
-      if (!cleanCompany.city) cleanCompany.city = null;
-      if (!cleanCompany.state) cleanCompany.state = null;
-      if (!cleanCompany.pin) cleanCompany.pin = null;
-      if (!cleanCompany.gst) cleanCompany.gst = null;
+    
+    // 1. Validation for Step 1
+    if (!formData.company.name) {
+      alert("Please provide the Company Name (Step 1).");
+      setStep(1);
+      return;
+    }
 
+    // 2. Navigation / Submission Logic
+    if (step < 3) {
+      // If Enter is pressed on Step 1 or 2, just go to next step
+      nextStep();
+      return;
+    }
+
+    // 3. Validation for Step 3 (Final Submission)
+    if (!formData.admin.email || !formData.admin.password) {
+      alert("Admin Email and Password are required to complete onboarding.");
+      return;
+    }
+
+    try {
+      // 1. Prepare Company Data
+      const cleanCompany = { ...formData.company };
+      // Convert empty strings to null for text fields
+      ['domain', 'owner', 'email', 'contact', 'address', 'city', 'state', 'pin', 'gst'].forEach(key => {
+        if (!cleanCompany[key]) cleanCompany[key] = null;
+      });
+      // Safety check for numeric fields
+      cleanCompany.members_count = parseInt(cleanCompany.members_count) || 0;
+
+      // 2. Prepare Admin Data
       const cleanAdmin = { ...formData.admin };
-      if (!cleanAdmin.first_name) cleanAdmin.first_name = null;
-      if (!cleanAdmin.last_name) cleanAdmin.last_name = null;
-      if (!cleanAdmin.mobile) cleanAdmin.mobile = null;
-      if (!cleanAdmin.designation) cleanAdmin.designation = null;
+      // Note: Only convert fields that are truly optional in the backend to null
+      ['first_name', 'last_name', 'mobile', 'designation'].forEach(key => {
+        if (!cleanAdmin[key]) cleanAdmin[key] = (cleanAdmin[key] === "" ? null : cleanAdmin[key]);
+      });
 
       await api.post('/companies', { company: cleanCompany, admin: cleanAdmin });
       setIsModalOpen(false);
@@ -98,7 +117,13 @@ const CompanyManagement = () => {
     } catch (error) {
       console.error('Error onboarding:', error);
       const detail = error.response?.data?.detail;
-      alert(typeof detail === 'string' ? detail : 'Onboarding failed. Please check all required fields.');
+      let message = 'Onboarding failed. Please check all fields.';
+      if (Array.isArray(detail)) {
+        message = `Validation Error: ${detail.map(d => `${d.loc.join('.')} - ${d.msg}`).join(', ')}`;
+      } else if (typeof detail === 'string') {
+        message = detail;
+      }
+      alert(message);
     }
   };
 
@@ -278,11 +303,11 @@ const CompanyManagement = () => {
             ))}
           </div>
 
-          <form onSubmit={handleOnboard}>
+          <div> {/* Changed from form to div for manual control */}
             <AnimatePresence mode="wait">
               {step === 1 && (
                 <motion.div key="1" initial={{ opacity: 0, x: 10 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -10 }} className="space-y-4">
-                  <IconicInput icon={Building2} label="Company Name *" required value={formData.company.name} onChange={(e) => setFormData({...formData, company: {...formData.company, name: e.target.value}})} />
+                  <IconicInput icon={Building2} label="Company Name *" value={formData.company.name} onChange={(e) => setFormData({...formData, company: {...formData.company, name: e.target.value}})} />
                   <div className="grid grid-cols-2 gap-4">
                     <IconicInput icon={Globe} label="Domain" value={formData.company.domain} onChange={(e) => setFormData({...formData, company: {...formData.company, domain: e.target.value}})} />
                     <IconicInput icon={Briefcase} label="Owner" value={formData.company.owner} onChange={(e) => setFormData({...formData, company: {...formData.company, owner: e.target.value}})} />
@@ -298,7 +323,7 @@ const CompanyManagement = () => {
                         <option>Manufacturing</option><option>Retail</option><option>Tech</option><option>Pharma</option><option>Service</option><option>Other</option>
                       </select>
                     </div>
-                    <IconicInput icon={Users} type="number" label="Staff Size" value={formData.company.members_count} onChange={(e) => setFormData({...formData, company: {...formData.company, members_count: parseInt(e.target.value)}})} />
+                    <IconicInput icon={Users} type="number" label="Staff Size" value={formData.company.members_count} onChange={(e) => setFormData({...formData, company: {...formData.company, members_count: parseInt(e.target.value) || 0}})} />
                   </div>
                 </motion.div>
               )}
@@ -318,15 +343,15 @@ const CompanyManagement = () => {
               {step === 3 && (
                 <motion.div key="3" initial={{ opacity: 0, x: 10 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -10 }} className="space-y-4">
                   <div className="grid grid-cols-2 gap-4">
-                    <IconicInput icon={User} label="First Name *" required value={formData.admin.first_name} onChange={(e) => setFormData({...formData, admin: {...formData.admin, first_name: e.target.value}})} />
-                    <IconicInput icon={User} label="Last Name *" required value={formData.admin.last_name} onChange={(e) => setFormData({...formData, admin: {...formData.admin, last_name: e.target.value}})} />
+                    <IconicInput icon={User} label="First Name" value={formData.admin.first_name} onChange={(e) => setFormData({...formData, admin: {...formData.admin, first_name: e.target.value}})} />
+                    <IconicInput icon={User} label="Last Name" value={formData.admin.last_name} onChange={(e) => setFormData({...formData, admin: {...formData.admin, last_name: e.target.value}})} />
                   </div>
                   <div className="grid grid-cols-2 gap-4">
-                    <IconicInput icon={Mail} label="Work Email *" type="email" required value={formData.admin.email} onChange={(e) => setFormData({...formData, admin: {...formData.admin, email: e.target.value}})} />
+                    <IconicInput icon={Mail} label="Work Email *" type="email" value={formData.admin.email} onChange={(e) => setFormData({...formData, admin: {...formData.admin, email: e.target.value}})} />
                     <IconicInput icon={Phone} label="Mobile Number" value={formData.admin.mobile} onChange={(e) => setFormData({...formData, admin: {...formData.admin, mobile: e.target.value}})} />
                   </div>
                   <div className="grid grid-cols-2 gap-4">
-                    <IconicInput icon={Lock} type="password" label="Temp Password *" required value={formData.admin.password} onChange={(e) => setFormData({...formData, admin: {...formData.admin, password: e.target.value}})} />
+                    <IconicInput icon={Lock} type="password" label="Temp Password *" value={formData.admin.password} onChange={(e) => setFormData({...formData, admin: {...formData.admin, password: e.target.value}})} />
                     <IconicInput icon={Briefcase} label="Designation" value={formData.admin.designation} onChange={(e) => setFormData({...formData, admin: {...formData.admin, designation: e.target.value}})} />
                   </div>
                   <div className="grid grid-cols-2 gap-4">
@@ -359,10 +384,10 @@ const CompanyManagement = () => {
               {step < 3 ? (
                 <button type="button" onClick={nextStep} className="flex-1 py-2 bg-[var(--btn-primary)] text-white rounded-lg text-[13px] font-bold hover:bg-[var(--btn-primary-hover)] shadow-sm transition-all">Continue</button>
               ) : (
-                <button type="submit" className="flex-1 py-2 bg-[var(--accent-green)] text-white rounded-lg text-[13px] font-bold hover:opacity-90 shadow-sm transition-all">Complete Onboarding</button>
+                <button type="button" onClick={handleOnboard} className="flex-1 py-2 bg-[var(--accent-green)] text-white rounded-lg text-[13px] font-bold hover:opacity-90 shadow-sm transition-all">Complete Onboarding</button>
               )}
             </div>
-          </form>
+          </div> {/* Changed from form end to div end */}
         </div>
       </Modal>
     </div>

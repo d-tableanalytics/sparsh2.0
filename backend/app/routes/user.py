@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from typing import List, Optional
 from app.models.user import UserResponse, UserRole
 from app.controllers.auth_controller import (
@@ -9,6 +9,7 @@ from app.db.mongodb import get_collection
 from bson import ObjectId
 from datetime import datetime
 from pydantic import BaseModel
+from app.services.notification_service import send_user_updated_email, send_access_control_email
 
 router = APIRouter(prefix="/users", tags=["Users"])
 
@@ -65,7 +66,7 @@ async def get_user(user_id: str, current_user: dict = Depends(get_current_user))
 
 # ─── Update User ───
 @router.put("/{user_id}")
-async def update_user(user_id: str, updates: UserEditRequest, current_user: dict = Depends(get_current_user)):
+async def update_user(user_id: str, updates: UserEditRequest, background_tasks: BackgroundTasks, current_user: dict = Depends(get_current_user)):
     if current_user.get("role") != "superadmin":
         raise HTTPException(status_code=403, detail="Not authorized")
     
@@ -77,9 +78,21 @@ async def update_user(user_id: str, updates: UserEditRequest, current_user: dict
     if not update_data:
         raise HTTPException(status_code=400, detail="No fields to update")
     
+    # ─── Check for Role/Access Change ───
+    old_role = user.get("role")
+    new_role = update_data.get("role")
+    updated_by = current_user.get("full_name") or current_user.get("first_name", "Admin")
+
     update_data["updated_at"] = datetime.utcnow()
     await get_collection(col_name).update_one({"_id": ObjectId(user_id)}, {"$set": update_data})
-    return {"message": "User updated successfully"}
+
+    # ─── Trigger Notifications ───
+    if new_role and new_role != old_role:
+        background_tasks.add_task(send_access_control_email, user, new_role, updated_by)
+    else:
+        background_tasks.add_task(send_user_updated_email, user, updated_by)
+
+    return {"message": "User updated successfully and notification triggered"}
 
 # ─── Delete User ───
 @router.delete("/{user_id}")
