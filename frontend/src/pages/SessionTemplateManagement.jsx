@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import api from '../services/api';
 import Modal from '../components/common/Modal';
+import { useNotification } from '../context/NotificationContext';
 import { motion } from 'framer-motion';
 import {
   Copy, Plus, Search, Trash2, Pencil, ExternalLink,
@@ -10,6 +11,7 @@ import {
 
 const SessionTemplateManagement = () => {
     const navigate = useNavigate();
+    const { showSuccess, showError } = useNotification();
     const [templates, setTemplates] = useState([]);
     const [loading, setLoading] = useState(true);
     const [searchTerm, setSearchTerm] = useState('');
@@ -41,16 +43,17 @@ const SessionTemplateManagement = () => {
             setShowCreate(false);
             setEditTemplate(null);
             setForm({ title: '', topic: '', description: '' });
+            showSuccess(editTemplate ? "Template updated" : "Template created");
             fetchData();
-        } catch (err) { alert('Failed to save template'); }
+        } catch (err) { showError('Failed to save template'); }
     };
 
     const handleDelete = async (id) => {
-        if (!confirm('Delete this template?')) return;
         try {
             await api.delete(`/session-templates/${id}`);
+            showSuccess("Template deleted");
             fetchData();
-        } catch (err) { alert('Delete failed'); }
+        } catch (err) { showError('Delete failed'); }
     };
 
     const openEdit = (t) => {

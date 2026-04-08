@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import api from '../services/api';
 import Modal from '../components/common/Modal';
+import { useNotification } from '../context/NotificationContext';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   ArrowLeft, User, Mail, Phone, Briefcase, Shield,
@@ -113,6 +114,7 @@ const generateActivityTimeline = () => {
 const MemberDashboard = () => {
   const { userId } = useParams();
   const navigate = useNavigate();
+  const { showSuccess, showError } = useNotification();
 
   const [member, setMember] = useState(null);
   const [activity, setActivity] = useState({ learnings: [], attendance: [], activities: [] });
@@ -194,22 +196,25 @@ const MemberDashboard = () => {
       const { _id, email, password, created_at, company_id, is_active, updated_at, ...fields } = editData;
       await api.put(`/users/${userId}`, fields);
       setEditMode(false);
+      showSuccess("Member details updated");
       fetchData();
-    } catch (err) { alert('Update failed'); }
+    } catch (err) { showError('Update failed'); }
   };
 
   const handleStatusToggle = async () => {
     try {
       await api.patch(`/users/${userId}/status`, { is_active: !member.is_active });
+      showSuccess(`Member ${!member.is_active ? 'activated' : 'deactivated'}`);
       fetchData();
-    } catch (err) { alert('Status change failed'); }
+    } catch (err) { showError('Status change failed'); }
   };
 
   const handleDelete = async () => {
     try {
       await api.delete(`/users/${userId}`);
+      showSuccess("Member deleted successfully");
       navigate(-1);
-    } catch (err) { alert('Delete failed'); }
+    } catch (err) { showError('Delete failed'); }
   };
 
   if (loading) return (

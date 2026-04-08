@@ -1,11 +1,13 @@
 import React, { useState, useEffect } from 'react';
 import api from '../services/api';
 import { useAuth } from '../context/AuthContext';
+import { useNotification } from '../context/NotificationContext';
 import { ShieldCheck, Plus, Trash2, Mail, Save, ToggleLeft as ToggleOff, ToggleRight as ToggleOn, Settings, Building2, UserCircle2, Search, Info } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 
 const SettingsPage = () => {
     const { user } = useAuth();
+    const { showSuccess, showError } = useNotification();
     const [config, setConfig] = useState({ allow_backdate: false, exception_users: [] });
     const [newEmail, setNewEmail] = useState('');
     const [loading, setLoading] = useState(true);
@@ -80,25 +82,25 @@ const SettingsPage = () => {
     const handleSave = async () => {
         try {
             await api.put('/settings/backdate-control', config);
-            alert("Workflow settings deployed successfully.");
-        } catch (error) { alert("Failed to deploy config."); }
+            showSuccess("Workflow settings deployed successfully.");
+        } catch (error) { showError("Failed to deploy config."); }
     };
 
     const handleTemplateSave = async () => {
         try {
             await api.put(`/settings/templates/${editingTemplate._id}`, editingTemplate);
-            alert("Template synchronized.");
+            showSuccess("Template synchronized.");
             setEditingTemplate(null);
             fetchTemplates();
-        } catch (err) { alert("Sync failed."); }
+        } catch (err) { showError("Sync failed."); }
     };
 
     const deleteTemplate = async (id) => {
-        if (!window.confirm("Permanently remove this template override?")) return;
         try {
             await api.delete(`/settings/templates/${id}`);
+            showSuccess("Template override removed");
             fetchTemplates();
-        } catch (err) { alert("Delete failed."); }
+        } catch (err) { showError("Delete failed."); }
     };
 
     const handleCreateTemplate = async () => {
@@ -112,11 +114,12 @@ const SettingsPage = () => {
                 company_id: selectedCompanyId || null
             };
             await api.post('/settings/templates', payload);
+            showSuccess("Infrastructure initialized");
             setShowCreateModal(false);
             setNewTemplateForm({ name: '', slug: 'task_created_email' });
             fetchTemplates();
         } catch (err) {
-            alert("Failed to initialize template.");
+            showError("Failed to initialize template.");
         }
     };
 

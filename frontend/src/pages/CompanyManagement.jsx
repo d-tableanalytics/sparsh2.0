@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import api from '../services/api';
 import Button from '../components/common/Button';
 import Modal from '../components/common/Modal';
+import { useNotification } from '../context/NotificationContext';
 import { motion, AnimatePresence } from 'framer-motion';
 import { 
   Plus, Building2, Globe, Users, Mail, User, 
@@ -32,6 +33,7 @@ const IconicInput = ({ icon: Icon, label, ...props }) => (
 
 const CompanyManagement = () => {
   const navigate = useNavigate();
+  const { showSuccess, showError } = useNotification();
   const [companies, setCompanies] = useState([]);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
@@ -75,7 +77,7 @@ const CompanyManagement = () => {
     
     // 1. Validation for Step 1
     if (!formData.company.name) {
-      alert("Please provide the Company Name (Step 1).");
+      showError("Please provide the Company Name (Step 1).");
       setStep(1);
       return;
     }
@@ -89,7 +91,7 @@ const CompanyManagement = () => {
 
     // 3. Validation for Step 3 (Final Submission)
     if (!formData.admin.email || !formData.admin.password) {
-      alert("Admin Email and Password are required to complete onboarding.");
+      showError("Admin Email and Password are required to complete onboarding.");
       return;
     }
 
@@ -112,6 +114,7 @@ const CompanyManagement = () => {
 
       await api.post('/companies', { company: cleanCompany, admin: cleanAdmin });
       setIsModalOpen(false);
+      showSuccess(`Company "${formData.company.name}" successfully onboarded!`);
       resetForm();
       fetchCompanies();
     } catch (error) {
@@ -123,7 +126,7 @@ const CompanyManagement = () => {
       } else if (typeof detail === 'string') {
         message = detail;
       }
-      alert(message);
+      showError(message);
     }
   };
 

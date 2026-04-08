@@ -48,12 +48,13 @@ async def process_knowledge_base(project_id: str, file_id: str, local_path: str,
     text = await extract_text_from_file(local_path, filename)
     chunks = chunk_text(text)
     
-    col = get_collection("gpt_knowledge_chunks")
+    col = get_collection("KnowledgeBase")
     chunk_docs = []
     for c in chunks:
         chunk_docs.append({
             "project_id": project_id,
             "file_id": file_id,
+            "filename": filename,
             "content": c,
             "created_at": datetime.utcnow()
         })
@@ -70,7 +71,7 @@ async def get_relevant_context(project_id: str, query: str, limit=5) -> str:
     Simple keyword-based context retrieval (Mocking RAG for modularity).
     In a full production version, this would use vector embeddings.
     """
-    col = get_collection("gpt_knowledge_chunks")
+    col = get_collection("KnowledgeBase")
     # Simple search for chunks containing any of the keywords from query
     keywords = [k for k in query.lower().split() if len(k) > 3]
     

@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import Optional, List
+from typing import Optional, List, Dict
 from datetime import datetime
 
 class Reminder(BaseModel):
@@ -31,6 +31,9 @@ class CalendarEventBase(BaseModel):
     additional_details: Optional[str] = None
     status_remark: Optional[str] = None # Added for handover/reschedule notes
     meeting_link: Optional[str] = None
+    gpt_project_id: Optional[str] = None
+    gpt_project_name: Optional[str] = None
+    gpt_projects: List[Dict] = []
 
     
     # Task specific

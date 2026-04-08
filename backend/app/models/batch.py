@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import Optional, List
+from typing import Optional, List, Dict
 from datetime import datetime
 
 class BatchBase(BaseModel):
@@ -10,6 +10,7 @@ class BatchBase(BaseModel):
     target_end_date: Optional[str] = None
     status: str = "active"  # active, completed, paused
     companies: List[str] = []  # list of company_ids
+    gpt_projects: List[Dict] = [] # list of {id: str, title: str}
 
 class BatchCreate(BaseModel):
     name: str
@@ -17,6 +18,9 @@ class BatchCreate(BaseModel):
     description: Optional[str] = None
     start_date: Optional[str] = None
     target_end_date: Optional[str] = None
+    gpt_project_id: Optional[str] = None
+    gpt_project_name: Optional[str] = None
+    gpt_projects: Optional[List[Dict]] = []
 
 class BatchUpdate(BaseModel):
     name: Optional[str] = None
@@ -25,6 +29,9 @@ class BatchUpdate(BaseModel):
     start_date: Optional[str] = None
     target_end_date: Optional[str] = None
     status: Optional[str] = None
+    gpt_project_id: Optional[str] = None
+    gpt_project_name: Optional[str] = None
+    gpt_projects: Optional[List[Dict]] = []
 
 class BatchResponse(BatchBase):
     id: str = Field(alias="_id")

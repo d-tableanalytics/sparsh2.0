@@ -8,10 +8,12 @@ import {
   Lock, Settings2, Save, X, Building2, MapPin
 } from 'lucide-react';
 import api from '../services/api';
+import { useNotification } from '../context/NotificationContext';
 
 const UserDetails = () => {
     const { userId } = useParams();
     const navigate = useNavigate();
+    const { showSuccess, showError } = useNotification();
     const [user, setUser] = useState(null);
     const [loading, setLoading] = useState(true);
     const [isEditing, setIsEditing] = useState(false);
@@ -37,23 +39,25 @@ const UserDetails = () => {
         try {
             await api.put(`/users/${userId}`, editForm);
             setIsEditing(false);
+            showSuccess("Profile updated");
             fetchData();
-        } catch (err) { console.error(err); }
+        } catch (err) { showError("Update failed"); }
     };
 
     const handleToggleStatus = async () => {
         try {
             await api.put(`/users/${userId}`, { is_active: !user.is_active });
+            showSuccess(`User ${!user.is_active ? 'activated' : 'deactivated'}`);
             fetchData();
-        } catch (err) { console.error(err); }
+        } catch (err) { showError("Status change failed"); }
     };
 
     const handleDelete = async () => {
-        if (!window.confirm("Permanently remove this staff member?")) return;
         try {
             await api.delete(`/users/${userId}`);
+            showSuccess("Member removed from registry");
             navigate('/admin/users');
-        } catch (err) { console.error(err); }
+        } catch (err) { showError("Delete failed"); }
     };
 
     if (loading) return <div className="flex items-center justify-center h-96 animate-pulse font-black uppercase text-[12px] text-[var(--accent-indigo)] tracking-widest">Generating Digital Profile...</div>;

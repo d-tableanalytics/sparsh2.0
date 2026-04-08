@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import api from '../services/api';
 import Modal from '../components/common/Modal';
+import { useNotification } from '../context/NotificationContext';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   ArrowLeft, Copy, Pencil, Trash2, Plus, 
@@ -14,6 +15,7 @@ import {
 const SessionTemplateDetails = () => {
     const { templateId } = useParams();
     const navigate = useNavigate();
+    const { showSuccess, showError } = useNotification();
 
     const [template, setTemplate] = useState(null);
     const [loading, setLoading] = useState(true);
@@ -23,8 +25,8 @@ const SessionTemplateDetails = () => {
     const [showTaskModal, setShowTaskModal] = useState(false);
     const [taskRows, setTaskRows] = useState([{ title: '', points: 0 }]);
     
-    // Assessment State
     const [showQuizModal, setShowQuizModal] = useState(false);
+    const [editQuizIdx, setEditQuizIdx] = useState(null);
     const [quizForm, setQuizForm] = useState({
         title: '', passing_score: 70, shuffle_questions: false,
         questions: [{ question_text: '', type: 'MCQ', options: ['', '', '', ''], correct_option_index: 0 }]
@@ -56,8 +58,9 @@ const SessionTemplateDetails = () => {
             const filtered = taskRows.filter(t => t.title.trim() !== '');
             await api.post(`/session-templates/${templateId}/tasks`, filtered);
             setShowTaskModal(false);
+            showSuccess("Learning tasks saved");
             fetchData();
-        } catch (err) { alert('Failed to save tasks'); }
+        } catch (err) { showError('Failed to save tasks'); }
     };
 
     // Assessments 📝
@@ -81,27 +84,40 @@ const SessionTemplateDetails = () => {
         setQuizForm({ ...quizForm, questions: newQuestions });
     };
 
+    const handleEditAssessment = (idx) => {
+        setEditQuizIdx(idx);
+        setQuizForm(template.assessments[idx]);
+        setShowQuizModal(true);
+    };
+
     const handleSaveQuiz = async () => {
         try {
-            // In this simplistic model we keep all assessments in one list
-            const newAssessments = [...(template.assessments || []), quizForm];
+            let newAssessments;
+            if (editQuizIdx !== null) {
+                newAssessments = [...template.assessments];
+                newAssessments[editQuizIdx] = quizForm;
+            } else {
+                newAssessments = [...(template.assessments || []), quizForm];
+            }
             await api.post(`/session-templates/${templateId}/assessments`, newAssessments);
             setShowQuizModal(false);
+            setEditQuizIdx(null);
             setQuizForm({
                 title: '', passing_score: 70, shuffle_questions: false,
                 questions: [{ question_text: '', type: 'MCQ', options: ['', '', '', ''], correct_option_index: 0 }]
             });
+            showSuccess(editQuizIdx !== null ? "Quiz updated" : "Quiz library updated");
             fetchData();
-        } catch (err) { alert('Failed to save quiz'); }
+        } catch (err) { showError('Failed to save quiz'); }
     };
 
     const handleDeleteAssessment = async (idx) => {
-        if (!confirm('Delete this assessment?')) return;
         const newAssessments = template.assessments.filter((_, i) => i !== idx);
         try {
             await api.post(`/session-templates/${templateId}/assessments`, newAssessments);
+            showSuccess("Assessment deleted");
             fetchData();
-        } catch (err) { alert('Delete failed'); }
+        } catch (err) { showError('Delete failed'); }
     }
 
     if (loading) return <div className="py-20 text-center"><div className="w-8 h-8 border-2 border-[var(--accent-indigo)] border-t-transparent rounded-full animate-spin mx-auto"></div></div>;
@@ -194,7 +210,10 @@ const SessionTemplateDetails = () => {
                                 <div key={idx} className="bg-[var(--bg-card)] border border-[var(--border)] p-5 rounded-2xl group hover:border-[var(--accent-indigo-border)] transition-all shadow-sm">
                                     <div className="flex justify-between items-start mb-3">
                                         <div className="p-2 bg-[var(--accent-orange-bg)] rounded-lg text-[var(--accent-orange)]"><MessageSquare size={18} /></div>
-                                        <button onClick={() => handleDeleteAssessment(idx)} className="p-1.5 rounded-md text-[var(--text-muted)] hover:text-[var(--accent-red)] hover:bg-[var(--accent-red-bg)] opacity-0 group-hover:opacity-100 transition-all"><Trash size={14} /></button>
+                                        <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-all">
+                                            <button onClick={() => handleEditAssessment(idx)} className="p-1.5 rounded-md text-[var(--text-muted)] hover:text-[var(--accent-indigo)] hover:bg-[var(--accent-indigo-bg)] transition-all"><Pencil size={14} /></button>
+                                            <button onClick={() => handleDeleteAssessment(idx)} className="p-1.5 rounded-md text-[var(--text-muted)] hover:text-[var(--accent-red)] hover:bg-[var(--accent-red-bg)] transition-all"><Trash size={14} /></button>
+                                        </div>
                                     </div>
                                     <h3 className="text-[14px] font-bold text-[var(--text-main)] mb-1">{a.title}</h3>
                                     <div className="flex items-center gap-4 mt-3">
@@ -252,7 +271,14 @@ const SessionTemplateDetails = () => {
             </Modal>
 
             {/* ─── Quiz Modal (Advanced Builder) ─── */}
-            <Modal isOpen={showQuizModal} onClose={() => setShowQuizModal(false)} title="Create Quiz">
+            <Modal isOpen={showQuizModal} onClose={() => {
+                setShowQuizModal(false);
+                setEditQuizIdx(null);
+                setQuizForm({
+                    title: '', passing_score: 70, shuffle_questions: false,
+                    questions: [{ question_text: '', type: 'MCQ', options: ['', '', '', ''], correct_option_index: 0 }]
+                });
+            }} title={editQuizIdx !== null ? "Edit Quiz Architecture" : "Create New Quiz"}>
                 <div className="space-y-4 max-h-[75vh] overflow-y-auto pr-2 scrollbar-thin">
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                         <div className="space-y-1">

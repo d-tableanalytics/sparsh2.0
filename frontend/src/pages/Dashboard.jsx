@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
+import { useNavigate } from 'react-router-dom';
 import api from '../services/api';
 import { 
   Users, Building2, Calendar, Target, 
@@ -14,53 +15,29 @@ import {
 import { motion } from 'framer-motion';
 
 const Dashboard = () => {
+  const navigate = useNavigate();
   const { user } = useAuth();
   const [stats, setStats] = useState({
-    companies: 0,
-    batches: 0,
-    activeLearners: 0,
-    sessionsThisWeek: 0
+    registered_entities: 0,
+    active_batches: 0,
+    strategic_learners: 0,
+    session_velocity: 0
   });
+  const [pulseData, setPulseData] = useState([]);
+  const [mixData, setMixData] = useState([]);
   const [upcomingEvents, setUpcomingEvents] = useState([]);
   const [loading, setLoading] = useState(true);
 
-  // Mock data for charts (would be aggregated from actual history in production)
-  const areaData = [
-    { name: 'Mon', sessions: 4 }, { name: 'Tue', sessions: 7 },
-    { name: 'Wed', sessions: 5 }, { name: 'Thu', sessions: 9 },
-    { name: 'Fri', sessions: 12 }, { name: 'Sat', sessions: 3 },
-    { name: 'Sun', sessions: 2 }
-  ];
-
-  const pieData = [
-    { name: 'Core', value: 45, color: 'var(--accent-indigo)' },
-    { name: 'Support', value: 30, color: 'var(--accent-green)' },
-    { name: 'Review', value: 25, color: 'var(--accent-orange)' }
-  ];
-
   const fetchData = async () => {
     try {
-      const role = user?.role?.toLowerCase();
-      const isAdmin = ['superadmin', 'admin'].includes(role);
-      
-      const [compRes, batchRes, eventRes] = await Promise.all([
-        isAdmin ? api.get('/companies').catch(() => ({ data: [] })) : Promise.resolve({ data: [] }),
-        api.get('/batches').catch(() => ({ data: [] })),
+      const [statsRes, eventRes] = await Promise.all([
+        api.get('/dashboard/stats'),
         api.get('/calendar/events').catch(() => ({ data: [] }))
       ]);
       
-      setStats({
-        companies: compRes.data.length,
-        batches: batchRes.data.length,
-        activeLearners: 128, // Placeholder
-        sessionsThisWeek: eventRes.data.filter(e => {
-            const date = new Date(e.start);
-            const now = new Date();
-            const diffTime = Math.abs(now - date);
-            const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-            return diffDays <= 7;
-        }).length
-      });
+      setStats(statsRes.data.kpis);
+      setPulseData(statsRes.data.operational_pulse);
+      setMixData(statsRes.data.session_mix);
 
       setUpcomingEvents(eventRes.data
         .filter(e => new Date(e.start) >= new Date())
@@ -81,10 +58,10 @@ const Dashboard = () => {
   const isAdmin = ['superadmin', 'admin', 'coach'].includes(role);
 
   const statsTiles = [
-    { label: isAdmin ? 'Registered Entities' : 'Active Programs', value: stats.companies || 1, icon: Building2, color: 'var(--accent-indigo)', trend: '+12%', sub: isAdmin ? 'vs last month' : 'curated oversight' },
-    { label: isAdmin ? 'Active Batches' : 'My Learning Batches', value: stats.batches, icon: Zap, color: 'var(--accent-orange)', trend: '+5%', sub: isAdmin ? 'across regions' : 'operational active' },
-    { label: isAdmin ? 'Strategic Learners' : 'Program Collaborators', value: stats.activeLearners, icon: Users, color: 'var(--accent-green)', trend: '+18%', sub: isAdmin ? 'onboarded' : 'peer network' },
-    { label: 'Session Velocity', value: stats.sessionsThisWeek, icon: Activity, color: 'var(--accent-red)', trend: 'High', sub: 'scheduled this week' }
+    { label: isAdmin ? 'Registered Entities' : 'Active Programs', value: stats.registered_entities, icon: Building2, color: 'var(--accent-indigo)', trend: 'Live', sub: isAdmin ? 'total companies' : 'curated oversight' },
+    { label: isAdmin ? 'Active Batches' : 'Learning Batches', value: stats.active_batches, icon: Zap, color: 'var(--accent-orange)', trend: 'Active', sub: isAdmin ? 'in progress' : 'operational active' },
+    { label: isAdmin ? 'Strategic Learners' : 'Program Collaborators', value: stats.strategic_learners, icon: Users, color: 'var(--accent-green)', trend: 'Active', sub: isAdmin ? 'onboarded' : 'peer network' },
+    { label: 'Session Velocity', value: stats.session_velocity, icon: Activity, color: 'var(--accent-red)', trend: '30 Days', sub: 'completed sessions' }
   ];
 
   return (
@@ -131,51 +108,56 @@ const Dashboard = () => {
 
       {/* Middle Row: Charts */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <div className="lg:col-span-2 bg-[var(--bg-card)] border border-[var(--border)] rounded-[32px] p-8 shadow-sm flex flex-col h-[400px]">
+        <div className="lg:col-span-2 bg-[var(--bg-card)] border border-[var(--border)] rounded-[32px] p-8 shadow-sm flex flex-col h-[450px]">
           <div className="flex items-center justify-between mb-8">
             <div>
-              <h3 className="text-xl font-black text-[var(--text-main)]">Operational Pulse</h3>
-              <p className="text-[12px] text-[var(--text-muted)] font-bold">Session activity across all branches (7-day trend)</p>
+              <h3 className="text-xl font-black text-[var(--text-main)] uppercase italic tracking-tight">System Pulse</h3>
+              <p className="text-[12px] text-[var(--text-muted)] font-bold uppercase tracking-wider opacity-60">Completion Velocity & Neural Activity (14-Day Trend)</p>
             </div>
-            <select className="bg-[var(--input-bg)] border border-[var(--border)] rounded-xl px-4 py-2 text-[12px] font-black outline-none focus:border-[var(--accent-indigo)]">
-              <option>This Week</option><option>Last Month</option>
-            </select>
+            <div className="flex items-center gap-2 px-3 py-1.5 bg-[var(--input-bg)] border border-[var(--border)] rounded-xl">
+               <div className="w-2 h-2 rounded-full bg-[var(--accent-indigo)] animate-pulse"></div>
+               <span className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest">Live Flow</span>
+            </div>
           </div>
           <div className="flex-1 w-full min-h-0">
             <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={areaData}>
+              <AreaChart data={pulseData}>
                 <defs>
                   <linearGradient id="colorSessions" x1="0" y1="0" x2="0" y2="1">
                     <stop offset="5%" stopColor="var(--accent-indigo)" stopOpacity={0.3}/>
                     <stop offset="95%" stopColor="var(--accent-indigo)" stopOpacity={0}/>
                   </linearGradient>
                 </defs>
-                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="var(--border)" opacity={0.5} />
-                <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{fill: 'var(--text-muted)', fontSize: 11, fontWeight: 700}} dy={10} />
-                <YAxis axisLine={false} tickLine={false} tick={{fill: 'var(--text-muted)', fontSize: 11, fontWeight: 700}} />
+                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="var(--border)" opacity={0.3} />
+                <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{fill: 'var(--text-muted)', fontSize: 10, fontWeight: 900}} dy={10} />
+                <YAxis axisLine={false} tickLine={false} tick={{fill: 'var(--text-muted)', fontSize: 10, fontWeight: 900}} />
                 <Tooltip 
-                  contentStyle={{ borderRadius: '16px', border: '1px solid var(--border)', background: 'var(--bg-card)', boxShadow: '0 10px 30px rgba(0,0,0,0.1)' }}
-                  itemStyle={{ fontSize: '12px', fontWeight: 900, color: 'var(--accent-indigo)' }}
+                  contentStyle={{ borderRadius: '24px', border: '1px solid var(--border)', background: 'var(--bg-card)', boxShadow: '0 20px 50px rgba(0,0,0,0.1)', padding: '12px 20px' }}
+                  itemStyle={{ fontSize: '13px', fontWeight: 900, color: 'var(--accent-indigo)' }}
+                  cursor={{ stroke: 'var(--accent-indigo)', strokeWidth: 1, strokeDasharray: '5 5' }}
                 />
-                <Area type="monotone" dataKey="sessions" stroke="var(--accent-indigo)" strokeWidth={4} fillOpacity={1} fill="url(#colorSessions)" />
+                <Area type="monotone" dataKey="sessions" stroke="var(--accent-indigo)" strokeWidth={4} fillOpacity={1} fill="url(#colorSessions)" animationDuration={1500} />
               </AreaChart>
             </ResponsiveContainer>
           </div>
         </div>
 
-        <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-[32px] p-8 shadow-sm flex flex-col h-[400px]">
+        <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-[32px] p-8 shadow-sm flex flex-col h-[450px]">
           <div className="mb-6">
-            <h3 className="text-xl font-black text-[var(--text-main)]">Session Mix</h3>
-            <p className="text-[12px] text-[var(--text-muted)] font-bold">Distribution by Coaching Type</p>
+            <h3 className="text-xl font-black text-[var(--text-main)] uppercase italic tracking-tight">Coaching Mix</h3>
+            <p className="text-[12px] text-[var(--text-muted)] font-bold uppercase tracking-wider opacity-60">Distribution by Segment</p>
           </div>
           <div className="flex-1 w-full flex items-center justify-center">
             <ResponsiveContainer width="100%" height="100%">
               <PieChart>
-                <Pie data={pieData} innerRadius={70} outerRadius={100} paddingAngle={8} dataKey="value" stroke="none">
-                  {pieData.map((entry, index) => <Cell key={`cell-${index}`} fill={entry.color} />)}
+                <Pie data={mixData} innerRadius={80} outerRadius={110} paddingAngle={10} dataKey="value" stroke="none" animationBegin={0} animationDuration={1800}>
+                  {mixData.map((entry, index) => <Cell key={`cell-${index}`} fill={entry.color} />)}
                 </Pie>
-                <Tooltip />
-                <Legend layout="vertical" align="right" verticalAlign="middle" iconType="circle" />
+                <Tooltip 
+                   contentStyle={{ borderRadius: '20px', border: 'none', boxShadow: '0 10px 30px rgba(0,0,0,0.1)' }}
+                   itemStyle={{ fontSize: '11px', fontWeight: 900 }}
+                />
+                <Legend iconType="circle" wrapperStyle={{ fontSize: '10px', fontWeight: 900, textTransform: 'uppercase', letterSpacing: '0.1em' }} />
               </PieChart>
             </ResponsiveContainer>
           </div>
@@ -183,46 +165,31 @@ const Dashboard = () => {
       </div>
 
       {/* Bottom Row */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      <div className="grid grid-cols-1 lg:grid-cols-1 gap-6">
         <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-[32px] p-8 shadow-sm">
-            <div className="flex items-center justify-between mb-6">
-                <h3 className="text-xl font-black text-[var(--text-main)] flex items-center gap-2"><Clock size={22} className="text-[var(--accent-indigo)]"/> Upcoming Shedule</h3>
-                <button className="text-[12px] font-black text-[var(--accent-indigo)] uppercase tracking-wider hover:underline">View All</button>
+            <div className="flex items-center justify-between mb-8">
+                <h3 className="text-xl font-black text-[var(--text-main)] flex items-center gap-2 uppercase italic tracking-tight"><Clock size={22} className="text-[var(--accent-indigo)]"/> Operational Timeline</h3>
+                <button onClick={() => navigate('/calendar')} className="text-[11px] font-black text-[var(--accent-indigo)] uppercase tracking-widest px-4 py-2 bg-[var(--accent-indigo-bg)] rounded-xl hover:opacity-80 transition-all">Full Calendar</button>
             </div>
-            <div className="space-y-4">
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                 {upcomingEvents.length > 0 ? upcomingEvents.map((ev, i) => (
-                    <div key={ev.id} className="flex items-center justify-between p-4 bg-[var(--input-bg)] rounded-2xl hover:bg-[var(--bg-main)] border border-transparent hover:border-[var(--border)] transition-all group">
-                         <div className="flex items-center gap-4">
-                             <div className="w-12 h-12 flex flex-col items-center justify-center bg-[var(--bg-card)] rounded-xl border border-[var(--border)] group-hover:border-[var(--accent-indigo)] transition-all">
-                                 <span className="text-[10px] font-black text-[var(--accent-indigo)] uppercase">{new Date(ev.start).toLocaleString('en-US', { month: 'short' })}</span>
-                                 <span className="text-[16px] font-black text-[var(--text-main)]">{new Date(ev.start).getDate()}</span>
-                             </div>
-                             <div>
-                                 <h4 className="text-[14px] font-black text-[var(--text-main)] group-hover:text-[var(--accent-indigo)] transition-all">{ev.title}</h4>
-                                 <p className="text-[11px] font-bold text-[var(--text-muted)] flex items-center gap-1"><Clock size={12}/> {new Date(ev.start).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} • {ev.type}</p>
-                             </div>
+                    <div key={ev.id} onClick={() => navigate(`/sessions/${ev.id}`)} className="flex items-center gap-4 p-5 bg-[var(--input-bg)] rounded-2xl border border-transparent hover:border-[var(--border)] hover:bg-white transition-all group cursor-pointer shadow-sm hover:shadow-md">
+                         <div className="w-14 h-14 flex flex-col items-center justify-center bg-white rounded-2xl border border-[var(--border)] group-hover:border-[var(--accent-indigo)] transition-all flex-shrink-0">
+                             <span className="text-[10px] font-black text-[var(--accent-indigo)] uppercase tracking-tighter">{new Date(ev.start).toLocaleString('en-US', { month: 'short' })}</span>
+                             <span className="text-[18px] font-black text-[var(--text-main)] leading-none">{new Date(ev.start).getDate()}</span>
                          </div>
-                         <ChevronRight size={18} className="text-[var(--text-muted)] opacity-0 group-hover:opacity-100 transition-all translate-x-2 group-hover:translate-x-0" />
+                         <div className="min-w-0">
+                             <h4 className="text-[13px] font-black text-[var(--text-main)] group-hover:text-[var(--accent-indigo)] transition-all truncate uppercase italic">{ev.title}</h4>
+                             <p className="text-[11px] font-bold text-[var(--text-muted)] flex items-center gap-1 mt-0.5"><Clock size={12}/> {new Date(ev.start).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} • {ev.type}</p>
+                         </div>
                     </div>
                 )) : (
-                    <div className="py-10 text-center space-y-2 opacity-50">
-                        <Calendar size={32} className="mx-auto" />
-                        <p className="font-bold">No sessions scheduled for today.</p>
+                    <div className="col-span-full py-16 text-center space-y-3 opacity-30">
+                        <Calendar size={48} className="mx-auto" />
+                        <p className="text-[12px] font-black uppercase tracking-widest text-[var(--text-muted)]">No sessions scheduled for today's pulse.</p>
                     </div>
                 )}
             </div>
-        </div>
-
-        <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-[32px] p-8 shadow-sm flex flex-col justify-center text-center space-y-6 relative overflow-hidden">
-            <div className="absolute top-0 right-0 w-32 h-32 bg-[var(--accent-indigo-bg)] rounded-full -translate-y-1/2 translate-x-1/2 blur-3xl" />
-            <div className="absolute bottom-0 left-0 w-32 h-32 bg-[var(--accent-orange-bg)] rounded-full translate-y-1/2 -translate-x-1/2 blur-3xl" />
-            
-            <TrendingUp size={48} className="mx-auto text-[var(--accent-indigo)] animate-bounce" />
-            <div className="space-y-2">
-                <h3 className="text-2xl font-black text-[var(--text-main)]">Intelligence Report</h3>
-                <p className="text-[13px] text-[var(--text-muted)] font-bold max-w-[300px] mx-auto">AI Analysis: You have 3 learners falling behind this week. High engagement on Tuesday review sessions.</p>
-            </div>
-            <button className="px-8 py-3 bg-[var(--text-main)] text-white rounded-2xl text-[13px] font-black hover:opacity-90 transition-all shadow-xl shadow-black/10">Download Insights</button>
         </div>
       </div>
     </div>
