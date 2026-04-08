@@ -2,6 +2,7 @@ import os
 import pypdf
 import docx
 import pandas as pd
+import base64
 from datetime import datetime
 from bson import ObjectId
 from app.db.mongodb import get_collection
@@ -9,11 +10,21 @@ from app.config.settings import settings
 from openai import AsyncOpenAI
 import numpy as np
 
-async def extract_text_from_file(file_path: str, filename: str) -> str:
+async def extract_text_from_file(file_path: str, filename: str) -> dict:
+    """
+    Returns {"text": str, "images": list[str]}
+    Images are base64 data URIs: "data:image/png;base64,..."
+    """
     ext = filename.split('.')[-1].lower()
     text = ""
+    images = []
     try:
-        if ext == 'pdf':
+        if ext in ['jpg', 'jpeg', 'png', 'webp', 'gif']:
+            with open(file_path, "rb") as image_file:
+                base64_data = base64.b64encode(image_file.read()).decode('utf-8')
+                mime_type = "image/jpeg" if ext in ['jpg', 'jpeg'] else f"image/{ext}"
+                images.append(f"data:{mime_type};base64,{base64_data}")
+        elif ext == 'pdf':
             with open(file_path, 'rb') as f:
                 reader = pypdf.PdfReader(f)
                 for page in reader.pages:
@@ -26,11 +37,43 @@ async def extract_text_from_file(file_path: str, filename: str) -> str:
             with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
                 text = f.read()
         elif ext in ['csv', 'xls', 'xlsx']:
-            df = pd.read_excel(file_path) if ext.startswith('xls') else pd.read_csv(file_path)
-            text = df.to_string()
+            if ext == 'csv':
+                df = pd.read_csv(file_path)
+                text = df.to_string()
+            else:
+                # Read all sheets for text
+                xls = pd.ExcelFile(file_path)
+                sheet_texts = []
+                for sheet_name in xls.sheet_names:
+                    df = pd.read_excel(file_path, sheet_name=sheet_name)
+                    sheet_texts.append(f"[Sheet: {sheet_name}]\n{df.to_string()}")
+                text = "\n\n".join(sheet_texts)
+                
+                # Extract embedded images from Excel using openpyxl
+                try:
+                    from openpyxl import load_workbook
+                    from io import BytesIO
+                    wb = load_workbook(file_path)
+                    for ws in wb.worksheets:
+                        for img in ws._images:
+                            try:
+                                img_data = None
+                                if hasattr(img, '_data'):
+                                    img_data = img._data()
+                                elif hasattr(img, 'ref'):
+                                    img_data = img.ref.getvalue() if hasattr(img.ref, 'getvalue') else img.ref.read()
+                                
+                                if img_data:
+                                    b64 = base64.b64encode(img_data).decode('utf-8')
+                                    images.append(f"data:image/png;base64,{b64}")
+                            except Exception as img_err:
+                                print(f"Skipping image extraction: {img_err}")
+                    wb.close()
+                except Exception as excel_img_err:
+                    print(f"Excel image extraction warning: {excel_img_err}")
     except Exception as e:
         print(f"Extraction Error for {filename}: {e}")
-    return text
+    return {"text": text, "images": images}
 
 def chunk_text(text: str, chunk_size=800, overlap=150) -> list:
     chunks = []
@@ -45,7 +88,8 @@ async def process_knowledge_base(project_id: str, file_id: str, local_path: str,
     """
     Background Task to index the knowledge base.
     """
-    text = await extract_text_from_file(local_path, filename)
+    result = await extract_text_from_file(local_path, filename)
+    text = result["text"]
     chunks = chunk_text(text)
     
     col = get_collection("KnowledgeBase")
@@ -85,7 +129,7 @@ async def get_relevant_context(project_id: str, query: str, limit=5) -> str:
     context = "\n\n---\n\n".join([c["content"] for c in chunks])
     return context
 
-async def generate_ai_response(instructions: str, context: str, user_message: str, history: list):
+async def generate_ai_response(instructions: str, context: str, user_message: str, history: list, images: list = None):
     try:
         client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
         
@@ -111,7 +155,16 @@ The following snippets are extracted from your dedicated knowledge base. Priorit
         for h in history[-5:]: # Last 5 messages for history
             messages.append({"role": h["role"], "content": h["content"]})
             
-        messages.append({"role": "user", "content": user_message})
+        user_content = [{"type": "text", "text": user_message}]
+        
+        if images:
+            for img_url in images:
+                user_content.append({
+                    "type": "image_url",
+                    "image_url": {"url": img_url, "detail": "low"}
+                })
+                
+        messages.append({"role": "user", "content": user_content})
         
         response = await client.chat.completions.create(
             model="gpt-4o",

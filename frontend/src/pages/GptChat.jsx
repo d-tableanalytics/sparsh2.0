@@ -11,7 +11,8 @@ import {
     Terminal, Zap, Info
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
-
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 const GptChat = () => {
     const { id, sessionId } = useParams();
     const navigate = useNavigate();
@@ -32,6 +33,7 @@ const GptChat = () => {
     const scrollRef = useRef(null);
     const abortControllerRef = useRef(null);
     const fileInputRef = useRef(null);
+    const textareaRef = useRef(null);
 
     // ... existing fetch functions ...
     const fetchProjectDetails = async () => {
@@ -145,6 +147,18 @@ const GptChat = () => {
     }, [sessionId]);
 
     useEffect(() => {
+        if (textareaRef.current) {
+            textareaRef.current.style.height = 'auto';
+            textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 200)}px`;
+            if (textareaRef.current.scrollHeight > 200) {
+                textareaRef.current.style.overflowY = 'auto';
+            } else {
+                textareaRef.current.style.overflowY = 'hidden';
+            }
+        }
+    }, [input]);
+
+    useEffect(() => {
         if (scrollRef.current) {
             scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
         }
@@ -219,7 +233,7 @@ const GptChat = () => {
                 ref={fileInputRef} 
                 className="hidden" 
                 onChange={handleFileUpload}
-                accept=".pdf,.doc,.docx,.txt,.csv,.json"
+                accept=".pdf,.doc,.docx,.txt,.csv,.json,.xls,.xlsx,.png,.jpg,.jpeg,.webp,.gif"
             />
             
             {/* 1. Left Sidebar: Support Engine Chats */}
@@ -310,7 +324,7 @@ const GptChat = () => {
             </div>
 
             {/* 2. Main Chat Area */}
-            <div className="flex-1 flex flex-col relative bg-white dark:bg-[#0a0a1a]">
+            <div className="flex-1 flex flex-col relative bg-[var(--bg-main)]">
                 
                 {id && project ? (
                     <>
@@ -361,13 +375,25 @@ const GptChat = () => {
                                             <div className={`w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 shadow-sm ${m.role === 'user' ? 'bg-[var(--accent-indigo)] text-white' : 'bg-white border border-[var(--border)] text-[var(--accent-indigo)]'}`}>
                                                 {m.role === 'user' ? <User size={14} /> : <Bot size={14} />}
                                             </div>
-                                            <div className={`flex flex-col ${m.role === 'user' ? 'items-end' : 'items-start'} max-w-[85%] group/msg`}>
+                                            <div className={`flex flex-col ${m.role === 'user' ? 'items-end' : 'items-start'} max-w-[85%] group/msg ${editingIdx === idx ? 'w-full' : ''}`}>
                                                 {editingIdx === idx ? (
-                                                    <div className="w-full space-y-2">
+                                                    <div className="w-full min-w-[300px] md:min-w-[600px] max-w-full space-y-2">
                                                         <textarea 
                                                             value={editInput}
-                                                            onChange={e => setEditInput(e.target.value)}
-                                                            className="w-full bg-[var(--input-bg)] border border-[var(--accent-indigo)] rounded-2xl p-4 text-[13px] font-bold text-[var(--text-main)] outline-none min-h-[100px]"
+                                                            onChange={e => {
+                                                                setEditInput(e.target.value);
+                                                                e.target.style.height = 'auto';
+                                                                e.target.style.height = `${Math.min(e.target.scrollHeight, 400)}px`;
+                                                            }}
+                                                            ref={(el) => {
+                                                                if (el && !el.dataset.initialized) {
+                                                                    el.style.height = 'auto';
+                                                                    el.style.height = `${Math.min(el.scrollHeight, 400)}px`;
+                                                                    el.dataset.initialized = 'true';
+                                                                }
+                                                            }}
+                                                            className="w-full bg-[var(--input-bg)] border border-[var(--accent-indigo)] rounded-2xl p-4 text-[13px] font-bold text-[var(--text-main)] outline-none resize-none no-scrollbar leading-relaxed focus:ring-4 focus:ring-[var(--accent-indigo-bg)] transition-shadow"
+                                                            style={{ minHeight: '60px' }}
                                                         />
                                                         <div className="flex gap-2 justify-end">
                                                             <button onClick={() => setEditingIdx(null)} className="px-3 py-1.5 text-[10px] font-black uppercase text-[var(--text-muted)]">Cancel</button>
@@ -375,8 +401,16 @@ const GptChat = () => {
                                                         </div>
                                                     </div>
                                                 ) : (
-                                                    <div className={`relative p-4 rounded-2xl text-[13px] leading-relaxed font-bold shadow-sm transition-all ${m.role === 'user' ? 'bg-[var(--accent-indigo)] text-white' : m.system ? 'bg-amber-50/50 border border-amber-100 text-amber-700 italic' : 'bg-[var(--input-bg)] border border-[var(--border)] text-[var(--text-main)] whitespace-pre-wrap'}`}>
-                                                        {m.content}
+                                                    <div className={`relative p-4 rounded-2xl text-[13px] leading-relaxed font-bold shadow-sm transition-all ${m.role === 'user' ? 'bg-[var(--accent-indigo)] text-white' : m.system ? 'bg-amber-50/50 border border-amber-100 text-amber-700 italic' : 'bg-[var(--input-bg)] border border-[var(--border)] text-[var(--text-main)]'}`}>
+                                                        {m.role === 'assistant' && !m.system ? (
+                                                            <div className="prose prose-sm max-w-none prose-p:leading-relaxed prose-pre:bg-[var(--bg-main)] prose-pre:border-none prose-a:text-[var(--accent-indigo)] prose-strong:text-[var(--text-main)] overflow-x-auto">
+                                                                <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                                                                    {m.content}
+                                                                </ReactMarkdown>
+                                                            </div>
+                                                        ) : (
+                                                            <div className="whitespace-pre-wrap">{m.content}</div>
+                                                        )}
                                                         {m.role === 'user' && !sending && (
                                                             <button 
                                                                 onClick={() => { setEditingIdx(idx); setEditInput(m.content); }}
@@ -434,12 +468,20 @@ const GptChat = () => {
                                             {uploading ? <RefreshCcw size={16} className="animate-spin" /> : <Plus size={18} />}
                                         </button>
                                     </div>
-                                    <input 
+                                    <textarea 
+                                        ref={textareaRef}
                                         value={input}
                                         onChange={e => setInput(e.target.value)}
+                                        onKeyDown={e => {
+                                            if (e.key === 'Enter' && !e.shiftKey) {
+                                                e.preventDefault();
+                                                handleSend();
+                                            }
+                                        }}
                                         disabled={sending}
+                                        rows={1}
                                         placeholder={`Consult ${project.title} Engine...`}
-                                        className="w-full bg-[var(--input-bg)] border border-[var(--border)] rounded-2xl py-3.5 pl-12 pr-12 text-[13px] font-bold text-[var(--text-main)] outline-none focus:border-[var(--accent-indigo)] focus:ring-4 focus:ring-[var(--accent-indigo-bg)] transition-all shadow-sm placeholder:text-[var(--text-muted)]/50"
+                                        className="w-full bg-[var(--input-bg)] border border-[var(--border)] rounded-2xl py-3.5 pl-12 pr-12 text-[13px] font-bold text-[var(--text-main)] outline-none focus:border-[var(--accent-indigo)] focus:ring-4 focus:ring-[var(--accent-indigo-bg)] transition-shadow shadow-sm placeholder:text-[var(--text-muted)]/50 resize-none no-scrollbar leading-relaxed"
                                     />
                                     <button 
                                         type="submit" 

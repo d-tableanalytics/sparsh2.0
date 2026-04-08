@@ -244,21 +244,38 @@ const GptEditor = () => {
                                     ))}
                                 </div>
                                 
-                                <label className="cursor-pointer block group">
-                                    <input 
-                                        type="file" 
-                                        multiple 
-                                        webkitdirectory="true"
-                                        className="hidden" 
-                                        onChange={(e) => handleFileUpload(e, !id)} 
-                                    />
-                                    <div className="w-full py-6 border-2 border-dashed border-[var(--border)] hover:border-[var(--accent-indigo)] hover:bg-[var(--input-bg)] transition-all rounded-2xl flex flex-col items-center justify-center gap-2">
-                                         <div className="p-2 bg-[var(--input-bg)] text-[var(--accent-indigo)] rounded-lg group-hover:scale-110 transition-all">
-                                             <Upload size={16} />
-                                         </div>
-                                         <p className="text-[9px] font-black text-[var(--text-main)] uppercase tracking-widest">Select Files / Folders</p>
-                                    </div>
-                                </label>
+                                <div className="grid grid-cols-2 gap-3">
+                                    <label className="cursor-pointer group flex-1">
+                                        <input 
+                                            type="file" 
+                                            multiple 
+                                            className="hidden" 
+                                            onChange={(e) => handleFileUpload(e, !id)} 
+                                        />
+                                        <div className="w-full py-6 border-2 border-dashed border-[var(--border)] hover:border-[var(--accent-indigo)] hover:bg-[var(--input-bg)] transition-all rounded-2xl flex flex-col items-center justify-center gap-2">
+                                             <div className="p-2 bg-[var(--input-bg)] text-[var(--accent-indigo)] rounded-lg group-hover:scale-110 transition-all">
+                                                 <FileUp size={16} />
+                                             </div>
+                                             <p className="text-[9px] font-black text-[var(--text-main)] uppercase tracking-widest text-center px-2">Select Files</p>
+                                        </div>
+                                    </label>
+
+                                    <label className="cursor-pointer group flex-1">
+                                        <input 
+                                            type="file" 
+                                            multiple 
+                                            webkitdirectory="true"
+                                            className="hidden" 
+                                            onChange={(e) => handleFileUpload(e, !id)} 
+                                        />
+                                        <div className="w-full py-6 border-2 border-dashed border-[var(--border)] hover:border-amber-500/50 hover:bg-amber-50 transition-all rounded-2xl flex flex-col items-center justify-center gap-2">
+                                             <div className="p-2 bg-amber-50 text-amber-500 rounded-lg group-hover:scale-110 transition-all">
+                                                 <Folders size={16} />
+                                             </div>
+                                             <p className="text-[9px] font-black text-[var(--text-main)] uppercase tracking-widest text-center px-2">Select Folder</p>
+                                        </div>
+                                    </label>
+                                </div>
                             </div>
                         </div>
                     </div>
