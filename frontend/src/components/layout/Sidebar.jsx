@@ -1,8 +1,8 @@
 import React, { useState } from 'react';
 import { NavLink } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
-import { 
-  LayoutDashboard, Users, Briefcase, CheckSquare, 
+import {
+  LayoutDashboard, Users, Briefcase, CheckSquare,
   Settings, Building2,
   PieChart, MessageSquare, LogOut, Layers, Copy, Calendar, Sparkles, PlayCircle, Target, BarChart3
 } from 'lucide-react';
@@ -23,22 +23,26 @@ const Sidebar = () => {
     { name: 'My Progress', path: '/my-reports', icon: BarChart3, roles: ['clientadmin', 'clientuser'] },
     { name: 'Team', path: '/team', icon: Users, roles: ['clientadmin'] },
     { name: 'Calendar', path: '/calendar', icon: Calendar, roles: ['superadmin', 'admin', 'clientadmin', 'clientuser', 'coach', 'staff'], permissionKey: 'calendar' },
-    { name: 'Settings', path: '/settings', icon: Settings, roles: ['superadmin'], permissionKey: 'templates' },
+    // { name: 'Settings', path: '/settings', icon: Settings, roles: ['superadmin'] },
     { name: 'GPT', path: '/gpt', icon: Sparkles, roles: ['superadmin', 'admin', 'clientadmin', 'clientuser', 'coach', 'staff'] },
   ];
 
   const filteredLinks = links.filter(link => {
-    // 1. Role Check
+    const isClientRole = ['clientadmin', 'clientuser'].includes(user?.role);
+    const isAdminLink = ['Companies', 'Batches', 'Session Templates', 'User Management'].includes(link.name);
+
+    // If it's a client role, strictly hide admin links regardless of permissions
+    if (isClientRole && isAdminLink) return false;
+
+    // Default filtering logic
     const hasRole = link.roles.includes(user?.role);
-    
-    // 2. Permission Override (for staff/coach with CRUD perms)
     const hasPermission = link.permissionKey && user?.permissions?.[link.permissionKey]?.read;
 
     return hasRole || hasPermission;
   });
 
   return (
-    <motion.aside 
+    <motion.aside
       initial={false}
       animate={{ width: isCollapsed ? 72 : 240 }}
       transition={{ type: 'spring', stiffness: 400, damping: 40 }}
@@ -49,7 +53,7 @@ const Sidebar = () => {
       <div className={`p-5 py-6 flex items-center ${isCollapsed ? 'justify-center' : 'justify-between'}`}>
         <AnimatePresence mode="wait">
           {!isCollapsed ? (
-            <motion.div 
+            <motion.div
               key="full-logo"
               initial={{ opacity: 0, scale: 0.9 }}
               animate={{ opacity: 1, scale: 1 }}
@@ -65,7 +69,7 @@ const Sidebar = () => {
               </div>
             </motion.div>
           ) : (
-            <motion.div 
+            <motion.div
               key="icon-logo"
               className="w-8 h-8 rounded-lg flex items-center justify-center text-white font-bold text-[10px]"
               style={{ background: 'var(--avatar-bg)' }}
@@ -74,25 +78,25 @@ const Sidebar = () => {
             </motion.div>
           )}
         </AnimatePresence>
-        
+
       </div>
 
       <nav className="flex-1 px-3 space-y-1 overflow-y-auto no-scrollbar">
         {filteredLinks.map((link) => (
-          <NavLink 
-            key={link.path} 
-            to={link.path} 
+          <NavLink
+            key={link.path}
+            to={link.path}
             className={({ isActive }) => `
               group flex items-center gap-3 p-2.5 rounded-lg transition-colors relative
-              ${isActive 
-                ? 'bg-[var(--sidebar-active-bg)] text-[var(--sidebar-active-text)] font-bold shadow-sm' 
+              ${isActive
+                ? 'bg-[var(--sidebar-active-bg)] text-[var(--sidebar-active-text)] font-bold shadow-sm'
                 : 'text-[var(--text-muted)] hover:bg-[var(--input-bg)] hover:text-[var(--text-main)]'}
               ${isCollapsed ? 'justify-center' : ''}
             `}
           >
             <link.icon size={18} className="transition-transform group-hover:scale-105" />
             {!isCollapsed && (
-              <motion.span 
+              <motion.span
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
                 className="text-[13px] tracking-tight font-medium"
@@ -110,14 +114,14 @@ const Sidebar = () => {
       </nav>
 
       <div className="p-3 border-t border-[var(--sidebar-border)]">
-        <button 
-          onClick={logout} 
+        <button
+          onClick={logout}
           className={`w-full flex items-center gap-3 p-2.5 rounded-lg text-[var(--text-muted)] hover:bg-[var(--accent-red-bg)] hover:text-[var(--accent-red)] transition-all ${isCollapsed ? 'justify-center' : ''}`}
         >
           <LogOut size={18} />
           {!isCollapsed && <span className="text-[13px] font-bold tracking-tight">Logout</span>}
         </button>
-        
+
       </div>
     </motion.aside>
   );

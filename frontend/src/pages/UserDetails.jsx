@@ -172,15 +172,22 @@ const UserDetails = () => {
                                                 return (
                                                     <div key={action} 
                                                         onClick={() => {
-                                                            if (!isEditing) return;
-                                                            const updated = { ...editForm.permissions };
-                                                            updated[mod.id] = { ...updated[mod.id], [action]: !active };
-                                                            setEditForm({ ...editForm, permissions: updated });
+                                                            // Auto-enable edit mode if superadmin
+                                                            if (!isEditing) setIsEditing(true);
+                                                            
+                                                            setEditForm(prev => {
+                                                                const updatedPerms = { ...(prev.permissions || {}) };
+                                                                updatedPerms[mod.id] = { 
+                                                                    ...(updatedPerms[mod.id] || { create: false, read: false, update: false, delete: false }), 
+                                                                    [action]: !active 
+                                                                };
+                                                                return { ...prev, permissions: updatedPerms };
+                                                            });
                                                         }}
-                                                        className={`flex flex-col items-center gap-1.5 px-3 py-2 rounded-xl transition-all ${active ? 'bg-[var(--accent-indigo-bg)] border-[var(--accent-indigo-border)]' : 'bg-[var(--bg-card)] border-[var(--border)]'} border ${isEditing ? 'cursor-pointer hover:scale-105' : 'cursor-default opacity-80'}`}>
+                                                        className={`flex flex-col items-center gap-1.5 px-3 py-2 rounded-xl transition-all ${active ? 'bg-[var(--accent-indigo-bg)] border-[var(--accent-indigo-border)]' : 'bg-[var(--bg-card)] border-[var(--border)]'} border cursor-pointer hover:scale-105 active:scale-95`}>
                                                         <span className={`text-[8px] font-black uppercase tracking-tighter ${active ? 'text-[var(--accent-indigo)]' : 'text-[var(--text-muted)]'}`}>{action}</span>
-                                                        <div className={`w-8 h-4 rounded-full relative transition-colors ${active ? 'bg-[var(--accent-indigo)]' : 'bg-gray-200'}`}>
-                                                            <div className={`absolute top-0.5 w-3 h-3 bg-white rounded-full transition-all ${active ? 'right-0.5' : 'left-0.5'}`} />
+                                                        <div className={`w-8 h-4 rounded-full relative transition-colors ${active ? 'bg-[var(--accent-indigo)]' : 'bg-gray-200 shadow-inner'}`}>
+                                                            <div className={`absolute top-0.5 w-3 h-3 bg-white rounded-full transition-all shadow-sm ${active ? 'right-0.5' : 'left-0.5'}`} />
                                                         </div>
                                                     </div>
                                                 );

@@ -245,27 +245,38 @@ const CalendarPage = () => {
     };
 
     const handleQuickAction = async (id, action) => {
+        if (!id) return showError("Invalid operation: Blueprint ID missing.");
         try {
+            const ev = events.find(e => e.id === id || e._id === id);
+            const isCreator = ev?.extendedProps?.isCreator;
+
             if (action === 'delete') { 
-                if (!canDelete) return showError("Forbidden: You do not have digital authority to delete this blueprint.");
+                if (!canDelete && !isCreator) return showError("Forbidden: You do not have digital authority to delete this blueprint.");
                 await api.delete(`/calendar/events/${id}`); 
                 showSuccess("Entity removed from calendar"); 
             }
             else if (action === 'complete') { 
-                if (!canUpdate) return showError("Forbidden: You do not have digital authority to modify this event.");
-                await api.patch(`/calendar/events/${id}`, { status: 'completed' }); 
+                if (!canUpdate && !isCreator) return showError("Forbidden: You do not have digital authority to modify this event.");
+                // Use the specialized completion endpoint for better reliability
+                await api.patch(`/calendar/events/${id}/complete`); 
                 showSuccess("Status updated"); 
             }
             fetchData();
             // If in summary modal, refresh current day list
             if (showSummary) {
                 const res = await api.get('/calendar/events'); // Fast refresh for summary
-                const eventsForDay = res.data.filter(e => e.start.split('T')[0] === summaryDate && !['batch', 'quarter'].includes(e.type)).map(e => ({
-                    id: e.id, title: e.title, start: e.start, end: e.end, extendedProps: { ...e.extendedProps, id: e.id }
-                }));
+                const eventsForDay = res.data
+                    .filter(e => {
+                        const d = new Date(e.start);
+                        const eStart = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+                        return eStart === summaryDate && !['batch', 'quarter'].includes(e.type);
+                    })
+                    .map(e => ({
+                        id: e.id, title: e.title, start: e.start, end: e.end, extendedProps: { ...e.extendedProps, id: e.id }
+                    }));
                 setDayEvents(eventsForDay);
             }
-        } catch (err) { console.error(err); }
+        } catch (err) { console.error(err); showError("Communication Failure: The session architect could not be reached."); }
     };
 
     const handleSave = async () => {
@@ -301,12 +312,17 @@ const CalendarPage = () => {
     };
 
     const role = user?.role?.toLowerCase();
-    const canCreate = user?.role === 'superadmin' || user?.permissions?.calendar?.create;
-    const canUpdate = user?.role === 'superadmin' || user?.permissions?.calendar?.update;
-    const canDelete = user?.role === 'superadmin' || user?.permissions?.calendar?.delete;
-
-    const isStaff = ['superadmin', 'admin', 'coach', 'staff'].includes(role);
+    // Institutional roles (Staff) with global management authority
+    const isPowerRole = ['superadmin', 'admin', 'coach', 'staff'].includes(role);
+    const isStaff = isPowerRole;
+    
+    // Learners and Client Admins can create their own events.
     const isLearner = ['learner', 'clientadmin', 'clientdoer', 'clientuser'].includes(role);
+    const canCreate = isStaff || isLearner || user?.permissions?.calendar?.create;
+
+    // Only staff have global update/delete rights. Learners only have it if they are the creator (checked in the UI).
+    const canUpdate = isStaff || user?.permissions?.calendar?.update;
+    const canDelete = isStaff || user?.permissions?.calendar?.delete;
 
     // List of Staff users (Coaching side) for coaching team & task delegation
     const staffMembers = allUsers.filter(u => ['superadmin', 'admin', 'coach', 'staff'].includes(u.role?.toLowerCase()));
@@ -319,16 +335,20 @@ const CalendarPage = () => {
         const uRole = u.role?.toLowerCase();
         if (['superadmin', 'admin', 'coach', 'staff'].includes(uRole)) return false;
 
-        // 1. Batch & Company Linkage
+        // 1. Strict Batch & Company Linkage (Requirement: Only show batch-attached members)
         if (eventForm.batch_id) {
             const batch = batches.find(b => b._id === eventForm.batch_id || b.id === eventForm.batch_id);
             if (batch) {
-                const belongsToBatch = u.batch_id === eventForm.batch_id || batch.companies?.includes(u.company_id);
+                const belongsToBatch = (u.batch_id === eventForm.batch_id) || 
+                                     (batch.companies || []).includes(u.company_id);
                 if (!belongsToBatch) return false;
             }
+        } else if (eventForm.type === 'event') {
+            // For sessions, if no batch is selected, show no one to ensure accuracy
+            return false;
         }
 
-        // 2. Session Type Compatibility (Both means they see everything)
+        // 2. Session Type Compatibility
         if (u.session_type === 'Both' || u.session_type === eventForm.session_type) return true;
         
         return false;
@@ -654,15 +674,25 @@ const CalendarPage = () => {
                                             </div>
                                         </div>
 
-                                        {eventForm.meeting_link && (
-                                            <div className="pt-4 flex flex-col items-center space-y-4">
-                                                <a href={eventForm.meeting_link} target="_blank" rel="noreferrer" 
-                                                   className="w-full py-4 bg-indigo-600 text-white rounded-[24px] text-[14px] font-black uppercase tracking-widest flex items-center justify-center gap-3 shadow-xl shadow-indigo-500/40 hover:bg-indigo-700 hover:scale-[1.01] transition-all">
-                                                    <Video size={18} /> Join Virtual Session
-                                                </a>
-                                                <p className="text-[10px] font-bold text-gray-400 italic">Joining instructions are managed by the session architect.</p>
-                                            </div>
-                                        )}
+                                        <div className="pt-4 flex flex-col items-center space-y-4">
+                                            {eventForm.meeting_link ? (
+                                                <>
+                                                    <a href={eventForm.meeting_link} target="_blank" rel="noreferrer" 
+                                                       className="w-full py-4 bg-indigo-600 text-white rounded-[24px] text-[14px] font-black uppercase tracking-widest flex items-center justify-center gap-3 shadow-xl shadow-indigo-500/40 hover:bg-indigo-700 hover:scale-[1.01] transition-all">
+                                                        <Video size={18} /> Join Live Session
+                                                    </a>
+                                                    <button onClick={() => navigate(`/sessions/${currentEventId}`)} 
+                                                       className="text-[10px] font-black text-[var(--accent-indigo)] uppercase tracking-widest hover:underline">
+                                                        View Curriculum & Resources
+                                                    </button>
+                                                </>
+                                            ) : (
+                                                <button onClick={() => navigate(`/sessions/${currentEventId}`)} 
+                                                   className="w-full py-4 bg-[var(--bg-main)] border border-[var(--border)] text-[var(--accent-indigo)] rounded-[24px] text-[14px] font-black uppercase tracking-widest flex items-center justify-center gap-3 hover:bg-[var(--accent-indigo-bg)] transition-all">
+                                                    <Eye size={18} /> View Session Details
+                                                </button>
+                                            )}
+                                        </div>
 
                                         <div className="pt-2 border-t border-dashed border-gray-200">
                                             <label className="text-[9px] font-black text-gray-400 uppercase tracking-widest block mb-2">Final Briefing:</label>
@@ -751,37 +781,6 @@ const CalendarPage = () => {
                                                         <label className="text-[9px] font-black text-[var(--text-muted)] uppercase flex items-center gap-1.5"><Link size={12} /> Live Link</label>
                                                         <input placeholder="Zoom / Meet URL" className="w-full px-3 py-2 bg-[var(--input-bg)] border border-[var(--border)] rounded-lg text-[12px] font-bold" value={eventForm.meeting_link} onChange={e => setEventForm({ ...eventForm, meeting_link: e.target.value })} />
                                                     </div>
-                                                    <div className="space-y-1">
-                                                        <label className="text-[9px] font-black text-[var(--text-muted)] uppercase flex items-center gap-1.5"><Zap size={12} className="text-[var(--accent-indigo)]" /> Neural Engines</label>
-                                                        <div className="flex flex-wrap gap-1 mb-1">
-                                                            {(eventForm.gpt_projects || []).map(pId => {
-                                                                const project = gptProjects.find(px => px.id === pId);
-                                                                return (
-                                                                    <div key={pId} className="flex items-center gap-1 px-1.5 py-0.5 bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] rounded-md text-[9px] font-black border border-[var(--accent-indigo-border)]">
-                                                                        {project?.title || pId}
-                                                                        <button type="button" onClick={() => setEventForm({ ...eventForm, gpt_projects: eventForm.gpt_projects.filter(x => x !== pId) })}>
-                                                                            <X size={10} />
-                                                                        </button>
-                                                                    </div>
-                                                                );
-                                                            })}
-                                                        </div>
-                                                        <select
-                                                            value=""
-                                                            onChange={e => {
-                                                                const val = e.target.value;
-                                                                if (val && !(eventForm.gpt_projects || []).includes(val)) {
-                                                                    setEventForm({ ...eventForm, gpt_projects: [...(eventForm.gpt_projects || []), val] });
-                                                                }
-                                                            }}
-                                                            className="w-full px-3 py-2 bg-[var(--input-bg)] border border-[var(--border)] rounded-lg text-[12px] font-bold outline-none focus:border-[var(--accent-indigo)]"
-                                                        >
-                                                            <option value="">Link GPT Project...</option>
-                                                            {gptProjects.filter(p => !(eventForm.gpt_projects || []).includes(p.id)).map(p => (
-                                                                <option key={p.id} value={p.id}>{p.title}</option>
-                                                            ))}
-                                                        </select>
-                                                    </div>
                                                 </div>
                                                 <div className="space-y-4">
                                                     <div className="space-y-1">
@@ -853,37 +852,6 @@ const CalendarPage = () => {
                                                             ))}
                                                         </div>
                                                     </div>
-                                                    <div className="space-y-1">
-                                                        <label className="text-[9px] font-black text-[var(--text-muted)] uppercase flex items-center gap-1.5"><Zap size={12} className="text-[var(--accent-indigo)]" /> Neural Engines</label>
-                                                        <div className="flex flex-wrap gap-1 mb-1">
-                                                            {(eventForm.gpt_projects || []).map(pId => {
-                                                                const project = gptProjects.find(px => px.id === pId);
-                                                                return (
-                                                                    <div key={pId} className="flex items-center gap-1 px-1.5 py-0.5 bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] rounded-md text-[9px] font-black border border-[var(--accent-indigo-border)]">
-                                                                        {project?.title || pId}
-                                                                        <button type="button" onClick={() => setEventForm({ ...eventForm, gpt_projects: eventForm.gpt_projects.filter(x => x !== pId) })}>
-                                                                            <X size={10} />
-                                                                        </button>
-                                                                    </div>
-                                                                );
-                                                            })}
-                                                        </div>
-                                                        <select
-                                                            value=""
-                                                            onChange={e => {
-                                                                const val = e.target.value;
-                                                                if (val && !(eventForm.gpt_projects || []).includes(val)) {
-                                                                    setEventForm({ ...eventForm, gpt_projects: [...(eventForm.gpt_projects || []), val] });
-                                                                }
-                                                            }}
-                                                            className="w-full px-3 py-2 bg-[var(--input-bg)] border border-[var(--border)] rounded-lg text-[12px] font-bold outline-none focus:border-[var(--accent-indigo)]"
-                                                        >
-                                                            <option value="">Link GPT Project...</option>
-                                                            {gptProjects.filter(p => !(eventForm.gpt_projects || []).includes(p.id)).map(p => (
-                                                                <option key={p.id} value={p.id}>{p.title}</option>
-                                                            ))}
-                                                        </select>
-                                                    </div>
                                                 </div>
                                             </>
                                         )
@@ -954,34 +922,40 @@ const CalendarPage = () => {
                                     )}
                                 </div>
 
-                                <div className="space-y-3 p-4 bg-[var(--input-bg)] rounded-2xl border border-[var(--border)] shadow-sm">
-                                    <div className="space-y-2">
-                                        <label className="text-[9px] font-black text-[var(--text-muted)] uppercase tracking-wider flex items-center gap-1.5">
-                                            <Users2 size={12} /> {isStaff ? (eventForm.type === 'event' ? `Active Assignment: ${eventForm.assigned_departments.join(", ") || "None"}` : "Participant Scope") : "Participant Management"}
-                                        </label>
-                                        {(isStaff && eventForm.type === 'event') && (
-                                            <div className="flex flex-wrap gap-1">
-                                                {departments.map(dept => (
-                                                    <button key={dept} onClick={() => handleDeptToggle(dept)}
-                                                        className={`px-3 py-1 rounded-lg text-[9px] font-black border transition-all ${eventForm.assigned_departments.includes(dept) ? 'bg-[var(--accent-indigo)] text-white border-[var(--accent-indigo)] shadow-sm' : 'bg-white text-[var(--text-muted)] border-[var(--border)] hover:border-[var(--accent-indigo)]'}`}>
-                                                        {dept}
-                                                    </button>
-                                                ))}
-                                            </div>
-                                        )}
+                                {!(isStaff && eventForm.type === 'task') && (
+                                    <div className="space-y-3 p-4 bg-[var(--input-bg)] rounded-2xl border border-[var(--border)] shadow-sm">
+                                        <div className="space-y-2">
+                                            <label className="text-[9px] font-black text-[var(--text-muted)] uppercase tracking-wider flex items-center gap-1.5">
+                                                <Users2 size={12} /> {isStaff ? (eventForm.type === 'event' ? `Active Assignment: ${eventForm.assigned_departments.join(", ") || "None"}` : "Participant Scope") : "Participant Management"}
+                                            </label>
+                                            {(isStaff && eventForm.type === 'event') && (
+                                                <div className="flex flex-wrap gap-1">
+                                                    {departments.map(dept => (
+                                                        <button key={dept} onClick={() => handleDeptToggle(dept)}
+                                                            className={`px-3 py-1 rounded-lg text-[9px] font-black border transition-all ${eventForm.assigned_departments.includes(dept) ? 'bg-[var(--accent-indigo)] text-white border-[var(--accent-indigo)] shadow-sm' : 'bg-white text-[var(--text-muted)] border-[var(--border)] hover:border-[var(--accent-indigo)]'}`}>
+                                                            {dept}
+                                                        </button>
+                                                    ))}
+                                                </div>
+                                            )}
+                                        </div>
+                                        <div className="flex flex-wrap gap-1 p-1 min-h-[40px] max-h-[100px] overflow-y-auto no-scrollbar">
+                                            {visibleMembers.filter(u => {
+                                                if (!isStaff || eventForm.type !== 'event') return true;
+                                                if (!eventForm.assigned_departments || eventForm.assigned_departments.length === 0) return true;
+                                                return eventForm.assigned_departments.some(dept => u.department?.toString().toUpperCase() === dept.toUpperCase());
+                                            }).map(m => (
+                                                <div key={m._id} onClick={() => {
+                                                    const ids = [...(eventForm.assigned_member_ids || [])];
+                                                    setEventForm({ ...eventForm, assigned_member_ids: ids.includes(m._id) ? ids.filter(id => id !== m._id) : [...ids, m._id] })
+                                                }}
+                                                    className={`px-2 py-0.5 rounded-md text-[9px] font-bold cursor-pointer transition-all flex items-center gap-1.5 ${eventForm.assigned_member_ids?.includes(m._id) ? 'bg-[var(--accent-indigo)] text-white shadow-sm border border-[var(--accent-indigo-border)]' : 'bg-[var(--bg-card)] text-[var(--text-muted)] opacity-50 border border-dotted border-gray-400'}`}>
+                                                    {m.full_name || m.name} <X size={10} className={eventForm.assigned_member_ids?.includes(m._id) ? 'text-white' : 'hidden'} />
+                                                </div>
+                                            ))}
+                                        </div>
                                     </div>
-                                    <div className="flex flex-wrap gap-1 p-1 min-h-[40px] max-h-[100px] overflow-y-auto no-scrollbar">
-                                        {visibleMembers.filter(u => !isStaff || eventForm.type !== 'event' || eventForm.assigned_departments.some(dept => u.department?.toString().toUpperCase() === dept.toUpperCase())).map(m => (
-                                            <div key={m._id} onClick={() => {
-                                                const ids = [...(eventForm.assigned_member_ids || [])];
-                                                setEventForm({ ...eventForm, assigned_member_ids: ids.includes(m._id) ? ids.filter(id => id !== m._id) : [...ids, m._id] })
-                                            }}
-                                                className={`px-2 py-0.5 rounded-md text-[9px] font-bold cursor-pointer transition-all flex items-center gap-1.5 ${eventForm.assigned_member_ids?.includes(m._id) ? 'bg-[var(--accent-indigo)] text-white shadow-sm border border-[var(--accent-indigo-border)]' : 'bg-[var(--bg-card)] text-[var(--text-muted)] opacity-50 border border-dotted border-gray-400'}`}>
-                                                {m.full_name || m.name} <X size={10} className={eventForm.assigned_member_ids?.includes(m._id) ? 'text-white' : 'hidden'} />
-                                            </div>
-                                        ))}
-                                    </div>
-                                </div>
+                                )}
 
                                 <div className="space-y-4">
                                     <div className="flex items-center gap-4 flex-wrap">

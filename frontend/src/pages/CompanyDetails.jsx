@@ -431,9 +431,9 @@ const CompanyDetails = () => {
             {/* Stats Cards */}
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
               <StatCard icon={Users} label="Total Members" value={users.length} sub={`${activeUsers} active`} color="indigo" />
-              <StatCard icon={Layers} label="Batches" value={Math.max(1, Math.floor(users.length / 5))} sub="In progress" color="green" />
-              <StatCard icon={Calendar} label="Active Sessions" value={Math.floor(Math.random() * 5 + 2)} sub="This month" color="orange" />
-              <StatCard icon={Award} label="Avg. Score" value={`${Math.floor(Math.random() * 15 + 75)}%`} sub="+5% from last month" color="yellow" />
+              <StatCard icon={Layers} label="Batches" value={analytics?.total_batches ?? 0} sub="Affiliated" color="green" />
+              <StatCard icon={Calendar} label="Active Sessions" value={analytics?.active_sessions ?? 0} sub="This month" color="orange" />
+              <StatCard icon={Award} label="Avg. Score" value={analytics?.avg_score !== undefined ? `${analytics.avg_score}%` : '—'} sub="Global average" color="yellow" />
             </div>
 
             {/* Charts Row 1 */}

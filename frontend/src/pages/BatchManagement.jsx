@@ -20,15 +20,17 @@ const statusConfig = {
 const BatchManagement = () => {
   const navigate = useNavigate();
   const { user } = useAuth();
+  const { showSuccess, showError } = useNotification();
   const [batches, setBatches] = useState([]);
   const [loading, setLoading] = useState(true);
   const [viewMode, setViewMode] = useState('table');
   const [searchTerm, setSearchTerm] = useState('');
   const [showCreate, setShowCreate] = useState(false);
 
-  const canCreate = user?.role === 'superadmin' || user?.permissions?.batches?.create;
-  const canDelete = user?.role === 'superadmin' || user?.permissions?.batches?.delete;
-  const canUpdate = user?.role === 'superadmin' || user?.permissions?.batches?.update;
+  const isPowerRole = ['superadmin', 'admin', 'coach', 'staff'].includes(user?.role?.toLowerCase());
+  const canCreate = isPowerRole || user?.permissions?.batches?.create;
+  const canDelete = isPowerRole || user?.permissions?.batches?.delete;
+  const canUpdate = isPowerRole || user?.permissions?.batches?.update;
 
   const [form, setForm] = useState({
     name: '', product_name: '', description: '', start_date: '', target_end_date: '', gpt_projects: []

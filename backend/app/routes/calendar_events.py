@@ -179,7 +179,8 @@ async def validate_conflict(event_data: dict, current_user: dict = Depends(get_c
 @router.post("", response_model=dict)
 async def create_event(event: CalendarEventCreate, background_tasks: BackgroundTasks, current_user: dict = Depends(get_current_user)):
     # ─── Permission Check ───
-    if current_user.get("role") not in ["superadmin", "admin"]:
+    is_power_role = current_user.get("role") in ["superadmin", "admin", "coach", "staff", "clientadmin"]
+    if not is_power_role:
         if not current_user.get("permissions", {}).get("calendar", {}).get("create"):
             raise HTTPException(status_code=403, detail="Not authorized to create events")
 
@@ -285,7 +286,7 @@ async def update_event(event_id: str, updates: dict, background_tasks: Backgroun
     if not existing:
         raise HTTPException(status_code=404, detail="Event not found")
         
-    is_admin = current_user.get("role") in ["superadmin", "admin"]
+    is_admin = current_user.get("role") in ["superadmin", "admin", "coach", "staff", "clientadmin"]
     has_update_perm = current_user.get("permissions", {}).get("calendar", {}).get("update")
     is_creator = existing.get("user_id") == str(current_user["_id"])
 
@@ -395,7 +396,7 @@ async def update_event(event_id: str, updates: dict, background_tasks: Backgroun
 async def mark_attendance(event_id: str, attendance_data: dict, background_tasks: BackgroundTasks, current_user: dict = Depends(get_current_user)):
     existing, col_name = await find_event_across_collections(event_id)
     if not existing: raise HTTPException(status_code=404, detail="Event not found")
-    is_admin = current_user.get("role") in ["superadmin", "admin"]
+    is_admin = current_user.get("role") in ["superadmin", "admin", "coach", "staff", "clientadmin"]
     has_update_perm = current_user.get("permissions", {}).get("calendar", {}).get("update")
     is_creator = existing.get("user_id") == str(current_user["_id"])
     
@@ -433,7 +434,7 @@ async def upload_content(event_id: str, file: UploadFile = File(...), current_us
     if not existing: raise HTTPException(status_code=404, detail="Event not found")
     
     # Creator or Admin only
-    is_admin = current_user.get("role") in ["superadmin", "admin"]
+    is_admin = current_user.get("role") in ["superadmin", "admin", "coach", "staff", "clientadmin"]
     has_update_perm = current_user.get("permissions", {}).get("calendar", {}).get("update")
     is_creator = existing.get("user_id") == str(current_user["_id"])
 
@@ -460,7 +461,7 @@ async def upload_resource(event_id: str, background_tasks: BackgroundTasks, file
     if not existing: raise HTTPException(status_code=404, detail="Event not found")
 
     # Creator or Admin only
-    is_admin = current_user.get("role") in ["superadmin", "admin"]
+    is_admin = current_user.get("role") in ["superadmin", "admin", "coach", "staff", "clientadmin"]
     has_update_perm = current_user.get("permissions", {}).get("calendar", {}).get("update")
     is_creator = existing.get("user_id") == str(current_user["_id"])
 
@@ -488,7 +489,7 @@ async def upload_resource(event_id: str, background_tasks: BackgroundTasks, file
 async def delete_event(event_id: str, background_tasks: BackgroundTasks, current_user: dict = Depends(get_current_user)):
     existing, col_name = await find_event_across_collections(event_id)
     if not existing: raise HTTPException(status_code=404, detail="Event not found")
-    is_admin = current_user.get("role") in ["superadmin", "admin"]
+    is_admin = current_user.get("role") in ["superadmin", "admin", "coach", "staff", "clientadmin"]
     has_delete_perm = current_user.get("permissions", {}).get("calendar", {}).get("delete")
     is_creator = existing.get("user_id") == str(current_user["_id"])
 
@@ -521,7 +522,7 @@ async def get_all_events(target_user_id: Optional[str] = None, view_mode: str = 
     effective_user_id = target_user_id if (target_user_id and is_staff_admin) else current_uid
     
     # Enable team view for those with 'calendar: read'
-    can_view_team = (view_mode == "team") and (role in ["superadmin", "admin"] or has_team_read_perm)
+    can_view_team = (view_mode == "team") and (role in ["superadmin", "admin", "coach", "staff", "clientadmin"] or has_team_read_perm)
     
     # ─── Batches & Quarters ───
     if not target_user_id:
@@ -594,7 +595,7 @@ async def get_all_events(target_user_id: Optional[str] = None, view_mode: str = 
         for c in db_docs:
             events.append({
                 "id": str(c["_id"]), "title": c["title"], "type": c["type"], "start": c["start"], "end": c.get("end"), "allDay": c.get("all_day", False),
-                "extendedProps": { **{k: v for k, v in c.items() if k not in ["_id", "created_at", "updated_at"]}, "id": str(c["_id"]), "isCreator": c.get("user_id") == current_uid, "isAssigned": current_uid in (c.get("target_staff_id") or []) or current_uid in (c.get("assigned_member_ids") or []), "canEdit": role in ["superadmin", "admin"] or c.get("user_id") == current_uid, "source_col": col_name }
+                "extendedProps": { **{k: v for k, v in c.items() if k not in ["_id", "created_at", "updated_at"]}, "id": str(c["_id"]), "isCreator": c.get("user_id") == current_uid, "isAssigned": current_uid in (c.get("target_staff_id") or []) or current_uid in (c.get("assigned_member_ids") or []), "canEdit": role in ["superadmin", "admin", "coach", "staff"] or c.get("user_id") == current_uid, "source_col": col_name }
             })
     return events
 
@@ -773,7 +774,7 @@ Structure your response clearly. Use markdown.
 async def complete_event(event_id: str, current_user: dict = Depends(get_current_user)):
     event, col_name = await find_event_across_collections(event_id)
     if not event: raise HTTPException(status_code=404, detail="Event not found")
-    is_admin = current_user.get("role") in ["superadmin", "admin"]
+    is_admin = current_user.get("role") in ["superadmin", "admin", "coach", "staff", "clientadmin"]
     has_update_perm = current_user.get("permissions", {}).get("calendar", {}).get("update")
     is_creator = event.get("user_id") == str(current_user["_id"])
 
@@ -825,7 +826,7 @@ async def track_join_session(event_id: str, current_user: dict = Depends(get_cur
 async def delete_resource(event_id: str, resource_id: str, current_user: dict = Depends(get_current_user)):
     existing, col_name = await find_event_across_collections(event_id)
     if not existing: raise HTTPException(status_code=404, detail="Event not found")
-    is_admin = current_user.get("role") in ["superadmin", "admin"]
+    is_admin = current_user.get("role") in ["superadmin", "admin", "coach", "staff", "clientadmin"]
     has_update_perm = current_user.get("permissions", {}).get("calendar", {}).get("update")
     is_creator = existing.get("user_id") == str(current_user["_id"])
 
@@ -839,7 +840,7 @@ async def delete_resource(event_id: str, resource_id: str, current_user: dict = 
 async def delete_content(event_id: str, content_id: str, current_user: dict = Depends(get_current_user)):
     existing, col_name = await find_event_across_collections(event_id)
     if not existing: raise HTTPException(status_code=404, detail="Event not found")
-    if current_user.get("role") not in ["superadmin", "admin"] and existing.get("user_id") != str(current_user["_id"]):
+    if current_user.get("role") not in ["superadmin", "admin", "coach", "staff", "clientadmin"] and existing.get("user_id") != str(current_user["_id"]):
          raise HTTPException(status_code=403, detail="Not authorized to delete content")
     await get_collection(col_name).update_one({"_id": ObjectId(event_id)}, {"$pull": {"contents": {"id": content_id}}})
     return {"message": "Content removed"}
