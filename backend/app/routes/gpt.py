@@ -16,10 +16,149 @@ router = APIRouter(prefix="/gpt", tags=["gpt"])
 async def get_gpt_projects(current_user: dict = Depends(get_current_user)):
     col = get_collection("gpt_projects")
     projects = await col.find({}).to_list(100)
+    
+    # If Admin/Staff, return all
+    if current_user.get("role") in ["superadmin", "admin", "coach", "staff"]:
+        for p in projects:
+            p["id"] = str(p["_id"])
+            p["locked"] = False
+            del p["_id"]
+        return projects
+
+    # For Learners: Complex Access Logic
+    user_id = str(current_user["_id"])
+    company_id = current_user.get("company_id")
+    
+    # 1. Fetch special permissions
+    perm_col = get_collection("gpt_permissions")
+    special_perms = await perm_col.find({
+        "$or": [
+            {"entity_id": user_id, "entity_type": "user"},
+            {"entity_id": company_id, "entity_type": "company"}
+        ]
+    }).to_list(100)
+    unlocked_project_ids = {p["project_id"] for p in special_perms}
+
+    # 2. Find linked projects in learner's path
+    batch_ids = current_user.get("batch_ids", [current_user.get("batch_id")])
+    batch_ids = [ObjectId(bid) for bid in batch_ids if bid]
+    
+    # Check Batches
+    batches = await get_collection("batches").find({"_id": {"$in": batch_ids}}).to_list(100)
+    batch_linked = {} # project_id -> is_completed
+    for b in batches:
+        is_completed = (b.get("status") == "completed")
+        # Legacy support
+        old_pid = b.get("gpt_project_id")
+        if old_pid: batch_linked[old_pid] = batch_linked.get(old_pid, False) or is_completed
+        # Multi support
+        for p in b.get("gpt_projects", []):
+            pid = p.get("id")
+            if pid: batch_linked[pid] = batch_linked.get(pid, False) or is_completed
+
+    # Check Quarters
+    quarters = await get_collection("quarters").find({"batch_id": {"$in": [str(bid) for bid in batch_ids]}}).to_list(200)
+    quarter_linked = {}
+    for q in quarters:
+        is_completed = (q.get("status") == "completed")
+        # Legacy support
+        old_pid = q.get("gpt_project_id")
+        if old_pid: quarter_linked[old_pid] = quarter_linked.get(old_pid, False) or is_completed
+        # Multi support
+        for p in q.get("gpt_projects", []):
+            pid = p.get("id")
+            if pid: quarter_linked[pid] = quarter_linked.get(pid, False) or is_completed
+
+    # Check Sessions
+    from app.utils.calendar_utils import CALENDAR_COLLECTIONS
+    session_collections = CALENDAR_COLLECTIONS + ["calendar_events"]
+    session_linked = {}
+    for col_name in session_collections:
+        sessions = await get_collection(col_name).find({
+            "$or": [
+                {"user_id": user_id},
+                {"assigned_member_ids": user_id},
+                {"coach_ids": user_id}
+            ]
+        }).to_list(500)
+        for s in sessions:
+            is_completed = (s.get("status") == "completed")
+            # Legacy support
+            old_pid = s.get("gpt_project_id")
+            if old_pid: session_linked[old_pid] = session_linked.get(old_pid, False) or is_completed
+            # Multi support
+            for p in s.get("gpt_projects", []):
+                pid = p.get("id")
+                if pid: session_linked[pid] = session_linked.get(pid, False) or is_completed
+
+    # 3. Assemble Result
+    result = []
+    seen_ids = set()
+    
     for p in projects:
-        p["id"] = str(p["_id"])
-        del p["_id"]
-    return projects
+        pid = str(p["_id"])
+        # Is it in the learner's path at all?
+        is_in_path = (pid in batch_linked) or (pid in quarter_linked) or (pid in session_linked) or (pid in unlocked_project_ids)
+        
+        if is_in_path:
+            p["id"] = pid
+            del p["_id"]
+            
+            # Determine if locked
+            is_unlocked = (
+                (pid in unlocked_project_ids) or
+                batch_linked.get(pid) or
+                quarter_linked.get(pid) or
+                session_linked.get(pid)
+            )
+            
+            p["locked"] = not is_unlocked
+            
+            # Metadata about WHY it's locked/available
+            if p["locked"]:
+                if pid in batch_linked: p["lock_reason"] = "Batch Level Access (Complete Batch to Unlock)"
+                elif pid in quarter_linked: p["lock_reason"] = "Quarter Level Access (Complete Quarter to Unlock)"
+                elif pid in session_linked: p["lock_reason"] = "Session Level Access (Complete Session to Unlock)"
+            
+            result.append(p)
+            seen_ids.add(pid)
+            
+    return result
+
+# ─── Permissions Endpoints ───
+@router.post("/permissions/grant")
+async def grant_gpt_permission(payload: dict, current_user: dict = Depends(get_current_user)):
+    if current_user.get("role") not in ["superadmin", "admin"]:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    
+    perm_col = get_collection("gpt_permissions")
+    payload["granted_by"] = str(current_user["_id"])
+    payload["granted_at"] = datetime.utcnow()
+    
+    await perm_col.insert_one(payload)
+    return {"message": "Permission granted"}
+
+@router.get("/permissions")
+async def list_gpt_permissions(project_id: Optional[str] = None, current_user: dict = Depends(get_current_user)):
+    if current_user.get("role") not in ["superadmin", "admin"]:
+        raise HTTPException(status_code=403, detail="Not authorized")
+        
+    perm_col = get_collection("gpt_permissions")
+    query = {}
+    if project_id: query["project_id"] = project_id
+    
+    perms = await perm_col.find(query).to_list(500)
+    for p in perms: p["id"] = str(p["_id"]); del p["_id"]
+    return perms
+
+@router.delete("/permissions/{perm_id}")
+async def revoke_gpt_permission(perm_id: str, current_user: dict = Depends(get_current_user)):
+    if current_user.get("role") not in ["superadmin", "admin"]:
+        raise HTTPException(status_code=403, detail="Not authorized")
+        
+    perm_col = get_collection("gpt_permissions")
+    await perm_col.delete_one({"_id": ObjectId(perm_id)})
+    return {"message": "Permission revoked"}
 
 @router.post("/projects", response_model=dict)
 async def create_gpt_project(project: GptProjectCreate, current_user: dict = Depends(get_current_user)):
@@ -60,9 +199,8 @@ async def delete_gpt_project(project_id: str, current_user: dict = Depends(get_c
         raise HTTPException(status_code=403, detail="SuperAdmin only")
     
     await get_collection("gpt_projects").delete_one({"_id": ObjectId(project_id)})
-    # Clean up knowledge chunks too
-    await get_collection("gpt_knowledge_chunks").delete_many({"project_id": project_id})
-    return {"message": "Project deleted"}
+    await get_collection("KnowledgeBase").delete_many({"project_id": project_id})
+    return {"message": "Project deleted and KnowledgeBase purged."}
 
 @router.post("/projects/{project_id}/upload-knowledge")
 async def upload_project_knowledge(
@@ -71,6 +209,7 @@ async def upload_project_knowledge(
     file: UploadFile = File(...), 
     current_user: dict = Depends(get_current_user)
 ):
+    print(f"--- ATTEMPTING KNOWLEDGE UPLOAD: {file.filename} for project {project_id} ---")
     if current_user.get("role") != "superadmin":
         raise HTTPException(status_code=403, detail="SuperAdmin only")
         
@@ -79,43 +218,51 @@ async def upload_project_knowledge(
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
     
-    # 1. Save locally temporarily for processing
-    tmp_path = os.path.join(tempfile.gettempdir(), f"gpt_kb_{project_id}_{file.filename}")
+    # Use only the filename, avoiding potential directory traversal or missing folders from webkitdirectory
+    safe_filename = os.path.basename(file.filename)
+    timestamp = datetime.utcnow().strftime("%Y%m%d%H%M%S")
+    tmp_path = os.path.join(tempfile.gettempdir(), f"gpt_kb_{project_id}_{timestamp}_{safe_filename}")
+    
     try:
+        # 1. Save locally temporarily for processing
         async with aiofiles.open(tmp_path, 'wb') as out_file:
             while chunk := await file.read(1024 * 1024):
                 await out_file.write(chunk)
                 
-        # 2. Extract Text and Save to DB IMMEDIATELY (for fast response)
+        # 2. Extract Text and Save to KnowledgeBase collection (for fast response)
+        # Using the user requested "KnowledgeBase" collection name
         from app.services.gpt_service import extract_text_from_file, chunk_text
-        text = await extract_text_from_file(tmp_path, file.filename)
+        text = await extract_text_from_file(tmp_path, safe_filename)
         chunks = chunk_text(text)
         
-        chunk_col = get_collection("gpt_knowledge_chunks")
+        kb_col = get_collection("KnowledgeBase")
         file_id = str(ObjectId())
         chunk_docs = []
         for c in chunks:
             chunk_docs.append({
                 "project_id": project_id,
                 "file_id": file_id,
+                "filename": safe_filename,
                 "content": c,
                 "created_at": datetime.utcnow()
             })
         
         if chunk_docs:
-            await chunk_col.insert_many(chunk_docs)
+            await kb_col.insert_many(chunk_docs)
+            print(f"+++ Indexed {len(chunk_docs)} chunks for {safe_filename} into KnowledgeBase +++")
 
-        # 3. Handle S3 Upload in BACKGROUND
-        def s3_upload_task(path, filename, content_type, p_id, f_id):
+        # 3. Handle S3 Upload in BACKGROUND to not block the UI
+        async def finalize_upload(path, filename, content_type, p_id, f_id):
             from app.services.s3_service import upload_file_to_s3
-            with open(path, 'rb') as f:
-                url = upload_file_to_s3(f, filename, content_type)
-            
-            # Update project with the final S3 URL
+            import functools
             import asyncio
-            from app.db.mongodb import get_collection
-            async def update_url():
-                col = get_collection("gpt_projects")
+            
+            try:
+                loop = asyncio.get_event_loop()
+                with open(path, 'rb') as f:
+                    url = await loop.run_in_executor(None, functools.partial(upload_file_to_s3, f, filename, content_type))
+                
+                proj_col = get_collection("gpt_projects")
                 file_doc = {
                     "id": f_id,
                     "name": filename,
@@ -123,67 +270,75 @@ async def upload_project_knowledge(
                     "url": url,
                     "uploaded_at": datetime.utcnow()
                 }
-                await col.update_one({"_id": ObjectId(p_id)}, {"$push": {"knowledge_files": file_doc}})
+                await proj_col.update_one({"_id": ObjectId(p_id)}, {"$push": {"knowledge_files": file_doc}})
+                print(f"--- S3 Sync Complete for {filename} from {p_id} ---")
+            except Exception as e:
+                print(f"!!! Error in background S3 upload for {filename}: {str(e)} !!!")
+            finally:
                 if os.path.exists(path):
                     os.remove(path)
-            
-            # Since this is a sync background task, we need a way to run async DB update or use sync driver.
-            # But FastAPI background tasks can be async. Let's make it more robust.
-            pass
 
-        # Let's use a better approach: background task for S3 only
-        async def finalize_upload(path, filename, content_type, p_id, f_id):
-            from app.services.s3_service import upload_file_to_s3
-            # s3 is usually sync client, but we can wrap it
-            import functools
-            import asyncio
-            loop = asyncio.get_event_loop()
-            with open(path, 'rb') as f:
-                url = await loop.run_in_executor(None, functools.partial(upload_file_to_s3, f, filename, content_type))
-            
-            proj_col = get_collection("gpt_projects")
-            file_doc = {
-                "id": f_id,
-                "name": filename,
-                "type": content_type,
-                "url": url,
-                "uploaded_at": datetime.utcnow()
-            }
-            await proj_col.update_one({"_id": ObjectId(p_id)}, {"$push": {"knowledge_files": file_doc}})
-            if os.path.exists(path):
-                os.remove(path)
+        background_tasks.add_task(finalize_upload, tmp_path, safe_filename, file.content_type, project_id, file_id)
 
-        background_tasks.add_task(finalize_upload, tmp_path, file.filename, file.content_type, project_id, file_id)
-
-        return {"message": "Knowledge indexed and saved to database. S3 sync in progress...", "file_id": file_id}
+        return {
+            "message": "Knowledge indexed and saved to KnowledgeBase cluster. S3 synchronization pending.", 
+            "file_id": file_id,
+            "filename": safe_filename
+        }
     except Exception as e:
+        print(f"!!! Knowledge processing CRITICAL ERROR: {str(e)} !!!")
         if os.path.exists(tmp_path): os.remove(tmp_path)
         raise HTTPException(status_code=500, detail=f"Knowledge processing failed: {str(e)}")
 
-@router.post("/chat/{project_id}/respond")
-async def gpt_chat_respond(project_id: str, payload: dict, current_user: dict = Depends(get_current_user)):
+@router.get("/chat/{project_id}/sessions", response_model=List[dict])
+async def get_gpt_sessions(project_id: str, current_user: dict = Depends(get_current_user)):
+    col = get_collection("gpt_conversations")
+    sessions = await col.find({"project_id": project_id, "user_id": str(current_user["_id"])}).sort("updated_at", -1).to_list(100)
+    for s in sessions:
+        s["id"] = str(s["_id"])
+        del s["_id"]
+        # Create a preview title from the first message
+        if s.get("messages") and len(s["messages"]) > 0:
+            s["title"] = s["messages"][0]["content"][:30] + "..."
+        else:
+            s["title"] = "New Chat Session"
+    return sessions
+
+@router.post("/chat/{project_id}/session", response_model=dict)
+async def create_new_gpt_session(project_id: str, current_user: dict = Depends(get_current_user)):
+    col = get_collection("gpt_conversations")
+    new_session = {
+        "project_id": project_id,
+        "user_id": str(current_user["_id"]),
+        "messages": [],
+        "created_at": datetime.utcnow(),
+        "updated_at": datetime.utcnow()
+    }
+    res = await col.insert_one(new_session)
+    return {"id": str(res.inserted_id)}
+
+@router.post("/chat/sessions/{session_id}/respond")
+async def gpt_session_respond(session_id: str, payload: dict, current_user: dict = Depends(get_current_user)):
     user_message = payload.get("message")
     if not user_message:
         raise HTTPException(status_code=400, detail="Message required")
         
-    # Get conversation history or create new
     conv_col = get_collection("gpt_conversations")
-    conv = await conv_col.find_one({"project_id": project_id, "user_id": str(current_user["_id"])})
+    conv = await conv_col.find_one({"_id": ObjectId(session_id), "user_id": str(current_user["_id"])})
     if not conv:
-        conv = {
-            "project_id": project_id,
-            "user_id": str(current_user["_id"]),
-            "messages": [],
-            "updated_at": datetime.utcnow()
-        }
-        res = await conv_col.insert_one(conv)
-        conv["_id"] = res.inserted_id
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    project_id = conv["project_id"]
 
     # 1. Fetch relevant knowledge (RAG)
     from app.services.gpt_service import get_relevant_context, generate_ai_response
     
+    # Combined knowledge: Project RAG + Session Knowledge
     context = await get_relevant_context(project_id, user_message)
-    
+    if conv.get("session_knowledge"):
+        for sk in conv["session_knowledge"]:
+            context += f"\n\n[Session Context - {sk['name']}]:\n{sk['content']}"
+
     # Get project instructions
     proj_col = get_collection("gpt_projects")
     project = await proj_col.find_one({"_id": ObjectId(project_id)})
@@ -206,10 +361,102 @@ async def gpt_chat_respond(project_id: str, payload: dict, current_user: dict = 
     
     return {"answer": ai_msg}
 
-@router.get("/chat/{project_id}/history")
-async def get_gpt_chat_history(project_id: str, current_user: dict = Depends(get_current_user)):
+@router.get("/chat/sessions/{session_id}/history")
+async def get_session_history(session_id: str, current_user: dict = Depends(get_current_user)):
     conv_col = get_collection("gpt_conversations")
-    conv = await conv_col.find_one({"project_id": project_id, "user_id": str(current_user["_id"])})
+    # Strict privacy: filter by user_id
+    conv = await conv_col.find_one({"_id": ObjectId(session_id), "user_id": str(current_user["_id"])})
     if not conv:
-        return {"messages": []}
+        raise HTTPException(status_code=404, detail="Session not found or access denied")
     return {"messages": conv["messages"]}
+
+@router.delete("/chat/sessions/{session_id}")
+async def delete_gpt_session(session_id: str, current_user: dict = Depends(get_current_user)):
+    conv_col = get_collection("gpt_conversations")
+    # Strict privacy check
+    res = await conv_col.delete_one({"_id": ObjectId(session_id), "user_id": str(current_user["_id"])})
+    if res.deleted_count == 0:
+         raise HTTPException(status_code=404, detail="Session not found or access denied")
+    return {"message": "Session deleted"}
+
+@router.patch("/chat/sessions/{session_id}/rethink")
+async def rethink_gpt_session(session_id: str, payload: dict, current_user: dict = Depends(get_current_user)):
+    message_idx = payload.get("index") # Index of the message to rethink from
+    new_content = payload.get("content")
+    if message_idx is None or new_content is None:
+        raise HTTPException(status_code=400, detail="Index and content required")
+
+    conv_col = get_collection("gpt_conversations")
+    conv = await conv_col.find_one({"_id": ObjectId(session_id), "user_id": str(current_user["_id"])})
+    if not conv:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    messages = conv["messages"]
+    if message_idx >= len(messages):
+        raise HTTPException(status_code=400, detail="Invalid message index")
+
+    # Truncate conversation from the edited message
+    truncated_messages = messages[:message_idx]
+    
+    # 1. RAG and AI generation with the NEW content
+    from app.services.gpt_service import get_relevant_context, generate_ai_response
+    context = await get_relevant_context(conv["project_id"], new_content)
+    
+    # Get project instructions
+    proj_col = get_collection("gpt_projects")
+    project = await proj_col.find_one({"_id": ObjectId(conv["project_id"])})
+    instructions = project.get("instruction", "You are a helpful assistant.")
+    
+    # 2. Generate new response
+    ai_msg = await generate_ai_response(instructions, context, new_content, truncated_messages)
+    
+    # Update messages
+    truncated_messages.append({"role": "user", "content": new_content, "timestamp": datetime.utcnow()})
+    truncated_messages.append({"role": "assistant", "content": ai_msg, "timestamp": datetime.utcnow()})
+    
+    await conv_col.update_one(
+        {"_id": conv["_id"]}, 
+        {"$set": {"messages": truncated_messages, "updated_at": datetime.utcnow()}}
+    )
+    
+    return {"answer": ai_msg, "messages": truncated_messages}
+
+@router.post("/chat/sessions/{session_id}/upload")
+async def upload_session_context(
+    session_id: str, 
+    file: UploadFile = File(...), 
+    current_user: dict = Depends(get_current_user)
+):
+    # Enforce session ownership
+    conv_col = get_collection("gpt_conversations")
+    conv = await conv_col.find_one({"_id": ObjectId(session_id), "user_id": str(current_user["_id"])})
+    if not conv:
+         raise HTTPException(status_code=404, detail="Session access denied")
+
+    # This file is temporary and scoped ONLY to this chat conversation
+    # We'll extract text and append it to the chat as a system context or hidden message 
+    # Or store it in a temporary session knowledge base.
+    
+    tmp_path = os.path.join(tempfile.gettempdir(), f"session_kb_{session_id}_{file.filename}")
+    try:
+        async with aiofiles.open(tmp_path, 'wb') as out_file:
+            while chunk := await file.read():
+                await out_file.write(chunk)
+                
+        from app.services.gpt_service import extract_text_from_file
+        text = await extract_text_from_file(tmp_path, file.filename)
+        
+        # Append this as a special 'context' message or metadata in session
+        context_preview = f"[Uploaded File: {file.filename}]\n{text[:2000]}..." # Truncate for safety
+        
+        # Store in session metadata or append hidden context
+        # For simplicity, we add it to a 'session_knowledge' list in the conversation doc
+        await conv_col.update_one(
+            {"_id": conv["_id"]},
+            {"$push": {"session_knowledge": {"name": file.filename, "content": text, "uploaded_at": datetime.utcnow()}}}
+        )
+        if os.path.exists(tmp_path): os.remove(tmp_path)
+        return {"message": f"File {file.filename} is now available in this chat engine session."}
+    except Exception as e:
+        if os.path.exists(tmp_path): os.remove(tmp_path)
+        raise HTTPException(status_code=500, detail=str(e))

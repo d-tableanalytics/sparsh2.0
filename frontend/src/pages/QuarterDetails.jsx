@@ -2,18 +2,19 @@ import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import api from '../services/api';
 import Modal from '../components/common/Modal';
+import { useNotification } from '../context/NotificationContext';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   ArrowLeft, Clock, FileText, Calendar,
   Pencil, Trash2, Save, X, CheckCircle2, PauseCircle,
-  PlayCircle, ChevronDown, Plus, AlertTriangle, 
-  LayoutDashboard, TrendingUp, Users, Target, Eye
+  PlayCircle, ChevronDown, Plus, AlertTriangle,
+  LayoutDashboard, TrendingUp, Users, Target, Eye, Bot
 } from 'lucide-react';
 
 const statusConfig = {
-  active:    { bg: 'var(--status-active-bg)', text: 'var(--status-active-text)', border: 'var(--status-active-border)', icon: PlayCircle, label: 'Active' },
+  active: { bg: 'var(--status-active-bg)', text: 'var(--status-active-text)', border: 'var(--status-active-border)', icon: PlayCircle, label: 'Active' },
   completed: { bg: 'var(--accent-indigo-bg)', text: 'var(--accent-indigo)', border: 'var(--accent-indigo-border)', icon: CheckCircle2, label: 'Completed' },
-  paused:    { bg: 'var(--accent-yellow-bg)', text: 'var(--accent-yellow)', border: 'var(--accent-yellow-border)', icon: PauseCircle, label: 'Paused' },
+  paused: { bg: 'var(--accent-yellow-bg)', text: 'var(--accent-yellow)', border: 'var(--accent-yellow-border)', icon: PauseCircle, label: 'Paused' },
 };
 
 const InfoRow = ({ icon: Icon, label, value, color }) => (
@@ -43,6 +44,7 @@ const StatCard = ({ icon: Icon, label, value, color }) => (
 const QuarterDetails = () => {
   const { quarterId } = useParams();
   const navigate = useNavigate();
+  const { showSuccess, showError } = useNotification();
 
   const [quarter, setQuarter] = useState(null);
   const [sessions, setSessions] = useState([]);
@@ -51,18 +53,21 @@ const QuarterDetails = () => {
   const [editData, setEditData] = useState({});
   const [statusDropdown, setStatusDropdown] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [gptProjects, setGptProjects] = useState([]);
 
   const fetchData = async () => {
     try {
-      const [res, evRes] = await Promise.all([
+      const [res, evRes, gptRes] = await Promise.all([
         api.get(`/quarters/${quarterId}`),
-        api.get('/calendar/events')
+        api.get('/calendar/events'),
+        api.get('/gpt/projects')
       ]);
       setQuarter(res.data);
       setEditData(res.data);
+      setGptProjects(gptRes.data);
 
-      const quarterSessions = evRes.data.filter(e => 
-          e.extendedProps?.quarter_id === quarterId && e.type === 'event'
+      const quarterSessions = evRes.data.filter(e =>
+        e.extendedProps?.quarter_id === quarterId && e.type === 'event'
       );
       setSessions(quarterSessions);
     } catch (err) { console.error(err); }
@@ -76,23 +81,30 @@ const QuarterDetails = () => {
       const { _id, created_at, status, batch_id, ...fields } = editData;
       await api.put(`/quarters/${quarterId}`, fields);
       setEditMode(false);
+      showSuccess("Quarter details updated");
       fetchData();
-    } catch (err) { alert('Update failed'); }
+    } catch (err) { 
+      const detail = err.response?.data?.detail;
+      const msg = Array.isArray(detail) ? detail.map(d => `${d.loc.join('.')}: ${d.msg}`).join(', ') : (detail || 'Update failed');
+      showError(msg); 
+    }
   };
 
   const handleStatusChange = async (newStatus) => {
     try {
       await api.put(`/quarters/${quarterId}`, { status: newStatus });
       setStatusDropdown(false);
+      showSuccess(`Quarter status changed to ${newStatus}`);
       fetchData();
-    } catch (err) { alert('Status change failed'); }
+    } catch (err) { showError('Status change failed'); }
   };
 
   const handleDelete = async () => {
-      try {
-          await api.delete(`/quarters/${quarterId}`);
-          navigate(-1);
-      } catch (err) { alert('Delete failed'); }
+    try {
+      await api.delete(`/quarters/${quarterId}`);
+      showSuccess("Quarter deleted successfully");
+      navigate(-1);
+    } catch (err) { showError('Delete failed'); }
   };
 
   if (loading) return (
@@ -165,6 +177,34 @@ const QuarterDetails = () => {
                     className="w-full px-3 py-1.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-md outline-none text-[13px] font-medium text-[var(--text-main)] focus:border-[var(--accent-indigo)]" />
                 </div>
               ))}
+              <div className="space-y-1">
+                <label className="text-[10px] font-bold text-[var(--text-muted)] uppercase tracking-widest">Linked GPT Projects</label>
+                <div className="flex flex-wrap gap-2 mb-2">
+                  {(editData.gpt_projects || []).map(p => (
+                    <div key={p.id} className="flex items-center gap-2 px-2 py-1 bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] rounded-md text-[11px] font-bold">
+                      {p.title}
+                      <button onClick={() => setEditData({ ...editData, gpt_projects: editData.gpt_projects.filter(x => x.id !== p.id) })}>
+                        <X size={12} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+                <select
+                  value=""
+                  onChange={e => {
+                    const selected = gptProjects.find(p => p.id === e.target.value);
+                    if (selected && !(editData.gpt_projects || []).some(x => x.id === selected.id)) {
+                      setEditData({ ...editData, gpt_projects: [...(editData.gpt_projects || []), { id: selected.id, title: selected.title }] });
+                    }
+                  }}
+                  className="w-full px-3 py-1.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-md outline-none text-[13px] font-medium text-[var(--text-main)] focus:border-[var(--accent-indigo)]"
+                >
+                  <option value="">Add GPT Project...</option>
+                  {gptProjects.filter(p => !(editData.gpt_projects || []).some(x => x.id === p.id)).map(p => (
+                    <option key={p.id} value={p.id}>{p.title}</option>
+                  ))}
+                </select>
+              </div>
             </div>
             <div className="flex gap-3 mt-6">
               <button onClick={handleSaveEdit} className="h-9 px-6 bg-[var(--accent-green)] text-white rounded-lg text-[12px] font-bold flex items-center gap-2 shadow-sm hover:opacity-90 transition-all"><Save size={14} /> Save Changes</button>
@@ -181,64 +221,79 @@ const QuarterDetails = () => {
           <InfoRow icon={Calendar} label="Start Date" value={quarter.start_date} color="green" />
           <InfoRow icon={Calendar} label="Target End" value={quarter.target_end_date} color="red" />
           <InfoRow icon={FileText} label="Description" value={quarter.description} color="indigo" />
+          <div className="flex items-start gap-3 py-2">
+            <div className="p-2 rounded-lg" style={{ background: `var(--accent-indigo-bg)` }}>
+              <Bot size={14} style={{ color: `var(--accent-indigo)` }} />
+            </div>
+            <div className="flex flex-col">
+              <span className="text-[10px] font-bold text-[var(--text-muted)] uppercase tracking-widest">Linked GPT Projects</span>
+              <div className="flex flex-wrap gap-1 mt-1">
+                {(quarter.gpt_projects || []).length > 0 ? (quarter.gpt_projects || []).map(p => (
+                  <span key={p.id} className="text-[11px] font-bold text-[var(--accent-indigo)] bg-[var(--accent-indigo-bg)] px-1.5 py-0.5 rounded shadow-sm border border-[var(--accent-indigo-border)]">
+                    {p.title}
+                  </span>
+                )) : <span className="text-[12px] font-medium text-[var(--text-main)]">None</span>}
+              </div>
+            </div>
+          </div>
         </div>
       </div>
 
       {/* ─── Quarter Stats ─── */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-          <StatCard icon={LayoutDashboard} label="Total Sessions" value="12" color="indigo" />
-          <StatCard icon={TrendingUp} label="Avg Attendance" value="94%" color="green" />
-          <StatCard icon={Users} label="Active Companies" value="8" color="orange" />
-          <StatCard icon={Target} label="Tasks Done" value="86%" color="red" />
+        <StatCard icon={LayoutDashboard} label="Total Sessions" value="12" color="indigo" />
+        <StatCard icon={TrendingUp} label="Avg Attendance" value="94%" color="green" />
+        <StatCard icon={Users} label="Active Companies" value="8" color="orange" />
+        <StatCard icon={Target} label="Tasks Done" value="86%" color="red" />
       </div>
 
       {/* ─── Sessions List ─── */}
       <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-xl p-6 shadow-sm">
         <div className="flex items-center justify-between mb-6">
-            <h3 className="text-lg font-bold text-[var(--text-main)] flex items-center gap-2"><Clock size={16} className="text-[var(--accent-indigo)]"/> Scheduled Sessions</h3>
+          <h3 className="text-lg font-bold text-[var(--text-main)] flex items-center gap-2"><Clock size={16} className="text-[var(--accent-indigo)]" /> Scheduled Sessions</h3>
         </div>
-        
+
         {sessions.length > 0 ? (
-            <div className="overflow-x-auto">
-                <table className="w-full text-left border-collapse">
-                    <thead>
-                        <tr className="border-b border-[var(--border)] text-[10px] font-bold text-[var(--text-muted)] uppercase tracking-wider bg-[var(--input-bg)]">
-                            <th className="p-3 font-medium rounded-tl-lg">Session Title</th>
-                            <th className="p-3 font-medium">Date & Time</th>
-                            <th className="p-3 font-medium">Status</th>
-                            <th className="p-3 font-medium text-right rounded-tr-lg">Action</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {sessions.map(session => (
-                            <tr key={session.id} className="border-b border-[var(--border)] hover:bg-[var(--input-bg)] transition-colors">
-                                <td className="p-3 text-[13px] font-bold text-[var(--text-main)]">{session.title}</td>
-                                <td className="p-3 text-[12px] font-medium text-[var(--text-muted)]">
-                                    {new Date(session.start).toLocaleString('en-IN', {
-                                        timeZone: 'Asia/Kolkata', weekday: 'short', day: 'numeric', month: 'short',
-                                        hour: '2-digit', minute: '2-digit', hour12: true
-                                    })}
-                                </td>
-                                <td className="p-3">
-                                    <span className={`px-2 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider ${session.extendedProps.status === 'completed' ? 'bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)]' : 'bg-orange-50 text-orange-600'}`}>
-                                        {session.extendedProps.status || 'scheduled'}
-                                    </span>
-                                </td>
-                                <td className="p-3 text-right">
-                                    <button onClick={() => navigate(`/sessions/${session.id}`)} className="p-2 text-[var(--text-muted)] hover:text-[var(--accent-indigo)] hover:bg-[var(--accent-indigo-bg)] rounded-lg transition-all" title="View Session Details">
-                                        <Eye size={16} />
-                                    </button>
-                                </td>
-                            </tr>
-                        ))}
-                    </tbody>
-                </table>
-            </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-left border-collapse">
+              <thead>
+                <tr className="border-b border-[var(--border)] text-[10px] font-bold text-[var(--text-muted)] uppercase tracking-wider bg-[var(--input-bg)]">
+                  <th className="p-3 font-medium rounded-tl-lg">Session Title</th>
+                  <th className="p-3 font-medium">Date & Time</th>
+                  <th className="p-3 font-medium">Status</th>
+                  <th className="p-3 font-medium text-right rounded-tr-lg">Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {sessions.map(session => (
+                  <tr key={session.id} className="border-b border-[var(--border)] hover:bg-[var(--input-bg)] transition-colors">
+                    <td className="p-3 text-[13px] font-bold text-[var(--text-main)]">{session.title}</td>
+                    <td className="p-3 text-[12px] font-medium text-[var(--text-muted)]">
+                      {new Date(session.start).toLocaleString('en-IN', {
+                        timeZone: 'Asia/Kolkata', weekday: 'short', day: 'numeric', month: 'short',
+                        hour: '2-digit', minute: '2-digit', hour12: true
+                      })}
+                    </td>
+                    <td className="p-3">
+                      <span className={`px-2 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider ${session.extendedProps.status === 'completed' ? 'bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)]' : 'bg-orange-50 text-orange-600'}`}>
+                        {session.extendedProps.status || 'scheduled'}
+                      </span>
+                    </td>
+                    <td className="p-3 text-right">
+                      <button onClick={() => navigate(`/sessions/${session.id}`)} className="p-2 text-[var(--text-muted)] hover:text-[var(--accent-indigo)] hover:bg-[var(--accent-indigo-bg)] rounded-lg transition-all" title="View Session Details">
+                        <Eye size={16} />
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         ) : (
-            <div className="py-12 flex flex-col items-center justify-center border border-dashed border-[var(--border)] bg-[var(--input-bg)] rounded-xl opacity-70">
-                <Calendar size={28} className="text-[var(--text-muted)] mb-3" />
-                <p className="text-[12px] font-bold text-[var(--text-muted)] uppercase">No Sessions Scheduled For This Quarter</p>
-            </div>
+          <div className="py-12 flex flex-col items-center justify-center border border-dashed border-[var(--border)] bg-[var(--input-bg)] rounded-xl opacity-70">
+            <Calendar size={28} className="text-[var(--text-muted)] mb-3" />
+            <p className="text-[12px] font-bold text-[var(--text-muted)] uppercase">No Sessions Scheduled For This Quarter</p>
+          </div>
         )}
       </div>
 

@@ -348,3 +348,103 @@ async def import_users_xlsx(company_id: str, background_tasks: BackgroundTasks, 
         created += 1
     
     return {"created": created, "skipped": skipped, "errors": errors}
+
+# ─── Training Path & Session Progress ───
+
+@router.get("/{company_id}/training-path")
+async def get_company_training_path(company_id: str, current_user: dict = Depends(get_current_user)):
+    if current_user.get("role") != "superadmin" and current_user.get("company_id") != company_id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    
+    batches_col = get_collection("batches")
+    quarters_col = get_collection("quarters")
+    from app.utils.calendar_utils import CALENDAR_COLLECTIONS
+    session_cols = CALENDAR_COLLECTIONS + ["calendar_events"]
+    
+    # 1. Get Batches
+    batches = await batches_col.find({"companies": company_id}).to_list(100)
+    for b in batches:
+        b["id"] = str(b.pop("_id"))
+        
+        # 2. Get Quarters
+        quarters = await quarters_col.find({"batch_id": b["id"]}).to_list(100)
+        b["quarters"] = []
+        for q in quarters:
+            q["id"] = str(q.pop("_id"))
+            
+            # 3. Get Sessions
+            q["sessions"] = []
+            for col_name in session_cols:
+                sessions = await get_collection(col_name).find({"quarter_id": q["id"]}).to_list(200)
+                for s in sessions:
+                    s["id"] = str(s.pop("_id"))
+                    s["source_col"] = col_name
+                    q["sessions"].append(s)
+            
+            b["quarters"].append(q)
+            
+    return batches
+
+@router.get("/{company_id}/sessions/{session_id}/tasks")
+async def get_company_session_tasks(company_id: str, session_id: str, current_user: dict = Depends(get_current_user)):
+    # 1. Find the session to get the template
+    from app.utils.calendar_utils import find_event_across_collections
+    session, _ = await find_event_across_collections(session_id)
+    if not session: raise HTTPException(status_code=404, detail="Session not found")
+    
+    # 2. Get tasks from session or template
+    tasks = session.get("tasks") or []
+    if not tasks and session.get("session_template_id"):
+        template = await get_collection("session_templates").find_one({"_id": ObjectId(session["session_template_id"])})
+        if template:
+            tasks = template.get("tasks") or []
+            
+    # 3. Get progress for this company
+    progress_col = get_collection("company_session_progress")
+    progress = await progress_col.find_one({
+        "company_id": company_id,
+        "session_id": session_id
+    })
+    
+    done_indices = (progress or {}).get("done_indices") or []
+    
+    # 4. Merge
+    result = []
+    for idx, t in enumerate(tasks):
+        result.append({
+            **t,
+            "index": idx,
+            "is_done": idx in done_indices
+        })
+    return result
+
+@router.patch("/{company_id}/sessions/{session_id}/tasks/{task_index}/toggle")
+async def toggle_company_session_task(company_id: str, session_id: str, task_index: int, current_user: dict = Depends(get_current_user)):
+    progress_col = get_collection("company_session_progress")
+    
+    progress = await progress_col.find_one({
+        "company_id": company_id,
+        "session_id": session_id
+    })
+    
+    if not progress:
+        # Create new progress record
+        await progress_col.insert_one({
+            "company_id": company_id,
+            "session_id": session_id,
+            "done_indices": [task_index],
+            "updated_at": datetime.utcnow()
+        })
+    else:
+        done_indices = progress.get("done_indices") or []
+        if task_index in done_indices:
+            done_indices.remove(task_index)
+        else:
+            done_indices.append(task_index)
+        
+        await progress_col.update_one(
+            {"_id": progress["_id"]},
+            {"$set": {"done_indices": done_indices, "updated_at": datetime.utcnow()}}
+        )
+        
+    return {"message": "Task toggled"}

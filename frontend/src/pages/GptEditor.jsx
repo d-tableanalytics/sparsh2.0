@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import api from '../services/api';
+import { useNotification } from '../context/NotificationContext';
 import { motion, AnimatePresence } from 'framer-motion';
 import { 
     ArrowLeft, Save, Sparkles, FileText, Plus, X, 
@@ -11,6 +12,7 @@ import {
 const GptEditor = () => {
     const { id } = useParams();
     const navigate = useNavigate();
+    const { showSuccess, showError } = useNotification();
     const [loading, setLoading] = useState(id ? true : false);
     const [saving, setSaving] = useState(false);
     
@@ -69,7 +71,7 @@ const GptEditor = () => {
 
     const handleSave = async () => {
         if (!formData.title || !formData.instruction) {
-            alert("Title and Instructions are required!");
+            showError("Title and Instructions are required!");
             return;
         }
 
@@ -94,11 +96,11 @@ const GptEditor = () => {
                 setUploading(false);
             }
 
-            alert("Engine Deployed Successfully!");
+            showSuccess(id ? "Engine Updated Successfully!" : "Engine Deployed Successfully!");
             navigate('/gpt');
         } catch (err) {
             console.error(err);
-            alert("Failed to save engine.");
+            showError("Failed to save engine.");
         } finally {
             setSaving(false);
         }

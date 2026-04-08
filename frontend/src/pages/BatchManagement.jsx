@@ -2,11 +2,12 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import api from '../services/api';
 import Modal from '../components/common/Modal';
+import { useNotification } from '../context/NotificationContext';
 import { motion } from 'framer-motion';
 import {
   Plus, Search, Layers, Calendar,
   LayoutGrid, List, ExternalLink, Clock, CheckCircle2,
-  PauseCircle, PlayCircle, Trash2, Package, Building2
+  PauseCircle, PlayCircle, Trash2, Package, Building2, X
 } from 'lucide-react';
 
 const statusConfig = {
@@ -17,6 +18,7 @@ const statusConfig = {
 
 const BatchManagement = () => {
   const navigate = useNavigate();
+  const { showSuccess, showError } = useNotification();
   const [batches, setBatches] = useState([]);
   const [loading, setLoading] = useState(true);
   const [viewMode, setViewMode] = useState('table');
@@ -24,13 +26,19 @@ const BatchManagement = () => {
   const [showCreate, setShowCreate] = useState(false);
 
   const [form, setForm] = useState({
-    name: '', product_name: '', description: '', start_date: '', target_end_date: ''
+    name: '', product_name: '', description: '', start_date: '', target_end_date: '', gpt_projects: []
   });
+
+  const [gptProjects, setGptProjects] = useState([]);
 
   const fetchData = async () => {
     try {
-      const res = await api.get('/batches');
+      const [res, gptRes] = await Promise.all([
+        api.get('/batches'),
+        api.get('/gpt/projects')
+      ]);
       setBatches(res.data);
+      setGptProjects(gptRes.data);
     } catch (err) { console.error(err); }
     finally { setLoading(false); }
   };
@@ -45,17 +53,33 @@ const BatchManagement = () => {
   const handleCreate = async (e) => {
     e.preventDefault();
     try {
-      await api.post('/batches', form);
+      // Map IDs to objects {id, title} for backend validation
+      const payload = {
+        ...form,
+        gpt_projects: (form.gpt_projects || []).map(pId => {
+          const p = gptProjects.find(px => px.id === pId);
+          return { id: pId, title: p?.title || pId };
+        })
+      };
+      await api.post('/batches', payload);
       setShowCreate(false);
-      setForm({ name: '', product_name: '', description: '', start_date: '', target_end_date: '' });
+      showSuccess('Batch created successfully');
+      setForm({ name: '', product_name: '', description: '', start_date: '', target_end_date: '', gpt_projects: [] });
       fetchData();
-    } catch (err) { alert(err.response?.data?.detail || 'Failed'); }
+    } catch (err) { 
+      const detail = err.response?.data?.detail;
+      const msg = Array.isArray(detail) ? detail.map(d => `${d.loc.join('.')}: ${d.msg}`).join(', ') : (detail || 'Failed to create batch');
+      showError(msg); 
+    }
   };
 
   const handleDelete = async (id) => {
-    if (!confirm('Delete this batch permanently?')) return;
-    try { await api.delete(`/batches/${id}`); fetchData(); }
-    catch { alert('Delete failed'); }
+    try { 
+        await api.delete(`/batches/${id}`); 
+        showSuccess('Batch deleted successfully');
+        fetchData(); 
+    }
+    catch { showError('Delete failed'); }
   };
 
   const activeCount = batches.filter(b => b.status === 'active').length;
@@ -213,7 +237,38 @@ const BatchManagement = () => {
                 value={form.target_end_date} onChange={e => setForm({...form, target_end_date: e.target.value})} />
             </div>
           </div>
-          <button type="submit" className="w-full py-2 bg-[var(--btn-primary)] text-white rounded-lg text-[13px] font-bold hover:bg-[var(--btn-primary-hover)] transition-all mt-2">Create Batch</button>
+          <div className="space-y-1">
+            <label className="text-[10px] font-bold text-[var(--text-muted)] uppercase tracking-widest">Linked Neural Engines (GPT Projects)</label>
+            <div className="flex flex-wrap gap-2 mb-2">
+              {(form.gpt_projects || []).map(pId => {
+                const project = gptProjects.find(px => px.id === pId);
+                return (
+                  <div key={pId} className="flex items-center gap-2 px-2 py-1 bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] rounded-md text-[11px] font-bold border border-[var(--accent-indigo-border)]">
+                    {project?.title || pId}
+                    <button type="button" onClick={() => setForm({ ...form, gpt_projects: form.gpt_projects.filter(x => x !== pId) })}>
+                      <X size={12} />
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+            <select
+              value=""
+              onChange={e => {
+                const val = e.target.value;
+                if (val && !(form.gpt_projects || []).includes(val)) {
+                  setForm({ ...form, gpt_projects: [...(form.gpt_projects || []), val] });
+                }
+              }}
+              className="w-full px-3 py-1.5 bg-[var(--input-bg)] border border-[var(--border)] rounded-md outline-none text-[13px] font-medium text-[var(--text-main)] focus:border-[var(--accent-indigo)]"
+            >
+              <option value="">Select Project...</option>
+              {gptProjects.filter(p => !(form.gpt_projects || []).includes(p.id)).map(p => (
+                <option key={p.id} value={p.id}>{p.title}</option>
+              ))}
+            </select>
+          </div>
+          <button type="submit" className="w-full py-2 bg-[var(--btn-primary)] text-white rounded-lg text-[13px] font-bold hover:bg-[var(--btn-primary-hover)] transition-all mt-4">Create Batch Architecture</button>
         </form>
       </Modal>
     </div>

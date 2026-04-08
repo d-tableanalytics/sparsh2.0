@@ -6,11 +6,13 @@ import {
   ChevronRight, BadgeCheck, XCircle, Clock,
   ArrowUpRight, Building2, UserCircle2
 } from 'lucide-react';
+import { useNotification } from '../context/NotificationContext';
 import { useNavigate } from 'react-router-dom';
 import api from '../services/api';
 
 const UserManagement = () => {
     const navigate = useNavigate();
+    const { showSuccess, showError } = useNotification();
     const [users, setUsers] = useState([]);
     const [loading, setLoading] = useState(true);
     const [searchTerm, setSearchTerm] = useState('');
@@ -55,12 +57,12 @@ const UserManagement = () => {
         setIsSaving(true);
         try {
             await api.post('/auth/register', staffForm);
-            alert("Staff registration successful. Email dispatched.");
+            showSuccess("Staff registration successful. Email dispatched.");
             setShowAddModal(false);
             setStaffForm(initialStaffForm);
             fetchData();
         } catch (err) {
-            alert(err.response?.data?.detail || "Registration failed");
+            showError(err.response?.data?.detail || "Registration failed");
         } finally {
             setIsSaving(false);
         }

@@ -8,6 +8,7 @@ import interactionPlugin from '@fullcalendar/interaction';
 import { motion, AnimatePresence } from 'framer-motion';
 import api from '../services/api';
 import { useAuth } from '../context/AuthContext';
+import { useNotification } from '../context/NotificationContext';
 import { useMemo } from 'react';
 
 import {
@@ -23,9 +24,11 @@ import ReminderModal from '../components/calendar/ReminderModal';
 const CalendarPage = () => {
     const calendarRef = useRef(null);
     const { user } = useAuth();
+    const { showSuccess, showError } = useNotification();
     const [events, setEvents] = useState([]);
     const [loading, setLoading] = useState(true);
     const [viewName, setViewName] = useState('dayGridMonth');
+    const [viewMode, setViewMode] = useState('personal'); 
 
     const [batches, setBatches] = useState([]);
     const [quarters, setQuarters] = useState([]);
@@ -33,6 +36,7 @@ const CalendarPage = () => {
     const [allUsers, setAllUsers] = useState([]);
     const [statFilter, setStatFilter] = useState(null);
     const [backdateSettings, setBackdateSettings] = useState({ allow_backdate: false, exception_users: [] });
+    const [gptProjects, setGptProjects] = useState([]);
 
     const [showSummary, setShowSummary] = useState(false);
     const [summaryDate, setSummaryDate] = useState(null);
@@ -50,7 +54,7 @@ const CalendarPage = () => {
         assigned_departments: [], assigned_member_ids: [], coach_ids: [],
         additional_details: '', category: 'General', repeat: 'Does not repeat',
         repeat_end_date: '', repeat_interval: 1, assigned_to: 'myself', target_staff_id: [],
-        reminders: [], status_remark: ''
+        reminders: [], status_remark: '', gpt_projects: []
     };
 
     const [eventForm, setEventForm] = useState(initialForm);
@@ -60,10 +64,11 @@ const CalendarPage = () => {
     const fetchData = async () => {
         setLoading(true);
         try {
-            const [evRes, bRes, qRes, tRes, uRes, sRes] = await Promise.all([
-                api.get('/calendar/events'), api.get('/batches'),
+            const [evRes, bRes, qRes, tRes, uRes, sRes, gRes] = await Promise.all([
+                api.get(`/calendar/events?view_mode=${viewMode}`), api.get('/batches'),
                 api.get('/quarters'), api.get('/session-templates'),
-                api.get('/users'), api.get('/settings/backdate-control')
+                api.get('/users'), api.get('/settings/backdate-control'),
+                api.get('/gpt/projects')
             ]);
             setEvents(evRes.data.map(e => ({
                 id: e.id, title: e.title, start: e.start, end: e.end,
@@ -72,11 +77,11 @@ const CalendarPage = () => {
                 extendedProps: { ...e.extendedProps, id: e.id, dotColor: getRescheduleColor(e.extendedProps?.status || e.status, e.extendedProps?.type || e.type, e.color) }
             })));
             setBatches(bRes.data); setQuarters(qRes.data); setTemplates(tRes.data); setAllUsers(uRes.data);
-            setBackdateSettings(sRes.data);
+            setBackdateSettings(sRes.data); setGptProjects(gRes.data);
         } catch (err) { console.error(err); }
         finally { setLoading(false); }
     };
-    useEffect(() => { fetchData(); }, []);
+    useEffect(() => { fetchData(); }, [viewMode]);
 
     const formatIST = (dateStr) => {
         if (!dateStr) return "";
@@ -213,6 +218,7 @@ const CalendarPage = () => {
             target_staff_id: props.target_staff_id || [],
             reminders: props.reminders || [],
             status_remark: props.status_remark || '',
+            gpt_projects: props.gpt_projects || [],
             isCreator: props.isCreator,
             isAssigned: props.isAssigned
         });
@@ -222,8 +228,8 @@ const CalendarPage = () => {
 
     const handleQuickAction = async (id, action) => {
         try {
-            if (action === 'delete') { if (!confirm('Delete?')) return; await api.delete(`/calendar/events/${id}`); }
-            else if (action === 'complete') await api.put(`/calendar/events/${id}`, { status: 'completed' });
+            if (action === 'delete') { await api.delete(`/calendar/events/${id}`); showSuccess("Entity removed from calendar"); }
+            else if (action === 'complete') { await api.put(`/calendar/events/${id}`, { status: 'completed' }); showSuccess("Status updated"); }
             fetchData();
             // If in summary modal, refresh current day list
             if (showSummary) {
@@ -237,7 +243,7 @@ const CalendarPage = () => {
     };
 
     const handleSave = async () => {
-        if (!eventForm.title) return alert("Add a title");
+        if (!eventForm.title) return showError("Add a title");
 
         const eventStart = new Date(eventForm.start);
         const now = new Date();
@@ -246,28 +252,26 @@ const CalendarPage = () => {
 
         if (isBackdated && !canBackdate && eventForm.status === 'schedule') {
             console.warn("RESTRICTED: Backdated attempt blocked in UI.");
-            return alert("Operation Blocked: You do not have permission to schedule tasks or events in the past.");
+            return showError("Operation Blocked: You do not have permission to schedule tasks or events in the past.");
         }
 
 
-        // ─── CONFLICT DETECTION WARNING ───
+        // ─── CONFLICT DETECTION WARNING (Logged) ───
         try {
             const conflictCheck = await api.post('/calendar/events/validate-conflict', { 
                 ...eventForm, id: currentEventId 
             });
             if (conflictCheck.data.has_conflict) {
-                const names = conflictCheck.data.conflicts.map(c => c.title).join(", ");
-                if (!confirm(`⚠️ SCHEDULE CONFLICT DETECTED\n\nThis overlapping session will trigger a conflict notification to the participants and their respective companies.\n\nConflicting with: ${names}\n\nProceed with this schedule?`)) {
-                    return;
-                }
+                console.warn("Conflict detected:", conflictCheck.data.conflicts.map(c => c.title).join(", "));
             }
         } catch (e) { console.error("Conflict check failed", e); }
 
         try {
             if (isEdit) await api.put(`/calendar/events/${currentEventId}`, eventForm);
             else await api.post('/calendar/events', eventForm);
+            showSuccess(isEdit ? 'Event updated' : 'Event scheduled successfully');
             fetchData(); setShowModal(false); setShowSummary(false); 
-        } catch (err) { console.error(err); }
+        } catch (err) { showError('Failed to save event'); console.error(err); }
     };
 
     const role = user?.role?.toLowerCase();
@@ -385,6 +389,17 @@ const CalendarPage = () => {
                     <p className="text-[12px] text-[var(--text-muted)] font-bold italic tracking-wide">Elite session governance & operational accountability engine.</p>
                 </div>
                 <div className="flex items-center gap-3">
+                    {/* Focus Toggle */}
+                    {(user.role === 'superadmin' || user.role === 'admin') && (
+                        <div className="flex items-center bg-[var(--bg-card)] border border-[var(--border)] rounded-xl p-1 shadow-sm mr-2">
+                             <button onClick={() => setViewMode('personal')} className={`px-4 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all flex items-center gap-1.5 ${viewMode === 'personal' ? 'bg-[var(--accent-indigo)] text-white shadow-lg shadow-indigo-100' : 'text-[var(--text-muted)] hover:text-indigo-500'}`}>
+                                 <UserCircle2 size={13} /> MY FOCUS
+                             </button>
+                             <button onClick={() => setViewMode('team')} className={`px-4 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all flex items-center gap-1.5 ${viewMode === 'team' ? 'bg-orange-600 text-white shadow-lg shadow-orange-100 font-black' : 'text-[var(--text-muted)] hover:text-orange-600'}`}>
+                                 <Users2 size={13} /> TEAM VIEW
+                             </button>
+                        </div>
+                    )}
                     <div className="flex items-center bg-[var(--bg-card)] border border-[var(--border)] rounded-xl p-1 shadow-sm">
                         {['dayGridMonth', 'timeGridWeek', 'timeGridDay', 'multiMonthYear'].map((view) => (
                             <button
@@ -706,6 +721,37 @@ const CalendarPage = () => {
                                                         <label className="text-[9px] font-black text-[var(--text-muted)] uppercase flex items-center gap-1.5"><Link size={12} /> Live Link</label>
                                                         <input placeholder="Zoom / Meet URL" className="w-full px-3 py-2 bg-[var(--input-bg)] border border-[var(--border)] rounded-lg text-[12px] font-bold" value={eventForm.meeting_link} onChange={e => setEventForm({ ...eventForm, meeting_link: e.target.value })} />
                                                     </div>
+                                                    <div className="space-y-1">
+                                                        <label className="text-[9px] font-black text-[var(--text-muted)] uppercase flex items-center gap-1.5"><Zap size={12} className="text-[var(--accent-indigo)]" /> Neural Engines</label>
+                                                        <div className="flex flex-wrap gap-1 mb-1">
+                                                            {(eventForm.gpt_projects || []).map(pId => {
+                                                                const project = gptProjects.find(px => px.id === pId);
+                                                                return (
+                                                                    <div key={pId} className="flex items-center gap-1 px-1.5 py-0.5 bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] rounded-md text-[9px] font-black border border-[var(--accent-indigo-border)]">
+                                                                        {project?.title || pId}
+                                                                        <button type="button" onClick={() => setEventForm({ ...eventForm, gpt_projects: eventForm.gpt_projects.filter(x => x !== pId) })}>
+                                                                            <X size={10} />
+                                                                        </button>
+                                                                    </div>
+                                                                );
+                                                            })}
+                                                        </div>
+                                                        <select
+                                                            value=""
+                                                            onChange={e => {
+                                                                const val = e.target.value;
+                                                                if (val && !(eventForm.gpt_projects || []).includes(val)) {
+                                                                    setEventForm({ ...eventForm, gpt_projects: [...(eventForm.gpt_projects || []), val] });
+                                                                }
+                                                            }}
+                                                            className="w-full px-3 py-2 bg-[var(--input-bg)] border border-[var(--border)] rounded-lg text-[12px] font-bold outline-none focus:border-[var(--accent-indigo)]"
+                                                        >
+                                                            <option value="">Link GPT Project...</option>
+                                                            {gptProjects.filter(p => !(eventForm.gpt_projects || []).includes(p.id)).map(p => (
+                                                                <option key={p.id} value={p.id}>{p.title}</option>
+                                                            ))}
+                                                        </select>
+                                                    </div>
                                                 </div>
                                                 <div className="space-y-4">
                                                     <div className="space-y-1">
@@ -776,6 +822,37 @@ const CalendarPage = () => {
                                                                 }} className={`px-2 py-1 rounded-md text-[9px] font-black cursor-pointer transition-all ${eventForm.target_staff_id?.includes(m._id) ? 'bg-[var(--accent-indigo)] text-white' : 'bg-[var(--bg-card)] text-[var(--text-muted)] border border-[var(--border)]'}`}>{m.full_name || m.name}</div>
                                                             ))}
                                                         </div>
+                                                    </div>
+                                                    <div className="space-y-1">
+                                                        <label className="text-[9px] font-black text-[var(--text-muted)] uppercase flex items-center gap-1.5"><Zap size={12} className="text-[var(--accent-indigo)]" /> Neural Engines</label>
+                                                        <div className="flex flex-wrap gap-1 mb-1">
+                                                            {(eventForm.gpt_projects || []).map(pId => {
+                                                                const project = gptProjects.find(px => px.id === pId);
+                                                                return (
+                                                                    <div key={pId} className="flex items-center gap-1 px-1.5 py-0.5 bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] rounded-md text-[9px] font-black border border-[var(--accent-indigo-border)]">
+                                                                        {project?.title || pId}
+                                                                        <button type="button" onClick={() => setEventForm({ ...eventForm, gpt_projects: eventForm.gpt_projects.filter(x => x !== pId) })}>
+                                                                            <X size={10} />
+                                                                        </button>
+                                                                    </div>
+                                                                );
+                                                            })}
+                                                        </div>
+                                                        <select
+                                                            value=""
+                                                            onChange={e => {
+                                                                const val = e.target.value;
+                                                                if (val && !(eventForm.gpt_projects || []).includes(val)) {
+                                                                    setEventForm({ ...eventForm, gpt_projects: [...(eventForm.gpt_projects || []), val] });
+                                                                }
+                                                            }}
+                                                            className="w-full px-3 py-2 bg-[var(--input-bg)] border border-[var(--border)] rounded-lg text-[12px] font-bold outline-none focus:border-[var(--accent-indigo)]"
+                                                        >
+                                                            <option value="">Link GPT Project...</option>
+                                                            {gptProjects.filter(p => !(eventForm.gpt_projects || []).includes(p.id)).map(p => (
+                                                                <option key={p.id} value={p.id}>{p.title}</option>
+                                                            ))}
+                                                        </select>
                                                     </div>
                                                 </div>
                                             </>

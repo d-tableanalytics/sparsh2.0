@@ -2,19 +2,20 @@ import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import api from '../services/api';
 import Modal from '../components/common/Modal';
+import { useNotification } from '../context/NotificationContext';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   ArrowLeft, Layers, Package, Calendar, FileText,
   Pencil, Trash2, Save, X, CheckCircle2, PauseCircle,
   PlayCircle, ChevronDown, Building2, Plus, XCircle,
   AlertTriangle, GitMerge, ExternalLink, ArrowRightLeft,
-  LayoutGrid, List, Clock
+  LayoutGrid, List, Clock, Bot
 } from 'lucide-react';
 
 const statusConfig = {
-  active:    { bg: 'var(--status-active-bg)', text: 'var(--status-active-text)', border: 'var(--status-active-border)', icon: PlayCircle, label: 'Active' },
+  active: { bg: 'var(--status-active-bg)', text: 'var(--status-active-text)', border: 'var(--status-active-border)', icon: PlayCircle, label: 'Active' },
   completed: { bg: 'var(--accent-indigo-bg)', text: 'var(--accent-indigo)', border: 'var(--accent-indigo-border)', icon: CheckCircle2, label: 'Completed' },
-  paused:    { bg: 'var(--accent-yellow-bg)', text: 'var(--accent-yellow)', border: 'var(--accent-yellow-border)', icon: PauseCircle, label: 'Paused' },
+  paused: { bg: 'var(--accent-yellow-bg)', text: 'var(--accent-yellow)', border: 'var(--accent-yellow-border)', icon: PauseCircle, label: 'Paused' },
 };
 
 const InfoRow = ({ icon: Icon, label, value, color }) => (
@@ -32,6 +33,7 @@ const InfoRow = ({ icon: Icon, label, value, color }) => (
 const BatchDetails = () => {
   const { batchId } = useParams();
   const navigate = useNavigate();
+  const { showSuccess, showError } = useNotification();
 
   const [batch, setBatch] = useState(null);
   const [batchCompanies, setBatchCompanies] = useState([]);
@@ -45,11 +47,12 @@ const BatchDetails = () => {
   const [editData, setEditData] = useState({});
   const [statusDropdown, setStatusDropdown] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [gptProjects, setGptProjects] = useState([]);
   const [showAddCompany, setShowAddCompany] = useState(false);
   const [showMerge, setShowMerge] = useState(false);
   const [showShift, setShowShift] = useState(false);
   const [showCreateQuarter, setShowCreateQuarter] = useState(false);
-  
+
   const [selectedCompanies, setSelectedCompanies] = useState([]);
   const [mergeBatchId, setMergeBatchId] = useState('');
   const [deleteSource, setDeleteSource] = useState(false);
@@ -57,23 +60,25 @@ const BatchDetails = () => {
   const [targetShiftBatchId, setTargetShiftBatchId] = useState('');
 
   const [quarterForm, setQuarterForm] = useState({
-      name: '', description: '', start_date: '', target_end_date: ''
+    name: '', description: '', start_date: '', target_end_date: ''
   });
 
   const fetchData = async () => {
     try {
-      const [batchRes, companiesRes, quartersRes, allCompRes, allBatchRes] = await Promise.all([
+      const [res, compRes, allCompRes, gptRes, quartersRes, allBatchRes] = await Promise.all([
         api.get(`/batches/${batchId}`),
         api.get(`/batches/${batchId}/companies`),
-        api.get(`/quarters/?batch_id=${batchId}`),
         api.get('/companies'),
+        api.get('/gpt/projects'),
+        api.get(`/quarters/?batch_id=${batchId}`),
         api.get('/batches'),
       ]);
-      setBatch(batchRes.data);
-      setEditData(batchRes.data);
-      setBatchCompanies(companiesRes.data);
-      setQuarters(quartersRes.data);
+      setBatch(res.data);
+      setEditData(res.data);
+      setBatchCompanies(compRes.data);
       setAllCompanies(allCompRes.data);
+      setGptProjects(gptRes.data);
+      setQuarters(quartersRes.data);
       setAllBatches(allBatchRes.data.filter(b => b._id !== batchId));
     } catch (err) { console.error(err); }
     finally { setLoading(false); }
@@ -86,23 +91,30 @@ const BatchDetails = () => {
       const { _id, created_at, companies, company_count, status, ...fields } = editData;
       await api.put(`/batches/${batchId}`, fields);
       setEditMode(false);
+      showSuccess('Batch details updated successfully');
       fetchData();
-    } catch (err) { alert('Update failed'); }
+    } catch (err) { 
+      const detail = err.response?.data?.detail;
+      const msg = Array.isArray(detail) ? detail.map(d => `${d.loc.join('.')}: ${d.msg}`).join(', ') : (detail || 'Update failed');
+      showError(msg); 
+    }
   };
 
   const handleStatusChange = async (newStatus) => {
     try {
       await api.patch(`/batches/${batchId}/status`, { status: newStatus });
       setStatusDropdown(false);
+      showSuccess(`Batch status changed to ${newStatus}`);
       fetchData();
-    } catch (err) { alert('Status change failed'); }
+    } catch (err) { showError('Status change failed'); }
   };
 
   const handleDelete = async () => {
     try {
       await api.delete(`/batches/${batchId}`);
+      showSuccess('Batch deleted successfully');
       navigate('/batches');
-    } catch (err) { alert('Delete failed'); }
+    } catch (err) { showError('Delete failed'); }
   };
 
   const handleAddCompanies = async () => {
@@ -111,15 +123,17 @@ const BatchDetails = () => {
       await api.post(`/batches/${batchId}/companies`, selectedCompanies);
       setShowAddCompany(false);
       setSelectedCompanies([]);
+      showSuccess(`${selectedCompanies.length} companies added to batch`);
       fetchData();
-    } catch (err) { alert('Failed to add companies'); }
+    } catch (err) { showError('Failed to add companies'); }
   };
 
   const handleRemoveCompany = async (companyId) => {
     try {
       await api.delete(`/batches/${batchId}/companies/${companyId}`);
+      showSuccess('Company removed from batch');
       fetchData();
-    } catch (err) { alert('Failed to remove company'); }
+    } catch (err) { showError('Failed to remove company'); }
   };
 
   const handleMerge = async () => {
@@ -129,12 +143,12 @@ const BatchDetails = () => {
         source_batch_id: mergeBatchId,
         delete_source: deleteSource
       });
-      alert(res.data.message);
+      showSuccess(res.data.message || 'Batches merged successfully');
       setShowMerge(false);
       setMergeBatchId('');
       setDeleteSource(false);
       fetchData();
-    } catch (err) { alert('Merge failed'); }
+    } catch (err) { showError('Merge failed'); }
   };
 
   const handleShift = async () => {
@@ -143,21 +157,23 @@ const BatchDetails = () => {
       await api.post(`/batches/${batchId}/companies/${shiftingCompany._id}/shift`, {
         target_batch_id: targetShiftBatchId
       });
+      showSuccess(`Shifted ${shiftingCompany.name} to new batch`);
       setShowShift(false);
       setShiftingCompany(null);
       setTargetShiftBatchId('');
       fetchData();
-    } catch (err) { alert('Shift failed'); }
+    } catch (err) { showError('Shift failed'); }
   };
 
   const handleCreateQuarter = async (e) => {
-      e.preventDefault();
-      try {
-          await api.post('/quarters', { ...quarterForm, batch_id: batchId });
-          setShowCreateQuarter(false);
-          setQuarterForm({ name: '', description: '', start_date: '', target_end_date: '' });
-          fetchData();
-      } catch (err) { alert('Failed to create quarter'); }
+    e.preventDefault();
+    try {
+      await api.post('/quarters', { ...quarterForm, batch_id: batchId });
+      setShowCreateQuarter(false);
+      showSuccess('Quarter created successfully');
+      setQuarterForm({ name: '', description: '', start_date: '', target_end_date: '' });
+      fetchData();
+    } catch (err) { showError('Failed to create quarter'); }
   };
 
   const toggleCompanySelection = (cid) => {
@@ -244,6 +260,34 @@ const BatchDetails = () => {
                     className="w-full px-3 py-1.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-md outline-none text-[13px] font-medium text-[var(--text-main)] focus:border-[var(--accent-indigo)]" />
                 </div>
               ))}
+              <div className="space-y-1">
+                <label className="text-[10px] font-bold text-[var(--text-muted)] uppercase tracking-widest">Linked GPT Projects</label>
+                <div className="flex flex-wrap gap-2 mb-2">
+                  {(editData.gpt_projects || []).map(p => (
+                    <div key={p.id} className="flex items-center gap-2 px-2 py-1 bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] rounded-md text-[11px] font-bold">
+                      {p.title}
+                      <button onClick={() => setEditData({ ...editData, gpt_projects: editData.gpt_projects.filter(x => x.id !== p.id) })}>
+                        <X size={12} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+                <select
+                  value=""
+                  onChange={e => {
+                    const selected = gptProjects.find(p => p.id === e.target.value);
+                    if (selected && !(editData.gpt_projects || []).some(x => x.id === selected.id)) {
+                      setEditData({ ...editData, gpt_projects: [...(editData.gpt_projects || []), { id: selected.id, title: selected.title }] });
+                    }
+                  }}
+                  className="w-full px-3 py-1.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-md outline-none text-[13px] font-medium text-[var(--text-main)] focus:border-[var(--accent-indigo)]"
+                >
+                  <option value="">Add GPT Project...</option>
+                  {gptProjects.filter(p => !(editData.gpt_projects || []).some(x => x.id === p.id)).map(p => (
+                    <option key={p.id} value={p.id}>{p.title}</option>
+                  ))}
+                </select>
+              </div>
             </div>
             <div className="flex gap-3 mt-6">
               <button onClick={handleSaveEdit} className="h-9 px-6 bg-[var(--accent-green)] text-white rounded-lg text-[12px] font-bold flex items-center gap-2"><Save size={14} /> Save</button>
@@ -262,6 +306,21 @@ const BatchDetails = () => {
             <InfoRow icon={FileText} label="Description" value={batch.description} color="green" />
             <InfoRow icon={Calendar} label="Start Date" value={batch.start_date} color="yellow" />
             <InfoRow icon={Calendar} label="Target End" value={batch.target_end_date} color="red" />
+            <div className="flex items-start gap-3 py-2">
+              <div className="p-2 rounded-lg" style={{ background: `var(--accent-indigo-bg)` }}>
+                <Bot size={14} style={{ color: `var(--accent-indigo)` }} />
+              </div>
+              <div className="flex flex-col">
+                <span className="text-[10px] font-bold text-[var(--text-muted)] uppercase tracking-widest">Linked GPT Projects</span>
+                <div className="flex flex-wrap gap-1 mt-1">
+                  {(batch.gpt_projects || []).length > 0 ? (batch.gpt_projects || []).map(p => (
+                    <span key={p.id} className="text-[11px] font-bold text-[var(--accent-indigo)] bg-[var(--accent-indigo-bg)] px-1.5 py-0.5 rounded shadow-sm border border-[var(--accent-indigo-border)]">
+                      {p.title}
+                    </span>
+                  )) : <span className="text-[12px] font-medium text-[var(--text-main)]">None</span>}
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       )}
@@ -368,11 +427,11 @@ const BatchDetails = () => {
                         </div>
                       </td>
                       <td className="px-5 py-2.5 text-[12px] text-[var(--text-muted)]">
-                          {q.start_date || '—'} → {q.target_end_date || '—'}
+                        {q.start_date || '—'} → {q.target_end_date || '—'}
                       </td>
                       <td className="px-5 py-2.5">
                         <span className="px-2 py-0.5 rounded-md text-[10px] font-bold bg-[var(--status-active-bg)] text-[var(--status-active-text)]">
-                            {q.status || 'active'}
+                          {q.status || 'active'}
                         </span>
                       </td>
                       <td className="px-5 py-2.5 text-right">
@@ -398,9 +457,8 @@ const BatchDetails = () => {
           <p className="text-[12px] text-[var(--text-muted)]">Select companies to add to <strong>{batch.name}</strong></p>
           <div className="max-h-[300px] overflow-y-auto space-y-2 pr-1">
             {availableCompanies.length > 0 ? availableCompanies.map(c => (
-              <label key={c._id} className={`flex items-center gap-3 p-3 rounded-lg cursor-pointer transition-all border ${
-                selectedCompanies.includes(c._id) ? 'bg-[var(--accent-indigo-bg)] border-[var(--accent-indigo-border)]' : 'bg-[var(--input-bg)] border-transparent hover:border-[var(--border)]'
-              }`}>
+              <label key={c._id} className={`flex items-center gap-3 p-3 rounded-lg cursor-pointer transition-all border ${selectedCompanies.includes(c._id) ? 'bg-[var(--accent-indigo-bg)] border-[var(--accent-indigo-border)]' : 'bg-[var(--input-bg)] border-transparent hover:border-[var(--border)]'
+                }`}>
                 <input type="checkbox" checked={selectedCompanies.includes(c._id)} onChange={() => toggleCompanySelection(c._id)}
                   className="w-4 h-4 rounded accent-[var(--accent-indigo)]" />
                 <div className="w-8 h-8 bg-[var(--accent-indigo-bg)] rounded-md flex items-center justify-center text-[var(--accent-indigo)]"><Building2 size={14} /></div>
@@ -415,9 +473,8 @@ const BatchDetails = () => {
           </div>
           {availableCompanies.length > 0 && (
             <button onClick={handleAddCompanies} disabled={selectedCompanies.length === 0}
-              className={`w-full py-2 rounded-lg text-[13px] font-bold transition-all ${
-                selectedCompanies.length > 0 ? 'bg-[var(--btn-primary)] text-white hover:bg-[var(--btn-primary-hover)]' : 'bg-[var(--input-bg)] text-[var(--text-muted)] cursor-not-allowed'
-              }`}>
+              className={`w-full py-2 rounded-lg text-[13px] font-bold transition-all ${selectedCompanies.length > 0 ? 'bg-[var(--btn-primary)] text-white hover:bg-[var(--btn-primary-hover)]' : 'bg-[var(--input-bg)] text-[var(--text-muted)] cursor-not-allowed'
+                }`}>
               Add {selectedCompanies.length} {selectedCompanies.length === 1 ? 'Company' : 'Companies'}
             </button>
           )}
@@ -450,9 +507,8 @@ const BatchDetails = () => {
             </div>
           </label>
           <button onClick={handleMerge} disabled={!mergeBatchId}
-            className={`w-full py-2 rounded-lg text-[13px] font-bold transition-all ${
-              mergeBatchId ? 'bg-[var(--accent-orange)] text-white hover:opacity-90' : 'bg-[var(--input-bg)] text-[var(--text-muted)] cursor-not-allowed'
-            }`}>
+            className={`w-full py-2 rounded-lg text-[13px] font-bold transition-all ${mergeBatchId ? 'bg-[var(--accent-orange)] text-white hover:opacity-90' : 'bg-[var(--input-bg)] text-[var(--text-muted)] cursor-not-allowed'
+              }`}>
             <GitMerge size={14} className="inline mr-2" /> Merge Batches
           </button>
         </div>
@@ -491,9 +547,8 @@ const BatchDetails = () => {
             </select>
           </div>
           <button onClick={handleShift} disabled={!targetShiftBatchId}
-            className={`w-full py-2 rounded-lg text-[13px] font-bold transition-all ${
-              targetShiftBatchId ? 'bg-[var(--btn-primary)] text-white hover:bg-[var(--btn-primary-hover)]' : 'bg-[var(--input-bg)] text-[var(--text-muted)] cursor-not-allowed'
-            }`}>
+            className={`w-full py-2 rounded-lg text-[13px] font-bold transition-all ${targetShiftBatchId ? 'bg-[var(--btn-primary)] text-white hover:bg-[var(--btn-primary-hover)]' : 'bg-[var(--input-bg)] text-[var(--text-muted)] cursor-not-allowed'
+              }`}>
             Confirm Shift
           </button>
         </div>
@@ -505,27 +560,27 @@ const BatchDetails = () => {
           <div className="space-y-1">
             <label className="text-[10px] font-bold text-[var(--text-muted)] uppercase tracking-widest">Quarter Name *</label>
             <input required placeholder="e.g. Quarter 1 / Phase 2" className="w-full px-3 py-1.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-md text-[13px] text-[var(--text-main)] outline-none focus:border-[var(--accent-indigo)]"
-              value={quarterForm.name} onChange={e => setQuarterForm({...quarterForm, name: e.target.value})} />
+              value={quarterForm.name} onChange={e => setQuarterForm({ ...quarterForm, name: e.target.value })} />
           </div>
           <div className="space-y-1">
             <label className="text-[10px] font-bold text-[var(--text-muted)] uppercase tracking-widest">Quarter Description</label>
             <textarea rows={2} placeholder="Focus areas for this quarter..." className="w-full px-3 py-1.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-md text-[13px] text-[var(--text-main)] outline-none resize-none"
-              value={quarterForm.description} onChange={e => setQuarterForm({...quarterForm, description: e.target.value})} />
+              value={quarterForm.description} onChange={e => setQuarterForm({ ...quarterForm, description: e.target.value })} />
           </div>
           <div className="grid grid-cols-2 gap-4">
             <div className="space-y-1">
               <label className="text-[10px] font-bold text-[var(--text-muted)] uppercase tracking-widest">Start Date</label>
               <input type="date" className="w-full px-3 py-1.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-md text-[13px] text-[var(--text-main)] outline-none"
-                value={quarterForm.start_date} onChange={e => setQuarterForm({...quarterForm, start_date: e.target.value})} />
+                value={quarterForm.start_date} onChange={e => setQuarterForm({ ...quarterForm, start_date: e.target.value })} />
             </div>
             <div className="space-y-1">
               <label className="text-[10px] font-bold text-[var(--text-muted)] uppercase tracking-widest">Target End Date</label>
               <input type="date" className="w-full px-3 py-1.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-md text-[13px] text-[var(--text-main)] outline-none"
-                value={quarterForm.target_end_date} onChange={e => setQuarterForm({...quarterForm, target_end_date: e.target.value})} />
+                value={quarterForm.target_end_date} onChange={e => setQuarterForm({ ...quarterForm, target_end_date: e.target.value })} />
             </div>
           </div>
           <div className="p-3 bg-[var(--status-active-bg)] border border-[var(--status-active-border)] rounded-lg">
-              <p className="text-[11px] font-bold text-[var(--status-active-text)]">Status will be set to "Active" by default.</p>
+            <p className="text-[11px] font-bold text-[var(--status-active-text)]">Status will be set to "Active" by default.</p>
           </div>
           <button type="submit" className="w-full py-2 bg-[var(--btn-primary)] text-white rounded-lg text-[13px] font-bold hover:bg-[var(--btn-primary-hover)] transition-all">Create Quarter</button>
         </form>

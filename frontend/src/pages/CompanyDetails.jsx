@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import api from '../services/api';
 import Modal from '../components/common/Modal';
+import { useNotification } from '../context/NotificationContext';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   BarChart3, PieChart as PieChartIcon, TrendingUp, Award, Zap,
@@ -9,7 +10,7 @@ import {
   ArrowLeft, Pencil, Trash2, Download, Upload, Plus, User, Lock,
   CheckCircle2, XCircle, PauseCircle, ChevronDown, Save, X,
   FileSpreadsheet, AlertTriangle, ExternalLink, Layers, Calendar,
-  Target, BookOpen
+  Target, BookOpen, ChevronRight, CheckCircle, Circle, UploadCloud, FileText, Bot
 } from 'lucide-react';
 import {
   BarChart, Bar, LineChart, Line, PieChart, Pie, Cell,
@@ -100,6 +101,7 @@ const CompanyDetails = () => {
   const { companyId } = useParams();
   const navigate = useNavigate();
   const fileInputRef = useRef(null);
+  const { showSuccess, showError } = useNotification();
 
   const [company, setCompany] = useState(null);
   const [users, setUsers] = useState([]);
@@ -117,6 +119,16 @@ const CompanyDetails = () => {
     role: 'clientuser', session_type: 'None', designation: '', department: 'Other'
   });
 
+  // Training Path State
+  const [trainingPath, setTrainingPath] = useState([]);
+  const [fetchingPath, setFetchingPath] = useState(false);
+  const [selectedSessionId, setSelectedSessionId] = useState(null);
+  const [sessionTasks, setSessionTasks] = useState([]);
+  const [fetchingTasks, setFetchingTasks] = useState(false);
+  const [expandedBatches, setExpandedBatches] = useState({});
+  const [expandedQuarters, setExpandedQuarters] = useState({});
+  const [uploadingFile, setUploadingFile] = useState(false);
+
   const fetchData = async () => {
     try {
       const [compRes, usersRes] = await Promise.all([
@@ -133,7 +145,35 @@ const CompanyDetails = () => {
     }
   };
 
-  useEffect(() => { fetchData(); }, [companyId]);
+  const fetchTrainingPath = async () => {
+    setFetchingPath(true);
+    try {
+        const res = await api.get(`/companies/${companyId}/training-path`);
+        setTrainingPath(res.data);
+    } catch (err) {
+        console.error(err);
+    } finally {
+        setFetchingPath(false);
+    }
+  };
+
+  const fetchSessionTasks = async (sessionId) => {
+    setFetchingTasks(true);
+    try {
+        const res = await api.get(`/companies/${companyId}/sessions/${sessionId}/tasks`);
+        setSessionTasks(res.data);
+        setSelectedSessionId(sessionId);
+    } catch (err) {
+        console.error(err);
+    } finally {
+        setFetchingTasks(false);
+    }
+  };
+
+  useEffect(() => { 
+    fetchData(); 
+    if (activeTab === 'batches') fetchTrainingPath();
+  }, [companyId, activeTab]);
 
   // ─── Handlers ───
   const handleSaveEdit = async () => {
@@ -141,23 +181,26 @@ const CompanyDetails = () => {
       const { _id, created_at, admin_id, is_active, status, ...fields } = editData;
       await api.put(`/companies/${companyId}`, fields);
       setEditMode(false);
+      showSuccess('Company details updated successfully');
       fetchData();
-    } catch (err) { alert('Update failed'); }
+    } catch (err) { showError('Update failed'); }
   };
 
   const handleStatusChange = async (newStatus) => {
     try {
       await api.patch(`/companies/${companyId}/status`, { status: newStatus });
       setStatusDropdown(false);
+      showSuccess(`Company status changed to ${newStatus}`);
       fetchData();
-    } catch (err) { alert('Status change failed'); }
+    } catch (err) { showError('Status change failed'); }
   };
 
   const handleDelete = async () => {
     try {
       await api.delete(`/companies/${companyId}`);
+      showSuccess('Company deleted successfully');
       navigate('/companies');
-    } catch (err) { alert('Delete failed'); }
+    } catch (err) { showError('Delete failed'); }
   };
 
   const handleAddUser = async (e) => {
@@ -168,9 +211,10 @@ const CompanyDetails = () => {
       if (!cleanUser.designation) cleanUser.designation = null;
       await api.post(`/companies/${companyId}/users/bulk`, [cleanUser]);
       setShowAddUser(false);
+      showSuccess('User added successfully');
       setNewUser({ email: '', password: '', first_name: '', last_name: '', mobile: '', role: 'clientuser', session_type: 'None', designation: '', department: 'Other' });
       fetchData();
-    } catch (err) { alert(err.response?.data?.detail || 'Failed to create user'); }
+    } catch (err) { showError(err.response?.data?.detail || 'Failed to create user'); }
   };
 
   const handleExportTemplate = async () => {
@@ -182,7 +226,8 @@ const CompanyDetails = () => {
       link.download = `user_template_${companyId}.xlsx`;
       link.click();
       window.URL.revokeObjectURL(url);
-    } catch (err) { alert('Template download failed'); }
+      showSuccess('Template downloaded');
+    } catch (err) { showError('Template download failed'); }
   };
 
   const handleImportFile = async (e) => {
@@ -193,9 +238,42 @@ const CompanyDetails = () => {
     try {
       const res = await api.post(`/companies/${companyId}/users/import`, formData, { headers: { 'Content-Type': 'multipart/form-data' } });
       setImportStatus(res.data);
+      showSuccess('Import successfully completed');
       fetchData();
-    } catch (err) { alert('Import failed'); }
+    } catch (err) { showError('Import failed'); }
     e.target.value = '';
+  };
+
+  const handleToggleTask = async (sessionId, taskIndex) => {
+    try {
+        await api.patch(`/companies/${companyId}/sessions/${sessionId}/tasks/${taskIndex}/toggle`);
+        // Update local state
+        setSessionTasks(prev => prev.map(t => t.index === taskIndex ? { ...t, is_done: !t.is_done } : t));
+    } catch (err) {
+        showError("Failed to toggle task");
+    }
+  };
+
+  const handleLearnerUpload = async (e, sessionId) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    
+    setUploadingFile(true);
+    const formData = new FormData();
+    formData.append('file', file);
+    
+    try {
+        await api.post(`/calendar/events/${sessionId}/learner-upload`, formData, {
+            headers: { 'Content-Type': 'multipart/form-data' }
+        });
+        showSuccess("File uploaded successfully!");
+        // Refresh session data if needed or just show success
+        fetchSessionTasks(sessionId);
+    } catch (err) {
+        showError("Upload failed");
+    } finally {
+        setUploadingFile(false);
+    }
   };
 
   if (loading) return (
@@ -287,6 +365,7 @@ const CompanyDetails = () => {
         {[
           { id: 'dashboard', label: 'Company Dashboard', icon: BarChart3 },
           { id: 'members', label: 'Team Members', icon: Users },
+          { id: 'batches', label: 'Batches', icon: Layers },
         ].map(tab => (
           <button key={tab.id} onClick={() => setActiveTab(tab.id)}
             className={`flex items-center gap-2 px-5 py-2.5 rounded-lg text-[12px] font-bold transition-all ${
@@ -563,6 +642,243 @@ const CompanyDetails = () => {
                   </tbody>
                 </table>
               </div>
+            </div>
+          </motion.div>
+        )}
+
+        {/* ════════════ BATCHES & TRAINING TAB ════════════ */}
+        {activeTab === 'batches' && (
+          <motion.div key="batches" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+            
+            {/* Left Column: Hierarchical List */}
+            <div className="lg:col-span-4 space-y-4">
+              <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-2xl overflow-hidden shadow-sm">
+                <div className="p-4 border-b border-[var(--border)] bg-[var(--input-bg)]">
+                  <h3 className="text-[12px] font-black text-[var(--text-main)] uppercase tracking-[0.15em] flex items-center gap-2">
+                    <Layers size={14} className="text-[var(--accent-indigo)]" /> Assigned Training Path
+                  </h3>
+                </div>
+                
+                <div className="p-2 space-y-1 max-h-[70vh] overflow-y-auto custom-scrollbar">
+                  {fetchingPath ? (
+                    <div className="py-10 flex flex-col items-center gap-2 opacity-40">
+                      <div className="w-5 h-5 border-2 border-[var(--accent-indigo)] border-t-transparent rounded-full animate-spin"></div>
+                      <span className="text-[10px] font-bold uppercase tracking-widest">Loading Path...</span>
+                    </div>
+                  ) : trainingPath.length > 0 ? trainingPath.map(batch => (
+                    <div key={batch.id} className="space-y-1">
+                      {/* Batch Level */}
+                      <button 
+                        onClick={() => setExpandedBatches(prev => ({ ...prev, [batch.id]: !prev[batch.id] }))}
+                        className={`w-full flex items-center gap-3 p-3 rounded-xl transition-all ${expandedBatches[batch.id] ? 'bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)]' : 'hover:bg-[var(--input-bg)] text-[var(--text-muted)]'}`}
+                      >
+                        <Layers size={16} />
+                        <span className="text-[12px] font-black uppercase tracking-tight flex-1 text-left truncate">{batch.name}</span>
+                        <ChevronRight size={14} className={`transition-transform ${expandedBatches[batch.id] ? 'rotate-90' : ''}`} />
+                      </button>
+
+                      {/* Quarters Level */}
+                      <AnimatePresence>
+                        {expandedBatches[batch.id] && (
+                          <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }} exit={{ height: 0, opacity: 0 }} className="pl-4 overflow-hidden space-y-1">
+                            {batch.quarters?.map(quarter => (
+                              <div key={quarter.id} className="space-y-1">
+                                <button 
+                                  onClick={() => setExpandedQuarters(prev => ({ ...prev, [quarter.id]: !prev[quarter.id] }))}
+                                  className={`w-full flex items-center gap-3 p-2.5 rounded-lg transition-all ${expandedQuarters[quarter.id] ? 'text-[var(--accent-orange)]' : 'text-[var(--text-muted)] hover:bg-[var(--input-bg)]'}`}
+                                >
+                                  <div className="w-1 h-4 rounded-full bg-[var(--border)]"></div>
+                                  <span className="text-[11px] font-bold uppercase flex-1 text-left truncate">{quarter.name}</span>
+                                  <ChevronRight size={12} className={`transition-transform ${expandedQuarters[quarter.id] ? 'rotate-90' : ''}`} />
+                                </button>
+
+                                {/* Sessions Level */}
+                                <AnimatePresence>
+                                  {expandedQuarters[quarter.id] && (
+                                    <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }} exit={{ height: 0, opacity: 0 }} className="pl-6 overflow-hidden space-y-1">
+                                      {quarter.sessions?.map(session => (
+                                        <button 
+                                          key={session.id}
+                                          onClick={() => fetchSessionTasks(session.id)}
+                                          className={`w-full flex items-center gap-2.5 p-2 rounded-lg transition-all text-left ${selectedSessionId === session.id ? 'bg-white shadow-sm border border-[var(--border)] text-[var(--accent-green)]' : 'text-[var(--text-muted)] hover:bg-[var(--input-bg)] hover:text-[var(--text-main)]'}`}
+                                        >
+                                          <div className={`w-1.5 h-1.5 rounded-full ${selectedSessionId === session.id ? 'bg-[var(--accent-green)] scale-125' : 'bg-[var(--border)]'}`}></div>
+                                          <div className="flex-1 min-w-0">
+                                            <p className="text-[11px] font-bold truncate leading-tight">{session.title}</p>
+                                            <p className="text-[9px] opacity-60 tracking-wider">
+                                              {new Date(session.start).toLocaleDateString('en-IN', { day: '2-digit', month: 'short' })}
+                                            </p>
+                                          </div>
+                                          {session.status === 'completed' && <CheckCircle size={12} className="text-[var(--accent-green)]" />}
+                                        </button>
+                                      ))}
+                                    </motion.div>
+                                  )}
+                                </AnimatePresence>
+                              </div>
+                            ))}
+                          </motion.div>
+                        )}
+                      </AnimatePresence>
+                    </div>
+                  )) : (
+                    <div className="py-12 text-center opacity-40">
+                      <Layers size={32} className="mx-auto mb-2" />
+                      <p className="text-[10px] font-black uppercase tracking-widest">No assigned batches</p>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="bg-amber-50 border border-amber-100 rounded-2xl p-4 flex gap-3">
+                <AlertTriangle size={16} className="text-amber-500 shrink-0 mt-0.5" />
+                <p className="text-[10px] text-amber-700 font-bold leading-relaxed uppercase tracking-tight">
+                  Session locks are managed by staff. Once a session is marked "Completed", associated AI Engine access is unlocked for learners.
+                </p>
+              </div>
+            </div>
+
+            {/* Right Column: Session Details & Actions */}
+            <div className="lg:col-span-8">
+              {fetchingTasks ? (
+                <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-[32px] p-20 flex flex-col items-center justify-center gap-4 text-center">
+                  <div className="w-10 h-10 border-4 border-[var(--accent-indigo)] border-t-transparent rounded-full animate-spin"></div>
+                  <p className="text-[11px] font-black text-[var(--accent-indigo)] uppercase tracking-widest">Synchronizing Neural Path...</p>
+                </div>
+              ) : selectedSessionId ? (
+                <div className="space-y-6">
+                  {/* Session Header Card */}
+                  <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-[32px] p-8 shadow-sm relative overflow-hidden group">
+                    <div className="absolute top-0 right-0 w-32 h-32 bg-[var(--accent-indigo)] opacity-[0.03] rounded-full -mr-16 -mt-16 group-hover:scale-150 transition-transform duration-1000"></div>
+                    <div className="relative z-10">
+                      <div className="flex items-center gap-3 mb-4">
+                        <div className="px-3 py-1 bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] rounded-lg text-[10px] font-black uppercase tracking-widest border border-[var(--accent-indigo-border)]">Session Logic</div>
+                        <div className={`px-3 py-1 rounded-lg text-[10px] font-black uppercase tracking-widest border ${trainingPath.flatMap(b => b.quarters).flatMap(q => q.sessions).find(s => s.id === selectedSessionId)?.status === 'completed' ? 'bg-emerald-50 text-emerald-600 border-emerald-100' : 'bg-amber-50 text-amber-600 border-amber-100'}`}>
+                          {trainingPath.flatMap(b => b.quarters).flatMap(q => q.sessions).find(s => s.id === selectedSessionId)?.status}
+                        </div>
+                      </div>
+                      <h2 className="text-2xl font-black text-[var(--text-main)] italic uppercase tracking-tight leading-none mb-2">
+                        {trainingPath.flatMap(b => b.quarters).flatMap(q => q.sessions).find(s => s.id === selectedSessionId)?.title}
+                      </h2>
+                      <div className="flex items-center gap-6 text-[11px] font-bold text-[var(--text-muted)] uppercase tracking-widest">
+                        <span className="flex items-center gap-2"><Calendar size={14} /> {new Date(trainingPath.flatMap(b => b.quarters).flatMap(q => q.sessions).find(s => s.id === selectedSessionId)?.start).toLocaleDateString('en-IN', { weekday: 'long', day: '2-digit', month: 'long', year: 'numeric' })}</span>
+                        <span className="flex items-center gap-2"><Target size={14} /> Quarter Training Task</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    {/* Task Progress Section */}
+                    <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-[32px] overflow-hidden flex flex-col">
+                      <div className="p-6 border-b border-[var(--border)] flex items-center justify-between">
+                        <h4 className="text-[12px] font-black text-[var(--text-main)] uppercase tracking-widest flex items-center gap-2">
+                          <CheckCircle2 size={16} className="text-[var(--accent-green)]" /> Company Tasks
+                        </h4>
+                        <div className="text-[11px] font-black text-[var(--accent-green)] bg-[var(--accent-green-bg)] px-2.5 py-0.5 rounded-lg border border-[var(--accent-green-border)]">
+                          {sessionTasks.filter(t => t.is_done).length}/{sessionTasks.length} Done
+                        </div>
+                      </div>
+                      <div className="p-4 flex-1 space-y-2 overflow-y-auto no-scrollbar max-h-[350px]">
+                        {sessionTasks.length > 0 ? sessionTasks.map(task => (
+                          <div 
+                            key={task.index}
+                            onClick={() => handleToggleTask(selectedSessionId, task.index)}
+                            className={`flex items-start gap-4 p-4 rounded-2xl border transition-all cursor-pointer group ${task.is_done ? 'bg-[var(--accent-green-bg)] border-[var(--accent-green-border)]' : 'bg-[var(--input-bg)] border-transparent hover:border-[var(--accent-indigo)]'}`}
+                          >
+                            <div className={`mt-0.5 w-5 h-5 rounded-md flex items-center justify-center transition-all ${task.is_done ? 'bg-[var(--accent-green)] text-white' : 'bg-white border-2 border-[var(--border)] group-hover:border-[var(--accent-indigo)]'}`}>
+                              {task.is_done ? <CheckCircle size={14} /> : <Circle size={14} className="opacity-0 group-hover:opacity-20" />}
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <p className={`text-[13px] font-black uppercase tracking-tight transition-all ${task.is_done ? 'text-[var(--accent-green)] line-through' : 'text-[var(--text-main)]'}`}>
+                                {task.label || task.title || 'In-Session Milestone'}
+                              </p>
+                              {task.description && (
+                                <p className={`text-[10px] font-bold mt-1 leading-relaxed ${task.is_done ? 'opacity-40' : 'text-[var(--text-muted)]'}`}>
+                                  {task.description}
+                                </p>
+                              )}
+                            </div>
+                          </div>
+                        )) : (
+                          <div className="py-12 flex flex-col items-center justify-center opacity-30 italic">
+                            <Bot size={32} className="mb-2" />
+                            <p className="text-[10px] font-black uppercase tracking-widest">No predefined tasks for this session</p>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Content Upload Section */}
+                    <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-[32px] overflow-hidden flex flex-col">
+                      <div className="p-6 border-b border-[var(--border)] flex items-center justify-between">
+                        <h4 className="text-[12px] font-black text-[var(--text-main)] uppercase tracking-widest flex items-center gap-2">
+                          <UploadCloud size={16} className="text-[var(--accent-indigo)]" /> Learner Contents
+                        </h4>
+                        <label className={`h-8 px-4 rounded-xl flex items-center gap-1.5 text-[10px] font-black uppercase tracking-widest cursor-pointer transition-all ${uploadingFile ? 'bg-gray-100 text-gray-400' : 'bg-[var(--accent-indigo)] text-white hover:opacity-90 shadow-lg shadow-indigo-100'}`}>
+                          {uploadingFile ? 'Uploading...' : <><Plus size={12} /> Upload Content</>}
+                          <input type="file" className="hidden" disabled={uploadingFile} onChange={(e) => handleLearnerUpload(e, selectedSessionId)} />
+                        </label>
+                      </div>
+                      
+                      <div className="p-4 flex-1 space-y-2 overflow-y-auto no-scrollbar max-h-[350px]">
+                        {(trainingPath.flatMap(b => b.quarters).flatMap(q => q.sessions).find(s => s.id === selectedSessionId)?.learner_contents || []).length > 0 ? (
+                           trainingPath.flatMap(b => b.quarters).flatMap(q => q.sessions).find(s => s.id === selectedSessionId)?.learner_contents.map(content => (
+                            <a 
+                              href={content.url} 
+                              target="_blank" 
+                              rel="noopener noreferrer"
+                              key={content.id}
+                              className="flex items-center gap-4 p-4 bg-[var(--input-bg)] border border-transparent rounded-2xl hover:border-[var(--accent-indigo)] hover:bg-white transition-all group"
+                            >
+                              <div className="w-10 h-10 rounded-xl bg-white border border-[var(--border)] flex items-center justify-center text-[var(--accent-indigo)] group-hover:scale-110 transition-transform">
+                                <FileText size={20} />
+                              </div>
+                              <div className="flex-1 min-w-0">
+                                <p className="text-[12px] font-black text-[var(--text-main)] uppercase truncate tracking-tight">{content.name}</p>
+                                <p className="text-[9px] text-[var(--text-muted)] font-bold mt-0.5">
+                                  {content.uploader_name} · {new Date(content.uploaded_at).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}
+                                </p>
+                              </div>
+                              <Download size={14} className="text-[var(--text-muted)] group-hover:text-[var(--accent-indigo)]" />
+                            </a>
+                           ))
+                        ) : (
+                          <div className="py-12 flex flex-col items-center justify-center opacity-30 italic">
+                            <UploadCloud size={32} className="mb-2" />
+                            <p className="text-[10px] font-black uppercase tracking-widest">No contents uploaded by learners yet</p>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Quick Resources (Optional) */}
+                  <div className="bg-indigo-50 border border-indigo-100 rounded-3xl p-6">
+                    <h5 className="text-[11px] font-black text-[var(--accent-indigo)] uppercase tracking-[0.2em] mb-4 flex items-center gap-2">
+                       <BookOpen size={14} /> Training Resources & Materials
+                    </h5>
+                    <div className="flex flex-wrap gap-2">
+                      {(trainingPath.flatMap(b => b.quarters).flatMap(q => q.sessions).find(s => s.id === selectedSessionId)?.resources || []).length > 0 ? (
+                         trainingPath.flatMap(b => b.quarters).flatMap(q => q.sessions).find(s => s.id === selectedSessionId)?.resources.map(r => (
+                           <a key={r.id} href={r.url} target="_blank" rel="noopener noreferrer" className="px-4 py-2 bg-white border border-indigo-100 rounded-xl text-[11px] font-black text-indigo-700 uppercase tracking-tighter hover:border-[var(--accent-indigo)] transition-all flex items-center gap-2">
+                             <ExternalLink size={12} /> {r.name}
+                           </a>
+                         ))
+                      ) : (
+                        <p className="text-[10px] text-indigo-400 font-bold uppercase tracking-widest italic">No shared materials for this session</p>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-[32px] p-24 text-center">
+                  <div className="w-20 h-20 bg-[var(--input-bg)] border border-[var(--border)] rounded-[32px] mx-auto flex items-center justify-center mb-6 text-[var(--text-muted)] opacity-50">
+                    <Zap size={32} />
+                  </div>
+                  <h3 className="text-xl font-black text-[var(--text-main)] uppercase italic tracking-tight mb-2">Select a Neural Node</h3>
+                  <p className="text-[11px] text-[var(--text-muted)] font-bold uppercase tracking-widest max-w-xs mx-auto opacity-60">Choose a session to view detailed tasks and manage corporate training progress.</p>
+                </div>
+              )}
             </div>
           </motion.div>
         )}

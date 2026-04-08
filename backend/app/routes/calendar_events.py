@@ -273,7 +273,7 @@ async def create_event(event: CalendarEventCreate, background_tasks: BackgroundT
     await log_activity(current_user, "Create Event", col_name, f"Created in {col_name}: {event_dict['title']}")
     return {"id": str(result.inserted_id), "message": f"Event created in {col_name}"}
 
-@router.put("/{event_id}")
+@router.patch("/{event_id}")
 async def update_event(event_id: str, updates: dict, background_tasks: BackgroundTasks, current_user: dict = Depends(get_current_user)):
     existing, col_name = await find_event_across_collections(event_id)
     if not existing:
@@ -487,43 +487,83 @@ async def get_event(event_id: str, current_user: dict = Depends(get_current_user
 
 
 @router.get("")
-async def get_all_events(target_user_id: Optional[str] = None, current_user: dict = Depends(get_current_user)):
+async def get_all_events(target_user_id: Optional[str] = None, view_mode: str = "personal", current_user: dict = Depends(get_current_user)):
     events = []
     current_uid = str(current_user["_id"])
     role = current_user.get("role", "").lower()
-    effective_user_id = target_user_id if (target_user_id and role in ["superadmin", "admin"]) else current_uid
+    is_staff_admin = role in ["superadmin", "admin"]
     
-    # 1. Batches/Quarters (Omitted summary, logic remains)
-    # [BATCHES/QUARTERS FETCH LOGIC REMAINS UNCHANGED]
+    effective_user_id = target_user_id if (target_user_id and is_staff_admin) else current_uid
+    
+    # ─── Batches & Quarters ───
     if not target_user_id:
-        if role in ["superadmin", "admin"]:
+        if is_staff_admin and view_mode == "team":
             batches = await get_collection("batches").find({}).to_list(100)
             quarters = await get_collection("quarters").find({}).to_list(200)
         else:
-            batch_ids = current_user.get("batch_ids", [current_user.get("batch_id")])
+            # Filter batches where the user is a member OR a coach
+            # For simplicity, if they have batch_ids in profile, use those
+            batch_ids = current_user.get("batch_ids", [])
+            if not batch_ids and current_user.get("batch_id"):
+                batch_ids = [current_user.get("batch_id")]
+                
+            # If still no batch_ids, find where user is involved in sessions
+            if not batch_ids and is_staff_admin:
+                # Admins with personal view still might want see their active batches
+                # But for now, stick to the stored batch_ids or all if team view.
+                pass
+                
             batches = await get_collection("batches").find({"_id": {"$in": [ObjectId(bid) for bid in batch_ids if bid]}}).to_list(10)
             quarters = await get_collection("quarters").find({"batch_id": {"$in": [str(bid) for bid in batch_ids if bid]}}).to_list(50)
     else:
         batches = []; quarters = []
+
     for b in batches:
         if b.get("start_date"): events.append({"id": str(b["_id"]), "title": b["name"], "type": "batch", "start": b["start_date"], "color": "var(--accent-indigo)", "bg": "var(--accent-indigo-bg)", "editable": False})
     for q in quarters:
         if q.get("start_date"): events.append({"id": str(q["_id"]), "title": f"Q: {q['name']}", "type": "quarter", "start": q["start_date"], "color": "var(--accent-orange)", "bg": "var(--accent-orange-bg)", "editable": False})
             
-    # 2. Aggregated Custom Events from 4 Collections + Legacy
+    # ─── Aggregated Events & Tasks ───
     for col_name in (CALENDAR_COLLECTIONS + ["calendar_events"]):
         custom_col = get_collection(col_name)
-        if role in ["superadmin", "admin"] and not target_user_id:
-            batch = await custom_col.find({}).to_list(1000)
-        else:
-            batch = await custom_col.find({"$or": [
-                {"user_id": effective_user_id},
-                {"assigned_member_ids": effective_user_id},
-                {"coach_ids": effective_user_id},
-                {"target_staff_id": effective_user_id}
-            ]}).to_list(1000)
         
-        for c in batch:
+        if is_staff_admin and view_mode == "team" and not target_user_id:
+            db_docs = await custom_col.find({}).to_list(1000)
+        else:
+            # Privacy Logic: 
+            # 1. Events -> Visible if involved (Coach, Attendee, Creator, or Target Staff)
+            # 2. Tasks -> Visible if Creator OR in target_staff_id
+            privacy_query = {
+                "$or": [
+                    {
+                        "$and": [
+                            {"type": "event"},
+                            {"$or": [
+                                {"user_id": effective_user_id},
+                                {"assigned_member_ids": effective_user_id},
+                                {"coach_ids": effective_user_id},
+                                {"target_staff_id": effective_user_id},
+                                {"assigned_member_ids": {"$in": [effective_user_id]}},
+                                {"coach_ids": {"$in": [effective_user_id]}},
+                                {"target_staff_id": {"$in": [effective_user_id]}}
+                            ]}
+                        ]
+                    },
+                    {
+                        "$and": [
+                            {"type": "task"},
+                            {"$or": [
+                                {"user_id": effective_user_id},
+                                {"target_staff_id": effective_user_id},
+                                {"target_staff_id": {"$in": [effective_user_id]}}
+                            ]}
+                        ]
+                    }
+                ]
+            }
+            db_docs = await custom_col.find(privacy_query).to_list(1000)
+        
+        for c in db_docs:
             events.append({
                 "id": str(c["_id"]), "title": c["title"], "type": c["type"], "start": c["start"], "end": c.get("end"), "allDay": c.get("all_day", False),
                 "extendedProps": { **{k: v for k, v in c.items() if k not in ["_id", "created_at", "updated_at"]}, "id": str(c["_id"]), "isCreator": c.get("user_id") == current_uid, "isAssigned": current_uid in (c.get("target_staff_id") or []) or current_uid in (c.get("assigned_member_ids") or []), "canEdit": role in ["superadmin", "admin"] or c.get("user_id") == current_uid, "source_col": col_name }
@@ -621,3 +661,47 @@ async def complete_event(event_id: str, current_user: dict = Depends(get_current
     await sync_event_to_collection(event_id)
     return {"message": "Session marked as completed", "status": "completed"}
 
+@router.post("/{event_id}/learner-upload")
+async def learner_upload_content(event_id: str, file: UploadFile = File(...), current_user: dict = Depends(get_current_user)):
+    event, col_name = await find_event_across_collections(event_id)
+    if not event: raise HTTPException(status_code=404, detail="Session not found")
+    
+    # Upload to S3
+    file_bytes = await file.read()
+    s3_url = await upload_file_to_s3(file_bytes, f"learners/{event_id}/{file.filename}", file.content_type)
+    
+    content_obj = {
+        "id": str(datetime.utcnow().timestamp()),
+        "name": file.filename,
+        "url": s3_url,
+        "type": file.content_type,
+        "uploaded_by": str(current_user["_id"]),
+        "uploader_name": current_user.get("full_name") or current_user.get("email"),
+        "uploaded_at": datetime.utcnow().isoformat(),
+        "company_id": current_user.get("company_id")
+    }
+    
+    await get_collection(col_name).update_one(
+        {"_id": ObjectId(event_id)},
+        {"$push": {"learner_contents": content_obj}}
+    )
+    
+    return {"message": "Content uploaded successfully", "content": content_obj}
+
+@router.delete("/{event_id}/resources/{resource_id}")
+async def delete_resource(event_id: str, resource_id: str, current_user: dict = Depends(get_current_user)):
+    existing, col_name = await find_event_across_collections(event_id)
+    if not existing: raise HTTPException(status_code=404, detail="Event not found")
+    if current_user.get("role") not in ["superadmin", "admin"] and existing.get("user_id") != str(current_user["_id"]):
+         raise HTTPException(status_code=403, detail="Not authorized to delete resources")
+    await get_collection(col_name).update_one({"_id": ObjectId(event_id)}, {"$pull": {"resources": {"id": resource_id}}})
+    return {"message": "Resource removed"}
+
+@router.delete("/{event_id}/contents/{content_id}")
+async def delete_content(event_id: str, content_id: str, current_user: dict = Depends(get_current_user)):
+    existing, col_name = await find_event_across_collections(event_id)
+    if not existing: raise HTTPException(status_code=404, detail="Event not found")
+    if current_user.get("role") not in ["superadmin", "admin"] and existing.get("user_id") != str(current_user["_id"]):
+         raise HTTPException(status_code=403, detail="Not authorized to delete content")
+    await get_collection(col_name).update_one({"_id": ObjectId(event_id)}, {"$pull": {"contents": {"id": content_id}}})
+    return {"message": "Content removed"}

@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import Optional, List
+from typing import Optional, List, Dict
 from datetime import datetime
 
 class QuarterBase(BaseModel):
@@ -9,6 +9,7 @@ class QuarterBase(BaseModel):
     status: str = "active"  # active, completed, paused
     start_date: Optional[str] = None
     target_end_date: Optional[str] = None
+    gpt_projects: List[Dict] = []
 
 class QuarterCreate(BaseModel):
     name: str
@@ -16,6 +17,9 @@ class QuarterCreate(BaseModel):
     description: Optional[str] = None
     start_date: Optional[str] = None
     target_end_date: Optional[str] = None
+    gpt_project_id: Optional[str] = None
+    gpt_project_name: Optional[str] = None
+    gpt_projects: Optional[List[Dict]] = []
 
 class QuarterUpdate(BaseModel):
     name: Optional[str] = None
@@ -23,6 +27,9 @@ class QuarterUpdate(BaseModel):
     status: Optional[str] = None
     start_date: Optional[str] = None
     target_end_date: Optional[str] = None
+    gpt_project_id: Optional[str] = None
+    gpt_project_name: Optional[str] = None
+    gpt_projects: Optional[List[Dict]] = []
 
 class QuarterResponse(QuarterBase):
     id: str = Field(alias="_id")
