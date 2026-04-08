@@ -11,6 +11,7 @@ import {
   AlertTriangle, GitMerge, ExternalLink, ArrowRightLeft,
   LayoutGrid, List, Clock, Bot
 } from 'lucide-react';
+import { useAuth } from '../context/AuthContext';
 
 const statusConfig = {
   active: { bg: 'var(--status-active-bg)', text: 'var(--status-active-text)', border: 'var(--status-active-border)', icon: PlayCircle, label: 'Active' },
@@ -33,6 +34,7 @@ const InfoRow = ({ icon: Icon, label, value, color }) => (
 const BatchDetails = () => {
   const { batchId } = useParams();
   const navigate = useNavigate();
+  const { user } = useAuth();
   const { showSuccess, showError } = useNotification();
 
   const [batch, setBatch] = useState(null);
@@ -63,22 +65,38 @@ const BatchDetails = () => {
     name: '', description: '', start_date: '', target_end_date: ''
   });
 
+  const canUpdate = user?.role === 'superadmin' || user?.permissions?.batches?.update;
+  const canDelete = user?.role === 'superadmin' || user?.permissions?.batches?.delete;
+  const canCreateQuarter = user?.role === 'superadmin' || user?.permissions?.batches?.create; // or specific quarter perm if added later
+  const canReadCompanies = user?.role === 'superadmin' || user?.permissions?.companies?.read;
+  const canReadBatches = user?.role === 'superadmin' || user?.permissions?.batches?.read;
+
   const fetchData = async () => {
     try {
-      const [res, compRes, allCompRes, gptRes, quartersRes, allBatchRes] = await Promise.all([
+      const promises = [
         api.get(`/batches/${batchId}`),
         api.get(`/batches/${batchId}/companies`),
-        api.get('/companies'),
-        api.get('/gpt/projects'),
         api.get(`/quarters/?batch_id=${batchId}`),
-        api.get('/batches'),
-      ]);
+      ];
+
+      // Only fetch global lists if the user has permission to use them (for merge/shift/add)
+      if (canReadCompanies && canUpdate) promises.push(api.get('/companies'));
+      else promises.push(Promise.resolve({ data: [] }));
+
+      if (canUpdate) promises.push(api.get('/gpt/projects'));
+      else promises.push(Promise.resolve({ data: [] }));
+
+      if (canReadBatches && canUpdate) promises.push(api.get('/batches'));
+      else promises.push(Promise.resolve({ data: [] }));
+
+      const [res, compRes, quartersRes, allCompRes, gptRes, allBatchRes] = await Promise.all(promises);
+      
       setBatch(res.data);
       setEditData(res.data);
       setBatchCompanies(compRes.data);
+      setQuarters(quartersRes.data);
       setAllCompanies(allCompRes.data);
       setGptProjects(gptRes.data);
-      setQuarters(quartersRes.data);
       setAllBatches(allBatchRes.data.filter(b => b._id !== batchId));
     } catch (err) { console.error(err); }
     finally { setLoading(false); }
@@ -217,27 +235,33 @@ const BatchDetails = () => {
           </span>
         </div>
         <div className="flex items-center gap-2">
-          <button onClick={() => setEditMode(!editMode)} className="h-9 px-4 bg-[var(--bg-card)] border border-[var(--border)] text-[var(--text-muted)] rounded-lg text-[12px] font-bold flex items-center gap-2 hover:border-[var(--accent-indigo)] hover:text-[var(--accent-indigo)] transition-all">
-            <Pencil size={14} /> Edit
-          </button>
-          <button onClick={() => setShowMerge(true)} className="h-9 px-4 bg-[var(--accent-orange-bg)] border border-[var(--accent-orange-border)] text-[var(--accent-orange)] rounded-lg text-[12px] font-bold flex items-center gap-2 hover:opacity-80 transition-all">
-            <GitMerge size={14} /> Merge
-          </button>
-          <div className="relative">
-            <button onClick={() => setStatusDropdown(!statusDropdown)} className="h-9 px-4 bg-[var(--bg-card)] border border-[var(--border)] text-[var(--text-muted)] rounded-lg text-[12px] font-bold flex items-center gap-2 hover:border-[var(--accent-orange)] hover:text-[var(--accent-orange)] transition-all">
-              Status <ChevronDown size={12} />
-            </button>
-            {statusDropdown && (
-              <div className="absolute right-0 top-11 bg-[var(--bg-card)] border border-[var(--border)] rounded-lg shadow-lg z-50 min-w-[140px] py-1">
-                {['active', 'completed', 'paused'].map(s => (
-                  <button key={s} onClick={() => handleStatusChange(s)} className="w-full px-4 py-2 text-left text-[12px] font-bold text-[var(--text-muted)] hover:bg-[var(--input-bg)] capitalize transition-all">{s}</button>
-                ))}
+          {canUpdate && (
+            <>
+              <button onClick={() => setEditMode(!editMode)} className="h-9 px-4 bg-[var(--bg-card)] border border-[var(--border)] text-[var(--text-muted)] rounded-lg text-[12px] font-bold flex items-center gap-2 hover:border-[var(--accent-indigo)] hover:text-[var(--accent-indigo)] transition-all">
+                <Pencil size={14} /> Edit
+              </button>
+              <button onClick={() => setShowMerge(true)} className="h-9 px-4 bg-[var(--accent-orange-bg)] border border-[var(--accent-orange-border)] text-[var(--accent-orange)] rounded-lg text-[12px] font-bold flex items-center gap-2 hover:opacity-80 transition-all">
+                <GitMerge size={14} /> Merge
+              </button>
+              <div className="relative">
+                <button onClick={() => setStatusDropdown(!statusDropdown)} className="h-9 px-4 bg-[var(--bg-card)] border border-[var(--border)] text-[var(--text-muted)] rounded-lg text-[12px] font-bold flex items-center gap-2 hover:border-[var(--accent-orange)] hover:text-[var(--accent-orange)] transition-all">
+                  Status <ChevronDown size={12} />
+                </button>
+                {statusDropdown && (
+                  <div className="absolute right-0 top-11 bg-[var(--bg-card)] border border-[var(--border)] rounded-lg shadow-lg z-50 min-w-[140px] py-1">
+                    {['active', 'completed', 'paused'].map(s => (
+                      <button key={s} onClick={() => handleStatusChange(s)} className="w-full px-4 py-2 text-left text-[12px] font-bold text-[var(--text-muted)] hover:bg-[var(--input-bg)] capitalize transition-all">{s}</button>
+                    ))}
+                  </div>
+                )}
               </div>
-            )}
-          </div>
-          <button onClick={() => setShowDeleteConfirm(true)} className="h-9 px-4 bg-[var(--accent-red-bg)] border border-[var(--accent-red-border)] text-[var(--accent-red)] rounded-lg text-[12px] font-bold flex items-center gap-2 hover:opacity-80 transition-all">
-            <Trash2 size={14} /> Delete
-          </button>
+            </>
+          )}
+          {canDelete && (
+            <button onClick={() => setShowDeleteConfirm(true)} className="h-9 px-4 bg-[var(--accent-red-bg)] border border-[var(--accent-red-border)] text-[var(--accent-red)] rounded-lg text-[12px] font-bold flex items-center gap-2 hover:opacity-80 transition-all">
+              <Trash2 size={14} /> Delete
+            </button>
+          )}
         </div>
       </div>
 
@@ -343,9 +367,11 @@ const BatchDetails = () => {
                 <h3 className="text-[14px] font-bold text-[var(--text-main)]">Assigned Companies</h3>
                 <p className="text-[11px] text-[var(--text-muted)]">{batchCompanies.length} companies participating</p>
               </div>
-              <button onClick={() => { setShowAddCompany(true); setSelectedCompanies([]); }} className="h-8 px-3 bg-[var(--btn-primary)] text-white rounded-lg text-[11px] font-bold flex items-center gap-1.5 hover:bg-[var(--btn-primary-hover)] transition-all">
-                <Plus size={12} /> Add Companies
-              </button>
+              {canUpdate && (
+                <button onClick={() => { setShowAddCompany(true); setSelectedCompanies([]); }} className="h-8 px-3 bg-[var(--btn-primary)] text-white rounded-lg text-[11px] font-bold flex items-center gap-1.5 hover:bg-[var(--btn-primary-hover)] transition-all">
+                  <Plus size={12} /> Add Companies
+                </button>
+              )}
             </div>
             <div className="overflow-x-auto">
               <table className="w-full">
@@ -380,8 +406,12 @@ const BatchDetails = () => {
                       <td className="px-5 py-2.5 text-right">
                         <div className="flex items-center justify-end gap-1">
                           <button onClick={() => navigate(`/companies/${c._id}`)} className="p-1.5 text-[var(--text-muted)] hover:text-[var(--accent-indigo)] hover:bg-[var(--accent-indigo-bg)] rounded-md transition-all" title="View Company"><ExternalLink size={14} /></button>
-                          <button onClick={() => { setShiftingCompany(c); setShowShift(true); }} className="p-1.5 text-[var(--text-muted)] hover:text-[var(--accent-orange)] hover:bg-[var(--accent-orange-bg)] rounded-md transition-all" title="Shift to another batch"><ArrowRightLeft size={14} /></button>
-                          <button onClick={() => handleRemoveCompany(c._id)} className="p-1.5 text-[var(--text-muted)] hover:text-[var(--accent-red)] hover:bg-[var(--accent-red-bg)] rounded-md transition-all" title="Remove"><XCircle size={14} /></button>
+                          {canUpdate && (
+                            <>
+                              <button onClick={() => { setShiftingCompany(c); setShowShift(true); }} className="p-1.5 text-[var(--text-muted)] hover:text-[var(--accent-orange)] hover:bg-[var(--accent-orange-bg)] rounded-md transition-all" title="Shift to another batch"><ArrowRightLeft size={14} /></button>
+                              <button onClick={() => handleRemoveCompany(c._id)} className="p-1.5 text-[var(--text-muted)] hover:text-[var(--accent-red)] hover:bg-[var(--accent-red-bg)] rounded-md transition-all" title="Remove"><XCircle size={14} /></button>
+                            </>
+                          )}
                         </div>
                       </td>
                     </tr>
@@ -400,9 +430,11 @@ const BatchDetails = () => {
                 <h3 className="text-[14px] font-bold text-[var(--text-main)]">Batch Quarters</h3>
                 <p className="text-[11px] text-[var(--text-muted)]">{quarters.length} active or scheduled quarters</p>
               </div>
-              <button onClick={() => setShowCreateQuarter(true)} className="h-8 px-3 bg-[var(--btn-primary)] text-white rounded-lg text-[11px] font-bold flex items-center gap-1.5 hover:bg-[var(--btn-primary-hover)] transition-all">
-                <Plus size={12} /> Create Quarter
-              </button>
+              {canCreateQuarter && (
+                <button onClick={() => setShowCreateQuarter(true)} className="h-8 px-3 bg-[var(--btn-primary)] text-white rounded-lg text-[11px] font-bold flex items-center gap-1.5 hover:bg-[var(--btn-primary-hover)] transition-all">
+                  <Plus size={12} /> Create Quarter
+                </button>
+              )}
             </div>
             <div className="overflow-x-auto">
               <table className="w-full">

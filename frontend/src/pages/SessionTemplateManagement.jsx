@@ -9,7 +9,10 @@ import {
   MessageSquare, Hash, FileText, XCircle
 } from 'lucide-react';
 
+import { useAuth } from '../context/AuthContext';
+
 const SessionTemplateManagement = () => {
+    const { user } = useAuth();
     const navigate = useNavigate();
     const { showSuccess, showError } = useNotification();
     const [templates, setTemplates] = useState([]);
@@ -21,6 +24,10 @@ const SessionTemplateManagement = () => {
     const [form, setForm] = useState({
         title: '', topic: '', description: ''
     });
+
+    const canCreate = user?.role === 'superadmin' || user?.permissions?.templates?.create;
+    const canUpdate = user?.role === 'superadmin' || user?.permissions?.templates?.update;
+    const canDelete = user?.role === 'superadmin' || user?.permissions?.templates?.delete;
 
     const fetchData = async () => {
         try {
@@ -75,10 +82,12 @@ const SessionTemplateManagement = () => {
                     <h1 className="text-xl font-bold text-[var(--text-main)] tracking-tight">Session Templates</h1>
                     <p className="text-[13px] text-[var(--text-muted)] font-medium">Define reusable session structures for your batches.</p>
                 </div>
-                <button onClick={() => { setEditTemplate(null); setForm({ title: '', topic: '', description: '' }); setShowCreate(true); }} 
-                    className="h-10 px-4 bg-[var(--btn-primary)] hover:bg-[var(--btn-primary-hover)] text-white font-bold text-[13px] rounded-lg flex items-center gap-2 transition-all shadow-sm">
-                    <Plus size={16} /> New Template
-                </button>
+                {canCreate && (
+                    <button onClick={() => { setEditTemplate(null); setForm({ title: '', topic: '', description: '' }); setShowCreate(true); }} 
+                        className="h-10 px-4 bg-[var(--btn-primary)] hover:bg-[var(--btn-primary-hover)] text-white font-bold text-[13px] rounded-lg flex items-center gap-2 transition-all shadow-sm">
+                        <Plus size={16} /> New Template
+                    </button>
+                )}
             </div>
 
             {/* Search */}
@@ -105,8 +114,8 @@ const SessionTemplateManagement = () => {
                                     <Copy size={20} />
                                 </div>
                                 <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-all">
-                                    <button onClick={() => openEdit(t)} className="p-1.5 text-[var(--text-muted)] hover:text-[var(--accent-indigo)] hover:bg-[var(--accent-indigo-bg)] rounded-md transition-all"><Pencil size={14} /></button>
-                                    <button onClick={() => handleDelete(t._id)} className="p-1.5 text-[var(--text-muted)] hover:text-[var(--accent-red)] hover:bg-[var(--accent-red-bg)] rounded-md transition-all"><Trash2 size={14} /></button>
+                                    {canUpdate && <button onClick={() => openEdit(t)} className="p-1.5 text-[var(--text-muted)] hover:text-[var(--accent-indigo)] hover:bg-[var(--accent-indigo-bg)] rounded-md transition-all"><Pencil size={14} /></button>}
+                                    {canDelete && <button onClick={() => handleDelete(t._id)} className="p-1.5 text-[var(--text-muted)] hover:text-[var(--accent-red)] hover:bg-[var(--accent-red-bg)] rounded-md transition-all"><Trash2 size={14} /></button>}
                                 </div>
                             </div>
                             <h3 className="text-[15px] font-bold text-[var(--text-main)] mb-1 tracking-tight">{t.title}</h3>

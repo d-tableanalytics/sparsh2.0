@@ -64,11 +64,16 @@ const Dashboard = () => {
   const role = user?.role?.toLowerCase();
   const isAdmin = ['superadmin', 'admin', 'coach'].includes(role);
 
+  const canReadCompanies = user?.role === 'superadmin' || user?.permissions?.companies?.read;
+  const canReadBatches = user?.role === 'superadmin' || user?.permissions?.batches?.read;
+  const canReadUsers = user?.role === 'superadmin' || user?.permissions?.users?.read;
+  const canReadLogs = user?.role === 'superadmin' || user?.permissions?.logs?.read;
+
   const statsTiles = isAdmin ? [
-    { label: 'Registered Entities', value: stats.registered_entities, icon: Building2, color: 'var(--accent-indigo)', trend: 'Live', sub: 'total companies' },
-    { label: 'Active Batches', value: stats.active_batches, icon: Zap, color: 'var(--accent-orange)', trend: 'Active', sub: 'in progress' },
-    { label: 'Strategic Learners', value: stats.strategic_learners, icon: Users, color: 'var(--accent-green)', trend: 'Active', sub: 'onboarded' },
-    { label: 'Session Velocity', value: stats.session_velocity, icon: Activity, color: 'var(--accent-red)', trend: '30 Days', sub: 'completed sessions' }
+    ...(canReadCompanies ? [{ label: 'Registered Entities', value: stats.registered_entities, icon: Building2, color: 'var(--accent-indigo)', trend: 'Live', sub: 'total companies' }] : []),
+    ...(canReadBatches ? [{ label: 'Active Batches', value: stats.active_batches, icon: Zap, color: 'var(--accent-orange)', trend: 'Active', sub: 'in progress' }] : []),
+    ...(canReadUsers ? [{ label: 'Strategic Learners', value: stats.strategic_learners, icon: Users, color: 'var(--accent-green)', trend: 'Active', sub: 'onboarded' }] : []),
+    ...(canReadLogs ? [{ label: 'Session Velocity', value: stats.session_velocity, icon: Activity, color: 'var(--accent-red)', trend: '30 Days', sub: 'completed sessions' }] : [])
   ] : [
     { label: 'Team Magnitude', value: stats.strategic_learners, icon: Users, color: 'var(--accent-indigo)', trend: 'My Company', sub: 'active nodes' },
     { label: 'Attendance Pulse', value: `${stats.attendance_rate}%`, icon: Target, color: 'var(--accent-green)', trend: 'Overall', sub: 'participation rate' },
@@ -242,7 +247,9 @@ const Dashboard = () => {
                 <Zap size={48} className="text-white/20 mb-4 group-hover:scale-110 group-hover:rotate-12 transition-all duration-500" />
                 <h3 className="text-xl font-black mb-2 tracking-tight uppercase">System Insight</h3>
                 <p className="text-[13px] font-medium opacity-80 leading-relaxed">Organizational metadata is being synchronized in real-time. Last pulse detected from secure node.</p>
-                <button onClick={() => navigate('/admin/users')} className="mt-8 w-full py-3 bg-white text-[var(--accent-indigo)] rounded-2xl text-[11px] font-black uppercase tracking-widest shadow-lg hover:scale-[1.02] active:scale-[0.98] transition-all">Staff Registry</button>
+                {canReadUsers && (
+                    <button onClick={() => navigate('/admin/users')} className="mt-8 w-full py-3 bg-white text-[var(--accent-indigo)] rounded-2xl text-[11px] font-black uppercase tracking-widest shadow-lg hover:scale-[1.02] active:scale-[0.98] transition-all">Staff Registry</button>
+                )}
             </div>
         )}
       </div>

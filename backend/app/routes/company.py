@@ -39,7 +39,10 @@ class CompanyEditRequest(BaseModel):
 # ─── Onboard Company ───
 @router.post("", response_model=CompanyResponse, status_code=status.HTTP_201_CREATED)
 async def onboard_company(request: CompanyOnboardingRequest, background_tasks: BackgroundTasks, current_user: dict = Depends(get_current_user)):
-    if current_user.get("role") != "superadmin":
+    permissions = current_user.get("permissions", {})
+    can_create = permissions.get("companies", {}).get("create", False)
+    
+    if current_user.get("role") != "superadmin" and not can_create:
         raise HTTPException(status_code=403, detail="Not authorized to onboard companies")
     
     users_collection = get_collection("learners")
@@ -91,7 +94,10 @@ async def onboard_company(request: CompanyOnboardingRequest, background_tasks: B
 # ─── List Companies ───
 @router.get("", response_model=List[CompanyResponse])
 async def list_companies(current_user: dict = Depends(get_current_user)):
-    if current_user.get("role") != "superadmin":
+    permissions = current_user.get("permissions", {})
+    can_read = permissions.get("companies", {}).get("read", False)
+    
+    if current_user.get("role") != "superadmin" and not can_read:
         raise HTTPException(status_code=403, detail="Not authorized to list companies")
     
     db = get_db()
@@ -103,7 +109,13 @@ async def list_companies(current_user: dict = Depends(get_current_user)):
 # ─── Get Single Company ───
 @router.get("/{company_id}", response_model=CompanyResponse)
 async def get_company(company_id: str, current_user: dict = Depends(get_current_user)):
-    if current_user.get("role") != "superadmin" and current_user.get("company_id") != company_id:
+    permissions = current_user.get("permissions", {})
+    can_read = permissions.get("companies", {}).get("read", False)
+    
+    # Staff/Admin must have read perm or be superadmin. Client user only their own company.
+    is_authorized = current_user.get("role") == "superadmin" or can_read or current_user.get("company_id") == company_id
+    
+    if not is_authorized:
         raise HTTPException(status_code=403, detail="Not authorized to view this company")
     
     db = get_db()
@@ -117,7 +129,10 @@ async def get_company(company_id: str, current_user: dict = Depends(get_current_
 # ─── Update Company Details ───
 @router.put("/{company_id}")
 async def update_company(company_id: str, updates: CompanyEditRequest, current_user: dict = Depends(get_current_user)):
-    if current_user.get("role") != "superadmin":
+    permissions = current_user.get("permissions", {})
+    can_update = permissions.get("companies", {}).get("update", False)
+
+    if current_user.get("role") != "superadmin" and not can_update:
         raise HTTPException(status_code=403, detail="Not authorized")
     
     companies_collection = get_collection("companies")
@@ -137,7 +152,10 @@ async def update_company(company_id: str, updates: CompanyEditRequest, current_u
 # ─── Update Company Status ───
 @router.patch("/{company_id}/status")
 async def update_company_status(company_id: str, body: CompanyStatusUpdate, current_user: dict = Depends(get_current_user)):
-    if current_user.get("role") not in ["superadmin", "clientadmin"]:
+    permissions = current_user.get("permissions", {})
+    can_update = permissions.get("companies", {}).get("update", False)
+    
+    if current_user.get("role") not in ["superadmin", "clientadmin"] and not can_update:
         raise HTTPException(status_code=403, detail="Not authorized")
     
     # clientadmin can only update their own company status
@@ -161,7 +179,10 @@ async def update_company_status(company_id: str, body: CompanyStatusUpdate, curr
 # ─── Delete Company ───
 @router.delete("/{company_id}")
 async def delete_company(company_id: str, current_user: dict = Depends(get_current_user)):
-    if current_user.get("role") != "superadmin":
+    permissions = current_user.get("permissions", {})
+    can_delete = permissions.get("companies", {}).get("delete", False)
+    
+    if current_user.get("role") != "superadmin" and not can_delete:
         raise HTTPException(status_code=403, detail="Not authorized")
     
     companies_collection = get_collection("companies")
@@ -180,7 +201,12 @@ async def delete_company(company_id: str, current_user: dict = Depends(get_curre
 # ─── Get Company Users ───
 @router.get("/{company_id}/users")
 async def get_company_users(company_id: str, current_user: dict = Depends(get_current_user)):
-    if current_user.get("role") != "superadmin" and current_user.get("company_id") != company_id:
+    permissions = current_user.get("permissions", {})
+    can_read = permissions.get("companies", {}).get("read", False)
+
+    is_authorized = current_user.get("role") == "superadmin" or can_read or current_user.get("company_id") == company_id
+    
+    if not is_authorized:
         raise HTTPException(status_code=403, detail="Not authorized")
     
     users_collection = get_collection("learners")
@@ -193,7 +219,13 @@ async def get_company_users(company_id: str, current_user: dict = Depends(get_cu
 # ─── Bulk Create Users (JSON) ───
 @router.post("/{company_id}/users/bulk")
 async def bulk_create_users(company_id: str, users: List[UserCreate], background_tasks: BackgroundTasks, current_user: dict = Depends(get_current_user)):
-    if current_user.get("role") not in ["superadmin", "clientadmin"]:
+    permissions = current_user.get("permissions", {})
+    can_update = permissions.get("companies", {}).get("update", False)
+    
+    is_admin = current_user.get("role") in ["superadmin", "clientadmin"]
+    is_authorized = is_admin or can_update
+    
+    if not is_authorized:
         raise HTTPException(status_code=403, detail="Not authorized")
     
     if current_user.get("role") == "clientadmin" and current_user.get("company_id") != company_id:
@@ -247,7 +279,13 @@ async def bulk_create_users(company_id: str, users: List[UserCreate], background
 # ─── Export XLSX Template ───
 @router.get("/{company_id}/users/template")
 async def download_user_template(company_id: str, current_user: dict = Depends(get_current_user)):
-    if current_user.get("role") not in ["superadmin", "clientadmin"]:
+    permissions = current_user.get("permissions", {})
+    can_update = permissions.get("companies", {}).get("update", False)
+    
+    is_admin = current_user.get("role") in ["superadmin", "clientadmin"]
+    is_authorized = is_admin or can_update
+
+    if not is_authorized:
         raise HTTPException(status_code=403, detail="Not authorized")
     
     if current_user.get("role") == "clientadmin" and current_user.get("company_id") != company_id:
@@ -292,7 +330,13 @@ async def download_user_template(company_id: str, current_user: dict = Depends(g
 # ─── Import XLSX Users ───
 @router.post("/{company_id}/users/import")
 async def import_users_xlsx(company_id: str, background_tasks: BackgroundTasks, file: UploadFile = File(...), current_user: dict = Depends(get_current_user)):
-    if current_user.get("role") not in ["superadmin", "clientadmin"]:
+    permissions = current_user.get("permissions", {})
+    can_update = permissions.get("companies", {}).get("update", False)
+    
+    is_admin = current_user.get("role") in ["superadmin", "clientadmin"]
+    is_authorized = is_admin or can_update
+    
+    if not is_authorized:
         raise HTTPException(status_code=403, detail="Not authorized")
     
     if current_user.get("role") == "clientadmin" and current_user.get("company_id") != company_id:
@@ -380,7 +424,12 @@ async def import_users_xlsx(company_id: str, background_tasks: BackgroundTasks, 
 
 @router.get("/{company_id}/training-path")
 async def get_company_training_path(company_id: str, current_user: dict = Depends(get_current_user)):
-    if current_user.get("role") != "superadmin" and current_user.get("company_id") != company_id:
+    permissions = current_user.get("permissions", {})
+    can_read = permissions.get("companies", {}).get("read", False)
+    
+    is_authorized = current_user.get("role") == "superadmin" or can_read or current_user.get("company_id") == company_id
+    
+    if not is_authorized:
         raise HTTPException(status_code=403, detail="Not authorized")
     
     batches_col = get_collection("batches")
@@ -480,7 +529,12 @@ async def toggle_company_session_task(company_id: str, session_id: str, task_ind
 
 @router.get("/{company_id}/analytics")
 async def get_company_analytics(company_id: str, current_user: dict = Depends(get_current_user)):
-    if current_user.get("role") != "superadmin" and current_user.get("company_id") != company_id:
+    permissions = current_user.get("permissions", {})
+    can_read = permissions.get("companies", {}).get("read", False)
+    
+    is_authorized = current_user.get("role") == "superadmin" or can_read or current_user.get("company_id") == company_id
+    
+    if not is_authorized:
         raise HTTPException(status_code=403, detail="Not authorized")
     
     # 1. Monthly Sessions & Attendance Trend

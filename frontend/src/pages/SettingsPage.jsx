@@ -25,6 +25,13 @@ const SettingsPage = () => {
     const [showCreateModal, setShowCreateModal] = useState(false);
     const [newTemplateForm, setNewTemplateForm] = useState({ name: '', slug: 'task_created_email' });
     const [searchQuery, setSearchQuery] = useState('');
+    
+    // Permission Checks
+    const canUpdateSettings = user?.role === 'superadmin' || user?.permissions?.settings?.update;
+    const canReadTemplates = user?.role === 'superadmin' || user?.permissions?.templates?.read;
+    const canUpdateTemplates = user?.role === 'superadmin' || user?.permissions?.templates?.update;
+    const canDeleteTemplates = user?.role === 'superadmin' || user?.permissions?.templates?.delete;
+    const canReadCompanies = user?.role === 'superadmin' || user?.permissions?.companies?.read;
 
     const templateVariables = {
         task: ['task_name', 'topic', 'task_category', 'critical_level', 'assigned_user', 'assigned_by', 'deadline', 'date', 'day', 'time', 'description', 'task_status', 'session_type'],
@@ -50,14 +57,26 @@ const SettingsPage = () => {
         const init = async () => {
             setLoading(true);
             try {
-                if (user?.role === 'superadmin') {
-                    const [settingsRes, companiesRes] = await Promise.all([
-                        api.get('/settings/backdate-control'),
-                        api.get('/companies')
-                    ]);
-                    setConfig(settingsRes.data);
-                    setCompanies(companiesRes.data);
-                } else if (user?.role === 'clientadmin') {
+                const requests = [];
+                const readSettings = user?.role === 'superadmin' || user?.permissions?.settings?.read;
+                const readCompanies = user?.role === 'superadmin' || user?.permissions?.companies?.read;
+
+                if (readSettings) requests.push(api.get('/settings/backdate-control'));
+                if (readCompanies) requests.push(api.get('/companies'));
+
+                if (requests.length > 0) {
+                    const responses = await Promise.all(requests);
+                    let index = 0;
+                    if (readSettings) {
+                        setConfig(responses[index].data);
+                        index++;
+                    }
+                    if (readCompanies) {
+                        setCompanies(responses[index].data);
+                    }
+                }
+
+                if (user?.role === 'clientadmin') {
                     setSelectedCompanyId(user.company_id);
                 }
             } catch (err) { console.error(err); }
@@ -67,8 +86,8 @@ const SettingsPage = () => {
     }, [user]);
 
     useEffect(() => {
-        if (activeTab === 'templates') fetchTemplates();
-    }, [activeTab, scope, selectedCompanyId]);
+        if (activeTab === 'templates' && canReadTemplates) fetchTemplates();
+    }, [activeTab, scope, selectedCompanyId, canReadTemplates]);
 
     const fetchTemplates = async () => {
         try {
@@ -164,13 +183,15 @@ const SettingsPage = () => {
                     className={`flex items-center gap-2 px-4 py-1.5 rounded-lg text-[11px] font-black transition-all shrink-0 uppercase tracking-widest ${activeTab === 'backdate' ? 'bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] shadow-sm' : 'text-[var(--text-muted)] hover:bg-[var(--input-bg)]'}`}>
                     <ShieldCheck size={14}/> Security Rules
                 </button>
-                <button 
-                    onClick={() => setActiveTab('templates')} 
-                    className={`flex items-center gap-2 px-4 py-1.5 rounded-lg text-[11px] font-black transition-all shrink-0 uppercase tracking-widest ${activeTab === 'templates' ? 'bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] shadow-sm' : 'text-[var(--text-muted)] hover:bg-[var(--input-bg)]'}`}>
-                    <Mail size={14}/> Comms Templates
-                </button>
+                {canReadTemplates && (
+                    <button 
+                        onClick={() => setActiveTab('templates')} 
+                        className={`flex items-center gap-2 px-4 py-1.5 rounded-lg text-[11px] font-black transition-all shrink-0 uppercase tracking-widest ${activeTab === 'templates' ? 'bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] shadow-sm' : 'text-[var(--text-muted)] hover:bg-[var(--input-bg)]'}`}>
+                        <Mail size={14}/> Comms Templates
+                    </button>
+                )}
                 
-                {activeTab === 'templates' && scope === 'company' && user?.role === 'superadmin' && (
+                {activeTab === 'templates' && scope === 'company' && (user?.role === 'superadmin' || canReadCompanies) && (
                     <div className="flex items-center gap-2 ml-4 pl-4 border-l border-[var(--border)]">
                         <span className="text-[9px] font-black text-[var(--text-muted)] uppercase tracking-widest">Client</span>
                         <select value={selectedCompanyId} onChange={(e) => setSelectedCompanyId(e.target.value)}
@@ -191,9 +212,11 @@ const SettingsPage = () => {
                                 <h1 className="text-lg font-black text-[var(--text-main)] tracking-tight">System Permissions</h1>
                                 <p className="text-[11px] font-medium text-[var(--text-muted)] italic">Global overrides and security exception logic.</p>
                             </div>
-                            <button onClick={handleSave} className="bg-[var(--accent-indigo)] text-white px-6 py-2 rounded-xl font-black text-[11px] shadow-lg shadow-indigo-500/20 uppercase tracking-widest">
-                                Save Config
-                            </button>
+                            {canUpdateSettings && (
+                                <button onClick={handleSave} className="bg-[var(--accent-indigo)] text-white px-6 py-2 rounded-xl font-black text-[11px] shadow-lg shadow-indigo-500/20 uppercase tracking-widest">
+                                    Save Config
+                                </button>
+                            )}
                         </div>
 
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -203,7 +226,7 @@ const SettingsPage = () => {
                                     <h2 className="text-[13px] font-black text-[var(--text-main)]">Allow History Creation</h2>
                                     <p className="text-[10px] font-medium text-[var(--text-muted)] max-w-sm">Enable session/task scheduling in the past.</p>
                                 </div>
-                                <div className="cursor-pointer" onClick={() => setConfig({...config, allow_backdate: !config.allow_backdate})}>
+                                <div className="cursor-pointer" onClick={() => canUpdateSettings && setConfig({...config, allow_backdate: !config.allow_backdate})}>
                                     {config.allow_backdate ? <ToggleOn size={32} className="text-[var(--accent-indigo)]" /> : <ToggleOff size={32} className="text-gray-200" />}
                                 </div>
                             </div>
@@ -216,10 +239,11 @@ const SettingsPage = () => {
                                 </div>
 
                                 <div className="flex gap-2">
-                                    <input placeholder="Auth email..." value={newEmail} onChange={e => setNewEmail(e.target.value)}
-                                        className="flex-1 bg-[var(--input-bg)] border border-[var(--border)] px-3 py-2 rounded-xl text-[12px] font-medium outline-none focus:bg-[var(--bg-card)] focus:border-[var(--accent-indigo)]" />
+                                    <input placeholder="Auth email..." value={newEmail} onChange={e => setNewEmail(e.target.value)} disabled={!canUpdateSettings}
+                                        className="flex-1 bg-[var(--input-bg)] border border-[var(--border)] px-3 py-2 rounded-xl text-[12px] font-medium outline-none focus:bg-[var(--bg-card)] focus:border-[var(--accent-indigo)] disabled:opacity-50" />
                                     <button onClick={() => { if(newEmail) setConfig({...config, exception_users: [...config.exception_users, newEmail]}); setNewEmail(''); }}
-                                        className="bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] px-4 rounded-xl font-black text-[10px] uppercase tracking-widest border border-[var(--accent-indigo-border)]">
+                                        disabled={!canUpdateSettings}
+                                        className="bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] px-4 rounded-xl font-black text-[10px] uppercase tracking-widest border border-[var(--accent-indigo-border)] disabled:opacity-50">
                                         Authorize
                                     </button>
                                 </div>
@@ -258,7 +282,7 @@ const SettingsPage = () => {
                                             className={`w-full p-3 rounded-xl flex flex-col gap-0.5 text-left transition-all group border-2 ${editingTemplate?._id === t._id ? 'bg-white border-[var(--accent-indigo)] shadow-md' : 'bg-transparent border-transparent hover:bg-[var(--input-bg)]'}`}>
                                             <div className="flex items-center justify-between">
                                                 <span className={`text-[11px] font-black transition-colors ${editingTemplate?._id === t._id ? 'text-[var(--accent-indigo)]' : 'text-[var(--text-main)]'}`}>{t.name}</span>
-                                                {scope === 'company' && user?.role === 'superadmin' && (
+                                                {canDeleteTemplates && (
                                                     <Trash2 size={12} className="text-gray-200 hover:text-red-500 transition-all cursor-pointer" onClick={(e) => { e.stopPropagation(); deleteTemplate(t._id); }} />
                                                 )}
                                             </div>
@@ -269,8 +293,10 @@ const SettingsPage = () => {
                                     <div className="mt-10 text-center px-4 space-y-3">
                                         <p className="text-[9px] font-black text-gray-300 uppercase tracking-widest italic">Inventory Empty</p>
                                         <div className="flex flex-col gap-2">
-                                            <button onClick={() => setShowCreateModal(true)} className="text-[10px] font-black text-[var(--accent-indigo)] hover:underline">+ New Template</button>
-                                            {user?.role === 'superadmin' && (
+                                            {canUpdateTemplates && (
+                                                <button onClick={() => setShowCreateModal(true)} className="text-[10px] font-black text-[var(--accent-indigo)] hover:underline">+ New Template</button>
+                                            )}
+                                            {(user?.role === 'superadmin' || user?.permissions?.settings?.update) && (
                                                 <button onClick={handleInitializeDefaults} className="text-[9px] font-black text-[var(--accent-green)] hover:underline uppercase tracking-tighter">Initialize Defaults</button>
                                             )}
                                         </div>
@@ -298,9 +324,11 @@ const SettingsPage = () => {
                                         </div>
                                         <div className="flex items-center gap-2">
                                             <button onClick={() => setEditingTemplate(null)} className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest hover:text-red-500 mr-2 transition-all">Discard</button>
-                                            <button onClick={handleTemplateSave} className="bg-[var(--accent-indigo)] text-white px-5 py-2 rounded-xl font-black text-[11px] shadow-lg shadow-indigo-500/20 flex items-center gap-2 hover:brightness-110 transition-all uppercase tracking-widest">
-                                                <Save size={14}/> Sync Template
-                                            </button>
+                                            {canUpdateTemplates && (
+                                                <button onClick={handleTemplateSave} className="bg-[var(--accent-indigo)] text-white px-5 py-2 rounded-xl font-black text-[11px] shadow-lg shadow-indigo-500/20 flex items-center gap-2 hover:brightness-110 transition-all uppercase tracking-widest">
+                                                    <Save size={14}/> Sync Template
+                                                </button>
+                                            )}
                                         </div>
                                     </div>
 

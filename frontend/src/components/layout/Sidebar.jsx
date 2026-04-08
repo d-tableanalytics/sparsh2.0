@@ -13,20 +13,29 @@ const Sidebar = () => {
   const [isCollapsed, setIsCollapsed] = useState(true);
 
   const links = [
-    { name: 'Dashboard', path: '/', icon: LayoutDashboard, roles: ['superadmin', 'admin', 'clientadmin', 'clientuser'] },
-    { name: 'Companies', path: '/companies', icon: Building2, roles: ['superadmin'] },
-    { name: 'Batches', path: '/batches', icon: Layers, roles: ['superadmin', 'admin'] },
-    { name: 'Session Templates', path: '/session-templates', icon: Copy, roles: ['superadmin', 'admin'] },
-    { name: 'User Management', path: '/admin/users', icon: Users, roles: ['superadmin', 'admin'] },
+    { name: 'Dashboard', path: '/', icon: LayoutDashboard, roles: ['superadmin', 'admin', 'clientadmin', 'clientuser', 'coach', 'staff'] },
+    { name: 'Companies', path: '/companies', icon: Building2, roles: ['superadmin'], permissionKey: 'companies' },
+    { name: 'Batches', path: '/batches', icon: Layers, roles: ['superadmin', 'admin', 'coach'], permissionKey: 'batches' },
+    { name: 'Session Templates', path: '/session-templates', icon: Copy, roles: ['superadmin', 'admin', 'coach'], permissionKey: 'templates' },
+    { name: 'User Management', path: '/admin/users', icon: Users, roles: ['superadmin', 'admin', 'coach'], permissionKey: 'users' },
     { name: 'Training Roadmap', path: '/company-portal', icon: Target, roles: ['clientadmin', 'clientuser'] },
     { name: 'Live Sessions', path: '/sessions', icon: PlayCircle, roles: ['clientadmin', 'clientuser'] },
     { name: 'My Progress', path: '/my-reports', icon: BarChart3, roles: ['clientadmin', 'clientuser'] },
     { name: 'Team', path: '/team', icon: Users, roles: ['clientadmin'] },
-    { name: 'Calendar', path: '/calendar', icon: Calendar, roles: ['superadmin', 'admin', 'clientadmin', 'clientuser'] },
-    { name: 'GPT', path: '/gpt', icon: Sparkles, roles: ['superadmin', 'admin', 'clientadmin', 'clientuser'] },
+    { name: 'Calendar', path: '/calendar', icon: Calendar, roles: ['superadmin', 'admin', 'clientadmin', 'clientuser', 'coach', 'staff'], permissionKey: 'calendar' },
+    { name: 'Settings', path: '/settings', icon: Settings, roles: ['superadmin'], permissionKey: 'templates' },
+    { name: 'GPT', path: '/gpt', icon: Sparkles, roles: ['superadmin', 'admin', 'clientadmin', 'clientuser', 'coach', 'staff'] },
   ];
 
-  const filteredLinks = links.filter(link => link.roles.includes(user?.role));
+  const filteredLinks = links.filter(link => {
+    // 1. Role Check
+    const hasRole = link.roles.includes(user?.role);
+    
+    // 2. Permission Override (for staff/coach with CRUD perms)
+    const hasPermission = link.permissionKey && user?.permissions?.[link.permissionKey]?.read;
+
+    return hasRole || hasPermission;
+  });
 
   return (
     <motion.aside 

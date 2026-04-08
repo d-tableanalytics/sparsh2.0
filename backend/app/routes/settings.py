@@ -25,8 +25,11 @@ async def get_backdate_settings(current_user: dict = Depends(get_current_user)):
 
 @router.put("/backdate-control")
 async def update_backdate_settings(updates: SystemSettingsUpdate = Body(...), current_user: dict = Depends(get_current_user)):
-    if current_user.get("role") != "superadmin":
-        raise HTTPException(status_code=403, detail="Only superadmin can update backdate settings")
+    permissions = current_user.get("permissions", {})
+    can_update = permissions.get("settings", {}).get("update", False) # Fallback to settings node if it exists, or superadmin
+    
+    if current_user.get("role") != "superadmin" and not can_update:
+        raise HTTPException(status_code=403, detail="Only authorized personnel can update backdate settings")
     
     col = get_collection("system_settings")
     print(f"DEBUG: RECEIVED UPDATES: {updates.model_dump()}")
@@ -44,6 +47,12 @@ async def update_backdate_settings(updates: SystemSettingsUpdate = Body(...), cu
 
 @router.get("/templates", response_model=List[dict])
 async def get_templates(scope: Optional[str] = None, company_id: Optional[str] = None, current_user: dict = Depends(get_current_user)):
+    permissions = current_user.get("permissions", {})
+    can_read = permissions.get("templates", {}).get("read", False)
+    
+    if current_user.get("role") not in ["superadmin", "clientadmin"] and not can_read:
+        raise HTTPException(status_code=403, detail="Unauthorized")
+
     col = get_collection("notification_templates")
     query = {}
     if scope: query["scope"] = scope
@@ -61,9 +70,12 @@ async def get_templates(scope: Optional[str] = None, company_id: Optional[str] =
 
 @router.post("/templates")
 async def create_template(template: dict = Body(...), current_user: dict = Depends(get_current_user)):
-    # Permission check: superadmin can create for anyone, clientadmin only for their company
+    # Permission check: superadmin can create for anyone, clientadmin only for their company, staff with perm
+    permissions = current_user.get("permissions", {})
+    can_create = permissions.get("templates", {}).get("create", False)
+    
     role = current_user.get("role")
-    if role not in ["superadmin", "clientadmin"]:
+    if role not in ["superadmin", "clientadmin"] and not can_create:
          raise HTTPException(status_code=403, detail="Unauthorized")
     
     col = get_collection("notification_templates")
@@ -88,10 +100,13 @@ async def update_template(template_id: str, template: dict = Body(...), current_
     if not existing: raise HTTPException(status_code=404, detail="Not found")
 
     # Authorization
+    permissions = current_user.get("permissions", {})
+    can_update = permissions.get("templates", {}).get("update", False)
+    
     role = current_user.get("role")
     if role == "clientadmin" and existing.get("company_id") != current_user.get("company_id"):
         raise HTTPException(status_code=403, detail="Unauthorized")
-    if role != "superadmin" and role != "clientadmin":
+    if role != "superadmin" and role != "clientadmin" and not can_update:
         raise HTTPException(status_code=403, detail="Unauthorized")
 
     update_data = {k: v for k, v in template.items() if k not in ["_id", "created_at", "created_by"]}
@@ -105,10 +120,13 @@ async def delete_template(template_id: str, current_user: dict = Depends(get_cur
     col = get_collection("notification_templates")
     existing = await col.find_one({"_id": ObjectId(template_id)})
     
+    permissions = current_user.get("permissions", {})
+    can_delete = permissions.get("templates", {}).get("delete", False)
+    
     role = current_user.get("role")
     if role == "clientadmin" and existing.get("company_id") != current_user.get("company_id"):
         raise HTTPException(status_code=403, detail="Unauthorized")
-    if role != "superadmin" and role != "clientadmin":
+    if role != "superadmin" and role != "clientadmin" and not can_delete:
         raise HTTPException(status_code=403, detail="Unauthorized")
 
     await col.delete_one({"_id": ObjectId(template_id)})

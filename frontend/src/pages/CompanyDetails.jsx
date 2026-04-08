@@ -12,6 +12,7 @@ import {
   FileSpreadsheet, AlertTriangle, ExternalLink, Layers, Calendar,
   Target, BookOpen, ChevronRight, CheckCircle, Circle, UploadCloud, FileText, Bot
 } from 'lucide-react';
+import { useAuth } from '../context/AuthContext';
 import {
   BarChart, Bar, LineChart, Line, PieChart, Pie, Cell,
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
@@ -101,6 +102,7 @@ const CompanyDetails = () => {
   const { companyId } = useParams();
   const navigate = useNavigate();
   const fileInputRef = useRef(null);
+  const { user } = useAuth();
   const { showSuccess, showError } = useNotification();
 
   const [company, setCompany] = useState(null);
@@ -131,15 +133,25 @@ const CompanyDetails = () => {
   const [expandedQuarters, setExpandedQuarters] = useState({});
   const [uploadingFile, setUploadingFile] = useState(false);
 
+  const canUpdate = user?.role === 'superadmin' || user?.permissions?.companies?.update;
+  const canDelete = user?.role === 'superadmin' || user?.permissions?.companies?.delete;
+  const canReadUsers = user?.role === 'superadmin' || user?.permissions?.users?.read;
+  const canReadAnalytics = user?.role === 'superadmin' || user?.permissions?.companies?.read;
+
   const fetchData = async () => {
     try {
-      const [compRes, usersRes] = await Promise.all([
-        api.get(`/companies/${companyId}`),
-        api.get(`/companies/${companyId}/users`)
-      ]);
-      setCompany(compRes.data);
-      setUsers(usersRes.data);
-      setEditData(compRes.data);
+      const requests = [api.get(`/companies/${companyId}`)];
+      if (canReadUsers) {
+        requests.push(api.get(`/companies/${companyId}/users`));
+      }
+      
+      const responses = await Promise.all(requests);
+      setCompany(responses[0].data);
+      setEditData(responses[0].data);
+      
+      if (canReadUsers && responses[1]) {
+        setUsers(responses[1].data);
+      }
     } catch (err) {
       console.error(err);
     } finally {
@@ -148,6 +160,7 @@ const CompanyDetails = () => {
   };
 
   const fetchAnalytics = async () => {
+    if (!canReadAnalytics) return;
     setFetchingAnalytics(true);
     try {
         const res = await api.get(`/companies/${companyId}/analytics`);
@@ -323,24 +336,30 @@ const CompanyDetails = () => {
           <StatusBadge status={company.status || 'active'} />
         </div>
         <div className="flex items-center gap-2">
-          <button onClick={() => setEditMode(!editMode)} className="h-9 px-4 bg-[var(--bg-card)] border border-[var(--border)] text-[var(--text-muted)] rounded-lg text-[12px] font-bold flex items-center gap-2 hover:border-[var(--accent-indigo)] hover:text-[var(--accent-indigo)] transition-all">
-            <Pencil size={14} /> Edit
-          </button>
-          <div className="relative">
-            <button onClick={() => setStatusDropdown(!statusDropdown)} className="h-9 px-4 bg-[var(--bg-card)] border border-[var(--border)] text-[var(--text-muted)] rounded-lg text-[12px] font-bold flex items-center gap-2 hover:border-[var(--accent-orange)] hover:text-[var(--accent-orange)] transition-all">
-              Status <ChevronDown size={12} />
-            </button>
-            {statusDropdown && (
-              <div className="absolute right-0 top-11 bg-[var(--bg-card)] border border-[var(--border)] rounded-lg shadow-lg z-50 min-w-[140px] py-1">
-                {['active', 'hold', 'inactive'].map(s => (
-                  <button key={s} onClick={() => handleStatusChange(s)} className="w-full px-4 py-2 text-left text-[12px] font-bold text-[var(--text-muted)] hover:bg-[var(--input-bg)] capitalize transition-all">{s}</button>
-                ))}
+          {canUpdate && (
+            <>
+              <button onClick={() => setEditMode(!editMode)} className="h-9 px-4 bg-[var(--bg-card)] border border-[var(--border)] text-[var(--text-muted)] rounded-lg text-[12px] font-bold flex items-center gap-2 hover:border-[var(--accent-indigo)] hover:text-[var(--accent-indigo)] transition-all">
+                <Pencil size={14} /> Edit
+              </button>
+              <div className="relative">
+                <button onClick={() => setStatusDropdown(!statusDropdown)} className="h-9 px-4 bg-[var(--bg-card)] border border-[var(--border)] text-[var(--text-muted)] rounded-lg text-[12px] font-bold flex items-center gap-2 hover:border-[var(--accent-orange)] hover:text-[var(--accent-orange)] transition-all">
+                  Status <ChevronDown size={12} />
+                </button>
+                {statusDropdown && (
+                  <div className="absolute right-0 top-11 bg-[var(--bg-card)] border border-[var(--border)] rounded-lg shadow-lg z-50 min-w-[140px] py-1">
+                    {['active', 'hold', 'inactive'].map(s => (
+                      <button key={s} onClick={() => handleStatusChange(s)} className="w-full px-4 py-2 text-left text-[12px] font-bold text-[var(--text-muted)] hover:bg-[var(--input-bg)] capitalize transition-all">{s}</button>
+                    ))}
+                  </div>
+                )}
               </div>
-            )}
-          </div>
-          <button onClick={() => setShowDeleteConfirm(true)} className="h-9 px-4 bg-[var(--accent-red-bg)] border border-[var(--accent-red-border)] text-[var(--accent-red)] rounded-lg text-[12px] font-bold flex items-center gap-2 hover:opacity-80 transition-all">
-            <Trash2 size={14} /> Delete
-          </button>
+            </>
+          )}
+          {canDelete && (
+            <button onClick={() => setShowDeleteConfirm(true)} className="h-9 px-4 bg-[var(--accent-red-bg)] border border-[var(--accent-red-border)] text-[var(--accent-red)] rounded-lg text-[12px] font-bold flex items-center gap-2 hover:opacity-80 transition-all">
+              <Trash2 size={14} /> Delete
+            </button>
+          )}
         </div>
       </div>
 
@@ -374,10 +393,10 @@ const CompanyDetails = () => {
       {/* ─── Tabs ─── */}
       <div className="flex gap-1 bg-[var(--bg-card)] border border-[var(--border)] p-1 rounded-xl w-fit">
         {[
-          { id: 'dashboard', label: 'Company Dashboard', icon: BarChart3 },
-          { id: 'members', label: 'Team Members', icon: Users },
-          { id: 'batches', label: 'Batches', icon: Layers },
-        ].map(tab => (
+          { id: 'dashboard', label: 'Company Dashboard', icon: BarChart3, show: canReadAnalytics },
+          { id: 'members', label: 'Team Members', icon: Users, show: canReadUsers },
+          { id: 'batches', label: 'Batches', icon: Layers, show: canReadAnalytics },
+        ].filter(t => t.show).map(tab => (
           <button key={tab.id} onClick={() => setActiveTab(tab.id)}
             className={`flex items-center gap-2 px-5 py-2.5 rounded-lg text-[12px] font-bold transition-all ${
               activeTab === tab.id
@@ -579,16 +598,20 @@ const CompanyDetails = () => {
                   <p className="text-[11px] text-[var(--text-muted)]">{users.length} users registered · {activeUsers} active</p>
                 </div>
                 <div className="flex items-center gap-2">
-                  <button onClick={handleExportTemplate} className="h-8 px-3 bg-[var(--accent-green-bg)] border border-[var(--accent-green-border)] text-[var(--accent-green)] rounded-lg text-[11px] font-bold flex items-center gap-1.5 hover:opacity-80 transition-all">
-                    <Download size={12} /> Template
-                  </button>
-                  <button onClick={() => fileInputRef.current?.click()} className="h-8 px-3 bg-[var(--accent-orange-bg)] border border-[var(--accent-orange-border)] text-[var(--accent-orange)] rounded-lg text-[11px] font-bold flex items-center gap-1.5 hover:opacity-80 transition-all">
-                    <Upload size={12} /> Import
-                  </button>
-                  <input ref={fileInputRef} type="file" accept=".xlsx,.xls" onChange={handleImportFile} className="hidden" />
-                  <button onClick={() => setShowAddUser(true)} className="h-8 px-3 bg-[var(--btn-primary)] text-white rounded-lg text-[11px] font-bold flex items-center gap-1.5 hover:bg-[var(--btn-primary-hover)] transition-all">
-                    <Plus size={12} /> Add User
-                  </button>
+                  {canUpdate && (
+                    <>
+                      <button onClick={handleExportTemplate} className="h-8 px-3 bg-[var(--accent-green-bg)] border border-[var(--accent-green-border)] text-[var(--accent-green)] rounded-lg text-[11px] font-bold flex items-center gap-1.5 hover:opacity-80 transition-all">
+                        <Download size={12} /> Template
+                      </button>
+                      <button onClick={() => fileInputRef.current?.click()} className="h-8 px-3 bg-[var(--accent-orange-bg)] border border-[var(--accent-orange-border)] text-[var(--accent-orange)] rounded-lg text-[11px] font-bold flex items-center gap-1.5 hover:opacity-80 transition-all">
+                        <Upload size={12} /> Import
+                      </button>
+                      <input ref={fileInputRef} type="file" accept=".xlsx,.xls" onChange={handleImportFile} className="hidden" />
+                      <button onClick={() => setShowAddUser(true)} className="h-8 px-3 bg-[var(--btn-primary)] text-white rounded-lg text-[11px] font-bold flex items-center gap-1.5 hover:bg-[var(--btn-primary-hover)] transition-all">
+                        <Plus size={12} /> Add User
+                      </button>
+                    </>
+                  )}
                 </div>
               </div>
 

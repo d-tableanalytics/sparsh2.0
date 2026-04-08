@@ -16,6 +16,12 @@ router = APIRouter(prefix="/users", tags=["Users"])
 # ─── List Users (Combined) ───
 @router.get("/")
 async def list_users(current_user: dict = Depends(get_current_user)):
+    permissions = current_user.get("permissions", {})
+    can_read = permissions.get("users", {}).get("read", False)
+    
+    if current_user.get("role") != "superadmin" and not can_read:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    
     staff = await get_collection("staff").find({}).to_list(1000)
     learners = await get_collection("learners").find({}).to_list(1000)
     
@@ -35,6 +41,7 @@ class UserEditRequest(BaseModel):
     session_type: Optional[str] = None
     designation: Optional[str] = None
     department: Optional[str] = None
+    permissions: Optional[dict] = None
 
 class UserStatusUpdate(BaseModel):
     is_active: bool
@@ -61,13 +68,17 @@ async def get_user(user_id: str, current_user: dict = Depends(get_current_user))
         raise HTTPException(status_code=404, detail="User not found")
     
     # ─── Auth Check ───
-    if current_user.get("role") != "superadmin":
-        if str(current_user.get("_id")) != user_id:
-            if current_user.get("role") == "clientadmin":
-                if user.get("company_id") != current_user.get("company_id"):
-                    raise HTTPException(status_code=403, detail="Not authorized to view this user")
-            else:
-                raise HTTPException(status_code=403, detail="Not authorized")
+    permissions = current_user.get("permissions", {})
+    can_read = permissions.get("users", {}).get("read", False)
+    
+    is_authorized = current_user.get("role") == "superadmin" or can_read or str(current_user.get("_id")) == user_id
+    
+    if not is_authorized:
+        if current_user.get("role") == "clientadmin":
+            if user.get("company_id") != current_user.get("company_id"):
+                raise HTTPException(status_code=403, detail="Not authorized to view this user")
+        else:
+            raise HTTPException(status_code=403, detail="Not authorized")
 
     user["_id"] = str(user["_id"])
     user.pop("password", None)
@@ -81,7 +92,12 @@ async def update_user(user_id: str, updates: UserEditRequest, background_tasks: 
         raise HTTPException(status_code=404, detail="User not found")
 
     # ─── Auth Check ───
-    if current_user.get("role") != "superadmin":
+    permissions = current_user.get("permissions", {})
+    can_update = permissions.get("users", {}).get("update", False)
+    
+    is_authorized = current_user.get("role") == "superadmin" or can_update
+    
+    if not is_authorized:
         if current_user.get("role") == "clientadmin":
             if user.get("company_id") != current_user.get("company_id"):
                  raise HTTPException(status_code=403, detail="Not authorized for this user")
@@ -117,7 +133,12 @@ async def delete_user(user_id: str, current_user: dict = Depends(get_current_use
         raise HTTPException(status_code=404, detail="User not found")
 
     # ─── Auth Check ───
-    if current_user.get("role") != "superadmin":
+    permissions = current_user.get("permissions", {})
+    can_delete = permissions.get("users", {}).get("delete", False)
+    
+    is_authorized = current_user.get("role") == "superadmin" or can_delete
+    
+    if not is_authorized:
         if current_user.get("role") == "clientadmin":
             if user.get("company_id") != current_user.get("company_id"):
                  raise HTTPException(status_code=403, detail="Not authorized to delete this user")
@@ -137,13 +158,15 @@ async def get_user_activity(user_id: str, current_user: dict = Depends(get_curre
         raise HTTPException(status_code=404, detail="User not found")
 
     # ─── Auth Check ───
+    permissions = current_user.get("permissions", {})
+    can_read = permissions.get("users", {}).get("read", False)
+    
     authorized = False
-    if current_user.get("role") == "superadmin":
+    if current_user.get("role") == "superadmin" or can_read:
         authorized = True
     elif str(current_user.get("_id")) == user_id:
         authorized = True
     elif current_user.get("role") == "clientadmin":
-        # Check if user belongs to the same company
         if user.get("company_id") == current_user.get("company_id"):
             authorized = True
     
@@ -222,13 +245,17 @@ async def get_user_analytics(user_id: str, current_user: dict = Depends(get_curr
     if not user: raise HTTPException(status_code=404, detail="User not found")
     
     # Auth check
-    if current_user.get("role") != "superadmin":
-        if str(current_user.get("_id")) != user_id:
-            if current_user.get("role") == "clientadmin":
-                if user.get("company_id") != current_user.get("company_id"):
-                    raise HTTPException(status_code=403, detail="Not authorized")
-            else:
+    permissions = current_user.get("permissions", {})
+    can_read = permissions.get("users", {}).get("read", False)
+    
+    authorized = current_user.get("role") == "superadmin" or can_read or str(current_user.get("_id")) == user_id
+    
+    if not authorized:
+        if current_user.get("role") == "clientadmin":
+            if user.get("company_id") != current_user.get("company_id"):
                 raise HTTPException(status_code=403, detail="Not authorized")
+        else:
+            raise HTTPException(status_code=403, detail="Not authorized")
 
     # 1. Weekly Scores (Last 8 assessments)
     assessments_col = get_collection("LearnerAssessments")
