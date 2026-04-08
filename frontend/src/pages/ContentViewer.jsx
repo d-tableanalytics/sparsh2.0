@@ -16,16 +16,26 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import api from '../services/api';
+import { useAuth } from '../context/AuthContext';
 
 const ContentViewer = () => {
     const { sessionId, resourceId } = useParams();
     const navigate = useNavigate();
+    const { user } = useAuth();
     const [loading, setLoading] = useState(true);
     const [resource, setResource] = useState(null);
     const [activeTab, setActiveTab] = useState('AI'); // AI, Transcript
     const [chatInput, setChatInput] = useState('');
     const [chatHistory, setChatHistory] = useState([]);
     const [askingAI, setAskingAI] = useState(false);
+    
+    // Analytics & Heartbeat
+    const [watchSessionId, setWatchSessionId] = useState(null);
+    const [showAnalytics, setShowAnalytics] = useState(false);
+    const [analyticsMode, setAnalyticsMode] = useState('unique'); // 'unique' or 'full'
+    const [analytics, setAnalytics] = useState(null);
+    const [loadingAnalytics, setLoadingAnalytics] = useState(false);
+    
     const videoRef = useRef(null);
 
     useEffect(() => {
@@ -46,9 +56,44 @@ const ContentViewer = () => {
 
     const trackView = async () => {
         try {
-            await api.post(`/calendar/events/${sessionId}/resources/${resourceId}/view`);
+            const res = await api.post(`/calendar/events/${sessionId}/resources/${resourceId}/view`);
+            if (res.data.watch_session_id) {
+                setWatchSessionId(res.data.watch_session_id);
+            }
         } catch (err) {
             console.error("Error tracking view:", err);
+        }
+    };
+
+    // ─── Heartbeat Mechanism ───
+    useEffect(() => {
+        if (!watchSessionId || !videoRef.current) return;
+
+        const interval = setInterval(() => {
+            const isPlaying = videoRef.current && !videoRef.current.paused && !videoRef.current.ended;
+            if (isPlaying) {
+                api.post(`/calendar/events/${sessionId}/resources/${resourceId}/watch-time`, {
+                    watch_session_id: watchSessionId,
+                    seconds: 5
+                }).catch(() => {}); // Silent fail
+            }
+        }, 5000);
+
+        return () => clearInterval(interval);
+    }, [watchSessionId]);
+
+    const fetchAnalytics = async (mode = 'unique') => {
+        if (!['superadmin', 'admin', 'coach', 'staff'].includes(user?.role)) return;
+        setAnalyticsMode(mode);
+        setLoadingAnalytics(true);
+        try {
+            const res = await api.get(`/calendar/events/${sessionId}/resources/${resourceId}/analytics`);
+            setAnalytics(res.data);
+            setShowAnalytics(true);
+        } catch (err) {
+            console.error("Error fetching analytics:", err);
+        } finally {
+            setLoadingAnalytics(false);
         }
     };
 
@@ -102,6 +147,9 @@ const ContentViewer = () => {
 
     const isVideo = resource.file_type?.startsWith('video/') || resource.system_type === 'video';
     const isAudio = resource.file_type?.startsWith('audio/') || resource.system_type === 'audio';
+    const isPDF = resource.file_type === 'application/pdf' || resource.system_type === 'pdf' || resource.url?.toLowerCase().endsWith('.pdf');
+    const isImage = resource.file_type?.startsWith('image/') || ['jpg', 'jpeg', 'png', 'svg', 'webp'].some(ext => resource.url?.toLowerCase().endsWith(`.${ext}`));
+    const isDoc = !isVideo && !isAudio && !isPDF && !isImage;
 
     return (
         <div className="min-h-screen bg-[var(--bg-main)] flex flex-col lg:flex-row">
@@ -144,11 +192,34 @@ const ContentViewer = () => {
                                 className="w-full max-w-md accent-indigo-500" 
                             />
                         </div>
+                    ) : isPDF ? (
+                        <iframe 
+                            src={`${resource.url}#toolbar=0`} 
+                            className="w-full h-full border-0"
+                            title={resource.name}
+                        />
+                    ) : isImage ? (
+                        <img 
+                            src={resource.url} 
+                            alt={resource.name}
+                            className="w-full h-full object-contain"
+                        />
                     ) : (
-                        <div className="text-white flex flex-col items-center gap-4">
+                        <div className="text-white flex flex-col items-center gap-4 p-10 text-center">
                             <FileText size={80} className="opacity-20" />
-                            <p className="font-bold text-lg">Document Viewer</p>
-                            <div className="px-6 py-2 bg-white/10 border border-white/20 text-white rounded-full font-black text-xs uppercase cursor-default">Non-Downloadable Resource</div>
+                            <p className="font-black text-xl uppercase tracking-widest">{resource.name}</p>
+                            <p className="text-[11px] font-bold text-gray-400 max-w-sm">
+                                This file type ({resource.file_type || 'Unknown'}) is being analyzed by Sparsh AI. 
+                                Use the Knowledge Companion on the right to interact with its contents.
+                            </p>
+                            <a 
+                                href={resource.url} 
+                                target="_blank" 
+                                rel="noreferrer" 
+                                className="mt-4 px-8 py-3 bg-[var(--accent-indigo)] text-white rounded-full font-black text-xs uppercase shadow-lg shadow-indigo-500/20 active:scale-95 transition-all"
+                            >
+                                Open in New Tab
+                            </a>
                         </div>
                     )}
                 </div>
@@ -156,7 +227,7 @@ const ContentViewer = () => {
                 {/* Meta Info */}
                 <div className="flex flex-col md:flex-row md:items-start justify-between gap-6 pb-20">
                     <div className="space-y-4 max-w-2xl">
-                        <h1 className="text-3xl font-black text-[var(--text-main)] tracking-tight">{resource.name}</h1>
+                        <h1 className="text-xl md:text-2xl font-black text-[var(--text-main)] tracking-tight leading-tight">{resource.name}</h1>
                         <div className="space-y-2">
                             <label className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest">Description</label>
                             <p className="text-[14px] leading-relaxed text-[var(--text-muted)]">
@@ -165,26 +236,34 @@ const ContentViewer = () => {
                         </div>
                     </div>
 
-                    <div className="flex gap-4">
-                        <div className="bg-[var(--bg-card)] border border-[var(--border)] p-4 rounded-2xl flex items-center gap-4 shadow-sm min-w-[140px]">
-                            <div className="w-10 h-10 rounded-xl bg-blue-50 text-blue-600 flex items-center justify-center">
-                                <Eye size={20} />
+                    {['superadmin', 'admin', 'coach', 'staff'].includes(user?.role) && (
+                        <div className="flex gap-4">
+                            <div 
+                                onClick={() => fetchAnalytics('full')}
+                                className="bg-[var(--bg-card)] border border-[var(--border)] p-4 rounded-2xl flex items-center gap-4 shadow-sm min-w-[140px] cursor-pointer hover:border-[var(--accent-indigo)] transition-all active:scale-95"
+                            >
+                                <div className="w-10 h-10 rounded-xl bg-blue-50 text-blue-600 flex items-center justify-center">
+                                    <Eye size={20} />
+                                </div>
+                                <div>
+                                    <p className="text-[10px] font-black text-gray-400 uppercase">Total Hits</p>
+                                    <p className="text-xl font-black">{resource.views || 0}</p>
+                                </div>
                             </div>
-                            <div>
-                                <p className="text-[10px] font-black text-gray-400 uppercase">Total Views</p>
-                                <p className="text-xl font-black">{resource.views || 0}</p>
+                            <div 
+                                onClick={() => fetchAnalytics('unique')}
+                                className="bg-[var(--bg-card)] border border-[var(--border)] p-4 rounded-2xl flex items-center gap-4 shadow-sm min-w-[160px] cursor-pointer hover:border-[var(--accent-indigo)] transition-all active:scale-95"
+                            >
+                                <div className="w-10 h-10 rounded-xl bg-purple-50 text-purple-600 flex items-center justify-center">
+                                    <Users size={20} />
+                                </div>
+                                <div>
+                                    <p className="text-[10px] font-black text-gray-400 uppercase">Unique Viewers</p>
+                                    <p className="text-xl font-black">{resource.unique_viewers_count || 1}</p>
+                                </div>
                             </div>
                         </div>
-                        <div className="bg-[var(--bg-card)] border border-[var(--border)] p-4 rounded-2xl flex items-center gap-4 shadow-sm min-w-[160px]">
-                            <div className="w-10 h-10 rounded-xl bg-purple-50 text-purple-600 flex items-center justify-center">
-                                <Users size={20} />
-                            </div>
-                            <div>
-                                <p className="text-[10px] font-black text-gray-400 uppercase">Unique Viewers</p>
-                                <p className="text-xl font-black">1</p>
-                            </div>
-                        </div>
-                    </div>
+                    )}
                 </div>
             </div>
 
@@ -308,6 +387,96 @@ const ContentViewer = () => {
                     </div>
                 )}
             </div>
+
+            {/* Engagement Analytics Modal */}
+            <AnimatePresence>
+                {showAnalytics && (
+                    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+                        <motion.div 
+                            initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+                            onClick={() => setShowAnalytics(false)}
+                            className="absolute inset-0 bg-black/60 backdrop-blur-sm"
+                        />
+                        <motion.div 
+                            initial={{ opacity: 0, scale: 0.95, y: 20 }}
+                            animate={{ opacity: 1, scale: 1, y: 0 }}
+                            exit={{ opacity: 0, scale: 0.95, y: 20 }}
+                            className="relative w-full max-w-2xl bg-[var(--bg-main)] rounded-[32px] overflow-hidden shadow-2xl border border-[var(--border)]"
+                        >
+                            <div className="p-8 border-b border-[var(--border)] flex items-center justify-between bg-[var(--bg-card)]">
+                                <div>
+                                    <h3 className="text-2xl font-black text-[var(--text-main)]">Audience Engagement</h3>
+                                    <p className="text-[12px] font-bold text-[var(--text-muted)] uppercase tracking-widest mt-1">Resource: {resource.name}</p>
+                                </div>
+                                <button onClick={() => setShowAnalytics(false)} className="w-10 h-10 rounded-full bg-[var(--input-bg)] flex items-center justify-center text-[var(--text-muted)] hover:text-red-500 transition-colors">
+                                    <ChevronRight className="rotate-90" />
+                                </button>
+                            </div>
+
+                            <div className="p-8 max-h-[60vh] overflow-y-auto no-scrollbar">
+                                <div className="grid grid-cols-2 gap-4 mb-8">
+                                    <div className="p-6 rounded-[24px] bg-blue-50/50 border border-blue-100 flex flex-col items-center">
+                                        <p className="text-[10px] font-black text-blue-400 uppercase tracking-widest mb-1">Total Hits</p>
+                                        <p className="text-3xl font-black text-blue-600">{analytics?.total_views || 0}</p>
+                                    </div>
+                                    <div className="p-6 rounded-[24px] bg-purple-50/50 border border-purple-100 flex flex-col items-center">
+                                        <p className="text-[10px] font-black text-purple-400 uppercase tracking-widest mb-1">Unique Viewers</p>
+                                        <p className="text-3xl font-black text-purple-600">{analytics?.unique_viewers_count || 0}</p>
+                                    </div>
+                                </div>
+
+                                <div className="space-y-4">
+                                    <div className="flex items-center justify-between ml-1">
+                                        <h4 className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest">{analyticsMode === 'unique' ? 'Reach (Unique Members)' : 'Impact (Every Hit History)'}</h4>
+                                        <div className="flex bg-[var(--input-bg)] p-1 rounded-lg border border-[var(--border)]">
+                                            <button onClick={() => setAnalyticsMode('full')} className={`px-3 py-1 text-[9px] font-black uppercase rounded-md transition-all ${analyticsMode === 'full' ? 'bg-[var(--bg-card)] text-[var(--accent-indigo)] shadow-sm' : 'text-[var(--text-muted)]'}`}>Hits</button>
+                                            <button onClick={() => setAnalyticsMode('unique')} className={`px-3 py-1 text-[9px] font-black uppercase rounded-md transition-all ${analyticsMode === 'unique' ? 'bg-[var(--bg-card)] text-[var(--accent-indigo)] shadow-sm' : 'text-[var(--text-muted)]'}`}>Unique</button>
+                                        </div>
+                                    </div>
+                                    <div className="space-y-2">
+                                        {(analyticsMode === 'unique' ? analytics?.unique_logs : analytics?.full_logs)?.map((viewer, idx) => (
+                                            <div key={idx} className="p-4 bg-[var(--bg-card)] border border-[var(--border)] rounded-2xl flex items-center justify-between hover:border-[var(--accent-indigo)] transition-colors group">
+                                                <div className="flex items-center gap-4">
+                                                    <div className="w-10 h-10 rounded-full bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] flex items-center justify-center font-black text-sm">
+                                                        {viewer.user_name?.charAt(0).toUpperCase()}
+                                                    </div>
+                                                    <div>
+                                                        <p className="font-bold text-[var(--text-main)] group-hover:text-[var(--accent-indigo)] transition-colors">{viewer.user_name}</p>
+                                                        <p className="text-[10px] text-[var(--text-muted)] font-bold uppercase tracking-wider">
+                                                            {analyticsMode === 'unique' ? 'Last seen: ' : 'Viewed at: '} 
+                                                            {new Date(viewer.last_view || viewer.timestamp).toLocaleString(undefined, {
+                                                                day: 'numeric', month: 'numeric', year: 'numeric',
+                                                                hour: '2-digit', minute: '2-digit', second: '2-digit',
+                                                                hour12: true
+                                                            })}
+                                                        </p>
+                                                    </div>
+                                                </div>
+                                                <div className="text-right">
+                                                    <div className="flex items-center gap-1 justify-end text-[var(--accent-indigo)]">
+                                                        <Clock size={12} />
+                                                        <p className="text-sm font-black">
+                                                            {Math.floor((viewer.total_duration || viewer.duration) / 60)}m 
+                                                            {(viewer.total_duration || viewer.duration) % 60}s
+                                                        </p>
+                                                    </div>
+                                                    <p className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest">
+                                                        {analyticsMode === 'unique' ? `Across ${viewer.view_count} visits` : 'Session Duration'}
+                                                    </p>
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div className="p-6 bg-[var(--input-bg)]/50 text-center">
+                                <p className="text-[10px] font-bold text-[var(--text-muted)] uppercase tracking-wider">Tracking active • Data updates in real-time</p>
+                            </div>
+                        </motion.div>
+                    </div>
+                )}
+            </AnimatePresence>
         </div>
     );
 };

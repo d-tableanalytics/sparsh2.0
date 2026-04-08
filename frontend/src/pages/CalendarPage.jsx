@@ -85,11 +85,29 @@ const CalendarPage = () => {
 
     const formatIST = (dateStr) => {
         if (!dateStr) return "";
-        return new Date(dateStr).toLocaleString('en-IN', {
+        let d = new Date(dateStr);
+        if (typeof dateStr === 'string' && !dateStr.endsWith('Z') && !dateStr.includes('+')) {
+            d = new Date(dateStr + 'Z');
+        }
+        return d.toLocaleString('en-IN', {
             timeZone: 'Asia/Kolkata', weekday: 'long', day: 'numeric', month: 'long',
             hour: '2-digit', minute: '2-digit', hour12: true
         });
     };
+
+    const formatShortIST = (dateStr) => {
+        if (!dateStr) return "";
+        let d = new Date(dateStr);
+        if (typeof dateStr === 'string' && !dateStr.endsWith('Z') && !dateStr.includes('+')) {
+            d = new Date(dateStr + 'Z');
+        }
+        return d.toLocaleString('en-IN', {
+            timeZone: 'Asia/Kolkata',
+            day: 'numeric', month: 'short',
+            hour: '2-digit', minute: '2-digit', hour12: true
+        });
+    };
+
 
     const getLocalDatePart = (dateStr) => {
         if (!dateStr) return "";
@@ -229,7 +247,7 @@ const CalendarPage = () => {
     const handleQuickAction = async (id, action) => {
         try {
             if (action === 'delete') { await api.delete(`/calendar/events/${id}`); showSuccess("Entity removed from calendar"); }
-            else if (action === 'complete') { await api.put(`/calendar/events/${id}`, { status: 'completed' }); showSuccess("Status updated"); }
+            else if (action === 'complete') { await api.patch(`/calendar/events/${id}`, { status: 'completed' }); showSuccess("Status updated"); }
             fetchData();
             // If in summary modal, refresh current day list
             if (showSummary) {
@@ -267,7 +285,7 @@ const CalendarPage = () => {
         } catch (e) { console.error("Conflict check failed", e); }
 
         try {
-            if (isEdit) await api.put(`/calendar/events/${currentEventId}`, eventForm);
+            if (isEdit) await api.patch(`/calendar/events/${currentEventId}`, eventForm);
             else await api.post('/calendar/events', eventForm);
             showSuccess(isEdit ? 'Event updated' : 'Event scheduled successfully');
             fetchData(); setShowModal(false); setShowSummary(false); 
@@ -343,12 +361,12 @@ const CalendarPage = () => {
                 <div className="flex flex-col gap-1.5 text-[10px] font-bold text-[var(--text-muted)] mt-2 border-t border-[var(--border)] pt-2 border-dashed">
                     <div className="flex items-center justify-between">
                         <span className="flex items-center gap-1 opacity-60"> <Clock size={11} /> Deadline: </span>
-                        <span className="text-[var(--text-main)]">{new Date(ev.start).toLocaleDateString([], { day: 'numeric', month: 'short' })} • {new Date(ev.start).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true })}</span>
+                        <span className="text-[var(--text-main)]">{formatShortIST(ev.start)}</span>
                     </div>
                     {ev.extendedProps.completed_at && (
                         <div className="flex items-center justify-between text-emerald-600 bg-emerald-500/5 px-2 py-0.5 rounded-md">
                             <span className="flex items-center gap-1 uppercase text-[8px] font-black"> <CheckCircle size={11} /> Completed: </span>
-                            <span className="font-black italic">{new Date(ev.extendedProps.completed_at).toLocaleString([], { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', hour12: true })}</span>
+                            <span className="font-black italic">{formatShortIST(ev.extendedProps.completed_at)}</span>
                         </div>
                     )}
                     <div className="flex items-center gap-2 mt-0.5">

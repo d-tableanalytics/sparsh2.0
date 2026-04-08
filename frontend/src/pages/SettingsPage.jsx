@@ -53,7 +53,7 @@ const SettingsPage = () => {
                 if (user?.role === 'superadmin') {
                     const [settingsRes, companiesRes] = await Promise.all([
                         api.get('/settings/backdate-control'),
-                        api.get('/company')
+                        api.get('/companies')
                     ]);
                     setConfig(settingsRes.data);
                     setCompanies(companiesRes.data);
@@ -136,6 +136,16 @@ const SettingsPage = () => {
         t.slug.toLowerCase().includes(searchQuery.toLowerCase())
     );
 
+    const handleInitializeDefaults = async () => {
+        try {
+            await api.post('/settings/initialize-templates');
+            showSuccess("Default infrastructure deployed");
+            fetchTemplates();
+        } catch (err) {
+            showError("Initialization failed");
+        }
+    };
+
     if (loading) return (
         <div className="h-screen flex items-center justify-center bg-[var(--bg-main)]">
             <div className="flex flex-col items-center gap-4">
@@ -207,7 +217,7 @@ const SettingsPage = () => {
 
                                 <div className="flex gap-2">
                                     <input placeholder="Auth email..." value={newEmail} onChange={e => setNewEmail(e.target.value)}
-                                        className="flex-1 bg-[var(--input-bg)] border border-[var(--border)] px-3 py-2 rounded-xl text-[12px] font-medium outline-none focus:bg-white focus:border-[var(--accent-indigo)]" />
+                                        className="flex-1 bg-[var(--input-bg)] border border-[var(--border)] px-3 py-2 rounded-xl text-[12px] font-medium outline-none focus:bg-[var(--bg-card)] focus:border-[var(--accent-indigo)]" />
                                     <button onClick={() => { if(newEmail) setConfig({...config, exception_users: [...config.exception_users, newEmail]}); setNewEmail(''); }}
                                         className="bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] px-4 rounded-xl font-black text-[10px] uppercase tracking-widest border border-[var(--accent-indigo-border)]">
                                         Authorize
@@ -256,9 +266,14 @@ const SettingsPage = () => {
                                         </button>
                                     ))
                                 ) : (
-                                    <div className="mt-10 text-center px-4">
+                                    <div className="mt-10 text-center px-4 space-y-3">
                                         <p className="text-[9px] font-black text-gray-300 uppercase tracking-widest italic">Inventory Empty</p>
-                                        <button onClick={() => setShowCreateModal(true)} className="mt-2 text-[10px] font-black text-[var(--accent-indigo)] hover:underline">+ New Template</button>
+                                        <div className="flex flex-col gap-2">
+                                            <button onClick={() => setShowCreateModal(true)} className="text-[10px] font-black text-[var(--accent-indigo)] hover:underline">+ New Template</button>
+                                            {user?.role === 'superadmin' && (
+                                                <button onClick={handleInitializeDefaults} className="text-[9px] font-black text-[var(--accent-green)] hover:underline uppercase tracking-tighter">Initialize Defaults</button>
+                                            )}
+                                        </div>
                                     </div>
                                 )}
                             </div>
@@ -296,7 +311,7 @@ const SettingsPage = () => {
                                                 <div className="space-y-1.5">
                                                     <label className="text-[9px] font-black text-[var(--text-muted)] uppercase tracking-widest px-2">Email Subject Header</label>
                                                     <input value={editingTemplate.subject} onChange={e => setEditingTemplate({...editingTemplate, subject: e.target.value})}
-                                                        className="w-full bg-[var(--input-bg)] px-4 py-2.5 border border-[var(--border)] rounded-xl font-black text-[13px] text-[var(--text-main)] outline-none focus:bg-white focus:border-[var(--accent-indigo)] transition-all" />
+                                                        className="w-full bg-[var(--input-bg)] px-4 py-2.5 border border-[var(--border)] rounded-xl font-black text-[13px] text-[var(--text-main)] outline-none focus:bg-[var(--bg-card)] focus:border-[var(--accent-indigo)] transition-all" />
                                                 </div>
 
                                                 <div className="space-y-1.5">
@@ -305,7 +320,7 @@ const SettingsPage = () => {
                                                         <span className="text-[8px] font-black text-[var(--accent-indigo)] flex items-center gap-1"><Info size={10}/> FULL HTML WRAPPER ACTIVE</span>
                                                     </div>
                                                     <textarea id="template-editor" rows={18} value={editingTemplate.body} onChange={e => setEditingTemplate({...editingTemplate, body: e.target.value})}
-                                                        className="w-full bg-[var(--input-bg)] p-6 border border-[var(--border)] rounded-[20px] font-medium text-[13px] leading-relaxed text-[var(--text-main)] outline-none focus:bg-white focus:border-[var(--accent-indigo)] transition-all font-mono" />
+                                                        className="w-full bg-[var(--input-bg)] p-6 border border-[var(--border)] rounded-[20px] font-medium text-[13px] leading-relaxed text-[var(--text-main)] outline-none focus:bg-[var(--bg-card)] focus:border-[var(--accent-indigo)] transition-all font-mono" />
                                                 </div>
                                             </div>
                                         </div>

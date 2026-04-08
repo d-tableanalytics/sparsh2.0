@@ -113,6 +113,8 @@ const CompanyDetails = () => {
   const [showAddUser, setShowAddUser] = useState(false);
   const [importStatus, setImportStatus] = useState(null);
   const [statusDropdown, setStatusDropdown] = useState(false);
+  const [analytics, setAnalytics] = useState(null);
+  const [fetchingAnalytics, setFetchingAnalytics] = useState(false);
 
   const [newUser, setNewUser] = useState({
     email: '', password: '', first_name: '', last_name: '', mobile: '',
@@ -145,6 +147,18 @@ const CompanyDetails = () => {
     }
   };
 
+  const fetchAnalytics = async () => {
+    setFetchingAnalytics(true);
+    try {
+        const res = await api.get(`/companies/${companyId}/analytics`);
+        setAnalytics(res.data);
+    } catch (err) {
+        console.error("Failed to fetch analytics:", err);
+    } finally {
+        setFetchingAnalytics(false);
+    }
+  };
+
   const fetchTrainingPath = async () => {
     setFetchingPath(true);
     try {
@@ -172,6 +186,7 @@ const CompanyDetails = () => {
 
   useEffect(() => { 
     fetchData(); 
+    if (activeTab === 'dashboard') fetchAnalytics();
     if (activeTab === 'batches') fetchTrainingPath();
   }, [companyId, activeTab]);
 
@@ -284,18 +299,14 @@ const CompanyDetails = () => {
 
   if (!company) return <div className="text-center py-20 text-[var(--text-muted)]">Company not found</div>;
 
-  // Chart data
-  const monthlyData = generateMonthlyData(users.length);
-  const pieData = generatePieData(users.length);
-  const deptData = generateDeptData(users);
-  const perfData = generatePerformanceData();
+  // Mapping logic for Charts
+  const monthlyData = analytics?.monthly_trend || generateMonthlyData(users.length);
+  const pieData = (analytics?.session_type_split && analytics.session_type_split.length > 0) ? analytics.session_type_split : generatePieData(users.length);
+  const deptData = (analytics?.dept_distribution && analytics.dept_distribution.length > 0) ? analytics.dept_distribution : generateDeptData(users);
+  const perfData = analytics?.performance_data || generatePerformanceData();
+  const topPerformersData = (analytics?.top_performers && analytics.top_performers.length > 0) ? analytics.top_performers : [];
+  
   const activeUsers = users.filter(u => u.is_active !== false).length;
-
-  const topPerformers = users.slice(0, 3).map((u, i) => ({
-    ...u,
-    score: Math.floor(Math.random() * 20 + 80),
-    rank: i + 1,
-  }));
 
   return (
     <div className="space-y-6">
@@ -512,7 +523,7 @@ const CompanyDetails = () => {
                   <Award size={16} className="text-[var(--accent-yellow)]" />
                 </div>
                 <div className="space-y-3">
-                  {topPerformers.map(p => (
+                  {topPerformersData.map(p => (
                     <div key={p._id || p.email} className="flex items-center gap-3 p-2.5 rounded-lg hover:bg-[var(--input-bg)] transition-all">
                       <div className={`w-7 h-7 rounded-md flex items-center justify-center font-black text-[11px] text-white ${
                         p.rank === 1 ? 'bg-amber-500' : p.rank === 2 ? 'bg-gray-400' : 'bg-amber-700'
@@ -520,17 +531,17 @@ const CompanyDetails = () => {
                         {p.rank}
                       </div>
                       <div className="w-8 h-8 rounded-md flex items-center justify-center text-white font-bold text-[10px]" style={{ background: 'var(--avatar-bg)' }}>
-                        {p.full_name?.charAt(0) || '?'}
+                        {p.full_name?.charAt(0) || p.email?.charAt(0) || '?'}
                       </div>
                       <div className="flex-1 min-w-0">
                         <p className="text-[13px] font-bold text-[var(--text-main)] truncate">{p.full_name || p.email}</p>
-                        <p className="text-[10px] text-[var(--text-muted)]">{p.department || 'Team'}</p>
+                        <p className="text-[10px] text-[var(--text-muted)]">{p.department || 'Training Star'}</p>
                       </div>
                       <span className="text-[14px] font-black text-[var(--accent-green)]">{p.score}%</span>
                     </div>
                   ))}
-                  {topPerformers.length === 0 && (
-                    <p className="text-[12px] text-[var(--text-muted)] text-center py-8">No data yet</p>
+                  {topPerformersData.length === 0 && (
+                    <p className="text-[12px] text-[var(--text-muted)] text-center py-8">No assessment data yet</p>
                   )}
                 </div>
               </div>

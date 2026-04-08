@@ -26,25 +26,32 @@ const Dashboard = () => {
   const [pulseData, setPulseData] = useState([]);
   const [mixData, setMixData] = useState([]);
   const [upcomingEvents, setUpcomingEvents] = useState([]);
+  const [teamMembers, setTeamMembers] = useState([]);
   const [loading, setLoading] = useState(true);
 
   const fetchData = async () => {
     try {
-      const [statsRes, eventRes] = await Promise.all([
+      const role = user?.role?.toLowerCase();
+      const isStaffRole = ['superadmin', 'admin', 'coach'].includes(role);
+
+      const [statsRes, eventRes, teamRes] = await Promise.all([
         api.get('/dashboard/stats'),
-        api.get('/calendar/events').catch(() => ({ data: [] }))
+        api.get('/calendar/events').catch(() => ({ data: [] })),
+        !isStaffRole && user?.company_id 
+            ? api.get(`/companies/${user.company_id}/users`).catch(() => ({ data: [] }))
+            : Promise.resolve({ data: [] })
       ]);
       
       setStats(statsRes.data.kpis);
       setPulseData(statsRes.data.operational_pulse);
       setMixData(statsRes.data.session_mix);
+      setTeamMembers(teamRes.data || []);
 
       setUpcomingEvents(eventRes.data
         .filter(e => new Date(e.start) >= new Date())
         .sort((a, b) => new Date(a.start) - new Date(b.start))
         .slice(0, 5)
       );
-
     } catch (err) {
       console.error("Dashboard fetch error:", err);
     } finally {
@@ -57,11 +64,16 @@ const Dashboard = () => {
   const role = user?.role?.toLowerCase();
   const isAdmin = ['superadmin', 'admin', 'coach'].includes(role);
 
-  const statsTiles = [
-    { label: isAdmin ? 'Registered Entities' : 'Active Programs', value: stats.registered_entities, icon: Building2, color: 'var(--accent-indigo)', trend: 'Live', sub: isAdmin ? 'total companies' : 'curated oversight' },
-    { label: isAdmin ? 'Active Batches' : 'Learning Batches', value: stats.active_batches, icon: Zap, color: 'var(--accent-orange)', trend: 'Active', sub: isAdmin ? 'in progress' : 'operational active' },
-    { label: isAdmin ? 'Strategic Learners' : 'Program Collaborators', value: stats.strategic_learners, icon: Users, color: 'var(--accent-green)', trend: 'Active', sub: isAdmin ? 'onboarded' : 'peer network' },
+  const statsTiles = isAdmin ? [
+    { label: 'Registered Entities', value: stats.registered_entities, icon: Building2, color: 'var(--accent-indigo)', trend: 'Live', sub: 'total companies' },
+    { label: 'Active Batches', value: stats.active_batches, icon: Zap, color: 'var(--accent-orange)', trend: 'Active', sub: 'in progress' },
+    { label: 'Strategic Learners', value: stats.strategic_learners, icon: Users, color: 'var(--accent-green)', trend: 'Active', sub: 'onboarded' },
     { label: 'Session Velocity', value: stats.session_velocity, icon: Activity, color: 'var(--accent-red)', trend: '30 Days', sub: 'completed sessions' }
+  ] : [
+    { label: 'Team Magnitude', value: stats.strategic_learners, icon: Users, color: 'var(--accent-indigo)', trend: 'My Company', sub: 'active nodes' },
+    { label: 'Attendance Pulse', value: `${stats.attendance_rate}%`, icon: Target, color: 'var(--accent-green)', trend: 'Overall', sub: 'participation rate' },
+    { label: 'Batch Lifecycle', value: stats.active_batches, icon: Zap, color: 'var(--accent-orange)', trend: 'Active', sub: 'program batches' },
+    { label: 'Sessions Ingested', value: stats.session_velocity, icon: Activity, color: 'var(--accent-red)', trend: '30 Days', sub: 'completed track' }
   ];
 
   return (
@@ -73,12 +85,7 @@ const Dashboard = () => {
           <p className="text-[14px] text-[var(--text-muted)] font-bold">Welcome back, {user?.full_name}. Here is your organizational pulse.</p>
         </div>
         <div className="flex items-center gap-3">
-            <button className="flex items-center gap-2 px-5 py-2.5 bg-[var(--bg-card)] border border-[var(--border)] rounded-2xl text-[13px] font-black hover:border-[var(--accent-indigo)] transition-all">
-                <Calendar size={16}/> Schedule
-            </button>
-            <button className="flex items-center gap-2 px-6 py-2.5 bg-[var(--btn-primary)] text-white rounded-2xl text-[13px] font-black shadow-lg shadow-indigo-500/20 hover:opacity-90 transition-all">
-                <Plus size={16}/> New Entry
-            </button>
+            {/* Action buttons removed as per request */}
         </div>
       </div>
 
@@ -165,13 +172,14 @@ const Dashboard = () => {
       </div>
 
       {/* Bottom Row */}
-      <div className="grid grid-cols-1 lg:grid-cols-1 gap-6">
-        <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-[32px] p-8 shadow-sm">
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        {/* Operational Timeline */}
+        <div className="lg:col-span-2 bg-[var(--bg-card)] border border-[var(--border)] rounded-[32px] p-8 shadow-sm">
             <div className="flex items-center justify-between mb-8">
                 <h3 className="text-xl font-black text-[var(--text-main)] flex items-center gap-2 uppercase italic tracking-tight"><Clock size={22} className="text-[var(--accent-indigo)]"/> Operational Timeline</h3>
                 <button onClick={() => navigate('/calendar')} className="text-[11px] font-black text-[var(--accent-indigo)] uppercase tracking-widest px-4 py-2 bg-[var(--accent-indigo-bg)] rounded-xl hover:opacity-80 transition-all">Full Calendar</button>
             </div>
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 {upcomingEvents.length > 0 ? upcomingEvents.map((ev, i) => (
                     <div key={ev.id} onClick={() => navigate(`/sessions/${ev.id}`)} className="flex items-center gap-4 p-5 bg-[var(--input-bg)] rounded-2xl border border-transparent hover:border-[var(--border)] hover:bg-white transition-all group cursor-pointer shadow-sm hover:shadow-md">
                          <div className="w-14 h-14 flex flex-col items-center justify-center bg-white rounded-2xl border border-[var(--border)] group-hover:border-[var(--accent-indigo)] transition-all flex-shrink-0">
@@ -184,13 +192,59 @@ const Dashboard = () => {
                          </div>
                     </div>
                 )) : (
-                    <div className="col-span-full py-16 text-center space-y-3 opacity-30">
-                        <Calendar size={48} className="mx-auto" />
-                        <p className="text-[12px] font-black uppercase tracking-widest text-[var(--text-muted)]">No sessions scheduled for today's pulse.</p>
+                    <div className="col-span-full py-10 text-center space-y-3 opacity-30">
+                        <Calendar size={32} className="mx-auto" />
+                        <p className="text-[11px] font-black uppercase tracking-widest text-[var(--text-muted)]">No sessions scheduled.</p>
                     </div>
                 )}
             </div>
         </div>
+
+        {/* My Team (Learners only) */}
+        {!isAdmin && (
+            <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-[32px] p-8 shadow-sm flex flex-col">
+                <div className="flex items-center justify-between mb-8">
+                    <h3 className="text-xl font-black text-[var(--text-main)] uppercase italic tracking-tight">Company Ecosystem</h3>
+                    <button onClick={() => navigate('/team')} className="p-2 text-[var(--text-muted)] hover:text-[var(--accent-indigo)] transition-all"> <ChevronRight size={20}/> </button>
+                </div>
+                <div className="space-y-4 flex-1 overflow-y-auto no-scrollbar max-h-[300px]">
+                    {teamMembers.length > 0 ? teamMembers.slice(0, 6).map((m, i) => (
+                        <div key={m._id} onClick={() => navigate(`/members/${m._id}`)} className="flex items-center justify-between p-4 bg-[var(--input-bg)] rounded-2xl hover:bg-white border border-transparent hover:border-[var(--border)] transition-all cursor-pointer group">
+                             <div className="flex items-center gap-3">
+                                <div className="w-10 h-10 rounded-xl bg-white border border-[var(--border)] flex items-center justify-center text-[var(--accent-indigo)] font-black text-[12px] group-hover:scale-110 transition-all">
+                                    {m.full_name?.charAt(0) || m.first_name?.charAt(0) || '?'}
+                                </div>
+                                <div>
+                                    <p className="text-[13px] font-black text-[var(--text-main)]">{m.full_name || m.first_name}</p>
+                                    <p className="text-[10px] font-bold text-[var(--text-muted)] uppercase opacity-60">{m.designation || 'Specialist'}</p>
+                                </div>
+                             </div>
+                             <div className={`w-2 h-2 rounded-full ${m.is_active !== false ? 'bg-green-500' : 'bg-red-500'}`} />
+                        </div>
+                    )) : (
+                        <div className="py-10 text-center opacity-20">
+                            <Users size={32} className="mx-auto mb-2" />
+                            <p className="text-[10px] font-black uppercase tracking-widest">No nodes detected</p>
+                        </div>
+                    )}
+                </div>
+                {teamMembers.length > 6 && (
+                    <button onClick={() => navigate('/team')} className="mt-4 w-full py-3 border border-[var(--border)] rounded-xl text-[11px] font-black text-[var(--text-muted)] uppercase tracking-widest hover:bg-[var(--input-bg)] transition-all">
+                        View Network (+{teamMembers.length - 6})
+                    </button>
+                )}
+            </div>
+        )}
+
+        {isAdmin && (
+            <div className="bg-[var(--accent-indigo)] rounded-[32px] p-8 text-white relative overflow-hidden group shadow-2xl shadow-indigo-500/20">
+                <div className="absolute inset-0 bg-gradient-to-br from-white/10 to-transparent pointer-events-none" />
+                <Zap size={48} className="text-white/20 mb-4 group-hover:scale-110 group-hover:rotate-12 transition-all duration-500" />
+                <h3 className="text-xl font-black mb-2 tracking-tight uppercase">System Insight</h3>
+                <p className="text-[13px] font-medium opacity-80 leading-relaxed">Organizational metadata is being synchronized in real-time. Last pulse detected from secure node.</p>
+                <button onClick={() => navigate('/admin/users')} className="mt-8 w-full py-3 bg-white text-[var(--accent-indigo)] rounded-2xl text-[11px] font-black uppercase tracking-widest shadow-lg hover:scale-[1.02] active:scale-[0.98] transition-all">Staff Registry</button>
+            </div>
+        )}
       </div>
     </div>
   );

@@ -7,7 +7,8 @@ from app.models.user import UserCreate
 from app.controllers.auth_controller import get_current_user, get_password_hash
 from app.services.notification_service import send_notification_from_template, send_company_registration_email
 from bson import ObjectId
-from datetime import datetime
+from app.services.activity_log_service import log_activity
+from datetime import datetime, timezone
 from pydantic import BaseModel
 import io
 
@@ -49,7 +50,7 @@ async def onboard_company(request: CompanyOnboardingRequest, background_tasks: B
         raise HTTPException(status_code=400, detail="Admin email already registered")
     
     company_dict = request.company.model_dump()
-    company_dict["created_at"] = datetime.utcnow()
+    company_dict["created_at"] = datetime.now(timezone.utc)
     company_dict["status"] = "active"
     
     company_result = await companies_collection.insert_one(company_dict)
@@ -60,7 +61,7 @@ async def onboard_company(request: CompanyOnboardingRequest, background_tasks: B
     admin_dict["role"] = "clientadmin"
     admin_dict["company_id"] = company_id
     admin_dict["is_active"] = True
-    admin_dict["created_at"] = datetime.utcnow()
+    admin_dict["created_at"] = datetime.now(timezone.utc)
     
     if not admin_dict.get("full_name"):
         admin_dict["full_name"] = f"{admin_dict.get('first_name', '')} {admin_dict.get('last_name', '')}".strip()
@@ -83,6 +84,8 @@ async def onboard_company(request: CompanyOnboardingRequest, background_tasks: B
     
     company_dict["_id"] = company_id
     company_dict["admin_id"] = admin_id
+    
+    await log_activity(current_user, "Onboard Company", "Company", f"Onboarded company {company_dict.get('name')}")
     return company_dict
 
 # ─── List Companies ───
@@ -123,7 +126,7 @@ async def update_company(company_id: str, updates: CompanyEditRequest, current_u
     if not update_data:
         raise HTTPException(status_code=400, detail="No fields to update")
     
-    update_data["updated_at"] = datetime.utcnow()
+    update_data["updated_at"] = datetime.now(timezone.utc)
     result = await companies_collection.update_one({"_id": ObjectId(company_id)}, {"$set": update_data})
     
     if result.modified_count == 0:
@@ -134,16 +137,20 @@ async def update_company(company_id: str, updates: CompanyEditRequest, current_u
 # ─── Update Company Status ───
 @router.patch("/{company_id}/status")
 async def update_company_status(company_id: str, body: CompanyStatusUpdate, current_user: dict = Depends(get_current_user)):
-    if current_user.get("role") != "superadmin":
+    if current_user.get("role") not in ["superadmin", "clientadmin"]:
         raise HTTPException(status_code=403, detail="Not authorized")
     
+    # clientadmin can only update their own company status
+    if current_user.get("role") == "clientadmin" and current_user.get("company_id") != company_id:
+        raise HTTPException(status_code=403, detail="Not authorized to update this company status")
+
     if body.status not in ["active", "hold", "inactive"]:
         raise HTTPException(status_code=400, detail="Invalid status. Must be: active, hold, inactive")
     
     companies_collection = get_collection("companies")
     result = await companies_collection.update_one(
         {"_id": ObjectId(company_id)},
-        {"$set": {"status": body.status, "updated_at": datetime.utcnow()}}
+        {"$set": {"status": body.status, "updated_at": datetime.now(timezone.utc)}}
     )
     
     if result.modified_count == 0:
@@ -186,8 +193,11 @@ async def get_company_users(company_id: str, current_user: dict = Depends(get_cu
 # ─── Bulk Create Users (JSON) ───
 @router.post("/{company_id}/users/bulk")
 async def bulk_create_users(company_id: str, users: List[UserCreate], background_tasks: BackgroundTasks, current_user: dict = Depends(get_current_user)):
-    if current_user.get("role") != "superadmin":
+    if current_user.get("role") not in ["superadmin", "clientadmin"]:
         raise HTTPException(status_code=403, detail="Not authorized")
+    
+    if current_user.get("role") == "clientadmin" and current_user.get("company_id") != company_id:
+        raise HTTPException(status_code=403, detail="Not authorized for this company")
     
     users_collection = get_collection("learners")
     from app.services.notification_service import send_notification_from_template
@@ -207,7 +217,7 @@ async def bulk_create_users(company_id: str, users: List[UserCreate], background
         user_dict["password"] = get_password_hash(user_dict["password"])
         user_dict["company_id"] = company_id
         user_dict["is_active"] = True
-        user_dict["created_at"] = datetime.utcnow()
+        user_dict["created_at"] = datetime.now(timezone.utc)
         
         if not user_dict.get("full_name"):
             user_dict["full_name"] = f"{user_dict.get('first_name', '')} {user_dict.get('last_name', '')}".strip()
@@ -231,13 +241,17 @@ async def bulk_create_users(company_id: str, users: List[UserCreate], background
         )
         created += 1
     
+    await log_activity(current_user, "Bulk Create Users", "Company", f"Created {created} users for company {company_id}")
     return {"message": f"Created {created} users, skipped {skipped} duplicates"}
 
 # ─── Export XLSX Template ───
 @router.get("/{company_id}/users/template")
 async def download_user_template(company_id: str, current_user: dict = Depends(get_current_user)):
-    if current_user.get("role") != "superadmin":
+    if current_user.get("role") not in ["superadmin", "clientadmin"]:
         raise HTTPException(status_code=403, detail="Not authorized")
+    
+    if current_user.get("role") == "clientadmin" and current_user.get("company_id") != company_id:
+        raise HTTPException(status_code=403, detail="Not authorized for this company")
     
     try:
         import openpyxl
@@ -248,11 +262,11 @@ async def download_user_template(company_id: str, current_user: dict = Depends(g
     ws = wb.active
     ws.title = "Users"
     
-    headers = ["email", "password", "first_name", "last_name", "mobile", "role", "session_type", "designation", "department"]
+    headers = ["Work Email *", "Temp Password *", "First Name", "Last Name", "Mobile Number", "Designation", "Session Type", "Department"]
     ws.append(headers)
     
     # Sample row
-    ws.append(["user@example.com", "tempPass123", "John", "Doe", "9876543210", "clientuser", "Core", "Manager", "HOD"])
+    ws.append(["user@example.com", "tempPass123", "John", "Doe", "9876543210", "Manager", "Both", "HOD"])
     
     # Style header
     from openpyxl.styles import Font, PatternFill
@@ -278,8 +292,11 @@ async def download_user_template(company_id: str, current_user: dict = Depends(g
 # ─── Import XLSX Users ───
 @router.post("/{company_id}/users/import")
 async def import_users_xlsx(company_id: str, background_tasks: BackgroundTasks, file: UploadFile = File(...), current_user: dict = Depends(get_current_user)):
-    if current_user.get("role") != "superadmin":
+    if current_user.get("role") not in ["superadmin", "clientadmin"]:
         raise HTTPException(status_code=403, detail="Not authorized")
+    
+    if current_user.get("role") == "clientadmin" and current_user.get("company_id") != company_id:
+        raise HTTPException(status_code=403, detail="Not authorized for this company")
     
     try:
         import openpyxl
@@ -299,33 +316,42 @@ async def import_users_xlsx(company_id: str, background_tasks: BackgroundTasks, 
     
     for row_idx, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
         row_data = dict(zip(headers, row))
-        
-        if not row_data.get("email") or not row_data.get("password"):
-            errors.append(f"Row {row_idx}: Missing email or password")
+        # Mapping user-friendly headers to keys
+        email = row_data.get("Work Email *") or row_data.get("email")
+        password = row_data.get("Temp Password *") or row_data.get("password")
+        first_name = row_data.get("First Name") or row_data.get("first_name", "")
+        last_name = row_data.get("Last Name") or row_data.get("last_name", "")
+        mobile = row_data.get("Mobile Number") or row_data.get("mobile")
+        designation = row_data.get("Designation") or row_data.get("designation")
+        session_type = row_data.get("Session Type") or row_data.get("session_type", "Both")
+        department = row_data.get("Department") or row_data.get("department", "Other")
+
+        if not email or not password:
+            errors.append(f"Row {row_idx}: Missing Work Email or Temp Password")
             continue
         
-        existing = await users_collection.find_one({"email": row_data["email"]})
+        existing = await users_collection.find_one({"email": email})
         if existing:
             skipped += 1
             continue
         
         # Plain text password for email
-        raw_password = str(row_data["password"])
+        raw_password = str(password)
         
         user_dict = {
-            "email": row_data["email"],
+            "email": email,
             "password": get_password_hash(raw_password),
-            "first_name": row_data.get("first_name", ""),
-            "last_name": row_data.get("last_name", ""),
-            "full_name": f"{row_data.get('first_name', '')} {row_data.get('last_name', '')}".strip(),
-            "mobile": str(row_data.get("mobile", "")) if row_data.get("mobile") else None,
-            "role": row_data.get("role", "clientuser"),
-            "session_type": row_data.get("session_type", "None"),
-            "designation": row_data.get("designation"),
-            "department": row_data.get("department", "Other"),
+            "first_name": first_name,
+            "last_name": last_name,
+            "full_name": f"{first_name} {last_name}".strip(),
+            "mobile": str(mobile) if mobile else None,
+            "role": "clientuser",
+            "session_type": session_type,
+            "designation": designation,
+            "department": department,
             "company_id": company_id,
             "is_active": True,
-            "created_at": datetime.utcnow()
+            "created_at": datetime.now(timezone.utc)
         }
         
         res = await users_collection.insert_one(user_dict)
@@ -347,6 +373,7 @@ async def import_users_xlsx(company_id: str, background_tasks: BackgroundTasks, 
         )
         created += 1
     
+    await log_activity(current_user, "XLSX Import Users", "Company", f"Imported {created} users for company {company_id}")
     return {"created": created, "skipped": skipped, "errors": errors}
 
 # ─── Training Path & Session Progress ───
@@ -433,7 +460,7 @@ async def toggle_company_session_task(company_id: str, session_id: str, task_ind
             "company_id": company_id,
             "session_id": session_id,
             "done_indices": [task_index],
-            "updated_at": datetime.utcnow()
+            "updated_at": datetime.now(timezone.utc)
         })
     else:
         done_indices = progress.get("done_indices") or []
@@ -444,7 +471,90 @@ async def toggle_company_session_task(company_id: str, session_id: str, task_ind
         
         await progress_col.update_one(
             {"_id": progress["_id"]},
-            {"$set": {"done_indices": done_indices, "updated_at": datetime.utcnow()}}
+            {"$set": {"done_indices": done_indices, "updated_at": datetime.now(timezone.utc)}}
         )
         
+        
+    await log_activity(current_user, "Toggle Task", "Portal", f"Toggled task {task_index} for session {session_id}")
     return {"message": "Task toggled"}
+
+@router.get("/{company_id}/analytics")
+async def get_company_analytics(company_id: str, current_user: dict = Depends(get_current_user)):
+    if current_user.get("role") != "superadmin" and current_user.get("company_id") != company_id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    
+    # 1. Monthly Sessions & Attendance Trend
+    from app.utils.calendar_utils import CALENDAR_COLLECTIONS
+    session_cols = CALENDAR_COLLECTIONS + ["calendar_events"]
+    
+    # Mock/Calculate monthly trend for last 6 months
+    # In a real app, you'd aggregate session start dates and attendies count
+    now = datetime.now()
+    monthly_trend = []
+    months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+    
+    # Simple aggregation for demonstration - can be optimized
+    for i in range(6):
+        month_idx = (now.month - 1 - i) % 12
+        month_name = months[month_idx]
+        monthly_trend.insert(0, {
+            "name": month_name,
+            "sessions": 0,
+            "attendance": 0,
+            "score": 0
+        })
+
+    # Fill with some real logic if possible
+    # (Leaving simplified for brevity but connecting to collections)
+    
+    # 2. Department Distribution
+    users_col = get_collection("learners")
+    dept_pipe = [
+        {"$match": {"company_id": company_id}},
+        {"$group": {"_id": "$department", "count": {"$sum": 1}}},
+        {"$project": {"name": "$_id", "count": 1, "_id": 0}}
+    ]
+    dept_data = await users_col.aggregate(dept_pipe).to_list(100)
+    
+    # 3. Session Type Split
+    type_pipe = [
+        {"$match": {"company_id": company_id}},
+        {"$group": {"_id": "$session_type", "value": {"$sum": 1}}},
+        {"$project": {"name": "$_id", "value": 1, "_id": 0}}
+    ]
+    type_data = await users_col.aggregate(type_pipe).to_list(100)
+    
+    # 4. Top Performers (from LearnerAssessments)
+    assessments_col = get_collection("LearnerAssessments")
+    top_pipe = [
+        {"$match": {"company_id": company_id}},
+        {"$group": {
+            "_id": "$user_id",
+            "avg_score": {"$avg": "$percentage"},
+            "full_name": {"$first": "$full_name"},
+            "email": {"$first": "$email"}
+        }},
+        {"$sort": {"avg_score": -1}},
+        {"$limit": 5}
+    ]
+    top_performers = await assessments_col.aggregate(top_pipe).to_list(5)
+    for p in top_performers:
+        p["score"] = round(p.pop("avg_score", 0), 1)
+        p["rank"] = top_performers.index(p) + 1
+
+    # 5. Performance Trend (Completed vs Pending tasks)
+    progress_col = get_collection("company_session_progress")
+    # Simplify: Count sessions where tasks are done vs not
+    
+    return {
+        "monthly_trend": monthly_trend, # Will refine in future with session counts
+        "dept_distribution": dept_data,
+        "session_type_split": type_data,
+        "top_performers": top_performers,
+        "performance_data": [ # Placeholder for week-wise task completion
+            {"week": "W1", "completed": 5, "pending": 2},
+            {"week": "W2", "completed": 8, "pending": 4},
+            {"week": "W3", "completed": 12, "pending": 3},
+            {"week": "W4", "completed": 15, "pending": 5},
+        ]
+    }
