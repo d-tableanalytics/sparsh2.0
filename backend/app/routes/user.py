@@ -173,11 +173,38 @@ async def get_user_activity(user_id: str, current_user: dict = Depends(get_curre
     if not authorized:
         raise HTTPException(status_code=403, detail="Not authorized")
     
-    # Learnings
+    # Learnings (Mix of content and assessments)
+    learnings = []
+    
+    # 1. Assessments
+    assessments_col = get_collection("LearnerAssessments")
+    q_ass = await assessments_col.find({"user_id": user_id}).sort("submitted_at", -1).to_list(100)
+    for a in q_ass:
+        a["_id"] = str(a["_id"])
+        learners_item = {
+            "_id": a["_id"],
+            "name": a.get("session_title", "Assessment"),
+            "completed": a.get("percentage", 0),
+            "date": a.get("submitted_at"),
+            "type": "assessment",
+            "status": "Completed" if a.get("passed") else "Failed"
+        }
+        learnings.append(learners_item)
+
+    # 2. Manual/Module Learnings
     learnings_col = get_collection("learnings")
-    learnings = await learnings_col.find({"user_id": user_id}).sort("date", -1).to_list(100)
-    for l in learnings:
+    manual_learns = await learnings_col.find({"user_id": user_id}).sort("date", -1).to_list(100)
+    for l in manual_learns:
         l["_id"] = str(l["_id"])
+        if not any(x["_id"] == l["_id"] for x in learnings):
+            learnings.append({
+                "_id": l["_id"],
+                "name": l.get("module_name", "Module"),
+                "completed": l.get("progress", 0),
+                "date": l.get("date"),
+                "type": "module",
+                "status": l.get("status", "In Progress")
+            })
     
     # Attendance
     attendance_col = get_collection("attendance")
@@ -299,35 +326,44 @@ async def get_user_analytics(user_id: str, current_user: dict = Depends(get_curr
     attendance_data.sort(key=lambda x: months.index(x["name"]))
 
     # 3. Learning Progress (Top Modules)
-    # Derive from assessments for now
     module_scores = {}
+    total_percentage = 0
     for ass in all_ass:
         mod = ass.get("session_title", "General")
         if mod not in module_scores: module_scores[mod] = []
         module_scores[mod].append(ass.get("percentage", 0))
+        total_percentage += ass.get("percentage", 0)
     
     learning_progress = []
     for mod, scores in module_scores.items():
         avg = round(sum(scores) / len(scores), 1)
-        learning_progress.append({
-            "name": mod,
-            "completed": avg,
-            "total": 100
-        })
+        learning_progress.append({ "name": mod, "completed": avg, "total": 100 })
 
-    # 4. Task Breakdown
-    # Check session tasks
-    progress_col = get_collection("company_session_progress")
-    # For a specific user? Real tasks are often per-user or per-company.
-    # Assuming session tasks are global for now.
-    
+    avg_score = round(total_percentage / len(all_ass), 1) if all_ass else 0
+
+    # 4. Active Sessions for User
+    batch_id = user.get("batch_id")
+    active_sessions_count = 0
+    if batch_id:
+        from app.utils.calendar_utils import CALENDAR_COLLECTIONS
+        session_cols = CALENDAR_COLLECTIONS + ["calendar_events"]
+        now = datetime.now()
+        for col_name in session_cols:
+            count = await get_collection(col_name).count_documents({
+                "batch_id": batch_id,
+                "start": {"$regex": f"^{now.year}-{now.month:02d}"}
+            })
+            active_sessions_count += count
+
     return {
         "weekly_scores": weekly_scores,
         "attendance_data": attendance_data,
-        "learning_progress": learning_progress[:5], # top 5
+        "learning_progress": learning_progress[:5],
+        "avg_score": avg_score,
+        "active_sessions": active_sessions_count,
         "task_stats": [
             {"name": "Completed", "value": len([a for a in all_ass if a.get("passed")])},
-            {"name": "In Progress", "value": len(all_ass) // 2}, # Mocking relative split
-            {"name": "Pending", "value": 5}
+            {"name": "Pending", "value": max(0, 10 - len(all_ass))}, # Example: assuming 10 core modules
+            {"name": "Other", "value": 0}
         ]
     }

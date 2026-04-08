@@ -44,16 +44,23 @@ const SessionDetails = () => {
             const ev = res.data;
             setGptProjects(gptRes.data);
 
-            // Fetch template details if linked
-            if (ev.session_template_id) {
+            // ─── CURRICULUM SYNC: Linked Template Logic ───
+            // Handle both possible field names and ensure string conversion if it's a mongo object
+            const rawTemplateId = ev.session_template_id || ev.template_id;
+            const tId = (typeof rawTemplateId === 'object' && rawTemplateId?.$oid) ? rawTemplateId.$oid : rawTemplateId;
+
+            if (tId) {
+                console.log(`[SessionDetails] Linking Curriculum Template: ${tId}`);
                 try {
-                    const tempRes = await api.get(`/session-templates/${ev.session_template_id}`);
+                    const tempRes = await api.get(`/session-templates/${tId}`);
                     ev.template_tasks = tempRes.data.tasks || [];
                     ev.assessments = tempRes.data.assessments || [];
-                    console.log("Session Template Logic: Successfully linked curriculum meta-data");
+                    console.log(`[SessionDetails] Sync Success: Found ${ev.template_tasks.length} tasks and ${ev.assessments.length} assessments.`);
                 } catch (tErr) {
-                    console.error("CURRICULUM SYNC ERROR:", tErr);
+                    console.error("[SessionDetails] Curriculum Sync Failure:", tErr);
                 }
+            } else {
+                console.warn("[SessionDetails] No Template ID detected on session document.");
             }
 
             setSession(ev);
@@ -565,40 +572,50 @@ const SessionDetails = () => {
                 {/* Session Learning Tasks */}
                 <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-[24px] p-6 shadow-sm overflow-hidden flex flex-col">
                     <div className="flex items-center justify-between mb-4">
-                        <h3 className="text-[11px] font-black text-[var(--text-muted)] uppercase tracking-widest flex items-center gap-2">
-                            <ListTodo size={16} className="text-emerald-500" /> Session Tasks
-                        </h3>
+                        <div>
+                            <h3 className="text-[11px] font-black text-[var(--text-muted)] uppercase tracking-widest flex items-center gap-2">
+                                <ListTodo size={16} className="text-emerald-500" /> Session Tasks
+                            </h3>
+                            <p className="text-[9px] font-bold text-gray-400 uppercase tracking-tighter mt-1">Curriculum Benchmarks</p>
+                        </div>
                         <span className="text-[10px] font-bold text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded-full uppercase tracking-widest">
                             {session.template_tasks?.length || 0} Total
                         </span>
                     </div>
-                    <div className="space-y-2 flex-1 overflow-y-auto max-h-[300px] no-scrollbar">
+                    <div className="space-y-2 flex-1 overflow-y-auto max-h-[350px] no-scrollbar">
                         {session.template_tasks && session.template_tasks.length > 0 ? (
                             session.template_tasks.map((task, idx) => {
                                 const isDone = (session.session_tasks || []).find(t => t.index === idx)?.is_done;
                                 return (
                                     <div 
                                         key={idx} 
-                                        onClick={() => (!isStaff && role !== 'clientadmin') ? null : handleToggleTask(idx)}
-                                        className={`group flex items-center justify-between p-4 border rounded-2xl transition-all cursor-pointer ${isDone ? 'bg-emerald-50 border-emerald-100' : 'bg-[var(--input-bg)] border-transparent hover:border-emerald-500/30'}`}
+                                        onClick={() => isStaff ? null : handleToggleTask(idx)}
+                                        className={`group flex items-center justify-between p-4 border rounded-2xl transition-all ${isStaff ? 'cursor-default' : 'cursor-pointer hover:border-emerald-500/30'} ${isDone ? 'bg-emerald-50 border-emerald-100' : 'bg-[var(--input-bg)] border-transparent'}`}
                                     >
                                         <div className="flex flex-col">
                                             <span className={`text-[13px] font-black uppercase tracking-tight ${isDone ? 'text-emerald-700' : 'text-[var(--text-main)]'}`}>{task.title}</span>
                                             <div className="flex items-center gap-2 mt-1">
                                                 <span className="text-[9px] font-bold uppercase text-[var(--text-muted)] opacity-60 flex items-center gap-1">
-                                                    <Target size={10} /> {task.points} XP
+                                                    <Target size={10} /> {task.points} Training Points
                                                 </span>
-                                                {isDone && <span className="text-[9px] font-black text-emerald-600 uppercase tracking-widest flex items-center gap-1">• <CheckCircle size={10}/> Completed</span>}
+                                                {isDone && <span className="text-[9px] font-black text-emerald-600 uppercase tracking-widest flex items-center gap-1">• <CheckCircle size={10}/> Authenticated</span>}
                                             </div>
                                         </div>
-                                        <div className={`w-6 h-6 rounded-lg flex items-center justify-center transition-all ${isDone ? 'bg-emerald-500 text-white shadow-lg shadow-emerald-200' : 'bg-white border-2 border-gray-100 group-hover:border-emerald-500'}`}>
-                                            {isDone ? <CheckCircle size={14} /> : <div className="w-1.5 h-1.5 rounded-full bg-gray-200"></div>}
-                                        </div>
+                                        {!isStaff && (
+                                            <div className={`w-8 h-8 rounded-xl flex items-center justify-center transition-all ${isDone ? 'bg-emerald-500 text-white shadow-lg shadow-emerald-200' : 'bg-white border-2 border-gray-100 group-hover:border-emerald-500'}`}>
+                                                {isDone ? <CheckCircle size={14} /> : <div className="w-2 h-2 rounded-full bg-gray-200"></div>}
+                                            </div>
+                                        )}
+                                        {isStaff && isDone && (
+                                            <div className="w-8 h-8 rounded-xl bg-emerald-100 text-emerald-600 flex items-center justify-center">
+                                                <CheckCircle size={16} />
+                                            </div>
+                                        )}
                                     </div>
                                 );
                             })
                         ) : (
-                            <div className="flex flex-col items-center justify-center p-8 opacity-40 italic border-2 border-dashed border-gray-100 rounded-2xl">
+                            <div className="flex flex-col items-center justify-center p-12 opacity-40 italic border-2 border-dashed border-gray-100 rounded-2xl">
                                 <ListTodo size={32} className="mb-2 text-gray-400" />
                                 <p className="text-[10px] font-black uppercase tracking-widest">No Curriculum Tasks</p>
                             </div>
@@ -609,22 +626,25 @@ const SessionDetails = () => {
                 {/* Session Assessments (Quizzes) */}
                 <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-[24px] p-6 shadow-sm flex flex-col">
                     <div className="flex items-center justify-between mb-4">
-                        <h3 className="text-[11px] font-black text-[var(--text-muted)] uppercase tracking-widest flex items-center gap-2">
-                            <FileQuestion size={16} className="text-purple-500" /> Knowledge Checks
-                        </h3>
+                        <div>
+                            <h3 className="text-[11px] font-black text-[var(--text-muted)] uppercase tracking-widest flex items-center gap-2">
+                                <FileQuestion size={16} className="text-purple-500" /> Knowledge Checks
+                            </h3>
+                            <p className="text-[9px] font-bold text-gray-400 uppercase tracking-tighter mt-1">Quality Assessments</p>
+                        </div>
                         <span className="text-[10px] font-bold text-purple-600 bg-purple-50 px-2 py-0.5 rounded-full uppercase tracking-widest">
                              {session.assessments?.length || 0} Active
                         </span>
                     </div>
-                    <div className="space-y-3 flex-1 overflow-y-auto max-h-[300px] no-scrollbar">
+                    <div className="space-y-3 flex-1 overflow-y-auto max-h-[350px] no-scrollbar">
                         {session.assessments && session.assessments.length > 0 ? (
                             session.assessments.map((quiz, idx) => (
                                 <div 
                                     key={idx} 
-                                    className="flex items-center gap-4 p-4 bg-[var(--input-bg)] border border-transparent hover:border-purple-500/30 rounded-2xl transition-all group"
+                                    className="flex items-center gap-4 p-4 bg-[var(--input-bg)] border border-transparent rounded-2xl transition-all group"
                                 >
-                                    <div className="w-10 h-10 rounded-xl bg-purple-50 text-purple-600 flex items-center justify-center group-hover:scale-110 transition-transform shadow-sm">
-                                        <BookOpen size={18} />
+                                    <div className="w-12 h-12 rounded-2xl bg-purple-50 text-purple-600 flex items-center justify-center transition-transform shadow-sm">
+                                        <BookOpen size={20} />
                                     </div>
                                     <div className="flex-1 min-w-0">
                                         <p className="text-[13px] font-black text-[var(--text-main)] uppercase truncate tracking-tight">{quiz.title}</p>
@@ -633,21 +653,21 @@ const SessionDetails = () => {
                                                 <Target size={10} /> Passing: {quiz.passing_score}%
                                             </p>
                                             <p className="text-[9px] font-bold text-[var(--text-muted)] uppercase flex items-center gap-1">
-                                                <Clock size={10} /> {quiz.questions?.length || 0} Q's • {quiz.questions?.reduce((acc, q) => acc + (q.marks || 1), 0)} Marks
+                                                <Clock size={10} /> {quiz.questions?.length || 0} Questions
                                             </p>
                                         </div>
                                     </div>
                                     <button 
                                         onClick={() => navigate(`/assessment/${sessionId}/${idx}`)} 
-                                        className="p-2.5 rounded-xl bg-white border border-gray-100 text-purple-600 hover:bg-purple-600 hover:text-white transition-all shadow-sm"
-                                        title={isStaff ? "View Quiz Details" : "Start Assessment"}
+                                        className="p-3 rounded-2xl bg-white border border-gray-100 text-purple-600 hover:bg-purple-600 hover:text-white transition-all shadow-sm"
+                                        title={isStaff ? "Audit Content" : "Initiate Verification"}
                                     >
-                                        <ChevronRight size={16} />
+                                        <Eye size={18} />
                                     </button>
                                 </div>
                             ))
                         ) : (
-                            <div className="flex flex-col items-center justify-center p-8 opacity-40 italic border-2 border-dashed border-gray-100 rounded-2xl">
+                            <div className="flex flex-col items-center justify-center p-12 opacity-40 italic border-2 border-dashed border-gray-100 rounded-2xl">
                                 <HelpCircle size={32} className="mb-2 text-gray-400" />
                                 <p className="text-[10px] font-black uppercase tracking-widest">No Assessments Linked</p>
                             </div>

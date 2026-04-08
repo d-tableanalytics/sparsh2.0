@@ -251,6 +251,18 @@ async def send_notification_from_template(user_obj: dict, template_slug: str, co
         results["whatsapp"] = await send_whatsapp_notification(phone, rendered_body, user_id, whatsapp_t["slug"])
     return results
 
+def format_datetime_standard(dt_str: str) -> str:
+    if not dt_str: return "TBD"
+    try:
+        if isinstance(dt_str, datetime):
+            dt = dt_str
+        else:
+            dt = datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
+        return dt.strftime("%d %b %Y, %I:%M %p")
+    except Exception as e:
+        logger.error(f"Date parsing error for {dt_str}: {e}")
+        return dt_str
+
 async def send_notification(user_obj: dict, subject: str, message: str, delivery_type: str = "both"):
     email = user_obj.get("email")
     phone = user_obj.get("mobile")
@@ -273,12 +285,12 @@ async def send_task_created_email(user_obj: dict, task_data: dict, creator_name:
 
     context = {
         "task_name": task_data.get("title"),
-        "topic": task_data.get("title"), # Alias for uniform HTML templates
+        "topic": task_data.get("title"), 
         "task_category": task_data.get("category"),
         "critical_level": task_data.get("priority"),
         "assigned_user": user_obj.get("full_name") or user_obj.get("first_name"),
         "assigned_by": creator_name,
-        "deadline": dt_str,
+        "deadline": format_datetime_standard(dt_str),
         "date": parsed_date,
         "day": parsed_day,
         "time": parsed_time,
@@ -300,12 +312,12 @@ async def send_task_updated_email(user_obj: dict, task_data: dict, updated_by: s
 
     context = {
         "task_name": task_data.get("title"),
-        "topic": task_data.get("title"), # Alias 
+        "topic": task_data.get("title"), 
         "task_category": task_data.get("category"),
         "critical_level": task_data.get("priority"),
         "assigned_user": user_obj.get("full_name") or user_obj.get("first_name"),
         "assigned_by": updated_by,
-        "deadline": dt_str,
+        "deadline": format_datetime_standard(dt_str),
         "date": parsed_date,
         "day": parsed_day,
         "time": parsed_time,
@@ -405,11 +417,14 @@ async def send_event_deleted_email(user_obj: dict, event_title: str, deleted_by:
 
 async def send_reminder_email(user_obj: dict, event: dict):
     is_task = event.get("type") == "task"
+    dt_str = event.get("start", "")
+    formatted_dt = format_datetime_standard(dt_str)
+    
     context = {
         "title": event.get("title"),
         "reminder_time": datetime.utcnow().strftime("%H:%M %p"),
-        "event_time": event.get("start") if not is_task else "N/A",
-        "task_deadline": event.get("start") if is_task else "N/A",
+        "event_time": formatted_dt if not is_task else "N/A",
+        "task_deadline": formatted_dt if is_task else "N/A",
         "meeting_url": event.get("meeting_link") or "View in Dashboard",
         "description": event.get("additional_details") or "No further details."
     }
@@ -459,7 +474,7 @@ async def send_attendance_thanks_email(user_obj: dict, event_data: dict):
     context = {
         "user_name": user_obj.get("full_name") or user_obj.get("first_name", "User"),
         "event_title": event_data.get("title"),
-        "event_time": event_data.get("start")
+        "event_time": format_datetime_standard(event_data.get("start"))
     }
     return await send_notification_from_template(user_obj, "attendance_thanks", context, "email")
 
@@ -467,6 +482,6 @@ async def send_attendance_absent_email(user_obj: dict, event_data: dict):
     context = {
         "user_name": user_obj.get("full_name") or user_obj.get("first_name", "User"),
         "event_title": event_data.get("title"),
-        "event_time": event_data.get("start")
+        "event_time": format_datetime_standard(event_data.get("start"))
     }
     return await send_notification_from_template(user_obj, "attendance_absent", context, "email")

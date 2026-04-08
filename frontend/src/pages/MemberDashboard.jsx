@@ -242,16 +242,21 @@ const MemberDashboard = () => {
 
   if (!member) return <div className="text-center py-20 text-[var(--text-muted)]">Member not found</div>;
 
-  // Generate chart data - Fallback to mock if live data unavailable
-  const weeklyScores = (analytics?.weekly_scores && analytics.weekly_scores.length > 0) ? analytics.weekly_scores : generateWeeklyScores();
-  const attendanceData = (analytics?.attendance_data && analytics.attendance_data.length > 0) ? analytics.attendance_data : generateAttendanceData();
-  const learningProgress = (analytics?.learning_progress && analytics.learning_progress.length > 0) ? analytics.learning_progress : generateLearningProgress();
-  const taskPie = analytics?.task_stats || generateTaskPie();
-  const mockTimeline = activity.activities.length > 0 ? activity.activities : generateActivityTimeline();
+  // Generate chart data - Strictly use live data
+  const weeklyScores = analytics?.weekly_scores || [];
+  const attendanceData = analytics?.attendance_data || [];
+  const learningProgress = analytics?.learning_progress || [];
+  const taskPie = analytics?.task_stats || [
+    { name: 'Completed', value: 0 },
+    { name: 'In Progress', value: 0 },
+    { name: 'Other', value: 0 }
+  ];
+  const mockTimeline = activity.activities.length > 0 ? activity.activities : [];
   const daysSinceJoined = member.created_at ? Math.floor((Date.now() - new Date(member.created_at).getTime()) / 86400000) : 0;
-  const totalPresent = attendanceData.reduce((s, d) => s + d.present, 0);
-  const totalAbsent = attendanceData.reduce((s, d) => s + d.absent, 0);
-  const attendanceRate = Math.round((totalPresent / (totalPresent + totalAbsent)) * 100);
+  
+  const totalPresent = attendanceData.reduce((s, d) => s + (d.present || 0), 0);
+  const totalAbsent = attendanceData.reduce((s, d) => s + (d.absent || 0), 0);
+  const attendanceRate = (totalPresent + totalAbsent) > 0 ? Math.round((totalPresent / (totalPresent + totalAbsent)) * 100) : 0;
 
   const tabs = [
     { id: 'overview', label: 'Overview', icon: BarChart3 },
@@ -363,9 +368,9 @@ const MemberDashboard = () => {
             {/* Stats */}
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
               <StatCard icon={BookOpen} label="Modules Done" value={learningProgress.filter(l => l.completed >= 80).length} sub={`of ${learningProgress.length} total`} color="indigo" />
-              <StatCard icon={CalendarCheck} label="Attendance Rate" value={`${attendanceRate}%`} sub={`${totalPresent} sessions`} color="green" />
-              <StatCard icon={Target} label="Avg. Score" value={`${Math.round(weeklyScores.reduce((s, d) => s + d.score, 0) / weeklyScores.length)}%`} sub="Last 8 weeks" color="orange" />
-              <StatCard icon={Clock} label="Days Active" value={daysSinceJoined} sub="Since onboarding" color="yellow" />
+              <StatCard icon={CalendarCheck} label="Attendance Rate" value={attendanceData.length > 0 ? `${attendanceRate}%` : '0%'} sub={`${totalPresent} sessions`} color="green" />
+              <StatCard icon={Target} label="Avg. Score" value={analytics?.avg_score !== undefined ? `${analytics.avg_score}%` : '—'} sub="Overall performance" color="orange" />
+              <StatCard icon={CalendarCheck} label="Active Sessions" value={analytics?.active_sessions ?? 0} sub="This month" color="yellow" />
             </div>
 
             {/* Profile Card */}
@@ -498,9 +503,9 @@ const MemberDashboard = () => {
           <motion.div key="learnings" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} className="space-y-6">
             {/* Learning Stats */}
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-              <StatCard icon={BookOpen} label="Modules Completed" value={learningProgress.filter(l => l.completed >= 80).length} color="green" />
-              <StatCard icon={Target} label="Highest Score" value={`${Math.max(...learningProgress.map(l => l.completed))}%`} color="indigo" />
-              <StatCard icon={Zap} label="Avg. Completion" value={`${Math.round(learningProgress.reduce((s, l) => s + l.completed, 0) / learningProgress.length)}%`} color="orange" />
+              <StatCard icon={BookOpen} label="Modules Completed" value={activity.learnings.filter(l => l.status === 'Completed').length} color="green" />
+              <StatCard icon={Target} label="Success Rate" value={`${activity.learnings.length > 0 ? Math.round((activity.learnings.filter(l => l.status === 'Completed').length / activity.learnings.length) * 100) : 0}%`} color="indigo" />
+              <StatCard icon={Zap} label="Avg. Score" value={`${analytics?.avg_score || 0}%`} color="orange" />
             </div>
 
             {/* Module Table */}
@@ -519,8 +524,8 @@ const MemberDashboard = () => {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[var(--border)]">
-                  {learningProgress.map((mod, i) => (
-                    <tr key={mod.name} className="hover:bg-[var(--table-hover)] transition-all">
+                  {activity.learnings.map((mod, i) => (
+                    <tr key={mod._id || i} className="hover:bg-[var(--table-hover)] transition-all">
                       <td className="px-5 py-3">
                         <div className="flex items-center gap-3">
                           <div className="w-8 h-8 rounded-md flex items-center justify-center" style={{ background: `var(--accent-indigo-bg)` }}>
@@ -540,11 +545,11 @@ const MemberDashboard = () => {
                       <td className="px-5 py-3 text-[13px] font-black" style={{ color: CHART_COLORS[i % CHART_COLORS.length] }}>{mod.completed}</td>
                       <td className="px-5 py-3">
                         <span className={`px-2 py-0.5 rounded-md text-[10px] font-bold ${
-                          mod.completed >= 80 ? 'bg-[var(--accent-green-bg)] text-[var(--accent-green)]' :
-                          mod.completed >= 50 ? 'bg-[var(--accent-yellow-bg)] text-[var(--accent-yellow)]' :
+                          mod.status === 'Completed' || mod.completed >= 80 ? 'bg-[var(--accent-green-bg)] text-[var(--accent-green)]' :
+                          mod.completed >= 40 ? 'bg-[var(--accent-yellow-bg)] text-[var(--accent-yellow)]' :
                           'bg-[var(--accent-red-bg)] text-[var(--accent-red)]'
                         }`}>
-                          {mod.completed >= 80 ? 'Completed' : mod.completed >= 50 ? 'In Progress' : 'Pending'}
+                          {mod.status}
                         </span>
                       </td>
                     </tr>

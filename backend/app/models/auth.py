@@ -9,3 +9,7 @@ class TokenData(BaseModel):
     email: Optional[str] = None
     role: Optional[str] = None
     company_id: Optional[str] = None
+
+class PasswordChange(BaseModel):
+    current_password: str
+    new_password: str

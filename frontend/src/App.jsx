@@ -22,6 +22,7 @@ import CalendarPage from './pages/CalendarPage';
 import UserManagement from './pages/UserManagement';
 import UserDetails from './pages/UserDetails';
 import SettingsPage from './pages/SettingsPage';
+import ProfilePage from './pages/ProfilePage';
 import GptProjects from './pages/GptProjects';
 import GptEditor from './pages/GptEditor';
 import GptChat from './pages/GptChat';
@@ -64,6 +65,7 @@ const AppRoutes = () => {
       <Route path="/admin/users" element={<PrivateRoute><UserManagement /></PrivateRoute>} />
       <Route path="/admin/users/:userId" element={<PrivateRoute><UserDetails /></PrivateRoute>} />
       <Route path="/admin/settings" element={<PrivateRoute><SettingsPage /></PrivateRoute>} />
+      <Route path="/profile" element={<PrivateRoute><ProfilePage /></PrivateRoute>} />
 
       {/* GPT Module */}
       <Route path="/gpt" element={<PrivateRoute><GptProjects /></PrivateRoute>} />

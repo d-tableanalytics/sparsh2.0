@@ -49,6 +49,12 @@ const QuarterDetails = () => {
   const [quarter, setQuarter] = useState(null);
   const [sessions, setSessions] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [analytics, setAnalytics] = useState({
+    total_sessions: 0,
+    avg_attendance: "0%",
+    active_companies: 0,
+    tasks_done: "0%"
+  });
   const [editMode, setEditMode] = useState(false);
   const [editData, setEditData] = useState({});
   const [statusDropdown, setStatusDropdown] = useState(false);
@@ -57,14 +63,16 @@ const QuarterDetails = () => {
 
   const fetchData = async () => {
     try {
-      const [res, evRes, gptRes] = await Promise.all([
+      const [res, evRes, gptRes, anaRes] = await Promise.all([
         api.get(`/quarters/${quarterId}`),
         api.get('/calendar/events'),
-        api.get('/gpt/projects')
+        api.get('/gpt/projects'),
+        api.get(`/quarters/${quarterId}/analytics`)
       ]);
       setQuarter(res.data);
       setEditData(res.data);
       setGptProjects(gptRes.data);
+      setAnalytics(anaRes.data);
 
       const quarterSessions = evRes.data.filter(e =>
         e.extendedProps?.quarter_id === quarterId && e.type === 'event'
@@ -241,10 +249,10 @@ const QuarterDetails = () => {
 
       {/* ─── Quarter Stats ─── */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        <StatCard icon={LayoutDashboard} label="Total Sessions" value="12" color="indigo" />
-        <StatCard icon={TrendingUp} label="Avg Attendance" value="94%" color="green" />
-        <StatCard icon={Users} label="Active Companies" value="8" color="orange" />
-        <StatCard icon={Target} label="Tasks Done" value="86%" color="red" />
+        <StatCard icon={LayoutDashboard} label="Total Sessions" value={analytics.total_sessions} color="indigo" />
+        <StatCard icon={TrendingUp} label="Avg Attendance" value={analytics.avg_attendance} color="green" />
+        <StatCard icon={Users} label="Active Companies" value={analytics.active_companies} color="orange" />
+        <StatCard icon={Target} label="Tasks Done" value={analytics.tasks_done} color="red" />
       </div>
 
       {/* ─── Sessions List ─── */}

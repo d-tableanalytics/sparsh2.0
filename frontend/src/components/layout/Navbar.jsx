@@ -1,14 +1,17 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { useTheme } from '../../context/ThemeContext';
 import { useAuth } from '../../context/AuthContext';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { 
-  Sun, Moon, Bell, Search, ChevronDown, Settings 
+  Sun, Moon, Bell, Search, ChevronDown, Settings, User, LogOut
 } from 'lucide-react';
 
 const Navbar = () => {
   const { theme, toggleTheme } = useTheme();
   const { user } = useAuth();
+
+  const navigate = useNavigate();
+  const [isProfileOpen, setIsProfileOpen] = useState(false);
 
   return (
     <nav className="h-14 px-6 flex items-center justify-between border-b border-[var(--border)] bg-[var(--bg-card)] sticky top-0 z-30 transition-all duration-300">
@@ -52,16 +55,45 @@ const Navbar = () => {
 
         <div className="h-6 w-px bg-[var(--border)] mx-1"></div>
 
-        <button className="flex items-center gap-2 p-1 pl-1 pr-2 hover:bg-[var(--input-bg)] rounded-lg transition-all group">
-          <div className="w-8 h-8 rounded-lg flex items-center justify-center text-white font-bold text-[10px]" style={{ background: 'var(--avatar-bg)' }}>
-            {user?.full_name?.charAt(0) || 'U'}
-          </div>
-          <div className="flex flex-col items-start sr-only sm:not-sr-only">
-            <span className="text-[13px] font-bold text-[var(--text-main)] leading-none">{user?.full_name || 'Guest'}</span>
-            <span className="text-[10px] text-[var(--accent-indigo)] font-bold uppercase tracking-tight mt-0.5">{user?.role || 'User'}</span>
-          </div>
-          <ChevronDown size={12} className="text-[var(--text-muted)] ml-1" />
-        </button>
+        <div className="relative">
+          <button 
+            onClick={() => setIsProfileOpen(!isProfileOpen)}
+            className="flex items-center gap-2 p-1 pl-1 pr-2 hover:bg-[var(--input-bg)] rounded-lg transition-all group"
+          >
+            <div className="w-8 h-8 rounded-lg flex items-center justify-center text-white font-bold text-[10px]" style={{ background: 'var(--avatar-bg)' }}>
+              {user?.full_name?.charAt(0) || 'U'}
+            </div>
+            <div className="flex flex-col items-start sr-only sm:not-sr-only">
+              <span className="text-[13px] font-bold text-[var(--text-main)] leading-none">{user?.full_name || 'Guest'}</span>
+              <span className="text-[10px] text-[var(--accent-indigo)] font-bold uppercase tracking-tight mt-0.5">{user?.role || 'User'}</span>
+            </div>
+            <ChevronDown size={12} className={`text-[var(--text-muted)] ml-1 transition-transform duration-300 ${isProfileOpen ? 'rotate-180' : ''}`} />
+          </button>
+
+          {isProfileOpen && (
+            <div className="absolute right-0 top-12 w-48 bg-[var(--bg-card)] border border-[var(--border)] rounded-xl shadow-xl z-50 overflow-hidden py-1 animate-in fade-in slide-in-from-top-2">
+              <Link 
+                to="/profile" 
+                onClick={() => setIsProfileOpen(false)}
+                className="flex items-center gap-3 px-4 py-2 text-[13px] font-medium text-[var(--text-main)] hover:bg-[var(--input-bg)] transition-all"
+              >
+                <div className="w-7 h-7 rounded-lg bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] flex items-center justify-center">
+                  <User size={14} />
+                </div>
+                Manage Profile
+              </Link>
+              <button 
+                onClick={() => { logout(); setIsProfileOpen(false); }}
+                className="w-full flex items-center gap-3 px-4 py-2 text-[13px] font-medium text-[var(--accent-red)] hover:bg-[var(--accent-red-bg)] transition-all"
+              >
+                <div className="w-7 h-7 rounded-lg bg-[var(--accent-red-bg)] text-[var(--accent-red)] flex items-center justify-center">
+                  <LogOut size={14} />
+                </div>
+                Sign Out
+              </button>
+            </div>
+          )}
+        </div>
       </div>
     </nav>
   );
