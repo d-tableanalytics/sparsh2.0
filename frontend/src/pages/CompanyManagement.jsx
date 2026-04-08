@@ -12,6 +12,7 @@ import {
   LayoutGrid, List, Search, Filter, MoreVertical,
   ExternalLink, Activity
 } from 'lucide-react';
+import { useAuth } from '../context/AuthContext';
 
 const IconicInput = ({ icon: Icon, label, ...props }) => (
   <div className="space-y-1 group">
@@ -33,6 +34,7 @@ const IconicInput = ({ icon: Icon, label, ...props }) => (
 
 const CompanyManagement = () => {
   const navigate = useNavigate();
+  const { user } = useAuth();
   const { showSuccess, showError } = useNotification();
   const [companies, setCompanies] = useState([]);
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -52,6 +54,8 @@ const CompanyManagement = () => {
       password: '', session_type: 'Both', designation: '', department: 'MD'
     }
   });
+
+  const canCreate = user?.role === 'superadmin' || user?.permissions?.companies?.create;
 
   const fetchCompanies = async () => {
     try {
@@ -166,13 +170,15 @@ const CompanyManagement = () => {
             </button>
           </div>
 
-          <button 
-            onClick={() => setIsModalOpen(true)} 
-            className="h-10 px-4 bg-[var(--btn-primary)] hover:bg-[var(--btn-primary-hover)] text-white font-bold text-[13px] rounded-lg flex items-center gap-2 transition-all shadow-sm"
-          >
-            <Plus size={16} />
-            Add Company
-          </button>
+          {canCreate && (
+            <button 
+              onClick={() => setIsModalOpen(true)} 
+              className="h-10 px-4 bg-[var(--btn-primary)] hover:bg-[var(--btn-primary-hover)] text-white font-bold text-[13px] rounded-lg flex items-center gap-2 transition-all shadow-sm"
+            >
+              <Plus size={16} />
+              Add Company
+            </button>
+          )}
         </div>
       </div>
 

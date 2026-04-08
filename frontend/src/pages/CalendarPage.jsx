@@ -85,11 +85,29 @@ const CalendarPage = () => {
 
     const formatIST = (dateStr) => {
         if (!dateStr) return "";
-        return new Date(dateStr).toLocaleString('en-IN', {
+        let d = new Date(dateStr);
+        if (typeof dateStr === 'string' && !dateStr.endsWith('Z') && !dateStr.includes('+')) {
+            d = new Date(dateStr + 'Z');
+        }
+        return d.toLocaleString('en-IN', {
             timeZone: 'Asia/Kolkata', weekday: 'long', day: 'numeric', month: 'long',
             hour: '2-digit', minute: '2-digit', hour12: true
         });
     };
+
+    const formatShortIST = (dateStr) => {
+        if (!dateStr) return "";
+        let d = new Date(dateStr);
+        if (typeof dateStr === 'string' && !dateStr.endsWith('Z') && !dateStr.includes('+')) {
+            d = new Date(dateStr + 'Z');
+        }
+        return d.toLocaleString('en-IN', {
+            timeZone: 'Asia/Kolkata',
+            day: 'numeric', month: 'short',
+            hour: '2-digit', minute: '2-digit', hour12: true
+        });
+    };
+
 
     const getLocalDatePart = (dateStr) => {
         if (!dateStr) return "";
@@ -228,8 +246,16 @@ const CalendarPage = () => {
 
     const handleQuickAction = async (id, action) => {
         try {
-            if (action === 'delete') { await api.delete(`/calendar/events/${id}`); showSuccess("Entity removed from calendar"); }
-            else if (action === 'complete') { await api.put(`/calendar/events/${id}`, { status: 'completed' }); showSuccess("Status updated"); }
+            if (action === 'delete') { 
+                if (!canDelete) return showError("Forbidden: You do not have digital authority to delete this blueprint.");
+                await api.delete(`/calendar/events/${id}`); 
+                showSuccess("Entity removed from calendar"); 
+            }
+            else if (action === 'complete') { 
+                if (!canUpdate) return showError("Forbidden: You do not have digital authority to modify this event.");
+                await api.patch(`/calendar/events/${id}`, { status: 'completed' }); 
+                showSuccess("Status updated"); 
+            }
             fetchData();
             // If in summary modal, refresh current day list
             if (showSummary) {
@@ -267,7 +293,7 @@ const CalendarPage = () => {
         } catch (e) { console.error("Conflict check failed", e); }
 
         try {
-            if (isEdit) await api.put(`/calendar/events/${currentEventId}`, eventForm);
+            if (isEdit) await api.patch(`/calendar/events/${currentEventId}`, eventForm);
             else await api.post('/calendar/events', eventForm);
             showSuccess(isEdit ? 'Event updated' : 'Event scheduled successfully');
             fetchData(); setShowModal(false); setShowSummary(false); 
@@ -275,6 +301,10 @@ const CalendarPage = () => {
     };
 
     const role = user?.role?.toLowerCase();
+    const canCreate = user?.role === 'superadmin' || user?.permissions?.calendar?.create;
+    const canUpdate = user?.role === 'superadmin' || user?.permissions?.calendar?.update;
+    const canDelete = user?.role === 'superadmin' || user?.permissions?.calendar?.delete;
+
     const isStaff = ['superadmin', 'admin', 'coach', 'staff'].includes(role);
     const isLearner = ['learner', 'clientadmin', 'clientdoer', 'clientuser'].includes(role);
 
@@ -343,12 +373,12 @@ const CalendarPage = () => {
                 <div className="flex flex-col gap-1.5 text-[10px] font-bold text-[var(--text-muted)] mt-2 border-t border-[var(--border)] pt-2 border-dashed">
                     <div className="flex items-center justify-between">
                         <span className="flex items-center gap-1 opacity-60"> <Clock size={11} /> Deadline: </span>
-                        <span className="text-[var(--text-main)]">{new Date(ev.start).toLocaleDateString([], { day: 'numeric', month: 'short' })} • {new Date(ev.start).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true })}</span>
+                        <span className="text-[var(--text-main)]">{formatShortIST(ev.start)}</span>
                     </div>
                     {ev.extendedProps.completed_at && (
                         <div className="flex items-center justify-between text-emerald-600 bg-emerald-500/5 px-2 py-0.5 rounded-md">
                             <span className="flex items-center gap-1 uppercase text-[8px] font-black"> <CheckCircle size={11} /> Completed: </span>
-                            <span className="font-black italic">{new Date(ev.extendedProps.completed_at).toLocaleString([], { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', hour12: true })}</span>
+                            <span className="font-black italic">{formatShortIST(ev.extendedProps.completed_at)}</span>
                         </div>
                     )}
                     <div className="flex items-center gap-2 mt-0.5">
@@ -363,16 +393,16 @@ const CalendarPage = () => {
 
                 <div className="mt-3 flex items-center justify-between border-t border-dashed border-gray-200 pt-3">
                     <div className="flex items-center gap-2">
-                        {(user.role === 'superadmin' || user.role === 'admin' || ev.extendedProps.isCreator) && (
+                        {(canUpdate || ev.extendedProps.isCreator) && (
                             <button onClick={() => handleQuickAction(ev.id, 'complete')} className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[9px] font-black transition-all ${s === 'completed' ? 'bg-green-100/10 text-green-600 border border-green-200' : 'bg-[var(--bg-main)] text-[var(--text-muted)] hover:bg-green-500 hover:text-white border border-[var(--border)]'}`}>
                                 {s === 'completed' ? <Check size={12} /> : <CheckCircle size={12} />} {s === 'completed' ? 'Done' : 'Complete'}
                             </button>
                         )}
                         <button onClick={() => openEditModal(ev)} className="p-1.5 bg-[var(--bg-main)] border border-[var(--border)] text-[var(--text-muted)] hover:text-[var(--accent-indigo)] hover:bg-indigo-500/10 rounded-lg transition-all"> 
-                            { (user.role === 'superadmin' || user.role === 'admin' || ev.extendedProps.isCreator) ? <Edit2 size={12} /> : <Eye size={12} /> } 
+                            { (canUpdate || ev.extendedProps.isCreator) ? <Edit2 size={12} /> : <Eye size={12} /> } 
                         </button>
                     </div>
-                    {(user.role === 'superadmin' || user.role === 'admin' || ev.extendedProps.isCreator) && (
+                    {(canDelete || ev.extendedProps.isCreator) && (
                         <button onClick={() => handleQuickAction(ev.id, 'delete')} className="p-1.5 text-gray-300 hover:text-red-500 hover:bg-red-500/10 rounded-lg transition-all opacity-0 group-hover:opacity-100"> <Trash2 size={12} /> </button>
                     )}
                 </div>
@@ -519,7 +549,7 @@ const CalendarPage = () => {
                                 <div className="space-y-4">
                                     <div className="flex items-center justify-between border-b border-[var(--border)] pb-2">
                                         <h3 className="text-[11px] font-black text-[var(--accent-indigo)] uppercase tracking-[0.2em] flex items-center gap-1.5"> <Activity size={14} /> Sessions ({dayEvents.filter(e => e.extendedProps.type === 'event').length}) </h3>
-                                        {(!summaryDate || new Date(summaryDate + "T23:59:59") >= new Date() || backdateSettings.allow_backdate || backdateSettings.exception_users.includes(user?.email)) && (
+                                        {(canCreate && (!summaryDate || new Date(summaryDate + "T23:59:59") >= new Date() || backdateSettings.allow_backdate || backdateSettings.exception_users.includes(user?.email))) && (
                                             <button onClick={() => openCreateModal('event')} className="flex items-center gap-1.5 px-4 py-1.5 bg-[var(--accent-indigo)] text-white rounded-lg text-[10px] font-black shadow-md shadow-indigo-200/40 hover:opacity-90 transition-all uppercase tracking-widest"> <PlusCircle size={12} /> Add Session </button>
                                         )}
                                     </div>
@@ -537,7 +567,7 @@ const CalendarPage = () => {
                                 <div className="space-y-4">
                                     <div className="flex items-center justify-between border-b border-[var(--border)] pb-2">
                                         <h3 className="text-[11px] font-black text-orange-500 uppercase tracking-[0.2em] flex items-center gap-1.5"> <CheckCircle size={14} /> Tasks ({dayEvents.filter(e => e.extendedProps.type === 'task').length}) </h3>
-                                        {(!summaryDate || new Date(summaryDate + "T23:59:59") >= new Date() || backdateSettings.allow_backdate || backdateSettings.exception_users.includes(user?.email)) && (
+                                        {(canCreate && (!summaryDate || new Date(summaryDate + "T23:59:59") >= new Date() || backdateSettings.allow_backdate || backdateSettings.exception_users.includes(user?.email))) && (
                                             <button onClick={() => openCreateModal('task')} className="flex items-center gap-1.5 px-4 py-1.5 bg-[var(--input-bg)] border border-[var(--border)] text-[var(--text-main)] rounded-lg text-[10px] font-black hover:bg-gray-100 transition-all uppercase tracking-widest"> <PlusCircle size={12} /> Add Task </button>
                                         )}
                                     </div>
@@ -577,14 +607,14 @@ const CalendarPage = () => {
                                     </span>
                                 </div>
                                 <div className="flex items-center gap-2">
-                                    {(isEdit && (user.role === 'superadmin' || user.role === 'admin' || eventForm.isCreator)) && (
+                                    {(isEdit && (canUpdate || eventForm.isCreator)) && (
                                         <div className="flex items-center bg-[var(--input-bg)] border border-[var(--border)] rounded-xl p-1 shrink-0">
                                             <button onClick={() => setEventForm({ ...eventForm, status: 'completed' })} className={`p-2 rounded-lg transition-all ${eventForm.status === 'completed' ? 'bg-green-500 text-white shadow-lg' : 'text-gray-400 hover:text-green-500'}`}> <CheckCircle size={16} /> </button>
                                             <button onClick={() => setEventForm({ ...eventForm, status: 'canceled' })} className={`p-2 rounded-lg transition-all ${eventForm.status === 'canceled' ? 'bg-red-500 text-white shadow-lg' : 'text-gray-400 hover:text-red-500'}`}> <Ban size={16} /> </button>
-                                            <button onClick={() => handleQuickAction(currentEventId, 'delete')} className="p-2 text-gray-400 hover:text-red-500 hover:bg-red-500/10 rounded-lg"> <Trash2 size={16} /> </button>
+                                            {canDelete && <button onClick={() => handleQuickAction(currentEventId, 'delete')} className="p-2 text-gray-400 hover:text-red-500 hover:bg-red-500/10 rounded-lg"> <Trash2 size={16} /> </button>}
                                         </div>
                                     )}
-                                    {isEdit && !(user.role === 'superadmin' || user.role === 'admin' || eventForm.isCreator) && (
+                                    {isEdit && !(canUpdate || eventForm.isCreator) && (
                                         <div className="px-3 py-1 bg-amber-500/10 border border-amber-500/20 text-amber-600 rounded-xl text-[8px] font-black uppercase tracking-tighter flex items-center gap-1">
                                             <Lock size={10} /> Read-Only Access
                                         </div>
@@ -652,7 +682,7 @@ const CalendarPage = () => {
                                         {isEdit && (
                                             <div className="flex items-center gap-1.5">
                                                 <label className="text-[9px] font-black text-gray-400 uppercase">Status:</label>
-                                                {(eventForm.isCreator || user.role === 'superadmin' || user.role === 'admin') ? (
+                                                {(eventForm.isCreator || canUpdate) ? (
                                                     <select value={eventForm.status} onChange={e => setEventForm({ ...eventForm, status: e.target.value })}
                                                         className="bg-[var(--input-bg)] border border-[var(--border)] rounded-md px-2 py-0.5 text-[10px] font-black text-[var(--accent-indigo)] uppercase outline-none focus:border-[var(--accent-indigo)]">
                                                         <option value="schedule">Scheduled</option>
@@ -699,7 +729,7 @@ const CalendarPage = () => {
                                     )}
                                 </div>
 
-                                <div className={`grid grid-cols-1 md:grid-cols-2 gap-6 ${(isEdit && !eventForm.isCreator && user.role !== 'superadmin' && user.role !== 'admin' && eventForm.isAssigned) ? 'opacity-40 pointer-events-none' : ''}`}>
+                                <div className={`grid grid-cols-1 md:grid-cols-2 gap-6 ${(isEdit && !eventForm.isCreator && !canUpdate && eventForm.isAssigned) ? 'opacity-40 pointer-events-none' : ''}`}>
                                     {isStaff ? (
                                         eventForm.type === 'event' ? (
                                             /* ─── STAFF ARCHITECT: SESSION ─── */

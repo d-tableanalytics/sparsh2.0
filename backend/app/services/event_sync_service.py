@@ -26,8 +26,9 @@ async def sync_event_to_collection(calendar_event_id: str):
     resources_data = []
     for r in cal_event.get("resources", []):
         resources_data.append({
+            "id": r.get("id"),
             "name": r.get("name"),
-            "link": r.get("url"),
+            "url": r.get("url"),
             "transcription": r.get("transcription")
         })
         
@@ -35,13 +36,14 @@ async def sync_event_to_collection(calendar_event_id: str):
     contents_data = []
     for c in cal_event.get("contents", []):
         contents_data.append({
+            "id": c.get("id"),
             "name": c.get("name"),
-            "link": c.get("url")
+            "url": c.get("url")
         })
         
     sync_doc = {
-        "calender_events_id": str(cal_event["_id"]),
-        "attendies_id": attendees_id,
+        "calendar_events_id": str(cal_event["_id"]),
+        "attendees_id": attendees_id,
         "absent_id": absent_id,
         "resources": resources_data,
         "contents": contents_data,

@@ -8,23 +8,35 @@ import {
 } from 'lucide-react';
 import { useNotification } from '../context/NotificationContext';
 import { useNavigate } from 'react-router-dom';
+import { useAuth } from '../context/AuthContext';
 import api from '../services/api';
 
 const UserManagement = () => {
     const navigate = useNavigate();
+    const { user } = useAuth();
     const { showSuccess, showError } = useNotification();
     const [users, setUsers] = useState([]);
     const [loading, setLoading] = useState(true);
     const [searchTerm, setSearchTerm] = useState('');
     const [filterRole, setFilterRole] = useState('All');
-    const [showAddModal, setShowAddModal] = useState(false);
     const [isSaving, setIsSaving] = useState(false);
+    const [showAddModal, setShowAddModal] = useState(false);
+    
+    const canCreate = user?.role === 'superadmin' || user?.permissions?.users?.create;
+    const canRead = user?.role === 'superadmin' || user?.permissions?.users?.read;
     
     const initialStaffForm = {
         first_name: '', last_name: '', email: '', password: '',
         mobile: '', role: 'coach', is_active: true,
         session_type: 'Both', department: 'Other',
-        permissions: [] // Access management
+        permissions: {
+            batches: { create: false, read: true, update: false, delete: false },
+            calendar: { create: false, read: true, update: false, delete: false },
+            users: { create: false, read: true, update: false, delete: false },
+            companies: { create: false, read: true, update: false, delete: false },
+            logs: { create: false, read: true, update: false, delete: false },
+            templates: { create: false, read: true, update: false, delete: false }
+        }
     };
     const [staffForm, setStaffForm] = useState(initialStaffForm);
 
@@ -77,9 +89,11 @@ const UserManagement = () => {
                    <h1 className="text-3xl font-black text-[var(--text-main)] tracking-tight">Staff Management</h1>
                    <p className="text-[14px] text-[var(--text-muted)] font-bold italic">Oversee core team members, coaches, and system administrators.</p>
                 </div>
-                <button onClick={() => setShowAddModal(true)} className="flex items-center gap-2 px-6 py-3 bg-[var(--btn-primary)] text-white rounded-2xl text-[14px] font-black shadow-xl shadow-indigo-500/20 hover:scale-[1.02] transition-all active:scale-95">
-                    <UserPlus size={18}/> Add New Staff
-                </button>
+                {canCreate && (
+                    <button onClick={() => setShowAddModal(true)} className="flex items-center gap-2 px-6 py-3 bg-[var(--btn-primary)] text-white rounded-2xl text-[14px] font-black shadow-xl shadow-indigo-500/20 hover:scale-[1.02] transition-all active:scale-95">
+                        <UserPlus size={18}/> Add New Staff
+                    </button>
+                )}
             </div>
 
             {/* Filters Bar */}
@@ -210,20 +224,36 @@ const UserManagement = () => {
                                     </div>
                                 </div>
 
-                                <div className="space-y-3 bg-gray-50/50 p-6 rounded-[28px] border border-dashed border-gray-200">
+                                <div className="space-y-3 bg-[var(--bg-main)] p-6 rounded-[28px] border border-dashed border-[var(--border)]">
                                     <label className="text-[10px] font-black text-[var(--text-muted)] uppercase flex items-center gap-2 group"> <BadgeCheck size={14} className="text-[var(--accent-indigo)]"/> Access Management (Scope)</label>
-                                    <div className="grid grid-cols-2 gap-3">
-                                        {['Batch Access', 'Calendar Admin', 'User Management', 'Company Oversight', 'Log Access', 'Template Designer'].map(perm => (
-                                            <label key={perm} className="flex items-center gap-3 cursor-pointer p-1 group">
-                                                <input type="checkbox" checked={staffForm.permissions?.includes(perm)} 
-                                                    onChange={e => {
-                                                        const p = [...(staffForm.permissions || [])];
-                                                        setStaffForm({...staffForm, permissions: e.target.checked ? [...p, perm] : p.filter(x => x !== perm)});
-                                                    }}
-                                                    className="w-4 h-4 accent-[var(--accent-indigo)]"
-                                                />
-                                                <span className="text-[11px] font-bold text-[var(--text-muted)] group-hover:text-[var(--text-main)] transition-colors">{perm}</span>
-                                            </label>
+                                    <div className="space-y-4">
+                                        {[
+                                            { id: 'batches', label: 'Batch Access' },
+                                            { id: 'calendar', label: 'Calendar Admin' },
+                                            { id: 'users', label: 'User Management' },
+                                            { id: 'companies', label: 'Company Oversight' },
+                                            { id: 'logs', label: 'Log Access' },
+                                            { id: 'templates', label: 'Template Designer' }
+                                        ].map(mod => (
+                                            <div key={mod.id} className="flex items-center justify-between p-3 bg-[var(--bg-card)] rounded-2xl border border-[var(--border)] group">
+                                                <span className="text-[11px] font-black text-[var(--text-main)] group-hover:text-[var(--accent-indigo)]">{mod.label}</span>
+                                                <div className="flex items-center gap-4">
+                                                    {['create', 'read', 'update', 'delete'].map(action => (
+                                                        <label key={action} className="flex items-center gap-1.5 cursor-pointer">
+                                                            <input type="checkbox" 
+                                                                checked={staffForm.permissions[mod.id]?.[action]} 
+                                                                onChange={e => {
+                                                                    const updated = { ...staffForm.permissions };
+                                                                    updated[mod.id] = { ...updated[mod.id], [action]: e.target.checked };
+                                                                    setStaffForm({ ...staffForm, permissions: updated });
+                                                                }}
+                                                                className="w-3.5 h-3.5 accent-[var(--accent-indigo)]"
+                                                            />
+                                                            <span className="text-[9px] font-black uppercase text-[var(--text-muted)]">{action[0]}</span>
+                                                        </label>
+                                                    ))}
+                                                </div>
+                                            </div>
                                         ))}
                                     </div>
                                 </div>

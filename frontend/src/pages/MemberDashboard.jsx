@@ -127,6 +127,8 @@ const MemberDashboard = () => {
   const [calendarLoading, setCalendarLoading] = useState(false);
   const [calView, setCalView] = useState('calendar'); // 'calendar', 'cards', 'table'
   const [calFilter, setCalFilter] = useState('all'); // 'all', 'task', 'event'
+  const [analytics, setAnalytics] = useState(null);
+  const [fetchingAnalytics, setFetchingAnalytics] = useState(false);
 
 
 
@@ -146,7 +148,22 @@ const MemberDashboard = () => {
     }
   };
 
-  useEffect(() => { fetchData(); }, [userId]);
+  const fetchAnalytics = async () => {
+    setFetchingAnalytics(true);
+    try {
+        const res = await api.get(`/users/${userId}/analytics`);
+        setAnalytics(res.data);
+    } catch (err) {
+        console.error("Failed to fetch user analytics:", err);
+    } finally {
+        setFetchingAnalytics(false);
+    }
+  };
+
+  useEffect(() => { 
+    fetchData();
+    if (activeTab === 'overview') fetchAnalytics();
+  }, [userId, activeTab]);
 
   useEffect(() => {
     if (activeTab === 'calendar') {
@@ -225,12 +242,11 @@ const MemberDashboard = () => {
 
   if (!member) return <div className="text-center py-20 text-[var(--text-muted)]">Member not found</div>;
 
-  // Generate chart data
-  const weeklyScores = generateWeeklyScores();
-  const attendanceData = generateAttendanceData();
-  const learningProgress = generateLearningProgress();
-  const skillRadial = generateSkillRadial();
-  const taskPie = generateTaskPie();
+  // Generate chart data - Fallback to mock if live data unavailable
+  const weeklyScores = (analytics?.weekly_scores && analytics.weekly_scores.length > 0) ? analytics.weekly_scores : generateWeeklyScores();
+  const attendanceData = (analytics?.attendance_data && analytics.attendance_data.length > 0) ? analytics.attendance_data : generateAttendanceData();
+  const learningProgress = (analytics?.learning_progress && analytics.learning_progress.length > 0) ? analytics.learning_progress : generateLearningProgress();
+  const taskPie = analytics?.task_stats || generateTaskPie();
   const mockTimeline = activity.activities.length > 0 ? activity.activities : generateActivityTimeline();
   const daysSinceJoined = member.created_at ? Math.floor((Date.now() - new Date(member.created_at).getTime()) / 86400000) : 0;
   const totalPresent = attendanceData.reduce((s, d) => s + d.present, 0);

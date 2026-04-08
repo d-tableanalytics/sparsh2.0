@@ -4,11 +4,19 @@ import { useAuth } from '../../context/AuthContext';
 import Sidebar from '../layout/Sidebar';
 import Navbar from '../layout/Navbar';
 
-const PrivateRoute = ({ children }) => {
+const PrivateRoute = ({ children, hideLayout = false }) => {
   const { user } = useAuth();
 
   if (!user) {
     return <Navigate to="/login" />;
+  }
+
+  if (hideLayout) {
+    return (
+      <div className="min-h-screen bg-[var(--bg-main)] text-[var(--text-main)] overflow-x-hidden selection:bg-indigo-100 selection:text-indigo-600">
+        {children}
+      </div>
+    );
   }
 
   return (

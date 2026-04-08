@@ -25,8 +25,11 @@ async def get_backdate_settings(current_user: dict = Depends(get_current_user)):
 
 @router.put("/backdate-control")
 async def update_backdate_settings(updates: SystemSettingsUpdate = Body(...), current_user: dict = Depends(get_current_user)):
-    if current_user.get("role") != "superadmin":
-        raise HTTPException(status_code=403, detail="Only superadmin can update backdate settings")
+    permissions = current_user.get("permissions", {})
+    can_update = permissions.get("settings", {}).get("update", False) # Fallback to settings node if it exists, or superadmin
+    
+    if current_user.get("role") != "superadmin" and not can_update:
+        raise HTTPException(status_code=403, detail="Only authorized personnel can update backdate settings")
     
     col = get_collection("system_settings")
     print(f"DEBUG: RECEIVED UPDATES: {updates.model_dump()}")
@@ -44,6 +47,12 @@ async def update_backdate_settings(updates: SystemSettingsUpdate = Body(...), cu
 
 @router.get("/templates", response_model=List[dict])
 async def get_templates(scope: Optional[str] = None, company_id: Optional[str] = None, current_user: dict = Depends(get_current_user)):
+    permissions = current_user.get("permissions", {})
+    can_read = permissions.get("templates", {}).get("read", False)
+    
+    if current_user.get("role") not in ["superadmin", "clientadmin"] and not can_read:
+        raise HTTPException(status_code=403, detail="Unauthorized")
+
     col = get_collection("notification_templates")
     query = {}
     if scope: query["scope"] = scope
@@ -61,9 +70,12 @@ async def get_templates(scope: Optional[str] = None, company_id: Optional[str] =
 
 @router.post("/templates")
 async def create_template(template: dict = Body(...), current_user: dict = Depends(get_current_user)):
-    # Permission check: superadmin can create for anyone, clientadmin only for their company
+    # Permission check: superadmin can create for anyone, clientadmin only for their company, staff with perm
+    permissions = current_user.get("permissions", {})
+    can_create = permissions.get("templates", {}).get("create", False)
+    
     role = current_user.get("role")
-    if role not in ["superadmin", "clientadmin"]:
+    if role not in ["superadmin", "clientadmin"] and not can_create:
          raise HTTPException(status_code=403, detail="Unauthorized")
     
     col = get_collection("notification_templates")
@@ -88,10 +100,13 @@ async def update_template(template_id: str, template: dict = Body(...), current_
     if not existing: raise HTTPException(status_code=404, detail="Not found")
 
     # Authorization
+    permissions = current_user.get("permissions", {})
+    can_update = permissions.get("templates", {}).get("update", False)
+    
     role = current_user.get("role")
     if role == "clientadmin" and existing.get("company_id") != current_user.get("company_id"):
         raise HTTPException(status_code=403, detail="Unauthorized")
-    if role != "superadmin" and role != "clientadmin":
+    if role != "superadmin" and role != "clientadmin" and not can_update:
         raise HTTPException(status_code=403, detail="Unauthorized")
 
     update_data = {k: v for k, v in template.items() if k not in ["_id", "created_at", "created_by"]}
@@ -105,13 +120,102 @@ async def delete_template(template_id: str, current_user: dict = Depends(get_cur
     col = get_collection("notification_templates")
     existing = await col.find_one({"_id": ObjectId(template_id)})
     
+    permissions = current_user.get("permissions", {})
+    can_delete = permissions.get("templates", {}).get("delete", False)
+    
     role = current_user.get("role")
     if role == "clientadmin" and existing.get("company_id") != current_user.get("company_id"):
         raise HTTPException(status_code=403, detail="Unauthorized")
-    if role != "superadmin" and role != "clientadmin":
+    if role != "superadmin" and role != "clientadmin" and not can_delete:
         raise HTTPException(status_code=403, detail="Unauthorized")
 
     await col.delete_one({"_id": ObjectId(template_id)})
     return {"message": "Template deleted"}
+
+@router.post("/initialize-templates")
+async def initialize_default_templates(current_user: dict = Depends(get_current_user)):
+    if current_user.get("role") != "superadmin":
+         raise HTTPException(status_code=403, detail="Unauthorized")
+    
+    col = get_collection("notification_templates")
+    
+    defaults = [
+        {
+            "name": "Task Created", "slug": "task_created_email", "channel": "email",
+            "subject": "New Task Assigned: {{task_name}}",
+            "body": "Hello {{assigned_user}},\n\nA new task '{{task_name}}' has been assigned to you by {{assigned_by}}.\nTopic: {{topic}}\nDeadline: {{deadline}}",
+            "scope": "staff", "is_active": True
+        },
+        {
+            "name": "Task Updated", "slug": "task_updated_email", "channel": "email",
+            "subject": "Update on Task: {{task_name}}",
+            "body": "Hello {{assigned_user}},\n\nThe task '{{task_name}}' has been updated.\nNew Status: {{task_status}}\nPlease check your dashboard for details.",
+            "scope": "staff", "is_active": True
+        },
+        {
+            "name": "Task Deleted", "slug": "task_deleted_email", "channel": "email",
+            "subject": "Task Cancelled: {{task_name}}",
+            "body": "Hello {{assigned_user}},\n\nThe task '{{task_name}}' has been removed from your list.",
+            "scope": "staff", "is_active": True
+        },
+        {
+            "name": "Session Scheduled", "slug": "event_created_email", "channel": "email",
+            "subject": "New Session Scheduled: {{event_title}}",
+            "body": "Hello {{name}},\n\nA new training session '{{event_title}}' has been scheduled.\nDate: {{date}}\nTime: {{time}}\nLink: {{meeting_link}}",
+            "scope": "staff", "is_active": True
+        },
+        {
+            "name": "Session Rescheduled", "slug": "event_updated_email", "channel": "email",
+            "subject": "Session Rescheduled: {{event_title}}",
+            "body": "Hello {{name}},\n\nThe session '{{event_title}}' has been moved to a new time.\nNew Date: {{date}}\nNew Time: {{time}}",
+            "scope": "staff", "is_active": True
+        },
+        {
+            "name": "Session Cancelled", "slug": "event_deleted_email", "channel": "email",
+            "subject": "Session Cancelled: {{event_title}}",
+            "body": "Hello {{name}},\n\nThe session '{{event_title}}' scheduled for {{date}} has been cancelled.",
+            "scope": "staff", "is_active": True
+        },
+        {
+            "name": "User Created", "slug": "user_creation_email", "channel": "email",
+            "subject": "Welcome to Sparsh 2.0",
+            "body": "Hello {{name}},\n\nYour account has been created.\nRole: {{new_role}}\nLogin here: {{login_url}}\nTemporary Password: {{password}}",
+            "scope": "staff", "is_active": True
+        },
+        {
+            "name": "Profile Updated", "slug": "user_edit_email", "channel": "email",
+            "subject": "Your Account Information Updated",
+            "body": "Hello {{name}},\n\nYour profile details were updated by {{updated_by}}.\nIf you did not authorize this, please contact support.",
+            "scope": "staff", "is_active": True
+        },
+        {
+            "name": "User Access Removed", "slug": "user_deleted_email", "channel": "email",
+            "subject": "Account Deactivation Notice",
+            "body": "Hello {{name}},\n\nYour access to the platform has been revoked.",
+            "scope": "staff", "is_active": True
+        },
+        {
+            "name": "Event Reminder", "slug": "reminder_email", "channel": "email",
+            "subject": "Upcoming: {{title}} in {{reminder_time}}",
+            "body": "Hello {{name}},\n\nThis is a friendly reminder for '{{title}}' starting at {{event_time}}.\nLink: {{meeting_url}}",
+            "scope": "staff", "is_active": True
+        },
+        {
+            "name": "New Company Registered", "slug": "company_registration_email", "channel": "email",
+            "subject": "Welcome, {{company_name}}!",
+            "body": "Hello {{name}},\n\n{{company_name}} is now live on our platform.\nYou can manage your team and learners at: {{login_url}}",
+            "scope": "staff", "is_active": True
+        }
+    ]
+
+    for d in defaults:
+        d["created_by"] = str(current_user["_id"])
+        d["created_at"] = datetime.utcnow()
+        # Check if already exists to avoid duplicates
+        exists = await col.find_one({"slug": d["slug"], "scope": d["scope"], "company_id": None})
+        if not exists:
+            await col.insert_one(d)
+
+    return {"message": "Default infrastructure initialized successfully"}
 
 

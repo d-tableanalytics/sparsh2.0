@@ -9,6 +9,7 @@ import {
   LayoutGrid, List, ExternalLink, Clock, CheckCircle2,
   PauseCircle, PlayCircle, Trash2, Package, Building2, X
 } from 'lucide-react';
+import { useAuth } from '../context/AuthContext';
 
 const statusConfig = {
   active:    { bg: 'var(--status-active-bg)', text: 'var(--status-active-text)', border: 'var(--status-active-border)', icon: PlayCircle, label: 'Active' },
@@ -18,12 +19,16 @@ const statusConfig = {
 
 const BatchManagement = () => {
   const navigate = useNavigate();
-  const { showSuccess, showError } = useNotification();
+  const { user } = useAuth();
   const [batches, setBatches] = useState([]);
   const [loading, setLoading] = useState(true);
   const [viewMode, setViewMode] = useState('table');
   const [searchTerm, setSearchTerm] = useState('');
   const [showCreate, setShowCreate] = useState(false);
+
+  const canCreate = user?.role === 'superadmin' || user?.permissions?.batches?.create;
+  const canDelete = user?.role === 'superadmin' || user?.permissions?.batches?.delete;
+  const canUpdate = user?.role === 'superadmin' || user?.permissions?.batches?.update;
 
   const [form, setForm] = useState({
     name: '', product_name: '', description: '', start_date: '', target_end_date: '', gpt_projects: []
@@ -97,9 +102,11 @@ const BatchManagement = () => {
             <button onClick={() => setViewMode('card')} className={`p-1.5 rounded-md transition-all ${viewMode === 'card' ? 'bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)]' : 'text-[var(--text-muted)]'}`}><LayoutGrid size={16} /></button>
             <button onClick={() => setViewMode('table')} className={`p-1.5 rounded-md transition-all ${viewMode === 'table' ? 'bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)]' : 'text-[var(--text-muted)]'}`}><List size={16} /></button>
           </div>
-          <button onClick={() => setShowCreate(true)} className="h-10 px-4 bg-[var(--btn-primary)] hover:bg-[var(--btn-primary-hover)] text-white font-bold text-[13px] rounded-lg flex items-center gap-2 transition-all">
-            <Plus size={16} /> New Batch
-          </button>
+          {canCreate && (
+            <button onClick={() => setShowCreate(true)} className="h-10 px-4 bg-[var(--btn-primary)] hover:bg-[var(--btn-primary-hover)] text-white font-bold text-[13px] rounded-lg flex items-center gap-2 transition-all">
+              <Plus size={16} /> New Batch
+            </button>
+          )}
         </div>
       </div>
 
@@ -193,7 +200,9 @@ const BatchManagement = () => {
                     <td className="px-5 py-2.5 text-right">
                       <div className="flex items-center justify-end gap-1">
                         <button onClick={() => navigate(`/batches/${b._id}`)} className="p-1.5 text-[var(--text-muted)] hover:text-[var(--accent-indigo)] hover:bg-[var(--accent-indigo-bg)] rounded-md transition-all" title="View Details"><ExternalLink size={14} /></button>
-                        <button onClick={() => handleDelete(b._id)} className="p-1.5 text-[var(--text-muted)] hover:text-[var(--accent-red)] hover:bg-[var(--accent-red-bg)] rounded-md transition-all" title="Delete"><Trash2 size={14} /></button>
+                        {canDelete && (
+                          <button onClick={() => handleDelete(b._id)} className="p-1.5 text-[var(--text-muted)] hover:text-[var(--accent-red)] hover:bg-[var(--accent-red-bg)] rounded-md transition-all" title="Delete"><Trash2 size={14} /></button>
+                        )}
                       </div>
                     </td>
                   </tr>

@@ -16,6 +16,12 @@ router = APIRouter(prefix="/users", tags=["Users"])
 # ─── List Users (Combined) ───
 @router.get("/")
 async def list_users(current_user: dict = Depends(get_current_user)):
+    permissions = current_user.get("permissions", {})
+    can_read = permissions.get("users", {}).get("read", False)
+    
+    if current_user.get("role") != "superadmin" and not can_read:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    
     staff = await get_collection("staff").find({}).to_list(1000)
     learners = await get_collection("learners").find({}).to_list(1000)
     
@@ -35,6 +41,7 @@ class UserEditRequest(BaseModel):
     session_type: Optional[str] = None
     designation: Optional[str] = None
     department: Optional[str] = None
+    permissions: Optional[dict] = None
 
 class UserStatusUpdate(BaseModel):
     is_active: bool
@@ -60,6 +67,19 @@ async def get_user(user_id: str, current_user: dict = Depends(get_current_user))
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     
+    # ─── Auth Check ───
+    permissions = current_user.get("permissions", {})
+    can_read = permissions.get("users", {}).get("read", False)
+    
+    is_authorized = current_user.get("role") == "superadmin" or can_read or str(current_user.get("_id")) == user_id
+    
+    if not is_authorized:
+        if current_user.get("role") == "clientadmin":
+            if user.get("company_id") != current_user.get("company_id"):
+                raise HTTPException(status_code=403, detail="Not authorized to view this user")
+        else:
+            raise HTTPException(status_code=403, detail="Not authorized")
+
     user["_id"] = str(user["_id"])
     user.pop("password", None)
     return user
@@ -67,12 +87,23 @@ async def get_user(user_id: str, current_user: dict = Depends(get_current_user))
 # ─── Update User ───
 @router.put("/{user_id}")
 async def update_user(user_id: str, updates: UserEditRequest, background_tasks: BackgroundTasks, current_user: dict = Depends(get_current_user)):
-    if current_user.get("role") != "superadmin":
-        raise HTTPException(status_code=403, detail="Not authorized")
-    
     user, col_name = await find_user_by_id(user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
+
+    # ─── Auth Check ───
+    permissions = current_user.get("permissions", {})
+    can_update = permissions.get("users", {}).get("update", False)
+    
+    is_authorized = current_user.get("role") == "superadmin" or can_update
+    
+    if not is_authorized:
+        if current_user.get("role") == "clientadmin":
+            if user.get("company_id") != current_user.get("company_id"):
+                 raise HTTPException(status_code=403, detail="Not authorized for this user")
+        else:
+             raise HTTPException(status_code=403, detail="Not authorized")
+
         
     update_data = {k: v for k, v in updates.model_dump().items() if v is not None}
     if not update_data:
@@ -97,12 +128,23 @@ async def update_user(user_id: str, updates: UserEditRequest, background_tasks: 
 # ─── Delete User ───
 @router.delete("/{user_id}")
 async def delete_user(user_id: str, current_user: dict = Depends(get_current_user)):
-    if current_user.get("role") != "superadmin":
-        raise HTTPException(status_code=403, detail="Not authorized")
-    
     user, col_name = await find_user_by_id(user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
+
+    # ─── Auth Check ───
+    permissions = current_user.get("permissions", {})
+    can_delete = permissions.get("users", {}).get("delete", False)
+    
+    is_authorized = current_user.get("role") == "superadmin" or can_delete
+    
+    if not is_authorized:
+        if current_user.get("role") == "clientadmin":
+            if user.get("company_id") != current_user.get("company_id"):
+                 raise HTTPException(status_code=403, detail="Not authorized to delete this user")
+        else:
+             raise HTTPException(status_code=403, detail="Not authorized")
+
     
     await get_collection(col_name).delete_one({"_id": ObjectId(user_id)})
     return {"message": "User deleted"}
@@ -111,9 +153,25 @@ async def delete_user(user_id: str, current_user: dict = Depends(get_current_use
 @router.get("/{user_id}/activity")
 async def get_user_activity(user_id: str, current_user: dict = Depends(get_current_user)):
     """Returns learning progress, attendance, and activity history for a member."""
-    if current_user.get("role") != "superadmin":
-        if str(current_user.get("_id")) != user_id:
-            raise HTTPException(status_code=403, detail="Not authorized")
+    user, _ = await find_user_by_id(user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    # ─── Auth Check ───
+    permissions = current_user.get("permissions", {})
+    can_read = permissions.get("users", {}).get("read", False)
+    
+    authorized = False
+    if current_user.get("role") == "superadmin" or can_read:
+        authorized = True
+    elif str(current_user.get("_id")) == user_id:
+        authorized = True
+    elif current_user.get("role") == "clientadmin":
+        if user.get("company_id") == current_user.get("company_id"):
+            authorized = True
+    
+    if not authorized:
+        raise HTTPException(status_code=403, detail="Not authorized")
     
     # Learnings
     learnings_col = get_collection("learnings")
@@ -128,8 +186,8 @@ async def get_user_activity(user_id: str, current_user: dict = Depends(get_curre
         a["_id"] = str(a["_id"])
     
     # Activity log
-    activity_col = get_collection("activity_log")
-    activities = await activity_col.find({"user_id": user_id}).sort("timestamp", -1).to_list(50)
+    activity_col = get_collection("activity_logs")
+    activities = await activity_col.find({"user_id": user_id}).sort("timestamp", -1).to_list(100)
     for act in activities:
         act["_id"] = str(act["_id"])
     
@@ -139,7 +197,137 @@ async def get_user_activity(user_id: str, current_user: dict = Depends(get_curre
         "activities": activities
     }
 
-# ─── Admin Dashboard ───
-@router.get("/admin/dashboard")
-async def admin_dashboard(current_user: dict = Depends(check_role([UserRole.SUPERADMIN, UserRole.ADMIN]))):
+# ─── Learner Reports ───
+@router.get("/me/reports")
+async def get_my_reports(current_user: dict = Depends(get_current_active_user)):
+    user_id = str(current_user["_id"])
+    
+    # 1. Activities
+    activity_col = get_collection("activity_logs")
+    activities = await activity_col.find({"user_id": user_id}).sort("timestamp", -1).to_list(100)
+    for act in activities:
+        act["_id"] = str(act["_id"])
+        
+    # 2. Assessments
+    assessment_col = get_collection("LearnerAssessments") # Fixed typo in logic
+    # Also check the typo version if it exists
+    assessments_legacy = await get_collection("LearnerAsessments").find({"user_id": user_id}).to_list(100)
+    assessments_new = await assessment_col.find({"user_id": user_id}).to_list(100)
+    
+    all_assessments = assessments_legacy + assessments_new
+    for ass in all_assessments:
+        ass["_id"] = str(ass["_id"])
+    
+    # Sort by submitted_at
+    all_assessments.sort(key=lambda x: x.get("submitted_at", ""), reverse=True)
+
+    # 3. Calculate Stats
+    total_activities = len(activities)
+    quizzes_taken = len(all_assessments)
+    quizzes_passed = len([a for a in all_assessments if a.get("passed")])
+    
+    return {
+        "stats": {
+            "total_activities": total_activities,
+            "quizzes_taken": quizzes_taken,
+            "quizzes_passed": quizzes_passed,
+            "pass_rate": round((quizzes_passed / quizzes_taken * 100) if quizzes_taken > 0 else 0, 1)
+        },
+        "activities": activities,
+        "assessments": all_assessments
+    }
+
     return {"message": f"Welcome, Admin {current_user['full_name']}"}
+
+@router.get("/{user_id}/analytics")
+async def get_user_analytics(user_id: str, current_user: dict = Depends(get_current_user)):
+    user, _ = await find_user_by_id(user_id)
+    if not user: raise HTTPException(status_code=404, detail="User not found")
+    
+    # Auth check
+    permissions = current_user.get("permissions", {})
+    can_read = permissions.get("users", {}).get("read", False)
+    
+    authorized = current_user.get("role") == "superadmin" or can_read or str(current_user.get("_id")) == user_id
+    
+    if not authorized:
+        if current_user.get("role") == "clientadmin":
+            if user.get("company_id") != current_user.get("company_id"):
+                raise HTTPException(status_code=403, detail="Not authorized")
+        else:
+            raise HTTPException(status_code=403, detail="Not authorized")
+
+    # 1. Weekly Scores (Last 8 assessments)
+    assessments_col = get_collection("LearnerAssessments")
+    assessments_new = await assessments_col.find({"user_id": user_id}).sort("submitted_at", 1).to_list(100)
+    # Plus legacy if any
+    assessments_old = await get_collection("LearnerAsessments").find({"user_id": user_id}).sort("submitted_at", 1).to_list(100)
+    all_ass = assessments_old + assessments_new
+    all_ass.sort(key=lambda x: x.get("submitted_at", ""))
+    
+    weekly_scores = []
+    for i, ass in enumerate(all_ass[-8:]):
+        weekly_scores.append({
+            "week": f"A{i+1}",
+            "score": ass.get("percentage", 0),
+            "target": 85
+        })
+
+    # 2. Attendance Summary (Monthly)
+    attendance_col = get_collection("attendance")
+    attendance = await attendance_col.find({"user_id": user_id}).to_list(500)
+    
+    months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+    monthly_att = {} # {month_name: {"present": 0, "absent": 0}}
+    
+    for a in attendance:
+        dt = a.get("date")
+        if isinstance(dt, str):
+            try: dt = datetime.fromisoformat(dt.replace('Z', '+00:00'))
+            except: continue
+        if not dt: continue
+        
+        m_name = months[dt.month - 1]
+        if m_name not in monthly_att: monthly_att[m_name] = {"present": 0, "absent": 0}
+        
+        status = a.get("status", "absent").lower()
+        if status == "present": monthly_att[m_name]["present"] += 1
+        else: monthly_att[m_name]["absent"] += 1
+
+    attendance_data = [{"name": m, **v} for m, v in monthly_att.items()]
+    # Ensure some order
+    attendance_data.sort(key=lambda x: months.index(x["name"]))
+
+    # 3. Learning Progress (Top Modules)
+    # Derive from assessments for now
+    module_scores = {}
+    for ass in all_ass:
+        mod = ass.get("session_title", "General")
+        if mod not in module_scores: module_scores[mod] = []
+        module_scores[mod].append(ass.get("percentage", 0))
+    
+    learning_progress = []
+    for mod, scores in module_scores.items():
+        avg = round(sum(scores) / len(scores), 1)
+        learning_progress.append({
+            "name": mod,
+            "completed": avg,
+            "total": 100
+        })
+
+    # 4. Task Breakdown
+    # Check session tasks
+    progress_col = get_collection("company_session_progress")
+    # For a specific user? Real tasks are often per-user or per-company.
+    # Assuming session tasks are global for now.
+    
+    return {
+        "weekly_scores": weekly_scores,
+        "attendance_data": attendance_data,
+        "learning_progress": learning_progress[:5], # top 5
+        "task_stats": [
+            {"name": "Completed", "value": len([a for a in all_ass if a.get("passed")])},
+            {"name": "In Progress", "value": len(all_ass) // 2}, # Mocking relative split
+            {"name": "Pending", "value": 5}
+        ]
+    }

@@ -10,31 +10,36 @@ router = APIRouter(prefix="/dashboard", tags=["Dashboard"])
 
 @router.get("/stats")
 async def get_dashboard_stats(current_user: dict = Depends(get_current_user)):
-    # Check if user is staff (admin or superadmin or coach)
     role = current_user.get("role", "").lower()
-    if role not in ["superadmin", "admin", "coach"]:
-        raise HTTPException(status_code=403, detail="Not authorized")
-
+    company_id = current_user.get("company_id")
+    
+    #スタッフ or 会社管理 or 一般的な学習者
+    is_staff = role in ["superadmin", "admin", "coach"]
+    
     companies_col = get_collection("companies")
     batches_col = get_collection("batches")
     learners_col = get_collection("learners")
     from app.utils.calendar_utils import CALENDAR_COLLECTIONS
     session_cols = CALENDAR_COLLECTIONS + ["calendar_events"]
 
-    # 1. Registered Entities (Total Companies)
-    registered_entities = await companies_col.count_documents({})
+    # 1. KPIs
+    if is_staff:
+        registered_entities = await companies_col.count_documents({})
+        active_batches = await batches_col.count_documents({"status": "active"})
+        strategic_learners = await learners_col.count_documents({})
+    else:
+        # For company users (admin/user)
+        registered_entities = 1 # Just their own
+        # Count batches that have this company associated, or just batches conceptually
+        active_batches = await batches_col.count_documents({"status": "active", "company_id": company_id})
+        # My Team members
+        strategic_learners = await learners_col.count_documents({"company_id": company_id})
 
-    # 2. Active Batches (status='active')
-    active_batches = await batches_col.count_documents({"status": "active"})
-
-    # 3. Strategic Learners (Total learners)
-    strategic_learners = await get_collection("learners").count_documents({})
-
-    # 4. Session Velocity (Completed in last 30 days)
+    # 2. Session Velocity (Completed in last 30 days)
     thirty_days_ago = (datetime.utcnow() - timedelta(days=30)).isoformat()
     session_velocity = 0
     
-    # 5. Operational Pulse (Last 14 Days for better trend)
+    # 3. Operational Pulse (Last 14 Days)
     pulse_data = []
     today = datetime.utcnow().date()
     for i in range(13, -1, -1):
@@ -42,29 +47,39 @@ async def get_dashboard_stats(current_user: dict = Depends(get_current_user)):
         day_str = day.strftime("%d %b")
         count = 0
         
-        # Count sessions starting on that day that are completed
-        for col in session_cols:
-            count += await get_collection(col).count_documents({
+        # Count sessions
+        for col_name in session_cols:
+            query = {
                 "start": {"$regex": f"^{day.isoformat()}"},
                 "status": "completed"
-            })
+            }
+            if not is_staff:
+                query["company_id"] = company_id
+                
+            count += await get_collection(col_name).count_documents(query)
         pulse_data.append({"name": day_str, "sessions": count})
 
     # Total Velocity for the KPI (30 days)
-    for col in session_cols:
-        session_velocity += await get_collection(col).count_documents({
+    for col_name in session_cols:
+        query = {
             "status": "completed",
             "start": {"$gte": thirty_days_ago}
-        })
+        }
+        if not is_staff:
+            query["company_id"] = company_id
+        session_velocity += await get_collection(col_name).count_documents(query)
 
-    # 6. Session Mix (Pie Chart)
+    # 4. Session Mix (Pie Chart)
     mix_data = []
     mix_counts = {"Strategic": 0, "Technical": 0, "Operational": 0, "Other": 0}
-    for col in session_cols:
-        cursor = get_collection(col).find({})
+    for col_name in session_cols:
+        query = {}
+        if not is_staff:
+            query["company_id"] = company_id
+            
+        cursor = get_collection(col_name).find(query)
         async for session in cursor:
             s_type = session.get("session_type", "Other")
-            # Map types to segments
             if any(kw in s_type for kw in ["Direct", "Strategy", "CEO"]): mix_counts["Strategic"] += 1
             elif any(kw in s_type for kw in ["Review", "Module", "Session"]): mix_counts["Technical"] += 1
             elif any(kw in s_type for kw in ["Support", "Check"]): mix_counts["Operational"] += 1
@@ -80,12 +95,28 @@ async def get_dashboard_stats(current_user: dict = Depends(get_current_user)):
         if v > 0:
             mix_data.append({"name": k, "value": v, "color": colors.get(k, "var(--text-muted)")})
 
+    # 5. Attendance (If learner, calculate for their company)
+    attendance_rate = 0
+    if not is_staff:
+        attendance_col = get_collection("attendance")
+        # Simplified: count present vs total records for the company
+        # First find all learners of this company
+        company_learners = await learners_col.find({"company_id": company_id}, {"_id": 1}).to_list(1000)
+        learner_ids = [str(l["_id"]) for l in company_learners]
+        
+        if learner_ids:
+            total_records = await attendance_col.count_documents({"user_id": {"$in": learner_ids}})
+            present_records = await attendance_col.count_documents({"user_id": {"$in": learner_ids}, "status": "present"})
+            if total_records > 0:
+                attendance_rate = round((present_records / total_records) * 100)
+
     return {
         "kpis": {
             "registered_entities": registered_entities,
             "active_batches": active_batches,
             "strategic_learners": strategic_learners,
-            "session_velocity": session_velocity
+            "session_velocity": session_velocity,
+            "attendance_rate": attendance_rate # Added for learners
         },
         "operational_pulse": pulse_data,
         "session_mix": mix_data

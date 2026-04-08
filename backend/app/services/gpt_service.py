@@ -1,6 +1,7 @@
 import os
 import pypdf
 import docx
+import json
 import pandas as pd
 from datetime import datetime
 from bson import ObjectId
@@ -122,3 +123,46 @@ The following snippets are extracted from your dedicated knowledge base. Priorit
     except Exception as e:
         print(f"GPT Generation Error: {e}")
         return f"I'm sorry, I encountered an error: {str(e)}"
+
+async def grade_descriptive_answer(question: str, user_answer: str, keywords: str, checker_instructions: str, max_marks: float):
+    try:
+        client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+        
+        prompt = f"""You are an Expert Academic Evaluator. Your task is to grade a student's answer based on the following criteria:
+
+### QUESTION
+{question}
+
+### STUDENT'S ANSWER
+{user_answer}
+
+### EXPECTED CORE KEYWORDS / CONCEPTS
+{keywords}
+
+### SPECIAL INSTRUCTIONS FOR CHECKER
+{checker_instructions}
+
+### GRADING PROTOCOL
+1. Assign a numeric score from 0 to {max_marks}.
+2. Compare the student's answer against the keywords and question context.
+3. Be fair but strict according to the special instructions.
+4. Provide constructive feedback, explaining the REASON for the marks given and offering SUGGESTIONS for improvement.
+5. If the answer is blank or irrelevant, assign 0.
+6. Return ONLY a valid JSON object.
+
+### OUTPUT FORMAT (JSON ONLY)
+{{
+  "score": <number>,
+  "feedback": "<string>"
+}}
+"""
+        response = await client.chat.completions.create(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": prompt}],
+            response_format={ "type": "json_object" },
+            temperature=0.3
+        )
+        return json.loads(response.choices[0].message.content)
+    except Exception as e:
+        print(f"AI Grading Error: {e}")
+        return {"score": 0, "feedback": f"AI Grading Engine Error: {str(e)}"}

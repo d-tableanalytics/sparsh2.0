@@ -63,10 +63,11 @@ async def process_background_upload_and_transcribe(
     local_file_path: str, 
     filename: str, 
     content_type: str, 
-    system_type: str
+    system_type: str,
+    col_name: str = "calendar_events"
 ):
     try:
-        col = get_collection("calendar_events")
+        col = get_collection(col_name)
         
         url = await upload_large_file_to_s3(local_file_path, filename, content_type)
         await col.update_one(

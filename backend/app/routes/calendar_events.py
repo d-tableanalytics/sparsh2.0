@@ -9,6 +9,7 @@ from app.services.notification_service import (
     send_conflict_notification_email, send_attendance_thanks_email, send_attendance_absent_email
 )
 from app.services.activity_log_service import log_activity
+from app.services.gpt_service import grade_descriptive_answer
 from app.services.s3_service import upload_file_to_s3
 from app.services.event_sync_service import sync_event_to_collection
 from bson import ObjectId
@@ -177,6 +178,11 @@ async def validate_conflict(event_data: dict, current_user: dict = Depends(get_c
 
 @router.post("", response_model=dict)
 async def create_event(event: CalendarEventCreate, background_tasks: BackgroundTasks, current_user: dict = Depends(get_current_user)):
+    # ─── Permission Check ───
+    if current_user.get("role") not in ["superadmin", "admin"]:
+        if not current_user.get("permissions", {}).get("calendar", {}).get("create"):
+            raise HTTPException(status_code=403, detail="Not authorized to create events")
+
     event_dict = event.model_dump()
     # Backdate validation logic... (omitted summary for brevity, keeping existing code)
     # [STRICT BACKDATE VALIDATION CODE REMAINS UNCHANGED]
@@ -280,18 +286,19 @@ async def update_event(event_id: str, updates: dict, background_tasks: Backgroun
         raise HTTPException(status_code=404, detail="Event not found")
         
     is_admin = current_user.get("role") in ["superadmin", "admin"]
+    has_update_perm = current_user.get("permissions", {}).get("calendar", {}).get("update")
     is_creator = existing.get("user_id") == str(current_user["_id"])
 
-    if not (is_admin or is_creator):
-        raise HTTPException(status_code=403, detail="Not authorized to edit this event. Assignees have read-only access.")
+    if not (is_admin or has_update_perm or is_creator):
+        raise HTTPException(status_code=403, detail="Not authorized to edit this event.")
          
     # ─── Record Completion Timestamp ───
     if updates.get("status") == "completed" and existing.get("status") != "completed":
-        updates["completed_at"] = datetime.utcnow()
+        updates["completed_at"] = datetime.now(timezone.utc)
     elif updates.get("status") == "schedule":
         updates["completed_at"] = None
 
-    updates["updated_at"] = datetime.utcnow()
+    updates["updated_at"] = datetime.now(timezone.utc)
 
     # ─── Movement Logic ───
     projected = {**existing, **updates}
@@ -388,7 +395,11 @@ async def update_event(event_id: str, updates: dict, background_tasks: Backgroun
 async def mark_attendance(event_id: str, attendance_data: dict, background_tasks: BackgroundTasks, current_user: dict = Depends(get_current_user)):
     existing, col_name = await find_event_across_collections(event_id)
     if not existing: raise HTTPException(status_code=404, detail="Event not found")
-    if current_user.get("role") not in ["superadmin", "admin"] and existing.get("user_id") != str(current_user["_id"]):
+    is_admin = current_user.get("role") in ["superadmin", "admin"]
+    has_update_perm = current_user.get("permissions", {}).get("calendar", {}).get("update")
+    is_creator = existing.get("user_id") == str(current_user["_id"])
+    
+    if not (is_admin or has_update_perm or is_creator):
          raise HTTPException(status_code=403, detail="Not authorized to mark attendance")
          
     # Expected payload: {"attendees": {"user_id_1": True, "user_id_2": False}}
@@ -422,8 +433,12 @@ async def upload_content(event_id: str, file: UploadFile = File(...), current_us
     if not existing: raise HTTPException(status_code=404, detail="Event not found")
     
     # Creator or Admin only
-    if current_user.get("role") not in ["superadmin", "admin"] and existing.get("user_id") != str(current_user["_id"]):
-         raise HTTPException(status_code=403, detail="Only the creator or an administrator can upload content")
+    is_admin = current_user.get("role") in ["superadmin", "admin"]
+    has_update_perm = current_user.get("permissions", {}).get("calendar", {}).get("update")
+    is_creator = existing.get("user_id") == str(current_user["_id"])
+
+    if not (is_admin or has_update_perm or is_creator):
+         raise HTTPException(status_code=403, detail="Only the creator or an authorized administrator can upload content")
 
     try:
         url = upload_file_to_s3(file.file, file.filename, file.content_type)
@@ -445,8 +460,12 @@ async def upload_resource(event_id: str, background_tasks: BackgroundTasks, file
     if not existing: raise HTTPException(status_code=404, detail="Event not found")
 
     # Creator or Admin only
-    if current_user.get("role") not in ["superadmin", "admin"] and existing.get("user_id") != str(current_user["_id"]):
-         raise HTTPException(status_code=403, detail="Only the creator or an administrator can upload resources")
+    is_admin = current_user.get("role") in ["superadmin", "admin"]
+    has_update_perm = current_user.get("permissions", {}).get("calendar", {}).get("update")
+    is_creator = existing.get("user_id") == str(current_user["_id"])
+
+    if not (is_admin or has_update_perm or is_creator):
+         raise HTTPException(status_code=403, detail="Only the creator or an authorized administrator can upload resources")
 
     try:
         resource_id = str(ObjectId())
@@ -460,7 +479,7 @@ async def upload_resource(event_id: str, background_tasks: BackgroundTasks, file
         resource_obj = {"id": resource_id, "name": file.filename, "url": None, "system_type": resource_type, "file_type": file.content_type, "uploaded_by": str(current_user["_id"]), "uploaded_at": datetime.utcnow(), "status": "processing", "transcription": None, "views": 0}
         await get_collection(col_name).update_one({"_id": ObjectId(event_id)}, {"$push": {"resources": resource_obj}})
         # ... background tasks
-        background_tasks.add_task(process_background_upload_and_transcribe, event_id, resource_id, local_path, file.filename, file.content_type, resource_type)
+        background_tasks.add_task(process_background_upload_and_transcribe, event_id, resource_id, local_path, file.filename, file.content_type, resource_type, col_name)
         return {"message": "Resource accepted.", "resource": resource_obj}
     except Exception as e: raise HTTPException(status_code=500, detail=str(e))
 
@@ -469,8 +488,13 @@ async def upload_resource(event_id: str, background_tasks: BackgroundTasks, file
 async def delete_event(event_id: str, background_tasks: BackgroundTasks, current_user: dict = Depends(get_current_user)):
     existing, col_name = await find_event_across_collections(event_id)
     if not existing: raise HTTPException(status_code=404, detail="Event not found")
-    if current_user.get("role") not in ["superadmin", "admin"] and existing.get("user_id") != str(current_user["_id"]):
+    is_admin = current_user.get("role") in ["superadmin", "admin"]
+    has_delete_perm = current_user.get("permissions", {}).get("calendar", {}).get("delete")
+    is_creator = existing.get("user_id") == str(current_user["_id"])
+
+    if not (is_admin or has_delete_perm or is_creator):
          raise HTTPException(status_code=403, detail="Not authorized to delete this event")
+    
     await get_collection(col_name).delete_one({"_id": ObjectId(event_id)})
     creator_name = current_user.get("full_name") or current_user.get("first_name", "System Admin")
     background_tasks.add_task(notify_users_instant, existing, "deleted", creator_name)
@@ -491,13 +515,17 @@ async def get_all_events(target_user_id: Optional[str] = None, view_mode: str = 
     events = []
     current_uid = str(current_user["_id"])
     role = current_user.get("role", "").lower()
-    is_staff_admin = role in ["superadmin", "admin"]
+    is_staff_admin = role in ["superadmin", "admin", "coach", "staff"]
+    has_team_read_perm = current_user.get("permissions", {}).get("calendar", {}).get("read")
     
     effective_user_id = target_user_id if (target_user_id and is_staff_admin) else current_uid
     
+    # Enable team view for those with 'calendar: read'
+    can_view_team = (view_mode == "team") and (role in ["superadmin", "admin"] or has_team_read_perm)
+    
     # ─── Batches & Quarters ───
     if not target_user_id:
-        if is_staff_admin and view_mode == "team":
+        if can_view_team:
             batches = await get_collection("batches").find({}).to_list(100)
             quarters = await get_collection("quarters").find({}).to_list(200)
         else:
@@ -527,7 +555,7 @@ async def get_all_events(target_user_id: Optional[str] = None, view_mode: str = 
     for col_name in (CALENDAR_COLLECTIONS + ["calendar_events"]):
         custom_col = get_collection(col_name)
         
-        if is_staff_admin and view_mode == "team" and not target_user_id:
+        if can_view_team and not target_user_id:
             db_docs = await custom_col.find({}).to_list(1000)
         else:
             # Privacy Logic: 
@@ -580,10 +608,16 @@ async def get_resource_details(event_id: str, resource_id: str, current_user: di
     if not resource: raise HTTPException(status_code=404, detail="Resource not found")
     # ... URL signing logic (unchanged)
     from app.services.s3_service import get_signed_url
-    url = resource.get("url")
+    import urllib.parse
+    url = resource.get("url") or resource.get("link")
     if url and ".amazonaws.com/" in url:
         try:
-            s3_key = url.split(".amazonaws.com/")[-1]
+            # Extract only the object key, ignoring existing query parameters
+            path_part = url.split(".amazonaws.com/")[-1]
+            s3_key_quoted = path_part.split("?")[0]
+            # Crucial: Unquote the key because the stored URL already has %20 for spaces
+            # If we don't unquote, boto3 will double-encode it (e.g., %20 -> %2520), causing a 404.
+            s3_key = urllib.parse.unquote(s3_key_quoted)
             resource["url"] = get_signed_url(s3_key)
         except Exception: pass
     return resource
@@ -593,9 +627,89 @@ async def get_resource_details(event_id: str, resource_id: str, current_user: di
 async def track_resource_view(event_id: str, resource_id: str, current_user: dict = Depends(get_current_user)):
     event, col_name = await find_event_across_collections(event_id)
     if not event: raise HTTPException(status_code=404, detail="Event not found")
-    await get_collection(col_name).update_one({"_id": ObjectId(event_id), "resources.id": resource_id}, {"$inc": {"resources.$.views": 1}})
-    await get_collection(col_name).update_one({"_id": ObjectId(event_id), "contents.id": resource_id}, {"$inc": {"contents.$.views": 1}})
-    return {"message": "View tracked"}
+    
+    view_entry = {
+        "user_id": str(current_user["_id"]),
+        "user_name": current_user.get("full_name") or current_user.get("email"),
+        "timestamp": datetime.utcnow(),
+        "duration": 0, # Seconds
+        "session_id": str(ObjectId()) # Unique ID for this specific watch session
+    }
+    
+    await get_collection(col_name).update_one(
+        {"_id": ObjectId(event_id), "resources.id": resource_id}, 
+        {
+            "$inc": {"resources.$.views": 1},
+            "$push": {"resources.$.view_logs": view_entry}
+        }
+    )
+    
+    # Log Activity
+    await log_activity(current_user, "View Resource", "Calendar", f"Started viewing resource {resource_id} in {event.get('title')}")
+    return {"message": "View tracked", "watch_session_id": view_entry["session_id"]}
+
+
+@router.post("/{event_id}/resources/{resource_id}/watch-time")
+async def update_watch_time(event_id: str, resource_id: str, payload: dict, current_user: dict = Depends(get_current_user)):
+    watch_session_id = payload.get("watch_session_id")
+    increment = payload.get("seconds", 10)
+    
+    if not watch_session_id: return {"status": "ignored"}
+    
+    event, col_name = await find_event_across_collections(event_id)
+    if not event: raise HTTPException(status_code=404, detail="Event not found")
+    
+    # Update the specific log entry for this session
+    # Using arrayFilters to target the correct resource AND the correct log entry inside it
+    await get_collection(col_name).update_one(
+        {"_id": ObjectId(event_id)},
+        {"$inc": {"resources.$[res].view_logs.$[log].duration": increment}},
+        array_filters=[
+            {"res.id": resource_id},
+            {"log.session_id": watch_session_id}
+        ]
+    )
+    return {"status": "updated"}
+
+@router.get("/{event_id}/resources/{resource_id}/analytics")
+async def get_resource_analytics(event_id: str, resource_id: str, current_user: dict = Depends(get_current_user)):
+    if current_user.get("role") not in ["superadmin", "admin", "coach", "staff"]:
+        if not current_user.get("permissions", {}).get("calendar", {}).get("read"):
+            raise HTTPException(status_code=403, detail="Access denied")
+        
+    event, col_name = await find_event_across_collections(event_id)
+    if not event: raise HTTPException(status_code=404, detail="Event not found")
+    
+    resource = next((r for r in (event.get("resources") or []) if r.get("id") == resource_id), None)
+    if not resource: raise HTTPException(status_code=404, detail="Resource not found")
+    
+    logs = resource.get("view_logs", [])
+    
+    # Aggregated mapping
+    unique_users = {}
+    for log in logs:
+        uid = log["user_id"]
+        if uid not in unique_users:
+            unique_users[uid] = {
+                "user_name": log["user_name"],
+                "total_duration": 0,
+                "first_view": log["timestamp"],
+                "last_view": log["timestamp"],
+                "view_count": 0
+            }
+        
+        unique_users[uid]["total_duration"] += log.get("duration", 0)
+        unique_users[uid]["view_count"] += 1
+        if log["timestamp"] > unique_users[uid]["last_view"]:
+            unique_users[uid]["last_view"] = log["timestamp"]
+
+    return {
+        "total_views": resource.get("views", 0),
+        "unique_viewers_count": len(unique_users),
+        "unique_logs": list(unique_users.values()),
+        "full_logs": logs
+    }
+
 
 
 @router.post("/{event_id}/resources/{resource_id}/chat")
@@ -644,6 +758,9 @@ Structure your response clearly. Use markdown.
             temperature=0.7
         )
         
+        # Log AI Chat
+        await log_activity(current_user, "AI Chat", "Calendar", f"Consulted AI Companion for {file_name} in {event.get('title')}")
+        
         return {"answer": response.choices[0].message.content}
     except Exception as e:
         print(f"AI Chat Error: {e}")
@@ -651,12 +768,18 @@ Structure your response clearly. Use markdown.
         if "insufficient_quota" in str(e):
              return {"answer": "I'm sorry, my AI processing unit (OpenAI) has run out of credits. Please contact your administrator to top up the OpenAI API quota.", "error": "insufficient_quota"}
         return {"answer": f"Error interacting with AI: {str(e)}"}
+
 @router.patch("/{event_id}/complete")
 async def complete_event(event_id: str, current_user: dict = Depends(get_current_user)):
     event, col_name = await find_event_across_collections(event_id)
     if not event: raise HTTPException(status_code=404, detail="Event not found")
-    if current_user.get("role") not in ["superadmin", "admin"] and event.get("user_id") != str(current_user["_id"]):
+    is_admin = current_user.get("role") in ["superadmin", "admin"]
+    has_update_perm = current_user.get("permissions", {}).get("calendar", {}).get("update")
+    is_creator = event.get("user_id") == str(current_user["_id"])
+
+    if not (is_admin or has_update_perm or is_creator):
          raise HTTPException(status_code=403, detail="Not authorized")
+    
     await get_collection(col_name).update_one({"_id": ObjectId(event_id)}, {"$set": {"status": "completed", "updated_at": datetime.utcnow()}})
     await sync_event_to_collection(event_id)
     return {"message": "Session marked as completed", "status": "completed"}
@@ -686,14 +809,29 @@ async def learner_upload_content(event_id: str, file: UploadFile = File(...), cu
         {"$push": {"learner_contents": content_obj}}
     )
     
+    await log_activity(current_user, "Learner Upload", "Calendar", f"Uploaded {file.filename} to session {event.get('title')}")
     return {"message": "Content uploaded successfully", "content": content_obj}
+
+@router.post("/{event_id}/track-join")
+async def track_join_session(event_id: str, current_user: dict = Depends(get_current_user)):
+    event, col_name = await find_event_across_collections(event_id)
+    if not event: raise HTTPException(status_code=404, detail="Session not found")
+    
+    await log_activity(current_user, "Join Session", "Calendar", f"Joined virtual link for {event.get('title')}")
+    return {"message": "Join activity logged"}
+
 
 @router.delete("/{event_id}/resources/{resource_id}")
 async def delete_resource(event_id: str, resource_id: str, current_user: dict = Depends(get_current_user)):
     existing, col_name = await find_event_across_collections(event_id)
     if not existing: raise HTTPException(status_code=404, detail="Event not found")
-    if current_user.get("role") not in ["superadmin", "admin"] and existing.get("user_id") != str(current_user["_id"]):
+    is_admin = current_user.get("role") in ["superadmin", "admin"]
+    has_update_perm = current_user.get("permissions", {}).get("calendar", {}).get("update")
+    is_creator = existing.get("user_id") == str(current_user["_id"])
+
+    if not (is_admin or has_update_perm or is_creator):
          raise HTTPException(status_code=403, detail="Not authorized to delete resources")
+         
     await get_collection(col_name).update_one({"_id": ObjectId(event_id)}, {"$pull": {"resources": {"id": resource_id}}})
     return {"message": "Resource removed"}
 
@@ -705,3 +843,109 @@ async def delete_content(event_id: str, content_id: str, current_user: dict = De
          raise HTTPException(status_code=403, detail="Not authorized to delete content")
     await get_collection(col_name).update_one({"_id": ObjectId(event_id)}, {"$pull": {"contents": {"id": content_id}}})
     return {"message": "Content removed"}
+
+# ─── Assessment Submission ───
+@router.post("/{event_id}/assessments/{quiz_index}/submit")
+async def submit_assessment(event_id: str, quiz_index: int, payload: dict, current_user: dict = Depends(get_current_user)):
+    existing, col_name = await find_event_across_collections(event_id)
+    if not existing: raise HTTPException(status_code=404, detail="Event not found")
+    
+    # Fetch original quiz data for reliable grading
+    assessments = existing.get("assessments") or existing.get("quizzes") or []
+    if not assessments and existing.get("session_template_id"):
+        temp = await get_collection("session_templates").find_one({"_id": ObjectId(existing["session_template_id"])})
+        if temp: 
+            assessments = temp.get("assessments") or temp.get("quizzes") or []
+    
+    active_quiz = assessments[quiz_index] if quiz_index < len(assessments) else None
+    if not active_quiz: raise HTTPException(status_code=404, detail="Assessment template not found")
+
+    # Grade the submission
+    responses = payload.get("responses", [])
+    graded_responses = []
+    total_earned = 0
+    total_available = 0
+
+    for i, q in enumerate(active_quiz.get("questions", [])):
+        user_answer = payload.get("answers", {}).get(str(i))
+        q_type = q.get("type", "MCQ")
+        q_marks = q.get("marks") or 1
+        total_available += q_marks
+        
+        is_correct = False
+        earned = 0
+        feedback = ""
+
+        if q_type == "MCQ":
+            correct_idx = q.get("correct_option_index")
+            if str(user_answer) == str(correct_idx):
+                is_correct = True
+                earned = q_marks
+        else:
+            # Descriptive AI Grading
+            keywords = q.get("expected_keywords") or ""
+            instructions = q.get("checker_instructions") or "Grade based on accuracy and completeness."
+            ai_result = await grade_descriptive_answer(
+                question=q.get("question_text"),
+                user_answer=str(user_answer or ""),
+                keywords=keywords,
+                checker_instructions=instructions,
+                max_marks=float(q_marks)
+            )
+            earned = ai_result.get("score", 0)
+            feedback = ai_result.get("feedback", "")
+            is_correct = earned >= (q_marks / 2) # Arbitrary threshold for 'correct' flag
+
+        total_earned += earned
+        graded_responses.append({
+            "question": q.get("question_text"),
+            "user_answer": user_answer,
+            "is_correct": is_correct,
+            "marks_earned": earned,
+            "total_marks": q_marks,
+            "feedback": feedback
+        })
+
+    percentage = (total_earned / total_available * 100) if total_available > 0 else 0
+    passing_score = active_quiz.get("passing_score") or 50
+    passed = percentage >= passing_score
+
+    result_obj = {
+        "id": str(ObjectId()),
+        "user_id": str(current_user["_id"]),
+        "user_name": current_user.get("full_name") or current_user.get("email"),
+        "quiz_index": quiz_index,
+        "session_id": event_id,
+        "company_id": current_user.get("company_id"),
+        "quiz_title": active_quiz.get("title"),
+        "score": total_earned,
+        "total_marks": total_available,
+        "percentage": percentage,
+        "passed": passed,
+        "responses": graded_responses,
+        "submitted_at": datetime.now(timezone.utc)
+    }
+    
+    # Store in the new dedicated collection
+    await get_collection("LearnerAssessments").insert_one(result_obj)
+    
+    # Also keep a link in the session document for curriculum continuity
+    await get_collection(col_name).update_one(
+        {"_id": ObjectId(event_id)},
+        {"$push": {"assessment_submissions": {
+            "submission_id": result_obj["id"],
+            "user_id": result_obj["user_id"],
+            "percentage": result_obj["percentage"],
+            "passed": result_obj["passed"]
+        }}}
+    )
+    
+    await log_activity(current_user, "Submit Assessment", col_name, f"Submitted quiz {quiz_index} for session {event_id}")
+    
+    # Stringify the auto-generated MongoDB _id for JSON serialization
+    if "_id" in result_obj:
+        result_obj["_id"] = str(result_obj["_id"])
+        
+    return {"message": "Assessment processed with AI grading", "result": result_obj}
+
+

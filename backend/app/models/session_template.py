@@ -13,6 +13,7 @@ class AssessmentQuestion(BaseModel):
     correct_option_index: Optional[int] = None # Only for MCQ
     expected_answer: Optional[str] = None # Only for Descriptive
     instruction: Optional[str] = None # Only for Descriptive
+    marks: int = 1 # Points for this question
 
 class AssessmentTemplate(BaseModel):
     title: str

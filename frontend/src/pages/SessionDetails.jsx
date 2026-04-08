@@ -84,6 +84,20 @@ const SessionDetails = () => {
         fetchSessionData();
     }, [sessionId]);
 
+    // ─── Background Status Polling ───
+    useEffect(() => {
+        // If any resource is still processing, poll every 5 seconds
+        const isProcessing = session?.resources?.some(r => r.status === 'processing');
+        
+        if (isProcessing) {
+            const interval = setInterval(() => {
+                console.log("Polling background resource status...");
+                fetchSessionData();
+            }, 5000);
+            return () => clearInterval(interval);
+        }
+    }, [session?.resources]);
+
     const handleSaveAttendance = async () => {
         setSavingAttendance(true);
         try {
@@ -285,7 +299,15 @@ const SessionDetails = () => {
                 <div className="flex gap-3">
                     {/* Common Join Button */}
                     {session.meeting_link && session.status !== 'completed' && (
-                        <a href={session.meeting_link} target="_blank" rel="noreferrer" className="flex items-center gap-2 h-10 px-6 bg-blue-600 text-white rounded-xl text-[12px] font-black hover:bg-blue-700 transition-all shadow-lg active:scale-95 uppercase tracking-widest">
+                        <a 
+                            href={session.meeting_link} 
+                            target="_blank" 
+                            rel="noreferrer" 
+                            onClick={async () => {
+                                try { await api.post(`/calendar/events/${sessionId}/track-join`); } catch(e){}
+                            }}
+                            className="flex items-center gap-2 h-10 px-6 bg-blue-600 text-white rounded-xl text-[12px] font-black hover:bg-blue-700 transition-all shadow-lg active:scale-95 uppercase tracking-widest"
+                        >
                             <Video size={16} /> Join
                         </a>
                     )}
@@ -611,12 +633,12 @@ const SessionDetails = () => {
                                                 <Target size={10} /> Passing: {quiz.passing_score}%
                                             </p>
                                             <p className="text-[9px] font-bold text-[var(--text-muted)] uppercase flex items-center gap-1">
-                                                <Clock size={10} /> {quiz.questions?.length || 0} Questions
+                                                <Clock size={10} /> {quiz.questions?.length || 0} Q's • {quiz.questions?.reduce((acc, q) => acc + (q.marks || 1), 0)} Marks
                                             </p>
                                         </div>
                                     </div>
                                     <button 
-                                        onClick={() => showSuccess("Viewing " + quiz.title)} 
+                                        onClick={() => navigate(`/assessment/${sessionId}/${idx}`)} 
                                         className="p-2.5 rounded-xl bg-white border border-gray-100 text-purple-600 hover:bg-purple-600 hover:text-white transition-all shadow-sm"
                                         title={isStaff ? "View Quiz Details" : "Start Assessment"}
                                     >

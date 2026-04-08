@@ -11,7 +11,10 @@ router = APIRouter(prefix="/batches", tags=["Batches"])
 # ─── Create Batch ───
 @router.post("/", status_code=status.HTTP_201_CREATED)
 async def create_batch(batch: BatchCreate, current_user: dict = Depends(get_current_user)):
-    if current_user.get("role") not in ["superadmin", "admin"]:
+    permissions = current_user.get("permissions", {})
+    can_create = permissions.get("batches", {}).get("create", False)
+    
+    if current_user.get("role") != "superadmin" and not can_create:
         raise HTTPException(status_code=403, detail="Not authorized")
     
     batches_col = get_collection("batches")
@@ -33,6 +36,11 @@ async def create_batch(batch: BatchCreate, current_user: dict = Depends(get_curr
 # ─── List All Batches ───
 @router.get("/")
 async def list_batches(current_user: dict = Depends(get_current_user)):
+    permissions = current_user.get("permissions", {})
+    can_read = permissions.get("batches", {}).get("read", False)
+    
+    if current_user.get("role") != "superadmin" and not can_read:
+        raise HTTPException(status_code=403, detail="Not authorized")
     batches_col = get_collection("batches")
     batches = await batches_col.find().sort("created_at", -1).to_list(200)
     for b in batches:
@@ -43,6 +51,11 @@ async def list_batches(current_user: dict = Depends(get_current_user)):
 # ─── Get Single Batch ───
 @router.get("/{batch_id}")
 async def get_batch(batch_id: str, current_user: dict = Depends(get_current_user)):
+    permissions = current_user.get("permissions", {})
+    can_read = permissions.get("batches", {}).get("read", False)
+    
+    if current_user.get("role") != "superadmin" and not can_read:
+        raise HTTPException(status_code=403, detail="Not authorized")
     batches_col = get_collection("batches")
     batch = await batches_col.find_one({"_id": ObjectId(batch_id)})
     if not batch:
@@ -54,7 +67,10 @@ async def get_batch(batch_id: str, current_user: dict = Depends(get_current_user
 # ─── Update Batch ───
 @router.put("/{batch_id}")
 async def update_batch(batch_id: str, updates: BatchUpdate, current_user: dict = Depends(get_current_user)):
-    if current_user.get("role") not in ["superadmin", "admin"]:
+    permissions = current_user.get("permissions", {})
+    can_update = permissions.get("batches", {}).get("update", False)
+    
+    if current_user.get("role") != "superadmin" and not can_update:
         raise HTTPException(status_code=403, detail="Not authorized")
     
     batches_col = get_collection("batches")
@@ -71,7 +87,10 @@ async def update_batch(batch_id: str, updates: BatchUpdate, current_user: dict =
 # ─── Update Batch Status ───
 @router.patch("/{batch_id}/status")
 async def update_batch_status(batch_id: str, body: dict, current_user: dict = Depends(get_current_user)):
-    if current_user.get("role") not in ["superadmin", "admin"]:
+    permissions = current_user.get("permissions", {})
+    can_update = permissions.get("batches", {}).get("update", False)
+    
+    if current_user.get("role") != "superadmin" and not can_update:
         raise HTTPException(status_code=403, detail="Not authorized")
     
     new_status = body.get("status")
@@ -90,7 +109,10 @@ async def update_batch_status(batch_id: str, body: dict, current_user: dict = De
 # ─── Delete Batch ───
 @router.delete("/{batch_id}")
 async def delete_batch(batch_id: str, current_user: dict = Depends(get_current_user)):
-    if current_user.get("role") not in ["superadmin", "admin"]:
+    permissions = current_user.get("permissions", {})
+    can_delete = permissions.get("batches", {}).get("delete", False)
+    
+    if current_user.get("role") != "superadmin" and not can_delete:
         raise HTTPException(status_code=403, detail="Not authorized")
     
     batches_col = get_collection("batches")
@@ -102,7 +124,10 @@ async def delete_batch(batch_id: str, current_user: dict = Depends(get_current_u
 # ─── Add Companies to Batch ───
 @router.post("/{batch_id}/companies")
 async def add_companies_to_batch(batch_id: str, company_ids: List[str], current_user: dict = Depends(get_current_user)):
-    if current_user.get("role") not in ["superadmin", "admin"]:
+    permissions = current_user.get("permissions", {})
+    can_update = permissions.get("batches", {}).get("update", False)
+    
+    if current_user.get("role") != "superadmin" and not can_update:
         raise HTTPException(status_code=403, detail="Not authorized")
     
     batches_col = get_collection("batches")
@@ -124,7 +149,10 @@ async def add_companies_to_batch(batch_id: str, company_ids: List[str], current_
 # ─── Remove Company from Batch ───
 @router.delete("/{batch_id}/companies/{company_id}")
 async def remove_company_from_batch(batch_id: str, company_id: str, current_user: dict = Depends(get_current_user)):
-    if current_user.get("role") not in ["superadmin", "admin"]:
+    permissions = current_user.get("permissions", {})
+    can_update = permissions.get("batches", {}).get("update", False)
+    
+    if current_user.get("role") != "superadmin" and not can_update:
         raise HTTPException(status_code=403, detail="Not authorized")
     
     batches_col = get_collection("batches")
@@ -137,6 +165,11 @@ async def remove_company_from_batch(batch_id: str, company_id: str, current_user
 # ─── Get Batch Companies (with details) ───
 @router.get("/{batch_id}/companies")
 async def get_batch_companies(batch_id: str, current_user: dict = Depends(get_current_user)):
+    permissions = current_user.get("permissions", {})
+    can_read = permissions.get("batches", {}).get("read", False)
+    
+    if current_user.get("role") != "superadmin" and not can_read:
+        raise HTTPException(status_code=403, detail="Not authorized")
     batches_col = get_collection("batches")
     companies_col = get_collection("companies")
     
@@ -160,7 +193,10 @@ async def get_batch_companies(batch_id: str, current_user: dict = Depends(get_cu
 @router.post("/{batch_id}/merge")
 async def merge_batches(batch_id: str, body: dict, current_user: dict = Depends(get_current_user)):
     """Merge source_batch_id into batch_id. Combines companies, optionally deletes source."""
-    if current_user.get("role") not in ["superadmin", "admin"]:
+    permissions = current_user.get("permissions", {})
+    can_update = permissions.get("batches", {}).get("update", False)
+    
+    if current_user.get("role") != "superadmin" and not can_update:
         raise HTTPException(status_code=403, detail="Not authorized")
     
     source_id = body.get("source_batch_id")
@@ -200,7 +236,10 @@ async def merge_batches(batch_id: str, body: dict, current_user: dict = Depends(
 # ─── Shift Company Between Batches ───
 @router.post("/{batch_id}/companies/{company_id}/shift")
 async def shift_company(batch_id: str, company_id: str, body: dict, current_user: dict = Depends(get_current_user)):
-    if current_user.get("role") not in ["superadmin", "admin"]:
+    permissions = current_user.get("permissions", {})
+    can_update = permissions.get("batches", {}).get("update", False)
+    
+    if current_user.get("role") != "superadmin" and not can_update:
         raise HTTPException(status_code=403, detail="Not authorized")
     
     target_batch_id = body.get("target_batch_id")

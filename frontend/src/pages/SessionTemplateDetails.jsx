@@ -29,7 +29,7 @@ const SessionTemplateDetails = () => {
     const [editQuizIdx, setEditQuizIdx] = useState(null);
     const [quizForm, setQuizForm] = useState({
         title: '', passing_score: 70, shuffle_questions: false,
-        questions: [{ question_text: '', type: 'MCQ', options: ['', '', '', ''], correct_option_index: 0 }]
+        questions: [{ question_text: '', type: 'MCQ', options: ['', '', '', ''], correct_option_index: 0, marks: 1 }]
     });
 
     const fetchData = async () => {
@@ -65,7 +65,7 @@ const SessionTemplateDetails = () => {
 
     // Assessments 📝
     const addQuestion = () => setQuizForm({
-        ...quizForm, questions: [...quizForm.questions, { question_text: '', type: 'MCQ', options: ['', '', '', ''], correct_option_index: 0 }]
+        ...quizForm, questions: [...quizForm.questions, { question_text: '', type: 'MCQ', options: ['', '', '', ''], correct_option_index: 0, marks: 1 }]
     });
     
     const removeQuestion = (idx) => setQuizForm({
@@ -104,7 +104,7 @@ const SessionTemplateDetails = () => {
             setEditQuizIdx(null);
             setQuizForm({
                 title: '', passing_score: 70, shuffle_questions: false,
-                questions: [{ question_text: '', type: 'MCQ', options: ['', '', '', ''], correct_option_index: 0 }]
+                questions: [{ question_text: '', type: 'MCQ', options: ['', '', '', ''], correct_option_index: 0, marks: 1 }]
             });
             showSuccess(editQuizIdx !== null ? "Quiz updated" : "Quiz library updated");
             fetchData();
@@ -223,7 +223,7 @@ const SessionTemplateDetails = () => {
                                         </div>
                                         <div className="flex flex-col">
                                             <span className="text-[10px] font-bold text-[var(--text-muted)] uppercase tracking-wider">Questions</span>
-                                            <span className="text-[12px] font-bold text-[var(--text-main)]">{a.questions.length} Quiz Q's</span>
+                                            <span className="text-[12px] font-bold text-[var(--text-main)]">{a.questions.length} Q's • {a.questions.reduce((acc, q) => acc + (q.marks || 1), 0)} Marks</span>
                                         </div>
                                     </div>
                                 </div>
@@ -276,7 +276,7 @@ const SessionTemplateDetails = () => {
                 setEditQuizIdx(null);
                 setQuizForm({
                     title: '', passing_score: 70, shuffle_questions: false,
-                    questions: [{ question_text: '', type: 'MCQ', options: ['', '', '', ''], correct_option_index: 0 }]
+                    questions: [{ question_text: '', type: 'MCQ', options: ['', '', '', ''], correct_option_index: 0, marks: 1 }]
                 });
             }} title={editQuizIdx !== null ? "Edit Quiz Architecture" : "Create New Quiz"}>
                 <div className="space-y-4 max-h-[75vh] overflow-y-auto pr-2 scrollbar-thin">
@@ -316,7 +316,7 @@ const SessionTemplateDetails = () => {
                         </h3>
                         <div className="flex gap-4">
                             <button onClick={() => {
-                                const templateStr = "Question,Type(MCQ/Descriptive),Option1,Option2,Option3,Option4,CorrectIndex(0-3),ExpectedAnswer,Instruction\nWhat is React?,MCQ,Library,Framework,Language,DB,0,,";
+                                const templateStr = "Question,Type(MCQ/Descriptive),Option1,Option2,Option3,Option4,CorrectIndex(0-3),ExpectedAnswer,Instruction,Marks\nWhat is React?,MCQ,Library,Framework,Language,DB,0,,,1";
                                 const blob = new Blob([templateStr], { type: 'text/csv' });
                                 const url = window.URL.createObjectURL(blob);
                                 const a = document.createElement('a');
@@ -343,7 +343,8 @@ const SessionTemplateDetails = () => {
                                                 options: cols[1] === 'MCQ' ? [cols[2], cols[3], cols[4], cols[5]] : null,
                                                 correct_option_index: cols[1] === 'MCQ' ? parseInt(cols[6]) : null,
                                                 expected_answer: cols[1] === 'Descriptive' ? cols[7] : null,
-                                                instruction: cols[1] === 'Descriptive' ? cols[8] : null
+                                                instruction: cols[1] === 'Descriptive' ? cols[8] : null,
+                                                marks: parseInt(cols[9]) || 1
                                             };
                                         });
                                         setQuizForm({ ...quizForm, questions: [...quizForm.questions, ...imported] });
@@ -365,6 +366,11 @@ const SessionTemplateDetails = () => {
                                         <div className="flex items-center justify-between">
                                             <span className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest">Question {qIdx + 1}</span>
                                             <div className="flex items-center gap-4">
+                                                <div className="flex items-center gap-2 bg-[var(--input-bg)] border border-[var(--border)] rounded-lg px-2 py-1">
+                                                    <span className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest">Mark:</span>
+                                                    <input type="number" className="w-10 bg-transparent border-none outline-none text-[11px] font-black text-[var(--accent-indigo)] text-center"
+                                                        value={q.marks} onChange={e => handleQuizChange(qIdx, 'marks', parseInt(e.target.value))} />
+                                                </div>
                                                 <select className="px-3 py-1 bg-[var(--input-bg)] border border-[var(--border)] rounded-lg text-[11px] font-black text-[var(--text-main)] outline-none focus:border-[var(--accent-indigo)]"
                                                     value={q.type} onChange={e => handleQuizChange(qIdx, 'type', e.target.value)}>
                                                     <option value="MCQ">MCQ</option>

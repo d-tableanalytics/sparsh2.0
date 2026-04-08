@@ -24,6 +24,16 @@ class UserBase(BaseModel):
     session_type: Optional[str] = "None" # Core, Support, Both, None
     designation: Optional[str] = None
     department: Optional[str] = "Other" # HOD, Implementor, EA, MD, Other
+    
+    # Highly Granular CRUD Permissions
+    permissions: dict = {
+        "batches": {"create": False, "read": True, "update": False, "delete": False},
+        "calendar": {"create": False, "read": True, "update": False, "delete": False},
+        "users": {"create": False, "read": True, "update": False, "delete": False},
+        "companies": {"create": False, "read": True, "update": False, "delete": False},
+        "logs": {"create": False, "read": True, "update": False, "delete": False},
+        "templates": {"create": False, "read": True, "update": False, "delete": False}
+    }
 
 class UserCreate(UserBase):
     password: str
