@@ -232,7 +232,8 @@ async def upload_project_knowledge(
         # 2. Extract Text and Save to KnowledgeBase collection (for fast response)
         # Using the user requested "KnowledgeBase" collection name
         from app.services.gpt_service import extract_text_from_file, chunk_text
-        text = await extract_text_from_file(tmp_path, safe_filename)
+        result = await extract_text_from_file(tmp_path, safe_filename)
+        text = result["text"]
         chunks = chunk_text(text)
         
         kb_col = get_collection("KnowledgeBase")
@@ -335,9 +336,13 @@ async def gpt_session_respond(session_id: str, payload: dict, current_user: dict
     
     # Combined knowledge: Project RAG + Session Knowledge
     context = await get_relevant_context(project_id, user_message)
+    session_images = []
     if conv.get("session_knowledge"):
         for sk in conv["session_knowledge"]:
-            context += f"\n\n[Session Context - {sk['name']}]:\n{sk['content']}"
+            if sk["content"].startswith("[IMAGE_BASE64]"):
+                session_images.append(sk["content"].replace("[IMAGE_BASE64]", "", 1))
+            else:
+                context += f"\n\n[Session Context - {sk['name']}]:\n{sk['content']}"
 
     # Get project instructions
     proj_col = get_collection("gpt_projects")
@@ -347,7 +352,7 @@ async def gpt_session_respond(session_id: str, payload: dict, current_user: dict
     instructions = project.get("instruction", "You are a helpful assistant.")
     
     # 2. Generate AI Response
-    ai_msg = await generate_ai_response(instructions, context, user_message, conv["messages"])
+    ai_msg = await generate_ai_response(instructions, context, user_message, conv["messages"], images=session_images if session_images else None)
     
     # 3. Save to History
     new_messages = conv["messages"]
@@ -401,6 +406,13 @@ async def rethink_gpt_session(session_id: str, payload: dict, current_user: dict
     # 1. RAG and AI generation with the NEW content
     from app.services.gpt_service import get_relevant_context, generate_ai_response
     context = await get_relevant_context(conv["project_id"], new_content)
+    session_images = []
+    if conv.get("session_knowledge"):
+        for sk in conv["session_knowledge"]:
+            if sk["content"].startswith("[IMAGE_BASE64]"):
+                session_images.append(sk["content"].replace("[IMAGE_BASE64]", "", 1))
+            else:
+                context += f"\n\n[Session Context - {sk['name']}]:\n{sk['content']}"
     
     # Get project instructions
     proj_col = get_collection("gpt_projects")
@@ -408,7 +420,7 @@ async def rethink_gpt_session(session_id: str, payload: dict, current_user: dict
     instructions = project.get("instruction", "You are a helpful assistant.")
     
     # 2. Generate new response
-    ai_msg = await generate_ai_response(instructions, context, new_content, truncated_messages)
+    ai_msg = await generate_ai_response(instructions, context, new_content, truncated_messages, images=session_images if session_images else None)
     
     # Update messages
     truncated_messages.append({"role": "user", "content": new_content, "timestamp": datetime.utcnow()})
@@ -444,19 +456,39 @@ async def upload_session_context(
                 await out_file.write(chunk)
                 
         from app.services.gpt_service import extract_text_from_file
-        text = await extract_text_from_file(tmp_path, file.filename)
+        result = await extract_text_from_file(tmp_path, file.filename)
         
-        # Append this as a special 'context' message or metadata in session
-        context_preview = f"[Uploaded File: {file.filename}]\n{text[:2000]}..." # Truncate for safety
+        knowledge_entries = []
         
-        # Store in session metadata or append hidden context
-        # For simplicity, we add it to a 'session_knowledge' list in the conversation doc
-        await conv_col.update_one(
-            {"_id": conv["_id"]},
-            {"$push": {"session_knowledge": {"name": file.filename, "content": text, "uploaded_at": datetime.utcnow()}}}
-        )
+        # Store text content if available
+        if result["text"]:
+            knowledge_entries.append({
+                "name": file.filename, 
+                "content": result["text"], 
+                "uploaded_at": datetime.utcnow()
+            })
+        
+        # Store each image as a separate entry with IMAGE_BASE64 tag
+        for i, img_data in enumerate(result["images"]):
+            knowledge_entries.append({
+                "name": f"{file.filename} (image {i+1})",
+                "content": f"[IMAGE_BASE64]{img_data}",
+                "uploaded_at": datetime.utcnow()
+            })
+        
+        if knowledge_entries:
+            await conv_col.update_one(
+                {"_id": conv["_id"]},
+                {"$push": {"session_knowledge": {"$each": knowledge_entries}}}
+            )
+        
+        img_count = len(result["images"])
+        msg = f"File {file.filename} is now available in this chat engine session."
+        if img_count:
+            msg += f" ({img_count} embedded image{'s' if img_count > 1 else ''} also extracted)"
+        
         if os.path.exists(tmp_path): os.remove(tmp_path)
-        return {"message": f"File {file.filename} is now available in this chat engine session."}
+        return {"message": msg}
     except Exception as e:
         if os.path.exists(tmp_path): os.remove(tmp_path)
         raise HTTPException(status_code=500, detail=str(e))
