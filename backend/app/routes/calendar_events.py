@@ -180,8 +180,13 @@ async def validate_conflict(event_data: dict, current_user: dict = Depends(get_c
 @router.post("", response_model=dict)
 async def create_event(event: CalendarEventCreate, background_tasks: BackgroundTasks, current_user: dict = Depends(get_current_user)):
     # ─── Permission Check ───
-    if current_user.get("role") != "superadmin":
-        if not current_user.get("permissions", {}).get("calendar", {}).get("create"):
+    user_role = current_user.get("role", "").lower()
+    has_create_perm = current_user.get("permissions", {}).get("calendar", {}).get("create")
+    
+    if user_role != "superadmin":
+        # Allow Client Users (Learners) and Client Admins to create events
+        # Staff roles (admin, coach, staff) still require the explicit permission bit
+        if not has_create_perm and user_role not in ["clientuser", "clientadmin"]:
             raise HTTPException(status_code=403, detail="Not authorized to create events")
 
     event_dict = event.model_dump()
