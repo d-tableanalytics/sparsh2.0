@@ -46,6 +46,7 @@ const SettingsPage = () => {
     const getVarsForTemplate = (slug) => {
         if (slug.includes('task')) return templateVariables.task;
         if (slug.includes('event')) return templateVariables.event;
+        if (slug.includes('session_complete')) return [...templateVariables.attendance, 'topic'];
         if (slug.includes('user')) return templateVariables.user;
         if (slug.includes('company')) return templateVariables.company;
         if (slug.includes('attendance')) return templateVariables.attendance;
@@ -417,6 +418,7 @@ const SettingsPage = () => {
                                                 <option value="event_created_email">Session Scheduled</option>
                                                 <option value="event_updated_email">Session Rescheduled</option>
                                                 <option value="event_deleted_email">Session Cancelled</option>
+                                                <option value="session_complete_email">Session Completed</option>
                                             </optgroup>
                                             <optgroup label="User Management">
                                                 <option value="user_creation_email">User Created</option>

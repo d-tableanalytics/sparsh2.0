@@ -6,7 +6,8 @@ from app.models.calendar_event import CalendarEventCreate, CalendarEventResponse
 from app.services.notification_service import (
     send_task_created_email, send_task_updated_email, send_task_deleted_email,
     send_event_created_email, send_event_updated_email, send_event_deleted_email,
-    send_conflict_notification_email, send_attendance_thanks_email, send_attendance_absent_email
+    send_conflict_notification_email, send_attendance_thanks_email, send_attendance_absent_email,
+    send_session_complete_email
 )
 from app.services.activity_log_service import log_activity
 from app.services.gpt_service import grade_descriptive_answer
@@ -770,14 +771,11 @@ Structure your response clearly. Use markdown.
         return {"answer": f"Error interacting with AI: {str(e)}"}
 
 @router.patch("/{event_id}/complete")
-async def complete_event(event_id: str, current_user: dict = Depends(get_current_user)):
+async def complete_event(event_id: str, background_tasks: BackgroundTasks, current_user: dict = Depends(get_current_user)):
     event, col_name = await find_event_across_collections(event_id)
     if not event: raise HTTPException(status_code=404, detail="Event not found")
-    is_admin = current_user.get("role") == "superadmin"
-    has_update_perm = event.get("permissions", {}).get("calendar", {}).get("update") # Wait, this should probably be current_user
-    # Actually, the logic in other routes is current_user.get("permissions", {}).get("calendar", {}).get("update")
     
-    # Correction:
+    is_admin = current_user.get("role") == "superadmin"
     has_update_perm = current_user.get("permissions", {}).get("calendar", {}).get("update")
     is_creator = event.get("user_id") == str(current_user["_id"])
 
@@ -786,6 +784,26 @@ async def complete_event(event_id: str, current_user: dict = Depends(get_current
     
     await get_collection(col_name).update_one({"_id": ObjectId(event_id)}, {"$set": {"status": "completed", "updated_at": datetime.utcnow()}})
     await sync_event_to_collection(event_id)
+
+    # ─── Notify Attendees of Completion ───
+    async def process_completion_emails():
+        try:
+            user_col = get_collection("users")
+            member_ids = event.get("assigned_member_ids", [])
+            # Also notify coaches/staff assigned
+            coaches = event.get("coach_ids", [])
+            target_ids = list(set(member_ids + coaches))
+            
+            for uid in target_ids:
+                if not uid: continue
+                user = await user_col.find_one({"_id": ObjectId(uid)})
+                if user:
+                    await send_session_complete_email(user, event)
+        except Exception as e:
+            print(f"Error sending session completion emails: {e}")
+
+    background_tasks.add_task(process_completion_emails)
+    
     return {"message": "Session marked as completed", "status": "completed"}
 
 @router.post("/{event_id}/learner-upload")

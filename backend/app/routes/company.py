@@ -437,6 +437,11 @@ async def get_company_training_path(company_id: str, current_user: dict = Depend
     from app.utils.calendar_utils import CALENDAR_COLLECTIONS
     session_cols = CALENDAR_COLLECTIONS + ["calendar_events"]
     
+    user_id = str(current_user["_id"])
+    user_role = current_user.get("role", "").lower()
+    # staff/admins can see everything. clientuser (learner) only assigned.
+    is_learner = user_role == "clientuser"
+    
     # 1. Get Batches
     batches = await batches_col.find({"companies": company_id}).to_list(100)
     for b in batches:
@@ -451,10 +456,20 @@ async def get_company_training_path(company_id: str, current_user: dict = Depend
             # 3. Get Sessions
             q["sessions"] = []
             for col_name in session_cols:
-                sessions = await get_collection(col_name).find({"quarter_id": q["id"]}).to_list(200)
+                # Query sessions for this quarter
+                query = {"quarter_id": q["id"]}
+                sessions = await get_collection(col_name).find(query).to_list(1000)
+                
                 for s in sessions:
                     s["id"] = str(s.pop("_id"))
                     s["source_col"] = col_name
+                    
+                    # Apply Privacy Filter for Learners
+                    if is_learner:
+                        assigned_members = s.get("assigned_member_ids", [])
+                        if assigned_members and user_id not in assigned_members:
+                            continue # Skip if assigned list exists but user not in it
+                    
                     q["sessions"].append(s)
             
             b["quarters"].append(q)
