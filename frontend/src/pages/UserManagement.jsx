@@ -74,7 +74,9 @@ const UserManagement = () => {
             setStaffForm(initialStaffForm);
             fetchData();
         } catch (err) {
-            showError(err.response?.data?.detail || "Registration failed");
+            if (err.response?.status !== 403) {
+                showError(err.response?.data?.detail || "Registration failed");
+            }
         } finally {
             setIsSaving(false);
         }

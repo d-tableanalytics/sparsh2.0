@@ -51,7 +51,11 @@ const UserDetails = () => {
             setIsEditing(false);
             showSuccess("Profile updated");
             fetchData();
-        } catch (err) { showError("Update failed"); }
+        } catch (err) { 
+            if (err.response?.status !== 403) {
+                showError(err.response?.data?.detail || "Update failed");
+            }
+        }
     };
 
     const handleToggleStatus = async () => {
@@ -59,15 +63,24 @@ const UserDetails = () => {
             await api.put(`/users/${userId}`, { is_active: !user.is_active });
             showSuccess(`User ${!user.is_active ? 'activated' : 'deactivated'}`);
             fetchData();
-        } catch (err) { showError("Status change failed"); }
+        } catch (err) { 
+            if (err.response?.status !== 403) {
+                showError(err.response?.data?.detail || "Status change failed");
+            }
+        }
     };
 
     const handleDelete = async () => {
+        if (!window.confirm("Are you sure? This will permanently remove the user.")) return;
         try {
             await api.delete(`/users/${userId}`);
             showSuccess("Member removed from registry");
             navigate('/admin/users');
-        } catch (err) { showError("Delete failed"); }
+        } catch (err) { 
+            if (err.response?.status !== 403) {
+                showError(err.response?.data?.detail || "Delete failed");
+            }
+        }
     };
 
     if (loading) return <div className="flex items-center justify-center h-96 animate-pulse font-black uppercase text-[12px] text-[var(--accent-indigo)] tracking-widest">Generating Digital Profile...</div>;

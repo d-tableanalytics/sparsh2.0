@@ -245,10 +245,10 @@ async def send_notification_from_template(user_obj: dict, template_slug: str, co
     if delivery_type in ["email", "both"] and email and email_t:
         rendered_body = render_template(email_t["body"], context)
         rendered_subject = render_template(email_t.get("subject", "Notification"), context)
-        results["email"] = await send_email_notification(email, rendered_subject, rendered_body, user_id, email_t["slug"])
+        results["email"] = await send_email_notification(email, rendered_subject, rendered_body, user_id, email_t.get("slug", f"{template_slug}_email"))
     if delivery_type in ["whatsapp", "both"] and phone and whatsapp_t:
         rendered_body = render_template(whatsapp_t["body"], context)
-        results["whatsapp"] = await send_whatsapp_notification(phone, rendered_body, user_id, whatsapp_t["slug"])
+        results["whatsapp"] = await send_whatsapp_notification(phone, rendered_body, user_id, whatsapp_t.get("slug", f"{template_slug}_whatsapp"))
     return results
 
 def format_datetime_standard(dt_str: str) -> str:

@@ -17,6 +17,14 @@ export const NotificationProvider = ({ children }) => {
     setNotification(null);
   }, []);
 
+  React.useEffect(() => {
+    const handleGlobalError = (event) => {
+      showError(event.detail.message);
+    };
+    window.addEventListener('app-error', handleGlobalError);
+    return () => window.removeEventListener('app-error', handleGlobalError);
+  }, [showError]);
+
   return (
     <NotificationContext.Provider value={{ notification, showSuccess, showError, clearNotification }}>
       {children}

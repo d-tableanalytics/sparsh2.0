@@ -155,7 +155,7 @@ async def update_company_status(company_id: str, body: CompanyStatusUpdate, curr
     permissions = current_user.get("permissions", {})
     can_update = permissions.get("companies", {}).get("update", False)
     
-    if current_user.get("role") not in ["superadmin", "clientadmin"] and not can_update:
+    if current_user.get("role") != "superadmin" and current_user.get("role") != "clientadmin" and not can_update:
         raise HTTPException(status_code=403, detail="Not authorized")
     
     # clientadmin can only update their own company status
@@ -222,7 +222,7 @@ async def bulk_create_users(company_id: str, users: List[UserCreate], background
     permissions = current_user.get("permissions", {})
     can_update = permissions.get("companies", {}).get("update", False)
     
-    is_admin = current_user.get("role") in ["superadmin", "clientadmin"]
+    is_admin = current_user.get("role") == "superadmin" or current_user.get("role") == "clientadmin"
     is_authorized = is_admin or can_update
     
     if not is_authorized:
@@ -282,7 +282,7 @@ async def download_user_template(company_id: str, current_user: dict = Depends(g
     permissions = current_user.get("permissions", {})
     can_update = permissions.get("companies", {}).get("update", False)
     
-    is_admin = current_user.get("role") in ["superadmin", "clientadmin"]
+    is_admin = current_user.get("role") == "superadmin" or current_user.get("role") == "clientadmin"
     is_authorized = is_admin or can_update
 
     if not is_authorized:
@@ -333,7 +333,7 @@ async def import_users_xlsx(company_id: str, background_tasks: BackgroundTasks, 
     permissions = current_user.get("permissions", {})
     can_update = permissions.get("companies", {}).get("update", False)
     
-    is_admin = current_user.get("role") in ["superadmin", "clientadmin"]
+    is_admin = current_user.get("role") == "superadmin" or current_user.get("role") == "clientadmin"
     is_authorized = is_admin or can_update
     
     if not is_authorized:

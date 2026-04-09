@@ -515,12 +515,19 @@ const SessionDetails = () => {
                             session.resources.map((item, idx) => (
                                 <div key={idx} className="flex flex-col bg-[var(--input-bg)] border border-[var(--border)] rounded-xl overflow-hidden group/item">
                                     <div className="flex items-center justify-between p-3 border-b border-transparent">
-                                        <div className="flex flex-col">
+                                        <div className="flex flex-col flex-1 min-w-0">
                                             <span className="text-[12px] font-bold text-[var(--text-main)] truncate max-w-[180px]">{item.name}</span>
-                                            <span className="text-[9px] font-black uppercase text-amber-600">
-                                                {item.system_type} {item.status === 'processing' && '— Processing...'}
-                                                {item.status === 'failed' && '— Failed'}
-                                            </span>
+                                            <div className="flex items-center gap-2 mt-0.5">
+                                                <span className="text-[9px] font-black uppercase text-amber-600">
+                                                    {item.system_type} {item.status === 'processing' && `— Processing... ${item.progress || 0}%`}
+                                                    {item.status === 'failed' && '— Failed'}
+                                                </span>
+                                                {item.status === 'processing' && (
+                                                    <div className="flex-1 max-w-[100px] h-1 bg-amber-100 rounded-full overflow-hidden">
+                                                        <div className="h-full bg-amber-500 transition-all duration-500" style={{ width: `${item.progress || 0}%` }}></div>
+                                                    </div>
+                                                )}
+                                            </div>
                                         </div>
                                         <div className="flex items-center gap-2">
                                             {item.status === 'processing' ? (

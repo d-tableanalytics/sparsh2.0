@@ -11,8 +11,7 @@ router = APIRouter(prefix="/quarters", tags=["Quarters"])
 # ─── Create Quarter ───
 @router.post("/", status_code=status.HTTP_201_CREATED)
 async def create_quarter(quarter: QuarterCreate, current_user: dict = Depends(get_current_user)):
-    is_power_role = current_user.get("role") in ["superadmin", "admin", "coach", "staff"]
-    if not is_power_role:
+    if current_user.get("role") != "superadmin":
         if not current_user.get("permissions", {}).get("batches", {}).get("create"):
              raise HTTPException(status_code=403, detail="Not authorized")
     
@@ -116,8 +115,7 @@ async def get_quarter(quarter_id: str, current_user: dict = Depends(get_current_
 # ─── Update Quarter ───
 @router.put("/{quarter_id}")
 async def update_quarter(quarter_id: str, updates: QuarterUpdate, current_user: dict = Depends(get_current_user)):
-    is_power_role = current_user.get("role") in ["superadmin", "admin", "coach", "staff"]
-    if not is_power_role:
+    if current_user.get("role") != "superadmin":
         if not current_user.get("permissions", {}).get("batches", {}).get("update"):
              raise HTTPException(status_code=403, detail="Not authorized")
     
@@ -135,8 +133,7 @@ async def update_quarter(quarter_id: str, updates: QuarterUpdate, current_user: 
 # ─── Delete Quarter ───
 @router.delete("/{quarter_id}")
 async def delete_quarter(quarter_id: str, current_user: dict = Depends(get_current_user)):
-    is_power_role = current_user.get("role") in ["superadmin", "admin", "coach", "staff"]
-    if not is_power_role:
+    if current_user.get("role") != "superadmin":
         if not current_user.get("permissions", {}).get("batches", {}).get("delete"):
              raise HTTPException(status_code=403, detail="Not authorized")
     

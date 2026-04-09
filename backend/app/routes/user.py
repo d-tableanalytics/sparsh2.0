@@ -97,6 +97,17 @@ async def update_user(user_id: str, updates: UserEditRequest, background_tasks: 
     
     is_authorized = current_user.get("role") == "superadmin" or can_update
     
+    # ─── 1. Restrict Staff Management to Superadmin ───
+    is_superadmin = current_user.get("role") == "superadmin"
+    if col_name == "staff" and not is_superadmin:
+        raise HTTPException(status_code=403, detail="Only superadmin can manage staff users")
+
+    # ─── 2. Harden Self-Modification Check ───
+    is_self = str(current_user["_id"]) == str(user_id)
+    if is_self and not is_superadmin:
+        if updates.role is not None or updates.permissions is not None:
+            raise HTTPException(status_code=403, detail="Cannot modify your own role or permissions")
+
     if not is_authorized:
         if current_user.get("role") == "clientadmin":
             if user.get("company_id") != current_user.get("company_id"):
@@ -136,8 +147,10 @@ async def delete_user(user_id: str, current_user: dict = Depends(get_current_use
     permissions = current_user.get("permissions", {})
     can_delete = permissions.get("users", {}).get("delete", False)
     
-    is_authorized = current_user.get("role") == "superadmin" or can_delete
-    
+    # ─── Restrict Staff Deletion to Superadmin ───
+    if col_name == "staff" and current_user.get("role") != "superadmin":
+        raise HTTPException(status_code=403, detail="Only superadmin can delete staff users")
+
     if not is_authorized:
         if current_user.get("role") == "clientadmin":
             if user.get("company_id") != current_user.get("company_id"):
