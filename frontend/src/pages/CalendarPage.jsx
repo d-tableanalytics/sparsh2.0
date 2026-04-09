@@ -41,6 +41,12 @@ const CalendarPage = () => {
     const [showSummary, setShowSummary] = useState(false);
     const [summaryDate, setSummaryDate] = useState(null);
     const [dayEvents, setDayEvents] = useState([]);
+    const [currentViewDate, setCurrentViewDate] = useState(new Date());
+
+    const monthsList = [
+        'JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN',
+        'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'
+    ];
 
     const [showModal, setShowModal] = useState(false);
     const [isEdit, setIsEdit] = useState(false);
@@ -435,7 +441,10 @@ const CalendarPage = () => {
 
             <div className="flex items-center justify-between px-2">
                 <div>
-                    <h1 className="text-xl font-black text-[var(--text-main)] tracking-tight">Organization Calendar</h1>
+                    <h1 className="text-xl font-black text-[var(--text-main)] tracking-tight uppercase">
+                        Organization Calendar <span className="text-[var(--accent-indigo)] px-2">•</span> 
+                        {currentViewDate.toLocaleDateString(undefined, { month: 'long', year: 'numeric' })}
+                    </h1>
                     <p className="text-[12px] text-[var(--text-muted)] font-bold italic tracking-wide">Elite session governance & operational accountability engine.</p>
                 </div>
                 <div className="flex items-center gap-3">
@@ -510,9 +519,34 @@ const CalendarPage = () => {
                     })}
                 </div>
 
+                {/* ─── Month Jump Bar ─── */}
+                <div className="flex items-center gap-1 mb-6 bg-[var(--input-bg)] p-1.5 rounded-2xl border border-[var(--border)] overflow-x-auto no-scrollbar">
+                    {monthsList.map((m, idx) => {
+                        const isCurrentMonth = currentViewDate.getMonth() === idx;
+                        return (
+                            <button
+                                key={m}
+                                onClick={() => {
+                                    const newDate = new Date(currentViewDate);
+                                    newDate.setMonth(idx);
+                                    calendarRef.current.getApi().gotoDate(newDate);
+                                }}
+                                className={`flex-1 min-w-[50px] py-2 rounded-xl text-[11px] font-black transition-all ${
+                                    isCurrentMonth 
+                                    ? 'bg-[var(--accent-indigo)] text-white shadow-lg' 
+                                    : 'text-[var(--text-muted)] hover:bg-white hover:text-[var(--accent-indigo)]'
+                                }`}
+                            >
+                                {m}
+                            </button>
+                        );
+                    })}
+                </div>
+
                 <FullCalendar
                     ref={calendarRef} plugins={[dayGridPlugin, timeGridPlugin, listPlugin, multiMonthPlugin, interactionPlugin]}
                     initialView="dayGridMonth" headerToolbar={false} events={filteredEvents} height="auto" selectable={true}
+                    datesSet={(arg) => setCurrentViewDate(arg.view.currentStart)}
 
                     select={handleDateSelect} eventClick={(info) => {
                         const eStart = info.event.startStr.split('T')[0];

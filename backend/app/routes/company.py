@@ -155,7 +155,7 @@ async def update_company_status(company_id: str, body: CompanyStatusUpdate, curr
     permissions = current_user.get("permissions", {})
     can_update = permissions.get("companies", {}).get("update", False)
     
-    if current_user.get("role") not in ["superadmin", "clientadmin"] and not can_update:
+    if current_user.get("role") != "superadmin" and current_user.get("role") != "clientadmin" and not can_update:
         raise HTTPException(status_code=403, detail="Not authorized")
     
     # clientadmin can only update their own company status
@@ -222,7 +222,7 @@ async def bulk_create_users(company_id: str, users: List[UserCreate], background
     permissions = current_user.get("permissions", {})
     can_update = permissions.get("companies", {}).get("update", False)
     
-    is_admin = current_user.get("role") in ["superadmin", "clientadmin"]
+    is_admin = current_user.get("role") == "superadmin" or current_user.get("role") == "clientadmin"
     is_authorized = is_admin or can_update
     
     if not is_authorized:
@@ -282,7 +282,7 @@ async def download_user_template(company_id: str, current_user: dict = Depends(g
     permissions = current_user.get("permissions", {})
     can_update = permissions.get("companies", {}).get("update", False)
     
-    is_admin = current_user.get("role") in ["superadmin", "clientadmin"]
+    is_admin = current_user.get("role") == "superadmin" or current_user.get("role") == "clientadmin"
     is_authorized = is_admin or can_update
 
     if not is_authorized:
@@ -333,7 +333,7 @@ async def import_users_xlsx(company_id: str, background_tasks: BackgroundTasks, 
     permissions = current_user.get("permissions", {})
     can_update = permissions.get("companies", {}).get("update", False)
     
-    is_admin = current_user.get("role") in ["superadmin", "clientadmin"]
+    is_admin = current_user.get("role") == "superadmin" or current_user.get("role") == "clientadmin"
     is_authorized = is_admin or can_update
     
     if not is_authorized:
@@ -437,6 +437,11 @@ async def get_company_training_path(company_id: str, current_user: dict = Depend
     from app.utils.calendar_utils import CALENDAR_COLLECTIONS
     session_cols = CALENDAR_COLLECTIONS + ["calendar_events"]
     
+    user_id = str(current_user["_id"])
+    user_role = current_user.get("role", "").lower()
+    # staff/admins can see everything. clientuser (learner) only assigned.
+    is_learner = user_role == "clientuser"
+    
     # 1. Get Batches
     batches = await batches_col.find({"companies": company_id}).to_list(100)
     for b in batches:
@@ -451,10 +456,20 @@ async def get_company_training_path(company_id: str, current_user: dict = Depend
             # 3. Get Sessions
             q["sessions"] = []
             for col_name in session_cols:
-                sessions = await get_collection(col_name).find({"quarter_id": q["id"]}).to_list(200)
+                # Query sessions for this quarter
+                query = {"quarter_id": q["id"]}
+                sessions = await get_collection(col_name).find(query).to_list(1000)
+                
                 for s in sessions:
                     s["id"] = str(s.pop("_id"))
                     s["source_col"] = col_name
+                    
+                    # Apply Privacy Filter for Learners
+                    if is_learner:
+                        assigned_members = s.get("assigned_member_ids", [])
+                        if assigned_members and user_id not in assigned_members:
+                            continue # Skip if assigned list exists but user not in it
+                    
                     q["sessions"].append(s)
             
             b["quarters"].append(q)

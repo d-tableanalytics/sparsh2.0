@@ -11,8 +11,9 @@ router = APIRouter(prefix="/session-templates", tags=["Session Templates"])
 # ─── Create Session Template ───
 @router.post("/", status_code=status.HTTP_201_CREATED)
 async def create_template(template: SessionTemplateCreate, current_user: dict = Depends(get_current_user)):
-    if current_user.get("role") not in ["superadmin", "admin"]:
-        raise HTTPException(status_code=403, detail="Not authorized")
+    if current_user.get("role") != "superadmin":
+        if not current_user.get("permissions", {}).get("templates", {}).get("create"):
+            raise HTTPException(status_code=403, detail="Not authorized")
     
     templates_col = get_collection("session_templates")
     template_dict = template.model_dump()
@@ -44,8 +45,9 @@ async def get_template(template_id: str, current_user: dict = Depends(get_curren
 # ─── Update Session Template ───
 @router.put("/{template_id}")
 async def update_template(template_id: str, updates: SessionTemplateUpdate, current_user: dict = Depends(get_current_user)):
-    if current_user.get("role") not in ["superadmin", "admin"]:
-        raise HTTPException(status_code=403, detail="Not authorized")
+    if current_user.get("role") != "superadmin":
+        if not current_user.get("permissions", {}).get("templates", {}).get("update"):
+            raise HTTPException(status_code=403, detail="Not authorized")
     
     templates_col = get_collection("session_templates")
     update_data = {k: v for k, v in updates.model_dump().items() if v is not None}
@@ -61,8 +63,9 @@ async def update_template(template_id: str, updates: SessionTemplateUpdate, curr
 # ─── Add/Replace Tasks ───
 @router.post("/{template_id}/tasks")
 async def update_tasks(template_id: str, tasks: List[dict], current_user: dict = Depends(get_current_user)):
-    if current_user.get("role") not in ["superadmin", "admin"]:
-        raise HTTPException(status_code=403, detail="Not authorized")
+    if current_user.get("role") != "superadmin":
+        if not current_user.get("permissions", {}).get("templates", {}).get("update"):
+            raise HTTPException(status_code=403, detail="Not authorized")
     
     templates_col = get_collection("session_templates")
     result = await templates_col.update_one(
@@ -74,8 +77,9 @@ async def update_tasks(template_id: str, tasks: List[dict], current_user: dict =
 # ─── Add/Replace Assessments ───
 @router.post("/{template_id}/assessments")
 async def update_assessments(template_id: str, assessments: List[dict], current_user: dict = Depends(get_current_user)):
-    if current_user.get("role") not in ["superadmin", "admin"]:
-        raise HTTPException(status_code=403, detail="Not authorized")
+    if current_user.get("role") != "superadmin":
+        if not current_user.get("permissions", {}).get("templates", {}).get("update"):
+            raise HTTPException(status_code=403, detail="Not authorized")
     
     templates_col = get_collection("session_templates")
     result = await templates_col.update_one(
@@ -88,8 +92,9 @@ async def update_assessments(template_id: str, assessments: List[dict], current_
 # ─── Delete Session Template ───
 @router.delete("/{template_id}")
 async def delete_template(template_id: str, current_user: dict = Depends(get_current_user)):
-    if current_user.get("role") not in ["superadmin", "admin"]:
-        raise HTTPException(status_code=403, detail="Not authorized")
+    if current_user.get("role") != "superadmin":
+        if not current_user.get("permissions", {}).get("templates", {}).get("delete"):
+            raise HTTPException(status_code=403, detail="Not authorized")
     
     templates_col = get_collection("session_templates")
     result = await templates_col.delete_one({"_id": ObjectId(template_id)})

@@ -142,6 +142,18 @@ DEFAULT_TEMPLATES = {
     "event_created_email": {
         "subject": "Session Scheduled: {{event_title}}",
         "body": SESSION_HTML_TEMPLATE
+    },
+    "session_complete_email": {
+        "subject": "Session Completed: {{topic}}",
+        "body": "Hello {{user_name}},\n\nThe session '{{topic}}' has been successfully completed. Thank you for your participation.\n\nYou can access all session resources and recordings via the Sparsh 2.0 dashboard.\n\nRegards,\nTeam Sparsh"
+    },
+    "attendance_thanks_email": {
+        "subject": "Participation Authenticated: {{event_title}}",
+        "body": "Hello {{user_name}},\n\nThank you for attending the session '{{event_title}}' on {{event_time}}. Your presence has been verified and your engagement points have been updated.\n\nRegards,\nTeam Sparsh"
+    },
+    "attendance_absent_email": {
+        "subject": "Absence Noted: {{event_title}}",
+        "body": "Hello {{user_name}},\n\nWe missed you in today's session '{{event_title}}' at {{event_time}}. Please ensure you review the shared materials and complete any pending tasks to stay on track.\n\nRegards,\nTeam Sparsh"
     }
 }
 
@@ -245,10 +257,10 @@ async def send_notification_from_template(user_obj: dict, template_slug: str, co
     if delivery_type in ["email", "both"] and email and email_t:
         rendered_body = render_template(email_t["body"], context)
         rendered_subject = render_template(email_t.get("subject", "Notification"), context)
-        results["email"] = await send_email_notification(email, rendered_subject, rendered_body, user_id, email_t["slug"])
+        results["email"] = await send_email_notification(email, rendered_subject, rendered_body, user_id, email_t.get("slug", f"{template_slug}_email"))
     if delivery_type in ["whatsapp", "both"] and phone and whatsapp_t:
         rendered_body = render_template(whatsapp_t["body"], context)
-        results["whatsapp"] = await send_whatsapp_notification(phone, rendered_body, user_id, whatsapp_t["slug"])
+        results["whatsapp"] = await send_whatsapp_notification(phone, rendered_body, user_id, whatsapp_t.get("slug", f"{template_slug}_whatsapp"))
     return results
 
 def format_datetime_standard(dt_str: str) -> str:
@@ -485,3 +497,12 @@ async def send_attendance_absent_email(user_obj: dict, event_data: dict):
         "event_time": format_datetime_standard(event_data.get("start"))
     }
     return await send_notification_from_template(user_obj, "attendance_absent", context, "email")
+
+async def send_session_complete_email(user_obj: dict, event_data: dict):
+    context = {
+        "user_name": user_obj.get("full_name") or user_obj.get("first_name", "User"),
+        "topic": event_data.get("title"),
+        "event_title": event_data.get("title"),
+        "event_time": format_datetime_standard(event_data.get("start"))
+    }
+    return await send_notification_from_template(user_obj, "session_complete", context, "email")

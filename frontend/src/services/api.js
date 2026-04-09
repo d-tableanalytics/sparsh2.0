@@ -26,4 +26,19 @@ api.interceptors.request.use((config) => {
   return Promise.reject(error);
 });
 
+// Response interceptor for global error handling
+api.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    if (error.response?.status === 403) {
+      // Dispatch a custom event for global notification
+      const event = new CustomEvent('app-error', { 
+        detail: { message: "You do not have permission", status: 403 } 
+      });
+      window.dispatchEvent(event);
+    }
+    return Promise.reject(error);
+  }
+);
+
 export default api;

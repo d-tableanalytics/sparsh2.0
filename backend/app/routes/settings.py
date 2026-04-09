@@ -205,6 +205,24 @@ async def initialize_default_templates(current_user: dict = Depends(get_current_
             "subject": "Welcome, {{company_name}}!",
             "body": "Hello {{name}},\n\n{{company_name}} is now live on our platform.\nYou can manage your team and learners at: {{login_url}}",
             "scope": "staff", "is_active": True
+        },
+        {
+            "name": "Session Completed", "slug": "session_complete_email", "channel": "email",
+            "subject": "Session Completed: {{topic}}",
+            "body": "Hello {{user_name}},\n\nThe session '{{topic}}' has been completed. Thank you for attending.",
+            "scope": "staff", "is_active": True
+        },
+        {
+            "name": "Attendance Thanks", "slug": "attendance_thanks_email", "channel": "email",
+            "subject": "Participation Authenticated: {{event_title}}",
+            "body": "Hello {{user_name}},\n\nThank you for attending '{{event_title}}' at {{event_time}}.",
+            "scope": "staff", "is_active": True
+        },
+        {
+            "name": "Attendance Absent", "slug": "attendance_absent_email", "channel": "email",
+            "subject": "Absence Noted: {{event_title}}",
+            "body": "Hello {{user_name}},\n\nWe missed you in '{{event_title}}' at {{event_time}}. Please review the resources.",
+            "scope": "staff", "is_active": True
         }
     ]
 

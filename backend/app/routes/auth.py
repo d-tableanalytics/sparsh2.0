@@ -11,7 +11,8 @@ from app.controllers.auth_controller import (
     get_password_hash, 
     verify_password, 
     create_access_token,
-    get_current_active_user
+    get_current_active_user,
+    get_current_user
 )
 from app.services.activity_log_service import log_activity
 from app.services.notification_service import send_notification_from_template
@@ -37,9 +38,16 @@ async def change_password(data: PasswordChange, current_user: dict = Depends(get
 
 
 @router.post("/register", response_model=UserResponse)
-async def register(user: UserCreate, background_tasks: BackgroundTasks):
+async def register(user: UserCreate, background_tasks: BackgroundTasks, current_user: Optional[dict] = Depends(get_current_user)):
     role = user.role.lower()
-    collection_name = "staff" if role in ["superadmin", "admin", "coach", "staff"] else "learners"
+    is_staff_role = role in ["superadmin", "admin", "coach", "staff"]
+    
+    # ─── Restrict Staff Creation to Superadmin ───
+    if is_staff_role:
+        if not current_user or current_user.get("role") != "superadmin":
+            raise HTTPException(status_code=403, detail="Only superadmin can create staff users")
+            
+    collection_name = "staff" if is_staff_role else "learners"
     col = get_collection(collection_name)
     
     if await col.find_one({"email": user.email}):
