@@ -32,15 +32,24 @@ const GptProjects = () => {
 
     useEffect(() => {
         fetchProjects();
-    }, []);
+        // Poll for updates if files are processing
+        let poll;
+        if (projects.some(p => p.knowledge_files?.some(f => f.status === 'processing'))) {
+            poll = setInterval(fetchProjects, 5000);
+        }
+        return () => clearInterval(poll);
+    }, [projects]);
 
     const filteredProjects = projects.filter(p => 
         p.title.toLowerCase().includes(search.toLowerCase()) ||
         p.description?.toLowerCase().includes(search.toLowerCase())
     );
 
+    const activeSyncingCount = projects.reduce((acc, p) => acc + (p.knowledge_files?.filter(f => f.status === 'processing').length || 0), 0);
+
     const handleDelete = async (id, e) => {
         e.stopPropagation();
+        if (!window.confirm("Delete this Intelligence Engine?")) return;
         try {
             await api.delete(`/gpt/projects/${id}`);
             showSuccess("Intelligence Engine deleted");
@@ -81,6 +90,37 @@ const GptProjects = () => {
                 </div>
             </div>
 
+            {/* Global Sync Indicator */}
+            <AnimatePresence>
+                {activeSyncingCount > 0 && (
+                    <motion.div 
+                        initial={{ height: 0, opacity: 0 }}
+                        animate={{ height: 'auto', opacity: 1 }}
+                        exit={{ height: 0, opacity: 0 }}
+                        className="bg-indigo-50 border border-indigo-100 rounded-2xl p-4 flex items-center justify-between overflow-hidden"
+                    >
+                        <div className="flex items-center gap-3">
+                            <div className="w-8 h-8 bg-indigo-500 rounded-lg flex items-center justify-center text-white animate-pulse">
+                                <Bot size={18} />
+                            </div>
+                            <div>
+                                <h4 className="text-[11px] font-black text-indigo-900 uppercase tracking-widest">Neural Sync in Progress</h4>
+                                <p className="text-[10px] font-bold text-indigo-600/70">{activeSyncingCount} knowledge components being integrated across the network...</p>
+                            </div>
+                        </div>
+                        <div className="flex items-center gap-4">
+                            <div className="w-32 h-1.5 bg-indigo-200 rounded-full overflow-hidden">
+                                <motion.div 
+                                    className="h-full bg-indigo-500"
+                                    animate={{ x: [-100, 100] }}
+                                    transition={{ repeat: Infinity, duration: 1.5, ease: "linear" }}
+                                />
+                            </div>
+                        </div>
+                    </motion.div>
+                )}
+            </AnimatePresence>
+
             {/* View Controls & Filter */}
             <div className="flex flex-col sm:flex-row gap-4 items-center justify-between bg-[var(--bg-card)] border border-[var(--border)] p-2 rounded-2xl shadow-sm">
                 <div className="relative flex-1 w-full max-w-md">
@@ -119,45 +159,69 @@ const GptProjects = () => {
                 viewMode === 'grid' ? (
                     /* COMPACT GRID VIEW */
                     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-                        {filteredProjects.map((project) => (
-                            <motion.div 
-                                key={project.id}
-                                whileHover={project.locked ? {} : { y: -4 }}
-                                onClick={() => !project.locked && navigate(`/gpt/chat/${project.id}`)}
-                                className={`bg-[var(--bg-card)] border border-[var(--border)] rounded-2xl p-4 space-y-3 transition-all group relative overflow-hidden ${project.locked ? 'opacity-70 cursor-not-allowed grayscale-[0.5]' : 'cursor-pointer hover:shadow-xl'}`}
-                            >
-                                <div className={`absolute top-0 right-0 w-24 h-24 ${project.locked ? 'bg-gray-400' : 'bg-[var(--accent-indigo)]'} opacity-[0.02] rounded-full -mr-12 -mt-12 group-hover:scale-150 transition-transform duration-700`}></div>
-                                
-                                <div className="flex items-start justify-between relative z-10">
-                                    <div className={`w-10 h-10 rounded-xl flex items-center justify-center shadow-inner transition-transform ${project.locked ? 'bg-gray-100 text-gray-400' : 'bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] group-hover:scale-110'}`}>
-                                        {project.locked ? <Bot size={20} className="opacity-50" /> : <Bot size={20} />}
-                                    </div>
-                                    <div className="flex items-center gap-1">
-                                        {project.locked && (
-                                            <div className="p-1.5 bg-amber-50 text-amber-500 rounded-lg" title={project.lock_reason || "Locked until requirement met"}>
-                                                <Settings2 size={16} />
-                                            </div>
-                                        )}
-                                        {['superadmin', 'admin'].includes(user?.role) && (
-                                            <div className="flex gap-0.5">
-                                                <button 
-                                                    onClick={(e) => { e.stopPropagation(); navigate(`/gpt/edit/${project.id}`); }}
-                                                    className="p-1.5 hover:bg-[var(--input-bg)] rounded-lg text-[var(--text-muted)] hover:text-[var(--accent-indigo)] transition-all"
-                                                    title="Edit GPT"
-                                                >
+                        {filteredProjects.map((project) => {
+                            const processingFiles = project.knowledge_files?.filter(f => f.status === 'processing') || [];
+                            const totalKnowledgeCount = project.knowledge_files?.length || 0;
+                            const avgProgress = totalKnowledgeCount > 0 
+                                ? project.knowledge_files.reduce((acc, f) => acc + (f.progress || 0), 0) / totalKnowledgeCount 
+                                : 0;
+
+                            return (
+                                <motion.div 
+                                    key={project.id}
+                                    whileHover={project.locked ? {} : { y: -4 }}
+                                    onClick={() => !project.locked && navigate(`/gpt/chat/${project.id}`)}
+                                    className={`bg-[var(--bg-card)] border border-[var(--border)] rounded-2xl p-4 space-y-3 transition-all group relative overflow-hidden ${project.locked ? 'opacity-70 cursor-not-allowed grayscale-[0.5]' : 'cursor-pointer hover:shadow-xl'}`}
+                                >
+                                    <div className={`absolute top-0 right-0 w-24 h-24 ${project.locked ? 'bg-gray-400' : 'bg-[var(--accent-indigo)]'} opacity-[0.02] rounded-full -mr-12 -mt-12 group-hover:scale-150 transition-transform duration-700`}></div>
+                                    
+                                    <div className="flex items-start justify-between relative z-10">
+                                        <div className={`w-10 h-10 rounded-xl flex items-center justify-center shadow-inner transition-transform ${project.locked ? 'bg-gray-100 text-gray-400' : 'bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] group-hover:scale-110'}`}>
+                                            {project.locked ? <Bot size={20} className="opacity-50" /> : <Bot size={20} />}
+                                        </div>
+                                        <div className="flex items-center gap-1">
+                                            {project.locked && (
+                                                <div className="p-1.5 bg-amber-50 text-amber-500 rounded-lg" title={project.lock_reason || "Locked until requirement met"}>
                                                     <Settings2 size={16} />
-                                                </button>
-                                                <button 
-                                                    onClick={(e) => handleDelete(project.id, e)}
-                                                    className="p-1.5 hover:bg-red-50 rounded-lg text-[var(--text-muted)] hover:text-red-500 transition-all opacity-0 group-hover:opacity-100"
-                                                    title="Delete GPT"
-                                                >
-                                                    <Trash2 size={16} />
-                                                </button>
-                                            </div>
-                                        )}
+                                                </div>
+                                            )}
+                                            {['superadmin', 'admin'].includes(user?.role) && (
+                                                <div className="flex gap-0.5">
+                                                    <button 
+                                                        onClick={(e) => { e.stopPropagation(); navigate(`/gpt/edit/${project.id}`); }}
+                                                        className="p-1.5 hover:bg-[var(--input-bg)] rounded-lg text-[var(--text-muted)] hover:text-[var(--accent-indigo)] transition-all"
+                                                        title="Edit GPT"
+                                                    >
+                                                        <Settings2 size={16} />
+                                                    </button>
+                                                    <button 
+                                                        onClick={(e) => handleDelete(project.id, e)}
+                                                        className="p-1.5 hover:bg-red-50 rounded-lg text-[var(--text-muted)] hover:text-red-500 transition-all opacity-0 group-hover:opacity-100"
+                                                        title="Delete GPT"
+                                                    >
+                                                        <Trash2 size={16} />
+                                                    </button>
+                                                </div>
+                                            )}
+                                        </div>
                                     </div>
-                                </div>
+
+                                    {/* Progress Indicator for syncing engines */}
+                                    {processingFiles.length > 0 && (
+                                        <div className="relative z-10 py-1 space-y-1.5">
+                                            <div className="flex justify-between items-center text-[8px] font-black uppercase tracking-widest text-indigo-500">
+                                                <span>Syncing Knowledge ({processingFiles.length}/{totalKnowledgeCount})</span>
+                                                <span>{Math.round(avgProgress)}%</span>
+                                            </div>
+                                            <div className="w-full h-1 bg-[var(--input-bg)] rounded-full overflow-hidden">
+                                                <motion.div 
+                                                    initial={{ width: 0 }}
+                                                    animate={{ width: `${avgProgress}%` }}
+                                                    className="h-full bg-indigo-500"
+                                                />
+                                            </div>
+                                        </div>
+                                    )}
 
                                 <div className="space-y-1 relative z-10 pr-2">
                                     <h3 className={`text-sm font-black tracking-tight transition-colors uppercase italic ${project.locked ? 'text-gray-500' : 'text-[var(--text-main)] group-hover:text-[var(--accent-indigo)]'}`}>
@@ -191,7 +255,8 @@ const GptProjects = () => {
                                     </button>
                                 </div>
                             </motion.div>
-                        ))}
+                        );
+                        })}
                     </div>
                 ) : (
                     /* MODERN TABLE VIEW */
@@ -226,7 +291,20 @@ const GptProjects = () => {
                                             </p>
                                         </td>
                                         <td className="px-6 py-4">
-                                            {project.locked ? (
+                                            {project.knowledge_files?.some(f => f.status === 'processing') ? (
+                                                <div className="flex flex-col gap-1">
+                                                    <div className="flex items-center gap-2 px-2 py-1 bg-indigo-50 text-indigo-600 border border-indigo-100 rounded-lg w-fit">
+                                                        <div className="w-1.5 h-1.5 rounded-full bg-indigo-500 animate-pulse"></div>
+                                                        <span className="text-[9px] font-black uppercase tracking-widest">Syncing</span>
+                                                    </div>
+                                                    <div className="w-24 h-1 bg-indigo-100 rounded-full overflow-hidden">
+                                                        <div 
+                                                            className="h-full bg-indigo-500 transition-all duration-500" 
+                                                            style={{ width: `${Math.round(project.knowledge_files.reduce((acc, f) => acc + (f.progress || 0), 0) / project.knowledge_files.length)}%` }}
+                                                        ></div>
+                                                    </div>
+                                                </div>
+                                            ) : project.locked ? (
                                                 <div className="flex items-center gap-2 px-2 py-1 bg-amber-50 text-amber-600 border border-amber-100 rounded-lg w-fit">
                                                     <div className="w-1.5 h-1.5 rounded-full bg-amber-500"></div>
                                                     <span className="text-[9px] font-black uppercase tracking-widest">Restricted</span>

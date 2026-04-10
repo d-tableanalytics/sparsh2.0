@@ -10,6 +10,7 @@ from app.db.mongodb import get_collection
 from app.config.settings import settings
 from openai import AsyncOpenAI
 import numpy as np
+from app.services.transcription_service import transcribe_media_file
 
 async def extract_text_from_file(file_path: str, filename: str) -> dict:
     """
@@ -72,6 +73,11 @@ async def extract_text_from_file(file_path: str, filename: str) -> dict:
                     wb.close()
                 except Exception as excel_img_err:
                     print(f"Excel image extraction warning: {excel_img_err}")
+        elif ext in ['mp3', 'wav', 'm4a', 'aac', 'flac', 'mp4', 'mov', 'avi', 'mkv', 'webm']:
+            print(f"--- Transcribing Media Knowledge: {filename} ---")
+            text = await transcribe_media_file(file_path)
+            if not text:
+                text = f"[Media File: {filename} - No speech detected or readable]"
     except Exception as e:
         print(f"Extraction Error for {filename}: {e}")
     return {"text": text, "images": images}

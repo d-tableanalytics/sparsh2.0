@@ -228,61 +228,98 @@ async def upload_project_knowledge(
         async with aiofiles.open(tmp_path, 'wb') as out_file:
             while chunk := await file.read(1024 * 1024):
                 await out_file.write(chunk)
-                
-        # 2. Extract Text and Save to KnowledgeBase collection (for fast response)
-        # Using the user requested "KnowledgeBase" collection name
-        from app.services.gpt_service import extract_text_from_file, chunk_text
-        result = await extract_text_from_file(tmp_path, safe_filename)
-        text = result["text"]
-        chunks = chunk_text(text)
         
-        kb_col = get_collection("KnowledgeBase")
+        # 2. Insert stub immediately so UI can show progress
         file_id = str(ObjectId())
-        chunk_docs = []
-        for c in chunks:
-            chunk_docs.append({
-                "project_id": project_id,
-                "file_id": file_id,
-                "filename": safe_filename,
-                "content": c,
-                "created_at": datetime.utcnow()
-            })
-        
-        if chunk_docs:
-            await kb_col.insert_many(chunk_docs)
-            print(f"+++ Indexed {len(chunk_docs)} chunks for {safe_filename} into KnowledgeBase +++")
+        file_stub = {
+            "id": file_id,
+            "name": safe_filename,
+            "type": file.content_type,
+            "status": "processing",
+            "progress": 0,
+            "uploaded_at": datetime.utcnow()
+        }
+        await col.update_one({"_id": ObjectId(project_id)}, {"$push": {"knowledge_files": file_stub}})
 
-        # 3. Handle S3 Upload in BACKGROUND to not block the UI
-        async def finalize_upload(path, filename, content_type, p_id, f_id):
-            from app.services.s3_service import upload_file_to_s3
-            import functools
-            import asyncio
-            
+        # 3. Define background task for both indexing and S3 upload
+        async def process_media_and_index(path, filename, content_type, p_id, f_id):
+            proj_col = get_collection("gpt_projects")
             try:
+                # Part A: Extract Text & Index (may take time for video)
+                from app.services.gpt_service import extract_text_from_file, chunk_text
+                print(f"--- Starting background extraction for {filename} ---")
+                
+                # Mocking progressive updates if it's a known slow file (video/audio)
+                # In a real scenario, we'd pass a callback to extract_text_from_file
+                await proj_col.update_one(
+                    {"_id": ObjectId(p_id), "knowledge_files.id": f_id},
+                    {"$set": {"knowledge_files.$.progress": 10}}
+                )
+
+                result = await extract_text_from_file(path, filename)
+                text = result.get("text", "")
+                chunks = chunk_text(text)
+                
+                await proj_col.update_one(
+                    {"_id": ObjectId(p_id), "knowledge_files.id": f_id},
+                    {"$set": {"knowledge_files.$.progress": 60}}
+                )
+
+                kb_col = get_collection("KnowledgeBase")
+                chunk_docs = []
+                for idx, c in enumerate(chunks):
+                    chunk_docs.append({
+                        "project_id": p_id,
+                        "file_id": f_id,
+                        "filename": filename,
+                        "content": c,
+                        "created_at": datetime.utcnow()
+                    })
+                
+                if chunk_docs:
+                    await kb_col.insert_many(chunk_docs)
+                
+                await proj_col.update_one(
+                    {"_id": ObjectId(p_id), "knowledge_files.id": f_id},
+                    {"$set": {"knowledge_files.$.progress": 80}}
+                )
+
+                # Part B: S3 Sync
+                from app.services.s3_service import upload_file_to_s3
+                import functools
+                import asyncio
+                
                 loop = asyncio.get_event_loop()
                 with open(path, 'rb') as f:
                     url = await loop.run_in_executor(None, functools.partial(upload_file_to_s3, f, filename, content_type))
                 
-                proj_col = get_collection("gpt_projects")
-                file_doc = {
-                    "id": f_id,
-                    "name": filename,
-                    "type": content_type,
-                    "url": url,
-                    "uploaded_at": datetime.utcnow()
+                update_fields = {
+                    "knowledge_files.$.status": "ready",
+                    "knowledge_files.$.progress": 100,
+                    "knowledge_files.$.url": url
                 }
-                await proj_col.update_one({"_id": ObjectId(p_id)}, {"$push": {"knowledge_files": file_doc}})
-                print(f"--- S3 Sync Complete for {filename} from {p_id} ---")
+                await proj_col.update_one(
+                    {"_id": ObjectId(p_id), "knowledge_files.id": f_id},
+                    {"$set": update_fields}
+                )
+                print(f"--- S3/Knowledge Sync Complete for {filename} ---")
+                
             except Exception as e:
-                print(f"!!! Error in background S3 upload for {filename}: {str(e)} !!!")
+                print(f"!!! Error in background knowledge task for {filename}: {str(e)} !!!")
+                await proj_col.update_one(
+                    {"_id": ObjectId(p_id), "knowledge_files.id": f_id},
+                    {"$set": {"knowledge_files.$.status": "failed", "knowledge_files.$.error": str(e)}}
+                )
             finally:
                 if os.path.exists(path):
-                    os.remove(path)
+                    try: os.remove(path)
+                    except: pass
 
-        background_tasks.add_task(finalize_upload, tmp_path, safe_filename, file.content_type, project_id, file_id)
+        # Dispatch background task
+        background_tasks.add_task(process_media_and_index, tmp_path, safe_filename, file.content_type, project_id, file_id)
 
         return {
-            "message": "Knowledge indexed and saved to KnowledgeBase cluster. S3 synchronization pending.", 
+            "message": "Upload successful. Neural processing started.", 
             "file_id": file_id,
             "filename": safe_filename
         }
@@ -290,6 +327,23 @@ async def upload_project_knowledge(
         print(f"!!! Knowledge processing CRITICAL ERROR: {str(e)} !!!")
         if os.path.exists(tmp_path): os.remove(tmp_path)
         raise HTTPException(status_code=500, detail=f"Knowledge processing failed: {str(e)}")
+
+@router.delete("/projects/{project_id}/knowledge/{file_id}")
+async def delete_project_knowledge(project_id: str, file_id: str, current_user: dict = Depends(get_current_user)):
+    if current_user.get("role") != "superadmin":
+        raise HTTPException(status_code=403, detail="SuperAdmin only")
+        
+    col = get_collection("gpt_projects")
+    # 1. Remove from GPT project knowledge_files array
+    await col.update_one(
+        {"_id": ObjectId(project_id)},
+        {"$pull": {"knowledge_files": {"id": file_id}}}
+    )
+    
+    # 2. Remove all chunks from KnowledgeBase
+    await get_collection("KnowledgeBase").delete_many({"project_id": project_id, "file_id": file_id})
+    
+    return {"message": "Knowledge file removed successfully"}
 
 @router.get("/chat/{project_id}/sessions", response_model=List[dict])
 async def get_gpt_sessions(project_id: str, current_user: dict = Depends(get_current_user)):
