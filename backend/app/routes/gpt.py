@@ -39,40 +39,71 @@ async def get_gpt_projects(current_user: dict = Depends(get_current_user)):
     }).to_list(100)
     unlocked_project_ids = {p["project_id"] for p in special_perms}
 
-    # 2. Find linked projects in learner's path
-    batch_ids = current_user.get("batch_ids", [current_user.get("batch_id")])
-    batch_ids = [ObjectId(bid) for bid in batch_ids if bid]
+    # 2. Resolve all relevant Batches (Directly assigned or via Company)
+    # Get direct batch IDs from user document
+    direct_batch_ids = current_user.get("batch_ids") or []
+    if not isinstance(direct_batch_ids, list):
+        direct_batch_ids = [direct_batch_ids]
     
-    # Check Batches
-    batches = await get_collection("batches").find({"_id": {"$in": batch_ids}}).to_list(100)
-    batch_linked = {} # project_id -> is_completed
-    for b in batches:
-        is_completed = (b.get("status") == "completed")
-        # Legacy support
-        old_pid = b.get("gpt_project_id")
-        if old_pid: batch_linked[old_pid] = batch_linked.get(old_pid, False) or is_completed
-        # Multi support
-        for p in b.get("gpt_projects", []):
-            pid = p.get("id")
-            if pid: batch_linked[pid] = batch_linked.get(pid, False) or is_completed
+    single_batch_id = current_user.get("batch_id")
+    if single_batch_id and single_batch_id not in direct_batch_ids:
+        direct_batch_ids.append(single_batch_id)
+        
+    all_batch_oids = [ObjectId(bid) for bid in direct_batch_ids if bid]
+    
+    # Also find batches where the user's company is assigned
+    if company_id:
+        company_batches = await get_collection("batches").find({"companies": str(company_id)}).to_list(100)
+        for b in company_batches:
+            if b["_id"] not in all_batch_oids:
+                all_batch_oids.append(b["_id"])
 
-    # Check Quarters
-    quarters = await get_collection("quarters").find({"batch_id": {"$in": [str(bid) for bid in batch_ids]}}).to_list(200)
+    # 3. Analyze Batch Level Access
+    batches = await get_collection("batches").find({"_id": {"$in": all_batch_oids}}).to_list(100)
+    batch_linked = {} # project_id -> is_completed
+    batch_str_ids = [str(b["_id"]) for b in batches]
+
+    for b in batches:
+        # Robust status check
+        status = b.get("status", "").lower()
+        is_completed = (status == "completed")
+        
+        # Legacy support (singular field)
+        old_pid = b.get("gpt_project_id")
+        if old_pid:
+            batch_linked[str(old_pid)] = batch_linked.get(str(old_pid), False) or is_completed
+            
+        # Multi support (list of objects)
+        for p_link in b.get("gpt_projects", []):
+            pid = p_link.get("id")
+            if pid:
+                batch_linked[str(pid)] = batch_linked.get(str(pid), False) or is_completed
+
+    # 4. Analyze Quarter Level Access
+    # Quarters are linked via batch_id (string)
+    quarters = await get_collection("quarters").find({"batch_id": {"$in": batch_str_ids}}).to_list(200)
     quarter_linked = {}
     for q in quarters:
-        is_completed = (q.get("status") == "completed")
+        status = q.get("status", "").lower()
+        is_completed = (status == "completed")
+        
         # Legacy support
         old_pid = q.get("gpt_project_id")
-        if old_pid: quarter_linked[old_pid] = quarter_linked.get(old_pid, False) or is_completed
+        if old_pid:
+            quarter_linked[str(old_pid)] = quarter_linked.get(str(old_pid), False) or is_completed
+            
         # Multi support
-        for p in q.get("gpt_projects", []):
-            pid = p.get("id")
-            if pid: quarter_linked[pid] = quarter_linked.get(pid, False) or is_completed
+        for p_link in q.get("gpt_projects", []):
+            pid = p_link.get("id")
+            if pid:
+                quarter_linked[str(pid)] = quarter_linked.get(str(pid), False) or is_completed
 
-    # Check Sessions
+    # 5. Analyze Session Level Access
     from app.utils.calendar_utils import CALENDAR_COLLECTIONS
     session_collections = CALENDAR_COLLECTIONS + ["calendar_events"]
     session_linked = {}
+    
+    # Optimization: Only search sessions if the user is a learner in them
     for col_name in session_collections:
         sessions = await get_collection(col_name).find({
             "$or": [
@@ -82,34 +113,40 @@ async def get_gpt_projects(current_user: dict = Depends(get_current_user)):
             ]
         }).to_list(500)
         for s in sessions:
-            is_completed = (s.get("status") == "completed")
+            status = s.get("status", "").lower()
+            is_completed = (status == "completed")
+            
             # Legacy support
             old_pid = s.get("gpt_project_id")
-            if old_pid: session_linked[old_pid] = session_linked.get(old_pid, False) or is_completed
+            if old_pid:
+                session_linked[str(old_pid)] = session_linked.get(str(old_pid), False) or is_completed
+            
             # Multi support
-            for p in s.get("gpt_projects", []):
-                pid = p.get("id")
-                if pid: session_linked[pid] = session_linked.get(pid, False) or is_completed
+            for p_link in s.get("gpt_projects", []):
+                pid = p_link.get("id")
+                if pid:
+                    session_linked[str(pid)] = session_linked.get(str(pid), False) or is_completed
 
-    # 3. Assemble Result
+    # 6. Assemble Result
     result = []
-    seen_ids = set()
     
     for p in projects:
         pid = str(p["_id"])
-        # Is it in the learner's path at all?
+        
+        # Check if project should be visible (is in path)
+        # Note: unlocked_project_ids contains strings from special permissions
         is_in_path = (pid in batch_linked) or (pid in quarter_linked) or (pid in session_linked) or (pid in unlocked_project_ids)
         
         if is_in_path:
             p["id"] = pid
-            del p["_id"]
+            if "_id" in p: del p["_id"]
             
             # Determine if locked
             is_unlocked = (
                 (pid in unlocked_project_ids) or
-                batch_linked.get(pid) or
-                quarter_linked.get(pid) or
-                session_linked.get(pid)
+                batch_linked.get(pid, False) or
+                quarter_linked.get(pid, False) or
+                session_linked.get(pid, False)
             )
             
             p["locked"] = not is_unlocked
@@ -121,7 +158,6 @@ async def get_gpt_projects(current_user: dict = Depends(get_current_user)):
                 elif pid in session_linked: p["lock_reason"] = "Session Level Access (Complete Session to Unlock)"
             
             result.append(p)
-            seen_ids.add(pid)
             
     return result
 
