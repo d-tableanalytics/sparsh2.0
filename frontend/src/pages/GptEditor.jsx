@@ -56,17 +56,31 @@ const GptEditor = () => {
 
         // Direct upload for existing project
         setUploading(true);
+        setUploadProgress(0);
+        
+        let completedCount = 0;
         for (const file of files) {
             const uploadData = new FormData();
             uploadData.append('file', file);
             try {
-                await api.post(`/gpt/projects/${id}/upload-knowledge`, uploadData);
+                await api.post(`/gpt/projects/${id}/upload-knowledge`, uploadData, {
+                    onUploadProgress: (progressEvent) => {
+                        const fileProgress = (progressEvent.loaded / progressEvent.total) * 100;
+                        // For simplicity, overall progress is (completed + current) / total
+                        const overall = ((completedCount + (fileProgress / 100)) / files.length) * 100;
+                        setUploadProgress(Math.round(overall));
+                    }
+                });
+                completedCount++;
             } catch (err) {
                 console.error("Upload failed for", file.name);
+                showError(`Failed to upload ${file.name}`);
             }
         }
         setUploading(false);
+        setUploadProgress(100);
         fetchProject();
+        showSuccess("All files synchronized!");
     };
 
     const handleSave = async () => {
@@ -227,8 +241,26 @@ const GptEditor = () => {
                                 <div className="flex flex-col gap-2 max-h-40 overflow-y-auto no-scrollbar">
                                     {/* Existing Files */}
                                     {formData.knowledge_files.map((file, idx) => (
-                                        <div key={`exist-${idx}`} className="flex items-center gap-2 px-3 py-2 bg-emerald-500/10 text-emerald-600 border border-emerald-500/20 rounded-xl text-[10px] font-black">
-                                            <CheckCircle2 size={12} className="shrink-0" /> <span className="truncate">{file.name}</span>
+                                        <div key={`exist-${idx}`} className="flex items-center justify-between gap-2 px-3 py-2 bg-emerald-500/10 text-emerald-600 border border-emerald-500/20 rounded-xl text-[10px] font-black group">
+                                            <div className="flex items-center gap-2 truncate">
+                                                <CheckCircle2 size={12} className="shrink-0" /> <span className="truncate">{file.name}</span>
+                                            </div>
+                                            <button 
+                                                onClick={async () => {
+                                                    if (window.confirm(`Are you sure you want to remove ${file.name}?`)) {
+                                                        try {
+                                                            await api.delete(`/gpt/projects/${id}/knowledge/${file.id}`);
+                                                            showSuccess("Knowledge removed.");
+                                                            fetchProject();
+                                                        } catch (err) {
+                                                            showError("Failed to remove knowledge.");
+                                                        }
+                                                    }
+                                                }}
+                                                className="text-red-500 opacity-0 group-hover:opacity-100 transition-all shrink-0"
+                                            >
+                                                <X size={12} />
+                                            </button>
                                         </div>
                                     ))}
                                     {/* Selected but not yet uploaded */}
@@ -249,10 +281,18 @@ const GptEditor = () => {
                                         <input 
                                             type="file" 
                                             multiple 
+                                            accept="*"
                                             className="hidden" 
+                                            disabled={uploading}
                                             onChange={(e) => handleFileUpload(e, !id)} 
                                         />
-                                        <div className="w-full py-6 border-2 border-dashed border-[var(--border)] hover:border-[var(--accent-indigo)] hover:bg-[var(--input-bg)] transition-all rounded-2xl flex flex-col items-center justify-center gap-2">
+                                        <div className="w-full h-full py-6 border-2 border-dashed border-[var(--border)] hover:border-[var(--accent-indigo)] hover:bg-[var(--input-bg)] transition-all rounded-2xl flex flex-col items-center justify-center gap-2 relative overflow-hidden">
+                                             {uploading && (
+                                                <div className="absolute inset-0 bg-white/80 z-20 flex flex-col items-center justify-center">
+                                                    <div className="w-8 h-8 border-4 border-[var(--accent-indigo)] border-t-transparent rounded-full animate-spin"></div>
+                                                    <p className="text-[10px] font-black text-[var(--accent-indigo)] mt-2">{uploadProgress}%</p>
+                                                </div>
+                                             )}
                                              <div className="p-2 bg-[var(--input-bg)] text-[var(--accent-indigo)] rounded-lg group-hover:scale-110 transition-all">
                                                  <FileUp size={16} />
                                              </div>
@@ -266,9 +306,16 @@ const GptEditor = () => {
                                             multiple 
                                             webkitdirectory="true"
                                             className="hidden" 
+                                            disabled={uploading}
                                             onChange={(e) => handleFileUpload(e, !id)} 
                                         />
-                                        <div className="w-full py-6 border-2 border-dashed border-[var(--border)] hover:border-amber-500/50 hover:bg-amber-50 transition-all rounded-2xl flex flex-col items-center justify-center gap-2">
+                                        <div className="w-full h-full py-6 border-2 border-dashed border-[var(--border)] hover:border-amber-500/50 hover:bg-amber-50 transition-all rounded-2xl flex flex-col items-center justify-center gap-2 relative overflow-hidden">
+                                             {uploading && (
+                                                <div className="absolute inset-0 bg-white/80 z-20 flex flex-col items-center justify-center">
+                                                    <div className="w-8 h-8 border-4 border-amber-500 border-t-transparent rounded-full animate-spin"></div>
+                                                    <p className="text-[10px] font-black text-amber-500 mt-2">{uploadProgress}%</p>
+                                                </div>
+                                             )}
                                              <div className="p-2 bg-amber-50 text-amber-500 rounded-lg group-hover:scale-110 transition-all">
                                                  <Folders size={16} />
                                              </div>
