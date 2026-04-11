@@ -9,7 +9,7 @@ from datetime import datetime
 router = APIRouter(prefix="/quarters", tags=["Quarters"])
 
 # ─── Create Quarter ───
-@router.post("/", status_code=status.HTTP_201_CREATED)
+@router.post("", status_code=status.HTTP_201_CREATED)
 async def create_quarter(quarter: QuarterCreate, current_user: dict = Depends(get_current_user)):
     if current_user.get("role") != "superadmin":
         if not current_user.get("permissions", {}).get("batches", {}).get("create"):
@@ -90,7 +90,7 @@ async def get_quarter_analytics(quarter_id: str, current_user: dict = Depends(ge
     }
 
 # ─── List Quarters ───
-@router.get("/")
+@router.get("")
 async def list_quarters(batch_id: Optional[str] = None, current_user: dict = Depends(get_current_user)):
     quarters_col = get_collection("quarters")
     query = {}

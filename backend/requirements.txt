@@ -1,13 +1,46 @@
-fastapi
-uvicorn
-motor
-pydantic[email]
-pydantic-settings
-python-jose[cryptography]
-passlib[bcrypt]
-bcrypt==3.2.0
-python-multipart
-email-validator
-certifi
-SpeechRecognition
-boto3
+# ─── Web Framework ───
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+
+# ─── Database ───
+motor==3.7.0
+pymongo==4.10.1
+certifi==2024.12.14
+
+# ─── Pydantic / Settings ───
+pydantic[email]==2.10.5
+pydantic-settings==2.7.1
+email-validator==2.2.0
+
+# ─── Authentication ───
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+# bcrypt 4.x is required for Python 3.11+ compatibility; 3.2.0 causes AttributeError
+bcrypt==4.2.1
+
+# ─── File Handling ───
+python-multipart==0.0.20
+aiofiles==24.1.0
+
+# ─── Document Parsing ───
+pypdf==5.1.0
+python-docx==1.1.2
+pandas==2.2.3
+openpyxl==3.1.5
+
+# ─── AI / ML ───
+openai==1.61.1
+numpy==2.2.3
+
+# ─── Speech / Audio ───
+SpeechRecognition==3.14.1
+
+# ─── AWS S3 ───
+boto3==1.37.5
+
+# ─── HTTP / Networking ───
+requests==2.32.3
+
+# ─── Environment ───
+# Required by app/config/settings.py: from dotenv import load_dotenv
+python-dotenv==1.0.1

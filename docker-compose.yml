@@ -1,0 +1,29 @@
+services:
+  backend:
+    build: ./backend
+    container_name: backend-sparsh
+    expose:
+      - "8000"
+    env_file:
+      - ./backend/.env
+    restart: always
+    networks:
+      - sparsh-net
+
+  frontend:
+    build: ./frontend
+    container_name: frontend-sparsh
+    ports:
+      - "80:80"     # HTTP  → nginx redirects to HTTPS
+      - "443:443"   # HTTPS → nginx serves SSL + proxies API
+    volumes:
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+    depends_on:
+      - backend
+    restart: always
+    networks:
+      - sparsh-net
+
+networks:
+  sparsh-net:
+    driver: bridge

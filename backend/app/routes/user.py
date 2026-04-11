@@ -14,7 +14,7 @@ from app.services.notification_service import send_user_updated_email, send_acce
 router = APIRouter(prefix="/users", tags=["Users"])
 
 # ─── List Users (Combined) ───
-@router.get("/")
+@router.get("")
 async def list_users(current_user: dict = Depends(get_current_user)):
     permissions = current_user.get("permissions", {})
     can_read = permissions.get("users", {}).get("read", False)

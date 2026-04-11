@@ -76,7 +76,7 @@ const BatchDetails = () => {
       const promises = [
         api.get(`/batches/${batchId}`),
         api.get(`/batches/${batchId}/companies`),
-        api.get(`/quarters/?batch_id=${batchId}`),
+        api.get(`/quarters?batch_id=${batchId}`),
       ];
 
       // Only fetch global lists if the user has permission to use them (for merge/shift/add)

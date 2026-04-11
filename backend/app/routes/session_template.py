@@ -9,7 +9,7 @@ from datetime import datetime
 router = APIRouter(prefix="/session-templates", tags=["Session Templates"])
 
 # ─── Create Session Template ───
-@router.post("/", status_code=status.HTTP_201_CREATED)
+@router.post("", status_code=status.HTTP_201_CREATED)
 async def create_template(template: SessionTemplateCreate, current_user: dict = Depends(get_current_user)):
     if current_user.get("role") != "superadmin":
         if not current_user.get("permissions", {}).get("templates", {}).get("create"):
@@ -24,7 +24,7 @@ async def create_template(template: SessionTemplateCreate, current_user: dict = 
     return template_dict
 
 # ─── List All Session Templates ───
-@router.get("/")
+@router.get("")
 async def list_templates(current_user: dict = Depends(get_current_user)):
     templates_col = get_collection("session_templates")
     templates = await templates_col.find().sort("created_at", -1).to_list(100)

@@ -9,7 +9,7 @@ from datetime import datetime
 router = APIRouter(prefix="/batches", tags=["Batches"])
 
 # ─── Create Batch ───
-@router.post("/", status_code=status.HTTP_201_CREATED)
+@router.post("", status_code=status.HTTP_201_CREATED)
 async def create_batch(batch: BatchCreate, current_user: dict = Depends(get_current_user)):
     permissions = current_user.get("permissions", {})
     can_create = permissions.get("batches", {}).get("create", False)
@@ -34,7 +34,7 @@ async def create_batch(batch: BatchCreate, current_user: dict = Depends(get_curr
     return batch_dict
 
 # ─── List All Batches ───
-@router.get("/")
+@router.get("")
 async def list_batches(current_user: dict = Depends(get_current_user)):
     permissions = current_user.get("permissions", {})
     can_read = permissions.get("batches", {}).get("read", False)
