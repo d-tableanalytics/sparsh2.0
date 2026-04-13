@@ -1,26 +1,48 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useTheme } from '../../context/ThemeContext';
 import { useAuth } from '../../context/AuthContext';
 import { Link, useNavigate } from 'react-router-dom';
-import { 
+import {
   Sun, Moon, Bell, Search, ChevronDown, Settings, User, LogOut
 } from 'lucide-react';
+import NotificationDrawer from './NotificationDrawer';
+import api from '../../services/api';
 
 const Navbar = () => {
   const { theme, toggleTheme } = useTheme();
-  const { user } = useAuth();
+  const { user, logout } = useAuth();
 
   const navigate = useNavigate();
   const [isProfileOpen, setIsProfileOpen] = useState(false);
+  const [isNotificationsOpen, setIsNotificationsOpen] = useState(false);
+  const [unreadCount, setUnreadCount] = useState(0);
+
+  useEffect(() => {
+    const fetchUnreadCount = async () => {
+      try {
+        const response = await api.get('/notifications/unread-count');
+        setUnreadCount(response.data.count);
+      } catch (error) {
+        console.error('Error fetching unread count:', error);
+      }
+    };
+
+    if (user) {
+      fetchUnreadCount();
+      // Optionally poll every 30 seconds
+      const interval = setInterval(fetchUnreadCount, 30000);
+      return () => clearInterval(interval);
+    }
+  }, [user]);
 
   return (
     <nav className="h-14 px-6 flex items-center justify-between border-b border-[var(--border)] bg-[var(--bg-card)] sticky top-0 z-30 transition-all duration-300">
       <div className="flex-1 max-w-sm">
         <div className="relative">
           <Search size={14} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-[var(--text-muted)]" />
-          <input 
-            type="text" 
-            placeholder="Search..." 
+          <input
+            type="text"
+            placeholder="Search..."
             className="w-full pl-10 pr-4 py-1.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-lg focus:border-[var(--accent-indigo)] outline-none text-[13px] font-medium text-[var(--text-main)] transition-all placeholder:text-[var(--text-muted)]"
           />
         </div>
@@ -28,13 +50,13 @@ const Navbar = () => {
 
       <div className="flex items-center gap-4">
         <div className="flex items-center gap-1 bg-[var(--input-bg)] p-1 rounded-lg border border-[var(--input-border)]">
-          <button 
+          <button
             onClick={toggleTheme}
             className={`p-1.5 rounded-md transition-all ${theme === 'light' ? 'bg-[var(--accent-orange-bg)] text-[var(--accent-orange)] shadow-sm' : 'text-[var(--text-muted)]'}`}
           >
             <Sun size={14} />
           </button>
-          <button 
+          <button
             onClick={toggleTheme}
             className={`p-1.5 rounded-md transition-all ${theme === 'dark' ? 'bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] shadow-sm' : 'text-[var(--text-muted)]'}`}
           >
@@ -42,10 +64,23 @@ const Navbar = () => {
           </button>
         </div>
 
-        <button className="p-2 text-[var(--text-muted)] hover:text-[var(--accent-orange)] hover:bg-[var(--accent-orange-bg)] rounded-lg transition-all relative">
+        <button
+          onClick={() => setIsNotificationsOpen(true)}
+          className="p-2 text-[var(--text-muted)] hover:text-[var(--accent-orange)] hover:bg-[var(--accent-orange-bg)] rounded-lg transition-all relative"
+        >
           <Bell size={18} />
-          <span className="absolute top-2 right-2 w-1.5 h-1.5 bg-[var(--accent-red)] border border-[var(--bg-card)] rounded-full"></span>
+          {unreadCount > 0 && (
+            <span className="absolute top-1 right-1 min-w-[16px] h-4 px-1 flex items-center justify-center bg-[var(--accent-red)] text-white text-[9px] font-bold border border-[var(--bg-card)] rounded-full">
+              {unreadCount > 9 ? '9+' : unreadCount}
+            </span>
+          )}
         </button>
+
+        <NotificationDrawer
+          isOpen={isNotificationsOpen}
+          onClose={() => setIsNotificationsOpen(false)}
+          onCountChange={setUnreadCount}
+        />
 
         {user?.role === 'superadmin' && (
           <Link to="/admin/settings" className="p-2 text-[var(--text-muted)] hover:text-[var(--accent-indigo)] hover:bg-[var(--accent-indigo-bg)] rounded-lg transition-all">
@@ -56,7 +91,7 @@ const Navbar = () => {
         <div className="h-6 w-px bg-[var(--border)] mx-1"></div>
 
         <div className="relative">
-          <button 
+          <button
             onClick={() => setIsProfileOpen(!isProfileOpen)}
             className="flex items-center gap-2 p-1 pl-1 pr-2 hover:bg-[var(--input-bg)] rounded-lg transition-all group"
           >
@@ -72,8 +107,8 @@ const Navbar = () => {
 
           {isProfileOpen && (
             <div className="absolute right-0 top-12 w-48 bg-[var(--bg-card)] border border-[var(--border)] rounded-xl shadow-xl z-50 overflow-hidden py-1 animate-in fade-in slide-in-from-top-2">
-              <Link 
-                to="/profile" 
+              <Link
+                to="/profile"
                 onClick={() => setIsProfileOpen(false)}
                 className="flex items-center gap-3 px-4 py-2 text-[13px] font-medium text-[var(--text-main)] hover:bg-[var(--input-bg)] transition-all"
               >
@@ -82,7 +117,7 @@ const Navbar = () => {
                 </div>
                 Manage Profile
               </Link>
-              <button 
+              <button
                 onClick={() => { logout(); setIsProfileOpen(false); }}
                 className="w-full flex items-center gap-3 px-4 py-2 text-[13px] font-medium text-[var(--accent-red)] hover:bg-[var(--accent-red-bg)] transition-all"
               >
