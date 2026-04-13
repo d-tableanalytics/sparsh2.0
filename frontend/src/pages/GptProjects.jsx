@@ -6,7 +6,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { 
     Sparkles, Plus, Search, Bot, 
     MessageCircle, ArrowRight, Settings2, Trash2,
-    LayoutGrid, List, MessageSquare, ExternalLink, ShieldCheck
+    LayoutGrid, List, MessageSquare, ExternalLink, ShieldCheck, File
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 
@@ -180,6 +180,12 @@ const GptProjects = () => {
                                             {project.locked ? <Bot size={20} className="opacity-50" /> : <Bot size={20} />}
                                         </div>
                                         <div className="flex items-center gap-1">
+                                            {['superadmin', 'admin', 'coach', 'staff'].includes(user?.role) && totalKnowledgeCount > 0 && (
+                                                <div className="flex items-center gap-1 px-2 py-1 bg-[var(--input-bg)] rounded-lg text-[10px] font-black text-[var(--accent-indigo)] border border-[var(--border)]">
+                                                    <File size={10} />
+                                                    {totalKnowledgeCount}
+                                                </div>
+                                            )}
                                             {project.locked && (
                                                 <div className="p-1.5 bg-amber-50 text-amber-500 rounded-lg" title={project.lock_reason || "Locked until requirement met"}>
                                                     <Settings2 size={16} />
@@ -283,6 +289,12 @@ const GptProjects = () => {
                                                     <Bot size={16} />
                                                 </div>
                                                 <span className={`text-[13px] font-black italic uppercase ${project.locked ? 'text-gray-400' : 'text-[var(--text-main)]'}`}>{project.title}</span>
+                                                {['superadmin', 'admin', 'coach', 'staff'].includes(user?.role) && project.knowledge_files?.length > 0 && (
+                                                    <div className="flex items-center gap-1 px-1.5 py-0.5 bg-[var(--input-bg)] rounded-md text-[9px] font-black text-[var(--accent-indigo)] border border-[var(--border)]">
+                                                        <File size={10} />
+                                                        {project.knowledge_files.length}
+                                                    </div>
+                                                )}
                                             </div>
                                         </td>
                                         <td className="px-6 py-4">

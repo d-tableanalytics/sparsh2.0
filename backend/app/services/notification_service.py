@@ -182,6 +182,23 @@ def render_template(template_body: str, context: Dict[str, Any]):
         content = content.replace(f"{{{{{key}}}}}", str(value))
     return content
 
+async def create_in_app_notification(user_id: str, title: str, message: str, type: str = "info", meta: dict = None):
+    try:
+        notification = {
+            "user_id": str(user_id),
+            "title": title,
+            "message": message,
+            "type": type, # "info", "success", "warning", "error"
+            "is_read": False,
+            "created_at": datetime.utcnow(),
+            "meta": meta or {}
+        }
+        col = get_collection("in_app_notifications")
+        await col.insert_one(notification)
+    except Exception as e:
+        logger.error(f"Failed to create in-app notification: {e}")
+
+
 async def log_notification(user_id: str, contact: str, channel: str, slug: str, content: str, status: str, error: str = None):
     try:
         log_entry = {
@@ -310,6 +327,13 @@ async def send_task_created_email(user_obj: dict, task_data: dict, creator_name:
         "task_status": task_data.get("status", "schedule"),
         "session_type": "Task"
     }
+    await create_in_app_notification(
+        user_id=user_obj.get("_id") or user_obj.get("id"),
+        title="New Task Assigned",
+        message=f"A new task '{task_data.get('title')}' has been assigned to you by {creator_name}.",
+        type="info",
+        meta={"task_id": str(task_data.get("_id", ""))}
+    )
     return await send_notification_from_template(user_obj, "task_created", context, "email")
 
 async def send_task_updated_email(user_obj: dict, task_data: dict, updated_by: str):
@@ -359,6 +383,12 @@ async def send_access_control_email(user_obj: dict, new_role: str, updated_by: s
         "updated_by": updated_by,
         "login_url": "https://sparsh.app/login"
     }
+    await create_in_app_notification(
+        user_id=user_obj.get("_id") or user_obj.get("id"),
+        title="Access Level Changed",
+        message=f"Your account role has been updated to '{new_role}' by {updated_by}.",
+        type="warning"
+    )
     return await send_notification_from_template(user_obj, "user_access_control_change", context, "email")
 
 async def send_company_registration_email(admin_obj: dict, company_name: str, raw_password: str):
@@ -395,6 +425,14 @@ async def send_event_created_email(user_obj: dict, event_data: dict, creator_nam
     except Exception as e:
         logger.error(f"Error parsing date for email: {e}")
         context = {"session_type": "Session", "meeting_link": event_data.get("meeting_link", ""), "topic": event_data.get("title"), "date": "TBD", "day": "TBD", "time": "TBD", "description": ""}
+    
+    await create_in_app_notification(
+        user_id=user_obj.get("_id") or user_obj.get("id"),
+        title="New Session Scheduled",
+        message=f"A new {event_data.get('session_type', 'session')} '{event_data.get('title')}' has been scheduled for {context.get('date')} at {context.get('time')}.",
+        type="success",
+        meta={"event_id": str(event_data.get("_id", ""))}
+    )
     return await send_notification_from_template(user_obj, "event_created", context, "email")
 
 async def send_event_updated_email(user_obj: dict, event_data: dict, updated_by: str, batch_name: str = "TBD", quarter: str = "TBD"):
