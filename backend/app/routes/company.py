@@ -67,7 +67,9 @@ async def onboard_company(request: CompanyOnboardingRequest, background_tasks: B
     admin_dict["created_at"] = datetime.now(timezone.utc)
     
     if not admin_dict.get("full_name"):
-        admin_dict["full_name"] = f"{admin_dict.get('first_name', '')} {admin_dict.get('last_name', '')}".strip()
+        fn = admin_dict.get("first_name") or ""
+        ln = admin_dict.get("last_name") or ""
+        admin_dict["full_name"] = f"{fn} {ln}".strip()
     
     admin_result = await users_collection.insert_one(admin_dict)
     admin_id = str(admin_result.inserted_id)
@@ -252,7 +254,9 @@ async def bulk_create_users(company_id: str, users: List[UserCreate], background
         user_dict["created_at"] = datetime.now(timezone.utc)
         
         if not user_dict.get("full_name"):
-            user_dict["full_name"] = f"{user_dict.get('first_name', '')} {user_dict.get('last_name', '')}".strip()
+            fn = user_dict.get("first_name") or ""
+            ln = user_dict.get("last_name") or ""
+            user_dict["full_name"] = f"{fn} {ln}".strip()
         
         res = await users_collection.insert_one(user_dict)
         user_dict["_id"] = str(res.inserted_id)
@@ -387,7 +391,7 @@ async def import_users_xlsx(company_id: str, background_tasks: BackgroundTasks, 
             "password": get_password_hash(raw_password),
             "first_name": first_name,
             "last_name": last_name,
-            "full_name": f"{first_name} {last_name}".strip(),
+            "full_name": f"{(first_name or '')} {(last_name or '')}".strip(),
             "mobile": str(mobile) if mobile else None,
             "role": "clientuser",
             "session_type": session_type,

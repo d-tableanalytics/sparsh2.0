@@ -120,6 +120,18 @@ async def update_user(user_id: str, updates: UserEditRequest, background_tasks: 
     if not update_data:
         raise HTTPException(status_code=400, detail="No fields to update")
     
+    # ─── Recalculate full_name if first_name/last_name changed ───
+    if "first_name" in update_data or "last_name" in update_data:
+        # Use existing values if not being updated
+        fn = update_data.get("first_name", user.get("first_name"))
+        ln = update_data.get("last_name", user.get("last_name"))
+        
+        # Ensure fn and ln are strings, not None
+        fn_str = fn if fn else ""
+        ln_str = ln if ln else ""
+        
+        update_data["full_name"] = f"{fn_str} {ln_str}".strip()
+    
     # ─── Check for Role/Access Change ───
     old_role = user.get("role")
     new_role = update_data.get("role")
@@ -134,7 +146,7 @@ async def update_user(user_id: str, updates: UserEditRequest, background_tasks: 
     else:
         background_tasks.add_task(send_user_updated_email, user, updated_by)
 
-    return {"message": "User updated successfully and notification triggered"}
+    return {"message": "User updated successfully and notification triggered", "full_name": update_data.get("full_name")}
 
 # ─── Delete User ───
 @router.delete("/{user_id}")

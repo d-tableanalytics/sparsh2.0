@@ -58,7 +58,9 @@ async def register(user: UserCreate, background_tasks: BackgroundTasks, current_
     hashed_password = get_password_hash(user.password)
     user_dict = user.model_dump()
     user_dict["password"] = hashed_password
-    user_dict["full_name"] = f"{user.first_name} {user.last_name}".strip()
+    fn = user.first_name or ""
+    ln = user.last_name or ""
+    user_dict["full_name"] = f"{fn} {ln}".strip()
     user_dict["created_at"] = datetime.utcnow()
     
     result = await col.insert_one(user_dict)
@@ -105,7 +107,7 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
         data={
             "sub": user["email"], 
             "role": user["role"],
-            "full_name": user.get("full_name") or f"{user.get('first_name', '')} {user.get('last_name', '')}".strip() or "User",
+            "full_name": user.get("full_name") or f"{user.get('first_name') or ''} {user.get('last_name') or ''}".strip() or "User",
             "_id": str(user["_id"]),
             "company_id": user.get("company_id"),
             "permissions": user.get("permissions", {})

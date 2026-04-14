@@ -195,7 +195,7 @@ const UserManagement = () => {
                                     </div>
                                     <div className="space-y-1.5">
                                         <label className="text-[10px] font-black text-[var(--text-muted)] uppercase px-2">Last Name</label>
-                                        <input required className="w-full bg-[var(--input-bg)] px-4 py-2.5 rounded-xl border border-[var(--border)] text-[13px] font-bold" value={staffForm.last_name} onChange={e => setStaffForm({...staffForm, last_name: e.target.value})} />
+                                        <input className="w-full bg-[var(--input-bg)] px-4 py-2.5 rounded-xl border border-[var(--border)] text-[13px] font-bold" value={staffForm.last_name} onChange={e => setStaffForm({...staffForm, last_name: e.target.value})} />
                                     </div>
                                 </div>
 
