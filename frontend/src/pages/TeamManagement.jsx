@@ -241,7 +241,7 @@ const TeamManagement = () => {
                                      </div>
                                      <div className="space-y-1.5">
                                          <label className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest px-1">Last Name</label>
-                                         <input required className="w-full bg-[var(--input-bg)] px-5 py-2.5 rounded-2xl border border-[var(--border)] text-[14px] font-black focus:border-[var(--accent-indigo)] outline-none" placeholder="e.g. Turing" value={memberForm.last_name} onChange={e => setMemberForm({...memberForm, last_name: e.target.value})} />
+                                         <input className="w-full bg-[var(--input-bg)] px-5 py-2.5 rounded-2xl border border-[var(--border)] text-[14px] font-black focus:border-[var(--accent-indigo)] outline-none" placeholder="e.g. Turing" value={memberForm.last_name} onChange={e => setMemberForm({...memberForm, last_name: e.target.value})} />
                                      </div>
                                  </div>
 
