@@ -24,7 +24,7 @@ const Sidebar = () => {
     { name: 'Team', path: '/team', icon: Users, roles: ['clientadmin'] },
     { name: 'Calendar', path: '/calendar', icon: Calendar, roles: ['superadmin', 'admin', 'clientadmin', 'clientuser', 'coach', 'staff'], permissionKey: 'calendar' },
     // { name: 'Settings', path: '/settings', icon: Settings, roles: ['superadmin'] },
-    { name: 'GPT', path: '/gpt', icon: Sparkles, roles: ['superadmin', 'admin', 'clientadmin', 'clientuser', 'coach', 'staff'] },
+    { name: 'Sparsh GPT', path: '/gpt', icon: Sparkles, roles: ['superadmin', 'admin', 'clientadmin', 'clientuser', 'coach', 'staff'] },
   ];
 
   const filteredLinks = links.filter(link => {
