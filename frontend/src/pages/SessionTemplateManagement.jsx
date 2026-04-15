@@ -6,7 +6,7 @@ import { useNotification } from '../context/NotificationContext';
 import { motion } from 'framer-motion';
 import {
   Copy, Plus, Search, Trash2, Pencil, ExternalLink,
-  MessageSquare, Hash, FileText, XCircle
+  MessageSquare, Hash, FileText, XCircle, LayoutGrid, List
 } from 'lucide-react';
 
 import { useAuth } from '../context/AuthContext';
@@ -20,6 +20,12 @@ const SessionTemplateManagement = () => {
     const [searchTerm, setSearchTerm] = useState('');
     const [showCreate, setShowCreate] = useState(false);
     const [editTemplate, setEditTemplate] = useState(null);
+
+    const [viewMode, setViewMode] = useState(() => localStorage.getItem('templatesViewMode') || 'card');
+    
+    useEffect(() => {
+        localStorage.setItem('templatesViewMode', viewMode);
+    }, [viewMode]);
 
     const [form, setForm] = useState({
         title: '', topic: '', description: ''
@@ -97,6 +103,16 @@ const SessionTemplateManagement = () => {
                     <input type="text" placeholder="Search templates by title or topic..." className="w-full pl-9 pr-4 h-9 bg-[var(--input-bg)] border border-transparent rounded-lg outline-none focus:border-[var(--accent-indigo)] text-[13px] font-medium text-[var(--text-main)] transition-all"
                         value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} />
                 </div>
+                <div className="flex items-center gap-1 p-1 bg-[var(--bg-main)] rounded-lg border border-[var(--border)]">
+                    <button onClick={() => setViewMode('card')}
+                        className={`p-1.5 rounded-md transition-all ${viewMode === 'card' ? 'bg-[var(--accent-indigo)] text-white shadow-sm' : 'text-[var(--text-muted)] hover:text-[var(--text-main)]'}`}>
+                        <LayoutGrid size={16} />
+                    </button>
+                    <button onClick={() => setViewMode('list')}
+                        className={`p-1.5 rounded-md transition-all ${viewMode === 'list' ? 'bg-[var(--accent-indigo)] text-white shadow-sm' : 'text-[var(--text-muted)] hover:text-[var(--text-main)]'}`}>
+                        <List size={16} />
+                    </button>
+                </div>
             </div>
 
             {/* Grid */}
@@ -104,7 +120,7 @@ const SessionTemplateManagement = () => {
                 <div className="py-20 flex flex-col items-center justify-center">
                     <div className="w-8 h-8 border-2 border-[var(--accent-indigo-border)] border-t-[var(--accent-indigo)] rounded-full animate-spin"></div>
                 </div>
-            ) : (
+            ) : viewMode === 'card' ? (
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                     {filtered.map(t => (
                         <motion.div key={t._id} initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }}
@@ -138,6 +154,59 @@ const SessionTemplateManagement = () => {
                             <p className="text-[13px] text-[var(--text-muted)]">No templates found.</p>
                         </div>
                     )}
+                </div>
+            ) : (
+                <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-2xl overflow-hidden shadow-sm">
+                    <div className="overflow-x-auto">
+                        <table className="w-full text-left border-collapse">
+                            <thead>
+                                <tr className="bg-[var(--bg-main)] border-b border-[var(--border)]">
+                                    <th className="px-6 py-4 text-[10px] font-bold text-[var(--text-muted)] uppercase tracking-widest">Template Title</th>
+                                    <th className="px-6 py-4 text-[10px] font-bold text-[var(--text-muted)] uppercase tracking-widest">Topic</th>
+                                    <th className="px-6 py-4 text-[10px] font-bold text-[var(--text-muted)] uppercase tracking-widest">Created Date</th>
+                                    <th className="px-6 py-4 text-[10px] font-bold text-[var(--text-muted)] uppercase tracking-widest text-right">Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody className="divide-y divide-[var(--border)]">
+                                {filtered.map(t => (
+                                    <tr key={t._id} className="hover:bg-[var(--bg-main)] transition-all group">
+                                        <td className="px-6 py-4">
+                                            <div className="flex items-center gap-3">
+                                                <div className="w-8 h-8 bg-[var(--accent-indigo-bg)] rounded-lg flex items-center justify-center text-[var(--accent-indigo)]">
+                                                    <Copy size={14} />
+                                                </div>
+                                                <span className="text-[13px] font-bold text-[var(--text-main)]">{t.title}</span>
+                                            </div>
+                                        </td>
+                                        <td className="px-6 py-4">
+                                            <div className="flex items-center gap-1.5">
+                                                <Hash size={10} className="text-[var(--accent-orange)]" />
+                                                <span className="text-[11px] font-bold text-[var(--accent-orange)] uppercase tracking-wider">{t.topic}</span>
+                                            </div>
+                                        </td>
+                                        <td className="px-6 py-4 text-[12px] text-[var(--text-muted)] font-medium">
+                                            {new Date(t.created_at).toLocaleDateString()}
+                                        </td>
+                                        <td className="px-6 py-4">
+                                            <div className="flex items-center justify-end gap-2">
+                                                <button onClick={() => navigate(`/session-templates/${t._id}`)} className="p-2 text-[var(--text-muted)] hover:text-[var(--accent-indigo)] hover:bg-[var(--accent-indigo-bg)] rounded-md transition-all" title="View Details"><ExternalLink size={14} /></button>
+                                                {canUpdate && <button onClick={() => openEdit(t)} className="p-2 text-[var(--text-muted)] hover:text-[var(--accent-indigo)] hover:bg-[var(--accent-indigo-bg)] rounded-md transition-all" title="Edit"><Pencil size={14} /></button>}
+                                                {canDelete && <button onClick={() => handleDelete(t._id)} className="p-2 text-[var(--text-muted)] hover:text-[var(--accent-red)] hover:bg-[var(--accent-red-bg)] rounded-md transition-all" title="Delete"><Trash2 size={14} /></button>}
+                                            </div>
+                                        </td>
+                                    </tr>
+                                ))}
+                                {filtered.length === 0 && (
+                                    <tr>
+                                        <td colSpan="4" className="py-20 text-center">
+                                            <XCircle size={32} className="mx-auto mb-3 text-[var(--text-muted)] opacity-30" />
+                                            <p className="text-[13px] text-[var(--text-muted)]">No templates found.</p>
+                                        </td>
+                                    </tr>
+                                )}
+                            </tbody>
+                        </table>
+                    </div>
                 </div>
             )}
 

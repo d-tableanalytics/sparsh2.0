@@ -334,17 +334,37 @@ const SessionTemplateDetails = () => {
                                     const reader = new FileReader();
                                     reader.onload = (event) => {
                                         const csv = event.target.result;
-                                        const lines = csv.split('\n').filter(l => l.trim() !== '');
+                                        const lines = csv.split(/\r?\n/).filter(l => l.trim() !== '');
                                         const imported = lines.slice(1).map(row => {
-                                            const cols = row.split(',');
+                                            // Robust CSV splitting handling quotes and empty fields
+                                            const cols = [];
+                                            let col = '';
+                                            let inQuotes = false;
+                                            for (let i = 0; i < row.length; i++) {
+                                                const char = row[i];
+                                                if (char === '"') inQuotes = !inQuotes;
+                                                else if (char === ',' && !inQuotes) {
+                                                    cols.push(col);
+                                                    col = '';
+                                                } else {
+                                                    col += char;
+                                                }
+                                            }
+                                            cols.push(col);
+
+                                            const cleanCols = cols.map(c => c.trim().replace(/^"|"$/g, '').replace(/""/g, '"'));
+                                            
+                                            const type = (cleanCols[1] || 'MCQ').trim();
+                                            const isMCQ = type.toUpperCase() === 'MCQ';
+
                                             return {
-                                                question_text: cols[0],
-                                                type: cols[1] || 'MCQ',
-                                                options: cols[1] === 'MCQ' ? [cols[2], cols[3], cols[4], cols[5]] : null,
-                                                correct_option_index: cols[1] === 'MCQ' ? parseInt(cols[6]) : null,
-                                                expected_answer: cols[1] === 'Descriptive' ? cols[7] : null,
-                                                instruction: cols[1] === 'Descriptive' ? cols[8] : null,
-                                                marks: parseInt(cols[9]) || 1
+                                                question_text: cleanCols[0],
+                                                type: isMCQ ? 'MCQ' : 'Descriptive',
+                                                options: isMCQ ? [cleanCols[2], cleanCols[3], cleanCols[4], cleanCols[5]] : [null, null, null, null],
+                                                correct_option_index: isMCQ ? (parseInt(cleanCols[6]) || 0) : 0,
+                                                expected_answer: !isMCQ ? cleanCols[7] : '',
+                                                instruction: !isMCQ ? cleanCols[8] : '',
+                                                marks: parseInt(cleanCols[9]) || 1
                                             };
                                         });
                                         setQuizForm({ ...quizForm, questions: [...quizForm.questions, ...imported] });
