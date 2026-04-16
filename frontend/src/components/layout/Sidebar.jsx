@@ -8,8 +8,16 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 
+import logo1 from '../../assets/Sparsh Magic  Logo PNG1.png';
+import logo2 from '../../assets/Sparsh Magic  Logo PNG2.png';
+import logo3 from '../../assets/Sparsh Magic white  Logo PNG3.png';
+import dtableLogo from '../../assets/D-Table_Logo.png';
+import dtableFull from '../../assets/D-Table Analytics-Picsart-BackgroundRemover.jpeg';
+import { useTheme } from '../../context/ThemeContext';
+
 const Sidebar = () => {
   const { user, logout } = useAuth();
+  const { theme } = useTheme();
   const [isCollapsed, setIsCollapsed] = useState(true);
 
   const links = [
@@ -58,23 +66,19 @@ const Sidebar = () => {
               initial={{ opacity: 0, scale: 0.9 }}
               animate={{ opacity: 1, scale: 1 }}
               exit={{ opacity: 0, scale: 0.9 }}
-              className="flex items-center gap-2"
+              className="flex items-center gap-3"
             >
-              <div className="w-8 h-8 rounded-lg flex items-center justify-center text-white font-bold text-[10px]" style={{ background: 'var(--avatar-bg)' }}>
-                SP
-              </div>
+              <img src={logo1} alt="Logo" className="w-8 h-8 object-contain" />
               <div className="flex flex-col">
-                <span className="text-[13px] font-black text-[var(--text-main)] tracking-tight">Sparsh ERP</span>
-                <span className="text-[10px] text-[var(--text-muted)] font-bold tracking-widest mt-0.5 uppercase opacity-60">v2.0 Beta</span>
+                <img src={theme === 'dark' ? logo3 : logo2} alt="Sparsh ERP" className="h-9 object-contain" />
               </div>
             </motion.div>
           ) : (
             <motion.div
               key="icon-logo"
-              className="w-8 h-8 rounded-lg flex items-center justify-center text-white font-bold text-[10px]"
-              style={{ background: 'var(--avatar-bg)' }}
+              className="w-10 h-10 flex items-center justify-center p-1"
             >
-              SP
+              <img src={logo1} alt="Logo" className="w-full h-full object-contain" />
             </motion.div>
           )}
         </AnimatePresence>
@@ -122,6 +126,13 @@ const Sidebar = () => {
           {!isCollapsed && <span className="text-[13px] font-bold tracking-tight">Logout</span>}
         </button>
 
+        <div className={`mt-4 p-2.5 rounded-xl bg-white shadow-sm flex items-center transition-all ${isCollapsed ? 'justify-center mx-1' : 'justify-start px-3 gap-2'}`}>
+          <img
+            src={isCollapsed ? dtableLogo : dtableFull}
+            alt="D-Table Analytics"
+            className={`${isCollapsed ? 'w-8 h-8' : 'w-full h-10'} object-contain`}
+          />
+        </div>
       </div>
     </motion.aside>
   );
