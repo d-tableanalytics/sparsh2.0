@@ -24,6 +24,7 @@ const SessionTemplateDetails = () => {
     // Task State
     const [showTaskModal, setShowTaskModal] = useState(false);
     const [taskRows, setTaskRows] = useState([{ title: '', points: 0 }]);
+    const [editTaskIdx, setEditTaskIdx] = useState(null);
     
     const [showQuizModal, setShowQuizModal] = useState(false);
     const [editQuizIdx, setEditQuizIdx] = useState(null);
@@ -37,7 +38,6 @@ const SessionTemplateDetails = () => {
             const res = await api.get(`/session-templates/${templateId}`);
             const data = res.data;
             setTemplate(data);
-            setTaskRows(data.tasks && data.tasks.length > 0 ? data.tasks : [{ title: '', points: 0 }]);
         } catch (err) { console.error(err); }
         finally { setLoading(false); }
     };
@@ -56,11 +56,38 @@ const SessionTemplateDetails = () => {
     const handleSaveTasks = async () => {
         try {
             const filtered = taskRows.filter(t => t.title.trim() !== '');
-            await api.post(`/session-templates/${templateId}/tasks`, filtered);
+            if (filtered.length === 0) return setShowTaskModal(false);
+
+            let finalTasks;
+            if (editTaskIdx !== null) {
+                finalTasks = [...(template.tasks || [])];
+                finalTasks[editTaskIdx] = filtered[0];
+            } else {
+                finalTasks = [...(template.tasks || []), ...filtered];
+            }
+
+            await api.post(`/session-templates/${templateId}/tasks`, finalTasks);
             setShowTaskModal(false);
-            showSuccess("Learning tasks saved");
+            setEditTaskIdx(null);
+            showSuccess(editTaskIdx !== null ? "Task updated" : "Learning tasks saved");
             fetchData();
         } catch (err) { showError('Failed to save tasks'); }
+    };
+
+    const handleEditTask = (idx) => {
+        setEditTaskIdx(idx);
+        setTaskRows([template.tasks[idx]]);
+        setShowTaskModal(true);
+    };
+
+    const handleDeleteTask = async (idx) => {
+        if (!window.confirm("Are you sure you want to delete this task?")) return;
+        const newTasks = template.tasks.filter((_, i) => i !== idx);
+        try {
+            await api.post(`/session-templates/${templateId}/tasks`, newTasks);
+            showSuccess("Task deleted");
+            fetchData();
+        } catch (err) { showError('Delete failed'); }
     };
 
     // Assessments 📝
@@ -165,7 +192,11 @@ const SessionTemplateDetails = () => {
                     <motion.div key="tasks" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }} className="space-y-4">
                         <div className="flex justify-between items-center px-1">
                             <h2 className="text-[14px] font-bold text-[var(--text-main)]">Learning Tasks</h2>
-                            <button onClick={() => setShowTaskModal(true)} className="h-8 px-3 bg-[var(--btn-primary)] text-white text-[11px] font-bold rounded-lg flex items-center gap-1.5 shadow-sm">
+                            <button onClick={() => {
+                                setEditTaskIdx(null);
+                                setTaskRows([{ title: '', points: 0 }]);
+                                setShowTaskModal(true);
+                            }} className="h-8 px-3 bg-[var(--btn-primary)] text-white text-[11px] font-bold rounded-lg flex items-center gap-1.5 shadow-sm">
                                 <Plus size={14} /> Add Tasks
                             </button>
                         </div>
@@ -176,6 +207,7 @@ const SessionTemplateDetails = () => {
                                         <th className="px-6 py-3 text-left text-[11px] font-bold text-[var(--text-muted)] uppercase tracking-wider">#</th>
                                         <th className="px-6 py-3 text-left text-[11px] font-bold text-[var(--text-muted)] uppercase tracking-wider">Task Title</th>
                                         <th className="px-6 py-3 text-left text-[11px] font-bold text-[var(--text-muted)] uppercase tracking-wider">Weightage/Points</th>
+                                        <th className="px-6 py-3 text-right text-[11px] font-bold text-[var(--text-muted)] uppercase tracking-wider">Actions</th>
                                     </tr>
                                 </thead>
                                 <tbody className="divide-y divide-[var(--border)]">
@@ -188,10 +220,20 @@ const SessionTemplateDetails = () => {
                                                     {t.points} Points
                                                 </span>
                                             </td>
+                                            <td className="px-6 py-3 text-right">
+                                                <div className="flex justify-end gap-1">
+                                                    <button onClick={() => handleEditTask(idx)} className="p-1.5 rounded-md text-[var(--text-muted)] hover:text-[var(--accent-indigo)] hover:bg-[var(--accent-indigo-bg)] transition-all">
+                                                        <Pencil size={14} />
+                                                    </button>
+                                                    <button onClick={() => handleDeleteTask(idx)} className="p-1.5 rounded-md text-[var(--text-muted)] hover:text-[var(--accent-red)] hover:bg-[var(--accent-red-bg)] transition-all">
+                                                        <Trash size={14} />
+                                                    </button>
+                                                </div>
+                                            </td>
                                         </tr>
                                     ))}
                                     {(!template?.tasks || template.tasks.length === 0) && (
-                                        <tr><td colSpan={3} className="px-6 py-12 text-center text-[var(--text-muted)] text-[13px]">No tasks defined yet. Click "Add Tasks" to start building.</td></tr>
+                                        <tr><td colSpan={4} className="px-6 py-12 text-center text-[var(--text-muted)] text-[13px]">No tasks defined yet. Click "Add Tasks" to start building.</td></tr>
                                     )}
                                 </tbody>
                             </table>
@@ -237,7 +279,7 @@ const SessionTemplateDetails = () => {
             </AnimatePresence>
 
             {/* ─── Task Modal (Image Match) ─── */}
-            <Modal isOpen={showTaskModal} onClose={() => setShowTaskModal(false)} title="Add Task Templates">
+            <Modal isOpen={showTaskModal} onClose={() => { setShowTaskModal(false); setEditTaskIdx(null); }} title={editTaskIdx !== null ? "Edit Task" : "Add Task Templates"}>
                 <div className="space-y-4">
                     <div className="max-h-[300px] overflow-y-auto space-y-4 pr-1 scrollbar-thin">
                         {taskRows.map((row, idx) => (
@@ -263,8 +305,10 @@ const SessionTemplateDetails = () => {
                             <Plus size={14} /> Add More Task
                         </button>
                         <div className="flex gap-3">
-                            <button onClick={() => setShowTaskModal(false)} className="px-6 py-2 text-[13px] font-bold text-[var(--text-muted)] hover:text-red-500 transition-all font-inter">Cancel</button>
-                            <button onClick={handleSaveTasks} className="px-8 py-2 bg-[var(--accent-green)] text-white rounded-xl text-[13px] font-bold shadow-lg shadow-green-500/20 hover:opacity-90 transition-all">Create Tasks</button>
+                            <button onClick={() => { setShowTaskModal(false); setEditTaskIdx(null); }} className="px-6 py-2 text-[13px] font-bold text-[var(--text-muted)] hover:text-red-500 transition-all font-inter">Cancel</button>
+                            <button onClick={handleSaveTasks} className="px-8 py-2 bg-[var(--accent-green)] text-white rounded-xl text-[13px] font-bold shadow-lg shadow-green-500/20 hover:opacity-90 transition-all">
+                                {editTaskIdx !== null ? "Update Task" : "Create Tasks"}
+                            </button>
                         </div>
                     </div>
                 </div>
