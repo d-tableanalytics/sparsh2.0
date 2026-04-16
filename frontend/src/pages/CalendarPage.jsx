@@ -21,6 +21,85 @@ import {
 } from 'lucide-react';
 import ReminderModal from '../components/calendar/ReminderModal';
 
+const CustomTimePicker = ({ value, onChange, label }) => {
+    const [isOpen, setIsOpen] = useState(false);
+    const containerRef = useRef(null);
+    
+    // Parse initial value (expected HH:mm)
+    const [hours, minutes] = (value || "00:00").split(':');
+    
+    const hoursList = Array.from({ length: 24 }, (_, i) => String(i).padStart(2, '0'));
+    const minutesList = Array.from({ length: 12 }, (_, i) => String(i * 5).padStart(2, '0'));
+
+    useEffect(() => {
+        const handleClickOutside = (event) => {
+            if (containerRef.current && !containerRef.current.contains(event.target)) {
+                setIsOpen(false);
+            }
+        };
+        document.addEventListener('mousedown', handleClickOutside);
+        return () => document.removeEventListener('mousedown', handleClickOutside);
+    }, []);
+
+    const handleSelect = (h, m) => {
+        onChange(`${h}:${m}`);
+    };
+
+    return (
+        <div className="relative" ref={containerRef}>
+            <button
+                type="button"
+                onClick={() => setIsOpen(!isOpen)}
+                className="flex items-center gap-2 bg-transparent px-3 py-1.5 text-[12px] font-black text-[var(--accent-indigo)] outline-none hover:bg-white/50 rounded-lg transition-all"
+            >
+                {value || "00:00"}
+                <Clock size={12} className="opacity-60" />
+            </button>
+
+            <AnimatePresence>
+                {isOpen && (
+                    <motion.div
+                        initial={{ opacity: 0, y: 10, scale: 0.95 }}
+                        animate={{ opacity: 1, y: 0, scale: 1 }}
+                        exit={{ opacity: 0, y: 10, scale: 0.95 }}
+                        className="absolute bottom-full mb-2 left-1/2 -translate-x-1/2 bg-white rounded-2xl shadow-2xl border border-gray-100 flex overflow-hidden z-[1000] min-w-[140px]"
+                    >
+                        {/* Hours Column */}
+                        <div className="flex-1 max-h-[200px] overflow-y-auto no-scrollbar border-r border-gray-50 py-2">
+                            <div className="px-3 py-1 text-[8px] font-black text-gray-400 uppercase tracking-widest text-center sticky top-0 bg-white">Hrs</div>
+                            {hoursList.map(h => (
+                                <button
+                                    key={h}
+                                    onClick={() => handleSelect(h, minutes)}
+                                    className={`w-full px-4 py-2 text-[12px] font-black transition-all ${h === hours ? 'bg-[var(--accent-indigo)] text-white' : 'text-gray-600 hover:bg-indigo-50 hover:text-[var(--accent-indigo)]'}`}
+                                >
+                                    {h}
+                                </button>
+                            ))}
+                        </div>
+                        {/* Minutes Column */}
+                        <div className="flex-1 max-h-[200px] overflow-y-auto no-scrollbar py-2">
+                            <div className="px-3 py-1 text-[8px] font-black text-gray-400 uppercase tracking-widest text-center sticky top-0 bg-white">Min</div>
+                            {minutesList.map(m => (
+                                <button
+                                    key={m}
+                                    onClick={() => {
+                                        handleSelect(hours, m);
+                                        setIsOpen(false);
+                                    }}
+                                    className={`w-full px-4 py-2 text-[12px] font-black transition-all ${m === minutes ? 'bg-[var(--accent-indigo)] text-white' : 'text-gray-600 hover:bg-indigo-50 hover:text-[var(--accent-indigo)]'}`}
+                                >
+                                    {m}
+                                </button>
+                            ))}
+                        </div>
+                    </motion.div>
+                )}
+            </AnimatePresence>
+        </div>
+    );
+};
+
 const CalendarPage = () => {
     const calendarRef = useRef(null);
     const { user } = useAuth();
@@ -1010,20 +1089,20 @@ const CalendarPage = () => {
                                         </label>
                                         {!eventForm.all_day && (
                                             <div className="flex items-center gap-2 bg-[var(--accent-indigo-bg)] p-1 rounded-xl border border-[var(--border)] shadow-inner">
-                                                <input type="time" className="bg-transparent px-3 py-1.5 text-[12px] font-black text-[var(--accent-indigo)] outline-none"
+                                                <CustomTimePicker 
                                                     value={new Date(eventForm.start).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })}
-                                                    onChange={(e) => {
-                                                        const [hours, minutes] = e.target.value.split(':');
+                                                    onChange={(newTime) => {
+                                                        const [hours, minutes] = newTime.split(':');
                                                         const newDate = new Date(eventForm.start);
                                                         newDate.setHours(parseInt(hours), parseInt(minutes));
                                                         setEventForm({ ...eventForm, start: newDate.toISOString() });
                                                     }}
                                                 />
                                                 <ArrowRightLeft size={10} className="text-[var(--accent-indigo)] opacity-40" />
-                                                <input type="time" className="bg-transparent px-3 py-1.5 text-[12px] font-black text-[var(--accent-indigo)] outline-none"
+                                                <CustomTimePicker 
                                                     value={new Date(eventForm.end).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })}
-                                                    onChange={(e) => {
-                                                        const [hours, minutes] = e.target.value.split(':');
+                                                    onChange={(newTime) => {
+                                                        const [hours, minutes] = newTime.split(':');
                                                         const newDate = new Date(eventForm.end);
                                                         newDate.setHours(parseInt(hours), parseInt(minutes));
                                                         setEventForm({ ...eventForm, end: newDate.toISOString() });
