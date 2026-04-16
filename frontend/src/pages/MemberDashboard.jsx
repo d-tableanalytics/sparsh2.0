@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import api from '../services/api';
 import Modal from '../components/common/Modal';
+import { useAuth } from '../context/AuthContext';
 import { useNotification } from '../context/NotificationContext';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
@@ -10,7 +11,8 @@ import {
   BookOpen, CalendarCheck, Clock, Activity,
   CheckCircle2, XCircle, AlertTriangle, Building2,
   TrendingUp, Target, Award, Zap, BarChart3,
-  LayoutGrid, Table as TableIcon, Download, Search, Filter, List
+  LayoutGrid, Table as TableIcon, Download, Search, Filter, List,
+  Eye, Save as SaveIcon, Layout, Brain
 } from 'lucide-react';
 
 import {
@@ -114,6 +116,7 @@ const generateActivityTimeline = () => {
 const MemberDashboard = () => {
   const { userId } = useParams();
   const navigate = useNavigate();
+  const { user } = useAuth();
   const { showSuccess, showError } = useNotification();
 
   const [member, setMember] = useState(null);
@@ -127,8 +130,12 @@ const MemberDashboard = () => {
   const [calendarLoading, setCalendarLoading] = useState(false);
   const [calView, setCalView] = useState('calendar'); // 'calendar', 'cards', 'table'
   const [calFilter, setCalFilter] = useState('all'); // 'all', 'task', 'event'
-  const [analytics, setAnalytics] = useState(null);
   const [fetchingAnalytics, setFetchingAnalytics] = useState(false);
+  const [selectedAssessment, setSelectedAssessment] = useState(null);
+  const [showAssessmentModal, setShowAssessmentModal] = useState(false);
+  const [loadingAssessment, setLoadingAssessment] = useState(false);
+  const [savingMarks, setSavingMarks] = useState(false);
+  const [analytics, setAnalytics] = useState(null);
 
 
 
@@ -151,16 +158,16 @@ const MemberDashboard = () => {
   const fetchAnalytics = async () => {
     setFetchingAnalytics(true);
     try {
-        const res = await api.get(`/users/${userId}/analytics`);
-        setAnalytics(res.data);
+      const res = await api.get(`/users/${userId}/analytics`);
+      setAnalytics(res.data);
     } catch (err) {
-        console.error("Failed to fetch user analytics:", err);
+      console.error("Failed to fetch user analytics:", err);
     } finally {
-        setFetchingAnalytics(false);
+      setFetchingAnalytics(false);
     }
   };
 
-  useEffect(() => { 
+  useEffect(() => {
     fetchData();
     if (activeTab === 'overview') fetchAnalytics();
   }, [userId, activeTab]);
@@ -187,18 +194,18 @@ const MemberDashboard = () => {
     const filtered = userEvents.filter(e => calFilter === 'all' || e.type === calFilter);
     const headers = ["Title", "Type", "Start", "End", "Status"];
     const csvRows = [headers.join(",")];
-    
+
     filtered.forEach(e => {
-        const row = [
-            `"${e.title}"`,
-            `"${e.type}"`,
-            `"${e.start}"`,
-            `"${e.end || ''}"`,
-            `"${e.extendedProps?.status || ''}"`
-        ];
-        csvRows.push(row.join(","));
+      const row = [
+        `"${e.title}"`,
+        `"${e.type}"`,
+        `"${e.start}"`,
+        `"${e.end || ''}"`,
+        `"${e.extendedProps?.status || ''}"`
+      ];
+      csvRows.push(row.join(","));
     });
-    
+
     const blob = new Blob([csvRows.join("\n")], { type: 'text/csv' });
     const url = window.URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -234,6 +241,46 @@ const MemberDashboard = () => {
     } catch (err) { showError('Delete failed'); }
   };
 
+  const handleViewAssessment = async (submissionId) => {
+    setLoadingAssessment(true);
+    setShowAssessmentModal(true);
+    try {
+      const res = await api.get(`/calendar/events/assessments/submissions/${submissionId}`);
+      setSelectedAssessment(res.data);
+    } catch (err) {
+      showError("Failed to load assessment details");
+      setShowAssessmentModal(false);
+    } finally {
+      setLoadingAssessment(false);
+    }
+  };
+
+  const handleUpdateMarks = async (qIdx, newMarks) => {
+    setSavingMarks(true);
+    try {
+      const res = await api.patch(`/calendar/events/assessments/submissions/${selectedAssessment._id}/marks`, {
+        question_index: qIdx,
+        new_marks: newMarks
+      });
+      showSuccess(res.data.message);
+      // Update local state
+      setSelectedAssessment(prev => {
+        const next = { ...prev };
+        next.responses[qIdx].marks_earned = parseFloat(newMarks);
+        next.score = res.data.new_score;
+        next.percentage = res.data.new_percentage;
+        next.passed = res.data.passed;
+        return next;
+      });
+      // Refresh activity data to show updated scores in table
+      fetchData();
+    } catch (err) {
+      showError("Failed to update marks");
+    } finally {
+      setSavingMarks(false);
+    }
+  };
+
   if (loading) return (
     <div className="flex items-center justify-center py-32">
       <div className="w-8 h-8 border-2 border-[var(--accent-indigo-border)] border-t-[var(--accent-indigo)] rounded-full animate-spin"></div>
@@ -253,7 +300,7 @@ const MemberDashboard = () => {
   ];
   const mockTimeline = activity.activities.length > 0 ? activity.activities : [];
   const daysSinceJoined = member.created_at ? Math.floor((Date.now() - new Date(member.created_at).getTime()) / 86400000) : 0;
-  
+
   const totalPresent = attendanceData.reduce((s, d) => s + (d.present || 0), 0);
   const totalAbsent = attendanceData.reduce((s, d) => s + (d.absent || 0), 0);
   const attendanceRate = (totalPresent + totalAbsent) > 0 ? Math.round((totalPresent / (totalPresent + totalAbsent)) * 100) : 0;
@@ -284,11 +331,10 @@ const MemberDashboard = () => {
               <p className="text-[12px] text-[var(--text-muted)]">{member.email} · {member.role}</p>
             </div>
           </div>
-          <span className={`px-2.5 py-1 rounded-md text-[11px] font-bold uppercase tracking-wider inline-flex items-center gap-1.5 ${
-            member.is_active !== false
+          <span className={`px-2.5 py-1 rounded-md text-[11px] font-bold uppercase tracking-wider inline-flex items-center gap-1.5 ${member.is_active !== false
               ? 'bg-[var(--status-active-bg)] text-[var(--status-active-text)] border border-[var(--status-active-border)]'
               : 'bg-[var(--accent-red-bg)] text-[var(--accent-red)] border border-[var(--accent-red-border)]'
-          }`}>
+            }`}>
             {member.is_active !== false ? <><CheckCircle2 size={12} /> Active</> : <><XCircle size={12} /> Inactive</>}
           </span>
         </div>
@@ -296,11 +342,10 @@ const MemberDashboard = () => {
           <button onClick={() => setEditMode(!editMode)} className="h-9 px-4 bg-[var(--bg-card)] border border-[var(--border)] text-[var(--text-muted)] rounded-lg text-[12px] font-bold flex items-center gap-2 hover:border-[var(--accent-indigo)] hover:text-[var(--accent-indigo)] transition-all">
             <Pencil size={14} /> Edit
           </button>
-          <button onClick={handleStatusToggle} className={`h-9 px-4 rounded-lg text-[12px] font-bold flex items-center gap-2 border transition-all ${
-            member.is_active !== false
+          <button onClick={handleStatusToggle} className={`h-9 px-4 rounded-lg text-[12px] font-bold flex items-center gap-2 border transition-all ${member.is_active !== false
               ? 'bg-[var(--accent-yellow-bg)] border-[var(--accent-yellow-border)] text-[var(--accent-yellow)]'
               : 'bg-[var(--accent-green-bg)] border-[var(--accent-green-border)] text-[var(--accent-green)]'
-          }`}>
+            }`}>
             {member.is_active !== false ? <><XCircle size={14} /> Deactivate</> : <><CheckCircle2 size={14} /> Activate</>}
           </button>
           <button onClick={() => setShowDeleteConfirm(true)} className="h-9 px-4 bg-[var(--accent-red-bg)] border border-[var(--accent-red-border)] text-[var(--accent-red)] rounded-lg text-[12px] font-bold flex items-center gap-2 hover:opacity-80 transition-all">
@@ -350,9 +395,8 @@ const MemberDashboard = () => {
       <div className="flex gap-1 bg-[var(--bg-card)] border border-[var(--border)] p-1 rounded-xl w-fit">
         {tabs.map(tab => (
           <button key={tab.id} onClick={() => setActiveTab(tab.id)}
-            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-[12px] font-bold transition-all ${
-              activeTab === tab.id ? 'bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)]' : 'text-[var(--text-muted)] hover:bg-[var(--input-bg)]'
-            }`}>
+            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-[12px] font-bold transition-all ${activeTab === tab.id ? 'bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)]' : 'text-[var(--text-muted)] hover:bg-[var(--input-bg)]'
+              }`}>
             <tab.icon size={14} /> {tab.label}
           </button>
         ))}
@@ -521,6 +565,7 @@ const MemberDashboard = () => {
                     <th className="px-5 py-3 text-left text-[11px] font-bold text-[var(--text-muted)] uppercase tracking-wider">Progress</th>
                     <th className="px-5 py-3 text-left text-[11px] font-bold text-[var(--text-muted)] uppercase tracking-wider">Score</th>
                     <th className="px-5 py-3 text-left text-[11px] font-bold text-[var(--text-muted)] uppercase tracking-wider">Status</th>
+                    <th className="px-5 py-3 text-right text-[11px] font-bold text-[var(--text-muted)] uppercase tracking-wider">Action</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[var(--border)]">
@@ -544,13 +589,23 @@ const MemberDashboard = () => {
                       </td>
                       <td className="px-5 py-3 text-[13px] font-black" style={{ color: CHART_COLORS[i % CHART_COLORS.length] }}>{mod.completed}</td>
                       <td className="px-5 py-3">
-                        <span className={`px-2 py-0.5 rounded-md text-[10px] font-bold ${
-                          mod.status === 'Completed' || mod.completed >= 80 ? 'bg-[var(--accent-green-bg)] text-[var(--accent-green)]' :
-                          mod.completed >= 40 ? 'bg-[var(--accent-yellow-bg)] text-[var(--accent-yellow)]' :
-                          'bg-[var(--accent-red-bg)] text-[var(--accent-red)]'
-                        }`}>
+                        <span className={`px-2 py-0.5 rounded-md text-[10px] font-bold ${mod.status === 'Completed' || mod.completed >= 80 ? 'bg-[var(--accent-green-bg)] text-[var(--accent-green)]' :
+                            mod.completed >= 40 ? 'bg-[var(--accent-yellow-bg)] text-[var(--accent-yellow)]' :
+                              'bg-[var(--accent-red-bg)] text-[var(--accent-red)]'
+                          }`}>
                           {mod.status}
                         </span>
+                      </td>
+                      <td className="px-5 py-3 text-right">
+                        {mod.type === 'assessment' && (
+                          <button
+                            onClick={() => handleViewAssessment(mod._id)}
+                            className="p-1.5 hover:bg-[var(--accent-indigo-bg)] text-[var(--text-muted)] hover:text-[var(--accent-indigo)] rounded-md transition-all"
+                            title="View Answers"
+                          >
+                            <Eye size={16} />
+                          </button>
+                        )}
                       </td>
                     </tr>
                   ))}
@@ -675,33 +730,33 @@ const MemberDashboard = () => {
                   <div className="w-10 h-10 border-4 border-[var(--accent-indigo)] border-t-transparent rounded-full animate-spin"></div>
                 </div>
               )}
-              
+
               {/* Header Controls */}
               <div className="flex items-center justify-between flex-wrap gap-4 mb-8">
                 <div>
                   <h3 className="text-xl font-black text-[var(--text-main)] tracking-tight">Member Roadmap</h3>
                   <p className="text-[12px] text-[var(--text-muted)] font-medium">Schedule & Actions for {member.full_name}</p>
                 </div>
-                
+
                 <div className="flex items-center gap-3 flex-wrap">
-                   {/* Type Filter */}
-                   <div className="flex items-center bg-[var(--input-bg)] p-1 rounded-xl border border-[var(--border)]">
-                      <button onClick={() => setCalFilter('all')} className={`px-4 py-1.5 rounded-lg text-[10px] font-black uppercase transition-all ${calFilter === 'all' ? 'bg-white text-[var(--accent-indigo)] shadow-sm' : 'text-[var(--text-muted)]'}`}>All Types</button>
-                      <button onClick={() => setCalFilter('event')} className={`px-4 py-1.5 rounded-lg text-[10px] font-black uppercase transition-all ${calFilter === 'event' ? 'bg-white text-[var(--accent-indigo)] shadow-sm' : 'text-[var(--text-muted)]'}`}>Sessions</button>
-                      <button onClick={() => setCalFilter('task')} className={`px-4 py-1.5 rounded-lg text-[10px] font-black uppercase transition-all ${calFilter === 'task' ? 'bg-white text-[var(--accent-indigo)] shadow-sm' : 'text-[var(--text-muted)]'}`}>Tasks</button>
-                   </div>
+                  {/* Type Filter */}
+                  <div className="flex items-center bg-[var(--input-bg)] p-1 rounded-xl border border-[var(--border)]">
+                    <button onClick={() => setCalFilter('all')} className={`px-4 py-1.5 rounded-lg text-[10px] font-black uppercase transition-all ${calFilter === 'all' ? 'bg-white text-[var(--accent-indigo)] shadow-sm' : 'text-[var(--text-muted)]'}`}>All Types</button>
+                    <button onClick={() => setCalFilter('event')} className={`px-4 py-1.5 rounded-lg text-[10px] font-black uppercase transition-all ${calFilter === 'event' ? 'bg-white text-[var(--accent-indigo)] shadow-sm' : 'text-[var(--text-muted)]'}`}>Sessions</button>
+                    <button onClick={() => setCalFilter('task')} className={`px-4 py-1.5 rounded-lg text-[10px] font-black uppercase transition-all ${calFilter === 'task' ? 'bg-white text-[var(--accent-indigo)] shadow-sm' : 'text-[var(--text-muted)]'}`}>Tasks</button>
+                  </div>
 
-                   {/* View Switcher */}
-                   <div className="flex items-center bg-[var(--input-bg)] p-1 rounded-xl border border-[var(--border)]">
-                      <button onClick={() => setCalView('calendar')} className={`p-2 rounded-lg transition-all ${calView === 'calendar' ? 'bg-white text-[var(--accent-indigo)] shadow-sm' : 'text-[var(--text-muted)]'}`} title="Calendar View"><CalendarCheck size={16} /></button>
-                      <button onClick={() => setCalView('table')} className={`p-2 rounded-lg transition-all ${calView === 'table' ? 'bg-white text-[var(--accent-indigo)] shadow-sm' : 'text-[var(--text-muted)]'}`} title="Table View"><TableIcon size={16} /></button>
-                      <button onClick={() => setCalView('cards')} className={`p-2 rounded-lg transition-all ${calView === 'cards' ? 'bg-white text-[var(--accent-indigo)] shadow-sm' : 'text-[var(--text-muted)]'}`} title="Card View"><LayoutGrid size={16} /></button>
-                   </div>
+                  {/* View Switcher */}
+                  <div className="flex items-center bg-[var(--input-bg)] p-1 rounded-xl border border-[var(--border)]">
+                    <button onClick={() => setCalView('calendar')} className={`p-2 rounded-lg transition-all ${calView === 'calendar' ? 'bg-white text-[var(--accent-indigo)] shadow-sm' : 'text-[var(--text-muted)]'}`} title="Calendar View"><CalendarCheck size={16} /></button>
+                    <button onClick={() => setCalView('table')} className={`p-2 rounded-lg transition-all ${calView === 'table' ? 'bg-white text-[var(--accent-indigo)] shadow-sm' : 'text-[var(--text-muted)]'}`} title="Table View"><TableIcon size={16} /></button>
+                    <button onClick={() => setCalView('cards')} className={`p-2 rounded-lg transition-all ${calView === 'cards' ? 'bg-white text-[var(--accent-indigo)] shadow-sm' : 'text-[var(--text-muted)]'}`} title="Card View"><LayoutGrid size={16} /></button>
+                  </div>
 
-                   {/* Download Button */}
-                   <button onClick={downloadReport} className="h-10 px-6 bg-[var(--accent-indigo)] text-white rounded-xl text-[11px] font-black uppercase tracking-widest flex items-center gap-2 shadow-lg shadow-indigo-500/20 hover:scale-[1.02] active:scale-[0.98] transition-all">
-                      <Download size={14} /> Report
-                   </button>
+                  {/* Download Button */}
+                  <button onClick={downloadReport} className="h-10 px-6 bg-[var(--accent-indigo)] text-white rounded-xl text-[11px] font-black uppercase tracking-widest flex items-center gap-2 shadow-lg shadow-indigo-500/20 hover:scale-[1.02] active:scale-[0.98] transition-all">
+                    <Download size={14} /> Report
+                  </button>
                 </div>
               </div>
 
@@ -720,10 +775,10 @@ const MemberDashboard = () => {
                       const isTask = type === 'task';
                       return (
                         <div className={`px-2 py-0.5 flex items-center gap-1.5 truncate text-[10px] font-black uppercase tracking-tight transition-all ${isTask ? 'bg-orange-50 text-orange-700' : 'bg-indigo-50 text-indigo-700'} ${info.isStart ? 'rounded-l-md' : ''} ${info.isEnd ? 'rounded-r-md' : ''} ${!info.isStart && !info.isEnd ? '' : 'rounded-md'}`}
-                             style={{ 
-                               marginLeft: info.isStart ? '0' : '-8px',
-                               marginRight: info.isEnd ? '0' : '-8px',
-                             }}>
+                          style={{
+                            marginLeft: info.isStart ? '0' : '-8px',
+                            marginRight: info.isEnd ? '0' : '-8px',
+                          }}>
                           <div className={`w-1.5 h-1.5 rounded-full shrink-0 ${isTask ? 'bg-orange-500' : 'bg-indigo-500'}`} />
                           {info.event.title}
                         </div>
@@ -759,11 +814,10 @@ const MemberDashboard = () => {
                             <span className="text-[10px] text-[var(--text-muted)]">{new Date(e.start).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
                           </td>
                           <td className="px-6 py-4">
-                            <span className={`px-2.5 py-1 rounded-md text-[10px] font-black uppercase tracking-widest ${
-                              e.extendedProps?.status === 'completed' ? 'bg-green-100 text-green-700' : 
-                              e.extendedProps?.status === 'schedule' ? 'bg-blue-100 text-blue-700' : 
-                              'bg-gray-100 text-gray-700'
-                            }`}>
+                            <span className={`px-2.5 py-1 rounded-md text-[10px] font-black uppercase tracking-widest ${e.extendedProps?.status === 'completed' ? 'bg-green-100 text-green-700' :
+                                e.extendedProps?.status === 'schedule' ? 'bg-blue-100 text-blue-700' :
+                                  'bg-gray-100 text-gray-700'
+                              }`}>
                               {e.extendedProps?.status || 'Scheduled'}
                             </span>
                           </td>
@@ -776,39 +830,39 @@ const MemberDashboard = () => {
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
                   {userEvents.filter(e => calFilter === 'all' || e.type === calFilter).map(e => (
                     <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} key={e.id} className="bg-[var(--input-bg)] border border-[var(--border)] p-6 rounded-[24px] hover:border-[var(--accent-indigo)] transition-all group">
-                       <div className="flex items-center justify-between mb-4">
-                          <span className={`px-2 py-0.5 rounded text-[8px] font-black uppercase tracking-[0.2em] ${e.type === 'task' ? 'bg-orange-500 text-white' : 'bg-indigo-500 text-white'}`}>
-                            {e.type}
-                          </span>
-                          <span className="text-[10px] text-[var(--text-muted)] font-black uppercase tracking-widest opacity-60">#{e.id.slice(-4)}</span>
-                       </div>
-                       <h4 className="text-[15px] font-black text-[var(--text-main)] mb-3 leading-snug group-hover:text-[var(--accent-indigo)] transition-colors">{e.title}</h4>
-                       <div className="space-y-3 pt-3 border-t border-[var(--border)]">
-                          <div className="flex items-center justify-between">
-                            <span className="text-[10px] text-[var(--text-muted)] font-black uppercase tracking-widest">Date:</span>
-                            <span className="text-[12px] font-bold">{new Date(e.start).toLocaleDateString()}</span>
+                      <div className="flex items-center justify-between mb-4">
+                        <span className={`px-2 py-0.5 rounded text-[8px] font-black uppercase tracking-[0.2em] ${e.type === 'task' ? 'bg-orange-500 text-white' : 'bg-indigo-500 text-white'}`}>
+                          {e.type}
+                        </span>
+                        <span className="text-[10px] text-[var(--text-muted)] font-black uppercase tracking-widest opacity-60">#{e.id.slice(-4)}</span>
+                      </div>
+                      <h4 className="text-[15px] font-black text-[var(--text-main)] mb-3 leading-snug group-hover:text-[var(--accent-indigo)] transition-colors">{e.title}</h4>
+                      <div className="space-y-3 pt-3 border-t border-[var(--border)]">
+                        <div className="flex items-center justify-between">
+                          <span className="text-[10px] text-[var(--text-muted)] font-black uppercase tracking-widest">Date:</span>
+                          <span className="text-[12px] font-bold">{new Date(e.start).toLocaleDateString()}</span>
+                        </div>
+                        <div className="flex items-center justify-between">
+                          <span className="text-[10px] text-[var(--text-muted)] font-black uppercase tracking-widest">Timing:</span>
+                          <span className="text-[12px] font-bold text-[var(--accent-indigo)]">{new Date(e.start).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                        </div>
+                        <div className="flex items-center justify-between pt-2">
+                          <div className="flex items-center gap-2">
+                            <div className={`w-2 h-2 rounded-full ${e.extendedProps?.status === 'completed' ? 'bg-green-500' : 'bg-blue-500 animate-pulse'}`} />
+                            <span className="text-[11px] font-black uppercase tracking-widest">{e.extendedProps?.status || 'Scheduled'}</span>
                           </div>
-                          <div className="flex items-center justify-between">
-                            <span className="text-[10px] text-[var(--text-muted)] font-black uppercase tracking-widest">Timing:</span>
-                            <span className="text-[12px] font-bold text-[var(--accent-indigo)]">{new Date(e.start).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
-                          </div>
-                          <div className="flex items-center justify-between pt-2">
-                             <div className="flex items-center gap-2">
-                               <div className={`w-2 h-2 rounded-full ${e.extendedProps?.status === 'completed' ? 'bg-green-500' : 'bg-blue-500 animate-pulse'}`} />
-                               <span className="text-[11px] font-black uppercase tracking-widest">{e.extendedProps?.status || 'Scheduled'}</span>
-                             </div>
-                             <button onClick={() => setActiveTab('overview')} className="p-2 bg-white rounded-lg border border-[var(--border)] text-[var(--text-muted)] hover:text-[var(--accent-indigo)]"><Search size={14} /></button>
-                          </div>
-                       </div>
+                          <button onClick={() => setActiveTab('overview')} className="p-2 bg-white rounded-lg border border-[var(--border)] text-[var(--text-muted)] hover:text-[var(--accent-indigo)]"><Search size={14} /></button>
+                        </div>
+                      </div>
                     </motion.div>
-                  )) }
+                  ))}
                 </div>
               )}
 
               {userEvents.filter(e => calFilter === 'all' || e.type === calFilter).length === 0 && !calendarLoading && (
                 <div className="flex flex-col items-center justify-center py-20 opacity-40">
-                   <Target size={48} className="text-[var(--text-muted)] mb-4" />
-                   <p className="text-[14px] font-black text-[var(--text-muted)] uppercase tracking-widest">No items found matching your filters.</p>
+                  <Target size={48} className="text-[var(--text-muted)] mb-4" />
+                  <p className="text-[14px] font-black text-[var(--text-muted)] uppercase tracking-widest">No items found matching your filters.</p>
                 </div>
               )}
             </div>
@@ -831,6 +885,113 @@ const MemberDashboard = () => {
             <button onClick={handleDelete} className="px-6 py-2 bg-[var(--accent-red)] text-white rounded-lg text-[13px] font-bold hover:opacity-90 transition-all">Delete Permanently</button>
           </div>
         </div>
+      </Modal>
+
+      {/* ─── Assessment Details Modal ─── */}
+      <Modal
+        isOpen={showAssessmentModal}
+        onClose={() => setShowAssessmentModal(false)}
+        title="Assessment Review"
+        maxWidth="4xl"
+      >
+        {loadingAssessment ? (
+          <div className="py-20 flex flex-col items-center justify-center gap-4">
+            <div className="w-10 h-10 border-4 border-[var(--accent-indigo)] border-t-transparent rounded-full animate-spin"></div>
+            <p className="text-[12px] font-black text-[var(--accent-indigo)] uppercase tracking-widest">Loading Submission...</p>
+          </div>
+        ) : selectedAssessment ? (
+          <div className="space-y-8 max-h-[70vh] overflow-y-auto pr-2 no-scrollbar">
+            {/* Summary Header */}
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              <div className="bg-[var(--input-bg)] p-4 rounded-2xl border border-[var(--border)]">
+                <span className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest block mb-1">Total Score</span>
+                <p className="text-xl font-black text-[var(--text-main)]">{selectedAssessment.score} / {selectedAssessment.total_marks}</p>
+              </div>
+              <div className="bg-[var(--input-bg)] p-4 rounded-2xl border border-[var(--border)]">
+                <span className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest block mb-1">Percentage</span>
+                <p className="text-xl font-black text-[var(--accent-indigo)]">{Math.round(selectedAssessment.percentage)}%</p>
+              </div>
+              <div className="bg-[var(--input-bg)] p-4 rounded-2xl border border-[var(--border)]">
+                <span className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest block mb-1">Result</span>
+                <p className={`text-xl font-black uppercase italic ${selectedAssessment.passed ? 'text-emerald-500' : 'text-orange-500'}`}>
+                  {selectedAssessment.passed ? 'Passed' : 'Failed'}
+                </p>
+              </div>
+              <div className="bg-[var(--input-bg)] p-4 rounded-2xl border border-[var(--border)]">
+                <span className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest block mb-1">Submitted On</span>
+                <p className="text-sm font-bold text-[var(--text-main)]">{new Date(selectedAssessment.submitted_at).toLocaleDateString()}</p>
+              </div>
+            </div>
+
+            {/* Responses List */}
+            <div className="space-y-6">
+              <h4 className="text-[12px] font-black text-[var(--text-main)] uppercase tracking-widest flex items-center gap-2">
+                <Layout size={14} className="text-[var(--accent-indigo)]" /> Detailed Responses
+              </h4>
+
+              {selectedAssessment.responses.map((resp, rIdx) => (
+                <div key={rIdx} className="bg-[var(--bg-card)] border border-[var(--border)] rounded-[24px] p-6 space-y-4 hover:border-[var(--accent-indigo-border)] transition-all">
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="space-y-1">
+                      <span className="text-[10px] font-black text-[var(--accent-indigo)] uppercase tracking-widest">Question {rIdx + 1}</span>
+                      <p className="text-[15px] font-bold text-[var(--text-main)]">{resp.question}</p>
+                    </div>
+                    <div className="text-right shrink-0">
+                      <div className="flex items-center gap-2 bg-[var(--input-bg)] px-3 py-1.5 rounded-xl border border-[var(--border)]">
+                        {/* Edit marks input if descriptive and is staff */}
+                        {['superadmin', 'admin', 'coach', 'staff'].includes(user?.role) ? (
+                          <div className="flex items-center gap-2">
+                            <input
+                              type="number"
+                              className="w-12 bg-transparent text-center font-black text-sm outline-none focus:text-[var(--accent-indigo)]"
+                              defaultValue={resp.marks_earned}
+                              onBlur={(e) => handleUpdateMarks(rIdx, e.target.value)}
+                              disabled={savingMarks}
+                            />
+                            <span className="text-[var(--text-muted)] opacity-30">/</span>
+                            <span className="text-sm font-black">{resp.total_marks}</span>
+                          </div>
+                        ) : (
+                          <span className="text-sm font-black">{resp.marks_earned} / {resp.total_marks}</span>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* User Answer */}
+                  <div className="bg-[var(--input-bg)] p-4 rounded-2xl border border-dashed border-[var(--border)]">
+                    <span className="text-[9px] font-black text-[var(--text-muted)] uppercase tracking-widest block mb-2">Learner Submission</span>
+                    <p className="text-[14px] text-[var(--text-main)] leading-relaxed font-medium">
+                      {typeof resp.user_answer === 'number'
+                        ? (selectedAssessment.quiz_data?.questions?.[rIdx]?.options?.[resp.user_answer] || `Option ${String.fromCharCode(65 + resp.user_answer)}`)
+                        : (resp.user_answer || "No response provided")}
+                    </p>
+                  </div>
+
+                  {/* Feedback / AI Notes */}
+                  {resp.feedback && (
+                    <div className="flex items-start gap-3 text-orange-600 bg-orange-50 p-4 rounded-2xl border border-orange-100">
+                      <Brain size={18} className="shrink-0 mt-0.5" />
+                      <div>
+                        <span className="text-[9px] font-black uppercase tracking-widest block mb-1">AI Evaluator Feedback</span>
+                        <p className="text-[13px] font-medium leading-snug">{resp.feedback}</p>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Overwrite History */}
+                  {resp.overwritten_by_name && (
+                    <div className="text-[9px] font-black text-[var(--accent-indigo)] uppercase tracking-widest pl-2">
+                      Modified by {resp.overwritten_by_name} on {new Date(resp.overwritten_at).toLocaleDateString()}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : (
+          <div className="py-20 text-center text-[var(--text-muted)]">Unable to retrieve assessment data.</div>
+        )}
       </Modal>
     </div>
   );

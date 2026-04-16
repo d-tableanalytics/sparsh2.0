@@ -826,6 +826,14 @@ const CompanyDetails = () => {
                               <p className={`text-[13px] font-black uppercase tracking-tight transition-all ${task.is_done ? 'text-[var(--accent-green)] line-through' : 'text-[var(--text-main)]'}`}>
                                 {task.label || task.title || 'In-Session Milestone'}
                               </p>
+                              {task.is_done && task.completed_by && (
+                                <div className="flex items-center gap-2 mt-1 px-2 py-0.5 bg-emerald-50 border border-emerald-100 rounded-md w-fit">
+                                  <User size={10} className="text-emerald-600" />
+                                  <span className="text-[9px] font-black text-emerald-700 uppercase tracking-tighter">
+                                    Done by: {task.completed_by} {task.completed_at ? `· ${new Date(task.completed_at).toLocaleDateString('en-IN', { day: '2-digit', month: 'short' })}` : ''}
+                                  </span>
+                                </div>
+                              )}
                               {task.description && (
                                 <p className={`text-[10px] font-bold mt-1 leading-relaxed ${task.is_done ? 'opacity-40' : 'text-[var(--text-muted)]'}`}>
                                   {task.description}

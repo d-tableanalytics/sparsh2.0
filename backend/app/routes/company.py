@@ -502,25 +502,34 @@ async def get_company_session_tasks(company_id: str, session_id: str, current_us
     })
     
     done_indices = (progress or {}).get("done_indices") or []
+    task_details = (progress or {}).get("task_details") or {}
     
     # 4. Merge
     result = []
     for idx, t in enumerate(tasks):
+        details = task_details.get(str(idx)) or {}
         result.append({
             **t,
             "index": idx,
-            "is_done": idx in done_indices
+            "is_done": idx in done_indices,
+            "completed_by": details.get("completed_by"),
+            "completed_at": details.get("at")
         })
     return result
 
 @router.patch("/{company_id}/sessions/{session_id}/tasks/{task_index}/toggle")
 async def toggle_company_session_task(company_id: str, session_id: str, task_index: int, current_user: dict = Depends(get_current_user)):
     progress_col = get_collection("company_session_progress")
+    user_id = str(current_user["_id"])
+    user_name = current_user.get("full_name") or current_user.get("email", "Anonymous")
     
     progress = await progress_col.find_one({
         "company_id": company_id,
         "session_id": session_id
     })
+    
+    # We use a dictionary or list of objects to track WHO completed the task
+    # To maintain consistency, we'll keep done_indices but also add details
     
     if not progress:
         # Create new progress record
@@ -528,20 +537,39 @@ async def toggle_company_session_task(company_id: str, session_id: str, task_ind
             "company_id": company_id,
             "session_id": session_id,
             "done_indices": [task_index],
+            "task_details": {
+                str(task_index): {
+                    "completed_by": user_name,
+                    "user_id": user_id,
+                    "at": datetime.now(timezone.utc)
+                }
+            },
             "updated_at": datetime.now(timezone.utc)
         })
     else:
         done_indices = progress.get("done_indices") or []
+        task_details = progress.get("task_details") or {}
+        
         if task_index in done_indices:
             done_indices.remove(task_index)
+            if str(task_index) in task_details:
+                del task_details[str(task_index)]
         else:
             done_indices.append(task_index)
+            task_details[str(task_index)] = {
+                "completed_by": user_name,
+                "user_id": user_id,
+                "at": datetime.now(timezone.utc)
+            }
         
         await progress_col.update_one(
             {"_id": progress["_id"]},
-            {"$set": {"done_indices": done_indices, "updated_at": datetime.now(timezone.utc)}}
+            {"$set": {
+                "done_indices": done_indices, 
+                "task_details": task_details,
+                "updated_at": datetime.now(timezone.utc)
+            }}
         )
-        
         
     await log_activity(current_user, "Toggle Task", "Portal", f"Toggled task {task_index} for session {session_id}")
     return {"message": "Task toggled"}

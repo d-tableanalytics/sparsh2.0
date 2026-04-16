@@ -3,7 +3,7 @@ import requests
 import logging
 from typing import Optional, Dict, Any
 from app.db.mongodb import get_collection
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from bson import ObjectId
 import smtplib
 from email.mime.text import MIMEText
@@ -280,6 +280,13 @@ async def send_notification_from_template(user_obj: dict, template_slug: str, co
         results["whatsapp"] = await send_whatsapp_notification(phone, rendered_body, user_id, whatsapp_t.get("slug", f"{template_slug}_whatsapp"))
     return results
 
+def to_ist(dt: datetime) -> datetime:
+    """Convert a datetime object to IST (UTC+5:30)"""
+    if not dt: return dt
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone(timedelta(hours=5, minutes=30)))
+
 def format_datetime_standard(dt_str: str) -> str:
     if not dt_str: return "TBD"
     try:
@@ -287,6 +294,9 @@ def format_datetime_standard(dt_str: str) -> str:
             dt = dt_str
         else:
             dt = datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
+        
+        # Convert to IST for display
+        dt = to_ist(dt)
         return dt.strftime("%d %b %Y, %I:%M %p")
     except Exception as e:
         logger.error(f"Date parsing error for {dt_str}: {e}")
@@ -306,6 +316,7 @@ async def send_task_created_email(user_obj: dict, task_data: dict, creator_name:
     dt_str = task_data.get("start", "")
     try:
         dt = datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
+        dt = to_ist(dt) # Convert to IST
         parsed_date = dt.strftime("%d %b %Y")
         parsed_day = dt.strftime("%A")
         parsed_time = dt.strftime("%I:%M %p")
@@ -325,7 +336,9 @@ async def send_task_created_email(user_obj: dict, task_data: dict, creator_name:
         "time": parsed_time,
         "description": task_data.get("description") or task_data.get("additional_details", "No description provided."),
         "task_status": task_data.get("status", "schedule"),
-        "session_type": "Task"
+        "session_type": "Task",
+        "name": user_obj.get("full_name") or user_obj.get("first_name", "User"),
+        "event_title": task_data.get("title")
     }
     await create_in_app_notification(
         user_id=user_obj.get("_id") or user_obj.get("id"),
@@ -340,6 +353,7 @@ async def send_task_updated_email(user_obj: dict, task_data: dict, updated_by: s
     dt_str = task_data.get("start", "")
     try:
         dt = datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
+        dt = to_ist(dt) # Convert to IST
         parsed_date = dt.strftime("%d %b %Y")
         parsed_day = dt.strftime("%A")
         parsed_time = dt.strftime("%I:%M %p")
@@ -359,7 +373,9 @@ async def send_task_updated_email(user_obj: dict, task_data: dict, updated_by: s
         "time": parsed_time,
         "description": task_data.get("description") or task_data.get("additional_details", "No description provided."),
         "task_status": task_data.get("status", "schedule"),
-        "session_type": "Task Update"
+        "session_type": "Task Update",
+        "name": user_obj.get("full_name") or user_obj.get("first_name", "User"),
+        "event_title": task_data.get("title")
     }
     return await send_notification_from_template(user_obj, "task_updated", context, "email")
 
@@ -405,6 +421,7 @@ async def send_event_created_email(user_obj: dict, event_data: dict, creator_nam
     try:
         dt_str = event_data.get("start", "")
         dt = datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
+        dt = to_ist(dt) # Convert to IST
         context = {
             "session_type": event_data.get("session_type") or event_data.get("type", "General"),
             "meeting_link": event_data.get("meeting_link") or "No link provided.",
@@ -420,7 +437,8 @@ async def send_event_created_email(user_obj: dict, event_data: dict, creator_nam
             "event_datetime": dt.strftime("%d %b %Y, %I:%M %p"),
             "instruction": event_data.get("additional_details") or "No instructions.",
             "created_by": creator_name,
-            "user_name": user_obj.get("full_name") or user_obj.get("first_name", "User")
+            "user_name": user_obj.get("full_name") or user_obj.get("first_name", "User"),
+            "name": user_obj.get("full_name") or user_obj.get("first_name", "User")
         }
     except Exception as e:
         logger.error(f"Error parsing date for email: {e}")
@@ -439,6 +457,7 @@ async def send_event_updated_email(user_obj: dict, event_data: dict, updated_by:
     try:
         dt_str = event_data.get("start", "")
         dt = datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
+        dt = to_ist(dt) # Convert to IST
         context = {
             "session_type": event_data.get("session_type") or event_data.get("type", "General"),
             "meeting_link": event_data.get("meeting_link") or "No link provided.",
@@ -454,7 +473,8 @@ async def send_event_updated_email(user_obj: dict, event_data: dict, updated_by:
             "event_datetime": dt.strftime("%d %b %Y, %I:%M %p"),
             "instruction": event_data.get("additional_details") or "No instructions.",
             "created_by": updated_by,
-            "user_name": user_obj.get("full_name") or user_obj.get("first_name", "User")
+            "user_name": user_obj.get("full_name") or user_obj.get("first_name", "User"),
+            "name": user_obj.get("full_name") or user_obj.get("first_name", "User")
         }
     except Exception as e:
         logger.error(f"Error parsing date for email: {e}")
@@ -487,8 +507,10 @@ async def send_conflict_notification_email(user_obj: dict, event_data: dict, exi
     # 1. Standardize Timestamps for Template
     try:
         e_dt = datetime.fromisoformat(event_data["start"].replace("Z", "+00:00"))
+        e_dt = to_ist(e_dt)
         event_time_str = e_dt.strftime("%d %b, %I:%M %p")
         ex_dt = datetime.fromisoformat(existing_event["start"].replace("Z", "+00:00"))
+        ex_dt = to_ist(ex_dt)
         existing_time_str = ex_dt.strftime("%d %b, %I:%M %p")
     except:
         event_time_str = event_data.get("start")
@@ -496,6 +518,7 @@ async def send_conflict_notification_email(user_obj: dict, event_data: dict, exi
 
     context = {
         "user_name": user_obj.get("full_name") or user_obj.get("first_name", "User"),
+        "name": user_obj.get("full_name") or user_obj.get("first_name", "User"),
         "event_title": event_data.get("title"),
         "event_time": event_time_str,
         "existing_event": existing_event.get("title"),
@@ -523,6 +546,7 @@ async def send_conflict_notification_email(user_obj: dict, event_data: dict, exi
 async def send_attendance_thanks_email(user_obj: dict, event_data: dict):
     context = {
         "user_name": user_obj.get("full_name") or user_obj.get("first_name", "User"),
+        "name": user_obj.get("full_name") or user_obj.get("first_name", "User"),
         "event_title": event_data.get("title"),
         "event_time": format_datetime_standard(event_data.get("start"))
     }
@@ -531,6 +555,7 @@ async def send_attendance_thanks_email(user_obj: dict, event_data: dict):
 async def send_attendance_absent_email(user_obj: dict, event_data: dict):
     context = {
         "user_name": user_obj.get("full_name") or user_obj.get("first_name", "User"),
+        "name": user_obj.get("full_name") or user_obj.get("first_name", "User"),
         "event_title": event_data.get("title"),
         "event_time": format_datetime_standard(event_data.get("start"))
     }
@@ -539,6 +564,7 @@ async def send_attendance_absent_email(user_obj: dict, event_data: dict):
 async def send_session_complete_email(user_obj: dict, event_data: dict):
     context = {
         "user_name": user_obj.get("full_name") or user_obj.get("first_name", "User"),
+        "name": user_obj.get("full_name") or user_obj.get("first_name", "User"),
         "topic": event_data.get("title"),
         "event_title": event_data.get("title"),
         "event_time": format_datetime_standard(event_data.get("start"))

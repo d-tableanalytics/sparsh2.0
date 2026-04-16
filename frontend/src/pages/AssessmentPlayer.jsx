@@ -168,97 +168,99 @@ const AssessmentPlayer = () => {
                 </div>
             </div>
 
-            <div className="max-w-4xl mx-auto py-20 px-6">
+            <div className="max-w-3xl mx-auto py-12 px-6">
                 <AnimatePresence mode="wait">
                     <motion.div 
                         key={currentQuestionIndex}
-                        initial={{ opacity: 0, x: 20 }}
-                        animate={{ opacity: 1, x: 0 }}
-                        exit={{ opacity: 0, x: -20 }}
-                        transition={{ duration: 0.3 }}
-                        className="space-y-12"
+                        initial={{ opacity: 0, y: 10 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={{ opacity: 0, y: -10 }}
+                        transition={{ duration: 0.2 }}
+                        className="space-y-8"
                     >
                         {/* Question Label */}
-                        <div className="flex items-center gap-4">
-                            <div className="w-12 h-12 rounded-2xl bg-[var(--accent-indigo-bg)] border border-[var(--accent-indigo-border)] flex items-center justify-center text-[var(--accent-indigo)] font-black text-lg">
+                        <div className="flex items-center gap-3">
+                            <div className="w-10 h-10 rounded-xl bg-black text-white flex items-center justify-center font-black text-sm">
                                 {currentQuestionIndex + 1}
                             </div>
-                            <div className="h-px flex-1 bg-[var(--border)] opacity-30" />
-                            <div className="text-[11px] font-black text-[var(--text-muted)] uppercase tracking-widest">
-                                Point Value: {currentQuestion?.marks || 1}
+                            <div className="h-px flex-1 bg-[var(--border)] opacity-20" />
+                            <div className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest px-3 py-1 bg-[var(--input-bg)] rounded-lg">
+                                {currentQuestion?.marks || 1} Points
                             </div>
                         </div>
 
                         {/* Question Text */}
-                        <h1 className="text-4xl font-black text-[var(--text-main)] italic uppercase tracking-tighter leading-tight lg:text-5xl">
-                            {currentQuestion.question_text}
-                        </h1>
+                        <div className="space-y-2">
+                             <span className="text-[10px] font-black text-[var(--accent-indigo)] uppercase tracking-widest">Question Segment</span>
+                             <h1 className="text-xl md:text-2xl font-black text-[var(--text-main)] uppercase tracking-tight leading-snug">
+                                {currentQuestion.question_text}
+                             </h1>
+                        </div>
 
                         {/* Interaction Area */}
-                        <div className="space-y-6">
+                        <div className="space-y-4">
                             {currentQuestion.type === 'MCQ' ? (
-                                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <div className="grid grid-cols-1 gap-3">
                                     {(currentQuestion.options || []).map((opt, oIdx) => (
                                         <button
                                             key={oIdx}
                                             onClick={() => handleAnswer(currentQuestionIndex, oIdx)}
-                                            className={`group relative p-6 rounded-[32px] text-left border-2 transition-all flex items-center gap-4 ${answers[currentQuestionIndex] === oIdx 
-                                                ? 'bg-black text-white border-black shadow-2xl scale-[1.02]' 
-                                                : 'bg-[var(--bg-card)] border-[var(--border)] text-[var(--text-main)] hover:border-[var(--accent-indigo)] hover:-translate-y-1'}`}
+                                            className={`group relative p-5 rounded-2xl text-left border-2 transition-all flex items-center gap-4 ${answers[currentQuestionIndex] === oIdx 
+                                                ? 'bg-black text-white border-black shadow-lg translate-x-1' 
+                                                : 'bg-[var(--bg-card)] border-[var(--border)] text-[var(--text-main)] hover:border-[var(--accent-indigo)]'}`}
                                         >
-                                            <div className={`shrink-0 w-8 h-8 rounded-full flex items-center justify-center font-black text-[12px] transition-all ${answers[currentQuestionIndex] === oIdx ? 'bg-white text-black' : 'bg-[var(--input-bg)] group-hover:bg-[var(--accent-indigo-bg)] group-hover:text-[var(--accent-indigo)]'}`}>
+                                            <div className={`shrink-0 w-7 h-7 rounded-lg flex items-center justify-center font-black text-[11px] transition-all ${answers[currentQuestionIndex] === oIdx ? 'bg-white text-black' : 'bg-[var(--input-bg)]'}`}>
                                                 {String.fromCharCode(65 + oIdx)}
                                             </div>
-                                            <span className="text-[14px] font-black uppercase tracking-tight">{opt}</span>
+                                            <span className="text-[13px] font-bold uppercase tracking-tight">{opt}</span>
                                             {answers[currentQuestionIndex] === oIdx && (
-                                                <motion.div layoutId="check" className="absolute right-6">
-                                                    <CheckCircle2 size={24} />
-                                                </motion.div>
+                                                <div className="absolute right-5">
+                                                    <CheckCircle2 size={18} />
+                                                </div>
                                             )}
                                         </button>
                                     ))}
                                 </div>
                             ) : (
-                                <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-[40px] p-8 shadow-sm">
+                                <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-[24px] p-6 shadow-sm">
                                     <textarea 
-                                        rows={8}
+                                        rows={6}
                                         placeholder="Formulate your detailed response here..."
-                                        className="w-full bg-transparent border-none outline-none text-xl font-medium text-[var(--text-main)] resize-none no-scrollbar placeholder:opacity-20"
+                                        className="w-full bg-transparent border-none outline-none text-[15px] font-medium text-[var(--text-main)] resize-none no-scrollbar placeholder:opacity-20"
                                         value={answers[currentQuestionIndex] || ''}
                                         onChange={(e) => handleAnswer(currentQuestionIndex, e.target.value)}
                                     />
-                                    <div className="flex items-center gap-2 mt-6 pt-6 border-t border-[var(--border)] text-[10px] font-black text-orange-500 uppercase tracking-widest pl-2">
-                                        <Brain size={14} /> AI Evaluated Core Keywords Required
+                                    <div className="flex items-center gap-2 mt-4 pt-4 border-t border-[var(--border)] text-[9px] font-black text-orange-500 uppercase tracking-widest">
+                                        <Brain size={12} /> AI Assisted Keyword Validation Active
                                     </div>
                                 </div>
                             )}
                         </div>
 
                         {/* Navigation Footer */}
-                        <div className="pt-12 border-t border-[var(--border)] flex items-center justify-between">
+                        <div className="pt-8 border-t border-[var(--border)] flex items-center justify-between gap-4">
                             <button 
                                 onClick={() => setCurrentQuestionIndex(prev => Math.max(0, prev - 1))}
                                 disabled={currentQuestionIndex === 0}
-                                className="flex items-center gap-3 text-[12px] font-black text-[var(--text-muted)] uppercase tracking-widest hover:text-[var(--text-main)] disabled:opacity-0 transition-colors"
+                                className="flex-1 h-12 bg-[var(--bg-card)] border border-[var(--border)] text-[var(--text-main)] rounded-xl flex items-center justify-center gap-2 text-[11px] font-black uppercase tracking-widest hover:bg-[var(--input-bg)] disabled:opacity-0 transition-all"
                             >
-                                <ArrowLeft size={16} /> Previous Strategic Node
+                                <ArrowLeft size={14} /> Previous
                             </button>
 
                             {currentQuestionIndex === quiz.questions.length - 1 ? (
                                 <button 
                                     onClick={handleSubmit}
                                     disabled={submitting}
-                                    className="h-14 px-12 bg-black text-white rounded-[22px] flex items-center gap-3 text-[13px] font-black uppercase tracking-widest hover:scale-105 active:scale-95 transition-all shadow-xl disabled:opacity-50"
+                                    className="flex-[1.5] h-12 bg-[var(--accent-green)] text-white rounded-xl flex items-center justify-center gap-2 text-[11px] font-black uppercase tracking-widest hover:opacity-90 active:scale-95 transition-all shadow-lg disabled:opacity-50"
                                 >
-                                    {submitting ? 'Synchronizing Pipeline...' : <><Send size={18} /> Finish Assessment</>}
+                                    {submitting ? 'Syncing...' : <><Send size={15} /> Finish & Submit</>}
                                 </button>
                             ) : (
                                 <button 
                                     onClick={() => setCurrentQuestionIndex(prev => prev + 1)}
-                                    disabled={answers[currentQuestionIndex] === undefined}
-                                    className="h-14 px-12 bg-[var(--accent-indigo)] text-white rounded-[22px] flex items-center gap-3 text-[13px] font-black uppercase tracking-widest hover:scale-105 active:scale-95 transition-all shadow-xl disabled:opacity-30"
+                                    className="flex-1 h-12 bg-black text-white rounded-xl flex items-center justify-center gap-2 text-[11px] font-black uppercase tracking-widest hover:opacity-90 active:scale-95 transition-all shadow-lg"
                                 >
-                                    Next Intelligence Check <ArrowRight size={18} />
+                                    Next <ArrowRight size={14} />
                                 </button>
                             )}
                         </div>

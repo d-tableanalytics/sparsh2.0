@@ -949,6 +949,7 @@ async def submit_assessment(event_id: str, quiz_index: int, payload: dict, curre
         "total_marks": total_available,
         "percentage": percentage,
         "passed": passed,
+        "passing_score": passing_score,
         "responses": graded_responses,
         "submitted_at": datetime.now(timezone.utc)
     }
@@ -976,3 +977,76 @@ async def submit_assessment(event_id: str, quiz_index: int, payload: dict, curre
     return {"message": "Assessment processed with AI grading", "result": result_obj}
 
 
+@router.get("/assessments/submissions/{submission_id}")
+async def get_assessment_submission(submission_id: str, current_user: dict = Depends(get_current_user)):
+    col = get_collection("LearnerAssessments")
+    submission = await col.find_one({"_id": ObjectId(submission_id)})
+    if not submission:
+        # Check legacy typo
+        submission = await get_collection("LearnerAsessments").find_one({"_id": ObjectId(submission_id)})
+        
+    if not submission:
+        raise HTTPException(status_code=404, detail="Submission not found")
+        
+    submission["_id"] = str(submission["_id"])
+    return submission
+
+@router.patch("/assessments/submissions/{submission_id}/marks")
+async def update_submission_marks(submission_id: str, payload: dict, current_user: dict = Depends(get_current_user)):
+    # payload: { "question_index": 0, "new_marks": 5 }
+    if current_user.get("role") not in ["superadmin", "admin", "coach", "staff"]:
+        raise HTTPException(status_code=403, detail="Only staff can modify marks")
+        
+    col = get_collection("LearnerAssessments")
+    submission = await col.find_one({"_id": ObjectId(submission_id)})
+    if not submission:
+         raise HTTPException(status_code=404, detail="Submission not found")
+         
+    q_idx = payload.get("question_index")
+    new_marks = float(payload.get("new_marks", 0))
+    
+    responses = submission.get("responses", [])
+    if q_idx < 0 or q_idx >= len(responses):
+        raise HTTPException(status_code=400, detail="Invalid question index")
+        
+    responses[q_idx]["marks_earned"] = new_marks
+    responses[q_idx]["overwritten_by"] = str(current_user["_id"])
+    responses[q_idx]["overwritten_by_name"] = current_user.get("full_name") or current_user.get("email")
+    responses[q_idx]["overwritten_at"] = datetime.utcnow()
+    responses[q_idx]["is_correct"] = new_marks >= (responses[q_idx].get("total_marks", 1) / 2)
+    
+    # Recalculate totals
+    total_earned = sum(r.get("marks_earned", 0) for r in responses)
+    total_available = sum(r.get("total_marks", 1) for r in responses)
+    percentage = (total_earned / total_available * 100) if total_available > 0 else 0
+    
+    passing_score = submission.get("passing_score", 50)
+    passed = percentage >= passing_score
+    
+    updates = {
+        "responses": responses,
+        "score": total_earned,
+        "percentage": percentage,
+        "passed": passed,
+        "updated_at": datetime.utcnow(),
+        "last_overwritten_by": current_user.get("full_name") or current_user.get("email")
+    }
+    
+    await col.update_one({"_id": ObjectId(submission_id)}, {"$set": updates})
+    
+    # Sync status back to calendar event if linked
+    event_id = submission.get("session_id")
+    if event_id:
+        existing, col_name = await find_event_across_collections(event_id)
+        if existing:
+            await get_collection(col_name).update_one(
+                {"_id": ObjectId(event_id), "assessment_submissions.submission_id": str(submission_id)},
+                {"$set": {
+                    "assessment_submissions.$.percentage": percentage,
+                    "assessment_submissions.$.passed": passed
+                }}
+            )
+            
+    await log_activity(current_user, "Edit Marks", "Assessment", f"Updated marks for {submission.get('user_name')} in {submission.get('quiz_title')}")
+    
+    return {"message": "Marks updated successfully", "new_score": total_earned, "new_percentage": percentage, "passed": passed}
