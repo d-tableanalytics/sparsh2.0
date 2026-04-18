@@ -280,14 +280,22 @@ async def send_notification_from_template(user_obj: dict, template_slug: str, co
     email = user_obj.get("email")
     phone = user_obj.get("mobile")
     results = {}
-    
+
+    print(f"[DEBUG-NOTIFY] Slug: {template_slug}, ScopeOverride: {scope_override}, EffectiveCompany: {effective_company_id}")
+    print(f"[DEBUG-NOTIFY] Email Found: {bool(email_t)}, WhatsApp Found: {bool(whatsapp_t)}, Target Email: {email}")
+
     if delivery_type in ["email", "both"] and email and email_t:
         rendered_body = render_template(email_t["body"], context)
         rendered_subject = render_template(email_t.get("subject", "Notification"), context)
         results["email"] = await send_email_notification(email, rendered_subject, rendered_body, user_id, email_t.get("slug", f"{template_slug}_email"))
+        print(f"[DEBUG-NOTIFY] Email send attempt result: {results.get('email')}")
+    elif delivery_type in ["email", "both"]:
+        print(f"[DEBUG-NOTIFY] Email skip: target={email}, template={bool(email_t)}")
+
     if delivery_type in ["whatsapp", "both"] and phone and whatsapp_t:
         rendered_body = render_template(whatsapp_t["body"], context)
         results["whatsapp"] = await send_whatsapp_notification(phone, rendered_body, user_id, whatsapp_t.get("slug", f"{template_slug}_whatsapp"))
+    
     return results
 
 def to_ist(dt: datetime) -> datetime:
@@ -497,8 +505,38 @@ async def send_event_updated_email(user_obj: dict, event_data: dict, updated_by:
         context = {"session_type": "Session", "meeting_link": event_data.get("meeting_link", ""), "topic": event_data.get("title"), "date": "TBD", "day": "TBD", "time": "TBD", "description": ""}
     return await send_notification_from_template(user_obj, "event_updated", context, "email", event_data.get("notification_scope"))
 
-async def send_event_deleted_email(user_obj: dict, event_title: str, deleted_by: str, scope: str = "staff"):
-    context = {"event_title": event_title, "deleted_by": deleted_by, "name": user_obj.get("full_name") or user_obj.get("first_name", "User")}
+async def send_event_deleted_email(user_obj: dict, event_data: dict, deleted_by: str, scope: str = "staff", batch_name: str = "TBD", quarter: str = "TBD"):
+    try:
+        # If event_data is just a string (old behavior fallback), handle it
+        if isinstance(event_data, str):
+            context = {"event_title": event_data, "deleted_by": deleted_by, "name": user_obj.get("full_name") or user_obj.get("first_name", "User"), "date": "N/A", "time": "N/A", "description": ""}
+        else:
+            dt_str = event_data.get("start", "")
+            try:
+                dt = datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
+                dt = to_ist(dt)
+                parsed_date = dt.strftime("%d %b %Y")
+                parsed_day = dt.strftime("%A")
+                parsed_time = "Full Day Block" if event_data.get("all_day") else dt.strftime("%I:%M %p")
+            except:
+                parsed_date = parsed_day = parsed_time = "TBD"
+
+            context = {
+                "event_title": event_data.get("title"),
+                "deleted_by": deleted_by,
+                "name": user_obj.get("full_name") or user_obj.get("first_name", "User"),
+                "date": parsed_date,
+                "day": parsed_day,
+                "time": parsed_time,
+                "batch_name": batch_name,
+                "quarter": quarter,
+                "description": event_data.get("additional_details") or event_data.get("status_remark") or "No further details.",
+                "meeting_link": event_data.get("meeting_link") or "N/A"
+            }
+    except Exception as e:
+        logger.error(f"Error preparing delete email: {e}")
+        context = {"event_title": "Scheduled Session", "deleted_by": deleted_by, "name": "User"}
+
     return await send_notification_from_template(user_obj, "event_deleted", context, "email", scope)
 
 async def send_reminder_email(user_obj: dict, event: dict):
@@ -578,6 +616,7 @@ async def send_attendance_absent_email(user_obj: dict, event_data: dict):
     return await send_notification_from_template(user_obj, "attendance_absent", context, "email")
 
 async def send_session_complete_email(user_obj: dict, event_data: dict):
+    print(f"[DEBUG-COMPLETE] Sending mail to {user_obj.get('email')} for {event_data.get('title')}")
     context = {
         "user_name": user_obj.get("full_name") or user_obj.get("first_name", "User"),
         "name": user_obj.get("full_name") or user_obj.get("first_name", "User"),
