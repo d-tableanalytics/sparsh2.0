@@ -59,7 +59,7 @@ const AssessmentPlayer = () => {
             }
 
             // Shuffle if enabled
-            let questions = [...activeQuiz.questions];
+            let questions = activeQuiz.questions.map((q, idx) => ({ ...q, originalIndex: idx }));
             if (activeQuiz.shuffle_questions) {
                 questions = questions.sort(() => Math.random() - 0.5);
                 if (activeQuiz.questions_to_show) {
@@ -87,6 +87,7 @@ const AssessmentPlayer = () => {
         try {
             const payload = {
                 answers, // Send raw answers for server-side AI grading
+                question_indices: quiz.questions.map(q => q.originalIndex),
                 completed_at: new Date().toISOString()
             };
 

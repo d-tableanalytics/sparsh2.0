@@ -64,7 +64,8 @@ const AppRoutes = () => {
       {/* Admin Side: Staff Management */}
       <Route path="/admin/users" element={<PrivateRoute><UserManagement /></PrivateRoute>} />
       <Route path="/admin/users/:userId" element={<PrivateRoute><UserDetails /></PrivateRoute>} />
-      <Route path="/admin/settings" element={<PrivateRoute><SettingsPage /></PrivateRoute>} />
+      <Route path="/admin/settings" element={<Navigate to="/settings" />} />
+      <Route path="/settings" element={<PrivateRoute><SettingsPage /></PrivateRoute>} />
       <Route path="/profile" element={<PrivateRoute><ProfilePage /></PrivateRoute>} />
 
       {/* GPT Module */}

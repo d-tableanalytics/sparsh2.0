@@ -303,7 +303,8 @@ const CalendarPage = () => {
 
     const openEditModal = (ev) => {
         const props = ev.extendedProps;
-        setIsEdit(true); setCurrentEventId(ev.id || ev._id);
+        setIsEdit(true); 
+        setCurrentEventId(ev.id || ev._id);
         const startRaw = ev.start; const endRaw = ev.end || ev.start;
         setEventForm({
             ...initialForm, title: ev.title, type: props.type, start: startRaw, end: endRaw,
@@ -498,13 +499,13 @@ const CalendarPage = () => {
 
                 <div className="mt-3 flex items-center justify-between border-t border-dashed border-gray-200 pt-3">
                     <div className="flex items-center gap-2">
-                        {(canUpdate || ev.extendedProps.isCreator) && (
+                        {(canUpdate || ev.extendedProps.isCreator) && (type !== 'event' || !isStaff) && (
                             <button onClick={() => handleQuickAction(ev.id, 'complete')} className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[9px] font-black transition-all ${s === 'completed' ? 'bg-green-100/10 text-green-600 border border-green-200' : 'bg-[var(--bg-main)] text-[var(--text-muted)] hover:bg-green-500 hover:text-white border border-[var(--border)]'}`}>
                                 {s === 'completed' ? <Check size={12} /> : <CheckCircle size={12} />} {s === 'completed' ? 'Done' : 'Complete'}
                             </button>
                         )}
                         <button onClick={() => openEditModal(ev)} className="p-1.5 bg-[var(--bg-main)] border border-[var(--border)] text-[var(--text-muted)] hover:text-[var(--accent-indigo)] hover:bg-indigo-500/10 rounded-lg transition-all"> 
-                            { (canUpdate || ev.extendedProps.isCreator) ? <Edit2 size={12} /> : <Eye size={12} /> } 
+                            { ((canUpdate || ev.extendedProps.isCreator) && !(isStaff && type === 'event' && s === 'completed')) ? <Edit2 size={12} /> : <Eye size={12} /> } 
                         </button>
                     </div>
                     {(canDelete || ev.extendedProps.isCreator) && (
@@ -740,10 +741,14 @@ const CalendarPage = () => {
                                     </span>
                                 </div>
                                 <div className="flex items-center gap-2">
-                                    {(isEdit && (canUpdate || eventForm.isCreator)) && (
+                                    {(isEdit && (canUpdate || eventForm.isCreator)) && eventForm.status !== 'completed' && (
                                         <div className="flex items-center bg-[var(--input-bg)] border border-[var(--border)] rounded-xl p-1 shrink-0">
-                                            <button onClick={() => setEventForm({ ...eventForm, status: 'completed' })} className={`p-2 rounded-lg transition-all ${eventForm.status === 'completed' ? 'bg-green-500 text-white shadow-lg' : 'text-gray-400 hover:text-green-500'}`}> <CheckCircle size={16} /> </button>
+                                            {/* Staff cannot mark as completed from here, but can cancel/reschedule */}
+                                            {(!isStaff) && (
+                                                <button onClick={() => setEventForm({ ...eventForm, status: 'completed' })} className={`p-2 rounded-lg transition-all ${eventForm.status === 'completed' ? 'bg-green-500 text-white shadow-lg' : 'text-gray-400 hover:text-green-500'}`}> <CheckCircle size={16} /> </button>
+                                            )}
                                             <button onClick={() => setEventForm({ ...eventForm, status: 'canceled' })} className={`p-2 rounded-lg transition-all ${eventForm.status === 'canceled' ? 'bg-red-500 text-white shadow-lg' : 'text-gray-400 hover:text-red-500'}`}> <Ban size={16} /> </button>
+                                            
                                             {canDelete && <button onClick={() => handleQuickAction(currentEventId, 'delete')} className="p-2 text-gray-400 hover:text-red-500 hover:bg-red-500/10 rounded-lg"> <Trash2 size={16} /> </button>}
                                         </div>
                                     )}
@@ -757,7 +762,7 @@ const CalendarPage = () => {
                             </div>
 
                             <div className="p-6 overflow-y-auto no-scrollbar space-y-6">
-                                {(!isStaff && isEdit && !eventForm.isCreator) ? (
+                                {((!isStaff && isEdit && !eventForm.isCreator) || (eventForm.status === 'completed' && eventForm.type === 'event')) ? (
                                     /* ─── SIMPLIFIED LEARNER TICKET VIEW ─── */
                                     <div className="space-y-8 py-4">
                                         <div className="flex flex-col items-center text-center space-y-2">
@@ -831,7 +836,7 @@ const CalendarPage = () => {
                                                         <option value="schedule">Scheduled</option>
                                                         <option value="reschedule">Rescheduled</option>
                                                         <option value="canceled">Canceled</option>
-                                                        <option value="completed">Completed</option>
+                                                        {!isStaff && <option value="completed">Completed</option>}
                                                     </select>
                                                 ) : (
                                                     <span className="px-2 py-0.5 bg-gray-100 rounded text-[9px] font-black uppercase text-gray-500">{eventForm.status}</span>
@@ -862,12 +867,30 @@ const CalendarPage = () => {
                                                            }} />
                                                 </div>
                                                 <div className="space-y-1">
-                                                    <label className="text-[8px] font-black text-amber-600 uppercase">New Time</label>
-                                                    <input type="time" className="w-full px-3 py-2 bg-white border border-amber-100 rounded-lg text-xs font-black text-amber-900 outline-none"
-                                                           value={getLocalTimePart(eventForm.start)}
-                                                           onChange={(e) => setEventForm({...eventForm, start: updateDateTimePart(eventForm.start, e.target.value, false)})} />
+                                                    {/* Placeholder to maintain grid if needed, or we can use full width row above */}
                                                 </div>
                                             </div>
+                                            {!eventForm.all_day && (
+                                                <div className="grid grid-cols-2 gap-3">
+                                                    <div className="space-y-1">
+                                                        <label className="text-[8px] font-black text-amber-600 uppercase">New Start Time</label>
+                                                        <input type="time" className="w-full px-3 py-2 bg-white border border-amber-100 rounded-lg text-xs font-black text-amber-900 outline-none"
+                                                               value={getLocalTimePart(eventForm.start)}
+                                                               onChange={(e) => {
+                                                                    const newStart = updateDateTimePart(eventForm.start, e.target.value, false);
+                                                                    const duration = new Date(eventForm.end).getTime() - new Date(eventForm.start).getTime();
+                                                                    const newEnd = new Date(new Date(newStart).getTime() + duration).toISOString();
+                                                                    setEventForm({...eventForm, start: newStart, end: newEnd});
+                                                               }} />
+                                                    </div>
+                                                    <div className="space-y-1">
+                                                        <label className="text-[8px] font-black text-amber-600 uppercase">New End Time</label>
+                                                        <input type="time" className="w-full px-3 py-2 bg-white border border-amber-100 rounded-lg text-xs font-black text-amber-900 outline-none"
+                                                               value={getLocalTimePart(eventForm.end)}
+                                                               onChange={(e) => setEventForm({...eventForm, end: updateDateTimePart(eventForm.end, e.target.value, false)})} />
+                                                    </div>
+                                                </div>
+                                            )}
                                         </div>
                                     )}
                                 </div>
@@ -1147,7 +1170,7 @@ const CalendarPage = () => {
                                 onApply={(reminders) => setEventForm({ ...eventForm, reminders })}
                             />
 
-                            {!(isEdit && !isStaff && !eventForm.isCreator) && (
+                            {!(isEdit && !isStaff && !eventForm.isCreator) && eventForm.status !== 'completed' && (
                                 <div className="p-5 border-t border-[var(--border)] flex justify-between items-center bg-[var(--table-header-bg)]">
                                     <div className="flex items-center gap-3">
                                         <ShieldCheck size={20} className="text-[var(--accent-indigo)] opacity-30" />

@@ -323,6 +323,9 @@ async def send_task_created_email(user_obj: dict, task_data: dict, creator_name:
     except:
         parsed_date = parsed_day = parsed_time = dt_str
 
+    if task_data.get("all_day"):
+        parsed_time = "Full Day Block"
+
     context = {
         "task_name": task_data.get("title"),
         "topic": task_data.get("title"), 
@@ -359,6 +362,9 @@ async def send_task_updated_email(user_obj: dict, task_data: dict, updated_by: s
         parsed_time = dt.strftime("%I:%M %p")
     except:
         parsed_date = parsed_day = parsed_time = dt_str
+
+    if task_data.get("all_day"):
+        parsed_time = "Full Day Block"
 
     context = {
         "task_name": task_data.get("title"),
@@ -428,13 +434,13 @@ async def send_event_created_email(user_obj: dict, event_data: dict, creator_nam
             "topic": event_data.get("title"),
             "date": dt.strftime("%d %b %Y"),
             "day": dt.strftime("%A"),
-            "time": dt.strftime("%I:%M %p"),
+            "time": "Full Day Block" if event_data.get("all_day") else dt.strftime("%I:%M %p"),
             "description": event_data.get("additional_details") or "No instructions.",
             "event_title": event_data.get("title"),
             "session_strategy": event_data.get("session_type"),
             "batch_name": batch_name,
             "quarter": quarter,
-            "event_datetime": dt.strftime("%d %b %Y, %I:%M %p"),
+            "event_datetime": dt.strftime("%d %b %Y, %I:%M %p") if not event_data.get("all_day") else f"{dt.strftime('%d %b %Y')} (Full Day)",
             "instruction": event_data.get("additional_details") or "No instructions.",
             "created_by": creator_name,
             "user_name": user_obj.get("full_name") or user_obj.get("first_name", "User"),
@@ -447,7 +453,7 @@ async def send_event_created_email(user_obj: dict, event_data: dict, creator_nam
     await create_in_app_notification(
         user_id=user_obj.get("_id") or user_obj.get("id"),
         title="New Session Scheduled",
-        message=f"A new {event_data.get('session_type', 'session')} '{event_data.get('title')}' has been scheduled for {context.get('date')} at {context.get('time')}.",
+        message=f"A new {event_data.get('session_type', 'session')} '{event_data.get('title')}' has been scheduled for {context.get('date')} ({context.get('time')}).",
         type="success",
         meta={"event_id": str(event_data.get("_id", ""))}
     )
@@ -464,13 +470,13 @@ async def send_event_updated_email(user_obj: dict, event_data: dict, updated_by:
             "topic": event_data.get("title"),
             "date": dt.strftime("%d %b %Y"),
             "day": dt.strftime("%A"),
-            "time": dt.strftime("%I:%M %p"),
+            "time": "Full Day Block" if event_data.get("all_day") else dt.strftime("%I:%M %p"),
             "description": event_data.get("additional_details") or "No instructions.",
             "event_title": event_data.get("title"),
             "session_strategy": event_data.get("session_type"),
             "batch_name": batch_name,
             "quarter": quarter,
-            "event_datetime": dt.strftime("%d %b %Y, %I:%M %p"),
+            "event_datetime": dt.strftime("%d %b %Y, %I:%M %p") if not event_data.get("all_day") else f"{dt.strftime('%d %b %Y')} (Full Day)",
             "instruction": event_data.get("additional_details") or "No instructions.",
             "created_by": updated_by,
             "user_name": user_obj.get("full_name") or user_obj.get("first_name", "User"),
