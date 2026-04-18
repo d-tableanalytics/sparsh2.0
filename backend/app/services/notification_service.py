@@ -154,6 +154,10 @@ DEFAULT_TEMPLATES = {
     "attendance_absent_email": {
         "subject": "Absence Noted: {{event_title}}",
         "body": "Hello {{user_name}},\n\nWe missed you in today's session '{{event_title}}' at {{event_time}}. Please ensure you review the shared materials and complete any pending tasks to stay on track.\n\nRegards,\nTeam Sparsh"
+    },
+    "event_deleted_email": {
+        "subject": "Session Cancelled: {{event_title}}",
+        "body": "Hello {{name}},\n\nThis is to notify you that the session '{{event_title}}' has been cancelled by {{deleted_by}}.\n\nRegards,\nTeam Sparsh"
     }
 }
 
@@ -263,14 +267,20 @@ async def send_whatsapp_notification(phone: str, message: str, user_id: str = No
         await log_notification(user_id, phone, "whatsapp", slug, message, "failed", str(e))
         return False
 
-async def send_notification_from_template(user_obj: dict, template_slug: str, context: Dict[str, Any], delivery_type: str = "both"):
+async def send_notification_from_template(user_obj: dict, template_slug: str, context: Dict[str, Any], delivery_type: str = "both", scope_override: str = None):
     company_id = user_obj.get("company_id")
-    email_t = await fetch_template(f"{template_slug}_email", company_id)
-    whatsapp_t = await fetch_template(f"{template_slug}_whatsapp", company_id)
+    
+    # If scope is explicitly staff, ignore the company ID to fetch staff templates
+    effective_company_id = None if scope_override == "staff" else company_id
+    
+    email_t = await fetch_template(f"{template_slug}_email", effective_company_id)
+    whatsapp_t = await fetch_template(f"{template_slug}_whatsapp", effective_company_id)
+    
     user_id = user_obj.get("_id") or user_obj.get("id")
     email = user_obj.get("email")
     phone = user_obj.get("mobile")
     results = {}
+    
     if delivery_type in ["email", "both"] and email and email_t:
         rendered_body = render_template(email_t["body"], context)
         rendered_subject = render_template(email_t.get("subject", "Notification"), context)
@@ -350,7 +360,7 @@ async def send_task_created_email(user_obj: dict, task_data: dict, creator_name:
         type="info",
         meta={"task_id": str(task_data.get("_id", ""))}
     )
-    return await send_notification_from_template(user_obj, "task_created", context, "email")
+    return await send_notification_from_template(user_obj, "task_created", context, "email", task_data.get("notification_scope"))
 
 async def send_task_updated_email(user_obj: dict, task_data: dict, updated_by: str):
     dt_str = task_data.get("start", "")
@@ -383,7 +393,7 @@ async def send_task_updated_email(user_obj: dict, task_data: dict, updated_by: s
         "name": user_obj.get("full_name") or user_obj.get("first_name", "User"),
         "event_title": task_data.get("title")
     }
-    return await send_notification_from_template(user_obj, "task_updated", context, "email")
+    return await send_notification_from_template(user_obj, "task_updated", context, "email", task_data.get("notification_scope"))
 
 async def send_task_deleted_email(user_obj: dict, task_name: str, deleted_by: str):
     context = {"task_name": task_name, "deleted_by": deleted_by}
@@ -457,7 +467,7 @@ async def send_event_created_email(user_obj: dict, event_data: dict, creator_nam
         type="success",
         meta={"event_id": str(event_data.get("_id", ""))}
     )
-    return await send_notification_from_template(user_obj, "event_created", context, "email")
+    return await send_notification_from_template(user_obj, "event_created", context, "email", event_data.get("notification_scope"))
 
 async def send_event_updated_email(user_obj: dict, event_data: dict, updated_by: str, batch_name: str = "TBD", quarter: str = "TBD"):
     try:
@@ -485,11 +495,11 @@ async def send_event_updated_email(user_obj: dict, event_data: dict, updated_by:
     except Exception as e:
         logger.error(f"Error parsing date for email: {e}")
         context = {"session_type": "Session", "meeting_link": event_data.get("meeting_link", ""), "topic": event_data.get("title"), "date": "TBD", "day": "TBD", "time": "TBD", "description": ""}
-    return await send_notification_from_template(user_obj, "event_updated", context, "email")
+    return await send_notification_from_template(user_obj, "event_updated", context, "email", event_data.get("notification_scope"))
 
-async def send_event_deleted_email(user_obj: dict, event_title: str, deleted_by: str):
-    context = {"event_title": event_title, "deleted_by": deleted_by}
-    return await send_notification_from_template(user_obj, "event_deleted", context, "email")
+async def send_event_deleted_email(user_obj: dict, event_title: str, deleted_by: str, scope: str = "staff"):
+    context = {"event_title": event_title, "deleted_by": deleted_by, "name": user_obj.get("full_name") or user_obj.get("first_name", "User")}
+    return await send_notification_from_template(user_obj, "event_deleted", context, "email", scope)
 
 async def send_reminder_email(user_obj: dict, event: dict):
     is_task = event.get("type") == "task"
@@ -504,7 +514,7 @@ async def send_reminder_email(user_obj: dict, event: dict):
         "meeting_url": event.get("meeting_link") or "View in Dashboard",
         "description": event.get("additional_details") or "No further details."
     }
-    return await send_notification_from_template(user_obj, "reminder", context, "email")
+    return await send_notification_from_template(user_obj, "reminder", context, "email", event.get("notification_scope"))
 
 async def send_conflict_notification_email(user_obj: dict, event_data: dict, existing_event: dict):
     # Subject: Reschedule time mail due to conflict
@@ -575,4 +585,4 @@ async def send_session_complete_email(user_obj: dict, event_data: dict):
         "event_title": event_data.get("title"),
         "event_time": format_datetime_standard(event_data.get("start"))
     }
-    return await send_notification_from_template(user_obj, "session_complete", context, "email")
+    return await send_notification_from_template(user_obj, "session_complete", context, "email", event_data.get("notification_scope"))
