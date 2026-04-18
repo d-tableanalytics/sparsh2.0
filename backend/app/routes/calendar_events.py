@@ -136,7 +136,11 @@ async def notify_users_instant(event_dict: dict, action: str, creator_name: str)
                 elif action == "deleted": await send_task_deleted_email(user_data, event_dict.get("title"), creator_name)
             else:
                 if action == "created": await send_event_created_email(user_data, event_dict, creator_name, batch_name, quarter_name)
-                elif action == "updated": await send_event_updated_email(user_data, event_dict, creator_name, batch_name, quarter_name)
+                elif action == "updated":
+                    if event_dict.get("status") == "completed":
+                        await send_session_complete_email(user_data, event_dict)
+                    else:
+                        await send_event_updated_email(user_data, event_dict, creator_name, batch_name, quarter_name)
                 elif action == "deleted": await send_event_deleted_email(user_data, event_dict.get("title"), creator_name)
         except Exception as e:
             print(f"Notification Error for {uid}: {e}")
@@ -415,10 +419,32 @@ async def mark_attendance(event_id: str, attendance_data: dict, background_tasks
     await log_activity(current_user, "Mark Attendance", col_name, f"Marked attendance for session: {event_id}")
     await sync_event_to_collection(event_id)
 
-    # Process background emails
-    async def process_attendance_emails():
+    # Process background emails and SYNC attendance collection for analytics
+    async def process_attendance_sync():
         user_col = get_collection("users")
+        attendance_col = get_collection("attendance")
+        
         for user_id, is_present in attendance.items():
+            status = "present" if is_present else "absent"
+            
+            # Upsert into attendance collection for individual analytics & history
+            await attendance_col.update_one(
+                {"user_id": user_id, "session_id": event_id},
+                {
+                    "$set": {
+                        "user_id": user_id,
+                        "session_id": event_id,
+                        "session_name": existing.get("title"),
+                        "status": status,
+                        "date": existing.get("start"),
+                        "type": existing.get("session_type", "General"),
+                        "updated_at": datetime.utcnow()
+                    }
+                },
+                upsert=True
+            )
+
+            # Send emails
             user = await user_col.find_one({"_id": ObjectId(user_id)})
             if user:
                 try:
@@ -429,7 +455,7 @@ async def mark_attendance(event_id: str, attendance_data: dict, background_tasks
                 except Exception as e:
                     print(f"Error sending attendance email to {user_id}: {e}")
 
-    background_tasks.add_task(process_attendance_emails)
+    background_tasks.add_task(process_attendance_sync)
     
     return {"message": "Attendance marked successfully and notifications triggered"}
     
@@ -888,12 +914,23 @@ async def submit_assessment(event_id: str, quiz_index: int, payload: dict, curre
     if not active_quiz: raise HTTPException(status_code=404, detail="Assessment template not found")
 
     # Grade the submission
-    responses = payload.get("responses", [])
     graded_responses = []
     total_earned = 0
     total_available = 0
 
-    for i, q in enumerate(active_quiz.get("questions", [])):
+    # Identify which questions to grade (handling shuffle/limit from frontend)
+    original_questions = active_quiz.get("questions", [])
+    question_indices = payload.get("question_indices")
+
+    if question_indices:
+        questions_to_grade = []
+        for idx in question_indices:
+            if 0 <= idx < len(original_questions):
+                questions_to_grade.append(original_questions[idx])
+    else:
+        questions_to_grade = original_questions
+
+    for i, q in enumerate(questions_to_grade):
         user_answer = payload.get("answers", {}).get(str(i))
         q_type = q.get("type", "MCQ")
         q_marks = q.get("marks") or 1

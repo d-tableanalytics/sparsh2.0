@@ -31,8 +31,8 @@ const Sidebar = () => {
     { name: 'My Progress', path: '/my-reports', icon: BarChart3, roles: ['clientadmin', 'clientuser'] },
     { name: 'Team', path: '/team', icon: Users, roles: ['clientadmin'] },
     { name: 'Calendar', path: '/calendar', icon: Calendar, roles: ['superadmin', 'admin', 'clientadmin', 'clientuser', 'coach', 'staff'], permissionKey: 'calendar' },
-    // { name: 'Settings', path: '/settings', icon: Settings, roles: ['superadmin'] },
-    { name: 'Sparsh GPT', path: '/gpt', icon: Sparkles, roles: ['superadmin', 'admin', 'clientadmin', 'clientuser', 'coach', 'staff'] },
+    { name: 'Company Settings', path: '/settings', icon: Settings, roles: ['clientadmin'] },
+    { name: 'Support Engine', path: '/gpt', icon: Sparkles, roles: ['superadmin', 'admin', 'clientadmin', 'clientuser', 'coach', 'staff'] },
   ];
 
   const filteredLinks = links.filter(link => {

@@ -13,7 +13,7 @@ const SettingsPage = () => {
     const [loading, setLoading] = useState(true);
     
     // Notification Templates State
-    const [activeTab, setActiveTab] = useState('backdate');
+    const [activeTab, setActiveTab] = useState(user?.role === 'superadmin' ? 'backdate' : 'templates');
     const [templates, setTemplates] = useState([]);
     const [editingTemplate, setEditingTemplate] = useState(null);
     
@@ -23,34 +23,40 @@ const SettingsPage = () => {
     const [companies, setCompanies] = useState([]);
     const [selectedCompanyId, setSelectedCompanyId] = useState('');
     const [showCreateModal, setShowCreateModal] = useState(false);
-    const [newTemplateForm, setNewTemplateForm] = useState({ name: '', slug: 'task_created_email' });
+    const [newTemplateForm, setNewTemplateForm] = useState({ name: '', slug: 'task_created', channel: 'both' });
     const [searchQuery, setSearchQuery] = useState('');
     
     // Permission Checks
     const canUpdateSettings = user?.role === 'superadmin' || user?.permissions?.settings?.update;
-    const canReadTemplates = user?.role === 'superadmin' || user?.permissions?.templates?.read;
-    const canUpdateTemplates = user?.role === 'superadmin' || user?.permissions?.templates?.update;
-    const canDeleteTemplates = user?.role === 'superadmin' || user?.permissions?.templates?.delete;
+    const canReadTemplates = user?.role === 'superadmin' || user?.role === 'clientadmin' || user?.permissions?.templates?.read;
+    const canUpdateTemplates = user?.role === 'superadmin' || user?.role === 'clientadmin' || user?.permissions?.templates?.update;
+    const canDeleteTemplates = user?.role === 'superadmin' || user?.role === 'clientadmin' || user?.permissions?.templates?.delete;
     const canReadCompanies = user?.role === 'superadmin' || user?.permissions?.companies?.read;
 
     const templateVariables = {
         task: ['task_name', 'topic', 'task_category', 'critical_level', 'assigned_user', 'assigned_by', 'deadline', 'date', 'day', 'time', 'description', 'task_status', 'session_type'],
-        event: ['session_type', 'topic', 'date', 'day', 'time', 'meeting_link', 'description', 'batch_name', 'quarter', 'event_title', 'event_datetime'],
+        event_staff: ['session_type', 'topic', 'date', 'day', 'time', 'meeting_link', 'description', 'batch_name', 'quarter', 'event_title', 'event_datetime'],
+        event_learner: ['event_title', 'date', 'day', 'time', 'meeting_link', 'description', 'event_datetime'],
         user: ['name', 'email', 'new_role', 'updated_by', 'login_url', 'password'],
         company: ['name', 'company_name', 'email', 'password', 'login_url'],
         attendance: ['user_name', 'event_title', 'event_time'],
-        reminder: ['title', 'reminder_time', 'event_time', 'task_deadline', 'meeting_url', 'description'],
+        reminder_learner: ['event_title', 'date', 'day', 'time', 'meeting_link', 'description', 'event_datetime'],
+        reminder_staff: ['title', 'reminder_time', 'event_time', 'task_deadline', 'meeting_url', 'description'],
         general: ['name', 'email', 'role', 'login_url']
     };
 
     const getVarsForTemplate = (slug) => {
+        const isClient = user?.role?.toLowerCase().includes('client');
         if (slug.includes('task')) return templateVariables.task;
-        if (slug.includes('event')) return templateVariables.event;
-        if (slug.includes('session_complete')) return [...templateVariables.attendance, 'topic'];
+        if (slug.includes('event') || slug.includes('session_complete')) {
+            return isClient ? templateVariables.event_learner : templateVariables.event_staff;
+        }
         if (slug.includes('user')) return templateVariables.user;
         if (slug.includes('company')) return templateVariables.company;
         if (slug.includes('attendance')) return templateVariables.attendance;
-        if (slug.includes('reminder')) return templateVariables.reminder;
+        if (slug.includes('reminder')) {
+            return isClient ? templateVariables.reminder_learner : templateVariables.reminder_staff;
+        }
         return templateVariables.general;
     };
 
@@ -125,18 +131,23 @@ const SettingsPage = () => {
 
     const handleCreateTemplate = async () => {
         try {
-            const payload = {
-                name: newTemplateForm.name,
-                slug: newTemplateForm.slug,
-                subject: `New ${newTemplateForm.name} Notification`,
-                body: "Hello {{name}},\n\nAdd your template content here...",
-                scope: scope,
-                company_id: selectedCompanyId || null
-            };
-            await api.post('/settings/templates', payload);
-            showSuccess("Infrastructure initialized");
+            const channels = newTemplateForm.channel === 'both' ? ['email', 'whatsapp'] : [newTemplateForm.channel];
+            
+            for (const channel of channels) {
+                const payload = {
+                    name: `${newTemplateForm.name} (${channel.toUpperCase()})`,
+                    slug: `${newTemplateForm.slug}_${channel}`,
+                    channel: channel,
+                    subject: channel === 'email' ? `New ${newTemplateForm.name} Notification` : undefined,
+                    body: channel === 'email' ? "Hello {{name}},\n\nAdd your email content here..." : "Hello {{name}},\n\nAdd your WhatsApp message here...",
+                    scope: scope,
+                    company_id: selectedCompanyId || null
+                };
+                await api.post('/settings/templates', payload);
+            }
+            showSuccess(`${newTemplateForm.name} infrastructure initialized`);
             setShowCreateModal(false);
-            setNewTemplateForm({ name: '', slug: 'task_created_email' });
+            setNewTemplateForm({ name: '', slug: 'task_created', channel: 'both' });
             fetchTemplates();
         } catch (err) {
             showError("Failed to initialize template.");
@@ -166,6 +177,47 @@ const SettingsPage = () => {
         }
     };
 
+    const handleInitializeClientDefaults = async () => {
+        setLoading(true);
+        try {
+            const triggers = [
+                { name: 'Session Scheduled', slug: 'event_created' },
+                { name: 'Session Rescheduled', slug: 'event_updated' },
+                { name: 'Session Cancelled', slug: 'event_deleted' },
+                { name: 'Session Completed', slug: 'session_complete' },
+                { name: 'Task Created', slug: 'task_created' },
+                { name: 'Task Updated', slug: 'task_updated' },
+                { name: 'Task Deleted', slug: 'task_deleted' },
+                { name: 'Session Reminder', slug: 'reminder' }
+            ];
+
+            const channels = ['email', 'whatsapp'];
+            
+            for (const t of triggers) {
+                for (const channel of channels) {
+                    const payload = {
+                        name: `${t.name} (${channel.toUpperCase()})`,
+                        slug: `${t.slug}_${channel}`,
+                        channel: channel,
+                        subject: channel === 'email' ? `Notification: ${t.name}` : undefined,
+                        body: channel === 'email' 
+                            ? "Hello {{name}},\n\nThis is an automated notification regarding your session/task. Please log in to your portal for details." 
+                            : "Hello {{name}},\n\nYou have an update regarding: " + t.name,
+                        scope: 'company',
+                        company_id: user.company_id
+                    };
+                    try { await api.post('/settings/templates', payload); } catch (e) { /* skip existing */ }
+                }
+            }
+            showSuccess("Internal infrastructure synchronized.");
+            fetchTemplates();
+        } catch (err) {
+            showError("Initialization failed");
+        } finally {
+            setLoading(false);
+        }
+    };
+
     if (loading) return (
         <div className="h-screen flex items-center justify-center bg-[var(--bg-main)]">
             <div className="flex flex-col items-center gap-4">
@@ -179,11 +231,13 @@ const SettingsPage = () => {
         <div className="flex flex-col h-[calc(100vh-56px)] bg-[var(--bg-main)] overflow-hidden">
             {/* Top Navigation - Secondary Navbar */}
             <div className="flex items-center gap-2 px-6 py-2.5 bg-[var(--bg-card)] border-b border-[var(--border)] overflow-x-auto no-scrollbar">
-                <button 
-                    onClick={() => setActiveTab('backdate')} 
-                    className={`flex items-center gap-2 px-4 py-1.5 rounded-lg text-[11px] font-black transition-all shrink-0 uppercase tracking-widest ${activeTab === 'backdate' ? 'bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] shadow-sm' : 'text-[var(--text-muted)] hover:bg-[var(--input-bg)]'}`}>
-                    <ShieldCheck size={14}/> Security Rules
-                </button>
+                {user?.role === 'superadmin' && (
+                    <button 
+                        onClick={() => setActiveTab('backdate')} 
+                        className={`flex items-center gap-2 px-4 py-1.5 rounded-lg text-[11px] font-black transition-all shrink-0 uppercase tracking-widest ${activeTab === 'backdate' ? 'bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] shadow-sm' : 'text-[var(--text-muted)] hover:bg-[var(--input-bg)]'}`}>
+                        <ShieldCheck size={14}/> Security Rules
+                    </button>
+                )}
                 {canReadTemplates && (
                     <button 
                         onClick={() => setActiveTab('templates')} 
@@ -192,7 +246,7 @@ const SettingsPage = () => {
                     </button>
                 )}
                 
-                {activeTab === 'templates' && scope === 'company' && (user?.role === 'superadmin' || canReadCompanies) && (
+                {activeTab === 'templates' && scope === 'company' && user?.role !== 'clientadmin' && (user?.role === 'superadmin' || canReadCompanies) && (
                     <div className="flex items-center gap-2 ml-4 pl-4 border-l border-[var(--border)]">
                         <span className="text-[9px] font-black text-[var(--text-muted)] uppercase tracking-widest">Client</span>
                         <select value={selectedCompanyId} onChange={(e) => setSelectedCompanyId(e.target.value)}
@@ -282,7 +336,7 @@ const SettingsPage = () => {
                                         <button key={t._id} onClick={() => setEditingTemplate(t)}
                                             className={`w-full p-3 rounded-xl flex flex-col gap-0.5 text-left transition-all group border-2 ${editingTemplate?._id === t._id ? 'bg-white border-[var(--accent-indigo)] shadow-md' : 'bg-transparent border-transparent hover:bg-[var(--input-bg)]'}`}>
                                             <div className="flex items-center justify-between">
-                                                <span className={`text-[11px] font-black transition-colors ${editingTemplate?._id === t._id ? 'text-[var(--accent-indigo)]' : 'text-[var(--text-main)]'}`}>{t.name}</span>
+                                                <span className={`text-[11px] font-black transition-colors ${editingTemplate?._id === t._id ? 'text-[var(--accent-indigo)]' : 'text-[var(--text-main)]'}`}>{t.name} {"{"}{t.channel?.toUpperCase() || 'EMAIL'}{"}"}</span>
                                                 {canDeleteTemplates && (
                                                     <Trash2 size={12} className="text-gray-200 hover:text-red-500 transition-all cursor-pointer" onClick={(e) => { e.stopPropagation(); deleteTemplate(t._id); }} />
                                                 )}
@@ -297,8 +351,8 @@ const SettingsPage = () => {
                                             {canUpdateTemplates && (
                                                 <button onClick={() => setShowCreateModal(true)} className="text-[10px] font-black text-[var(--accent-indigo)] hover:underline">+ New Template</button>
                                             )}
-                                            {(user?.role === 'superadmin' || user?.permissions?.settings?.update) && (
-                                                <button onClick={handleInitializeDefaults} className="text-[9px] font-black text-[var(--accent-green)] hover:underline uppercase tracking-tighter">Initialize Defaults</button>
+                                            {(user?.role === 'superadmin' || user?.role === 'clientadmin' || user?.permissions?.settings?.update) && (
+                                                <button onClick={user?.role === 'clientadmin' ? handleInitializeClientDefaults : handleInitializeDefaults} className="text-[9px] font-black text-[var(--accent-green)] hover:underline uppercase tracking-tighter">Initialize Defaults</button>
                                             )}
                                         </div>
                                     </div>
@@ -319,7 +373,8 @@ const SettingsPage = () => {
                                                 <h2 className="text-lg font-black text-[var(--text-main)] leading-tight">{editingTemplate.name}</h2>
                                                 <div className="flex items-center gap-2 mt-0.5">
                                                     <span className="text-[8px] font-black px-1.5 py-0.5 rounded bg-gray-100 text-gray-400 uppercase tracking-tighter">/{editingTemplate.slug}</span>
-                                                    <span className="text-[8px] font-black px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-400 uppercase tracking-tighter">{editingTemplate.scope}</span>
+                                                    <span className={`text-[8px] font-black px-1.5 py-0.5 rounded uppercase tracking-tighter ${editingTemplate.channel === 'whatsapp' ? 'bg-green-50 text-green-500' : 'bg-indigo-50 text-indigo-500'}`}>{editingTemplate.channel || 'EMAIL'}</span>
+                                                    <span className="text-[8px] font-black px-1.5 py-0.5 rounded bg-amber-50 text-amber-500 uppercase tracking-tighter">{editingTemplate.scope}</span>
                                                 </div>
                                             </div>
                                         </div>
@@ -337,11 +392,13 @@ const SettingsPage = () => {
                                         {/* Main Editor */}
                                         <div className="xl:col-span-3 space-y-4">
                                             <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-[24px] p-6 space-y-4 shadow-sm">
-                                                <div className="space-y-1.5">
-                                                    <label className="text-[9px] font-black text-[var(--text-muted)] uppercase tracking-widest px-2">Email Subject Header</label>
-                                                    <input value={editingTemplate.subject} onChange={e => setEditingTemplate({...editingTemplate, subject: e.target.value})}
-                                                        className="w-full bg-[var(--input-bg)] px-4 py-2.5 border border-[var(--border)] rounded-xl font-black text-[13px] text-[var(--text-main)] outline-none focus:bg-[var(--bg-card)] focus:border-[var(--accent-indigo)] transition-all" />
-                                                </div>
+                                                {editingTemplate.channel !== 'whatsapp' && (
+                                                    <div className="space-y-1.5">
+                                                        <label className="text-[9px] font-black text-[var(--text-muted)] uppercase tracking-widest px-2">Email Subject Header</label>
+                                                        <input value={editingTemplate.subject} onChange={e => setEditingTemplate({...editingTemplate, subject: e.target.value})}
+                                                            className="w-full bg-[var(--input-bg)] px-4 py-2.5 border border-[var(--border)] rounded-xl font-black text-[13px] text-[var(--text-main)] outline-none focus:bg-[var(--bg-card)] focus:border-[var(--accent-indigo)] transition-all" />
+                                                    </div>
+                                                )}
 
                                                 <div className="space-y-1.5">
                                                     <div className="flex items-center justify-between px-2">
@@ -409,28 +466,40 @@ const SettingsPage = () => {
                                         <input value={newTemplateForm.name} onChange={e => setNewTemplateForm({...newTemplateForm, name: e.target.value})} placeholder="Ex: Custom Session Email" className="w-full bg-gray-50 border border-gray-100 p-3 rounded-xl font-bold text-[12px] outline-none focus:border-indigo-500" />
                                     </div>
                                     <div className="space-y-1">
-                                        <label className="text-[9px] font-black text-gray-400 uppercase tracking-widest px-1">Infrastructure Slug</label>
+                                        <label className="text-[9px] font-black text-gray-400 uppercase tracking-widest px-1">Trigger Event</label>
                                         <select value={newTemplateForm.slug} onChange={e => setNewTemplateForm({...newTemplateForm, slug: e.target.value})} className="w-full bg-gray-50 border border-gray-100 p-3 rounded-xl font-bold text-[12px] outline-none">
-                                            <optgroup label="Calendar">
-                                                <option value="task_created_email">Task Created</option>
-                                                <option value="task_updated_email">Task Updated</option>
-                                                <option value="task_deleted_email">Task Deleted</option>
-                                                <option value="event_created_email">Session Scheduled</option>
-                                                <option value="event_updated_email">Session Rescheduled</option>
-                                                <option value="event_deleted_email">Session Cancelled</option>
-                                                <option value="session_complete_email">Session Completed</option>
+                                            <optgroup label="Sessions & Tasks">
+                                                <option value="task_created">Task Created</option>
+                                                <option value="task_updated">Task Updated</option>
+                                                <option value="task_deleted">Task Deleted</option>
+                                                <option value="event_created">Session Scheduled</option>
+                                                <option value="event_updated">Session Rescheduled</option>
+                                                <option value="event_deleted">Session Cancelled</option>
+                                                <option value="session_complete">Session Completed</option>
+                                                <option value="reminder">Session Reminder</option>
                                             </optgroup>
-                                            <optgroup label="User Management">
-                                                <option value="user_creation_email">User Created</option>
-                                                <option value="user_edit_email">Profile Updated</option>
-                                                <option value="user_access_control_change_email">Access Changed</option>
-                                                <option value="company_registration_email">New Company</option>
-                                            </optgroup>
-                                            <optgroup label="Engagement">
-                                                <option value="reminder_email">Event Reminder</option>
-                                                <option value="attendance_thanks_email">Attendance Thanks</option>
-                                                <option value="attendance_absent_email">Attendance Absent</option>
-                                            </optgroup>
+                                            {user?.role === 'superadmin' && (
+                                                <>
+                                                    <optgroup label="User Management">
+                                                        <option value="user_creation">User Created</option>
+                                                        <option value="user_edit">Profile Updated</option>
+                                                        <option value="user_access_control_change">Access Changed</option>
+                                                        <option value="company_registration">New Company</option>
+                                                    </optgroup>
+                                                    <optgroup label="Attendance (Staff Only)">
+                                                        <option value="attendance_thanks">Attendance Thanks</option>
+                                                        <option value="attendance_absent">Attendance Absent</option>
+                                                    </optgroup>
+                                                </>
+                                            )}
+                                        </select>
+                                    </div>
+                                    <div className="space-y-1">
+                                        <label className="text-[9px] font-black text-gray-400 uppercase tracking-widest px-1">Channels</label>
+                                        <select value={newTemplateForm.channel} onChange={e => setNewTemplateForm({...newTemplateForm, channel: e.target.value})} className="w-full bg-gray-50 border border-gray-100 p-3 rounded-xl font-bold text-[12px] outline-none">
+                                            <option value="both">Both (Email & WhatsApp)</option>
+                                            <option value="email">Email Only</option>
+                                            <option value="whatsapp">WhatsApp Only</option>
                                         </select>
                                     </div>
                                 </div>

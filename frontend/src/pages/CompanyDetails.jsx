@@ -89,11 +89,11 @@ const generateDeptData = (users) => {
 };
 
 const generatePerformanceData = () => {
-  const weeks = ['W1', 'W2', 'W3', 'W4', 'W5', 'W6', 'W7', 'W8'];
-  return weeks.map(w => ({
-    week: w,
-    completed: Math.floor(Math.random() * 15 + 5),
-    pending: Math.floor(Math.random() * 8 + 2),
+  const sessions = ['S1', 'S2', 'S3', 'S4', 'S5', 'S6'];
+  return sessions.map(s => ({
+    session: s,
+    completed: Math.floor(Math.random() * 10 + 2),
+    pending: Math.floor(Math.random() * 5 + 1),
   }));
 };
 
@@ -474,16 +474,20 @@ const CompanyDetails = () => {
                 <div className="flex items-center justify-between mb-4">
                   <div>
                     <h3 className="text-[14px] font-bold text-[var(--text-main)]">Task Performance</h3>
-                    <p className="text-[11px] text-[var(--text-muted)]">Completed vs pending tasks by week</p>
+                    <p className="text-[11px] text-[var(--text-muted)]">Completed vs pending tasks by session</p>
                   </div>
                   <Target size={16} className="text-[var(--accent-orange)]" />
                 </div>
                 <ResponsiveContainer width="100%" height={240}>
                   <BarChart data={perfData} barGap={4}>
                     <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
-                    <XAxis dataKey="week" tick={{ fontSize: 11, fill: 'var(--text-muted)' }} />
+                    <XAxis dataKey="session" tick={{ fontSize: 10, fill: 'var(--text-muted)' }} />
                     <YAxis tick={{ fontSize: 11, fill: 'var(--text-muted)' }} />
-                    <Tooltip contentStyle={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 8, fontSize: 12 }} />
+                    <Tooltip 
+                      contentStyle={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 8, fontSize: 12 }}
+                      labelStyle={{ fontWeight: 'bold', color: 'var(--text-main)', marginBottom: 4 }}
+                      labelFormatter={(label, payload) => payload[0]?.payload?.full_name || label}
+                    />
                     <Bar dataKey="completed" fill="#22c55e" radius={[4, 4, 0, 0]} name="Completed" />
                     <Bar dataKey="pending" fill="#f97316" radius={[4, 4, 0, 0]} name="Pending" />
                   </BarChart>
