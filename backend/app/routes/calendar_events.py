@@ -130,10 +130,11 @@ async def notify_users_instant(event_dict: dict, action: str, creator_name: str)
             user_data = await find_user_by_id(uid)
             if not user_data: continue
 
+            scope = event_dict.get("notification_scope", "staff")
             if is_task:
                 if action == "created": await send_task_created_email(user_data, event_dict, creator_name)
                 elif action == "updated": await send_task_updated_email(user_data, event_dict, creator_name)
-                elif action == "deleted": await send_task_deleted_email(user_data, event_dict.get("title"), creator_name)
+                elif action == "deleted": await send_task_deleted_email(user_data, event_dict.get("title"), creator_name, scope)
             else:
                 if action == "created": await send_event_created_email(user_data, event_dict, creator_name, batch_name, quarter_name)
                 elif action == "updated":
@@ -141,7 +142,7 @@ async def notify_users_instant(event_dict: dict, action: str, creator_name: str)
                         await send_session_complete_email(user_data, event_dict)
                     else:
                         await send_event_updated_email(user_data, event_dict, creator_name, batch_name, quarter_name)
-                elif action == "deleted": await send_event_deleted_email(user_data, event_dict.get("title"), creator_name)
+                elif action == "deleted": await send_event_deleted_email(user_data, event_dict.get("title"), creator_name, scope)
         except Exception as e:
             print(f"Notification Error for {uid}: {e}")
             
@@ -215,6 +216,14 @@ async def create_event(event: CalendarEventCreate, background_tasks: BackgroundT
     event_dict["user_id"] = str(current_user["_id"])
     event_dict["created_at"] = datetime.utcnow()
     
+    # ─── Set Notification Scope ───
+    # If a staff member creates it, it uses "staff" scope (standard design).
+    # If a learner (client admin/user) creates it, it uses "company" scope (their own design).
+    if current_user.get("role") in ["superadmin", "admin", "coach", "staff"]:
+        event_dict["notification_scope"] = "staff"
+    else:
+        event_dict["notification_scope"] = "company"
+
     # ─── Target Collection Selection ───
     col_name = await get_target_collection_name(event_dict)
     col = get_collection(col_name)
