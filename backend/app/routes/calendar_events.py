@@ -138,11 +138,14 @@ async def notify_users_instant(event_dict: dict, action: str, creator_name: str)
             else:
                 if action == "created": await send_event_created_email(user_data, event_dict, creator_name, batch_name, quarter_name)
                 elif action == "updated":
-                    if event_dict.get("status") == "completed":
+                    status = event_dict.get("status")
+                    if status == "completed":
                         await send_session_complete_email(user_data, event_dict)
+                    elif status == "canceled":
+                        await send_event_deleted_email(user_data, event_dict, creator_name, scope, batch_name, quarter_name)
                     else:
                         await send_event_updated_email(user_data, event_dict, creator_name, batch_name, quarter_name)
-                elif action == "deleted": await send_event_deleted_email(user_data, event_dict.get("title"), creator_name, scope)
+                elif action == "deleted": await send_event_deleted_email(user_data, event_dict, creator_name, scope, batch_name, quarter_name)
         except Exception as e:
             print(f"Notification Error for {uid}: {e}")
             
@@ -828,19 +831,28 @@ async def complete_event(event_id: str, background_tasks: BackgroundTasks, curre
     # ─── Notify Attendees of Completion ───
     async def process_completion_emails():
         try:
-            user_col = get_collection("users")
+            print(f"[DEBUG-TRACE-1] Starting completion mailing task for: {event_id}")
             member_ids = event.get("assigned_member_ids", [])
-            # Also notify coaches/staff assigned
             coaches = event.get("coach_ids", [])
-            target_ids = list(set(member_ids + coaches))
+            target_ids = list(set(str(uid) for uid in (member_ids + coaches) if uid))
+            
+            print(f"[DEBUG-TRACE-2] Target IDs: {target_ids}")
             
             for uid in target_ids:
-                if not uid: continue
-                user = await user_col.find_one({"_id": ObjectId(uid)})
-                if user:
-                    await send_session_complete_email(user, event)
+                try:
+                    # Robust lookup across staff/learners collections
+                    user = await find_user_by_id(uid)
+                    if user:
+                        print(f"[DEBUG-TRACE-3] Calling mail function for: {user.get('email')}")
+                        await send_session_complete_email(user, event)
+                        print(f"[DEBUG-TRACE-4] Mail function completed for: {user.get('email')}")
+                    else:
+                        print(f"[DEBUG-TRACE-ERR] User record not found for ID: {uid}")
+                except Exception as mail_err:
+                    print(f"[DEBUG-TRACE-ERR] Local mail error for {uid}: {mail_err}")
+                    
         except Exception as e:
-            print(f"Error sending session completion emails: {e}")
+            print(f"[DEBUG-FATAL] Logic error in scheduler: {e}")
 
     background_tasks.add_task(process_completion_emails)
     
