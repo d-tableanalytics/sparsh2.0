@@ -74,7 +74,7 @@ async def get_user(user_id: str, current_user: dict = Depends(get_current_user))
     is_authorized = current_user.get("role") == "superadmin" or can_read or str(current_user.get("_id")) == user_id
     
     if not is_authorized:
-        if current_user.get("role") == "clientadmin":
+        if current_user.get("role") in ("clientadmin", "clientuser"):
             if user.get("company_id") != current_user.get("company_id"):
                 raise HTTPException(status_code=403, detail="Not authorized to view this user")
         else:
@@ -191,13 +191,13 @@ async def get_user_activity(user_id: str, current_user: dict = Depends(get_curre
         authorized = True
     elif str(current_user.get("_id")) == user_id:
         authorized = True
-    elif current_user.get("role") == "clientadmin":
+    elif current_user.get("role") in ("clientadmin", "clientuser"):
         if user.get("company_id") == current_user.get("company_id"):
             authorized = True
-    
+
     if not authorized:
         raise HTTPException(status_code=403, detail="Not authorized")
-    
+
     # Learnings (Mix of content and assessments)
     learnings = []
     
@@ -303,7 +303,7 @@ async def get_user_analytics(user_id: str, current_user: dict = Depends(get_curr
     authorized = current_user.get("role") == "superadmin" or can_read or str(current_user.get("_id")) == user_id
     
     if not authorized:
-        if current_user.get("role") == "clientadmin":
+        if current_user.get("role") in ("clientadmin", "clientuser"):
             if user.get("company_id") != current_user.get("company_id"):
                 raise HTTPException(status_code=403, detail="Not authorized")
         else:

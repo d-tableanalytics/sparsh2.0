@@ -148,11 +148,14 @@ const CalendarPage = () => {
 
     const fetchData = async () => {
         setLoading(true);
+        const role = user?.role?.toLowerCase();
+        const isStaffRole = ['superadmin', 'admin', 'coach', 'staff'].includes(role);
+        const usersEndpoint = isStaffRole ? '/users' : `/companies/${user?.company_id}/users`;
         try {
             const [evRes, bRes, qRes, tRes, uRes, sRes, gRes] = await Promise.all([
                 api.get(`/calendar/events?view_mode=${viewMode}`), api.get('/batches'),
                 api.get('/quarters'), api.get('/session-templates'),
-                api.get('/users'), api.get('/settings/backdate-control'),
+                api.get(usersEndpoint), api.get('/settings/backdate-control'),
                 api.get('/gpt/projects')
             ]);
             setEvents(evRes.data.map(e => ({

@@ -36,12 +36,16 @@ const SessionDetails = () => {
 
     const fetchSessionData = async () => {
         try {
-            const [res, usersRes, gptRes] = await Promise.all([
+            const requests = [
                 api.get(`/calendar/events/${sessionId}`),
-                api.get('/users'),
                 api.get('/gpt/projects')
-            ]);
-            const ev = res.data;
+            ];
+            if (isStaff) requests.splice(1, 0, api.get('/users'));
+
+            const results = await Promise.all(requests);
+            const ev = results[0].data;
+            const usersData = isStaff ? results[1].data : [];
+            const gptRes = results[isStaff ? 2 : 1];
             setGptProjects(gptRes.data);
 
             // ─── CURRICULUM SYNC: Linked Template Logic ───
@@ -65,19 +69,20 @@ const SessionDetails = () => {
 
             setSession(ev);
 
-            // Also fetch users and filter attendees
-            const assignedIds = ev.assigned_member_ids || [];
-            // Target staff might also be attendees if it's a task. We'll handle 'assigned_member_ids'
-            const filteredUsers = usersRes.data.filter(u => assignedIds.includes(u._id || u.id));
-            setAttendees(filteredUsers);
+            if (isStaff) {
+                const assignedIds = ev.assigned_member_ids || [];
+                const filteredUsers = usersData.filter(u => assignedIds.includes(u._id || u.id));
+                setAttendees(filteredUsers);
 
-            if (ev.attendance) {
+                if (ev.attendance) {
+                    setAttendanceMarks(ev.attendance);
+                } else {
+                    const initialMarks = {};
+                    filteredUsers.forEach(u => initialMarks[u._id || u.id] = false);
+                    setAttendanceMarks(initialMarks);
+                }
+            } else if (ev.attendance) {
                 setAttendanceMarks(ev.attendance);
-            } else {
-                // Default all to absent (false)
-                const initialMarks = {};
-                filteredUsers.forEach(u => initialMarks[u._id || u.id] = false);
-                setAttendanceMarks(initialMarks);
             }
 
         } catch (err) {

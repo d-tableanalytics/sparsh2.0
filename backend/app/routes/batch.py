@@ -38,11 +38,18 @@ async def create_batch(batch: BatchCreate, current_user: dict = Depends(get_curr
 async def list_batches(current_user: dict = Depends(get_current_user)):
     permissions = current_user.get("permissions", {})
     can_read = permissions.get("batches", {}).get("read", False)
-    
-    if current_user.get("role") != "superadmin" and not can_read:
-        raise HTTPException(status_code=403, detail="Not authorized")
+    role = current_user.get("role")
+
     batches_col = get_collection("batches")
-    batches = await batches_col.find().sort("created_at", -1).to_list(200)
+
+    if role == "superadmin" or can_read:
+        batches = await batches_col.find().sort("created_at", -1).to_list(200)
+    elif role in ("clientadmin", "clientuser"):
+        company_id = current_user.get("company_id")
+        batches = await batches_col.find({"companies": company_id}).sort("created_at", -1).to_list(200)
+    else:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
     for b in batches:
         b["_id"] = str(b["_id"])
         b["company_count"] = len(b.get("companies", []))

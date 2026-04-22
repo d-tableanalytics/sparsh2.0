@@ -111,6 +111,8 @@ const TeamManagement = () => {
         }
     };
 
+    const isClientUser = currentUser?.role === 'clientuser';
+
     return (
         <div className="space-y-8 pb-10">
             {/* Header section */}
@@ -119,17 +121,19 @@ const TeamManagement = () => {
                    <h1 className="text-4xl font-black text-[var(--text-main)] tracking-tight italic uppercase">Team Ecosystem</h1>
                    <p className="text-[14px] text-[var(--text-muted)] font-bold italic opacity-70">Manage your company's workforce and digital access.</p>
                 </div>
-                <div className="flex flex-wrap items-center gap-3">
-                    <button onClick={handleExportTemplate} className="flex items-center gap-2 px-5 py-3 bg-[var(--input-bg)] text-[var(--text-main)] rounded-2xl text-[12px] font-black border border-[var(--border)] hover:bg-white transition-all">
-                        <Download size={16}/> Export Template
-                    </button>
-                    <button onClick={() => setShowImportModal(true)} className="flex items-center gap-2 px-5 py-3 bg-[var(--input-bg)] text-[var(--text-main)] rounded-2xl text-[12px] font-black border border-[var(--border)] hover:bg-white transition-all">
-                        <Upload size={16}/> Import Template
-                    </button>
-                    <button onClick={() => setShowAddModal(true)} className="flex items-center gap-2 px-7 py-3 bg-black text-white rounded-2xl text-[13px] font-black shadow-2xl hover:scale-105 transition-all active:scale-95">
-                        <UserPlus size={18}/> Add New Member
-                    </button>
-                </div>
+                {!isClientUser && (
+                    <div className="flex flex-wrap items-center gap-3">
+                        <button onClick={handleExportTemplate} className="flex items-center gap-2 px-5 py-3 bg-[var(--input-bg)] text-[var(--text-main)] rounded-2xl text-[12px] font-black border border-[var(--border)] hover:bg-white transition-all">
+                            <Download size={16}/> Export Template
+                        </button>
+                        <button onClick={() => setShowImportModal(true)} className="flex items-center gap-2 px-5 py-3 bg-[var(--input-bg)] text-[var(--text-main)] rounded-2xl text-[12px] font-black border border-[var(--border)] hover:bg-white transition-all">
+                            <Upload size={16}/> Import Template
+                        </button>
+                        <button onClick={() => setShowAddModal(true)} className="flex items-center gap-2 px-7 py-3 bg-black text-white rounded-2xl text-[13px] font-black shadow-2xl hover:scale-105 transition-all active:scale-95">
+                            <UserPlus size={18}/> Add New Member
+                        </button>
+                    </div>
+                )}
             </div>
 
             {/* Interactive Filters Bar */}
