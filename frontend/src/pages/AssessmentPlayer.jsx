@@ -137,7 +137,7 @@ const AssessmentPlayer = () => {
                     </div>
 
                     <button onClick={() => navigate('/company-portal')} className="w-full h-14 bg-black text-white rounded-[24px] font-black uppercase tracking-widest hover:scale-105 active:scale-95 transition-all shadow-xl">
-                        Terminate Session
+                        "End Quiz"/Sumbit
                     </button>
                 </motion.div>
             </div>

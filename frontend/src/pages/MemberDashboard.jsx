@@ -338,25 +338,27 @@ const MemberDashboard = () => {
             {member.is_active !== false ? <><CheckCircle2 size={12} /> Active</> : <><XCircle size={12} /> Inactive</>}
           </span>
         </div>
-        <div className="flex items-center gap-2">
-          <button onClick={() => setEditMode(!editMode)} className="h-9 px-4 bg-[var(--bg-card)] border border-[var(--border)] text-[var(--text-muted)] rounded-lg text-[12px] font-bold flex items-center gap-2 hover:border-[var(--accent-indigo)] hover:text-[var(--accent-indigo)] transition-all">
-            <Pencil size={14} /> Edit
-          </button>
-          <button onClick={handleStatusToggle} className={`h-9 px-4 rounded-lg text-[12px] font-bold flex items-center gap-2 border transition-all ${member.is_active !== false
-              ? 'bg-[var(--accent-yellow-bg)] border-[var(--accent-yellow-border)] text-[var(--accent-yellow)]'
-              : 'bg-[var(--accent-green-bg)] border-[var(--accent-green-border)] text-[var(--accent-green)]'
-            }`}>
-            {member.is_active !== false ? <><XCircle size={14} /> Deactivate</> : <><CheckCircle2 size={14} /> Activate</>}
-          </button>
-          <button onClick={() => setShowDeleteConfirm(true)} className="h-9 px-4 bg-[var(--accent-red-bg)] border border-[var(--accent-red-border)] text-[var(--accent-red)] rounded-lg text-[12px] font-bold flex items-center gap-2 hover:opacity-80 transition-all">
-            <Trash2 size={14} /> Delete
-          </button>
-        </div>
+        {user?.role !== 'clientuser' && (
+          <div className="flex items-center gap-2">
+            <button onClick={() => setEditMode(!editMode)} className="h-9 px-4 bg-[var(--bg-card)] border border-[var(--border)] text-[var(--text-muted)] rounded-lg text-[12px] font-bold flex items-center gap-2 hover:border-[var(--accent-indigo)] hover:text-[var(--accent-indigo)] transition-all">
+              <Pencil size={14} /> Edit
+            </button>
+            <button onClick={handleStatusToggle} className={`h-9 px-4 rounded-lg text-[12px] font-bold flex items-center gap-2 border transition-all ${member.is_active !== false
+                ? 'bg-[var(--accent-yellow-bg)] border-[var(--accent-yellow-border)] text-[var(--accent-yellow)]'
+                : 'bg-[var(--accent-green-bg)] border-[var(--accent-green-border)] text-[var(--accent-green)]'
+              }`}>
+              {member.is_active !== false ? <><XCircle size={14} /> Deactivate</> : <><CheckCircle2 size={14} /> Activate</>}
+            </button>
+            <button onClick={() => setShowDeleteConfirm(true)} className="h-9 px-4 bg-[var(--accent-red-bg)] border border-[var(--accent-red-border)] text-[var(--accent-red)] rounded-lg text-[12px] font-bold flex items-center gap-2 hover:opacity-80 transition-all">
+              <Trash2 size={14} /> Delete
+            </button>
+          </div>
+        )}
       </div>
 
       {/* ─── Edit Panel ─── */}
       <AnimatePresence>
-        {editMode && (
+        {editMode && user?.role !== 'clientuser' && (
           <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }} className="bg-[var(--bg-card)] border border-[var(--accent-indigo-border)] rounded-xl p-6 overflow-hidden">
             <h3 className="text-[14px] font-bold text-[var(--text-main)] mb-4">Edit Member</h3>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
