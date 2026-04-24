@@ -101,7 +101,7 @@ const Login = () => {
                 <input type="checkbox" />
                 <span>Remember me</span>
               </label>
-              <Link to="/forgot-password" disable="true" className="forgot-password">Forgot Password?</Link>
+              <Link to="/forgot-password"  className="forgot-password">Forgot Password?</Link>
             </div>
 
             {error && <p style={{ color: '#ef4444', fontSize: '0.85rem', textAlign: 'center' }}>{error}</p>}

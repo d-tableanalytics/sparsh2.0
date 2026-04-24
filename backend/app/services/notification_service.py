@@ -130,6 +130,45 @@ CONFLICT_HTML_TEMPLATE = """<!DOCTYPE html>
 </body>
 </html>"""
 
+OTP_HTML_TEMPLATE = """<!DOCTYPE html>
+<html>
+<head>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; color: #333; line-height: 1.6; margin: 0; padding: 0; background-color: #f4f7f6; }
+        .container { max-width: 500px; margin: 40px auto; background: #ffffff; border-radius: 16px; overflow: hidden; box-shadow: 0 10px 30px rgba(0,0,0,0.08); }
+        .header { background: linear-gradient(135deg, #00684a 0%, #00a375 100%); color: #ffffff; padding: 40px 20px; text-align: center; }
+        .header h1 { margin: 0; font-size: 28px; font-weight: 800; letter-spacing: -0.5px; }
+        .content { padding: 40px; text-align: center; }
+        .otp-badge { display: inline-block; padding: 15px 40px; background-color: #f0f7f4; border: 2px dashed #00684a; color: #00684a; font-size: 36px; font-weight: 900; letter-spacing: 12px; border-radius: 12px; margin: 30px 0; text-indent: 12px; }
+        .instruction { font-size: 15px; color: #666; margin-bottom: 20px; }
+        .warning { font-size: 13px; color: #e74c3c; background-color: #fdf2f2; padding: 12px; border-radius: 8px; margin-top: 30px; }
+        .footer { padding: 25px; text-align: center; background-color: #fafafa; border-top: 1px solid #eeeeee; font-size: 12px; color: #999; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>Password Reset</h1>
+        </div>
+        <div class="content">
+            <p style="font-size: 18px; font-weight: 600; color: #2c3e50; margin-bottom: 10px;">Security Verification</p>
+            <p class="instruction">Use the following 6-digit code to verify your password reset request. This code is valid for 10 minutes.</p>
+            
+            <div class="otp-badge">{{otp}}</div>
+            
+            <p class="instruction">If you didn't request this, you can safely ignore this email. No changes will be made to your account until you verify.</p>
+            
+            <div class="warning">
+                <strong>Safety Tip:</strong> Never share this code with anyone. Sparsh Team will never ask for your OTP over phone or email.
+            </div>
+        </div>
+        <div class="footer">
+            © 2026 Sparsh Magic • Security Operations Team
+        </div>
+    </div>
+</body>
+</html>"""
+
 DEFAULT_TEMPLATES = {
     "user_creation_email": {
         "subject": "Welcome to Sparsh 2.0 - Your Account Details",
@@ -158,6 +197,10 @@ DEFAULT_TEMPLATES = {
     "event_deleted_email": {
         "subject": "Session Cancelled: {{event_title}}",
         "body": "Hello {{name}},\n\nThis is to notify you that the session '{{event_title}}' has been cancelled by {{deleted_by}}.\n\nRegards,\nTeam Sparsh"
+    },
+    "password_reset_otp_email": {
+        "subject": "{{otp}} is your Sparsh verification code",
+        "body": OTP_HTML_TEMPLATE
     }
 }
 
@@ -625,3 +668,8 @@ async def send_session_complete_email(user_obj: dict, event_data: dict):
         "event_time": format_datetime_standard(event_data.get("start"))
     }
     return await send_notification_from_template(user_obj, "session_complete", context, "email", event_data.get("notification_scope"))
+
+async def send_otp_email(email: str, otp: str, user_obj: dict = None):
+    context = {"otp": otp}
+    user_data = user_obj or {"email": email, "first_name": "User"}
+    return await send_notification_from_template(user_data, "password_reset_otp", context, "email")

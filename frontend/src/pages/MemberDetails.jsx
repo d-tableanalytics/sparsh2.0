@@ -50,6 +50,17 @@ const MemberDetails = () => {
         } catch (err) { showError("Synchronization failed"); }
     };
 
+    const handleToggleStatus = async () => {
+        try {
+            const newStatus = !user.is_active;
+            await api.patch(`/users/${userId}/status`, { is_active: newStatus });
+            showSuccess(`Node ${newStatus ? 'Activated' : 'Suspended'}`);
+            fetchData();
+        } catch (err) { 
+            showError(err.response?.data?.detail || "Status toggle failed"); 
+        }
+    };
+
     const handleDelete = async () => {
         if (!window.confirm("Are you sure you want to terminate this node's access?")) return;
         try {
@@ -108,7 +119,15 @@ const MemberDetails = () => {
                                         </div>
                                     ) : (
                                         <>
-                                            <h1 className="text-3xl font-black text-[var(--text-main)] italic uppercase leading-none">{user.full_name || user.name}</h1>
+                                            <div className="flex items-center justify-between">
+                                                <h1 className="text-3xl font-black text-[var(--text-main)] italic uppercase leading-none">{user.full_name || user.name}</h1>
+                                                <button 
+                                                    onClick={handleToggleStatus}
+                                                    className={`px-4 py-1.5 rounded-xl text-[10px] font-black uppercase tracking-widest border transition-all ${user.is_active !== false ? 'bg-rose-50 text-rose-500 border-rose-100 hover:bg-rose-500 hover:text-white' : 'bg-emerald-50 text-emerald-500 border-emerald-100 hover:bg-emerald-500 hover:text-white'}`}
+                                                >
+                                                    {user.is_active !== false ? 'Deactivate Node' : 'Activate Node'}
+                                                </button>
+                                            </div>
                                             <div className="flex flex-wrap justify-center md:justify-start gap-2 text-[11px] font-black uppercase tracking-widest">
                                                 <span className="flex items-center gap-1.5 text-[var(--accent-indigo)] bg-indigo-50 px-3 py-1 rounded-lg border border-indigo-100"><Shield size={14}/> {user.role}</span>
                                                 <span className={`flex items-center gap-1.5 px-3 py-1 rounded-lg border ${user.is_active !== false ? 'text-emerald-600 bg-emerald-50 border-emerald-100' : 'text-rose-600 bg-rose-50 border-rose-100'}`}>

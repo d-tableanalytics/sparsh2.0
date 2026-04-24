@@ -60,8 +60,9 @@ const UserDetails = () => {
 
     const handleToggleStatus = async () => {
         try {
-            await api.put(`/users/${userId}`, { is_active: !user.is_active });
-            showSuccess(`User ${!user.is_active ? 'activated' : 'deactivated'}`);
+            const newStatus = user.is_active === false ? true : false;
+            await api.patch(`/users/${userId}/status`, { is_active: newStatus });
+            showSuccess(`User ${newStatus ? 'activated' : 'deactivated'}`);
             fetchData();
         } catch (err) { 
             if (err.response?.status !== 403) {
@@ -120,7 +121,15 @@ const UserDetails = () => {
                                         <input className="text-3xl font-black bg-[var(--input-bg)] rounded-xl px-4 py-2 w-full outline-none border border-[var(--border)]"
                                             value={editForm.full_name} onChange={e => setEditForm({...editForm, full_name: e.target.value})} />
                                     ) : (
-                                        <h1 className="text-4xl font-black text-[var(--text-main)] tracking-tight">{user.full_name || user.name}</h1>
+                                        <div className="flex items-center justify-between">
+                                            <h1 className="text-4xl font-black text-[var(--text-main)] tracking-tight">{user.full_name || user.name}</h1>
+                                            <button 
+                                                onClick={handleToggleStatus}
+                                                className={`px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest border transition-all ${user.is_active !== false ? 'border-red-200 text-red-500 hover:bg-red-500 hover:text-white' : 'border-green-200 text-green-500 hover:bg-green-500 hover:text-white'}`}
+                                            >
+                                                {user.is_active !== false ? 'Deactivate Account' : 'Activate Account'}
+                                            </button>
+                                        </div>
                                     )}
                                     <div className="flex flex-wrap justify-center md:justify-start gap-4 text-[13px] font-bold text-[var(--text-muted)]">
                                         <span className="flex items-center gap-1.5"><Shield size={16} className="text-[var(--accent-indigo)]"/> {user.role?.toUpperCase()}</span>

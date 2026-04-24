@@ -28,6 +28,10 @@ async def connect_to_mongo():
         
         # Select the database
         db_connection.db = db_connection.client[settings.DATABASE_NAME]
+        
+        # Create TTL index for password resets (10 minutes expiry)
+        await db_connection.db["password_resets"].create_index("expires_at", expireAfterSeconds=0)
+        
         print(f"[OK] Successfully connected to MongoDB Atlas (Database: {settings.DATABASE_NAME})")
         
     except Exception as e:

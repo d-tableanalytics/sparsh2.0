@@ -14,10 +14,152 @@ from app.controllers.auth_controller import (
     get_current_active_user,
     get_current_user
 )
+from bson import ObjectId
+import random
+from app.models.auth import Token, PasswordChange, ForgotPasswordRequest, ResetPasswordRequest, AdminMemberUpdate
 from app.services.activity_log_service import log_activity
-from app.services.notification_service import send_notification_from_template
+from app.services.notification_service import send_notification_from_template, send_otp_email
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
+
+@router.post("/forgot-password")
+async def forgot_password(data: ForgotPasswordRequest, background_tasks: BackgroundTasks):
+    email = data.email.lower().strip()
+    
+    # 1. Search across both staff and learners
+    user = await get_collection("staff").find_one({"email": email})
+    if not user:
+        user = await get_collection("learners").find_one({"email": email})
+    
+    if not user:
+        # Security: Return generic message so we don't leak user emails
+        return {"message": "If your email is registered, you will receive a 6-digit OTP."}
+
+    # 2. Generate 6-digit OTP
+    otp = "".join([str(random.randint(0, 9)) for _ in range(6)])
+    
+    # 3. Store OTP in password_resets collection
+    resets_col = get_collection("password_resets")
+    expires_at = datetime.utcnow() + timedelta(minutes=10)
+    
+    await resets_col.update_one(
+        {"email": email},
+        {"$set": {"otp": otp, "expires_at": expires_at}},
+        upsert=True
+    )
+    
+    # 4. Send background email
+    background_tasks.add_task(send_otp_email, email, otp, user)
+    
+    await log_activity(user, "Password Reset OTP Requested", "auth", f"OTP generated for {email}")
+    return {"message": "OTP has been sent to your registered email address."}
+
+@router.post("/reset-password")
+async def reset_password(data: ResetPasswordRequest):
+    email = data.email.lower().strip()
+    resets_col = get_collection("password_resets")
+    
+    # 1. Verify OTP record
+    record = await resets_col.find_one({"email": email})
+    if not record:
+        raise HTTPException(status_code=400, detail="No reset request found for this email")
+    
+    if record["otp"] != data.otp:
+        raise HTTPException(status_code=400, detail="Invalid verification code")
+    
+    if datetime.utcnow() > record["expires_at"]:
+        raise HTTPException(status_code=400, detail="Verification code has expired")
+    
+    # 2. Identify collection and update password
+    hashed_password = get_password_hash(data.new_password)
+    col_name = None
+    
+    user = await get_collection("staff").find_one({"email": email})
+    if user:
+        col_name = "staff"
+    else:
+        user = await get_collection("learners").find_one({"email": email})
+        if user:
+            col_name = "learners"
+            
+    if not col_name:
+        raise HTTPException(status_code=404, detail="Account not found during reset")
+        
+    await get_collection(col_name).update_one(
+        {"email": email},
+        {"$set": {"password": hashed_password}}
+    )
+    
+    # 3. Cleanup reset record
+    await resets_col.delete_one({"email": email})
+    
+    await log_activity(user, "Password Reset Completed", "auth", "Password successfully changed via OTP verification")
+    return {"message": "Your password has been reset successfully. You can now login with your new password."}
+
+@router.post("/request-admin-otp")
+async def request_admin_otp(current_user: dict = Depends(get_current_active_user), background_tasks: BackgroundTasks = BackgroundTasks()):
+    if current_user["role"] not in ["superadmin", "admin", "clientadmin"]:
+        raise HTTPException(status_code=403, detail="Not authorized")
+        
+    otp = "".join([str(random.randint(0, 9)) for _ in range(6)])
+    resets_col = get_collection("password_resets")
+    expires_at = datetime.utcnow() + timedelta(minutes=10)
+    
+    await resets_col.update_one(
+        {"email": current_user["email"]},
+        {"$set": {"otp": otp, "expires_at": expires_at}},
+        upsert=True
+    )
+    
+    background_tasks.add_task(send_otp_email, current_user["email"], otp, current_user)
+    return {"message": "Verification code sent to your email."}
+
+@router.post("/admin/update-member")
+async def admin_update_member(data: AdminMemberUpdate, current_user: dict = Depends(get_current_active_user)):
+    if current_user["role"] not in ["superadmin", "admin", "clientadmin"]:
+        raise HTTPException(status_code=403, detail="Not authorized")
+        
+    # 1. Verify OTP
+    resets_col = get_collection("password_resets")
+    record = await resets_col.find_one({"email": current_user["email"]})
+    if not record or record["otp"] != data.otp or datetime.utcnow() > record["expires_at"]:
+        raise HTTPException(status_code=400, detail="Invalid or expired verification code")
+        
+    # 2. Find target user
+    col_name = None
+    target_user = await get_collection("staff").find_one({"_id": ObjectId(data.user_id)})
+    if target_user:
+        col_name = "staff"
+    else:
+        target_user = await get_collection("learners").find_one({"_id": ObjectId(data.user_id)})
+        if target_user:
+            col_name = "learners"
+            
+    if not col_name:
+        raise HTTPException(status_code=404, detail="Target member not found")
+        
+    # 3. Authorization check
+    if current_user["role"] == "clientadmin":
+        if str(target_user.get("company_id")) != str(current_user.get("company_id")):
+            raise HTTPException(status_code=403, detail="Not authorized to manage members of other companies")
+            
+    # 4. Perform updates
+    update_dict = {}
+    if data.new_email:
+        update_dict["email"] = data.new_email.lower().strip()
+    if data.new_password:
+        update_dict["password"] = get_password_hash(data.new_password)
+        
+    if not update_dict:
+        raise HTTPException(status_code=400, detail="No updates provided")
+        
+    await get_collection(col_name).update_one({"_id": ObjectId(data.user_id)}, {"$set": update_dict})
+    
+    # 5. Cleanup
+    await resets_col.delete_one({"email": current_user["email"]})
+    
+    await log_activity(current_user, "Admin Action: Member Credentials Updated", "auth", f"Updated credentials for {target_user.get('email')} (ID: {data.user_id})")
+    return {"message": "Member credentials updated successfully."}
 
 @router.patch("/change-password")
 async def change_password(data: PasswordChange, current_user: dict = Depends(get_current_active_user)):
@@ -102,12 +244,23 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
             headers={"WWW-Authenticate": "Bearer"},
         )
     
+    if user.get("is_active") == False:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Your account has been deactivated. Please contact your administrator."
+        )
+    
     access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
         data={
             "sub": user["email"], 
             "role": user["role"],
             "full_name": user.get("full_name") or f"{user.get('first_name') or ''} {user.get('last_name') or ''}".strip() or "User",
+            "email": user.get("email"),
+            "mobile": user.get("mobile"),
+            "designation": user.get("designation"),
+            "department": user.get("department"),
+            "session_type": user.get("session_type"),
             "_id": str(user["_id"]),
             "company_id": user.get("company_id"),
             "permissions": user.get("permissions", {})
