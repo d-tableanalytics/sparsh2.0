@@ -13,3 +13,17 @@ class TokenData(BaseModel):
 class PasswordChange(BaseModel):
     current_password: str
     new_password: str
+
+class ForgotPasswordRequest(BaseModel):
+    email: str
+
+class ResetPasswordRequest(BaseModel):
+    email: str
+    otp: str
+    new_password: str
+
+class AdminMemberUpdate(BaseModel):
+    user_id: str
+    otp: str
+    new_email: Optional[str] = None
+    new_password: Optional[str] = None

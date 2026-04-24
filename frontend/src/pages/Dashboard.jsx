@@ -38,7 +38,7 @@ const Dashboard = () => {
         api.get('/dashboard/stats'),
         api.get('/calendar/events').catch(() => ({ data: [] })),
         !isStaffRole && user?.company_id 
-            ? api.get(`/companies/${user.company_id}/users`).catch(() => ({ data: [] }))
+            ? api.get(`/companies/${user.company_id}/users?active_only=true`).catch(() => ({ data: [] }))
             : Promise.resolve({ data: [] })
       ]);
       

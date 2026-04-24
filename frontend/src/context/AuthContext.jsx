@@ -10,16 +10,28 @@ export const AuthProvider = ({ children }) => {
 
   useEffect(() => {
     const token = localStorage.getItem('token');
+    const fetchUser = async (tokenData) => {
+      try {
+        const API_URL = import.meta.env.VITE_API_BASE_URL || '/api';
+        const response = await axios.get(`${API_URL}/users/me`);
+        const fullUser = { ...tokenData, ...response.data };
+        // Ensure _id exists (compatibility between JWT and API aliases)
+        if (!fullUser._id && fullUser.id) fullUser._id = fullUser.id;
+        setUser(fullUser);
+      } catch (err) {
+        console.error("Profile fetch error:", err);
+      }
+    };
+
     if (token) {
       try {
         const decoded = jwtDecode(token);
-        // Check if token is expired
         if (decoded.exp * 1000 < Date.now()) {
           logout();
         } else {
-          setUser(decoded);
-          // Set axios default authorization header
+          setUser(decoded); // Immediate load from token
           axios.defaults.headers.common['Authorization'] = `Bearer ${token}`;
+          fetchUser(decoded); // Background load full profile
         }
       } catch (err) {
         logout();
@@ -41,6 +53,17 @@ export const AuthProvider = ({ children }) => {
     const decoded = jwtDecode(access_token);
     setUser(decoded);
     axios.defaults.headers.common['Authorization'] = `Bearer ${access_token}`;
+    
+    // Fetch full profile info
+    try {
+      const profileResponse = await axios.get(`${API_URL}/users/me`);
+      const fullUser = { ...decoded, ...profileResponse.data };
+      if (!fullUser._id && fullUser.id) fullUser._id = fullUser.id;
+      setUser(fullUser);
+    } catch (err) {
+      console.error("Full profile fetch failed after login", err);
+    }
+    
     return decoded;
   };
 

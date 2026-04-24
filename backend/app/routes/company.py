@@ -202,7 +202,7 @@ async def delete_company(company_id: str, current_user: dict = Depends(get_curre
 
 # ─── Get Company Users ───
 @router.get("/{company_id}/users")
-async def get_company_users(company_id: str, current_user: dict = Depends(get_current_user)):
+async def get_company_users(company_id: str, active_only: bool = False, current_user: dict = Depends(get_current_user)):
     permissions = current_user.get("permissions", {})
     can_read = permissions.get("companies", {}).get("read", False)
 
@@ -211,8 +211,12 @@ async def get_company_users(company_id: str, current_user: dict = Depends(get_cu
     if not is_authorized:
         raise HTTPException(status_code=403, detail="Not authorized")
     
+    query = {"company_id": company_id}
+    if active_only:
+        query["is_active"] = {"$ne": False}
+        
     users_collection = get_collection("learners")
-    users = await users_collection.find({"company_id": company_id}).to_list(500)
+    users = await users_collection.find(query).to_list(500)
     for u in users:
         u["_id"] = str(u["_id"])
         u.pop("password", None)

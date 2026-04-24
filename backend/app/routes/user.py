@@ -10,20 +10,25 @@ from bson import ObjectId
 from datetime import datetime
 from pydantic import BaseModel
 from app.services.notification_service import send_user_updated_email, send_access_control_email
+from app.services.activity_log_service import log_activity
 
 router = APIRouter(prefix="/users", tags=["Users"])
 
 # ─── List Users (Combined) ───
 @router.get("")
-async def list_users(current_user: dict = Depends(get_current_user)):
+async def list_users(active_only: bool = False, current_user: dict = Depends(get_current_user)):
     permissions = current_user.get("permissions", {})
     can_read = permissions.get("users", {}).get("read", False)
     
     if current_user.get("role") != "superadmin" and not can_read:
         raise HTTPException(status_code=403, detail="Not authorized")
     
-    staff = await get_collection("staff").find({}).to_list(1000)
-    learners = await get_collection("learners").find({}).to_list(1000)
+    query = {}
+    if active_only:
+        query["is_active"] = {"$ne": False}
+    
+    staff = await get_collection("staff").find(query).to_list(1000)
+    learners = await get_collection("learners").find(query).to_list(1000)
     
     all_users = staff + learners
     for u in all_users:
@@ -163,16 +168,51 @@ async def delete_user(user_id: str, current_user: dict = Depends(get_current_use
     if col_name == "staff" and current_user.get("role") != "superadmin":
         raise HTTPException(status_code=403, detail="Only superadmin can delete staff users")
 
+    # ─── Roles & Permissions Check ───
+    is_authorized = current_user.get("role") == "superadmin"
+    
     if not is_authorized:
         if current_user.get("role") == "clientadmin":
-            if user.get("company_id") != current_user.get("company_id"):
-                 raise HTTPException(status_code=403, detail="Not authorized to delete this user")
-        else:
-             raise HTTPException(status_code=403, detail="Not authorized")
+            # ClientAdmin can only delete users from their own company
+            if str(user.get("company_id")) != str(current_user.get("company_id")):
+                raise HTTPException(status_code=403, detail="Not authorized to delete this user")
+        elif not can_delete:
+            raise HTTPException(status_code=403, detail="Not authorized to delete users")
 
     
     await get_collection(col_name).delete_one({"_id": ObjectId(user_id)})
     return {"message": "User deleted"}
+
+# ─── Update User Status (Activate/Deactivate) ───
+@router.patch("/{user_id}/status")
+async def update_user_status(user_id: str, data: dict, current_user: dict = Depends(get_current_user)):
+    user, col_name = await find_user_by_id(user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    # Auth check: Superadmin, Admin, or ClientAdmin (for their company)
+    is_authorized = current_user.get("role") in ["superadmin", "admin"]
+    if not is_authorized and current_user.get("role") == "clientadmin":
+        if str(user.get("company_id")) == str(current_user.get("company_id")):
+            is_authorized = True
+
+    if not is_authorized:
+        raise HTTPException(status_code=403, detail="Not authorized to change status for this user")
+
+    new_status = data.get("is_active")
+    if new_status is None:
+        raise HTTPException(status_code=400, detail="is_active field is required")
+
+    await get_collection(col_name).update_one(
+        {"_id": ObjectId(user_id)},
+        {"$set": {"is_active": new_status, "updated_at": datetime.utcnow()}}
+    )
+
+    action = "activated" if new_status else "deactivated"
+    await log_activity(current_user, f"User {action.capitalize()}", "user", f"{action.capitalize()} user {user.get('email')}")
+    
+    return {"message": f"User {action} successfully"}
+
 
 # ─── Get User Activity/History ───
 @router.get("/{user_id}/activity")

@@ -40,7 +40,7 @@ const SessionDetails = () => {
                 api.get(`/calendar/events/${sessionId}`),
                 api.get('/gpt/projects')
             ];
-            if (isStaff) requests.splice(1, 0, api.get('/users'));
+            if (isStaff) requests.splice(1, 0, api.get('/users?active_only=true'));
 
             const results = await Promise.all(requests);
             const ev = results[0].data;

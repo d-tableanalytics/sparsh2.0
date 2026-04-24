@@ -12,7 +12,7 @@ import {
   CheckCircle2, XCircle, AlertTriangle, Building2,
   TrendingUp, Target, Award, Zap, BarChart3,
   LayoutGrid, Table as TableIcon, Download, Search, Filter, List,
-  Eye, Save as SaveIcon, Layout, Brain
+  Eye, Save as SaveIcon, Layout, Brain, KeyRound, Lock, Loader2, Mail as MailIcon
 } from 'lucide-react';
 
 import {
@@ -136,6 +136,11 @@ const MemberDashboard = () => {
   const [loadingAssessment, setLoadingAssessment] = useState(false);
   const [savingMarks, setSavingMarks] = useState(false);
   const [analytics, setAnalytics] = useState(null);
+  const [showSecurityModal, setShowSecurityModal] = useState(false);
+  const [securityForm, setSecurityForm] = useState({ newEmail: '', newPassword: '', otp: '' });
+  const [securityStep, setSecurityStep] = useState(1); // 1: Inputs, 2: OTP
+  const [isRequestingOtp, setIsRequestingOtp] = useState(false);
+  const [isUpdatingCredentials, setIsUpdatingCredentials] = useState(false);
 
 
 
@@ -281,6 +286,48 @@ const MemberDashboard = () => {
     }
   };
 
+  const handleRequestSecurityOtp = async () => {
+    if (!securityForm.newEmail && !securityForm.newPassword) {
+      showError("Please provide a new email or password");
+      return;
+    }
+    setIsRequestingOtp(true);
+    try {
+      await api.post('/auth/request-admin-otp');
+      setSecurityStep(2);
+      showSuccess("Verification code sent to your email");
+    } catch (err) {
+      showError(err.response?.data?.detail || "Failed to send OTP");
+    } finally {
+      setIsRequestingOtp(false);
+    }
+  };
+
+  const handleUpdateCredentials = async () => {
+    if (!securityForm.otp) {
+      showError("Please enter the verification code");
+      return;
+    }
+    setIsUpdatingCredentials(true);
+    try {
+      await api.post('/auth/admin/update-member', {
+        user_id: userId,
+        otp: securityForm.otp,
+        new_email: securityForm.newEmail || null,
+        new_password: securityForm.newPassword || null
+      });
+      showSuccess("Credentials updated successfully");
+      setShowSecurityModal(false);
+      setSecurityStep(1);
+      setSecurityForm({ newEmail: '', newPassword: '', otp: '' });
+      fetchData();
+    } catch (err) {
+      showError(err.response?.data?.detail || "Update failed");
+    } finally {
+      setIsUpdatingCredentials(false);
+    }
+  };
+
   if (loading) return (
     <div className="flex items-center justify-center py-32">
       <div className="w-8 h-8 border-2 border-[var(--accent-indigo-border)] border-t-[var(--accent-indigo)] rounded-full animate-spin"></div>
@@ -342,6 +389,9 @@ const MemberDashboard = () => {
           <div className="flex items-center gap-2">
             <button onClick={() => setEditMode(!editMode)} className="h-9 px-4 bg-[var(--bg-card)] border border-[var(--border)] text-[var(--text-muted)] rounded-lg text-[12px] font-bold flex items-center gap-2 hover:border-[var(--accent-indigo)] hover:text-[var(--accent-indigo)] transition-all">
               <Pencil size={14} /> Edit
+            </button>
+            <button onClick={() => { setShowSecurityModal(true); setSecurityForm({ newEmail: '', newPassword: '', otp: '' }); setSecurityStep(1); }} className="h-9 px-4 bg-[var(--bg-card)] border border-[var(--border)] text-[var(--accent-indigo)] rounded-lg text-[12px] font-bold flex items-center gap-2 hover:border-[var(--accent-indigo)] transition-all">
+              <KeyRound size={14} /> Security
             </button>
             <button onClick={handleStatusToggle} className={`h-9 px-4 rounded-lg text-[12px] font-bold flex items-center gap-2 border transition-all ${member.is_active !== false
                 ? 'bg-[var(--accent-yellow-bg)] border-[var(--accent-yellow-border)] text-[var(--accent-yellow)]'
@@ -994,6 +1044,103 @@ const MemberDashboard = () => {
         ) : (
           <div className="py-20 text-center text-[var(--text-muted)]">Unable to retrieve assessment data.</div>
         )}
+      </Modal>
+
+      {/* ─── Security Update Modal ─── */}
+      <Modal 
+        isOpen={showSecurityModal} 
+        onClose={() => !isUpdatingCredentials && setShowSecurityModal(false)} 
+        title="Update Credentials"
+      >
+        <div className="space-y-6 py-2">
+          <AnimatePresence mode="wait">
+            {securityStep === 1 ? (
+              <motion.div key="inputs" initial={{ opacity: 0, x: -10 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: 10 }} className="space-y-4">
+                <div className="p-4 bg-[var(--accent-indigo-bg)] rounded-xl border border-[var(--accent-indigo-border)]">
+                  <div className="flex gap-3">
+                    <Shield className="text-[var(--accent-indigo)] shrink-0" size={18} />
+                    <p className="text-[12px] font-medium text-[var(--accent-indigo)] leading-relaxed">
+                      Updating a member's email or password is a sensitive action. You will need to verify your identity with an OTP sent to <b>{user?.email}</b>.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-[10px] font-bold text-[var(--text-muted)] uppercase tracking-widest ml-1">New Email Address</label>
+                  <div className="relative group">
+                    <MailIcon size={14} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-[var(--text-muted)]" />
+                    <input 
+                      type="email"
+                      placeholder={member.email}
+                      value={securityForm.newEmail}
+                      onChange={e => setSecurityForm({...securityForm, newEmail: e.target.value})}
+                      className="w-full pl-10 pr-4 py-2 bg-[var(--input-bg)] border border-[var(--border)] rounded-xl outline-none focus:border-[var(--accent-indigo)] text-[13px] transition-all"
+                    />
+                  </div>
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-[10px] font-bold text-[var(--text-muted)] uppercase tracking-widest ml-1">New Password</label>
+                  <div className="relative group">
+                    <Lock size={14} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-[var(--text-muted)]" />
+                    <input 
+                      type="password"
+                      placeholder="Enter new password (min 8 chars)"
+                      value={securityForm.newPassword}
+                      onChange={e => setSecurityForm({...securityForm, newPassword: e.target.value})}
+                      className="w-full pl-10 pr-4 py-2 bg-[var(--input-bg)] border border-[var(--border)] rounded-xl outline-none focus:border-[var(--accent-indigo)] text-[13px] transition-all"
+                    />
+                  </div>
+                </div>
+
+                <button 
+                  onClick={handleRequestSecurityOtp} 
+                  disabled={isRequestingOtp || (!securityForm.newEmail && !securityForm.newPassword)}
+                  className="w-full h-11 bg-[var(--accent-indigo)] text-white rounded-xl font-bold text-[13px] flex items-center justify-center gap-2 hover:opacity-90 disabled:opacity-50 transition-all"
+                >
+                  {isRequestingOtp ? <Loader2 size={16} className="animate-spin" /> : <KeyRound size={16} />}
+                  Request Verification Code
+                </button>
+              </motion.div>
+            ) : (
+              <motion.div key="otp" initial={{ opacity: 0, x: 10 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -10 }} className="space-y-4">
+                <div className="text-center space-y-2">
+                  <h4 className="text-[15px] font-bold text-[var(--text-main)]">Enter Verification Code</h4>
+                  <p className="text-[11px] text-[var(--text-muted)]">A 6-digit code has been sent to <b>{user?.email}</b></p>
+                </div>
+
+                <div className="flex justify-center">
+                  <input 
+                    type="text"
+                    maxLength="6"
+                    value={securityForm.otp}
+                    onChange={e => setSecurityForm({...securityForm, otp: e.target.value})}
+                    placeholder="000000"
+                    className="w-40 text-center text-2xl font-black tracking-[0.4em] py-3 bg-[var(--input-bg)] border-2 border-[var(--accent-indigo-border)] rounded-2xl outline-none focus:ring-4 focus:ring-indigo-500/10 transition-all"
+                  />
+                </div>
+
+                <div className="flex gap-3">
+                  <button 
+                    onClick={() => setSecurityStep(1)} 
+                    disabled={isUpdatingCredentials}
+                    className="flex-1 h-11 bg-[var(--input-bg)] border border-[var(--border)] text-[var(--text-muted)] rounded-xl font-bold text-[13px] hover:bg-[var(--table-hover)] transition-all"
+                  >
+                    Back
+                  </button>
+                  <button 
+                    onClick={handleUpdateCredentials} 
+                    disabled={isUpdatingCredentials || securityForm.otp.length < 6}
+                    className="flex-[2] h-11 bg-[var(--accent-green)] text-white rounded-xl font-bold text-[13px] flex items-center justify-center gap-2 hover:opacity-90 disabled:opacity-50 transition-all"
+                  >
+                    {isUpdatingCredentials ? <Loader2 size={16} className="animate-spin" /> : <CheckCircle2 size={16} />}
+                    Update Member
+                  </button>
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </div>
       </Modal>
     </div>
   );

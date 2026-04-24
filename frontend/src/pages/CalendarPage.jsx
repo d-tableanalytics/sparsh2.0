@@ -150,7 +150,7 @@ const CalendarPage = () => {
         setLoading(true);
         const role = user?.role?.toLowerCase();
         const isStaffRole = ['superadmin', 'admin', 'coach', 'staff'].includes(role);
-        const usersEndpoint = isStaffRole ? '/users' : `/companies/${user?.company_id}/users`;
+        const usersEndpoint = isStaffRole ? '/users?active_only=true' : `/companies/${user?.company_id}/users?active_only=true`;
         try {
             const [evRes, bRes, qRes, tRes, uRes, sRes, gRes] = await Promise.all([
                 api.get(`/calendar/events?view_mode=${viewMode}`), api.get('/batches'),

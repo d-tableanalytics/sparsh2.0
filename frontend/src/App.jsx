@@ -31,6 +31,7 @@ import LearnerSessions from './pages/LearnerSessions';
 import CompanyPortal from './pages/CompanyPortal';
 import AssessmentPlayer from './pages/AssessmentPlayer';
 import MyReports from './pages/MyReports';
+import ForgotPassword from './pages/ForgotPassword';
 import PrivateRoute from './components/common/PrivateRoute';
 import './index.css';
 import { useAuth } from './context/AuthContext';
@@ -41,6 +42,7 @@ const AppRoutes = () => {
   return (
     <Routes>
       <Route path="/login" element={user ? <Navigate to="/" /> : <Login />} />
+      <Route path="/forgot-password" element={<ForgotPassword />} />
 
       <Route path="/" element={<PrivateRoute><Dashboard /></PrivateRoute>} />
       <Route path="/dashboard" element={<Navigate to="/" />} />
