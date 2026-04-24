@@ -40,7 +40,7 @@ async def forgot_password(data: ForgotPasswordRequest, background_tasks: Backgro
     
     # 3. Store OTP in password_resets collection
     resets_col = get_collection("password_resets")
-    expires_at = datetime.utcnow() + timedelta(minutes=10)
+    expires_at = datetime.utcnow() + timedelta(seconds=60)
     
     await resets_col.update_one(
         {"email": email},
@@ -103,7 +103,7 @@ async def request_admin_otp(current_user: dict = Depends(get_current_active_user
         
     otp = "".join([str(random.randint(0, 9)) for _ in range(6)])
     resets_col = get_collection("password_resets")
-    expires_at = datetime.utcnow() + timedelta(minutes=10)
+    expires_at = datetime.utcnow() + timedelta(seconds=60)
     
     await resets_col.update_one(
         {"email": current_user["email"]},

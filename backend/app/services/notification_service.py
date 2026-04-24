@@ -152,7 +152,7 @@ OTP_HTML_TEMPLATE = """<!DOCTYPE html>
         </div>
         <div class="content">
             <p style="font-size: 18px; font-weight: 600; color: #2c3e50; margin-bottom: 10px;">Security Verification</p>
-            <p class="instruction">Use the following 6-digit code to verify your password reset request. This code is valid for 10 minutes.</p>
+            <p class="instruction">Use the following 6-digit code to verify your password reset request. This code is valid for 60 seconds.</p>
             
             <div class="otp-badge">{{otp}}</div>
             
