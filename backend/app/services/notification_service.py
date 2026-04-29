@@ -647,7 +647,7 @@ async def send_attendance_thanks_email(user_obj: dict, event_data: dict):
         "event_title": event_data.get("title"),
         "event_time": format_datetime_standard(event_data.get("start"))
     }
-    return await send_notification_from_template(user_obj, "attendance_thanks", context, "email")
+    return await send_notification_from_template(user_obj, "attendance_thanks", context, "email", event_data.get("notification_scope"))
 
 async def send_attendance_absent_email(user_obj: dict, event_data: dict):
     context = {
@@ -656,7 +656,7 @@ async def send_attendance_absent_email(user_obj: dict, event_data: dict):
         "event_title": event_data.get("title"),
         "event_time": format_datetime_standard(event_data.get("start"))
     }
-    return await send_notification_from_template(user_obj, "attendance_absent", context, "email")
+    return await send_notification_from_template(user_obj, "attendance_absent", context, "email", event_data.get("notification_scope"))
 
 async def send_session_complete_email(user_obj: dict, event_data: dict):
     print(f"[DEBUG-COMPLETE] Sending mail to {user_obj.get('email')} for {event_data.get('title')}")
