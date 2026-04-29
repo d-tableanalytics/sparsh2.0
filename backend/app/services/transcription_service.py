@@ -54,7 +54,7 @@ async def transcribe_audio_chunk(filepath: str) -> str:
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, sync_transcribe_wav, filepath)
 
-async def transcribe_media_file(local_file_path: str) -> str:
+async def transcribe_media_file(local_file_path: str, progress_callback=None) -> str:
     """
     General purpose transcription for audio/video files.
     """
@@ -76,18 +76,25 @@ async def transcribe_media_file(local_file_path: str) -> str:
         chunks = sorted([f for f in os.listdir(temp_dir) if f.startswith("chunk_") and f.endswith(".wav")])
         
         if chunks:
-            sem = asyncio.Semaphore(12)
-            async def bound_transcribe(c_file):
-                async with sem:
-                    return await transcribe_audio_chunk(os.path.join(temp_dir, c_file))
-                    
-            tasks = [bound_transcribe(cf) for cf in chunks]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            
             valid_texts = []
-            for res in results:
-                if not isinstance(res, Exception) and res:
-                    valid_texts.append(res)
+            total_chunks = len(chunks)
+            
+            # Process sequentially or in smaller batches to report progress
+            batch_size = 5
+            for i in range(0, total_chunks, batch_size):
+                batch = chunks[i:i+batch_size]
+                tasks = [transcribe_audio_chunk(os.path.join(temp_dir, cf)) for cf in batch]
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                
+                for res in results:
+                    if not isinstance(res, Exception) and res:
+                        valid_texts.append(res)
+                        
+                if progress_callback:
+                    # Report progress from 10% (ffmpeg done) up to 90%
+                    percent = 10 + int(80 * min(i + batch_size, total_chunks) / total_chunks)
+                    await progress_callback(percent)
+            
             
             final_transcription = " ".join(valid_texts)
     return final_transcription
@@ -104,13 +111,25 @@ async def process_background_upload_and_transcribe(
     try:
         col = get_collection(col_name)
         
+        async def update_progress(percent: int):
+            await col.update_one(
+                {"_id": ObjectId(event_id), "resources.id": resource_id},
+                {"$set": {"resources.$.progress": percent}}
+            )
+
+        # Start at 5% to indicate processing has begun
+        await update_progress(5)
+
         # 1. Start S3 Upload in background
         s3_task = asyncio.create_task(upload_large_file_to_s3(local_file_path, filename, content_type))
 
         final_transcription = None
         if system_type in ["audio", "video"]:
             print(f"[{resource_id}] Starting Fast Transcription Pipeline...")
-            final_transcription = await transcribe_media_file(local_file_path)
+            final_transcription = await transcribe_media_file(local_file_path, update_progress)
+        
+        # Set to 95% while waiting for upload to finish
+        await update_progress(95)
         
         # 2. Wait for S3 Upload to finish
         url = await s3_task

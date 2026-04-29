@@ -551,6 +551,28 @@ async def get_event(event_id: str, current_user: dict = Depends(get_current_user
     if not event: raise HTTPException(status_code=404, detail="Event not found")
     event["id"] = str(event["_id"])
     del event["_id"]
+    
+    from app.services.s3_service import get_signed_url
+    import urllib.parse
+    
+    def refresh_url(item):
+        url = item.get("url")
+        if url and ".amazonaws.com/" in url:
+            try:
+                path_part = url.split(".amazonaws.com/")[-1]
+                s3_key = urllib.parse.unquote(path_part.split("?")[0])
+                item["url"] = get_signed_url(s3_key)
+            except Exception: pass
+
+    for content in event.get("contents", []):
+        refresh_url(content)
+        
+    for content in event.get("learner_contents", []):
+        refresh_url(content)
+        
+    for resource in event.get("resources", []):
+        refresh_url(resource)
+
     return event
 
 
