@@ -32,6 +32,8 @@ import CompanyPortal from './pages/CompanyPortal';
 import AssessmentPlayer from './pages/AssessmentPlayer';
 import MyReports from './pages/MyReports';
 import ForgotPassword from './pages/ForgotPassword';
+import ORMTemplateManager from './pages/ORM/ORMTemplateManager';
+import ORMLearnerDashboard from './pages/ORM/ORMLearnerDashboard';
 import PrivateRoute from './components/common/PrivateRoute';
 import './index.css';
 import { useAuth } from './context/AuthContext';
@@ -62,6 +64,10 @@ const AppRoutes = () => {
       <Route path="/sessions" element={<PrivateRoute><LearnerSessions /></PrivateRoute>} />
       <Route path="/company-portal" element={<PrivateRoute><CompanyPortal /></PrivateRoute>} />
       <Route path="/my-reports" element={<PrivateRoute><MyReports /></PrivateRoute>} />
+      
+      {/* ORM Module */}
+      <Route path="/orm/templates" element={<PrivateRoute><ORMTemplateManager /></PrivateRoute>} />
+      <Route path="/orm/dashboard" element={<PrivateRoute><ORMLearnerDashboard /></PrivateRoute>} />
       
       {/* Admin Side: Staff Management */}
       <Route path="/admin/users" element={<PrivateRoute><UserManagement /></PrivateRoute>} />

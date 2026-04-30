@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
 from app.db.mongodb import connect_to_mongo, close_mongo_connection
-from app.routes import auth, user, company, batch, quarter, session_template, calendar_events, settings, gpt, dashboard, notification
+from app.routes import auth, user, company, batch, quarter, session_template, calendar_events, settings, gpt, dashboard, notification, orm
 
 from app.services.reminder_scheduler import start_reminder_scheduler
 import asyncio
@@ -55,6 +55,7 @@ app.include_router(settings.router, prefix="/api")
 app.include_router(gpt.router, prefix="/api")
 app.include_router(dashboard.router, prefix="/api")
 app.include_router(notification.router, prefix="/api")
+app.include_router(orm.router, prefix="/api")
 
 @app.get("/")
 async def root():
