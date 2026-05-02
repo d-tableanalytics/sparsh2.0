@@ -162,7 +162,7 @@ const CalendarPage = () => {
                 id: e.id, title: e.title, start: e.start, end: e.end,
                 backgroundColor: 'transparent', borderColor: 'transparent',
                 textColor: 'var(--text-main)', allDay: e.allDay,
-                extendedProps: { ...e.extendedProps, id: e.id, dotColor: getRescheduleColor(e.extendedProps?.status || e.status, e.extendedProps?.type || e.type, e.color) }
+                extendedProps: { ...e.extendedProps, id: e.id, dotColor: getRescheduleColor(e.extendedProps?.status || e.status, e.extendedProps?.type || e.type, e.color, e.extendedProps?.isCreator) }
             })));
             setBatches(bRes.data); setQuarters(qRes.data); setTemplates(tRes.data); setAllUsers(uRes.data);
             setBackdateSettings(sRes.data); setGptProjects(gRes.data);
@@ -228,18 +228,22 @@ const CalendarPage = () => {
         return Array.from(set);
     }, [events]);
 
-    const getRescheduleColor = (status, type, color) => {
+    const getRescheduleColor = (status, type, color, isCreator) => {
         if (status === 'reschedule') return '#f59e0b'; // Amber/Orange
         if (status === 'completed') return '#10b981'; // Emerald
         if (status === 'canceled') return '#ef4444'; // Red
-        return color || (type === 'task' ? '#f97316' : '#6366f1');
+        
+        if (isCreator) {
+            return color || (type === 'task' ? '#f97316' : '#6366f1'); // Orange / Indigo
+        } else {
+            return color || (type === 'task' ? '#e11d48' : '#0d9488'); // Rose / Teal
+        }
     };
 
     // ─── Stats Calculation ───
     const currentMonthStats = useMemo(() => {
-        const now = new Date();
-        const currentYear = now.getFullYear();
-        const currentMonth = now.getMonth();
+        const currentYear = currentViewDate.getFullYear();
+        const currentMonth = currentViewDate.getMonth();
 
         const data = events.filter(e => {
             const d = new Date(e.start);
@@ -266,7 +270,7 @@ const CalendarPage = () => {
             { id: 'tk_com', label: 'Task Complete', count: getCount('task', 'completed'), color: 'emerald', icon: <CheckCircle size={14} />, filter: { type: 'task', status: 'completed' } },
             { id: 'tk_pen', label: 'Task Pending', count: getCount('task', 'pending'), color: 'rose', icon: <AlertCircle size={14} />, filter: { type: 'task', status: 'pending' } },
         ];
-    }, [events]);
+    }, [events, currentViewDate]);
 
     const activeFilter = statFilter;
     const filteredEvents = useMemo(() => {
@@ -467,14 +471,34 @@ const CalendarPage = () => {
     const renderEventTile = (ev) => {
         const s = ev.extendedProps.status;
         const type = ev.extendedProps.type;
+        const isCreator = ev.extendedProps.isCreator;
+        const color = ev.extendedProps.dotColor;
+
+        const statusBadges = {
+            completed: <span className="px-2 py-0.5 bg-emerald-100 text-emerald-700 rounded-md text-[8px] font-black uppercase tracking-widest border border-emerald-200">Completed</span>,
+            reschedule: <span className="px-2 py-0.5 bg-amber-100 text-amber-700 rounded-md text-[8px] font-black uppercase tracking-widest border border-amber-200">Rescheduled</span>,
+            canceled: <span className="px-2 py-0.5 bg-rose-100 text-rose-700 rounded-md text-[8px] font-black uppercase tracking-widest border border-rose-200">Canceled</span>,
+            schedule: <span className="px-2 py-0.5 bg-indigo-50 text-indigo-600 rounded-md text-[8px] font-black uppercase tracking-widest border border-indigo-100">Scheduled</span>
+        };
+
         return (
-            <motion.div key={ev.id} layout className={`group relative bg-[var(--input-bg)] rounded-[24px] border border-[var(--border)] p-4 hover:shadow-xl hover:shadow-black/5 transition-all overflow-hidden ${s === 'completed' ? 'opacity-50' : ''}`}>
-                <div className="absolute top-0 right-0 w-1.5 h-full" style={{ background: ev.extendedProps.dotColor }} />
+            <motion.div key={ev.id} layout 
+                className={`group relative rounded-[24px] border p-4 hover:shadow-xl hover:shadow-black/5 transition-all overflow-hidden ${s === 'completed' ? 'opacity-50' : ''}`}
+                style={{ 
+                    background: isCreator ? 'var(--input-bg)' : (type === 'task' ? 'rgba(225, 29, 72, 0.03)' : 'rgba(13, 148, 136, 0.03)'),
+                    borderColor: isCreator ? 'var(--border)' : (type === 'task' ? 'rgba(225, 29, 72, 0.2)' : 'rgba(13, 148, 136, 0.2)')
+                }}
+            >
+                <div className="absolute top-0 right-0 w-1.5 h-full" style={{ background: color }} />
                 <div className="flex items-start justify-between mb-2">
-                    <div className="space-y-0.5">
-                        <div className="flex items-center gap-1.5 text-[8px] font-black uppercase tracking-widest text-[var(--text-muted)]">
-                            {type === 'task' ? <CheckCircle size={10} className="text-orange-500" /> : <Activity size={10} className="text-[var(--accent-indigo)]" />}
-                            {type} • {s || 'scheduled'}
+                    <div className="space-y-1.5">
+                        <div className="flex items-center gap-2">
+                            <div className="flex items-center gap-1.5 text-[8px] font-black uppercase tracking-widest text-[var(--text-muted)]">
+                                {type === 'task' ? <CheckCircle size={10} style={{ color: isCreator ? '#f97316' : '#e11d48' }} /> : <Activity size={10} style={{ color: isCreator ? '#6366f1' : '#0d9488' }} />}
+                                {type}
+                            </div>
+                            {statusBadges[s] || statusBadges.schedule}
+                            {!isCreator && <span className="px-2 py-0.5 bg-slate-100 text-slate-600 rounded-md text-[8px] font-black uppercase tracking-widest border border-slate-200 flex items-center gap-1"><UserCircle2 size={8}/> Assigned</span>}
                         </div>
                         <h4 className="text-[14px] font-black text-[var(--text-main)] group-hover:text-[var(--accent-indigo)] transition-colors pr-10 leading-tight">{ev.title}</h4>
                     </div>
@@ -639,17 +663,20 @@ const CalendarPage = () => {
                     dayMaxEvents={3} eventContent={(info) => {
                         const s = info.event.extendedProps.status;
                         const type = info.event.extendedProps.type;
+                        const isCreator = info.event.extendedProps.isCreator;
+                        const dotColor = info.event.extendedProps.dotColor;
                         const isTask = type === 'task';
-                        const isSpanning = info.isStart || info.isEnd || info.isMirror; // Simplified check
                         
                         return (
                             <div className={`flex items-center gap-1.5 px-2 py-0.5 max-w-full overflow-hidden group/ev transition-all border border-transparent hover:border-indigo-200/50 ${s === 'completed' ? 'opacity-40 grayscale' : ''} ${info.isStart ? 'rounded-l-lg' : ''} ${info.isEnd ? 'rounded-r-lg' : ''} ${!info.isStart && !info.isEnd ? '' : 'rounded-lg'}`}
                                  style={{ 
-                                     background: isTask ? 'rgba(249, 115, 22, 0.08)' : 'rgba(99, 102, 241, 0.08)',
+                                     background: isCreator 
+                                        ? (isTask ? 'rgba(249, 115, 22, 0.08)' : 'rgba(99, 102, 241, 0.08)')
+                                        : (isTask ? 'rgba(225, 29, 72, 0.08)' : 'rgba(13, 148, 136, 0.08)'),
                                      marginLeft: info.isStart ? '0' : '-8px',
                                      marginRight: info.isEnd ? '0' : '-8px',
                                  }}>
-                                <div className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ background: info.event.extendedProps.dotColor || (isTask ? '#f97316' : '#6366f1') }}></div>
+                                <div className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ background: dotColor }}></div>
                                 <span className={`text-[10px] font-black truncate ${isTask ? 'text-orange-700' : 'text-indigo-700'}`} style={{ textDecoration: s === 'completed' ? 'line-through' : 'none' }}>
                                     {info.event.title}
                                 </span>
