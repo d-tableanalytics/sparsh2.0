@@ -556,12 +556,12 @@ const CalendarPage = () => {
                 </div>
                 <div className="flex items-center gap-3">
                     {/* Focus Toggle */}
-                    {(user.role === 'superadmin' || user.role === 'admin') && (
-                        <div className="flex items-center bg-[var(--bg-card)] border border-[var(--border)] rounded-xl p-1 shadow-sm mr-2">
-                             <button onClick={() => setViewMode('personal')} className={`px-4 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all flex items-center gap-1.5 ${viewMode === 'personal' ? 'bg-[var(--accent-indigo)] text-white shadow-lg shadow-indigo-100' : 'text-[var(--text-muted)] hover:text-indigo-500'}`}>
+                    {(role === 'superadmin' || role === 'admin' || role === 'clientadmin') && (
+                        <div className="flex items-center gap-1.5 p-1.5 bg-white/40 backdrop-blur-md border border-white/40 rounded-2xl shadow-sm">
+                             <button onClick={() => setViewMode('personal')} className={`px-4 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all ${viewMode === 'personal' ? 'bg-[var(--accent-indigo)] text-white shadow-lg shadow-indigo-100' : 'text-[var(--text-muted)] hover:text-indigo-50'}`}>
                                  <UserCircle2 size={13} /> MY FOCUS
                              </button>
-                             <button onClick={() => setViewMode('team')} className={`px-4 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all flex items-center gap-1.5 ${viewMode === 'team' ? 'bg-orange-600 text-white shadow-lg shadow-orange-100 font-black' : 'text-[var(--text-muted)] hover:text-orange-600'}`}>
+                             <button onClick={() => setViewMode('team')} className={`px-4 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all ${viewMode === 'team' ? 'bg-orange-600 text-white shadow-lg shadow-orange-100 font-black' : 'text-[var(--text-muted)] hover:text-orange-600'}`}>
                                  <Users2 size={13} /> TEAM VIEW
                              </button>
                         </div>

@@ -217,6 +217,9 @@ async def create_event(event: CalendarEventCreate, background_tasks: BackgroundT
         raise HTTPException(status_code=500, detail="Security validation failed. Request blocked.")
 
     event_dict["user_id"] = str(current_user["_id"])
+    if current_user.get("company_id"):
+        event_dict["company_id"] = str(current_user["company_id"])
+    
     event_dict["created_at"] = datetime.utcnow()
     
     # ─── Set Notification Scope ───
@@ -584,9 +587,18 @@ async def get_all_events(target_user_id: Optional[str] = None, view_mode: str = 
     is_staff_admin = role in ["superadmin", "admin", "coach", "staff"]
     has_team_read_perm = current_user.get("permissions", {}).get("calendar", {}).get("read")
     
-    effective_user_id = target_user_id if (target_user_id and is_staff_admin) else current_uid
+    # ─── Effective Identity Resolution ───
+    effective_user_id = current_uid
+    if target_user_id:
+        if is_staff_admin:
+            effective_user_id = target_user_id
+        elif role == "clientadmin":
+            # Verify company alignment for Client Admins
+            target_user = await find_user_by_id(target_user_id)
+            if target_user and str(target_user.get("company_id")) == str(current_user.get("company_id")):
+                effective_user_id = target_user_id
     
-    # Enable team view for those with 'calendar: read'
+    # Enable team view for those with 'calendar: read' or superadmins
     can_view_team = (view_mode == "team") and (role == "superadmin" or has_team_read_perm)
     
     # ─── Batches & Quarters ───
@@ -622,40 +634,33 @@ async def get_all_events(target_user_id: Optional[str] = None, view_mode: str = 
         custom_col = get_collection(col_name)
         
         if can_view_team and not target_user_id:
-            db_docs = await custom_col.find({}).to_list(1000)
+            query = {}
+            if role != "superadmin" and current_user.get("company_id"):
+                # If team view but not superadmin, limit to their company
+                query = {
+                    "$or": [
+                        {"company_id": str(current_user["company_id"])},
+                        {"user_id": current_uid},
+                        {"assigned_member_ids": current_uid},
+                        {"assigned_member_ids": {"$in": [current_uid]}},
+                        {"target_staff_id": current_uid},
+                        {"target_staff_id": {"$in": [current_uid]}}
+                    ]
+                }
+            db_docs = await custom_col.find(query).to_list(1000)
         else:
             # Privacy Logic: 
-            # 1. Events -> Visible if involved (Coach, Attendee, Creator, or Target Staff)
-            # 2. Tasks -> Visible if Creator OR in target_staff_id
-            privacy_query = {
-                "$or": [
-                    {
-                        "$and": [
-                            {"type": "event"},
-                            {"$or": [
-                                {"user_id": effective_user_id},
-                                {"assigned_member_ids": effective_user_id},
-                                {"coach_ids": effective_user_id},
-                                {"target_staff_id": effective_user_id},
-                                {"assigned_member_ids": {"$in": [effective_user_id]}},
-                                {"coach_ids": {"$in": [effective_user_id]}},
-                                {"target_staff_id": {"$in": [effective_user_id]}}
-                            ]}
-                        ]
-                    },
-                    {
-                        "$and": [
-                            {"type": "task"},
-                            {"$or": [
-                                {"user_id": effective_user_id},
-                                {"target_staff_id": effective_user_id},
-                                {"target_staff_id": {"$in": [effective_user_id]}}
-                            ]}
-                        ]
-                    }
-                ]
-            }
-            db_docs = await custom_col.find(privacy_query).to_list(1000)
+            # Visible if Creator OR explicitly involved in any capacity (Attendee, Coach, Target)
+            involvement_clauses = [
+                {"user_id": effective_user_id},
+                {"assigned_member_ids": effective_user_id},
+                {"coach_ids": effective_user_id},
+                {"target_staff_id": effective_user_id},
+                {"assigned_member_ids": {"$in": [effective_user_id]}},
+                {"coach_ids": {"$in": [effective_user_id]}},
+                {"target_staff_id": {"$in": [effective_user_id]}}
+            ]
+            db_docs = await custom_col.find({"$or": involvement_clauses}).to_list(1000)
         
         for c in db_docs:
             events.append({
