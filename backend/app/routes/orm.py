@@ -88,6 +88,18 @@ async def create_assignment(assignment: ORMAssignment, current_user: dict = Depe
     assignment_dict["_id"] = str(result.inserted_id)
     return assignment_dict
 
+@router.get("/assignments")
+async def list_assignments(template_id: Optional[str] = None, current_user: dict = Depends(get_current_active_user)):
+    query = {"company_id": current_user["company_id"]}
+    if template_id:
+        query["template_id"] = template_id
+        
+    cursor = get_collection("orm_assignments").find(query)
+    assignments = await cursor.to_list(length=100)
+    for a in assignments:
+        a["_id"] = str(a["_id"])
+    return assignments
+
 # ─── Achievements & Scores ───
 
 @router.post("/achievements")
@@ -97,7 +109,29 @@ async def submit_achievement(achievement: ORMAchievement, current_user: dict = D
         raise HTTPException(status_code=403, detail="Not authorized to submit achievements")
     
     # 1. Verify Assignment & Template
-    assignment = await get_collection("orm_assignments").find_one({"_id": ObjectId(achievement.assignment_id)})
+    assignment_id = achievement.assignment_id
+    assignment = None
+    
+    if assignment_id.startswith("virtual_"):
+        template_id = assignment_id.replace("virtual_", "")
+        new_assign = {
+            "template_id": template_id,
+            "company_id": current_user["company_id"],
+            "start_date": datetime.utcnow(),
+            "is_active": True,
+            "created_at": datetime.utcnow()
+        }
+        result = await get_collection("orm_assignments").insert_one(new_assign)
+        assignment_id = str(result.inserted_id)
+        achievement.assignment_id = assignment_id 
+        assignment = new_assign
+        assignment["_id"] = result.inserted_id
+    else:
+        try:
+            assignment = await get_collection("orm_assignments").find_one({"_id": ObjectId(assignment_id)})
+        except:
+            raise HTTPException(status_code=400, detail="Invalid Assignment ID format")
+
     if not assignment:
         raise HTTPException(status_code=404, detail="Assignment not found")
         
@@ -188,56 +222,71 @@ async def get_orm_dashboard(learner_id: Optional[str] = None, current_user: dict
     target_id = learner_id or str(current_user["_id"])
     
     # Verify access
-    if current_user["role"] == "clientuser" and target_id != str(current_user["_id"]):
-         raise HTTPException(status_code=403, detail="You can only view your own dashboard")
-         
-    # 1. Find active assignments for the learner
-    # Note: Assignments can be to batch, course, or specific learner
-    # For now, let's look for assignments where learner_id is in learner_ids or batch_id matches
-    # (Simplified lookup)
-    assignments_cursor = get_collection("orm_assignments").find({
-        "$or": [
-            {"learner_ids": target_id},
-            {"company_id": current_user["company_id"]} # Very broad, should be refined
-        ]
-    })
-    assignments = await assignments_cursor.to_list(length=10)
-    
-    results = []
-    for assign in assignments:
-        assign_id = str(assign["_id"])
-        # Get latest score summary
-        summary = await get_collection("orm_scores").find_one(
-            {"learner_id": target_id, "assignment_id": assign_id},
-            sort=[("period", -1)]
-        )
+    try:
+        user_id = str(current_user["_id"])
+        company_id = current_user["company_id"]
+        is_client_admin = current_user["role"] == "clientadmin"
         
-        # Get template details
-        template = await get_collection("orm_templates").find_one({"_id": ObjectId(assign["template_id"])})
-        
-        if template:
-            # ─── Visibility Filter ───
-            user_id = str(current_user["_id"])
-            is_client_admin = current_user["role"] == "clientadmin"
-            
-            filtered_structure = []
-            for param in template["structure"]:
-                # If explicitly restricted viewers
-                if param.get("allowed_viewers"):
-                    if user_id in param["allowed_viewers"] or is_client_admin:
-                        filtered_structure.append(param)
-                else:
-                    # Default: visible to all learners assigned to this assignment
-                    filtered_structure.append(param)
-            
-            template["structure"] = filtered_structure
-
-        results.append({
-            "assignment_id": assign_id,
-            "template_name": template["name"] if template else "Unknown",
-            "current_score": summary["total_score"] if summary else 0,
-            "period": summary["period"] if summary else "N/A",
-            "structure": template["structure"] if template else []
+        # 1. Fetch all active templates for the company
+        templates_cursor = get_collection("orm_templates").find({
+            "company_id": company_id,
+            "is_active": True
         })
+        templates = await templates_cursor.to_list(length=100)
         
-    return results
+        # 2. Fetch all assignments for the company to link them
+        assignments_cursor = get_collection("orm_assignments").find({"company_id": company_id})
+        assignments = await assignments_cursor.to_list(length=200)
+        assignment_map = {a["template_id"]: a for a in assignments}
+        
+        results = []
+        
+        def filter_structure(nodes, uid, is_admin):
+            filtered = []
+            for node in nodes:
+                viewers = node.get("allowed_viewers") or []
+                fillers = node.get("allowed_fillers") or []
+                
+                # Process children first
+                filtered_children = []
+                if node.get("children"):
+                    filtered_children = filter_structure(node["children"], uid, is_admin)
+                
+                # Check direct access
+                directly_accessible = (uid in viewers) or (uid in fillers) or is_admin
+                
+                if directly_accessible or filtered_children:
+                    # Clone node to avoid modifying original template in memory if cached
+                    new_node = node.copy()
+                    if node.get("children"):
+                        new_node["children"] = filtered_children
+                    filtered.append(new_node)
+            return filtered
+
+        for template in templates:
+            # Recursive filter
+            filtered_structure = filter_structure(template.get("structure", []), user_id, is_client_admin)
+            
+            if filtered_structure:
+                # Find assignment or create a virtual one
+                assign = assignment_map.get(str(template["_id"]))
+                assign_id = str(assign["_id"]) if assign else f"virtual_{template['_id']}"
+                
+                # Get latest summary if exists
+                summary = await get_collection("orm_summaries").find_one({
+                    "learner_id": learner_id or user_id,
+                    "template_id": str(template["_id"])
+                })
+                
+                results.append({
+                    "assignment_id": assign_id,
+                    "template_id": str(template["_id"]),
+                    "template_name": template["name"],
+                    "structure": filtered_structure,
+                    "current_score": summary.get("total_score", 0) if summary else 0
+                })
+                
+        return results
+    except Exception as e:
+        print(f"ORM Dashboard error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

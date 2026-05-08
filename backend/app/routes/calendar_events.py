@@ -192,8 +192,7 @@ async def create_event(event: CalendarEventCreate, background_tasks: BackgroundT
     has_create_perm = current_user.get("permissions", {}).get("calendar", {}).get("create")
     
     if user_role != "superadmin":
-        # Allow Client Users (Learners) and Client Admins to create events
-        # Staff roles (admin, coach, staff) still require the explicit permission bit
+        
         if not has_create_perm and user_role not in ["clientuser", "clientadmin"]:
             raise HTTPException(status_code=403, detail="Not authorized to create events")
 
@@ -886,8 +885,7 @@ async def learner_upload_content(event_id: str, file: UploadFile = File(...), cu
     if not event: raise HTTPException(status_code=404, detail="Session not found")
     
     # Upload to S3
-    file_bytes = await file.read()
-    s3_url = await upload_file_to_s3(file_bytes, f"learners/{event_id}/{file.filename}", file.content_type)
+    s3_url = upload_file_to_s3(file.file, f"learners/{event_id}/{file.filename}", file.content_type)
     
     content_obj = {
         "id": str(datetime.utcnow().timestamp()),

@@ -39,6 +39,20 @@ const ORMLearnerDashboard = () => {
     }
   };
 
+  const getLeafNodes = (nodes, parentPath = '') => {
+    if (!nodes) return [];
+    let leaves = [];
+    nodes.forEach(node => {
+      const currentPath = parentPath ? `${parentPath}.${node.name}` : node.name;
+      if (!node.children || node.children.length === 0) {
+        leaves.push({ ...node, path: currentPath });
+      } else {
+        leaves = [...leaves, ...getLeafNodes(node.children, currentPath)];
+      }
+    });
+    return leaves;
+  };
+
   const handleSubmitAchievement = async () => {
     if (!achievementValue || !selectedKpi) {
       showError('Please enter a value');
@@ -122,7 +136,7 @@ const ORMLearnerDashboard = () => {
           <div className="bg-slate-900 p-5 rounded-2xl shadow-lg shadow-slate-200 text-white relative overflow-hidden">
              <div className="relative z-10">
                <h3 className="text-sm font-bold mb-1">Performance Insight</h3>
-               <p className="text-slate-400 text-[11px] leading-relaxed">Focus on 'Cost Adherence' to hit 95% total score this month.</p>
+               <p className="text-slate-400 text-[11px] leading-relaxed">You have {getLeafNodes(data.flatMap(d => d.structure)).length} active KPI steps assigned for data entry.</p>
                <button className="mt-4 bg-white/10 hover:bg-white/20 text-white px-3 py-1.5 rounded-lg text-[10px] font-bold transition-all border border-white/10">
                   Analyze All →
                </button>
@@ -193,11 +207,11 @@ const ORMLearnerDashboard = () => {
             <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100">
               <h3 className="text-sm font-black text-slate-400 uppercase tracking-widest mb-4">Input Values</h3>
               <div className="space-y-3">
-                {data[0]?.structure?.map((param, idx) => (
+                {data.length > 0 ? data.flatMap(d => getLeafNodes(d.structure).map(node => ({ ...node, assignment_id: d.assignment_id, template_name: d.template_name }))).map((param, idx) => (
                   <button 
-                    key={idx}
+                    key={`${param.assignment_id}-${param.path}`}
                     onClick={() => {
-                      setSelectedKpi({ name: param.name, path: param.name, target_value: 0 }); // Simplified path
+                      setSelectedKpi({ ...param, name: param.name, path: param.path, target_value: param.target_value });
                       setShowSubmitModal(true);
                     }}
                     className="w-full flex items-center justify-between p-3 bg-slate-50 hover:bg-indigo-50 rounded-xl transition-all group border border-transparent hover:border-indigo-100"
@@ -206,11 +220,18 @@ const ORMLearnerDashboard = () => {
                       <div className="w-7 h-7 bg-white rounded-lg flex items-center justify-center text-slate-400 group-hover:text-indigo-600 shadow-sm border border-slate-100">
                         <Plus size={14} />
                       </div>
-                      <span className="text-[13px] font-bold text-slate-600 group-hover:text-indigo-700">{param.name}</span>
+                      <div className="flex flex-col items-start">
+                        <span className="text-[13px] font-bold text-slate-600 group-hover:text-indigo-700 text-left">{param.name}</span>
+                        <span className="text-[9px] text-slate-400 font-medium">{param.template_name} {param.path.includes('.') && `> ${param.path.split('.').slice(0, -1).join(' > ')}`}</span>
+                      </div>
                     </div>
                     <svg className="w-3 h-3 text-slate-300 group-hover:text-indigo-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5l7 7-7 7"></path></svg>
                   </button>
-                ))}
+                )) : (
+                  <div className="py-10 text-center bg-slate-50 rounded-2xl border border-dashed border-slate-200">
+                    <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">No assigned steps</p>
+                  </div>
+                )}
               </div>
             </div>
 

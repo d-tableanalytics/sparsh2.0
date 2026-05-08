@@ -62,10 +62,10 @@ class ORMAchievement(BaseModel):
     kpi_id: str # Flattened ID or path
     period: str # YYYY-MM
     actual_value: float
-    target_value: float # Captured at time of entry from config
-    score: float # Calculated score for this entry
-    weighted_contribution: float # score * (weight/100)
-    submitted_by: str
+    target_value: Optional[float] = 0.0 # Captured at time of entry from config
+    score: Optional[float] = 0.0 # Calculated score for this entry
+    weighted_contribution: Optional[float] = 0.0 # score * (weight/100)
+    submitted_by: Optional[str] = None
     timestamp: datetime = Field(default_factory=datetime.utcnow)
     notes: Optional[str] = None
 

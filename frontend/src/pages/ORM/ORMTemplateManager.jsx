@@ -13,17 +13,19 @@ const ORMTemplateManager = () => {
   const [editingTemplate, setEditingTemplate] = useState(null); // template being edited
   const [showReminderModal, setShowReminderModal] = useState(null); // template for reminder config
   const [viewingTemplate, setViewingTemplate] = useState(null); // template for tabular report view
+  const [selectedLearner, setSelectedLearner] = useState('');
+  const [selectedPeriod, setSelectedPeriod] = useState(new Date().toISOString().slice(0, 7)); // YYYY-MM
   const [tempAchievements, setTempAchievements] = useState({}); // { nodeName_depth: value }
   const [newTemplate, setNewTemplate] = useState({
     name: '',
     description: '',
     category: '',
     structure: [
-      { name: 'Revenue', weightage: 30, formula_type: 'standard', target_value: 0, unit: '', allowed_fillers: [], allowed_viewers: [], is_anonymous: false, children: [] },
-      { name: 'Process', weightage: 20, formula_type: 'standard', target_value: 0, unit: '', allowed_fillers: [], allowed_viewers: [], is_anonymous: false, children: [] },
-      { name: 'Customer', weightage: 20, formula_type: 'standard', target_value: 0, unit: '', allowed_fillers: [], allowed_viewers: [], is_anonymous: false, children: [] },
-      { name: 'Team', weightage: 15, formula_type: 'standard', target_value: 0, unit: '', allowed_fillers: [], allowed_viewers: [], is_anonymous: true, children: [] },
-      { name: 'Cost', weightage: 15, formula_type: 'reverse', target_value: 0, unit: '', allowed_fillers: [], allowed_viewers: [], is_anonymous: false, children: [] }
+      { name: 'Revenue Target vs Achievement', weightage: 30, formula_type: 'standard', target_value: 0, unit: '', allowed_fillers: [], allowed_viewers: [], is_anonymous: false, children: [] },
+      { name: 'Process Score', weightage: 20, formula_type: 'standard', target_value: 0, unit: '', allowed_fillers: [], allowed_viewers: [], is_anonymous: false, children: [] },
+      { name: 'NPS or CSI', weightage: 20, formula_type: 'standard', target_value: 0, unit: '', allowed_fillers: [], allowed_viewers: [], is_anonymous: false, children: [] },
+      { name: 'Team Engagement Index', weightage: 15, formula_type: 'standard', target_value: 0, unit: '', allowed_fillers: [], allowed_viewers: [], is_anonymous: true, children: [] },
+      { name: 'Budget Cost Adherence', weightage: 15, formula_type: 'reverse', target_value: 0, unit: '', allowed_fillers: [], allowed_viewers: [], is_anonymous: false, children: [] }
     ]
   });
 
@@ -51,6 +53,52 @@ const ORMTemplateManager = () => {
       setUsers(response.data);
     } catch (error) {
       console.error('Failed to load users');
+    }
+  };
+
+  const handleUpdateScores = async () => {
+    if (!selectedLearner || !selectedPeriod) {
+      showError('Please select a learner and period first');
+      return;
+    }
+
+    try {
+      // 1. Find if an assignment exists for this learner & template
+      // For simplicity, we'll try to find one or create one if needed, 
+      // but usually an assignment should already exist.
+      const assignments = await ormService.getAssignments(viewingTemplate._id);
+      let targetAssignment = assignments.find(a => a.learner_ids?.includes(selectedLearner) || a.company_id === user.company_id);
+      
+      if (!targetAssignment) {
+        // Create a default assignment if none exists for this company
+        targetAssignment = await ormService.createAssignment({
+          template_id: viewingTemplate._id,
+          company_id: user.company_id,
+          learner_ids: [selectedLearner],
+          start_date: new Date().toISOString()
+        });
+      }
+
+      const submissionPromises = Object.entries(tempAchievements).map(([path, value]) => {
+        // Path in tempAchievements uses _ for recursion depth, backend expects .
+        const kpiId = path.replace(/_/g, '.');
+        return ormService.submitAchievement({
+          assignment_id: targetAssignment._id,
+          learner_id: selectedLearner,
+          period: selectedPeriod,
+          actual_value: parseFloat(value) || 0,
+          target_value: 0, // Backend will resolve from template
+          kpi_id: kpiId
+        });
+      });
+
+      await Promise.all(submissionPromises);
+      showSuccess('Scores updated and saved successfully');
+      setViewingTemplate(null);
+      setTempAchievements({});
+    } catch (error) {
+      console.error('Update scores error:', error);
+      showError('Failed to save some scores. Ensure all KPIs exist.');
     }
   };
 
@@ -250,11 +298,11 @@ const ORMTemplateManager = () => {
                 description: '',
                 category: '',
                 structure: [
-                  { name: 'Revenue', weightage: 30, formula_type: 'standard', target_value: 0, unit: '', allowed_fillers: [], allowed_viewers: [], is_anonymous: false, children: [] },
-                  { name: 'Process', weightage: 20, formula_type: 'standard', target_value: 0, unit: '', allowed_fillers: [], allowed_viewers: [], is_anonymous: false, children: [] },
-                  { name: 'Customer', weightage: 20, formula_type: 'standard', target_value: 0, unit: '', allowed_fillers: [], allowed_viewers: [], is_anonymous: false, children: [] },
-                  { name: 'Team', weightage: 15, formula_type: 'standard', target_value: 0, unit: '', allowed_fillers: [], allowed_viewers: [], is_anonymous: true, children: [] },
-                  { name: 'Cost', weightage: 15, formula_type: 'reverse', target_value: 0, unit: '', allowed_fillers: [], allowed_viewers: [], is_anonymous: false, children: [] }
+                  { name: 'Revenue Target vs Achievement', weightage: 30, formula_type: 'standard', target_value: 0, unit: '', allowed_fillers: [], allowed_viewers: [], is_anonymous: false, children: [] },
+                  { name: 'Process Score', weightage: 20, formula_type: 'standard', target_value: 0, unit: '', allowed_fillers: [], allowed_viewers: [], is_anonymous: false, children: [] },
+                  { name: 'NPS or CSI', weightage: 20, formula_type: 'standard', target_value: 0, unit: '', allowed_fillers: [], allowed_viewers: [], is_anonymous: false, children: [] },
+                  { name: 'Team Engagement Index', weightage: 15, formula_type: 'standard', target_value: 0, unit: '', allowed_fillers: [], allowed_viewers: [], is_anonymous: true, children: [] },
+                  { name: 'Budget Cost Adherence', weightage: 15, formula_type: 'reverse', target_value: 0, unit: '', allowed_fillers: [], allowed_viewers: [], is_anonymous: false, children: [] }
                 ]
               });
               setIsAdding(true);
@@ -612,11 +660,31 @@ const ORMTemplateManager = () => {
                 <p className="text-slate-500 text-sm font-medium ml-12">Outcome Result Performance Report</p>
               </div>
               <div className="flex items-center gap-4">
+                <div className="flex flex-col gap-1">
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Target Learner</label>
+                  <select 
+                    value={selectedLearner}
+                    onChange={(e) => setSelectedLearner(e.target.value)}
+                    className="bg-slate-50 border-slate-100 rounded-xl text-xs font-bold px-3 py-2 focus:ring-indigo-500 outline-none min-w-[150px]"
+                  >
+                    <option value="">Select Learner...</option>
+                    {users.map(u => <option key={u._id} value={u._id}>{u.full_name}</option>)}
+                  </select>
+                </div>
+                <div className="flex flex-col gap-1">
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Period</label>
+                  <input 
+                    type="month"
+                    value={selectedPeriod}
+                    onChange={(e) => setSelectedPeriod(e.target.value)}
+                    className="bg-slate-50 border-slate-100 rounded-xl text-xs font-bold px-3 py-2 focus:ring-indigo-500 outline-none"
+                  />
+                </div>
                 <button 
                   onClick={() => window.print()} 
                   className="flex items-center gap-2 px-6 py-3 bg-emerald-50 text-emerald-600 rounded-2xl font-bold text-sm hover:bg-emerald-100 transition-all border border-emerald-100"
                 >
-                  <Settings2 size={18} /> Download Report
+                  <Eye size={18} /> Print Matrix
                 </button>
                 <button onClick={() => setViewingTemplate(null)} className="p-3 hover:bg-slate-100 rounded-2xl transition-all text-slate-400">
                   <X size={24} />
@@ -782,7 +850,10 @@ const ORMTemplateManager = () => {
               <button onClick={() => setViewingTemplate(null)} className="px-8 py-3 rounded-2xl font-bold text-slate-500 hover:bg-slate-100 transition-all text-sm uppercase tracking-widest">
                 Close View
               </button>
-              <button className="bg-indigo-600 hover:bg-indigo-700 text-white px-10 py-3 rounded-2xl font-black shadow-xl shadow-indigo-100 transition-all text-sm uppercase tracking-widest">
+              <button 
+                onClick={handleUpdateScores}
+                className="bg-indigo-600 hover:bg-indigo-700 text-white px-10 py-3 rounded-2xl font-black shadow-xl shadow-indigo-100 transition-all text-sm uppercase tracking-widest"
+              >
                 Save & Update Scores
               </button>
             </div>

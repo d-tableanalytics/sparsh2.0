@@ -27,6 +27,7 @@ const Dashboard = () => {
   const [mixData, setMixData] = useState([]);
   const [upcomingEvents, setUpcomingEvents] = useState([]);
   const [teamMembers, setTeamMembers] = useState([]);
+  const [ormTasks, setOrmTasks] = useState([]);
   const [loading, setLoading] = useState(true);
 
   const fetchData = async () => {
@@ -52,6 +53,22 @@ const Dashboard = () => {
         .sort((a, b) => new Date(a.start) - new Date(b.start))
         .slice(0, 5)
       );
+
+      // Fetch ORM Tasks
+      const ormRes = await api.get('/orm/dashboard').catch(() => ({ data: [] }));
+      const allTasks = ormRes.data.flatMap(d => {
+        const getLeaves = (nodes, path = '') => {
+            let leaves = [];
+            nodes.forEach(n => {
+                const cur = path ? `${path}.${n.name}` : n.name;
+                if (!n.children || n.children.length === 0) leaves.push({ ...n, path: cur, template: d.template_name });
+                else leaves = [...leaves, ...getLeaves(n.children, cur)];
+            });
+            return leaves;
+        };
+        return getLeaves(d.structure);
+      });
+      setOrmTasks(allTasks);
     } catch (err) {
       console.error("Dashboard fetch error:", err);
     } finally {
@@ -242,14 +259,38 @@ const Dashboard = () => {
         )}
 
         {isAdmin && (
-            <div className="bg-[var(--accent-indigo)] rounded-[32px] p-8 text-white relative overflow-hidden group shadow-2xl shadow-indigo-500/20">
-                <div className="absolute inset-0 bg-gradient-to-br from-white/10 to-transparent pointer-events-none" />
-                <Zap size={48} className="text-white/20 mb-4 group-hover:scale-110 group-hover:rotate-12 transition-all duration-500" />
-                <h3 className="text-xl font-black mb-2 tracking-tight uppercase">System Insight</h3>
-                <p className="text-[13px] font-medium opacity-80 leading-relaxed">Organizational metadata is being synchronized in real-time. Last pulse detected from secure node.</p>
-                {canReadUsers && (
-                    <button onClick={() => navigate('/admin/users')} className="mt-8 w-full py-3 bg-white text-[var(--accent-indigo)] rounded-2xl text-[11px] font-black uppercase tracking-widest shadow-lg hover:scale-[1.02] active:scale-[0.98] transition-all">Staff Registry</button>
-                )}
+            <div className="flex flex-col gap-6">
+                <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-[32px] p-8 shadow-sm flex flex-col">
+                    <div className="flex items-center justify-between mb-6">
+                        <h3 className="text-xl font-black text-[var(--text-main)] uppercase italic tracking-tight">ORM Action Items</h3>
+                        <Target size={20} className="text-[var(--accent-indigo)]"/>
+                    </div>
+                    <div className="space-y-3 max-h-[300px] overflow-y-auto no-scrollbar">
+                        {ormTasks.length > 0 ? ormTasks.slice(0, 5).map((task, i) => (
+                            <div key={i} onClick={() => navigate('/orm/dashboard')} className="p-4 bg-[var(--input-bg)] rounded-2xl hover:bg-white border border-transparent hover:border-[var(--border)] transition-all cursor-pointer group">
+                                <p className="text-[12px] font-black text-[var(--text-main)] group-hover:text-[var(--accent-indigo)]">{task.name}</p>
+                                <p className="text-[9px] font-bold text-[var(--text-muted)] uppercase opacity-60 truncate">{task.template} {task.path.includes('.') && `> ${task.path.split('.').slice(0, -1).join(' > ')}`}</p>
+                            </div>
+                        )) : (
+                            <div className="py-10 text-center opacity-30">
+                                <p className="text-[10px] font-black uppercase tracking-widest">All steps completed</p>
+                            </div>
+                        )}
+                    </div>
+                    <button onClick={() => navigate('/orm/dashboard')} className="mt-4 w-full py-3 bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-[var(--accent-indigo)] hover:text-white transition-all">
+                        Full ORM Dashboard
+                    </button>
+                </div>
+
+                <div className="bg-[var(--accent-indigo)] rounded-[32px] p-8 text-white relative overflow-hidden group shadow-2xl shadow-indigo-500/20">
+                    <div className="absolute inset-0 bg-gradient-to-br from-white/10 to-transparent pointer-events-none" />
+                    <Zap size={48} className="text-white/20 mb-4 group-hover:scale-110 group-hover:rotate-12 transition-all duration-500" />
+                    <h3 className="text-xl font-black mb-2 tracking-tight uppercase">System Insight</h3>
+                    <p className="text-[13px] font-medium opacity-80 leading-relaxed">Organizational metadata is being synchronized in real-time. Last pulse detected from secure node.</p>
+                    {canReadUsers && (
+                        <button onClick={() => navigate('/admin/users')} className="mt-8 w-full py-3 bg-white text-[var(--accent-indigo)] rounded-2xl text-[11px] font-black uppercase tracking-widest shadow-lg hover:scale-[1.02] active:scale-[0.98] transition-all">Staff Registry</button>
+                    )}
+                </div>
             </div>
         )}
       </div>

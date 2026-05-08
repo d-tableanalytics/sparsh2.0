@@ -31,6 +31,11 @@ const ormService = {
   createAssignment: async (assignmentData) => {
     const response = await axios.post(`${API_URL}/orm/assignments`, assignmentData);
     return response.data;
+  },
+  getAssignments: async (templateId) => {
+    const url = templateId ? `${API_URL}/orm/assignments?template_id=${templateId}` : `${API_URL}/orm/assignments`;
+    const response = await axios.get(url);
+    return response.data;
   }
 };
 

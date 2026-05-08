@@ -21,20 +21,31 @@ def validate_total_weightage(nodes: List[ORMNode], expected_total: float = 100.0
     total = sum(node.weightage for node in nodes)
     return abs(total - expected_total) < 0.01
 
-def flatten_orm_structure(nodes: List[ORMNode], parent_path: str = "") -> List[Dict[str, Any]]:
+def flatten_orm_structure(nodes: List[Any], parent_path: str = "") -> List[Dict[str, Any]]:
     """Flatten the recursive structure for easier database storage/retrieval of specific KPIs."""
     flat_list = []
     for node in nodes:
-        current_path = f"{parent_path}.{node.name}" if parent_path else node.name
-        if not node.children:
+        # Handle both Pydantic objects and raw MongoDB dictionaries
+        is_dict = isinstance(node, dict)
+        name = node["name"] if is_dict else node.name
+        children = node.get("children", []) if is_dict else node.children
+        weightage = node.get("weightage", 0) if is_dict else node.weightage
+        formula_type = node.get("formula_type", "standard") if is_dict else node.formula_type
+        target_value = node.get("target_value", 0) if is_dict else node.target_value
+        unit = node.get("unit") if is_dict else node.unit
+        allowed_fillers = node.get("allowed_fillers", []) if is_dict else node.allowed_fillers
+        
+        current_path = f"{parent_path}.{name}" if parent_path else name
+        if not children:
             flat_list.append({
-                "name": node.name,
+                "name": name,
                 "path": current_path,
-                "weightage": node.weightage,
-                "formula_type": node.formula_type,
-                "target_value": node.target_value,
-                "unit": node.unit
+                "weightage": weightage,
+                "formula_type": formula_type,
+                "target_value": target_value,
+                "unit": unit,
+                "allowed_fillers": allowed_fillers
             })
         else:
-            flat_list.extend(flatten_orm_structure(node.children, current_path))
+            flat_list.extend(flatten_orm_structure(children, current_path))
     return flat_list
