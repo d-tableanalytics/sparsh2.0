@@ -191,15 +191,16 @@ async def register(user: UserCreate, background_tasks: BackgroundTasks, current_
             
     collection_name = "staff" if is_staff_role else "learners"
     col = get_collection(collection_name)
-    
+
     if await col.find_one({"email": user.email}):
         raise HTTPException(status_code=400, detail="Email already registered")
-    
+
     # Store raw password temporarily to send in email (if needed) or just confirm creation
     raw_password = user.password
     hashed_password = get_password_hash(user.password)
     user_dict = user.model_dump()
     user_dict["password"] = hashed_password
+    user_dict["tag"] = "staff" if is_staff_role else "learner"
     fn = user.first_name or ""
     ln = user.last_name or ""
     user_dict["full_name"] = f"{fn} {ln}".strip()

@@ -65,7 +65,7 @@ const QuarterDetails = () => {
     try {
       const [res, evRes, gptRes, anaRes] = await Promise.all([
         api.get(`/quarters/${quarterId}`),
-        api.get('/calendar/events'),
+        api.get('/calendar/events?view_mode=team'),
         api.get('/gpt/projects'),
         api.get(`/quarters/${quarterId}/analytics`)
       ]);
