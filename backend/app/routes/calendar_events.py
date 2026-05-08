@@ -629,10 +629,14 @@ async def get_all_events(target_user_id: Optional[str] = None, view_mode: str = 
     for q in quarters:
         if q.get("start_date"): events.append({"id": str(q["_id"]), "title": f"Q: {q['name']}", "type": "quarter", "start": q["start_date"], "color": "var(--accent-orange)", "bg": "var(--accent-orange-bg)", "editable": False})
             
+    # ─── Pre-fetch staff IDs for creator_is_staff enrichment ───
+    staff_docs = await get_collection("staff").find({}, {"_id": 1}).to_list(None)
+    staff_id_set = {str(doc["_id"]) for doc in staff_docs}
+
     # ─── Aggregated Events & Tasks ───
     for col_name in (CALENDAR_COLLECTIONS + ["calendar_events"]):
         custom_col = get_collection(col_name)
-        
+
         if can_view_team and not target_user_id:
             query = {}
             if role != "superadmin" and current_user.get("company_id"):
@@ -665,7 +669,7 @@ async def get_all_events(target_user_id: Optional[str] = None, view_mode: str = 
         for c in db_docs:
             events.append({
                 "id": str(c["_id"]), "title": c["title"], "type": c["type"], "start": c["start"], "end": c.get("end"), "allDay": c.get("all_day", False),
-                "extendedProps": { **{k: v for k, v in c.items() if k not in ["_id", "created_at", "updated_at"]}, "id": str(c["_id"]), "isCreator": c.get("user_id") == current_uid, "isAssigned": current_uid in (c.get("target_staff_id") or []) or current_uid in (c.get("assigned_member_ids") or []), "canEdit": role == "superadmin" or c.get("user_id") == current_uid, "source_col": col_name }
+                "extendedProps": { **{k: v for k, v in c.items() if k not in ["_id", "created_at", "updated_at"]}, "id": str(c["_id"]), "isCreator": c.get("user_id") == current_uid, "isAssigned": current_uid in (c.get("target_staff_id") or []) or current_uid in (c.get("assigned_member_ids") or []), "canEdit": role == "superadmin" or c.get("user_id") == current_uid, "source_col": col_name, "creator_is_staff": c.get("user_id") in staff_id_set }
             })
     return events
 
@@ -891,8 +895,9 @@ async def learner_upload_content(event_id: str, file: UploadFile = File(...), cu
     if not event: raise HTTPException(status_code=404, detail="Session not found")
     
     # Upload to S3
+    import io
     file_bytes = await file.read()
-    s3_url = await upload_file_to_s3(file_bytes, f"learners/{event_id}/{file.filename}", file.content_type)
+    s3_url = upload_file_to_s3(io.BytesIO(file_bytes), f"learners/{event_id}/{file.filename}", file.content_type)
     
     content_obj = {
         "id": str(datetime.utcnow().timestamp()),

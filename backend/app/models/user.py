@@ -19,7 +19,8 @@ class UserBase(BaseModel):
     role: str = "clientuser"
     company_id: Optional[str] = None
     is_active: bool = True
-    
+    tag: Optional[str] = None  # "staff" or "learner"
+
     # Business specific fields
     session_type: Optional[str] = "None" # Core, Support, Both, None
     designation: Optional[str] = None
