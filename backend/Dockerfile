@@ -3,6 +3,11 @@ FROM python:3.11-slim
 # Set working directory
 WORKDIR /app
 
+# Install system dependencies (ffmpeg is required for audio/video transcription)
+RUN apt-get update && apt-get install -y \
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
 # Copy requirements first (for caching)
 COPY requirements.txt .
 
