@@ -34,6 +34,9 @@ numpy==2.2.3
 
 # ─── Speech / Audio ───
 SpeechRecognition==3.14.1
+# Note: FFmpeg is a system dependency. The binary must be installed on the OS.
+# Below is the python wrapper for FFmpeg commands.
+ffmpeg-python==0.2.0
 
 # ─── AWS S3 ───
 boto3==1.37.5
