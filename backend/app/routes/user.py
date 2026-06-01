@@ -16,7 +16,7 @@ router = APIRouter(prefix="/users", tags=["Users"])
 
 # ─── List Users (Combined) ───
 @router.get("")
-async def list_users(active_only: bool = False, current_user: dict = Depends(get_current_user)):
+async def list_users(active_only: bool = False, company_id: Optional[str] = None, current_user: dict = Depends(get_current_user)):
     permissions = current_user.get("permissions", {})
     can_read = permissions.get("users", {}).get("read", False)
     
@@ -26,7 +26,9 @@ async def list_users(active_only: bool = False, current_user: dict = Depends(get
     query = {}
     if active_only:
         query["is_active"] = {"$ne": False}
-    
+    if company_id:
+        query["company_id"] = company_id
+
     staff = await get_collection("staff").find(query).to_list(1000)
     learners = await get_collection("learners").find(query).to_list(1000)
     

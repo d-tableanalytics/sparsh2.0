@@ -31,6 +31,9 @@ import LearnerSessions from './pages/LearnerSessions';
 import CompanyPortal from './pages/CompanyPortal';
 import AssessmentPlayer from './pages/AssessmentPlayer';
 import MyReports from './pages/MyReports';
+import ORMPage from './pages/ORM/ORMPage';
+import ORMSetup from './pages/ORM/ORMSetup';
+import ORMSheet from './pages/ORM/ORMSheet';
 import ForgotPassword from './pages/ForgotPassword';
 import PrivateRoute from './components/common/PrivateRoute';
 import './index.css';
@@ -62,6 +65,9 @@ const AppRoutes = () => {
       <Route path="/sessions" element={<PrivateRoute><LearnerSessions /></PrivateRoute>} />
       <Route path="/company-portal" element={<PrivateRoute><CompanyPortal /></PrivateRoute>} />
       <Route path="/my-reports" element={<PrivateRoute><MyReports /></PrivateRoute>} />
+      <Route path="/orm" element={<PrivateRoute><ORMPage /></PrivateRoute>} />
+      <Route path="/orm/setup" element={<PrivateRoute><ORMSetup /></PrivateRoute>} />
+      <Route path="/orm/sheet" element={<PrivateRoute><ORMSheet /></PrivateRoute>} />
       
       {/* Admin Side: Staff Management */}
       <Route path="/admin/users" element={<PrivateRoute><UserManagement /></PrivateRoute>} />
