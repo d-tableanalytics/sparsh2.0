@@ -82,3 +82,7 @@ frontend/.vite/
 # Database (if any local)
 *.sqlite3
 *.db
+
+# SSH / private keys
+*.pem
+*.key

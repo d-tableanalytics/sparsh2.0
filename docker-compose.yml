@@ -14,10 +14,11 @@ services:
     build: ./frontend
     container_name: frontend-sparsh
     ports:
-      - "80:80"     # HTTP  → nginx redirects to HTTPS
-      - "443:443"   # HTTPS → nginx serves SSL + proxies API
-    volumes:
-      - /etc/letsencrypt:/etc/letsencrypt:ro
+      # Host 8082 → container 80. This box shares a host nginx that owns :80/:443,
+      # so Sparsh is published on a dedicated port. Access: http://<host-ip>:8082
+      # When a domain + TLS is added, front this port with the host nginx (or
+      # re-introduce 443 + a letsencrypt volume mount here).
+      - "8082:80"
     depends_on:
       - backend
     restart: always
