@@ -31,6 +31,7 @@ import LearnerSessions from './pages/LearnerSessions';
 import CompanyPortal from './pages/CompanyPortal';
 import AssessmentPlayer from './pages/AssessmentPlayer';
 import MyReports from './pages/MyReports';
+import MediaLibrary from './pages/MediaLibrary';
 import ForgotPassword from './pages/ForgotPassword';
 import PrivateRoute from './components/common/PrivateRoute';
 import './index.css';
@@ -62,7 +63,8 @@ const AppRoutes = () => {
       <Route path="/sessions" element={<PrivateRoute><LearnerSessions /></PrivateRoute>} />
       <Route path="/company-portal" element={<PrivateRoute><CompanyPortal /></PrivateRoute>} />
       <Route path="/my-reports" element={<PrivateRoute><MyReports /></PrivateRoute>} />
-      
+      <Route path="/media" element={<PrivateRoute><MediaLibrary /></PrivateRoute>} />
+
       {/* Admin Side: Staff Management */}
       <Route path="/admin/users" element={<PrivateRoute><UserManagement /></PrivateRoute>} />
       <Route path="/admin/users/:userId" element={<PrivateRoute><UserDetails /></PrivateRoute>} />

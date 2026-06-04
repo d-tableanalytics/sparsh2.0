@@ -11,7 +11,7 @@ from app.services.notification_service import (
 )
 from app.services.activity_log_service import log_activity
 from app.services.gpt_service import grade_descriptive_answer
-from app.services.s3_service import upload_file_to_s3
+from app.services.s3_service import upload_file_to_s3, get_signed_url
 from app.services.event_sync_service import sync_event_to_collection
 from bson import ObjectId
 from datetime import datetime, timedelta, timezone
@@ -499,7 +499,7 @@ async def upload_content(event_id: str, file: UploadFile = File(...), current_us
 import os
 import aiofiles
 import tempfile
-from app.services.transcription_service import process_background_upload_and_transcribe
+from app.services.transcription_service import process_background_upload_and_transcribe, process_media_library_resource
 
 @router.post("/{event_id}/upload-resource")
 async def upload_resource(event_id: str, background_tasks: BackgroundTasks, file: UploadFile = File(...), resource_type: str = Form(...), current_user: dict = Depends(get_current_user)):
@@ -529,6 +529,94 @@ async def upload_resource(event_id: str, background_tasks: BackgroundTasks, file
         background_tasks.add_task(process_background_upload_and_transcribe, event_id, resource_id, local_path, file.filename, file.content_type, resource_type, col_name)
         return {"message": "Resource accepted.", "resource": resource_obj}
     except Exception as e: raise HTTPException(status_code=500, detail=str(e))
+
+
+async def _get_media_asset(media_id: str) -> dict:
+    """Fetch a Media Library record or raise 404."""
+    try:
+        media = await get_collection("media_library").find_one({"_id": ObjectId(media_id)})
+    except Exception:
+        media = None
+    if not media:
+        raise HTTPException(status_code=404, detail="Media Library file not found")
+    return media
+
+
+@router.post("/{event_id}/add-content-from-media")
+async def add_content_from_media(event_id: str, payload: dict, current_user: dict = Depends(get_current_user)):
+    """Attach an existing Media Library file as Shared Content (by reference)."""
+    existing, col_name = await find_event_across_collections(event_id)
+    if not existing: raise HTTPException(status_code=404, detail="Event not found")
+
+    is_admin = current_user.get("role") == "superadmin"
+    has_update_perm = current_user.get("permissions", {}).get("calendar", {}).get("update")
+    is_creator = existing.get("user_id") == str(current_user["_id"])
+    if not (is_admin or has_update_perm or is_creator):
+        raise HTTPException(status_code=403, detail="Only the creator or an authorized administrator can add content")
+
+    media = await _get_media_asset(payload.get("media_id"))
+    # Regenerate a fresh signed URL from the stored key (signed URLs expire).
+    url = get_signed_url(media["s3_key"]) if media.get("s3_key") else media.get("url")
+
+    content_obj = {
+        "id": str(ObjectId()),
+        "name": media.get("name") or media.get("file_name"),
+        "url": url,
+        "file_type": media.get("content_type"),
+        "media_id": str(media["_id"]),   # reference back to the library
+        "s3_key": media.get("s3_key"),
+        "uploaded_by": str(current_user["_id"]),
+        "uploaded_at": datetime.utcnow(),
+        "views": 0,
+    }
+    await get_collection(col_name).update_one({"_id": ObjectId(event_id)}, {"$push": {"contents": content_obj}})
+    await sync_event_to_collection(event_id)
+    return {"message": "Content added from Media Library", "content": content_obj}
+
+
+@router.post("/{event_id}/add-resource-from-media")
+async def add_resource_from_media(event_id: str, background_tasks: BackgroundTasks, payload: dict, current_user: dict = Depends(get_current_user)):
+    """Attach an existing Media Library file as an Executive Resource (by
+    reference). Audio/video still get auto-transcribed, same as a direct upload."""
+    existing, col_name = await find_event_across_collections(event_id)
+    if not existing: raise HTTPException(status_code=404, detail="Event not found")
+
+    is_admin = current_user.get("role") == "superadmin"
+    has_update_perm = current_user.get("permissions", {}).get("calendar", {}).get("update")
+    is_creator = existing.get("user_id") == str(current_user["_id"])
+    if not (is_admin or has_update_perm or is_creator):
+        raise HTTPException(status_code=403, detail="Only the creator or an authorized administrator can add resources")
+
+    media = await _get_media_asset(payload.get("media_id"))
+    # Resource format: caller may override, else fall back to the library type.
+    resource_type = (payload.get("resource_type") or media.get("media_type") or "other").lower()
+    url = get_signed_url(media["s3_key"]) if media.get("s3_key") else media.get("url")
+
+    resource_id = str(ObjectId())
+    resource_obj = {
+        "id": resource_id,
+        "name": media.get("name") or media.get("file_name"),
+        "url": url,
+        "system_type": resource_type,
+        "file_type": media.get("content_type"),
+        "media_id": str(media["_id"]),
+        "s3_key": media.get("s3_key"),
+        "uploaded_by": str(current_user["_id"]),
+        "uploaded_at": datetime.utcnow(),
+        "status": "processing",
+        "progress": 0,
+        "transcription": None,
+        "views": 0,
+    }
+    await get_collection(col_name).update_one({"_id": ObjectId(event_id)}, {"$push": {"resources": resource_obj}})
+
+    background_tasks.add_task(
+        process_media_library_resource,
+        event_id, resource_id, media.get("s3_key"),
+        resource_obj["name"], media.get("content_type") or "",
+        resource_type, url, col_name,
+    )
+    return {"message": "Resource added from Media Library", "resource": resource_obj}
 
 
 @router.delete("/{event_id}")
