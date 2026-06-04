@@ -16,6 +16,9 @@ from app.controllers.auth_controller import (
 )
 from bson import ObjectId
 import random
+import logging
+
+logger = logging.getLogger("auth")
 from app.models.auth import Token, PasswordChange, ForgotPasswordRequest, ResetPasswordRequest, AdminMemberUpdate
 from app.services.activity_log_service import log_activity
 from app.services.notification_service import send_notification_from_template, send_otp_email
@@ -232,25 +235,29 @@ async def register(user: UserCreate, background_tasks: BackgroundTasks, current_
 
 @router.post("/token", response_model=Token)
 async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends()):
+    logger.info(f"Login attempt for username: {form_data.username}")
     # Search Staff first
     user = await get_collection("staff").find_one({"email": form_data.username})
     if not user:
         # Search Learners
         user = await get_collection("learners").find_one({"email": form_data.username})
-        
+
     if not user or not verify_password(form_data.password, user["password"]):
+        logger.warning(f"Login failed (invalid credentials) for username: {form_data.username}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect username or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    
+
     if user.get("is_active") == False:
+        logger.warning(f"Login blocked (deactivated account): {form_data.username}")
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Your account has been deactivated. Please contact your administrator."
         )
-    
+
+    logger.info(f"Login success for {user.get('email')} (role={user.get('role')}, id={user.get('_id')})")
     access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
         data={

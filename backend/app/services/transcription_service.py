@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime
 from bson import ObjectId
 from app.db.mongodb import get_collection
-from app.services.s3_service import get_s3_client, get_signed_url
+from app.services.s3_service import get_s3_client, get_signed_url, download_file_from_s3
 from app.services.event_sync_service import sync_event_to_collection
 from app.config.settings import settings
 from boto3.s3.transfer import TransferConfig
@@ -162,5 +162,74 @@ async def process_background_upload_and_transcribe(
         if os.path.exists(local_file_path):
             try:
                 os.remove(local_file_path)
+            except Exception:
+                pass
+
+
+async def process_media_library_resource(
+    event_id: str,
+    resource_id: str,
+    s3_key: str,
+    filename: str,
+    content_type: str,
+    system_type: str,
+    signed_url: str,
+    col_name: str = "calendar_events",
+):
+    """Finalize a resource that references an existing Media Library file.
+
+    The file is already in S3, so we skip the upload. For audio/video we
+    download it to a temp file and run the same transcription pipeline used
+    for direct uploads, so the transcript-auto behavior stays identical.
+    """
+    col = get_collection(col_name)
+    local_path = None
+    try:
+        async def update_progress(percent: int):
+            await col.update_one(
+                {"_id": ObjectId(event_id), "resources.id": resource_id},
+                {"$set": {"resources.$.progress": percent}},
+            )
+
+        await update_progress(5)
+
+        final_transcription = None
+        if system_type in ["audio", "video"] and s3_key:
+            tmp_dir = tempfile.gettempdir()
+            local_path = os.path.join(tmp_dir, f"{resource_id}_{filename}")
+            loop = asyncio.get_event_loop()
+            downloaded = await loop.run_in_executor(
+                None, download_file_from_s3, s3_key, local_path
+            )
+            if downloaded:
+                print(f"[{resource_id}] Transcribing media-library file...")
+                final_transcription = await transcribe_media_file(local_path, update_progress)
+
+        update_doc = {
+            "resources.$.status": "ready",
+            "resources.$.url": signed_url,
+            "resources.$.progress": 100,
+            "updated_at": datetime.utcnow(),
+        }
+        if final_transcription:
+            update_doc["resources.$.transcription"] = final_transcription
+
+        await col.update_one(
+            {"_id": ObjectId(event_id), "resources.id": resource_id},
+            {"$set": update_doc},
+        )
+        print(f"[{resource_id}] Media-library resource ready!")
+        await sync_event_to_collection(event_id)
+
+    except Exception as e:
+        print(f"[{resource_id}] Media-library resource error: {e}")
+        await col.update_one(
+            {"_id": ObjectId(event_id), "resources.id": resource_id},
+            {"$set": {"resources.$.status": "failed", "resources.$.error": str(e)}},
+        )
+    finally:
+        if local_path and os.path.exists(local_path):
+            try:
+                os.remove(local_path)
             except Exception:
                 pass

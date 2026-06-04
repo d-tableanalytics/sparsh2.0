@@ -129,12 +129,68 @@ const SessionDetails = () => {
 
     // Upload States
     const [uploadModalType, setUploadModalType] = useState(null); // 'content' or 'resource'
+    const [uploadSource, setUploadSource] = useState('upload'); // 'upload' or 'library'
     const [uploadFile, setUploadFile] = useState(null);
     const [resourceType, setResourceType] = useState('pdf');
     const [uploading, setUploading] = useState(false);
     const [uploadProgress, setUploadProgress] = useState(0);
 
+    // Media Library States
+    const [mediaItems, setMediaItems] = useState([]);
+    const [selectedMediaId, setSelectedMediaId] = useState('');
+    const [loadingMedia, setLoadingMedia] = useState(false);
+
+    const openUploadModal = (type) => {
+        setUploadModalType(type);
+        setUploadSource('upload');
+        setUploadFile(null);
+        setSelectedMediaId('');
+        setUploadProgress(0);
+        if (mediaItems.length === 0) fetchMediaItems();
+    };
+
+    const fetchMediaItems = async () => {
+        setLoadingMedia(true);
+        try {
+            const { data } = await api.get('/media');
+            setMediaItems(data);
+        } catch (err) {
+            console.error('Failed to load media library', err);
+        } finally {
+            setLoadingMedia(false);
+        }
+    };
+
     const handleUploadSubmit = async () => {
+        // ─── Add by reference from the Media Library ───
+        if (uploadSource === 'library') {
+            if (!selectedMediaId) return showError("Please select a file from the library.");
+            setUploading(true);
+            try {
+                if (uploadModalType === 'resource') {
+                    await api.post(`/calendar/events/${sessionId}/add-resource-from-media`, {
+                        media_id: selectedMediaId,
+                        resource_type: resourceType,
+                    });
+                } else {
+                    await api.post(`/calendar/events/${sessionId}/add-content-from-media`, {
+                        media_id: selectedMediaId,
+                    });
+                }
+                showSuccess("Added from Media Library!");
+                setUploadModalType(null);
+                setSelectedMediaId('');
+                fetchSessionData();
+            } catch (err) {
+                console.error(err);
+                showError("Failed to add: " + (err.response?.data?.detail || "Unknown error"));
+            } finally {
+                setUploading(false);
+            }
+            return;
+        }
+
+        // ─── Upload a brand new file ───
         if (!uploadFile) return showError("Please select a file first.");
         setUploading(true);
         setUploadProgress(0);
@@ -472,7 +528,7 @@ const SessionDetails = () => {
                             <UploadCloud size={16} className="text-[var(--accent-indigo)]" /> Shared Content
                         </h3>
                         {isStaff && (
-                            <button onClick={() => setUploadModalType('content')} className="px-3 py-1 bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] rounded-lg text-[9px] font-black uppercase tracking-widest border border-[var(--accent-indigo-border)] hover:bg-[var(--accent-indigo)] hover:text-white transition-all">
+                            <button onClick={() => openUploadModal('content')} className="px-3 py-1 bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] rounded-lg text-[9px] font-black uppercase tracking-widest border border-[var(--accent-indigo-border)] hover:bg-[var(--accent-indigo)] hover:text-white transition-all">
                                 Upload New
                             </button>
                         )}
@@ -510,7 +566,7 @@ const SessionDetails = () => {
                             <FileUp size={16} className="text-amber-500" /> Executive Resources
                         </h3>
                         {isStaff && (
-                            <button onClick={() => setUploadModalType('resource')} className="px-3 py-1 bg-amber-50 text-amber-600 rounded-lg text-[9px] font-black uppercase tracking-widest border border-amber-200 hover:bg-amber-500 hover:text-white transition-all">
+                            <button onClick={() => openUploadModal('resource')} className="px-3 py-1 bg-amber-50 text-amber-600 rounded-lg text-[9px] font-black uppercase tracking-widest border border-amber-200 hover:bg-amber-500 hover:text-white transition-all">
                                 <PlusCircle size={10} className="inline mr-1" /> Add Source
                             </button>
                         )}
@@ -788,6 +844,24 @@ const SessionDetails = () => {
                         </div>
 
                         <div className="space-y-6 flex-1">
+                            {/* Source toggle: upload a new file OR pick one already in the Media Library */}
+                            <div className="grid grid-cols-2 gap-2 p-1 bg-[var(--input-bg)] rounded-2xl border border-[var(--border)]">
+                                <button
+                                    type="button"
+                                    onClick={() => setUploadSource('upload')}
+                                    className={`py-2 rounded-xl text-[11px] font-black uppercase tracking-widest transition-all ${uploadSource === 'upload' ? 'bg-[var(--accent-indigo)] text-white shadow' : 'text-[var(--text-muted)]'}`}
+                                >
+                                    Upload New
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => setUploadSource('library')}
+                                    className={`py-2 rounded-xl text-[11px] font-black uppercase tracking-widest transition-all ${uploadSource === 'library' ? 'bg-[var(--accent-indigo)] text-white shadow' : 'text-[var(--text-muted)]'}`}
+                                >
+                                    From Library
+                                </button>
+                            </div>
+
                             {uploadModalType === 'resource' && (
                                 <div className="space-y-2">
                                     <label className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest">Resource Format</label>
@@ -799,17 +873,53 @@ const SessionDetails = () => {
                                         <option value="excel">Excel Sheet</option>
                                         <option value="other">Other</option>
                                     </select>
+                                    {uploadSource === 'library' && (
+                                        <p className="text-[9px] font-bold text-[var(--text-muted)] uppercase tracking-wider">
+                                            Audio/Video resources are auto-transcribed after adding.
+                                        </p>
+                                    )}
                                 </div>
                             )}
 
-                            <div className="space-y-2">
-                                <label className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest">Select File</label>
-                                <input type="file" onChange={e => setUploadFile(e.target.files[0])}
-                                    className="w-full bg-[var(--input-bg)] px-4 py-3 border border-dashed border-[var(--border)] rounded-[16px] text-sm font-bold text-[var(--text-muted)] outline-none focus:border-[var(--accent-indigo)] transition-all
-                                        file:mr-4 file:py-2 file:px-4 file:rounded-xl file:border-0 file:text-[11px] file:font-black file:uppercase file:bg-[var(--accent-indigo-bg)] file:text-[var(--accent-indigo)] hover:file:opacity-90" />
-                            </div>
+                            {uploadSource === 'library' ? (
+                                <div className="space-y-2">
+                                    <label className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest">Select From Media Library</label>
+                                    {loadingMedia ? (
+                                        <p className="text-[12px] text-[var(--text-muted)] italic py-2">Loading library…</p>
+                                    ) : mediaItems.length === 0 ? (
+                                        <p className="text-[12px] text-[var(--text-muted)] italic py-2">No files in the Media Library yet.</p>
+                                    ) : (
+                                        <select
+                                            value={selectedMediaId}
+                                            onChange={e => {
+                                                setSelectedMediaId(e.target.value);
+                                                // For resources, default the format to the library file's type.
+                                                if (uploadModalType === 'resource') {
+                                                    const m = mediaItems.find(mi => mi._id === e.target.value);
+                                                    if (m?.media_type) setResourceType(m.media_type);
+                                                }
+                                            }}
+                                            className="w-full bg-[var(--input-bg)] px-4 py-3 border border-[var(--border)] rounded-[16px] text-sm font-bold text-[var(--text-main)] outline-none focus:border-[var(--accent-indigo)] transition-all"
+                                        >
+                                            <option value="">Choose a file…</option>
+                                            {mediaItems.map(m => (
+                                                <option key={m._id} value={m._id}>
+                                                    {m.name} ({m.media_type})
+                                                </option>
+                                            ))}
+                                        </select>
+                                    )}
+                                </div>
+                            ) : (
+                                <div className="space-y-2">
+                                    <label className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest">Select File</label>
+                                    <input type="file" onChange={e => setUploadFile(e.target.files[0])}
+                                        className="w-full bg-[var(--input-bg)] px-4 py-3 border border-dashed border-[var(--border)] rounded-[16px] text-sm font-bold text-[var(--text-muted)] outline-none focus:border-[var(--accent-indigo)] transition-all
+                                            file:mr-4 file:py-2 file:px-4 file:rounded-xl file:border-0 file:text-[11px] file:font-black file:uppercase file:bg-[var(--accent-indigo-bg)] file:text-[var(--accent-indigo)] hover:file:opacity-90" />
+                                </div>
+                            )}
 
-                            {uploading && (
+                            {uploading && uploadSource === 'upload' && (
                                 <div className="space-y-2 pt-2">
                                     <div className="flex justify-between items-center text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest">
                                         <span>Server Transfer Progress</span>
@@ -828,7 +938,7 @@ const SessionDetails = () => {
                                 Cancel
                             </button>
                             <button onClick={handleUploadSubmit} disabled={uploading} className="px-6 py-2.5 bg-[var(--accent-indigo)] text-white rounded-xl text-[12px] font-black hover:opacity-90 transition-all flex items-center gap-2 shadow-lg disabled:opacity-50">
-                                {uploading ? 'Processing...' : 'Upload File'}
+                                {uploading ? 'Processing...' : (uploadSource === 'library' ? 'Add From Library' : 'Upload File')}
                             </button>
                         </div>
                     </motion.div>
