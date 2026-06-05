@@ -109,6 +109,28 @@ function dispatchFrame(frame, onEvent) {
   onEvent(event, data);
 }
 
+/**
+ * Upload a file to the assistant. Returns { filename, text, has_images }.
+ * The extracted text is appended to the user's next message as context.
+ */
+export async function uploadFile(file) {
+  const formData = new FormData();
+  formData.append('file', file);
+
+  const res = await fetch(`${API_BASE}/assistant/upload`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${getToken()}` },
+    body: formData,
+  });
+
+  if (!res.ok) {
+    const err = new Error(`Upload failed (${res.status})`);
+    err.status = res.status;
+    throw err;
+  }
+  return res.json();
+}
+
 /** Non-streaming fallback. Returns { conversation_id, answer, sources, meta }. */
 export async function askOnce({ message, conversationId }) {
   const res = await api.post('/assistant/ask', {

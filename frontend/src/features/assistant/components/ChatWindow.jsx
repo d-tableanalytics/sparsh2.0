@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Bot, X, AlertTriangle, PanelLeft, Plus } from 'lucide-react';
+import { Bot, X, AlertTriangle, PanelLeft, Plus, Square } from 'lucide-react';
 import useAssistant from '../hooks/useAssistant';
 import useConversation from '../hooks/useConversation';
 import MessageList from './MessageList';
@@ -10,6 +10,7 @@ export default function ChatWindow({ onClose }) {
   const {
     messages,
     streaming,
+    uploading,
     activeTool,
     error,
     send,
@@ -21,15 +22,14 @@ export default function ChatWindow({ onClose }) {
 
   const conversations = useConversation();
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [editTarget, setEditTarget] = useState(null); // { id, content }
   const prevStreaming = useRef(false);
 
-  // Load history when the panel first opens.
   useEffect(() => {
     conversations.refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // After a turn finishes, refresh the list (captures a new conversation + title).
   useEffect(() => {
     if (prevStreaming.current && !streaming) {
       conversations.refresh();
@@ -63,8 +63,16 @@ export default function ChatWindow({ onClose }) {
     if (id === currentConversationId) reset();
   };
 
+  // Called from MessageBubble when user clicks Edit on their message
+  const handleEditMessage = (messageId, content) => {
+    setEditTarget({ id: messageId, content });
+  };
+
+  const handleEditConsumed = () => setEditTarget(null);
+
   return (
     <div className="relative flex h-full w-full flex-col overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--bg-card)] shadow-2xl">
+
       {/* Header */}
       <div className="flex items-center justify-between border-b border-[var(--border)] bg-[var(--bg-card)] px-2.5 py-2.5">
         <div className="flex items-center gap-1.5">
@@ -110,8 +118,23 @@ export default function ChatWindow({ onClose }) {
           streaming={streaming}
           activeTool={activeTool}
           onPickSuggestion={send}
+          onEditMessage={handleEditMessage}
         />
       </div>
+
+      {/* "Stop generating" pill — visible only while streaming */}
+      {streaming && (
+        <div className="flex justify-center pb-1 pt-0.5">
+          <button
+            type="button"
+            onClick={cancel}
+            className="flex items-center gap-1.5 rounded-full border border-[var(--border)] bg-[var(--bg-card)] px-3 py-1.5 text-xs font-medium text-[var(--text-muted)] shadow-sm hover:border-red-400 hover:text-red-500 transition"
+          >
+            <Square size={11} />
+            Stop generating
+          </button>
+        </div>
+      )}
 
       {/* Error banner */}
       {error && (
@@ -122,9 +145,16 @@ export default function ChatWindow({ onClose }) {
       )}
 
       {/* Input */}
-      <ChatInput onSend={send} onCancel={cancel} streaming={streaming} />
+      <ChatInput
+        onSend={send}
+        onCancel={cancel}
+        streaming={streaming}
+        uploading={uploading}
+        editTarget={editTarget}
+        onEditConsumed={handleEditConsumed}
+      />
 
-      {/* Conversation sidebar (overlay) */}
+      {/* Conversation sidebar overlay */}
       {sidebarOpen && (
         <div className="absolute inset-0 z-10 flex">
           <div className="h-full w-[72%] max-w-[260px] border-r border-[var(--border)] shadow-xl">
@@ -138,7 +168,6 @@ export default function ChatWindow({ onClose }) {
               onClose={() => setSidebarOpen(false)}
             />
           </div>
-          {/* Scrim to dismiss */}
           <button
             aria-label="Close conversations"
             onClick={() => setSidebarOpen(false)}

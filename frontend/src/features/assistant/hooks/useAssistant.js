@@ -1,17 +1,13 @@
 import { useCallback, useRef, useState } from 'react';
-import { streamAsk } from '../services/assistantApi';
+import { streamAsk, uploadFile } from '../services/assistantApi';
 
 let _seq = 0;
 const nextId = (p) => `${p}-${Date.now()}-${_seq++}`;
 
-/**
- * Owns the chat message list and the SSE streaming lifecycle.
- * Message shape: { id, role: 'user'|'assistant', content, streaming?, errored?,
- *                  sources?, attributions?, meta? }
- */
 export default function useAssistant() {
   const [messages, setMessages] = useState([]);
   const [streaming, setStreaming] = useState(false);
+  const [uploading, setUploading] = useState(false);
   const [activeTool, setActiveTool] = useState(null);
   const [error, setError] = useState(null);
   const [currentConversationId, setCurrentConversationId] = useState(null);
@@ -42,7 +38,6 @@ export default function useAssistant() {
     setStreaming(false);
   }, []);
 
-  // Hydrate from a loaded conversation (Milestone B).
   const loadConversation = useCallback((conversation) => {
     abortRef.current?.abort();
     conversationIdRef.current = conversation.id;
@@ -55,8 +50,6 @@ export default function useAssistant() {
         .filter((m) => m.role === 'user' || m.role === 'assistant')
         .map((m) => {
           const attributions = m.attributions || [];
-          // Persisted turns store `attributions` (not the live `sources` array),
-          // so derive the flat source list for the attribution chips.
           const sources = [...new Set(attributions.flatMap((a) => a.sources || []))];
           return {
             id: nextId(m.role),
@@ -73,17 +66,64 @@ export default function useAssistant() {
     abortRef.current?.abort();
   }, []);
 
+  /**
+   * send(text, { editMessageId, files })
+   * - editMessageId: if set, remove that message and everything after it before sending
+   * - files: File[] to upload before sending; extracted text is appended to message
+   */
   const send = useCallback(
-    async (text) => {
+    async (text, { editMessageId, files = [] } = {}) => {
       const content = (text || '').trim();
-      if (!content || streaming) return;
+      if ((!content && files.length === 0) || streaming) return;
 
       setError(null);
+
+      // When editing, slice the conversation up to (but not including) the edited message
+      if (editMessageId) {
+        setMessages((list) => {
+          const idx = list.findIndex((m) => m.id === editMessageId);
+          return idx >= 0 ? list.slice(0, idx) : list;
+        });
+      }
+
+      // Upload files and collect extracted text to append to the message
+      let finalContent = content;
+      if (files.length > 0) {
+        setUploading(true);
+        const fileContexts = [];
+        for (const file of files) {
+          try {
+            const result = await uploadFile(file);
+            fileContexts.push(
+              result.text
+                ? `[File: ${result.filename}]\n${result.text.slice(0, 2000)}`
+                : `[File attached: ${result.filename}]`,
+            );
+          } catch {
+            // If upload endpoint unavailable, just note the filename
+            fileContexts.push(`[File attached: ${file.name}]`);
+          }
+        }
+        setUploading(false);
+        if (fileContexts.length > 0) {
+          finalContent = finalContent
+            ? `${finalContent}\n\n${fileContexts.join('\n\n')}`
+            : fileContexts.join('\n\n');
+        }
+      }
+
+      if (!finalContent) return;
+
       const userId = nextId('u');
       const asstId = nextId('a');
+
+      // Show original user text in the bubble (not the enriched server payload)
+      const displayContent =
+        content || files.map((f) => `[File: ${f.name}]`).join(', ');
+
       setMessages((list) => [
         ...list,
-        { id: userId, role: 'user', content },
+        { id: userId, role: 'user', content: displayContent },
         { id: asstId, role: 'assistant', content: '', streaming: true },
       ]);
       setStreaming(true);
@@ -94,7 +134,7 @@ export default function useAssistant() {
 
       try {
         await streamAsk({
-          message: content,
+          message: finalContent,
           conversationId: conversationIdRef.current,
           signal: controller.signal,
           onEvent: (event, data) => {
@@ -118,13 +158,14 @@ export default function useAssistant() {
         });
       } catch (e) {
         if (e.name === 'AbortError') {
-          patch(asstId, { streaming: false });
+          // Mark the message as stopped — renders "Response stopped." indicator
+          patch(asstId, { streaming: false, stopped: true });
         } else {
           const msg =
             e.status === 429
               ? `You're sending messages too quickly.${e.retryAfter ? ` Try again in ${Math.ceil(e.retryAfter)}s.` : ' Please slow down.'}`
               : e.status === 403
-                ? 'The assistant isn’t available for your account yet.'
+                ? "The assistant isn't available for your account yet."
                 : 'Something went wrong reaching the assistant. Please try again.';
           setError(msg);
           patch(asstId, (m) => ({
@@ -145,6 +186,7 @@ export default function useAssistant() {
   return {
     messages,
     streaming,
+    uploading,
     activeTool,
     error,
     send,

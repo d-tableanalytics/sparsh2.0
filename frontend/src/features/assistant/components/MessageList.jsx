@@ -4,14 +4,13 @@ import MessageBubble from './MessageBubble';
 import TypingIndicator from './TypingIndicator';
 import SuggestedQuestions from './SuggestedQuestions';
 
-export default function MessageList({ messages, streaming, activeTool, onPickSuggestion }) {
+export default function MessageList({ messages, streaming, activeTool, onPickSuggestion, onEditMessage }) {
   const endRef = useRef(null);
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
   }, [messages, activeTool]);
 
-  // Whether the last assistant message is still empty (so show a typing row).
   const last = messages[messages.length - 1];
   const showTyping = streaming && last && last.role === 'assistant' && !last.content;
 
@@ -33,7 +32,7 @@ export default function MessageList({ messages, streaming, activeTool, onPickSug
   return (
     <div className="flex flex-col gap-3 px-3 py-3">
       {messages.map((m) => (
-        <MessageBubble key={m.id} message={m} />
+        <MessageBubble key={m.id} message={m} onEdit={onEditMessage} />
       ))}
       {showTyping && (
         <div className="pl-9">

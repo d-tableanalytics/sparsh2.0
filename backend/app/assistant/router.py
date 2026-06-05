@@ -13,7 +13,10 @@ Cross-cutting: correlation IDs, feature-flag gating, per-user rate limiting.
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+import os
+import tempfile
+
+from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, UploadFile
 from fastapi.responses import StreamingResponse
 
 from app.assistant import flags, ratelimit
@@ -107,6 +110,49 @@ async def ask(req: AskRequest, request: Request, response: Response,
         return await _orchestrator.handle_message(ctx, req.message, req.conversation_id)
     except AssistantError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
+
+
+# ── File upload (extract text for chat context) ────────────────────────────
+@router.post("/upload")
+async def upload_file(
+    file: UploadFile = File(...),
+    ctx: UserContext = Depends(get_user_context),
+):
+    """Accept a file, extract its text/images, and return content for chat context."""
+    from app.services.gpt_service import extract_text_from_file
+
+    ALLOWED = {
+        "image/jpeg", "image/jpg", "image/png", "image/webp",
+        "application/pdf", "application/msword",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "text/plain",
+        "audio/mpeg", "audio/wav", "audio/mp4",
+        "video/mp4", "video/webm", "video/quicktime",
+    }
+    MAX_BYTES = 10 * 1024 * 1024  # 10 MB
+
+    if file.content_type not in ALLOWED:
+        raise HTTPException(status_code=415, detail=f"Unsupported file type: {file.content_type}")
+
+    content = await file.read()
+    if len(content) > MAX_BYTES:
+        raise HTTPException(status_code=413, detail="File exceeds 10 MB limit.")
+
+    suffix = os.path.splitext(file.filename or "")[1] or ".bin"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(content)
+        tmp_path = tmp.name
+
+    try:
+        result = await extract_text_from_file(tmp_path, file.filename or "upload")
+        return {
+            "filename": file.filename,
+            "text": (result.get("text") or "")[:3000],
+            "has_images": len(result.get("images") or []) > 0,
+        }
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
 
 
 # ── Conversation management (owner-scoped) ─────────────────────────────────
