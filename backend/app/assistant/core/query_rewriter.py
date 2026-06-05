@@ -16,21 +16,44 @@ _FOLLOWUP_MARKERS = {
 
 # Greetings and social niceties that need no context rewrite — answer directly.
 _CASUAL = {
+    # Standard greetings
     "hi", "hello", "hey", "hiya", "howdy", "yo", "sup", "heya",
+    # Common typos / informal variants
+    "hy", "hii", "hiii", "helo", "helo", "heyy", "heyyy", "hai",
+    "helo", "hell0", "h1", "hihi", "hiiii",
+    # Time-based greetings
     "good morning", "good afternoon", "good evening", "good night",
-    "how are you", "how r u", "how are u", "whats up", "what's up",
+    "gm", "gn",
+    # How are you variants
+    "how are you", "how r u", "how are u", "how r you",
+    "whats up", "what's up", "wassup", "wazzup",
     "how do you do", "how's it going", "hows it going",
-    "thanks", "thank you", "ty", "thx", "cheers",
-    "bye", "goodbye", "see you", "see ya", "cya", "take care",
-    "ok", "okay", "alright", "cool", "nice", "great", "got it",
-    "sure", "sounds good", "perfect", "awesome",
+    "how are you doing", "how r u doing",
+    # Thanks / acknowledgement
+    "thanks", "thank you", "ty", "thx", "cheers", "thnx", "thanku", "thank u",
+    # Bye
+    "bye", "goodbye", "good bye", "see you", "see ya", "cya", "take care",
+    "bye bye", "byee", "tata",
+    # Short acknowledgements
+    "ok", "okay", "okk", "okkk", "alright", "cool", "nice", "great", "got it",
+    "sure", "sounds good", "perfect", "awesome", "noted", "k", "kk",
+}
+
+# First-word triggers: if the message starts with one of these it's a greeting
+_GREETING_STARTERS = {
+    "hi", "hey", "hello", "hy", "hiya", "heya", "hii", "helo", "hai",
+    "howdy", "yo", "sup", "gm", "gn",
 }
 
 
 def _is_casual(message: str) -> bool:
     """True for greetings / social niceties — skip context-based rewrite."""
-    normalized = message.strip().lower().rstrip("!?.,;:")
-    return normalized in _CASUAL
+    normalized = message.strip().lower().rstrip("!?.,;: ")
+    if normalized in _CASUAL:
+        return True
+    # Also catch "hi there", "hey buddy", "hello everyone", etc.
+    first_word = normalized.split()[0] if normalized.split() else ""
+    return first_word in _GREETING_STARTERS
 
 
 def _needs_rewrite(message: str) -> bool:
