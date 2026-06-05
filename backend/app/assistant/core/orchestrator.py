@@ -1,127 +1,227 @@
 """The agent loop — the conductor.
 
-Phase 1 flow (no memory/rewriter/analytics yet):
+Phase 2 flow:
 
-    user message
-      → build system prompt (persona + grounding rules)
-      → expose only the role-permitted tool schema to the model
-      → tool-calling loop (bounded by MAX_TOOL_ITERATIONS):
-            model picks tool(s) → execute_tool() (timeout + error isolation)
-            → feed compact results back → repeat
-      → model produces the final conversational answer
+    load/create conversation (owner-scoped)
+      → build context window (rolling summary + recent turns)
+      → query rewrite (resolve follow-ups / vague queries, when needed)
+      → build system prompt
+      → expose only role-permitted tools
+      → tool-calling loop (timeout + error isolation per tool)
+      → final answer  [non-streamed: returned | streamed: SSE token events]
+      → persist turn; auto-title first exchange; roll summary when long
 
-The orchestrator is injected with an LLMClient (overridable in tests with a fake).
+Two entry points share the same tool resolution:
+  * handle_message()  — non-streaming, returns AskResponse
+  * stream_message()  — async generator of SSE event strings
 """
 from __future__ import annotations
 
 import json
-from typing import List, Optional
+from typing import AsyncIterator, List, Optional, Tuple
 
 from app.assistant.config import config
-from app.assistant.core.llm_client import LLMClient
+from app.assistant.core import context_manager, query_rewriter
+from app.assistant.core.llm_client import LLMClient, UsageMeter
 from app.assistant.core.prompt_builder import build_system_prompt
+from app.assistant.memory import conversation_store, summarizer
 from app.assistant.schemas.chat import AskResponse
 from app.assistant.schemas.context import UserContext
+from app.assistant.schemas.conversation import Conversation
 from app.assistant.tools import registry
+
+
+def _sse(event: str, data: dict) -> str:
+    return f"event: {event}\ndata: {json.dumps(data, default=str)}\n\n"
 
 
 class Orchestrator:
     def __init__(self, llm: Optional[LLMClient] = None):
         self.llm = llm or LLMClient()
-        # Ensure all domain tools are registered (idempotent — imports are cached).
-        registry.register_all()
+        registry.register_all()  # idempotent
 
+    # ── Shared setup ──────────────────────────────────────────────────────
+    async def _prepare(
+        self, ctx: UserContext, message: str, conversation_id: Optional[str], meter: UsageMeter
+    ) -> Tuple[Conversation, List[dict], List[dict], str]:
+        convo = await conversation_store.load_or_create(ctx, conversation_id)
+        window = context_manager.build_window(convo)
+
+        recent = "\n".join(
+            f"{m.role}: {m.content}" for m in convo.messages[-4:]
+        )
+        rw = await query_rewriter.rewrite(
+            self.llm, message, convo.summary or "", recent, meter=meter
+        )
+        effective = rw["rewritten_query"]
+
+        messages = [{"role": "system", "content": build_system_prompt(ctx)}]
+        messages.extend(window)
+        messages.append({"role": "user", "content": effective})
+        return convo, messages, registry.openai_schema_for_role(ctx.role), effective
+
+    async def _run_tools(self, ctx, spec_calls, messages, sources, tools_used) -> None:
+        """Execute a batch of tool calls and append their results to the transcript."""
+        for call in spec_calls:
+            name = call["name"]
+            try:
+                args = json.loads(call.get("arguments") or "{}")
+            except json.JSONDecodeError:
+                args = {}
+            spec = registry.get_tool(name)
+            if spec is None:
+                payload = {"success": False, "error": "Unknown tool"}
+            else:
+                result = await registry.execute_tool(spec, ctx, args)
+                tools_used.append(name)
+                if result.meta.sources:
+                    sources.update(result.meta.sources)
+                payload = result.for_llm()
+            messages.append(
+                {"role": "tool", "tool_call_id": call.get("id") or name, "content": json.dumps(payload, default=str)}
+            )
+
+    async def _persist(self, convo, user_msg, answer, meter) -> None:
+        await conversation_store.append_turn(convo, user_msg, answer)
+        # Reload-light: reflect the two new messages locally for title/summary decisions.
+        convo.messages.append(_quick_msg("user", user_msg))
+        convo.messages.append(_quick_msg("assistant", answer))
+
+        if not convo.title:
+            title = await summarizer.generate_title(self.llm, convo, meter=meter)
+            await conversation_store.set_title(convo, title)
+            convo.title = title
+
+        if context_manager.needs_summary(convo):
+            new_summary = await summarizer.roll_summary(self.llm, convo, meter=meter)
+            if new_summary:
+                await conversation_store.set_summary(
+                    convo, new_summary, len(convo.messages) - config.MAX_WINDOW_MESSAGES
+                )
+
+    # ── Non-streaming ─────────────────────────────────────────────────────
     async def handle_message(
-        self,
-        ctx: UserContext,
-        message: str,
-        conversation_id: Optional[str] = None,
+        self, ctx: UserContext, message: str, conversation_id: Optional[str] = None
     ) -> AskResponse:
-        system_prompt = build_system_prompt(ctx)
-        tool_schema = registry.openai_schema_for_role(ctx.role)
-
-        messages: List[dict] = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": message},
-        ]
+        meter = UsageMeter()
+        convo, messages, tool_schema, _ = await self._prepare(ctx, message, conversation_id, meter)
 
         sources: set = set()
         tools_used: List[str] = []
+        answer = ""
 
         for _ in range(config.MAX_TOOL_ITERATIONS):
-            ai_msg = await self.llm.complete(messages, tools=tool_schema or None)
+            ai_msg = await self.llm.complete(messages, tools=tool_schema or None, meter=meter)
             tool_calls = getattr(ai_msg, "tool_calls", None)
-
-            # No tool calls → the model produced the final answer.
             if not tool_calls:
-                return self._respond(
-                    conversation_id, ai_msg.content or "", sources, tools_used
-                )
-
-            # Echo the assistant's tool-call message back into the transcript.
-            messages.append(
-                {
-                    "role": "assistant",
-                    "content": ai_msg.content,
-                    "tool_calls": [
-                        {
-                            "id": call.id,
-                            "type": "function",
-                            "function": {
-                                "name": call.function.name,
-                                "arguments": call.function.arguments,
-                            },
-                        }
-                        for call in tool_calls
-                    ],
-                }
+                answer = ai_msg.content or ""
+                break
+            messages.append(_assistant_tool_msg(ai_msg.content, tool_calls))
+            await self._run_tools(
+                ctx,
+                [_call_dict(c) for c in tool_calls],
+                messages,
+                sources,
+                tools_used,
+            )
+        else:
+            answer = (
+                "I wasn't able to finish answering that within the allowed steps. "
+                "Could you rephrase or narrow the question?"
             )
 
-            # Execute each requested tool with isolation + timeout, feed results back.
-            for call in tool_calls:
-                name = call.function.name
-                try:
-                    args = json.loads(call.function.arguments or "{}")
-                except json.JSONDecodeError:
-                    args = {}
-
-                spec = registry.get_tool(name)
-                if spec is None:
-                    result_payload = {"success": False, "error": "Unknown tool"}
-                else:
-                    result = await registry.execute_tool(spec, ctx, args)
-                    tools_used.append(name)
-                    if result.meta.sources:
-                        sources.update(result.meta.sources)
-                    result_payload = result.for_llm()
-
-                messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": call.id,
-                        "content": json.dumps(result_payload, default=str),
-                    }
-                )
-
-        # Exhausted the iteration budget without a final answer.
-        return self._respond(
-            conversation_id,
-            "I wasn't able to finish answering that within the allowed steps. "
-            "Could you rephrase or narrow the question?",
-            sources,
-            tools_used,
-        )
-
-    @staticmethod
-    def _respond(
-        conversation_id: Optional[str],
-        answer: str,
-        sources: set,
-        tools_used: List[str],
-    ) -> AskResponse:
+        await self._persist(convo, message, answer, meter)
         return AskResponse(
-            conversation_id=conversation_id or "ephemeral",
+            conversation_id=convo.id,
             answer=answer,
             sources=sorted(sources),
-            meta={"phase": "1-mvp", "tools_used": tools_used},
+            meta={
+                "phase": "2",
+                "tools_used": tools_used,
+                "usage": meter.as_dict(),
+                "title": convo.title,
+            },
         )
+
+    # ── Streaming (SSE) ───────────────────────────────────────────────────
+    async def stream_message(
+        self, ctx: UserContext, message: str, conversation_id: Optional[str] = None
+    ) -> AsyncIterator[str]:
+        meter = UsageMeter()
+        convo, messages, tool_schema, _ = await self._prepare(ctx, message, conversation_id, meter)
+        yield _sse("meta", {"conversation_id": convo.id})
+
+        sources: set = set()
+        tools_used: List[str] = []
+        answer_parts: List[str] = []
+
+        for _ in range(config.MAX_TOOL_ITERATIONS):
+            tool_calls = None
+            streamed_any = False
+            async for event, payload in self.llm.complete_stream(
+                messages, tools=tool_schema or None, meter=meter
+            ):
+                if event == "content" and payload:
+                    streamed_any = True
+                    answer_parts.append(payload)
+                    yield _sse("token", {"text": payload})
+                elif event == "tool_calls":
+                    tool_calls = payload
+
+            if tool_calls and not streamed_any:
+                messages.append(_assistant_tool_msg(None, tool_calls, from_stream=True))
+                for tc in tool_calls:
+                    yield _sse("tool", {"name": tc.get("name")})
+                await self._run_tools(ctx, tool_calls, messages, sources, tools_used)
+                continue
+            break  # produced the final answer
+
+        answer = "".join(answer_parts)
+        await self._persist(convo, message, answer, meter)
+        yield _sse(
+            "done",
+            {
+                "conversation_id": convo.id,
+                "sources": sorted(sources),
+                "tools_used": tools_used,
+                "usage": meter.as_dict(),
+                "title": convo.title,
+            },
+        )
+
+
+# ── small helpers ─────────────────────────────────────────────────────────
+def _call_dict(call) -> dict:
+    return {
+        "id": call.id,
+        "name": call.function.name,
+        "arguments": call.function.arguments,
+    }
+
+
+def _assistant_tool_msg(content, tool_calls, from_stream: bool = False) -> dict:
+    if from_stream:
+        items = [
+            {"id": c.get("id") or c.get("name"), "type": "function",
+             "function": {"name": c.get("name"), "arguments": c.get("arguments") or "{}"}}
+            for c in tool_calls
+        ]
+    else:
+        items = [
+            {"id": c.id, "type": "function",
+             "function": {"name": c.function.name, "arguments": c.function.arguments}}
+            for c in tool_calls
+        ]
+    return {"role": "assistant", "content": content, "tool_calls": items}
+
+
+class _QuickMsg:
+    __slots__ = ("role", "content")
+
+    def __init__(self, role, content):
+        self.role = role
+        self.content = content
+
+
+def _quick_msg(role, content) -> _QuickMsg:
+    return _QuickMsg(role, content)

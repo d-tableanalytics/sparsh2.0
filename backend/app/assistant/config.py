@@ -15,9 +15,13 @@ class AssistantConfig:
 
     # Agent loop guards.
     MAX_TOOL_ITERATIONS: int = 5         # safety cap on tool-calling rounds
-    MAX_HISTORY_TURNS: int = 10          # turns sent to the LLM before summarizing
     TOOL_TIMEOUT_SECONDS: float = 8.0    # per-tool execution timeout (cross-cutting)
     LLM_TEMPERATURE: float = 0.3
+
+    # Conversation memory / windowing (Phase 2).
+    MAX_WINDOW_MESSAGES: int = 10        # recent user/assistant messages sent to the LLM
+    SUMMARY_TRIGGER: int = 14            # message_count above which older turns are summarized
+    CONVERSATION_LIST_LIMIT: int = 50
 
     # Persistence.
     CONVERSATION_COLLECTION: str = "assistant_conversations"

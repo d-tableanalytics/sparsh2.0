@@ -101,13 +101,18 @@ class FakeLLM:
         self.script = list(script)
         self.calls = 0
 
-    async def complete(self, messages, tools=None, stream=False, max_tokens=None):
+    async def complete(self, messages, tools=None, max_tokens=None, meter=None, **kw):
         step = self.script[self.calls]
         self.calls += 1
         if "final" in step:
             return _Msg(content=step["final"])
         calls = [_Call(i, t["tool"], t.get("args", {})) for i, t in enumerate(step["tools"])]
         return _Msg(content=None, tool_calls=calls)
+
+    async def utility_complete(self, prompt, max_tokens=120, meter=None):
+        # Phase 1 scope: no rewrite/title content needed — return empty so the
+        # query rewriter falls back to the original message and titles default.
+        return ""
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────
@@ -148,6 +153,15 @@ def _install_fakes():
         return USERS.get(uid)
 
     profile_tools.find_user_by_id = _fake_find_user_by_id
+
+    # The orchestrator now persists turns (Phase 2). Point the conversation store
+    # at an in-memory collection so the agent-loop checks run without a real DB.
+    import app.assistant.memory.conversation_store as store
+    from app.assistant.tests.test_phase2_memory_streaming import FakeCollection
+
+    shared_col = FakeCollection()
+    store.get_collection = lambda name: shared_col
+    store._indexes_ready = True
 
 
 # ── Checks ────────────────────────────────────────────────────────────────
