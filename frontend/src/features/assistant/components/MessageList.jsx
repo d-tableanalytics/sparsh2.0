@@ -2,8 +2,9 @@ import React, { useEffect, useRef } from 'react';
 import { Sparkles } from 'lucide-react';
 import MessageBubble from './MessageBubble';
 import TypingIndicator from './TypingIndicator';
+import SuggestedQuestions from './SuggestedQuestions';
 
-export default function MessageList({ messages, streaming, activeTool }) {
+export default function MessageList({ messages, streaming, activeTool, onPickSuggestion }) {
   const endRef = useRef(null);
 
   useEffect(() => {
@@ -16,14 +17,15 @@ export default function MessageList({ messages, streaming, activeTool }) {
 
   if (messages.length === 0) {
     return (
-      <div className="flex h-full flex-col items-center justify-center gap-2 px-6 text-center">
+      <div className="flex h-full flex-col items-center justify-center px-5 py-6 text-center">
         <div className="flex h-12 w-12 items-center justify-center rounded-full bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)]">
           <Sparkles size={22} />
         </div>
-        <p className="text-sm font-medium text-[var(--text-main)]">Ask Sparsh anything</p>
+        <p className="mt-2 text-sm font-medium text-[var(--text-main)]">Ask Sparsh anything</p>
         <p className="text-xs text-[var(--text-muted)]">
           Your sessions, quiz scores, progress, or what to study next.
         </p>
+        <SuggestedQuestions onPick={onPickSuggestion} disabled={streaming} />
       </div>
     );
   }

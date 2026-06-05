@@ -14,9 +14,16 @@ export default function useAssistant() {
   const [streaming, setStreaming] = useState(false);
   const [activeTool, setActiveTool] = useState(null);
   const [error, setError] = useState(null);
+  const [currentConversationId, setCurrentConversationId] = useState(null);
 
   const conversationIdRef = useRef(null);
   const abortRef = useRef(null);
+
+  const rememberConversation = useCallback((id) => {
+    if (!id) return;
+    conversationIdRef.current = id;
+    setCurrentConversationId(id);
+  }, []);
 
   const patch = useCallback((id, fields) => {
     setMessages((list) =>
@@ -28,6 +35,7 @@ export default function useAssistant() {
     abortRef.current?.abort();
     abortRef.current = null;
     conversationIdRef.current = null;
+    setCurrentConversationId(null);
     setMessages([]);
     setError(null);
     setActiveTool(null);
@@ -38,18 +46,26 @@ export default function useAssistant() {
   const loadConversation = useCallback((conversation) => {
     abortRef.current?.abort();
     conversationIdRef.current = conversation.id;
+    setCurrentConversationId(conversation.id);
     setError(null);
     setActiveTool(null);
     setStreaming(false);
     setMessages(
       (conversation.messages || [])
         .filter((m) => m.role === 'user' || m.role === 'assistant')
-        .map((m) => ({
-          id: nextId(m.role),
-          role: m.role,
-          content: m.content || '',
-          attributions: m.attributions || [],
-        })),
+        .map((m) => {
+          const attributions = m.attributions || [];
+          // Persisted turns store `attributions` (not the live `sources` array),
+          // so derive the flat source list for the attribution chips.
+          const sources = [...new Set(attributions.flatMap((a) => a.sources || []))];
+          return {
+            id: nextId(m.role),
+            role: m.role,
+            content: m.content || '',
+            attributions,
+            sources,
+          };
+        }),
     );
   }, []);
 
@@ -83,13 +99,13 @@ export default function useAssistant() {
           signal: controller.signal,
           onEvent: (event, data) => {
             if (event === 'meta') {
-              if (data.conversation_id) conversationIdRef.current = data.conversation_id;
+              rememberConversation(data.conversation_id);
             } else if (event === 'tool') {
               setActiveTool(data.name || null);
             } else if (event === 'token') {
               patch(asstId, (m) => ({ content: m.content + (data.text || '') }));
             } else if (event === 'done') {
-              if (data.conversation_id) conversationIdRef.current = data.conversation_id;
+              rememberConversation(data.conversation_id);
               setActiveTool(null);
               patch(asstId, {
                 streaming: false,
@@ -123,7 +139,7 @@ export default function useAssistant() {
         abortRef.current = null;
       }
     },
-    [streaming, patch],
+    [streaming, patch, rememberConversation],
   );
 
   return {
@@ -135,6 +151,6 @@ export default function useAssistant() {
     cancel,
     reset,
     loadConversation,
-    conversationId: conversationIdRef,
+    currentConversationId,
   };
 }
