@@ -2,5 +2,7 @@
 
 Catalog (Phase 1+): search_knowledge (RAG bridge), get_calendar, lookup_entity.
 
-Phase 0: intentionally empty.
+Phase 3: search_knowledge. Importing it here runs its @tool decorator.
 """
+
+from app.assistant.tools.shared import knowledge_tools  # noqa: E402,F401

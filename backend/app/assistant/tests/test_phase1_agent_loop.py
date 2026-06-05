@@ -179,7 +179,9 @@ async def main():
 
     # 1) Scope: role filtering
     print("Scope / role filtering:")
-    check("learner sees 3 student tools", len(registry.tools_for_role("clientuser")) == 3)
+    learner_tools = {t.name for t in registry.tools_for_role("clientuser")}
+    check("learner has the 3 Phase-1 tools",
+          {"get_my_profile", "get_my_sessions", "get_latest_quiz_result"} <= learner_tools)
     check("superadmin sees 0 (no SA tools yet)", len(registry.openai_schema_for_role("superadmin")) == 0)
 
     # 2) End-to-end: profile

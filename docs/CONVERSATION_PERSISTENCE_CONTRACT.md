@@ -24,7 +24,11 @@
       "role":      "user|assistant",
       "content":   "string",
       "timestamp": ISODate,
-      "tool_calls": [ ... ]        // optional, retained for transparency
+      "tool_calls": [ ... ],       // optional, retained for transparency
+      "attributions": [            // assistant turns only — tool provenance
+        { "tool": "get_latest_quiz_result", "sources": ["LearnerAssessments"],
+          "scope_applied": "personal:A1", "success": true, "count": 1 }
+      ]
     }
   ],
   "message_count": 0,              // denormalized len(messages) for cheap windowing

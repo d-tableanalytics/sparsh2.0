@@ -60,7 +60,7 @@ class Orchestrator:
         messages.append({"role": "user", "content": effective})
         return convo, messages, registry.openai_schema_for_role(ctx.role), effective
 
-    async def _run_tools(self, ctx, spec_calls, messages, sources, tools_used) -> None:
+    async def _run_tools(self, ctx, spec_calls, messages, sources, tools_used, attributions) -> None:
         """Execute a batch of tool calls and append their results to the transcript."""
         for call in spec_calls:
             name = call["name"]
@@ -71,18 +71,27 @@ class Orchestrator:
             spec = registry.get_tool(name)
             if spec is None:
                 payload = {"success": False, "error": "Unknown tool"}
+                attributions.append({"tool": name, "sources": [], "scope_applied": None,
+                                     "success": False, "count": None})
             else:
                 result = await registry.execute_tool(spec, ctx, args)
                 tools_used.append(name)
                 if result.meta.sources:
                     sources.update(result.meta.sources)
+                attributions.append({
+                    "tool": result.meta.tool,
+                    "sources": result.meta.sources,
+                    "scope_applied": result.meta.scope_applied,
+                    "success": result.success,
+                    "count": result.meta.count,
+                })
                 payload = result.for_llm()
             messages.append(
                 {"role": "tool", "tool_call_id": call.get("id") or name, "content": json.dumps(payload, default=str)}
             )
 
-    async def _persist(self, convo, user_msg, answer, meter) -> None:
-        await conversation_store.append_turn(convo, user_msg, answer)
+    async def _persist(self, convo, user_msg, answer, meter, attributions=None) -> None:
+        await conversation_store.append_turn(convo, user_msg, answer, attributions=attributions)
         # Reload-light: reflect the two new messages locally for title/summary decisions.
         convo.messages.append(_quick_msg("user", user_msg))
         convo.messages.append(_quick_msg("assistant", answer))
@@ -108,6 +117,7 @@ class Orchestrator:
 
         sources: set = set()
         tools_used: List[str] = []
+        attributions: List[dict] = []
         answer = ""
 
         for _ in range(config.MAX_TOOL_ITERATIONS):
@@ -123,6 +133,7 @@ class Orchestrator:
                 messages,
                 sources,
                 tools_used,
+                attributions,
             )
         else:
             answer = (
@@ -130,14 +141,15 @@ class Orchestrator:
                 "Could you rephrase or narrow the question?"
             )
 
-        await self._persist(convo, message, answer, meter)
+        await self._persist(convo, message, answer, meter, attributions=attributions)
         return AskResponse(
             conversation_id=convo.id,
             answer=answer,
             sources=sorted(sources),
             meta={
-                "phase": "2",
+                "phase": "3",
                 "tools_used": tools_used,
+                "attributions": attributions,
                 "usage": meter.as_dict(),
                 "title": convo.title,
             },
@@ -153,6 +165,7 @@ class Orchestrator:
 
         sources: set = set()
         tools_used: List[str] = []
+        attributions: List[dict] = []
         answer_parts: List[str] = []
 
         for _ in range(config.MAX_TOOL_ITERATIONS):
@@ -172,18 +185,19 @@ class Orchestrator:
                 messages.append(_assistant_tool_msg(None, tool_calls, from_stream=True))
                 for tc in tool_calls:
                     yield _sse("tool", {"name": tc.get("name")})
-                await self._run_tools(ctx, tool_calls, messages, sources, tools_used)
+                await self._run_tools(ctx, tool_calls, messages, sources, tools_used, attributions)
                 continue
             break  # produced the final answer
 
         answer = "".join(answer_parts)
-        await self._persist(convo, message, answer, meter)
+        await self._persist(convo, message, answer, meter, attributions=attributions)
         yield _sse(
             "done",
             {
                 "conversation_id": convo.id,
                 "sources": sorted(sources),
                 "tools_used": tools_used,
+                "attributions": attributions,
                 "usage": meter.as_dict(),
                 "title": convo.title,
             },

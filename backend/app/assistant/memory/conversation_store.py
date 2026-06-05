@@ -79,11 +79,19 @@ async def load_or_create(ctx: UserContext, conversation_id: Optional[str]) -> Co
     return _to_conversation(doc)
 
 
-async def append_turn(conversation: Conversation, user_msg: str, assistant_msg: str) -> None:
+async def append_turn(
+    conversation: Conversation,
+    user_msg: str,
+    assistant_msg: str,
+    attributions: Optional[list] = None,
+) -> None:
     now = datetime.utcnow()
+    assistant_doc = {"role": "assistant", "content": assistant_msg, "timestamp": now}
+    if attributions:
+        assistant_doc["attributions"] = attributions
     new_msgs = [
         {"role": "user", "content": user_msg, "timestamp": now},
-        {"role": "assistant", "content": assistant_msg, "timestamp": now},
+        assistant_doc,
     ]
     await get_collection(COLL).update_one(
         {"_id": _oid(conversation.id), "user_id": conversation.user_id},
