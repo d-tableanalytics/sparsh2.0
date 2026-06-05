@@ -28,14 +28,24 @@ class UsageMeter:
         self.completion = 0
         self.total = 0
         self.calls = 0
+        self.by_model: dict = {}
 
-    def add(self, usage) -> None:
+    def add(self, usage, model: str = None) -> None:
         if not usage:
             return
-        self.prompt += getattr(usage, "prompt_tokens", 0) or 0
-        self.completion += getattr(usage, "completion_tokens", 0) or 0
-        self.total += getattr(usage, "total_tokens", 0) or 0
+        p = getattr(usage, "prompt_tokens", 0) or 0
+        c = getattr(usage, "completion_tokens", 0) or 0
+        t = getattr(usage, "total_tokens", 0) or 0
+        self.prompt += p
+        self.completion += c
+        self.total += t
         self.calls += 1
+        if model:
+            m = self.by_model.setdefault(model, {"prompt": 0, "completion": 0, "total": 0, "calls": 0})
+            m["prompt"] += p
+            m["completion"] += c
+            m["total"] += t
+            m["calls"] += 1
 
     def as_dict(self) -> dict:
         return {
@@ -43,6 +53,7 @@ class UsageMeter:
             "completion_tokens": self.completion,
             "total_tokens": self.total,
             "llm_calls": self.calls,
+            "by_model": self.by_model,
         }
 
 
@@ -80,7 +91,7 @@ class LLMClient:
 
         response = await self.client.chat.completions.create(**kwargs)
         if meter is not None:
-            meter.add(getattr(response, "usage", None))
+            meter.add(getattr(response, "usage", None), model=self.model)
         return response.choices[0].message
 
     # ── Primary (streamed) ────────────────────────────────────────────────
@@ -117,7 +128,7 @@ class LLMClient:
             usage = getattr(chunk, "usage", None)
             if usage:
                 if meter is not None:
-                    meter.add(usage)
+                    meter.add(usage, model=self.model)
                 yield ("usage", usage)
             if not chunk.choices:
                 continue
@@ -150,7 +161,7 @@ class LLMClient:
             max_tokens=max_tokens,
         )
         if meter is not None:
-            meter.add(getattr(response, "usage", None))
+            meter.add(getattr(response, "usage", None), model=config.UTILITY_MODEL)
         return (response.choices[0].message.content or "").strip()
 
     async def summarize(self, text: str, meter: Optional[UsageMeter] = None) -> str:

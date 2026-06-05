@@ -23,6 +23,34 @@ class AssistantConfig:
     SUMMARY_TRIGGER: int = 14            # message_count above which older turns are summarized
     CONVERSATION_LIST_LIMIT: int = 50
 
+    # ── Phase 4: production hardening ─────────────────────────────────────
+    # Feature flags.
+    STREAMING_ENABLED: bool = True
+    RAG_ENABLED: bool = True
+    ANALYTICS_ENABLED: bool = True
+    GUARDRAILS_ENABLED: bool = True
+
+    # Rollout controls.
+    ENABLED_ROLES: list = []             # empty = all roles; else raw role strings
+    ROLLOUT_MODE: str = "all"            # all | allowlist | percentage
+    ROLLOUT_ALLOWLIST: list = []         # user_ids or emails
+    ROLLOUT_PERCENT: int = 100           # used when ROLLOUT_MODE == "percentage"
+
+    # Rate limiting (per user).
+    RATE_LIMIT_ENABLED: bool = True
+    RATE_LIMIT_MAX: int = 30             # requests...
+    RATE_LIMIT_WINDOW: float = 60.0      # ...per this many seconds
+
+    # Caching TTLs (seconds).
+    CACHE_METADATA_TTL: float = 300.0    # accessible projects, profile-ish metadata
+    CACHE_ANALYTICS_TTL: float = 60.0    # analytics results
+    CACHE_KNOWLEDGE_TTL: float = 120.0   # knowledge retrieval results
+
+    # Cost reporting.
+    COST_REPORTING_ENABLED: bool = True
+    COST_COLLECTION: str = "assistant_cost"
+    METRICS_COLLECTION: str = "assistant_metrics"
+
     # Persistence.
     CONVERSATION_COLLECTION: str = "assistant_conversations"
 

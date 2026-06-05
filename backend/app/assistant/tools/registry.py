@@ -8,9 +8,12 @@ security control and a token/accuracy optimization.
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any, Dict, List, Optional
 
 from app.assistant.config import config
+from app.assistant.observability.logging import log_event
+from app.assistant.observability.metrics import metrics
 from app.assistant.schemas.context import UserContext
 from app.assistant.schemas.tool_result import ToolResult
 from app.assistant.security.rbac import normalize_role
@@ -93,17 +96,33 @@ async def execute_tool(
     timeout = timeout if timeout is not None else config.TOOL_TIMEOUT_SECONDS
 
     if normalize_role(ctx.role) not in spec.allowed_roles:
+        metrics.record_tool(spec.name, success=False, duration_ms=0.0)
         return ToolResult.fail(spec.name, "Tool not permitted for this role")
 
+    start = time.perf_counter()
+    timeout_hit = False
     try:
-        return await asyncio.wait_for(spec.run(ctx, **arguments), timeout=timeout)
+        result = await asyncio.wait_for(spec.run(ctx, **arguments), timeout=timeout)
     except asyncio.TimeoutError:
-        return ToolResult.fail(spec.name, f"Tool timed out after {timeout}s")
+        timeout_hit = True
+        result = ToolResult.fail(spec.name, f"Tool timed out after {timeout}s")
     except TypeError as exc:
         # Almost always bad/extra arguments hallucinated by the model.
-        return ToolResult.fail(spec.name, f"Invalid arguments: {exc}")
+        result = ToolResult.fail(spec.name, f"Invalid arguments: {exc}")
     except Exception as exc:  # noqa: BLE001 — deliberate catch-all for isolation
-        return ToolResult.fail(spec.name, f"Tool execution error: {exc}")
+        result = ToolResult.fail(spec.name, f"Tool execution error: {exc}")
+
+    duration_ms = (time.perf_counter() - start) * 1000
+    metrics.record_tool(spec.name, success=result.success, duration_ms=duration_ms, timeout=timeout_hit)
+    log_event(
+        "tool_executed",
+        tool=spec.name,
+        success=result.success,
+        ms=round(duration_ms, 2),
+        timeout=timeout_hit,
+        scope=result.meta.scope_applied,
+    )
+    return result
 
 
 def register_all() -> None:

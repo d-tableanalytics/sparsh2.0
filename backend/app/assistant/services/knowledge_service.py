@@ -20,6 +20,7 @@ from typing import List, Optional, Set
 from bson import ObjectId
 from bson.errors import InvalidId
 
+from app.assistant.caching import cache
 from app.assistant.schemas.context import UserContext
 from app.assistant.schemas.rag import RagRetrieval, RagSource
 from app.assistant.security.rbac import ROLE_AD, ROLE_SA, normalize_role
@@ -43,6 +44,12 @@ async def get_accessible_project_ids(ctx: UserContext) -> Optional[Set[str]]:
     """
     if normalize_role(ctx.role) in (ROLE_SA, ROLE_AD):
         return None
+
+    # Metadata cache: accessible projects change rarely (batch/permission edits).
+    cache_key = f"accessible:{ctx.user_id}:{ctx.company_id}:{','.join(sorted(ctx.batch_ids))}"
+    cached = cache.metadata_cache.get(cache_key)
+    if cached is not None:
+        return cached
 
     ids: Set[str] = set()
 
@@ -71,6 +78,7 @@ async def get_accessible_project_ids(ctx: UserContext) -> Optional[Set[str]]:
         if p.get("project_id"):
             ids.add(str(p["project_id"]))
 
+    cache.metadata_cache.set(cache_key, ids)
     return ids
 
 

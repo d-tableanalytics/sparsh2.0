@@ -18,6 +18,7 @@ Two entry points share the same tool resolution:
 from __future__ import annotations
 
 import json
+import time
 from typing import AsyncIterator, List, Optional, Tuple
 
 from app.assistant.config import config
@@ -25,9 +26,14 @@ from app.assistant.core import context_manager, query_rewriter
 from app.assistant.core.llm_client import LLMClient, UsageMeter
 from app.assistant.core.prompt_builder import build_system_prompt
 from app.assistant.memory import conversation_store, summarizer
+from app.assistant.observability import cost
+from app.assistant.observability.correlation import get_correlation_id
+from app.assistant.observability.logging import log_event
+from app.assistant.observability.metrics import metrics
 from app.assistant.schemas.chat import AskResponse
 from app.assistant.schemas.context import UserContext
 from app.assistant.schemas.conversation import Conversation
+from app.assistant.security import guardrails
 from app.assistant.tools import registry
 
 
@@ -47,6 +53,18 @@ class Orchestrator:
         convo = await conversation_store.load_or_create(ctx, conversation_id)
         window = context_manager.build_window(convo)
 
+        messages = [{"role": "system", "content": build_system_prompt(ctx)}]
+
+        # Input guardrail: detect (don't hard-block) likely prompt injection.
+        if config.GUARDRAILS_ENABLED:
+            screen = guardrails.screen_input(message)
+            if screen["flagged"]:
+                metrics.input_flagged += 1
+                log_event("input_flagged", reason=screen["reason"], user=ctx.user_id)
+                messages.append(guardrails.reinforcement_note())
+
+        messages.extend(window)
+
         recent = "\n".join(
             f"{m.role}: {m.content}" for m in convo.messages[-4:]
         )
@@ -55,8 +73,6 @@ class Orchestrator:
         )
         effective = rw["rewritten_query"]
 
-        messages = [{"role": "system", "content": build_system_prompt(ctx)}]
-        messages.extend(window)
         messages.append({"role": "user", "content": effective})
         return convo, messages, registry.openai_schema_for_role(ctx.role), effective
 
@@ -112,7 +128,10 @@ class Orchestrator:
     async def handle_message(
         self, ctx: UserContext, message: str, conversation_id: Optional[str] = None
     ) -> AskResponse:
+        cid = get_correlation_id()
+        started = time.perf_counter()
         meter = UsageMeter()
+        errored = False
         convo, messages, tool_schema, _ = await self._prepare(ctx, message, conversation_id, meter)
 
         sources: set = set()
@@ -136,21 +155,37 @@ class Orchestrator:
                 attributions,
             )
         else:
+            errored = True
             answer = (
                 "I wasn't able to finish answering that within the allowed steps. "
                 "Could you rephrase or narrow the question?"
             )
 
+        if config.GUARDRAILS_ENABLED:
+            vo = guardrails.validate_output(answer)
+            if not vo["ok"]:
+                log_event("output_flagged", issues=vo["issues"], user=ctx.user_id)
+
         await self._persist(convo, message, answer, meter, attributions=attributions)
+        cost_estimate = await cost.record_cost(cid, ctx.user_id, meter)
+
+        duration_ms = (time.perf_counter() - started) * 1000
+        metrics.record_request(duration_ms, error=errored)
+        log_event("request_complete", user=ctx.user_id, ms=round(duration_ms, 2),
+                  tools=tools_used, cost_usd=cost_estimate["total_usd"])
+
         return AskResponse(
             conversation_id=convo.id,
             answer=answer,
             sources=sorted(sources),
             meta={
-                "phase": "3",
+                "phase": "4",
+                "correlation_id": cid,
                 "tools_used": tools_used,
                 "attributions": attributions,
                 "usage": meter.as_dict(),
+                "cost": cost_estimate,
+                "latency_ms": round(duration_ms, 2),
                 "title": convo.title,
             },
         )
@@ -159,9 +194,11 @@ class Orchestrator:
     async def stream_message(
         self, ctx: UserContext, message: str, conversation_id: Optional[str] = None
     ) -> AsyncIterator[str]:
+        cid = get_correlation_id()
+        started = time.perf_counter()
         meter = UsageMeter()
         convo, messages, tool_schema, _ = await self._prepare(ctx, message, conversation_id, meter)
-        yield _sse("meta", {"conversation_id": convo.id})
+        yield _sse("meta", {"conversation_id": convo.id, "correlation_id": cid})
 
         sources: set = set()
         tools_used: List[str] = []
@@ -190,15 +227,30 @@ class Orchestrator:
             break  # produced the final answer
 
         answer = "".join(answer_parts)
+        if config.GUARDRAILS_ENABLED:
+            vo = guardrails.validate_output(answer)
+            if not vo["ok"]:
+                log_event("output_flagged", issues=vo["issues"], user=ctx.user_id)
+
         await self._persist(convo, message, answer, meter, attributions=attributions)
+        cost_estimate = await cost.record_cost(cid, ctx.user_id, meter)
+
+        duration_ms = (time.perf_counter() - started) * 1000
+        metrics.record_request(duration_ms, error=False)
+        log_event("request_complete", user=ctx.user_id, ms=round(duration_ms, 2),
+                  tools=tools_used, cost_usd=cost_estimate["total_usd"], streamed=True)
+
         yield _sse(
             "done",
             {
                 "conversation_id": convo.id,
+                "correlation_id": cid,
                 "sources": sorted(sources),
                 "tools_used": tools_used,
                 "attributions": attributions,
                 "usage": meter.as_dict(),
+                "cost": cost_estimate,
+                "latency_ms": round(duration_ms, 2),
                 "title": convo.title,
             },
         )
