@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from typing import Dict
 
+from bson import ObjectId
+
 # Fields that must never be returned to the model or the user.
 SENSITIVE_FIELDS = {"password", "hashed_password", "password_hash", "token", "otp"}
 
@@ -17,5 +19,23 @@ def strip_sensitive(doc: Dict) -> Dict:
 
 
 def serialize(doc: Dict, allowed_fields) -> Dict:
-    """Project a Mongo doc to a whitelisted set of fields. Phase 1."""
-    raise NotImplementedError("serializers.serialize — Phase 1")
+    """Project a Mongo doc to a whitelisted set of fields.
+
+    - Only `allowed_fields` are returned (plus a stringified `id` from `_id`).
+    - Always-sensitive fields are dropped even if explicitly allowed.
+    - `ObjectId` values are stringified so the result is JSON-serializable.
+    """
+    if not doc:
+        return {}
+
+    out: Dict = {}
+    if "_id" in doc:
+        out["id"] = str(doc["_id"])
+
+    for field in allowed_fields:
+        if field in SENSITIVE_FIELDS or field not in doc:
+            continue
+        value = doc[field]
+        out[field] = str(value) if isinstance(value, ObjectId) else value
+
+    return strip_sensitive(out)
