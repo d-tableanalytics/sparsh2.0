@@ -36,6 +36,7 @@ import ForgotPassword from './pages/ForgotPassword';
 import PrivateRoute from './components/common/PrivateRoute';
 import './index.css';
 import { useAuth } from './context/AuthContext';
+import { UploadProvider } from './context/UploadContext';
 
 const AppRoutes = () => {
   const { user } = useAuth();
@@ -94,9 +95,11 @@ const App = () => {
     <ThemeProvider>
       <AuthProvider>
         <NotificationProvider>
-          <Router>
-            <AppRoutes />
-          </Router>
+          <UploadProvider>
+            <Router>
+              <AppRoutes />
+            </Router>
+          </UploadProvider>
           <NotificationModal />
         </NotificationProvider>
       </AuthProvider>

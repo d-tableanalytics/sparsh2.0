@@ -3,8 +3,9 @@ import os
 from dotenv import load_dotenv
 from typing import Optional
 
-# Explicitly load .env file
-load_dotenv()
+# Explicitly load .env file (check for both .env and env)
+load_dotenv(".env")
+load_dotenv("env")
 
 class Settings(BaseSettings):
     MONGODB_URI: str = "mongodb://localhost:27017"

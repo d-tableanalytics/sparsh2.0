@@ -60,11 +60,12 @@ async def transcribe_media_file(local_file_path: str, progress_callback=None) ->
     """
     final_transcription = ""
     with tempfile.TemporaryDirectory() as temp_dir:
-        # Segment exactly 60 seconds of 16kHz mono audio
+        # Segment output into size-based chunks (approx. 10 MB per chunk)
         out_pattern = os.path.join(temp_dir, "chunk_%04d.wav")
+        chunk_size_bytes = 10 * 1024 * 1024
         cmd = [
-            "ffmpeg", "-i", local_file_path, 
-            "-f", "segment", "-segment_time", "60", 
+            "ffmpeg", "-i", local_file_path,
+            "-f", "segment", "-segment_size", str(chunk_size_bytes),
             "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le",
             "-vn", out_pattern
         ]

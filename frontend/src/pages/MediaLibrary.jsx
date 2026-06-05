@@ -2,10 +2,14 @@ import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   UploadCloud, FileVideo, FileAudio, FileText, FileImage, File as FileIcon,
-  Trash2, Download, Search, Loader2, X, Library
+  Trash2, Download, Search, Loader2, X, Library, Folder, BarChart2
 } from 'lucide-react';
 import api from '../services/api';
 import { useNotification } from '../context/NotificationContext';
+import { useUploadQueue } from '../context/UploadContext';
+import MediaChatbot from '../components/MediaChatbot';
+import MediaInsights from '../components/MediaInsights';
+import UploadProgressDashboard from '../components/UploadProgressDashboard';
 
 const MEDIA_TYPES = [
   { value: 'video', label: 'Video', icon: FileVideo },
@@ -33,16 +37,22 @@ const formatSize = (bytes) => {
 
 const MediaLibrary = () => {
   const { showSuccess, showError } = useNotification();
+  const { enqueueFile } = useUploadQueue();
   const fileInputRef = useRef(null);
 
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [uploading, setUploading] = useState(false);
   const [filter, setFilter] = useState('all');
   const [search, setSearch] = useState('');
 
   const [form, setForm] = useState({ media_type: 'video', name: '', description: '' });
   const [file, setFile] = useState(null);
+
+  // New folder, tag, and insights dashboard states
+  const [currentFolder, setCurrentFolder] = useState('/');
+  const [folders, setFolders] = useState([]);
+  const [selectedTag, setSelectedTag] = useState('');
+  const [activeTab, setActiveTab] = useState('library');
 
   const fetchItems = async () => {
     setLoading(true);
@@ -56,46 +66,95 @@ const MediaLibrary = () => {
     }
   };
 
+  const fetchFolders = async () => {
+    try {
+      const { data } = await api.get('/media/ai/folders');
+      setFolders(data);
+    } catch (err) {
+      console.warn("Failed to fetch folders:", err);
+    }
+  };
+
   useEffect(() => {
     fetchItems();
+    fetchFolders();
   }, []);
 
   const handleFileChange = (e) => {
-    const selected = e.target.files?.[0];
-    if (!selected) return;
-    setFile(selected);
-    // Pre-fill the name from the filename if the user hasn't typed one yet.
+    // For high volume uploads, support multiple files
+    const selectedFiles = Array.from(e.target.files || []);
+    if (!selectedFiles.length) return;
+    
+    // Process the first file for form preview, others will be queued directly
+    setFile(selectedFiles[0]);
+    // Store all files in a temp attribute if multiple selected
+    if (selectedFiles.length > 1) {
+       fileInputRef.current._filesToProcess = selectedFiles;
+       showSuccess(`Selected ${selectedFiles.length} files for upload. Submit to start queue.`);
+    } else {
+       fileInputRef.current._filesToProcess = [selectedFiles[0]];
+    }
+
     setForm((prev) => ({
       ...prev,
-      name: prev.name || selected.name.replace(/\.[^/.]+$/, ''),
+      name: prev.name || selectedFiles[0].name.replace(/\.[^/.]+$/, ''),
     }));
   };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    if (!file) return showError('Please choose a file to upload');
-    if (!form.name.trim()) return showError('Please enter a name');
+    const filesToUpload = fileInputRef.current?._filesToProcess || (file ? [file] : []);
+    
+    if (filesToUpload.length === 0) return showError('Please choose a file to upload');
+    if (filesToUpload.length === 1 && !form.name.trim()) return showError('Please enter a name');
 
-    const fd = new FormData();
-    fd.append('media_type', form.media_type);
-    fd.append('name', form.name.trim());
-    fd.append('description', form.description.trim());
-    fd.append('file', file);
+    for (let i = 0; i < filesToUpload.length; i++) {
+        let fileToProcess = filesToUpload[i];
+        // Only use the form name for the first file if multiple selected
+        const formToUpload = i === 0 ? { ...form } : { media_type: form.media_type, name: fileToProcess.name, description: '' };
 
-    setUploading(true);
-    try {
-      const { data } = await api.post('/media', fd);
-      setItems((prev) => [data.media, ...prev]);
-      showSuccess('File uploaded successfully');
-      setForm({ media_type: 'video', name: '', description: '' });
-      setFile(null);
-      if (fileInputRef.current) fileInputRef.current.value = '';
-    } catch (err) {
-      showError(err.response?.data?.detail || 'Upload failed');
-    } finally {
-      setUploading(false);
+        // Additive Duplicate Detection check before calling upload API
+        try {
+          const { data: dupCheck } = await api.get(`/media/ai/check-duplicate?filename=${encodeURIComponent(fileToProcess.name)}&size=${fileToProcess.size}`);
+          if (dupCheck.duplicate) {
+            const option = window.prompt(
+              `A file named "${fileToProcess.name}" already exists.\n\nType one of the following options:\n- "both": Keep both (rename the new file)\n- "replace": Replace the existing file\n- "skip": Skip this upload\n\nChoice:`,
+              "both"
+            );
+            if (!option) continue;
+            const choice = option.toLowerCase().trim();
+            if (choice === 'skip') {
+              continue;
+            } else if (choice === 'replace') {
+              await api.delete(`/media/${dupCheck.existing.id}`);
+            } else {
+              const nameParts = fileToProcess.name.split('.');
+              const ext = nameParts.pop();
+              const baseName = nameParts.join('.');
+              const newFileName = `${baseName}_copy_${Date.now()}.${ext}`;
+              fileToProcess = new File([fileToProcess], newFileName, { type: fileToProcess.type });
+              formToUpload.name = `${formToUpload.name.trim()} (Copy)`;
+            }
+          }
+        } catch (err) {
+          console.warn("Duplicate check error:", err);
+        }
+
+        // Enqueue to the background manager instead of blocking UI
+        await enqueueFile(fileToProcess, formToUpload, currentFolder);
+    }
+    
+    showSuccess(`${filesToUpload.length} file(s) added to the background upload queue.`);
+
+    // Clear form state immediately for the next upload
+    setForm({ media_type: 'video', name: '', description: '' });
+    setFile(null);
+    if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+        fileInputRef.current._filesToProcess = [];
     }
   };
+
 
   const handleDelete = async (id) => {
     if (!window.confirm('Delete this file? This cannot be undone.')) return;
@@ -114,115 +173,148 @@ const MediaLibrary = () => {
       !search.trim() ||
       i.name?.toLowerCase().includes(search.toLowerCase()) ||
       i.description?.toLowerCase().includes(search.toLowerCase());
-    return matchesType && matchesSearch;
+    const matchesFolder = (i.folder || '/') === currentFolder;
+    const matchesTag = !selectedTag || (i.tags && i.tags.includes(selectedTag));
+    return matchesType && matchesSearch && matchesFolder && matchesTag;
   });
 
   return (
     <div className="p-6 md:p-8 max-w-7xl mx-auto">
-      <div className="flex items-center gap-3 mb-6">
-        <div className="p-2.5 rounded-xl bg-[var(--sidebar-active-bg)] text-[var(--sidebar-active-text)]">
-          <Library size={22} />
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
+        <div className="flex items-center gap-3">
+          <div className="p-2.5 rounded-xl bg-[var(--sidebar-active-bg)] text-[var(--sidebar-active-text)]">
+            <Library size={22} />
+          </div>
+          <div>
+            <h1 className="text-xl font-bold text-[var(--text-main)] tracking-tight">Media Library</h1>
+            <p className="text-sm text-[var(--text-muted)]">
+              Upload videos, audio, PDFs and any file type. Other modules reference these uploads.
+            </p>
+          </div>
         </div>
-        <div>
-          <h1 className="text-xl font-bold text-[var(--text-main)] tracking-tight">Media Library</h1>
-          <p className="text-sm text-[var(--text-muted)]">
-            Upload videos, audio, PDFs and any file type. Other modules reference these uploads.
-          </p>
+
+        {/* View/Insights Toggle */}
+        <div className="flex bg-[var(--input-bg)] p-1 rounded-xl border border-[var(--border)] w-fit self-end sm:self-auto">
+          <button
+            onClick={() => setActiveTab('library')}
+            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+              activeTab === 'library'
+                ? 'bg-[var(--bg-card)] text-[var(--text-main)] shadow-sm'
+                : 'text-[var(--text-muted)] hover:text-[var(--text-main)]'
+            }`}
+          >
+            Library
+          </button>
+          <button
+            onClick={() => setActiveTab('insights')}
+            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center gap-1.5 ${
+              activeTab === 'insights'
+                ? 'bg-[var(--bg-card)] text-[var(--text-main)] shadow-sm'
+                : 'text-[var(--text-muted)] hover:text-[var(--text-main)]'
+            }`}
+          >
+            <BarChart2 size={13} />
+            AI Insights
+          </button>
         </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Upload form */}
-        <motion.form
-          initial={{ opacity: 0, y: 8 }}
-          animate={{ opacity: 1, y: 0 }}
-          onSubmit={handleSubmit}
-          className="lg:col-span-1 bg-[var(--bg-card)] border border-[var(--border)] rounded-2xl p-5 h-fit space-y-4 sticky top-6"
-        >
-          <h2 className="text-sm font-bold uppercase tracking-widest text-[var(--text-muted)]">
-            Upload File
-          </h2>
-
-          <div>
-            <label className="block text-xs font-semibold text-[var(--text-muted)] mb-1.5">Type</label>
-            <select
-              value={form.media_type}
-              onChange={(e) => setForm({ ...form, media_type: e.target.value })}
-              className="w-full px-3 py-2.5 rounded-lg bg-[var(--input-bg)] border border-[var(--border)] text-[var(--text-main)] text-sm focus:outline-none focus:ring-2 focus:ring-[var(--sidebar-active-bg)]"
+      {activeTab === 'insights' ? (
+        <MediaInsights />
+      ) : (
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          {/* Upload form column */}
+          <div className="lg:col-span-1 space-y-4 sticky top-6">
+            <motion.form
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              onSubmit={handleSubmit}
+              className="bg-[var(--bg-card)] border border-[var(--border)] rounded-2xl p-5 h-fit space-y-4"
             >
-              {MEDIA_TYPES.map((t) => (
-                <option key={t.value} value={t.value}>{t.label}</option>
-              ))}
-            </select>
-          </div>
+            <h2 className="text-sm font-bold uppercase tracking-widest text-[var(--text-muted)]">
+              Upload File
+            </h2>
 
-          <div>
-            <label className="block text-xs font-semibold text-[var(--text-muted)] mb-1.5">Name</label>
-            <input
-              type="text"
-              value={form.name}
-              onChange={(e) => setForm({ ...form, name: e.target.value })}
-              placeholder="e.g. Onboarding walkthrough"
-              className="w-full px-3 py-2.5 rounded-lg bg-[var(--input-bg)] border border-[var(--border)] text-[var(--text-main)] text-sm focus:outline-none focus:ring-2 focus:ring-[var(--sidebar-active-bg)]"
-            />
-          </div>
-
-          <div>
-            <label className="block text-xs font-semibold text-[var(--text-muted)] mb-1.5">Description</label>
-            <textarea
-              value={form.description}
-              onChange={(e) => setForm({ ...form, description: e.target.value })}
-              rows={3}
-              placeholder="Optional description"
-              className="w-full px-3 py-2.5 rounded-lg bg-[var(--input-bg)] border border-[var(--border)] text-[var(--text-main)] text-sm resize-none focus:outline-none focus:ring-2 focus:ring-[var(--sidebar-active-bg)]"
-            />
-          </div>
-
-          <div>
-            <label className="block text-xs font-semibold text-[var(--text-muted)] mb-1.5">File</label>
-            <div
-              onClick={() => fileInputRef.current?.click()}
-              className="border-2 border-dashed border-[var(--border)] rounded-lg p-5 text-center cursor-pointer hover:border-[var(--sidebar-active-bg)] transition-colors"
-            >
-              <UploadCloud size={24} className="mx-auto text-[var(--text-muted)] mb-2" />
-              {file ? (
-                <div className="flex items-center justify-center gap-2 text-sm text-[var(--text-main)]">
-                  <span className="truncate max-w-[180px]">{file.name}</span>
-                  <button
-                    type="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setFile(null);
-                      if (fileInputRef.current) fileInputRef.current.value = '';
-                    }}
-                    className="text-[var(--accent-red)]"
-                  >
-                    <X size={16} />
-                  </button>
-                </div>
-              ) : (
-                <p className="text-sm text-[var(--text-muted)]">Click to choose a file (any type)</p>
-              )}
+            <div>
+              <label className="block text-xs font-semibold text-[var(--text-muted)] mb-1.5">Type</label>
+              <select
+                value={form.media_type}
+                onChange={(e) => setForm({ ...form, media_type: e.target.value })}
+                className="w-full px-3 py-2.5 rounded-lg bg-[var(--input-bg)] border border-[var(--border)] text-[var(--text-main)] text-sm focus:outline-none focus:ring-2 focus:ring-[var(--sidebar-active-bg)]"
+              >
+                {MEDIA_TYPES.map((t) => (
+                  <option key={t.value} value={t.value}>{t.label}</option>
+                ))}
+              </select>
             </div>
-            <input
-              ref={fileInputRef}
-              type="file"
-              onChange={handleFileChange}
-              className="hidden"
-            />
-          </div>
 
-          <button
-            type="submit"
-            disabled={uploading}
-            className="w-full flex items-center justify-center gap-2 py-2.5 rounded-lg bg-[var(--sidebar-active-bg)] text-[var(--sidebar-active-text)] font-semibold text-sm disabled:opacity-60 hover:opacity-90 transition-opacity"
-          >
-            {uploading ? <Loader2 size={16} className="animate-spin" /> : <UploadCloud size={16} />}
-            {uploading ? 'Uploading…' : 'Upload'}
-          </button>
-        </motion.form>
+            <div>
+              <label className="block text-xs font-semibold text-[var(--text-muted)] mb-1.5">Name</label>
+              <input
+                type="text"
+                value={form.name}
+                onChange={(e) => setForm({ ...form, name: e.target.value })}
+                placeholder="e.g. Onboarding walkthrough"
+                className="w-full px-3 py-2.5 rounded-lg bg-[var(--input-bg)] border border-[var(--border)] text-[var(--text-main)] text-sm focus:outline-none focus:ring-2 focus:ring-[var(--sidebar-active-bg)]"
+              />
+            </div>
 
-        {/* Library list */}
+            <div>
+              <label className="block text-xs font-semibold text-[var(--text-muted)] mb-1.5">Description</label>
+              <textarea
+                value={form.description}
+                onChange={(e) => setForm({ ...form, description: e.target.value })}
+                rows={3}
+                placeholder="Optional description"
+                className="w-full px-3 py-2.5 rounded-lg bg-[var(--input-bg)] border border-[var(--border)] text-[var(--text-main)] text-sm resize-none focus:outline-none focus:ring-2 focus:ring-[var(--sidebar-active-bg)]"
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold text-[var(--text-muted)] mb-1.5">File</label>
+              <div
+                onClick={() => fileInputRef.current?.click()}
+                className="border-2 border-dashed border-[var(--border)] rounded-lg p-5 text-center cursor-pointer hover:border-[var(--sidebar-active-bg)] transition-colors"
+              >
+                <UploadCloud size={24} className="mx-auto text-[var(--text-muted)] mb-2" />
+                {file ? (
+                  <div className="flex items-center justify-center gap-2 text-sm text-[var(--text-main)]">
+                    <span className="truncate max-w-[180px]">{file.name}</span>
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setFile(null);
+                        if (fileInputRef.current) fileInputRef.current.value = '';
+                      }}
+                      className="text-[var(--accent-red)]"
+                    >
+                      <X size={16} />
+                    </button>
+                  </div>
+                ) : (
+                  <p className="text-sm text-[var(--text-muted)]">Click to choose a file (any type)</p>
+                )}
+              </div>
+              <input
+                ref={fileInputRef}
+                type="file"
+                onChange={handleFileChange}
+                className="hidden"
+              />
+            </div>
+
+            <button
+              type="submit"
+              disabled={!file && (!fileInputRef.current || !fileInputRef.current._filesToProcess?.length)}
+              className="w-full flex items-center justify-center gap-2 py-2.5 rounded-lg bg-[var(--sidebar-active-bg)] text-[var(--sidebar-active-text)] font-semibold text-sm disabled:opacity-60 hover:opacity-90 transition-opacity"
+            >
+              <UploadCloud size={16} />
+              Upload
+            </button>
+          </motion.form>
+        </div>
+
         <div className="lg:col-span-2 space-y-4">
           <div className="flex flex-col sm:flex-row gap-3">
             <div className="relative flex-1">
@@ -247,6 +339,60 @@ const MediaLibrary = () => {
             </select>
           </div>
 
+          {/* Folder Navigation & Tag Breadcrumbs */}
+          <div className="flex items-center justify-between flex-wrap gap-2 py-1.5 px-3 bg-[var(--input-bg)] border border-[var(--border)] rounded-xl text-xs font-semibold text-[var(--text-muted)]">
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <button
+                onClick={() => {
+                  setCurrentFolder('/');
+                  setSelectedTag('');
+                }}
+                className={`hover:text-[var(--text-main)] ${currentFolder === '/' ? 'text-[var(--text-main)] font-bold' : ''}`}
+              >
+                Root
+              </button>
+              {currentFolder !== '/' && (
+                <>
+                  <span>/</span>
+                  <span className="text-[var(--text-main)] font-bold">{currentFolder.replace(/^\//, '')}</span>
+                </>
+              )}
+              {selectedTag && (
+                <div className="flex items-center gap-1 bg-[var(--sidebar-active-bg)] text-[var(--sidebar-active-text)] px-2 py-0.5 rounded-full text-[10px]">
+                  <span>Tag: {selectedTag}</span>
+                  <button onClick={() => setSelectedTag('')} className="hover:opacity-80">
+                    <X size={10} />
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {currentFolder === '/' && folders.length > 0 && (
+              <span className="text-[10px] text-[var(--text-muted)] uppercase tracking-wider">{folders.length} Folder(s) available</span>
+            )}
+          </div>
+
+          {/* Virtual Folders Grid */}
+          {currentFolder === '/' && folders.length > 0 && (
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+              {folders.map((f) => (
+                <div
+                  key={f.id}
+                  onClick={() => setCurrentFolder(f.name)}
+                  className="flex items-center gap-3 p-3 bg-[var(--bg-card)] border border-[var(--border)] rounded-xl cursor-pointer hover:border-[var(--sidebar-active-bg)] transition-colors group"
+                >
+                  <div className="p-2.5 rounded-lg bg-[var(--input-bg)] text-amber-500 group-hover:bg-amber-500/10 transition-colors">
+                    <Folder size={18} />
+                  </div>
+                  <div className="min-w-0">
+                    <p className="text-xs font-bold text-[var(--text-main)] truncate">{f.name.replace(/^\//, '')}</p>
+                    <p className="text-[9px] text-[var(--text-muted)] mt-0.5">Click to view</p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
           {loading ? (
             <div className="flex items-center justify-center py-20 text-[var(--text-muted)]">
               <Loader2 size={22} className="animate-spin" />
@@ -254,7 +400,7 @@ const MediaLibrary = () => {
           ) : filtered.length === 0 ? (
             <div className="text-center py-20 text-[var(--text-muted)] border border-dashed border-[var(--border)] rounded-2xl">
               <Library size={32} className="mx-auto mb-3 opacity-50" />
-              <p className="text-sm">No files yet. Upload your first file using the form.</p>
+              <p className="text-sm">No files yet in this view.</p>
             </div>
           ) : (
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -287,6 +433,22 @@ const MediaLibrary = () => {
                         <p className="text-[11px] text-[var(--text-muted)] mt-1 truncate">
                           {item.file_name}{item.size ? ` · ${formatSize(item.size)}` : ''}
                         </p>
+
+                        {/* Display custom tags */}
+                        {item.tags && item.tags.length > 0 && (
+                          <div className="flex flex-wrap gap-1 mt-1.5">
+                            {item.tags.map((t) => (
+                              <span
+                                key={t}
+                                onClick={() => setSelectedTag(t)}
+                                className="cursor-pointer hover:bg-[var(--sidebar-active-bg)] hover:text-[var(--sidebar-active-text)] text-[9px] bg-[var(--input-bg)] border border-[var(--border)] text-[var(--text-muted)] px-1.5 py-0.5 rounded-full transition-colors"
+                              >
+                                #{t}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+
                         <div className="flex items-center gap-3 mt-2.5">
                           <a
                             href={item.url}
@@ -312,6 +474,24 @@ const MediaLibrary = () => {
           )}
         </div>
       </div>
+      )}
+
+      {/* Floating Chatbot Assistant */}
+      <UploadProgressDashboard />
+      <MediaChatbot
+        currentFolder={currentFolder}
+        onFilterChange={({ media_type, search, folder, tag }) => {
+          if (media_type) setFilter(media_type);
+          if (search !== undefined) setSearch(search);
+          if (folder) setCurrentFolder(folder);
+          if (tag !== undefined) setSelectedTag(tag);
+        }}
+        onRefreshFiles={fetchItems}
+        onFolderCreated={(folder) => {
+          fetchFolders();
+          setCurrentFolder(folder.name);
+        }}
+      />
     </div>
   );
 };
