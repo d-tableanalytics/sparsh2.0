@@ -82,8 +82,27 @@ async def get_accessible_project_ids(ctx: UserContext) -> Optional[Set[str]]:
     return ids
 
 
+# Common words that add noise (not signal) to a content regex. Kept short on
+# purpose — over-filtering only hurts recall.
+_STOPWORDS = {
+    "what", "when", "where", "which", "whom", "whose", "that", "this", "with",
+    "from", "your", "you", "the", "and", "for", "are", "was", "were", "how",
+    "does", "did", "can", "could", "would", "should", "about", "into", "tell",
+    "give", "show", "explain", "please", "have", "has", "any", "some", "want",
+}
+
+
 def _keywords(query: str) -> List[str]:
-    return [k for k in re.split(r"\W+", query.lower()) if len(k) > 3]
+    """Content keywords from a query.
+
+    Keeps 3-char tokens so acronyms (OOP, ROI, KPI) survive, but drops common
+    stopwords so a question like "what is OOP" searches for "oop", not "what".
+    """
+    return [
+        k
+        for k in re.split(r"\W+", query.lower())
+        if len(k) >= 3 and k not in _STOPWORDS
+    ]
 
 
 async def search(ctx: UserContext, query: str, limit: int = 5) -> RagRetrieval:

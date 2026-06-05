@@ -15,9 +15,13 @@ Importing the submodules here runs their @tool decorators so they self-register.
 
 from app.assistant.tools.student import (  # noqa: E402,F401
     assessment_tools,
+    attendance_tools,
+    content_tools,
+    curriculum_tools,
     performance_tools,
     profile_tools,
     progress_tools,
     recommendation_tools,
     session_tools,
+    task_tools,
 )

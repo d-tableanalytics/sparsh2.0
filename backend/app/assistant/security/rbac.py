@@ -21,6 +21,7 @@ _ROLE_MAP = {
     "staff": ROLE_AD,
     "clientadmin": ROLE_CA,
     "clientuser": ROLE_CU,
+    "clientdoer": ROLE_CU,   # task-doer learner — personal scope
 }
 
 

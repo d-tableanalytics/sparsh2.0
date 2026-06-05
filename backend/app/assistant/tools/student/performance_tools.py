@@ -16,7 +16,7 @@ from app.assistant.tools.registry import tool
         "trend, and strengths/weaknesses by subject. Use for 'how am I doing', "
         "'am I improving', 'what are my weak areas'."
     ),
-    allowed_roles=["CU", "CA"],
+    allowed_roles=["CU", "CA", "AD", "SA"],
     parameters={"period": {"type": "string", "enum": ["recent", "all"],
                            "description": "recent = last 8 assessments (default), all = full history"}},
 )
@@ -57,7 +57,7 @@ async def analyze_student_performance(ctx: UserContext, period: str = "recent") 
         "Break down the current user's assessment scores by subject (derived from "
         "quiz titles). Use for 'how am I doing in each subject', 'my scores per topic'."
     ),
-    allowed_roles=["CU", "CA"],
+    allowed_roles=["CU", "CA", "AD", "SA"],
     parameters={},
 )
 async def get_subject_wise_scores(ctx: UserContext) -> ToolResult:

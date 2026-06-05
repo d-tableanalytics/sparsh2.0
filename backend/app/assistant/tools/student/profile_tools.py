@@ -22,7 +22,7 @@ PROFILE_FIELDS = [
         "company, department, designation, batches). Use for questions like "
         "'what's my role', 'which batch am I in', or 'show my profile'."
     ),
-    allowed_roles=["CU", "CA"],
+    allowed_roles=["CU", "CA", "AD", "SA"],
     parameters={},
 )
 async def get_my_profile(ctx: UserContext) -> ToolResult:

@@ -20,7 +20,7 @@ from app.db.mongodb import get_collection
         "their weak subjects, performance trend, and upcoming sessions. Use for "
         "'what should I study today', 'what should I focus on'."
     ),
-    allowed_roles=["CU", "CA"],
+    allowed_roles=["CU", "CA", "AD", "SA"],
     parameters={},
 )
 async def recommend_study_plan(ctx: UserContext) -> ToolResult:

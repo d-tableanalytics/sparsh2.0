@@ -20,7 +20,7 @@ QUIZ_FIELDS = [
         "score, percentage, pass/fail). Use for 'how did I do on my last quiz', "
         "'my latest test score', 'did I pass my last exam'."
     ),
-    allowed_roles=["CU", "CA"],
+    allowed_roles=["CU", "CA", "AD", "SA"],
     parameters={},
 )
 async def get_latest_quiz_result(ctx: UserContext) -> ToolResult:

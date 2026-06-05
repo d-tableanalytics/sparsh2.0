@@ -17,22 +17,24 @@ from app.db.mongodb import get_collection
         "completion, module progress, and courses in progress. Use for "
         "'how far along am I', 'my overall progress'."
     ),
-    allowed_roles=["CU", "CA"],
+    allowed_roles=["CU", "CA", "AD", "SA"],
     parameters={},
 )
 async def get_learning_progress(ctx: UserContext) -> ToolResult:
-    learnings = await get_collection("learnings").find({"user_id": ctx.user_id}).to_list(200)
-
     sessions = []
     session_query = {"$or": [{"assigned_member_ids": ctx.user_id}, {"coach_ids": ctx.user_id}]}
     for col_name in SESSION_COLLECTIONS:
         sessions.extend(await get_collection(col_name).find(session_query).to_list(500))
 
+    # Quarters (modules) the learner is enrolled in, via their batches. batch_ids
+    # is backfilled from the company link in the request context.
     quarters = []
     if ctx.batch_ids:
         quarters = await get_collection("quarters").find({"batch_id": {"$in": ctx.batch_ids}}).to_list(200)
 
-    summary = progress.analyze(learnings, sessions, quarters)
+    # Progress is computed from session completion + active quarters. (The legacy
+    # `learnings` module-progress collection is unused in this deployment.)
+    summary = progress.analyze([], sessions, quarters)
 
     result = AnalyticsResult(
         analysis="progress",
@@ -55,6 +57,6 @@ async def get_learning_progress(ctx: UserContext) -> ToolResult:
     return ToolResult.ok(
         "get_learning_progress",
         result.model_dump(),
-        sources=["learnings", *SESSION_COLLECTIONS, "quarters"],
+        sources=[*SESSION_COLLECTIONS, "quarters"],
         scope_applied=f"personal:{ctx.user_id}",
     )

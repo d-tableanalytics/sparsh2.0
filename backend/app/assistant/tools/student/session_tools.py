@@ -26,7 +26,7 @@ SESSION_FIELDS = [
         "range). Use for 'what sessions do I have', 'my schedule next week', "
         "'upcoming classes'. Dates are ISO strings (YYYY-MM-DD)."
     ),
-    allowed_roles=["CU", "CA"],
+    allowed_roles=["CU", "CA", "AD", "SA"],
     parameters={
         "from_date": {"type": "string", "description": "Inclusive ISO lower bound, e.g. 2026-06-01"},
         "to_date": {"type": "string", "description": "Inclusive ISO upper bound, e.g. 2026-06-30"},

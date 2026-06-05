@@ -182,7 +182,8 @@ async def main():
     learner_tools = {t.name for t in registry.tools_for_role("clientuser")}
     check("learner has the 3 Phase-1 tools",
           {"get_my_profile", "get_my_sessions", "get_latest_quiz_result"} <= learner_tools)
-    check("superadmin sees 0 (no SA tools yet)", len(registry.openai_schema_for_role("superadmin")) == 0)
+    sa_tools = {t.name for t in registry.tools_for_role("superadmin")}
+    check("staff/superadmin now get self-scoped read tools", "get_my_profile" in sa_tools)
 
     # 2) End-to-end: profile
     print("\nE2E get_my_profile:")
@@ -261,8 +262,12 @@ async def main():
     r = await registry.execute_tool(registry.get_tool("_boom_tool"), LEARNER_A, {})
     check("raising tool isolated to ToolResult.fail", not r.success and "kaboom" in (r.error or ""))
 
-    # role re-check at execution layer
-    r = await registry.execute_tool(registry.get_tool("get_my_profile"),
+    # role re-check at execution layer: a learner-only tool must reject staff.
+    @registry.tool(name="_cu_only", description="x", allowed_roles=["CU"], parameters={})
+    async def _cu_only(ctx):
+        return ToolResult.ok("_cu_only", "ok")
+
+    r = await registry.execute_tool(registry.get_tool("_cu_only"),
                                     UserContext(user_id="x", role="superadmin"), {})
     check("execution-layer role re-check blocks disallowed role", not r.success)
 
