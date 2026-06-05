@@ -6,10 +6,27 @@ messages from history are not replayed.
 """
 from __future__ import annotations
 
+import re
 from typing import List
 
 from app.assistant.config import config
 from app.assistant.schemas.conversation import Conversation
+
+# Matches: [File: name.ext]\n<extracted body up to the next [ or end>
+_FILE_BODY_RE = re.compile(
+    r'(\[File(?:\s+attached)?:\s*[^\]\n]+\])\n[^\[]+',
+    re.DOTALL,
+)
+
+
+def _strip_file_bodies(content: str) -> str:
+    """Drop extracted file text from history turns.
+
+    The first time a file is processed the LLM needs its content, but in every
+    subsequent turn replaying those 2000 chars causes the model to fixate on
+    the old file instead of the new message. Keep only the [File: name] tag.
+    """
+    return _FILE_BODY_RE.sub(r'\1\n', content).strip()
 
 
 def build_window(conversation: Conversation) -> List[dict]:
@@ -27,7 +44,8 @@ def build_window(conversation: Conversation) -> List[dict]:
     recent = conversation.messages[-config.MAX_WINDOW_MESSAGES:]
     for msg in recent:
         if msg.role in ("user", "assistant"):
-            window.append({"role": msg.role, "content": msg.content})
+            content = _strip_file_bodies(msg.content) if msg.role == "user" else msg.content
+            window.append({"role": msg.role, "content": content})
 
     return window
 

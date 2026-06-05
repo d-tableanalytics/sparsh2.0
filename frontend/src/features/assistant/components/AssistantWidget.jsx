@@ -24,7 +24,7 @@ export default function AssistantWidget() {
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 24, scale: 0.98 }}
             transition={{ duration: 0.18, ease: 'easeOut' }}
-            className="fixed bottom-24 right-4 z-[70] h-[min(620px,calc(100vh-8rem))] w-[min(400px,calc(100vw-2rem))]"
+            className="fixed bottom-24 right-4 z-[70] h-[min(720px,calc(100vh-6rem))] w-[min(480px,calc(100vw-2rem))]"
           >
             <ChatWindow onClose={() => setOpen(false)} />
           </motion.div>

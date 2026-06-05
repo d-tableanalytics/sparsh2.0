@@ -14,8 +14,28 @@ _FOLLOWUP_MARKERS = {
     "there", "then", "same", "one", "ones", "another", "more",
 }
 
+# Greetings and social niceties that need no context rewrite — answer directly.
+_CASUAL = {
+    "hi", "hello", "hey", "hiya", "howdy", "yo", "sup", "heya",
+    "good morning", "good afternoon", "good evening", "good night",
+    "how are you", "how r u", "how are u", "whats up", "what's up",
+    "how do you do", "how's it going", "hows it going",
+    "thanks", "thank you", "ty", "thx", "cheers",
+    "bye", "goodbye", "see you", "see ya", "cya", "take care",
+    "ok", "okay", "alright", "cool", "nice", "great", "got it",
+    "sure", "sounds good", "perfect", "awesome",
+}
+
+
+def _is_casual(message: str) -> bool:
+    """True for greetings / social niceties — skip context-based rewrite."""
+    normalized = message.strip().lower().rstrip("!?.,;:")
+    return normalized in _CASUAL
+
 
 def _needs_rewrite(message: str) -> bool:
+    if _is_casual(message):
+        return False
     words = [w.strip("?.,!").lower() for w in message.split()]
     if len(words) <= 4:                       # very short → likely elliptical
         return True

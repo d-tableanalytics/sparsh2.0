@@ -121,7 +121,7 @@ async def upload_file(
     """Accept a file, extract its text/images, and return content for chat context."""
     from app.services.gpt_service import extract_text_from_file
 
-    ALLOWED = {
+    ALLOWED_TYPES = {
         "image/jpeg", "image/jpg", "image/png", "image/webp",
         "application/pdf", "application/msword",
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -129,9 +129,18 @@ async def upload_file(
         "audio/mpeg", "audio/wav", "audio/mp4",
         "video/mp4", "video/webm", "video/quicktime",
     }
+    ALLOWED_EXTS = {
+        "jpg", "jpeg", "png", "webp",
+        "pdf", "doc", "docx", "txt",
+        "mp3", "wav", "mp4", "mov", "webm",
+    }
     MAX_BYTES = 10 * 1024 * 1024  # 10 MB
 
-    if file.content_type not in ALLOWED:
+    # Strip charset/params before checking (e.g. "text/plain; charset=UTF-8" → "text/plain")
+    base_type = (file.content_type or "").split(";")[0].strip().lower()
+    ext = os.path.splitext(file.filename or "")[1].lstrip(".").lower()
+
+    if base_type not in ALLOWED_TYPES and ext not in ALLOWED_EXTS:
         raise HTTPException(status_code=415, detail=f"Unsupported file type: {file.content_type}")
 
     content = await file.read()

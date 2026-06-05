@@ -1,8 +1,8 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
-import { Send, Square, Paperclip, X, Mic, MicOff } from 'lucide-react';
+import { Send, Square, Paperclip, X, Mic, Check } from 'lucide-react';
 import FilePreview from './FilePreview';
 
-const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
+const MAX_FILE_SIZE = 10 * 1024 * 1024;
 
 const ALLOWED_TYPES = new Set([
   'image/jpeg', 'image/jpg', 'image/png', 'image/webp',
@@ -20,10 +20,11 @@ const ACCEPT = [
   '.mp3', '.wav', '.mp4', '.mov', '.webm',
 ].join(',');
 
-// Check browser support once
 const SpeechRecognition =
   typeof window !== 'undefined' &&
   (window.SpeechRecognition || window.webkitSpeechRecognition);
+
+const BAR_COUNT = 36;
 
 export default function ChatInput({
   onSend,
@@ -37,53 +38,95 @@ export default function ChatInput({
   const [value, setValue] = useState('');
   const [files, setFiles] = useState([]);
   const [fileError, setFileError] = useState('');
-
-  // Mic state
   const [listening, setListening] = useState(false);
   const [micError, setMicError] = useState('');
-  const recognitionRef = useRef(null);
+  const [waveformBars, setWaveformBars] = useState(Array(BAR_COUNT).fill(4));
 
+  const recognitionRef = useRef(null);
   const textareaRef = useRef(null);
   const fileInputRef = useRef(null);
+  const baseTextRef = useRef('');
+  const audioCtxRef = useRef(null);
+  const animFrameRef = useRef(null);
 
-  // ── Speech recognition ────────────────────────────────────────────────────
+  // ── Waveform ───────────────────────────────────────────────────────────────
+  const stopWaveform = useCallback(() => {
+    cancelAnimationFrame(animFrameRef.current);
+    if (audioCtxRef.current) {
+      try {
+        audioCtxRef.current.stream.getTracks().forEach((t) => t.stop());
+        audioCtxRef.current.ctx.close();
+      } catch (_) {}
+      audioCtxRef.current = null;
+    }
+    setWaveformBars(Array(BAR_COUNT).fill(4));
+  }, []);
+
+  const startWaveform = useCallback(async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 128;
+      analyser.smoothingTimeConstant = 0.8;
+      ctx.createMediaStreamSource(stream).connect(analyser);
+      audioCtxRef.current = { ctx, stream, analyser };
+
+      const tick = () => {
+        const data = new Uint8Array(analyser.frequencyBinCount);
+        analyser.getByteFrequencyData(data);
+        const bars = Array.from({ length: BAR_COUNT }, (_, i) => {
+          const idx = Math.floor((i / BAR_COUNT) * (analyser.frequencyBinCount * 0.65));
+          return Math.max(4, Math.round((data[idx] / 255) * 48));
+        });
+        setWaveformBars(bars);
+        animFrameRef.current = requestAnimationFrame(tick);
+      };
+      tick();
+    } catch (_) {
+      // Fallback: CSS sine-wave animation
+      let t = 0;
+      const tick = () => {
+        t += 0.12;
+        const bars = Array.from({ length: BAR_COUNT }, (_, i) =>
+          Math.max(4, Math.round(20 + Math.sin(t + i * 0.45) * 14 + Math.sin(t * 1.7 + i * 0.8) * 8))
+        );
+        setWaveformBars(bars);
+        animFrameRef.current = requestAnimationFrame(tick);
+      };
+      tick();
+    }
+  }, []);
+
+  // ── Speech recognition ─────────────────────────────────────────────────────
   const startListening = useCallback(() => {
     if (!SpeechRecognition) {
       setMicError('Speech recognition is not supported in this browser.');
       return;
     }
     setMicError('');
+    baseTextRef.current = (textareaRef.current?.value ?? '').trimEnd();
 
     const rec = new SpeechRecognition();
-    rec.lang = 'en-US';
-    rec.continuous = true;       // keep recording until user stops
-    rec.interimResults = true;   // show partial results while speaking
+    rec.lang = 'en-IN';
+    rec.continuous = true;
+    rec.interimResults = true;
 
-    let finalTranscript = '';
-
-    rec.onstart = () => setListening(true);
+    rec.onstart = () => {
+      setListening(true);
+      startWaveform();
+    };
 
     rec.onresult = (e) => {
-      let interim = '';
-      for (let i = e.resultIndex; i < e.results.length; i++) {
-        const t = e.results[i][0].transcript;
-        if (e.results[i].isFinal) finalTranscript += t + ' ';
-        else interim = t;
+      let finalText = '';
+      let interimText = '';
+      for (let i = 0; i < e.results.length; i++) {
+        if (e.results[i].isFinal) finalText += e.results[i][0].transcript;
+        else interimText += e.results[i][0].transcript;
       }
-      // Append to whatever the user already typed
-      setValue((prev) => {
-        const base = prev.trimEnd();
-        const combined = finalTranscript || interim;
-        return base ? `${base} ${combined.trim()}` : combined.trim();
-      });
-      // Auto-grow textarea
-      requestAnimationFrame(() => {
-        const el = textareaRef.current;
-        if (el) {
-          el.style.height = 'auto';
-          el.style.height = `${Math.min(el.scrollHeight, 120)}px`;
-        }
-      });
+      const speech = (finalText + interimText).trim();
+      const base = baseTextRef.current;
+      setValue(base ? `${base} ${speech}` : speech);
     };
 
     rec.onerror = (e) => {
@@ -93,29 +136,65 @@ export default function ChatInput({
         setMicError('Microphone error. Please try again.');
       }
       setListening(false);
+      stopWaveform();
     };
 
-    rec.onend = () => setListening(false);
+    rec.onend = () => {
+      setListening(false);
+      stopWaveform();
+    };
 
     recognitionRef.current = rec;
     rec.start();
-  }, []);
+  }, [startWaveform, stopWaveform]);
+
+  // Confirm: stop and keep transcript in textarea
+  const confirmListening = useCallback(() => {
+    recognitionRef.current?.stop();
+    recognitionRef.current = null;
+    setListening(false);
+    stopWaveform();
+    setTimeout(() => {
+      const el = textareaRef.current;
+      if (el) {
+        el.focus();
+        el.style.height = 'auto';
+        el.style.height = `${Math.min(el.scrollHeight, 120)}px`;
+        el.selectionStart = el.selectionEnd = el.value.length;
+      }
+    }, 50);
+  }, [stopWaveform]);
+
+  // Discard: stop and reset to pre-mic text
+  const discardListening = useCallback(() => {
+    recognitionRef.current?.stop();
+    recognitionRef.current = null;
+    setListening(false);
+    stopWaveform();
+    setValue(baseTextRef.current);
+  }, [stopWaveform]);
 
   const stopListening = useCallback(() => {
     recognitionRef.current?.stop();
     recognitionRef.current = null;
     setListening(false);
-  }, []);
+    stopWaveform();
+  }, [stopWaveform]);
 
-  const toggleMic = () => {
-    if (listening) stopListening();
-    else startListening();
-  };
+  // Cleanup on unmount
+  useEffect(() => () => {
+    recognitionRef.current?.stop();
+    stopWaveform();
+  }, [stopWaveform]);
 
-  // Stop mic if input is sent or component unmounts
-  useEffect(() => () => recognitionRef.current?.stop(), []);
+  // Reset height when input cleared
+  useEffect(() => {
+    if (!value && textareaRef.current) {
+      textareaRef.current.style.height = 'auto';
+    }
+  }, [value]);
 
-  // ── Edit pre-fill ─────────────────────────────────────────────────────────
+  // ── Edit pre-fill ──────────────────────────────────────────────────────────
   useEffect(() => {
     if (editTarget) {
       stopListening();
@@ -130,7 +209,7 @@ export default function ChatInput({
     }
   }, [editTarget, stopListening]);
 
-  // ── Submit ────────────────────────────────────────────────────────────────
+  // ── Submit ─────────────────────────────────────────────────────────────────
   const submit = () => {
     const text = value.trim();
     if ((!text && files.length === 0) || streaming || disabled || uploading) return;
@@ -155,7 +234,7 @@ export default function ChatInput({
     el.style.height = `${Math.min(el.scrollHeight, 120)}px`;
   };
 
-  // ── File handling ─────────────────────────────────────────────────────────
+  // ── File handling ──────────────────────────────────────────────────────────
   const handleFileSelect = (e) => {
     setFileError('');
     const selected = Array.from(e.target.files || []);
@@ -193,7 +272,7 @@ export default function ChatInput({
     <div className="border-t border-[var(--border)] bg-[var(--bg-card)]">
 
       {/* Edit mode banner */}
-      {editTarget && (
+      {editTarget && !listening && (
         <div className="flex items-center justify-between border-b border-[var(--border)] bg-[var(--accent-indigo-bg)] px-3 py-1.5">
           <span className="text-xs font-medium text-[var(--accent-indigo)]">Editing message</span>
           <button
@@ -206,28 +285,8 @@ export default function ChatInput({
         </div>
       )}
 
-      {/* Listening indicator */}
-      {listening && (
-        <div className="flex items-center gap-2 border-b border-[var(--border)] bg-red-50 dark:bg-red-950/20 px-3 py-1.5">
-          <span className="relative flex h-2 w-2">
-            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75" />
-            <span className="relative inline-flex h-2 w-2 rounded-full bg-red-500" />
-          </span>
-          <span className="text-xs font-medium text-red-600 dark:text-red-400">
-            Listening… speak now
-          </span>
-          <button
-            type="button"
-            onClick={stopListening}
-            className="ml-auto text-[10px] text-red-500 hover:text-red-700 underline"
-          >
-            Stop
-          </button>
-        </div>
-      )}
-
       {/* File previews */}
-      {files.length > 0 && (
+      {!listening && files.length > 0 && (
         <div className="flex flex-wrap gap-2 px-3 pt-2">
           {files.map((file, i) => (
             <FilePreview key={`${file.name}-${i}`} file={file} onRemove={() => removeFile(i)} />
@@ -236,85 +295,111 @@ export default function ChatInput({
       )}
 
       {/* Errors */}
-      {fileError && <p className="px-3 pt-1.5 text-xs text-[var(--accent-red)]">{fileError}</p>}
-      {micError  && <p className="px-3 pt-1.5 text-xs text-[var(--accent-red)]">{micError}</p>}
+      {!listening && fileError && <p className="px-3 pt-1.5 text-xs text-[var(--accent-red)]">{fileError}</p>}
+      {!listening && micError  && <p className="px-3 pt-1.5 text-xs text-[var(--accent-red)]">{micError}</p>}
 
-      {/* Input row */}
-      <div className="flex items-end gap-2 p-2.5">
+      {listening ? (
+        /* ── ChatGPT-style voice UI ──────────────────────────────────────── */
+        <div className="flex items-center gap-3 px-4 py-3">
+          {/* Waveform */}
+          <div className="flex flex-1 items-center justify-center gap-[2px] h-12">
+            {waveformBars.map((h, i) => (
+              <div
+                key={i}
+                className="w-[3px] rounded-full bg-[var(--accent-indigo)] transition-all duration-75"
+                style={{ height: `${h}px`, opacity: 0.5 + (h / 48) * 0.5 }}
+              />
+            ))}
+          </div>
 
-        {/* Attach button */}
-        <button
-          type="button"
-          onClick={() => fileInputRef.current?.click()}
-          disabled={isLoading || disabled}
-          title="Attach file"
-          className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-[var(--border)] bg-[var(--bg-main)] text-[var(--text-muted)] hover:border-[var(--accent-indigo)] hover:text-[var(--accent-indigo)] disabled:opacity-40 transition"
-        >
-          <Paperclip size={16} />
-        </button>
-        <input ref={fileInputRef} type="file" multiple accept={ACCEPT} onChange={handleFileSelect} className="hidden" />
-
-        {/* Textarea */}
-        <textarea
-          ref={textareaRef}
-          rows={1}
-          value={value}
-          onChange={autoGrow}
-          onKeyDown={onKeyDown}
-          disabled={disabled}
-          placeholder={listening ? 'Listening…' : 'Ask about your sessions, scores, progress…'}
-          className="max-h-[120px] flex-1 resize-none rounded-xl border border-[var(--input-border)] bg-[var(--input-bg)] px-3 py-2 text-sm text-[var(--text-main)] placeholder:text-[var(--text-muted)] focus:outline-none focus:ring-2 focus:ring-[var(--accent-indigo)] disabled:opacity-60 no-scrollbar"
-        />
-
-        {/* Mic button */}
-        {!streaming && (
+          {/* Discard */}
           <button
             type="button"
-            onClick={toggleMic}
-            disabled={disabled || uploading}
-            title={
-              !SpeechRecognition
-                ? 'Speech recognition not supported'
-                : listening
-                  ? 'Stop listening'
-                  : 'Speak your message'
-            }
-            className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border transition disabled:opacity-40 ${
-              listening
-                ? 'border-red-400 bg-red-500 text-white animate-pulse'
-                : 'border-[var(--border)] bg-[var(--bg-main)] text-[var(--text-muted)] hover:border-[var(--accent-indigo)] hover:text-[var(--accent-indigo)]'
-            }`}
+            onClick={discardListening}
+            title="Discard"
+            className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-[var(--border)] bg-[var(--bg-main)] text-[var(--text-muted)] hover:border-[var(--accent-red)] hover:text-[var(--accent-red)] transition"
           >
-            {listening ? <MicOff size={15} /> : <Mic size={15} />}
+            <X size={18} />
           </button>
-        )}
 
-        {/* Stop / Send */}
-        {streaming ? (
+          {/* Confirm */}
           <button
             type="button"
-            onClick={onCancel}
-            title="Stop generating"
-            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-[var(--border)] bg-[var(--bg-main)] text-[var(--text-muted)] hover:border-red-400 hover:text-red-500 transition"
+            onClick={confirmListening}
+            title="Use transcript"
+            className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-[var(--accent-indigo)] text-white hover:opacity-90 transition"
           >
-            <Square size={15} />
+            <Check size={18} />
           </button>
-        ) : (
+        </div>
+      ) : (
+        /* ── Normal input row ────────────────────────────────────────────── */
+        <div className="flex items-end gap-2 p-2.5">
+
+          {/* Attach */}
           <button
             type="button"
-            onClick={submit}
-            disabled={!canSend}
-            title={uploading ? 'Uploading…' : 'Send'}
-            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-[var(--accent-indigo)] text-white transition hover:opacity-90 disabled:opacity-40"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={isLoading || disabled}
+            title="Attach file"
+            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-[var(--border)] bg-[var(--bg-main)] text-[var(--text-muted)] hover:border-[var(--accent-indigo)] hover:text-[var(--accent-indigo)] disabled:opacity-40 transition"
           >
-            {uploading ? (
-              <div className="h-4 w-4 animate-spin rounded-full border-2 border-white/30 border-t-white" />
-            ) : (
-              <Send size={15} />
-            )}
+            <Paperclip size={16} />
           </button>
-        )}
-      </div>
+          <input ref={fileInputRef} type="file" multiple accept={ACCEPT} onChange={handleFileSelect} className="hidden" />
+
+          {/* Textarea */}
+          <textarea
+            ref={textareaRef}
+            rows={1}
+            value={value}
+            onChange={autoGrow}
+            onKeyDown={onKeyDown}
+            disabled={disabled}
+            placeholder="Ask anything…"
+            className="max-h-[120px] flex-1 resize-none rounded-xl border border-[var(--input-border)] bg-[var(--input-bg)] px-3 py-2 text-sm text-[var(--text-main)] placeholder:text-[var(--text-muted)] focus:outline-none focus:ring-2 focus:ring-[var(--accent-indigo)] disabled:opacity-60 no-scrollbar"
+          />
+
+          {/* Mic */}
+          {!streaming && (
+            <button
+              type="button"
+              onClick={startListening}
+              disabled={disabled || uploading || !SpeechRecognition}
+              title={!SpeechRecognition ? 'Speech recognition not supported' : 'Speak your message'}
+              className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-[var(--border)] bg-[var(--bg-main)] text-[var(--text-muted)] hover:border-[var(--accent-indigo)] hover:text-[var(--accent-indigo)] disabled:opacity-40 transition"
+            >
+              <Mic size={15} />
+            </button>
+          )}
+
+          {/* Stop / Send */}
+          {streaming ? (
+            <button
+              type="button"
+              onClick={onCancel}
+              title="Stop generating"
+              className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-[var(--border)] bg-[var(--bg-main)] text-[var(--text-muted)] hover:border-red-400 hover:text-red-500 transition"
+            >
+              <Square size={15} />
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={submit}
+              disabled={!canSend}
+              title={uploading ? 'Uploading…' : 'Send'}
+              className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-[var(--accent-indigo)] text-white transition hover:opacity-90 disabled:opacity-40"
+            >
+              {uploading ? (
+                <div className="h-4 w-4 animate-spin rounded-full border-2 border-white/30 border-t-white" />
+              ) : (
+                <Send size={15} />
+              )}
+            </button>
+          )}
+        </div>
+      )}
     </div>
   );
 }

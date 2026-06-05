@@ -4,6 +4,75 @@ import { streamAsk, uploadFile } from '../services/assistantApi';
 let _seq = 0;
 const nextId = (p) => `${p}-${Date.now()}-${_seq++}`;
 
+const EXT_MIME = {
+  pdf: 'application/pdf',
+  doc: 'application/msword',
+  docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  txt: 'text/plain',
+  mp3: 'audio/mpeg',
+  wav: 'audio/wav',
+  mp4: 'video/mp4',
+  mov: 'video/quicktime',
+  webm: 'video/webm',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  png: 'image/png',
+  webp: 'image/webp',
+};
+
+// Text-based extensions readable directly in the browser (no backend needed)
+const TEXT_EXTS = new Set(['txt', 'csv', 'md', 'json', 'xml', 'html', 'js', 'ts', 'py', 'log', 'yaml', 'yml']);
+
+function readFileAsText(file) {
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onload = (e) => resolve((e.target.result || '').trim());
+    reader.onerror = () => resolve('');
+    reader.readAsText(file);
+  });
+}
+
+// Parse backend-stored user content back into displayText + file cards
+function parseUserContent(raw) {
+  const filePattern = /\[File(?:\s+attached)?:\s*([^\]\n]+)\]/g;
+  const files = [];
+  let match;
+  while ((match = filePattern.exec(raw)) !== null) {
+    const name = match[1].trim();
+    const ext = name.split('.').pop().toLowerCase();
+    files.push({ name, type: EXT_MIME[ext] || 'application/octet-stream', size: 0, previewUrl: null });
+  }
+  const firstFileIdx = raw.search(/\[File(?:\s+attached)?:/);
+  const displayText = firstFileIdx >= 0 ? raw.slice(0, firstFileIdx).trim() : raw;
+  return { displayText, files: files.length > 0 ? files : undefined };
+}
+
+// Extract text from a single file (backend first, client-side fallback for text files)
+async function extractFileContext(file) {
+  const ext = file.name.split('.').pop().toLowerCase();
+  let text = '';
+  let filename = file.name;
+
+  try {
+    const result = await uploadFile(file);
+    filename = result.filename || file.name;
+    text = result.text || '';
+  } catch {
+    // backend unavailable — fall through to client-side read
+  }
+
+  if (!text && TEXT_EXTS.has(ext)) {
+    text = await readFileAsText(file);
+  }
+
+  return {
+    context: text
+      ? `[File: ${filename}]\n${text.slice(0, 3000)}`
+      : `[File attached: ${filename}]`,
+    hasText: Boolean(text),
+  };
+}
+
 export default function useAssistant() {
   const [messages, setMessages] = useState([]);
   const [streaming, setStreaming] = useState(false);
@@ -14,6 +83,8 @@ export default function useAssistant() {
 
   const conversationIdRef = useRef(null);
   const abortRef = useRef(null);
+  // Stores extracted file contexts from file-only uploads, to be attached on next message
+  const pendingFileContextsRef = useRef([]);
 
   const rememberConversation = useCallback((id) => {
     if (!id) return;
@@ -32,6 +103,7 @@ export default function useAssistant() {
     abortRef.current = null;
     conversationIdRef.current = null;
     setCurrentConversationId(null);
+    pendingFileContextsRef.current = [];
     setMessages([]);
     setError(null);
     setActiveTool(null);
@@ -42,6 +114,7 @@ export default function useAssistant() {
     abortRef.current?.abort();
     conversationIdRef.current = conversation.id;
     setCurrentConversationId(conversation.id);
+    pendingFileContextsRef.current = [];
     setError(null);
     setActiveTool(null);
     setStreaming(false);
@@ -51,13 +124,11 @@ export default function useAssistant() {
         .map((m) => {
           const attributions = m.attributions || [];
           const sources = [...new Set(attributions.flatMap((a) => a.sources || []))];
-          return {
-            id: nextId(m.role),
-            role: m.role,
-            content: m.content || '',
-            attributions,
-            sources,
-          };
+          if (m.role === 'user') {
+            const { displayText, files } = parseUserContent(m.content || '');
+            return { id: nextId('u'), role: 'user', content: displayText, files, attributions, sources };
+          }
+          return { id: nextId('a'), role: 'assistant', content: m.content || '', attributions, sources };
         }),
     );
   }, []);
@@ -66,11 +137,6 @@ export default function useAssistant() {
     abortRef.current?.abort();
   }, []);
 
-  /**
-   * send(text, { editMessageId, files })
-   * - editMessageId: if set, remove that message and everything after it before sending
-   * - files: File[] to upload before sending; extracted text is appended to message
-   */
   const send = useCallback(
     async (text, { editMessageId, files = [] } = {}) => {
       const content = (text || '').trim();
@@ -78,7 +144,6 @@ export default function useAssistant() {
 
       setError(null);
 
-      // When editing, slice the conversation up to (but not including) the edited message
       if (editMessageId) {
         setMessages((list) => {
           const idx = list.findIndex((m) => m.id === editMessageId);
@@ -86,30 +151,64 @@ export default function useAssistant() {
         });
       }
 
-      // Upload files and collect extracted text to append to the message
+      // ── File-only upload: extract text, store for next message, show status ──
+      if (files.length > 0 && !content) {
+        setUploading(true);
+        const fileContexts = [];
+        const fileMetas = files.map((f) => ({
+          name: f.name,
+          type: f.type,
+          size: f.size,
+          previewUrl: f.type.startsWith('image/') ? URL.createObjectURL(f) : null,
+        }));
+
+        for (const file of files) {
+          const { context } = await extractFileContext(file);
+          fileContexts.push(context);
+        }
+        setUploading(false);
+
+        // Store extracted contexts to attach on the user's next message
+        pendingFileContextsRef.current = [
+          ...pendingFileContextsRef.current,
+          ...fileContexts,
+        ];
+
+        // Show file card message + synthetic assistant status (no AI call)
+        setMessages((list) => [
+          ...list,
+          { id: nextId('u'), role: 'user', content: '', files: fileMetas },
+          {
+            id: nextId('a'),
+            role: 'assistant',
+            content: 'File uploaded and read successfully. You can now ask me to explain or summarize it.',
+            synthetic: true,
+          },
+        ]);
+        return;
+      }
+
+      // ── Normal send: attach any pending file contexts, then call AI ──────────
       let finalContent = content;
+
+      // If files were also sent alongside text, extract them now
       if (files.length > 0) {
         setUploading(true);
         const fileContexts = [];
         for (const file of files) {
-          try {
-            const result = await uploadFile(file);
-            fileContexts.push(
-              result.text
-                ? `[File: ${result.filename}]\n${result.text.slice(0, 2000)}`
-                : `[File attached: ${result.filename}]`,
-            );
-          } catch {
-            // If upload endpoint unavailable, just note the filename
-            fileContexts.push(`[File attached: ${file.name}]`);
-          }
+          const { context } = await extractFileContext(file);
+          fileContexts.push(context);
         }
         setUploading(false);
         if (fileContexts.length > 0) {
-          finalContent = finalContent
-            ? `${finalContent}\n\n${fileContexts.join('\n\n')}`
-            : fileContexts.join('\n\n');
+          finalContent = `${finalContent}\n\n${fileContexts.join('\n\n')}`;
         }
+      }
+
+      // Attach pending file contexts from a previous file-only upload
+      if (pendingFileContextsRef.current.length > 0) {
+        finalContent = `${finalContent}\n\n${pendingFileContextsRef.current.join('\n\n')}`;
+        pendingFileContextsRef.current = [];
       }
 
       if (!finalContent) return;
@@ -117,13 +216,21 @@ export default function useAssistant() {
       const userId = nextId('u');
       const asstId = nextId('a');
 
-      // Show original user text in the bubble (not the enriched server payload)
-      const displayContent =
-        content || files.map((f) => `[File: ${f.name}]`).join(', ');
+      const fileMetas = files.map((f) => ({
+        name: f.name,
+        type: f.type,
+        size: f.size,
+        previewUrl: f.type.startsWith('image/') ? URL.createObjectURL(f) : null,
+      }));
 
       setMessages((list) => [
         ...list,
-        { id: userId, role: 'user', content: displayContent },
+        {
+          id: userId,
+          role: 'user',
+          content: content,
+          files: fileMetas.length > 0 ? fileMetas : undefined,
+        },
         { id: asstId, role: 'assistant', content: '', streaming: true },
       ]);
       setStreaming(true);
@@ -158,7 +265,6 @@ export default function useAssistant() {
         });
       } catch (e) {
         if (e.name === 'AbortError') {
-          // Mark the message as stopped — renders "Response stopped." indicator
           patch(asstId, { streaming: false, stopped: true });
         } else {
           const msg =

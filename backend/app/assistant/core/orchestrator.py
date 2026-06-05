@@ -66,7 +66,8 @@ class Orchestrator:
         messages.extend(window)
 
         recent = "\n".join(
-            f"{m.role}: {m.content}" for m in convo.messages[-4:]
+            f"{m.role}: {context_manager._strip_file_bodies(m.content) if m.role == 'user' else m.content}"
+            for m in convo.messages[-4:]
         )
         rw = await query_rewriter.rewrite(
             self.llm, message, convo.summary or "", recent, meter=meter
