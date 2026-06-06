@@ -34,6 +34,7 @@ import MyReports from './pages/MyReports';
 import MediaLibrary from './pages/MediaLibrary';
 import ForgotPassword from './pages/ForgotPassword';
 import PrivateRoute from './components/common/PrivateRoute';
+import AssistantWidget from './features/assistant';
 import './index.css';
 import { useAuth } from './context/AuthContext';
 
@@ -96,6 +97,7 @@ const App = () => {
         <NotificationProvider>
           <Router>
             <AppRoutes />
+            <AssistantWidget />
           </Router>
           <NotificationModal />
         </NotificationProvider>
