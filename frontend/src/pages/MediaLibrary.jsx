@@ -2,12 +2,12 @@ import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   UploadCloud, FileVideo, FileAudio, FileText, FileImage, File as FileIcon,
-  Trash2, Download, Search, Loader2, X, Library, Folder, BarChart2
+  Trash2, Download, Search, Loader2, X, Library, Folder, BarChart2,
+  AlertTriangle, Copy, RefreshCw
 } from 'lucide-react';
 import api from '../services/api';
 import { useNotification } from '../context/NotificationContext';
 import { useUploadQueue } from '../context/UploadContext';
-import MediaChatbot from '../components/MediaChatbot';
 import MediaInsights from '../components/MediaInsights';
 import UploadProgressDashboard from '../components/UploadProgressDashboard';
 
@@ -37,8 +37,9 @@ const formatSize = (bytes) => {
 
 const MediaLibrary = () => {
   const { showSuccess, showError } = useNotification();
-  const { enqueueFile } = useUploadQueue();
+  const { enqueueFiles } = useUploadQueue();
   const fileInputRef = useRef(null);
+  const conflictResolverRef = useRef(null);
 
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -47,12 +48,15 @@ const MediaLibrary = () => {
 
   const [form, setForm] = useState({ media_type: 'video', name: '', description: '' });
   const [file, setFile] = useState(null);
+  const [selectedFileCount, setSelectedFileCount] = useState(0);
+  const [isDraggingFiles, setIsDraggingFiles] = useState(false);
 
   // New folder, tag, and insights dashboard states
   const [currentFolder, setCurrentFolder] = useState('/');
   const [folders, setFolders] = useState([]);
   const [selectedTag, setSelectedTag] = useState('');
   const [activeTab, setActiveTab] = useState('library');
+  const [conflictModal, setConflictModal] = useState(null);
 
   const fetchItems = async () => {
     setLoading(true);
@@ -80,13 +84,14 @@ const MediaLibrary = () => {
     fetchFolders();
   }, []);
 
-  const handleFileChange = (e) => {
+  const setSelectedFiles = (selectedFiles) => {
     // For high volume uploads, support multiple files
-    const selectedFiles = Array.from(e.target.files || []);
     if (!selectedFiles.length) return;
     
     // Process the first file for form preview, others will be queued directly
     setFile(selectedFiles[0]);
+    setSelectedFileCount(selectedFiles.length);
+
     // Store all files in a temp attribute if multiple selected
     if (selectedFiles.length > 1) {
        fileInputRef.current._filesToProcess = selectedFiles;
@@ -101,12 +106,43 @@ const MediaLibrary = () => {
     }));
   };
 
+  const handleFileChange = (e) => {
+    setSelectedFiles(Array.from(e.target.files || []));
+  };
+
+  const handleDrop = (e) => {
+    e.preventDefault();
+    setIsDraggingFiles(false);
+    setSelectedFiles(Array.from(e.dataTransfer.files || []));
+  };
+
+  const openConflictModal = (fileToProcess, existingFile) => {
+    return new Promise((resolve) => {
+      conflictResolverRef.current = resolve;
+      setConflictModal({
+        fileName: fileToProcess.name,
+        size: fileToProcess.size,
+        existing: existingFile,
+      });
+    });
+  };
+
+  const resolveConflictModal = (choice) => {
+    if (conflictResolverRef.current) {
+      conflictResolverRef.current(choice);
+      conflictResolverRef.current = null;
+    }
+    setConflictModal(null);
+  };
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     const filesToUpload = fileInputRef.current?._filesToProcess || (file ? [file] : []);
     
     if (filesToUpload.length === 0) return showError('Please choose a file to upload');
     if (filesToUpload.length === 1 && !form.name.trim()) return showError('Please enter a name');
+
+    const uploadBatch = [];
 
     for (let i = 0; i < filesToUpload.length; i++) {
         let fileToProcess = filesToUpload[i];
@@ -117,15 +153,12 @@ const MediaLibrary = () => {
         try {
           const { data: dupCheck } = await api.get(`/media/ai/check-duplicate?filename=${encodeURIComponent(fileToProcess.name)}&size=${fileToProcess.size}`);
           if (dupCheck.duplicate) {
-            const option = window.prompt(
-              `A file named "${fileToProcess.name}" already exists.\n\nType one of the following options:\n- "both": Keep both (rename the new file)\n- "replace": Replace the existing file\n- "skip": Skip this upload\n\nChoice:`,
-              "both"
-            );
-            if (!option) continue;
-            const choice = option.toLowerCase().trim();
-            if (choice === 'skip') {
+            const choice = await openConflictModal(fileToProcess, dupCheck.existing);
+            if (!choice || choice === 'skip') {
               continue;
-            } else if (choice === 'replace') {
+            }
+
+            if (choice === 'replace') {
               await api.delete(`/media/${dupCheck.existing.id}`);
             } else {
               const nameParts = fileToProcess.name.split('.');
@@ -140,15 +173,22 @@ const MediaLibrary = () => {
           console.warn("Duplicate check error:", err);
         }
 
-        // Enqueue to the background manager instead of blocking UI
-        await enqueueFile(fileToProcess, formToUpload, currentFolder);
+        uploadBatch.push({ file: fileToProcess, form: formToUpload, currentFolder });
     }
+
+    if (uploadBatch.length === 0) {
+      return showError('No files were added to the upload queue');
+    }
+
+    // Add the whole batch at once so the upload manager can start files in parallel.
+    await enqueueFiles(uploadBatch);
     
-    showSuccess(`${filesToUpload.length} file(s) added to the background upload queue.`);
+    showSuccess(`${uploadBatch.length} file(s) added to the background upload queue.`);
 
     // Clear form state immediately for the next upload
     setForm({ media_type: 'video', name: '', description: '' });
     setFile(null);
+    setSelectedFileCount(0);
     if (fileInputRef.current) {
         fileInputRef.current.value = '';
         fileInputRef.current._filesToProcess = [];
@@ -274,18 +314,41 @@ const MediaLibrary = () => {
               <label className="block text-xs font-semibold text-[var(--text-muted)] mb-1.5">File</label>
               <div
                 onClick={() => fileInputRef.current?.click()}
-                className="border-2 border-dashed border-[var(--border)] rounded-lg p-5 text-center cursor-pointer hover:border-[var(--sidebar-active-bg)] transition-colors"
+                onDragEnter={(e) => {
+                  e.preventDefault();
+                  setIsDraggingFiles(true);
+                }}
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  setIsDraggingFiles(true);
+                }}
+                onDragLeave={(e) => {
+                  e.preventDefault();
+                  setIsDraggingFiles(false);
+                }}
+                onDrop={handleDrop}
+                className={`border-2 border-dashed rounded-lg p-5 text-center cursor-pointer transition-colors ${
+                  isDraggingFiles
+                    ? 'border-[var(--sidebar-active-bg)] bg-[var(--sidebar-active-bg)]/10'
+                    : 'border-[var(--border)] hover:border-[var(--sidebar-active-bg)]'
+                }`}
               >
                 <UploadCloud size={24} className="mx-auto text-[var(--text-muted)] mb-2" />
                 {file ? (
                   <div className="flex items-center justify-center gap-2 text-sm text-[var(--text-main)]">
-                    <span className="truncate max-w-[180px]">{file.name}</span>
+                    <span className="truncate max-w-[180px]">
+                      {selectedFileCount > 1 ? `${selectedFileCount} files selected` : file.name}
+                    </span>
                     <button
                       type="button"
                       onClick={(e) => {
                         e.stopPropagation();
                         setFile(null);
-                        if (fileInputRef.current) fileInputRef.current.value = '';
+                        setSelectedFileCount(0);
+                        if (fileInputRef.current) {
+                          fileInputRef.current.value = '';
+                          fileInputRef.current._filesToProcess = [];
+                        }
                       }}
                       className="text-[var(--accent-red)]"
                     >
@@ -293,12 +356,16 @@ const MediaLibrary = () => {
                     </button>
                   </div>
                 ) : (
-                  <p className="text-sm text-[var(--text-muted)]">Click to choose a file (any type)</p>
+                  <div>
+                    <p className="text-sm font-semibold text-[var(--text-main)]">Drop files here or click to choose</p>
+                    <p className="mt-1 text-xs text-[var(--text-muted)]">Any file type, any batch size</p>
+                  </div>
                 )}
               </div>
               <input
                 ref={fileInputRef}
                 type="file"
+                multiple
                 onChange={handleFileChange}
                 className="hidden"
               />
@@ -476,22 +543,103 @@ const MediaLibrary = () => {
       </div>
       )}
 
-      {/* Floating Chatbot Assistant */}
+      <AnimatePresence>
+        {conflictModal && (
+          <motion.div
+            className="fixed inset-0 z-[80] flex items-center justify-center bg-black/45 px-4 py-6 backdrop-blur-sm"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+          >
+            <motion.div
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="file-conflict-title"
+              initial={{ opacity: 0, y: 18, scale: 0.98 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: 12, scale: 0.98 }}
+              transition={{ type: 'spring', stiffness: 420, damping: 34 }}
+              className="w-full max-w-lg overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--bg-card)] shadow-2xl"
+            >
+              <div className="flex items-start gap-4 border-b border-[var(--border)] px-6 py-5">
+                <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-amber-100 text-amber-600">
+                  <AlertTriangle size={24} />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <h2 id="file-conflict-title" className="text-lg font-bold text-[var(--text-main)]">
+                    File Already Exists
+                  </h2>
+                  <p className="mt-1 text-sm leading-5 text-[var(--text-muted)]">
+                    A file with this name is already available in your media library.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => resolveConflictModal('skip')}
+                  className="rounded-lg p-1.5 text-[var(--text-muted)] transition-colors hover:bg-[var(--input-bg)] hover:text-[var(--text-main)]"
+                  aria-label="Close conflict dialog"
+                >
+                  <X size={18} />
+                </button>
+              </div>
+
+              <div className="space-y-4 px-6 py-5">
+                <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3">
+                  <p className="text-xs font-bold uppercase text-amber-700">Conflicting file</p>
+                  <p className="mt-1 truncate text-sm font-semibold text-slate-900" title={conflictModal.fileName}>
+                    {conflictModal.fileName}
+                  </p>
+                </div>
+
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <div className="rounded-xl border border-[var(--border)] bg-[var(--input-bg)] p-3">
+                    <p className="text-[10px] font-bold uppercase text-[var(--text-muted)]">New upload</p>
+                    <p className="mt-1 text-sm font-semibold text-[var(--text-main)]">{formatSize(conflictModal.size)}</p>
+                  </div>
+                  <div className="rounded-xl border border-[var(--border)] bg-[var(--input-bg)] p-3">
+                    <p className="text-[10px] font-bold uppercase text-[var(--text-muted)]">Existing file</p>
+                    <p className="mt-1 truncate text-sm font-semibold text-[var(--text-main)]" title={conflictModal.existing?.name || conflictModal.existing?.file_name}>
+                      {conflictModal.existing?.name || conflictModal.existing?.file_name || 'Media library file'}
+                    </p>
+                  </div>
+                </div>
+
+                <p className="text-sm leading-6 text-[var(--text-muted)]">
+                  Choose how you want to handle this upload.
+                </p>
+              </div>
+
+              <div className="flex flex-col-reverse gap-2 border-t border-[var(--border)] bg-[var(--input-bg)] px-6 py-4 sm:flex-row sm:justify-end">
+                <button
+                  type="button"
+                  onClick={() => resolveConflictModal('skip')}
+                  className="inline-flex items-center justify-center gap-2 rounded-lg border border-[var(--border)] bg-[var(--bg-card)] px-4 py-2.5 text-sm font-semibold text-[var(--text-main)] transition-colors hover:bg-[var(--border)]"
+                >
+                  Skip
+                </button>
+                <button
+                  type="button"
+                  onClick={() => resolveConflictModal('replace')}
+                  className="inline-flex items-center justify-center gap-2 rounded-lg border border-red-200 bg-red-50 px-4 py-2.5 text-sm font-semibold text-red-700 transition-colors hover:bg-red-100"
+                >
+                  <RefreshCw size={16} />
+                  Replace
+                </button>
+                <button
+                  type="button"
+                  onClick={() => resolveConflictModal('both')}
+                  className="inline-flex items-center justify-center gap-2 rounded-lg bg-[var(--sidebar-active-bg)] px-4 py-2.5 text-sm font-semibold text-[var(--sidebar-active-text)] shadow-sm transition-opacity hover:opacity-90"
+                >
+                  <Copy size={16} />
+                  Keep Both
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       <UploadProgressDashboard />
-      <MediaChatbot
-        currentFolder={currentFolder}
-        onFilterChange={({ media_type, search, folder, tag }) => {
-          if (media_type) setFilter(media_type);
-          if (search !== undefined) setSearch(search);
-          if (folder) setCurrentFolder(folder);
-          if (tag !== undefined) setSelectedTag(tag);
-        }}
-        onRefreshFiles={fetchItems}
-        onFolderCreated={(folder) => {
-          fetchFolders();
-          setCurrentFolder(folder.name);
-        }}
-      />
     </div>
   );
 };

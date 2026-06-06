@@ -1,6 +1,8 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from typing import List, Optional
 from datetime import datetime
+import asyncio
+import functools
 import json
 
 from app.db.mongodb import get_collection
@@ -26,7 +28,11 @@ async def start_chunked_upload(
         raise HTTPException(status_code=403, detail="Not authorized to upload media")
         
     try:
-        res = create_multipart_upload(filename, content_type)
+        loop = asyncio.get_running_loop()
+        res = await loop.run_in_executor(
+            None,
+            functools.partial(create_multipart_upload, filename, content_type),
+        )
         return {"upload_id": res["upload_id"], "key": res["key"]}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -44,7 +50,11 @@ async def upload_file_chunk(
         raise HTTPException(status_code=403, detail="Not authorized")
         
     try:
-        res = upload_part(key, upload_id, part_number, file.file)
+        loop = asyncio.get_running_loop()
+        res = await loop.run_in_executor(
+            None,
+            functools.partial(upload_part, key, upload_id, part_number, file.file),
+        )
         return {"ETag": res["ETag"], "PartNumber": res["PartNumber"]}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -70,7 +80,11 @@ async def complete_chunked_upload(
         
     try:
         parts_list = json.loads(parts)
-        s3_res = complete_multipart_upload(key, upload_id, parts_list)
+        loop = asyncio.get_running_loop()
+        s3_res = await loop.run_in_executor(
+            None,
+            functools.partial(complete_multipart_upload, key, upload_id, parts_list),
+        )
         
         # Save to DB
         media_type = (media_type or "other").lower().strip()
@@ -111,7 +125,11 @@ async def abort_chunked_upload(
     if current_user.get("role") not in STAFF_ROLES:
         raise HTTPException(status_code=403, detail="Not authorized")
         
-    success = abort_multipart_upload(key, upload_id)
+    loop = asyncio.get_running_loop()
+    success = await loop.run_in_executor(
+        None,
+        functools.partial(abort_multipart_upload, key, upload_id),
+    )
     if not success:
         raise HTTPException(status_code=500, detail="Failed to abort multipart upload")
     return {"message": "Upload aborted successfully"}

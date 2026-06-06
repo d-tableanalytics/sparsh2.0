@@ -5,7 +5,8 @@ import { useNotification } from './NotificationContext';
 const UploadContext = createContext(null);
 
 const MAX_CONCURRENT = 5;
-const CHUNK_SIZE = 5 * 1024 * 1024; // 5MB
+const MAX_PARALLEL_CHUNKS = 3;
+const CHUNK_SIZE = 10 * 1024 * 1024; // 10MB
 const MAX_RETRIES = 3;
 
 // IndexedDB Helper
@@ -36,6 +37,26 @@ const saveToDB = async (upload) => {
     });
   } catch (err) {
     console.warn('IDB Save Error:', err);
+  }
+};
+
+const saveManyToDB = async (uploads) => {
+  if (!uploads.length) return;
+
+  try {
+    const db = await openDB();
+    const tx = db.transaction(STORE_NAME, 'readwrite');
+    const store = tx.objectStore(STORE_NAME);
+
+    uploads.forEach(upload => {
+      store.put(upload);
+    });
+
+    return new Promise((resolve) => {
+      tx.oncomplete = resolve;
+    });
+  } catch (err) {
+    console.warn('IDB Batch Save Error:', err);
   }
 };
 
@@ -108,12 +129,12 @@ export const UploadProvider = ({ children }) => {
     });
   };
 
-  const updateUploadState = (id, updates) => {
+  const updateUploadState = (id, updates, { persist = true } = {}) => {
     setQueue(prev => {
       const updated = prev.map(u => {
         if (u.id === id) {
           const newU = { ...u, ...updates };
-          saveToDB(newU);
+          if (persist) saveToDB(newU);
           return newU;
         }
         return u;
@@ -122,9 +143,9 @@ export const UploadProvider = ({ children }) => {
     });
   };
 
-  const enqueueFile = async (file, form, currentFolder) => {
-    const id = Date.now() + Math.random().toString(36).substring(2, 9);
-    const newUpload = {
+  const createUploadItem = (file, form, currentFolder) => {
+    const id = `${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+    return {
       id,
       file, // Native File object stores perfectly in IndexedDB
       fileName: file.name,
@@ -140,9 +161,20 @@ export const UploadProvider = ({ children }) => {
       s3Key: null,
       retries: 0
     };
-    
-    await saveToDB(newUpload);
-    setQueue(prev => [...prev, newUpload]);
+  };
+
+  const enqueueFiles = async (uploads) => {
+    const newUploads = uploads.map(({ file, form, currentFolder }) =>
+      createUploadItem(file, form, currentFolder)
+    );
+
+    await saveManyToDB(newUploads);
+    setQueue(prev => [...prev, ...newUploads]);
+    return newUploads.map(upload => upload.id);
+  };
+
+  const enqueueFile = async (file, form, currentFolder) => {
+    const [id] = await enqueueFiles([{ file, form, currentFolder }]);
     return id;
   };
 
@@ -183,14 +215,14 @@ export const UploadProvider = ({ children }) => {
       const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
       if (totalChunks === 0) throw new Error("Empty file");
 
-      for (let i = 0; i < totalChunks; i++) {
+      const uploadPart = async (chunkIndex) => {
         if (abortController.signal.aborted) throw new Error("Cancelled");
         
-        const partNumber = i + 1;
+        const partNumber = chunkIndex + 1;
         // Skip already uploaded parts
-        if (completedParts.some(p => p.PartNumber === partNumber)) continue;
+        if (completedParts.some(p => p.PartNumber === partNumber)) return;
 
-        const start = i * CHUNK_SIZE;
+        const start = chunkIndex * CHUNK_SIZE;
         const end = Math.min(start + CHUNK_SIZE, file.size);
         const chunk = file.slice(start, end);
 
@@ -210,7 +242,9 @@ export const UploadProvider = ({ children }) => {
               signal: abortController.signal
             });
 
-            completedParts.push({ ETag: partData.ETag, PartNumber: partData.PartNumber });
+            if (!completedParts.some(p => p.PartNumber === partData.PartNumber)) {
+              completedParts.push({ ETag: partData.ETag, PartNumber: partData.PartNumber });
+            }
             chunkUploaded = true;
             
             // Update progress
@@ -224,7 +258,24 @@ export const UploadProvider = ({ children }) => {
             await new Promise(r => setTimeout(r, 1000 * chunkRetries)); // exponential backoff
           }
         }
-      }
+      };
+
+      const chunkIndexes = Array.from({ length: totalChunks }, (_, i) => i)
+        .filter(i => !completedParts.some(p => p.PartNumber === i + 1));
+      let nextChunkIndex = 0;
+
+      const workers = Array.from(
+        { length: Math.min(MAX_PARALLEL_CHUNKS, chunkIndexes.length) },
+        async () => {
+          while (nextChunkIndex < chunkIndexes.length) {
+            const chunkIndex = chunkIndexes[nextChunkIndex];
+            nextChunkIndex += 1;
+            await uploadPart(chunkIndex);
+          }
+        }
+      );
+
+      await Promise.all(workers);
 
       // 3. Complete Upload
       if (abortController.signal.aborted) throw new Error("Cancelled");
@@ -245,14 +296,19 @@ export const UploadProvider = ({ children }) => {
 
       await api.post('/media/chunk/complete', completeFd);
 
-      updateUploadState(id, { status: 'completed' });
+      updateUploadState(id, { status: 'completed' }, { persist: false });
       activeProcessing.current.delete(id);
       abortControllers.current.delete(id);
       removeFromDB(id); // Clean up IDB
       
     } catch (err) {
       if (err.message === "Cancelled") {
-        updateUploadState(id, { status: 'cancelled' });
+        updateUploadState(id, {
+          status: 'cancelled',
+          s3UploadId: null,
+          s3Key: null,
+          uploadedChunks: [],
+        });
       } else {
         const retries = (uploadItem.retries || 0) + 1;
         if (retries < MAX_RETRIES) {
@@ -272,10 +328,6 @@ export const UploadProvider = ({ children }) => {
       controller.abort();
     }
     
-    updateUploadState(id, { status: 'cancelled' });
-    activeProcessing.current.delete(id);
-    
-    // Optional: Call /media/chunk/abort to clean up S3 parts
     const u = await loadFromDB().then(db => db.find(x => x.id === id));
     if (u && u.s3UploadId && u.s3Key) {
       const fd = new FormData();
@@ -283,7 +335,14 @@ export const UploadProvider = ({ children }) => {
       fd.append('key', u.s3Key);
       api.post('/media/chunk/abort', fd).catch(() => {});
     }
-    removeFromDB(id);
+
+    updateUploadState(id, {
+      status: 'cancelled',
+      s3UploadId: null,
+      s3Key: null,
+      uploadedChunks: [],
+    });
+    activeProcessing.current.delete(id);
   };
 
   const resumeUpload = (id) => {
@@ -291,11 +350,15 @@ export const UploadProvider = ({ children }) => {
   };
 
   const clearCompleted = () => {
-    setQueue(prev => prev.filter(u => u.status !== 'completed' && u.status !== 'cancelled'));
+    setQueue(prev => {
+      const removable = prev.filter(u => u.status === 'completed' || u.status === 'cancelled');
+      removable.forEach(u => removeFromDB(u.id));
+      return prev.filter(u => u.status !== 'completed' && u.status !== 'cancelled');
+    });
   };
 
   return (
-    <UploadContext.Provider value={{ queue, enqueueFile, cancelUpload, resumeUpload, clearCompleted }}>
+    <UploadContext.Provider value={{ queue, enqueueFile, enqueueFiles, cancelUpload, resumeUpload, clearCompleted }}>
       {children}
     </UploadContext.Provider>
   );
