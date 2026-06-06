@@ -31,6 +31,20 @@ async def extract_text_from_file(file_path: str, filename: str) -> dict:
                 reader = pypdf.PdfReader(f)
                 for page in reader.pages:
                     text += (page.extract_text() or "") + "\n"
+
+            # Image-based / scanned PDF (no real text layer): render each page
+            # to a PNG so the multimodal model can read it via the images path.
+            if len(text.strip()) < 20:
+                try:
+                    import fitz  # PyMuPDF
+                    doc = fitz.open(file_path)
+                    for page in doc[:10]:  # cap to first 10 pages
+                        pix = page.get_pixmap(dpi=150)
+                        b64 = base64.b64encode(pix.tobytes("png")).decode('utf-8')
+                        images.append(f"data:image/png;base64,{b64}")
+                    doc.close()
+                except Exception as pdf_img_err:
+                    print(f"PDF image-fallback failed for {filename}: {pdf_img_err}")
         elif ext in ['doc', 'docx']:
             doc = docx.Document(file_path)
             for para in doc.paragraphs:

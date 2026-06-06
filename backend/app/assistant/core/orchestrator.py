@@ -70,19 +70,28 @@ class Orchestrator:
 
         messages.extend(window)
 
-        recent = "\n".join(
-            f"{m.role}: {m.content}" for m in convo.messages[-4:]
-        )
-        rw = await query_rewriter.rewrite(
-            self.llm, message, convo.summary or "", recent, meter=meter
-        )
-        effective = rw["rewritten_query"]
+        has_attachments = bool(config.ATTACHMENTS_ENABLED and attachment_ids)
+
+        # An attachments-only turn (empty/whitespace message) defaults to a
+        # summary request. We skip the query rewriter entirely here: with no
+        # message it would otherwise hallucinate a question and derail the
+        # answer instead of describing the uploaded file.
+        if not (message or "").strip() and has_attachments:
+            effective = config.DEFAULT_ATTACHMENT_PROMPT
+        else:
+            recent = "\n".join(
+                f"{m.role}: {m.content}" for m in convo.messages[-4:]
+            )
+            rw = await query_rewriter.rewrite(
+                self.llm, message, convo.summary or "", recent, meter=meter
+            )
+            effective = rw["rewritten_query"]
 
         # Multi-modal: fold uploaded-file content into this turn. Text is appended
         # to the (rewritten) query; images become vision blocks. No attachments →
         # the message stays a plain string, exactly as before.
         attach_metas: list = []
-        if config.ATTACHMENTS_ENABLED and attachment_ids:
+        if has_attachments:
             from app.assistant.files import service as attachment_service
             attach = await attachment_service.build_attachment_context(
                 ctx, attachment_ids, convo.id

@@ -244,12 +244,99 @@ async def test_orchestrator_injection():
           bool(persisted_user.get("attachments")) and persisted_user["attachments"][0]["filename"] == "a.png")
 
 
+async def test_empty_message_defaults_to_summary():
+    print("\nAttachments-only turn (empty message):")
+    import app.assistant.memory.conversation_store as store
+    from app.assistant.core import query_rewriter
+    from app.assistant.core.orchestrator import Orchestrator
+
+    convo_doc = {"_id": ObjectId(), "user_id": "U1", "role": "clientuser", "title": None,
+                 "summary": None, "summary_upto": 0, "messages": [], "message_count": 0}
+
+    class _Coll:
+        async def create_index(self, *a, **k):
+            return "idx"
+
+        async def find_one(self, q):
+            return convo_doc
+
+        async def insert_one(self, d):
+            class R:
+                inserted_id = convo_doc["_id"]
+            return R()
+
+        async def update_one(self, f, u):
+            for k, v in u.get("$set", {}).items():
+                convo_doc[k] = v
+            for k, v in u.get("$push", {}).items():
+                convo_doc.setdefault(k, []).extend(v["$each"] if isinstance(v, dict) else [v])
+            class R:
+                modified_count = 1
+            return R()
+
+    store.get_collection = lambda name: _Coll()
+    store._indexes_ready = True
+
+    # Record whether the rewriter is invoked — it must be skipped for an
+    # empty, attachment-only turn (otherwise it hallucinates a question).
+    rewrite_called = {"hit": False}
+
+    async def _spy_rewrite(llm, message, summary="", recent="", meter=None):
+        rewrite_called["hit"] = True
+        return {"rewritten": False, "rewritten_query": message}
+    query_rewriter.rewrite = _spy_rewrite
+
+    async def _ctx(ctx, ids, cid):
+        return {"text_block": "\n\n[Attached files]\n## report.pdf (document)\nbody text\n",
+                "images": [],
+                "metas": [{"id": "att1", "filename": "report.pdf", "kind": "document"}]}
+    attachment_service.build_attachment_context = _ctx
+
+    class FakeUsage:
+        prompt_tokens = 10
+        completion_tokens = 5
+        total_tokens = 15
+
+    class _Msg:
+        def __init__(self, content):
+            self.content = content
+            self.tool_calls = None
+
+    captured = {}
+
+    class FakeLLM:
+        async def complete(self, messages, tools=None, max_tokens=None, meter=None):
+            captured["messages"] = messages
+            if meter:
+                meter.add(FakeUsage())
+            return _Msg("Here is a summary.")
+
+        async def utility_complete(self, prompt, max_tokens=120, meter=None):
+            return "Report"
+
+        async def summarize(self, text, meter=None):
+            return "s"
+
+    orch = Orchestrator(llm=FakeLLM())
+    resp = await orch.handle_message(USER, "", attachment_ids=["att1"])
+
+    user_msg = next(m for m in captured["messages"] if m["role"] == "user")
+    text = user_msg["content"] if isinstance(user_msg["content"], str) else \
+        next(p["text"] for p in user_msg["content"] if p.get("type") == "text")
+    check("rewriter skipped for empty attachment turn", not rewrite_called["hit"])
+    check("default summary instruction injected",
+          config.DEFAULT_ATTACHMENT_PROMPT in text, text[:80])
+    check("attachment content still present", "report.pdf" in text)
+    check("answer returned normally", resp.answer == "Here is a summary.")
+
+
 async def main():
     print("\n=== Phase 5 Multi-Modal Attachments Verification ===\n")
     await test_validation()
     await test_extractor()
     await test_context_building()
     await test_orchestrator_injection()
+    await test_empty_message_defaults_to_summary()
     passed = sum(1 for r in results if r)
     print(f"\n=== {passed}/{len(results)} checks passed ===")
     if passed != len(results):

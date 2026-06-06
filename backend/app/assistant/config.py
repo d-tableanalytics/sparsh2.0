@@ -69,6 +69,16 @@ class AssistantConfig:
     MAX_FILE_SIZE_MB: int = 100
     MAX_REQUEST_SIZE_MB: int = 500
 
+    # Default instruction used when a turn carries attachments but no text
+    # message (e.g. the user uploads a file and hits send with an empty box).
+    # Without this the empty message is run through the query rewriter, which
+    # invents a spurious question ("what is the latest message?") and derails
+    # the answer instead of describing the file.
+    DEFAULT_ATTACHMENT_PROMPT: str = (
+        "Please provide a clear, concise summary of the attached file(s), "
+        "highlighting the key points."
+    )
+
     # Context-injection caps so large files never blow the model context window.
     MAX_EXTRACTED_CHARS_PER_FILE: int = 24000
     MAX_TOTAL_ATTACHMENT_CHARS: int = 60000
