@@ -15,7 +15,7 @@ function getToken() {
  * onEvent(eventName, data) is called for: meta | tool | token | done.
  * Throws an Error (with .status / .retryAfter) on non-OK responses.
  */
-export async function streamAsk({ message, conversationId, signal, onEvent }) {
+export async function streamAsk({ message, conversationId, editFromIndex, signal, onEvent }) {
   const res = await fetch(`${API_BASE}/assistant/ask`, {
     method: 'POST',
     headers: {
@@ -26,6 +26,8 @@ export async function streamAsk({ message, conversationId, signal, onEvent }) {
       message,
       conversation_id: conversationId || null,
       stream: true,
+      // Present only for edit-and-resend; truncates stored history server-side.
+      ...(editFromIndex != null ? { edit_from_index: editFromIndex } : {}),
     }),
     signal,
   });
@@ -110,11 +112,12 @@ function dispatchFrame(frame, onEvent) {
 }
 
 /** Non-streaming fallback. Returns { conversation_id, answer, sources, meta }. */
-export async function askOnce({ message, conversationId }) {
+export async function askOnce({ message, conversationId, editFromIndex }) {
   const res = await api.post('/assistant/ask', {
     message,
     conversation_id: conversationId || null,
     stream: false,
+    ...(editFromIndex != null ? { edit_from_index: editFromIndex } : {}),
   });
   return res.data;
 }

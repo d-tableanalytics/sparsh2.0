@@ -21,19 +21,20 @@ def _oid(value: str):
 @tool(
     name="get_my_tasks",
     description=(
-        "List the current user's session tasks/assignments and which are still "
-        "pending vs completed. Use for 'what tasks do I have', 'what's pending', "
-        "'my assignments', 'what do I still need to complete'."
+        "List the current user's session tasks/assignments — both completed and "
+        "still-pending. Returns everything by default; pass only_pending=true when "
+        "the user specifically asks what's left to do. Use for 'show my tasks', "
+        "'what tasks do I have', 'my assignments', 'what's pending'."
     ),
     allowed_roles=["CU", "CA", "AD", "SA"],
     parameters={
-        "include_completed": {
+        "only_pending": {
             "type": "boolean",
-            "description": "Also list completed tasks (default false — pending only)",
+            "description": "Return only not-yet-completed tasks (default false — return all tasks)",
         },
     },
 )
-async def get_my_tasks(ctx: UserContext, include_completed: bool = False) -> ToolResult:
+async def get_my_tasks(ctx: UserContext, only_pending: bool = False) -> ToolResult:
     # Personal scope: the caller's own sessions. Task definitions live on the
     # session template; completion is tracked per company in
     # company_session_progress (done_indices).
@@ -63,17 +64,18 @@ async def get_my_tasks(ctx: UserContext, include_completed: bool = False) -> Too
             (completed if i in done_indices else pending).append(entry)
 
     data = {
-        "pending": pending,
+        "total_tasks": len(pending) + len(completed),
         "pending_count": len(pending),
         "completed_count": len(completed),
+        "pending": pending,
     }
-    if include_completed:
+    if not only_pending:
         data["completed"] = completed
 
     return ToolResult.ok(
         "get_my_tasks",
         data,
         sources=["session_templates", "company_session_progress"],
-        count=len(pending),
+        count=len(pending) if only_pending else len(pending) + len(completed),
         scope_applied=f"personal:{ctx.user_id}",
     )

@@ -97,14 +97,18 @@ async def ask(req: AskRequest, request: Request, response: Response,
 
     if req.stream and config.STREAMING_ENABLED:
         return StreamingResponse(
-            _orchestrator.stream_message(ctx, req.message, req.conversation_id),
+            _orchestrator.stream_message(
+                ctx, req.message, req.conversation_id, edit_from_index=req.edit_from_index
+            ),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "X-Request-ID": cid},
         )
 
     response.headers["X-Request-ID"] = cid
     try:
-        return await _orchestrator.handle_message(ctx, req.message, req.conversation_id)
+        return await _orchestrator.handle_message(
+            ctx, req.message, req.conversation_id, edit_from_index=req.edit_from_index
+        )
     except AssistantError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
 

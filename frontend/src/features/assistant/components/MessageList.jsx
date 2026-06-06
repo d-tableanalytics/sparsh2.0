@@ -4,7 +4,7 @@ import MessageBubble from './MessageBubble';
 import TypingIndicator from './TypingIndicator';
 import SuggestedQuestions from './SuggestedQuestions';
 
-export default function MessageList({ messages, streaming, activeTool, onPickSuggestion }) {
+export default function MessageList({ messages, streaming, activeTool, onPickSuggestion, onEdit }) {
   const endRef = useRef(null);
 
   useEffect(() => {
@@ -33,7 +33,7 @@ export default function MessageList({ messages, streaming, activeTool, onPickSug
   return (
     <div className="flex flex-col gap-3 px-3 py-3">
       {messages.map((m) => (
-        <MessageBubble key={m.id} message={m} />
+        <MessageBubble key={m.id} message={m} onEdit={onEdit} disabled={streaming} />
       ))}
       {showTyping && (
         <div className="pl-9">

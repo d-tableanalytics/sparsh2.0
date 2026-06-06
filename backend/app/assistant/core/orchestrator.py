@@ -48,9 +48,14 @@ class Orchestrator:
 
     # ── Shared setup ──────────────────────────────────────────────────────
     async def _prepare(
-        self, ctx: UserContext, message: str, conversation_id: Optional[str], meter: UsageMeter
+        self, ctx: UserContext, message: str, conversation_id: Optional[str], meter: UsageMeter,
+        edit_from_index: Optional[int] = None,
     ) -> Tuple[Conversation, List[dict], List[dict], str]:
         convo = await conversation_store.load_or_create(ctx, conversation_id)
+        # Edit-and-resend: drop the edited turn and everything after it before
+        # building context, so stale history isn't replayed to the model.
+        if edit_from_index is not None:
+            await conversation_store.truncate_messages(convo, edit_from_index)
         window = context_manager.build_window(convo)
 
         messages = [{"role": "system", "content": build_system_prompt(ctx)}]
@@ -126,13 +131,16 @@ class Orchestrator:
 
     # ── Non-streaming ─────────────────────────────────────────────────────
     async def handle_message(
-        self, ctx: UserContext, message: str, conversation_id: Optional[str] = None
+        self, ctx: UserContext, message: str, conversation_id: Optional[str] = None,
+        edit_from_index: Optional[int] = None,
     ) -> AskResponse:
         cid = get_correlation_id()
         started = time.perf_counter()
         meter = UsageMeter()
         errored = False
-        convo, messages, tool_schema, _ = await self._prepare(ctx, message, conversation_id, meter)
+        convo, messages, tool_schema, _ = await self._prepare(
+            ctx, message, conversation_id, meter, edit_from_index=edit_from_index
+        )
 
         sources: set = set()
         tools_used: List[str] = []
@@ -192,12 +200,15 @@ class Orchestrator:
 
     # ── Streaming (SSE) ───────────────────────────────────────────────────
     async def stream_message(
-        self, ctx: UserContext, message: str, conversation_id: Optional[str] = None
+        self, ctx: UserContext, message: str, conversation_id: Optional[str] = None,
+        edit_from_index: Optional[int] = None,
     ) -> AsyncIterator[str]:
         cid = get_correlation_id()
         started = time.perf_counter()
         meter = UsageMeter()
-        convo, messages, tool_schema, _ = await self._prepare(ctx, message, conversation_id, meter)
+        convo, messages, tool_schema, _ = await self._prepare(
+            ctx, message, conversation_id, meter, edit_from_index=edit_from_index
+        )
         yield _sse("meta", {"conversation_id": convo.id, "correlation_id": cid})
 
         sources: set = set()

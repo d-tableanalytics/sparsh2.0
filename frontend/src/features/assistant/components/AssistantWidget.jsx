@@ -11,6 +11,7 @@ import ChatWindow from './ChatWindow';
 export default function AssistantWidget() {
   const { user } = useAuth();
   const [open, setOpen] = useState(false);
+  const [expanded, setExpanded] = useState(false);
 
   if (!user) return null;
 
@@ -24,9 +25,17 @@ export default function AssistantWidget() {
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 24, scale: 0.98 }}
             transition={{ duration: 0.18, ease: 'easeOut' }}
-            className="fixed bottom-24 right-4 z-[70] h-[min(620px,calc(100vh-8rem))] w-[min(400px,calc(100vw-2rem))]"
+            className={
+              expanded
+                ? 'fixed bottom-24 right-4 z-[70] h-[calc(100vh-8rem)] w-[min(900px,calc(100vw-2rem))]'
+                : 'fixed bottom-24 right-4 z-[70] h-[min(620px,calc(100vh-8rem))] w-[min(400px,calc(100vw-2rem))]'
+            }
           >
-            <ChatWindow onClose={() => setOpen(false)} />
+            <ChatWindow
+              onClose={() => setOpen(false)}
+              expanded={expanded}
+              onToggleExpand={() => setExpanded((e) => !e)}
+            />
           </motion.div>
         )}
       </AnimatePresence>

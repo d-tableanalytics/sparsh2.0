@@ -23,5 +23,6 @@ from app.assistant.tools.student import (  # noqa: E402,F401
     progress_tools,
     recommendation_tools,
     session_tools,
+    support_engine_tools,
     task_tools,
 )

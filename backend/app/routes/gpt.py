@@ -4,6 +4,7 @@ from datetime import datetime
 from bson import ObjectId
 from app.db.mongodb import get_collection
 from app.controllers.auth_controller import get_current_user
+from app.services import gpt_access_service
 from app.services.s3_service import upload_file_to_s3, get_signed_url
 from app.models.gpt import GptProjectCreate, GptProjectUpdate, GptProjectResponse
 import os
@@ -14,152 +15,21 @@ router = APIRouter(prefix="/gpt", tags=["gpt"])
 
 @router.get("/projects", response_model=List[dict])
 async def get_gpt_projects(current_user: dict = Depends(get_current_user)):
-    col = get_collection("gpt_projects")
-    projects = await col.find({}).to_list(100)
-    
-    # If Admin/Staff, return all
-    if current_user.get("role") in ["superadmin", "admin", "coach", "staff"]:
-        for p in projects:
-            p["id"] = str(p["_id"])
-            p["locked"] = False
-            del p["_id"]
-        return projects
-
-    # For Learners: Complex Access Logic
-    user_id = str(current_user["_id"])
-    company_id = current_user.get("company_id")
-    
-    # 1. Fetch special permissions
-    perm_col = get_collection("gpt_permissions")
-    special_perms = await perm_col.find({
-        "$or": [
-            {"entity_id": user_id, "entity_type": "user"},
-            {"entity_id": company_id, "entity_type": "company"}
-        ]
-    }).to_list(100)
-    unlocked_project_ids = {p["project_id"] for p in special_perms}
-
-    # 2. Resolve all relevant Batches (Directly assigned or via Company)
-    # Get direct batch IDs from user document
+    # Access/unlock logic lives in the shared service so the website and the
+    # assistant's support-engine guidance stay in lockstep.
     direct_batch_ids = current_user.get("batch_ids") or []
     if not isinstance(direct_batch_ids, list):
         direct_batch_ids = [direct_batch_ids]
-    
     single_batch_id = current_user.get("batch_id")
     if single_batch_id and single_batch_id not in direct_batch_ids:
         direct_batch_ids.append(single_batch_id)
-        
-    all_batch_oids = [ObjectId(bid) for bid in direct_batch_ids if bid]
-    
-    # Also find batches where the user's company is assigned
-    if company_id:
-        company_batches = await get_collection("batches").find({"companies": str(company_id)}).to_list(100)
-        for b in company_batches:
-            if b["_id"] not in all_batch_oids:
-                all_batch_oids.append(b["_id"])
 
-    # 3. Analyze Batch Level Access
-    batches = await get_collection("batches").find({"_id": {"$in": all_batch_oids}}).to_list(100)
-    batch_linked = {} # project_id -> is_completed
-    batch_str_ids = [str(b["_id"]) for b in batches]
-
-    for b in batches:
-        # Robust status check
-        status = b.get("status", "").lower()
-        is_completed = (status == "completed")
-        
-        # Legacy support (singular field)
-        old_pid = b.get("gpt_project_id")
-        if old_pid:
-            batch_linked[str(old_pid)] = batch_linked.get(str(old_pid), False) or is_completed
-            
-        # Multi support (list of objects)
-        for p_link in b.get("gpt_projects", []):
-            pid = p_link.get("id")
-            if pid:
-                batch_linked[str(pid)] = batch_linked.get(str(pid), False) or is_completed
-
-    # 4. Analyze Quarter Level Access
-    # Quarters are linked via batch_id (string)
-    quarters = await get_collection("quarters").find({"batch_id": {"$in": batch_str_ids}}).to_list(200)
-    quarter_linked = {}
-    for q in quarters:
-        status = q.get("status", "").lower()
-        is_completed = (status == "completed")
-        
-        # Legacy support
-        old_pid = q.get("gpt_project_id")
-        if old_pid:
-            quarter_linked[str(old_pid)] = quarter_linked.get(str(old_pid), False) or is_completed
-            
-        # Multi support
-        for p_link in q.get("gpt_projects", []):
-            pid = p_link.get("id")
-            if pid:
-                quarter_linked[str(pid)] = quarter_linked.get(str(pid), False) or is_completed
-
-    # 5. Analyze Session Level Access
-    from app.utils.calendar_utils import CALENDAR_COLLECTIONS
-    session_collections = CALENDAR_COLLECTIONS + ["calendar_events"]
-    session_linked = {}
-    
-    # Optimization: Only search sessions if the user is a learner in them
-    for col_name in session_collections:
-        sessions = await get_collection(col_name).find({
-            "$or": [
-                {"user_id": user_id},
-                {"assigned_member_ids": user_id},
-                {"coach_ids": user_id}
-            ]
-        }).to_list(500)
-        for s in sessions:
-            status = s.get("status", "").lower()
-            is_completed = (status == "completed")
-            
-            # Legacy support
-            old_pid = s.get("gpt_project_id")
-            if old_pid:
-                session_linked[str(old_pid)] = session_linked.get(str(old_pid), False) or is_completed
-            
-            # Multi support
-            for p_link in s.get("gpt_projects", []):
-                pid = p_link.get("id")
-                if pid:
-                    session_linked[str(pid)] = session_linked.get(str(pid), False) or is_completed
-
-    # 6. Assemble Result
-    result = []
-    
-    for p in projects:
-        pid = str(p["_id"])
-        
-        # Check if project should be visible (is in path)
-        # Note: unlocked_project_ids contains strings from special permissions
-        is_in_path = (pid in batch_linked) or (pid in quarter_linked) or (pid in session_linked) or (pid in unlocked_project_ids)
-        
-        if is_in_path:
-            p["id"] = pid
-            if "_id" in p: del p["_id"]
-            
-            # Determine if locked
-            is_unlocked = (
-                (pid in unlocked_project_ids) or
-                batch_linked.get(pid, False) or
-                quarter_linked.get(pid, False) or
-                session_linked.get(pid, False)
-            )
-            
-            p["locked"] = not is_unlocked
-            
-            # Metadata about WHY it's locked/available
-            if p["locked"]:
-                if pid in batch_linked: p["lock_reason"] = "Batch Level Access (Complete Batch to Unlock)"
-                elif pid in quarter_linked: p["lock_reason"] = "Quarter Level Access (Complete Quarter to Unlock)"
-                elif pid in session_linked: p["lock_reason"] = "Session Level Access (Complete Session to Unlock)"
-            
-            result.append(p)
-            
-    return result
+    return await gpt_access_service.get_projects_with_access(
+        user_id=str(current_user["_id"]),
+        role=current_user.get("role"),
+        company_id=current_user.get("company_id"),
+        direct_batch_ids=[bid for bid in direct_batch_ids if bid],
+    )
 
 # ─── Permissions Endpoints ───
 @router.post("/permissions/grant")

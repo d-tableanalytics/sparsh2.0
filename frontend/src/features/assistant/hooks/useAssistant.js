@@ -74,7 +74,7 @@ export default function useAssistant() {
   }, []);
 
   const send = useCallback(
-    async (text) => {
+    async (text, { editFromIndex } = {}) => {
       const content = (text || '').trim();
       if (!content || streaming) return;
 
@@ -96,6 +96,7 @@ export default function useAssistant() {
         await streamAsk({
           message: content,
           conversationId: conversationIdRef.current,
+          editFromIndex,
           signal: controller.signal,
           onEvent: (event, data) => {
             if (event === 'meta') {
@@ -142,6 +143,22 @@ export default function useAssistant() {
     [streaming, patch, rememberConversation],
   );
 
+  // Edit a previously sent user message: drop it and everything after it, then
+  // resend the new text so the assistant answers the revised question.
+  const editAndResend = useCallback(
+    (id, newText) => {
+      const content = (newText || '').trim();
+      if (!content || streaming) return;
+      // The on-screen list mirrors the stored conversation 1:1, so this index
+      // is also the backend message index to truncate from.
+      const idx = messages.findIndex((m) => m.id === id);
+      if (idx === -1) return;
+      setMessages((list) => list.slice(0, idx));
+      send(content, { editFromIndex: idx });
+    },
+    [messages, streaming, send],
+  );
+
   return {
     messages,
     streaming,
@@ -150,6 +167,7 @@ export default function useAssistant() {
     send,
     cancel,
     reset,
+    editAndResend,
     loadConversation,
     currentConversationId,
   };

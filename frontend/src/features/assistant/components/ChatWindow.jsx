@@ -1,12 +1,12 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Bot, X, AlertTriangle, PanelLeft, Plus } from 'lucide-react';
+import { Bot, X, AlertTriangle, PanelLeft, Plus, Maximize2, Minimize2 } from 'lucide-react';
 import useAssistant from '../hooks/useAssistant';
 import useConversation from '../hooks/useConversation';
 import MessageList from './MessageList';
 import ChatInput from './ChatInput';
 import ConversationSidebar from './ConversationSidebar';
 
-export default function ChatWindow({ onClose }) {
+export default function ChatWindow({ onClose, expanded = false, onToggleExpand }) {
   const {
     messages,
     streaming,
@@ -15,6 +15,7 @@ export default function ChatWindow({ onClose }) {
     send,
     cancel,
     reset,
+    editAndResend,
     loadConversation,
     currentConversationId,
   } = useAssistant();
@@ -93,6 +94,15 @@ export default function ChatWindow({ onClose }) {
           >
             <Plus size={16} />
           </button>
+          {onToggleExpand && (
+            <button
+              onClick={onToggleExpand}
+              title={expanded ? 'Collapse' : 'Expand'}
+              className="hidden h-7 w-7 items-center justify-center rounded-lg text-[var(--text-muted)] hover:bg-[var(--bg-main)] hover:text-[var(--text-main)] sm:flex"
+            >
+              {expanded ? <Minimize2 size={15} /> : <Maximize2 size={15} />}
+            </button>
+          )}
           <button
             onClick={onClose}
             title="Close"
@@ -110,6 +120,7 @@ export default function ChatWindow({ onClose }) {
           streaming={streaming}
           activeTool={activeTool}
           onPickSuggestion={send}
+          onEdit={editAndResend}
         />
       </div>
 
