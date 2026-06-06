@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Bot, X, AlertTriangle, PanelLeft, Plus, Maximize2, Minimize2 } from 'lucide-react';
 import useAssistant from '../hooks/useAssistant';
 import useConversation from '../hooks/useConversation';
+import useAttachments from '../hooks/useAttachments';
 import MessageList from './MessageList';
 import ChatInput from './ChatInput';
 import ConversationSidebar from './ConversationSidebar';
@@ -21,8 +22,17 @@ export default function ChatWindow({ onClose, expanded = false, onToggleExpand }
   } = useAssistant();
 
   const conversations = useConversation();
+  const attachments = useAttachments();
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const prevStreaming = useRef(false);
+
+  // Send the message together with any ready attachments, then clear the tray.
+  const handleSend = (text) => {
+    const ids = attachments.completedIds;
+    const metas = attachments.metas;
+    send(text, ids.length ? { attachmentIds: ids, attachments: metas } : undefined);
+    if (ids.length) attachments.clear();
+  };
 
   // Load history when the panel first opens.
   useEffect(() => {
@@ -48,6 +58,7 @@ export default function ChatWindow({ onClose, expanded = false, onToggleExpand }
     setSidebarOpen(false);
     try {
       const convo = await conversations.load(id);
+      attachments.clear();
       loadConversation(convo);
     } catch {
       /* surfaced by the hook; keep current view */
@@ -56,6 +67,7 @@ export default function ChatWindow({ onClose, expanded = false, onToggleExpand }
 
   const handleNew = () => {
     setSidebarOpen(false);
+    attachments.clear();
     reset();
   };
 
@@ -133,7 +145,15 @@ export default function ChatWindow({ onClose, expanded = false, onToggleExpand }
       )}
 
       {/* Input */}
-      <ChatInput onSend={send} onCancel={cancel} streaming={streaming} />
+      <ChatInput
+        onSend={handleSend}
+        onCancel={cancel}
+        streaming={streaming}
+        attachmentItems={attachments.items}
+        onAddFiles={(files) => attachments.addFiles(files, currentConversationId)}
+        onRemoveAttachment={attachments.remove}
+        onRetryAttachment={(lid) => attachments.retry(lid, currentConversationId)}
+      />
 
       {/* Conversation sidebar (overlay) */}
       {sidebarOpen && (

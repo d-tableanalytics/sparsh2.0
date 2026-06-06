@@ -84,13 +84,18 @@ async def append_turn(
     user_msg: str,
     assistant_msg: str,
     attributions: Optional[list] = None,
+    attachments: Optional[list] = None,
 ) -> None:
     now = datetime.utcnow()
     assistant_doc = {"role": "assistant", "content": assistant_msg, "timestamp": now}
     if attributions:
         assistant_doc["attributions"] = attributions
+    user_doc = {"role": "user", "content": user_msg, "timestamp": now}
+    if attachments:
+        # Compact file descriptors so past turns can re-render their chips.
+        user_doc["attachments"] = attachments
     new_msgs = [
-        {"role": "user", "content": user_msg, "timestamp": now},
+        user_doc,
         assistant_doc,
     ]
     await get_collection(COLL).update_one(

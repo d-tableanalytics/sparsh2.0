@@ -3,6 +3,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Bot, User, AlertCircle, Copy, Check, Pencil } from 'lucide-react';
 import SourceList from './SourceList';
+import MessageAttachments from './MessageAttachments';
 
 // Render every markdown link so it opens in a new tab; rel guards against
 // reverse-tabnabbing and referrer leakage.
@@ -61,8 +62,15 @@ export default function MessageBubble({ message, onEdit, disabled }) {
   const canCopy = Boolean(message.content) && !message.streaming;
   const canEdit = isUser && !message.streaming && typeof onEdit === 'function';
 
+  const hasAttachments = Array.isArray(message.attachments) && message.attachments.length > 0;
+
   return (
     <div className="group flex flex-col">
+      {hasAttachments && (
+        <div className={isUser ? 'pr-9' : 'pl-9'}>
+          <MessageAttachments attachments={message.attachments} isUser={isUser} />
+        </div>
+      )}
       <div className={`flex gap-2.5 ${isUser ? 'flex-row-reverse' : 'flex-row'}`}>
         <div
           className={`mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full ${
@@ -72,7 +80,10 @@ export default function MessageBubble({ message, onEdit, disabled }) {
           {isUser ? <User size={15} /> : <Bot size={15} />}
         </div>
 
-        {editing ? (
+        {isUser && !message.content && hasAttachments ? (
+          // Attachment-only message: chips already render above; skip empty bubble.
+          <span className="sr-only">Sent attachments</span>
+        ) : editing ? (
           <div className="flex max-w-[82%] flex-1 flex-col gap-2">
             <textarea
               autoFocus

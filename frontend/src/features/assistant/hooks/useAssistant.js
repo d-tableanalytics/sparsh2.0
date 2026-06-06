@@ -64,6 +64,7 @@ export default function useAssistant() {
             content: m.content || '',
             attributions,
             sources,
+            attachments: m.attachments || undefined,
           };
         }),
     );
@@ -74,16 +75,18 @@ export default function useAssistant() {
   }, []);
 
   const send = useCallback(
-    async (text, { editFromIndex } = {}) => {
+    async (text, { editFromIndex, attachments, attachmentIds } = {}) => {
       const content = (text || '').trim();
-      if (!content || streaming) return;
+      const hasAttachments = attachmentIds && attachmentIds.length > 0;
+      // Allow an attachment-only message (no text), but otherwise require text.
+      if ((!content && !hasAttachments) || streaming) return;
 
       setError(null);
       const userId = nextId('u');
       const asstId = nextId('a');
       setMessages((list) => [
         ...list,
-        { id: userId, role: 'user', content },
+        { id: userId, role: 'user', content, attachments: attachments || undefined },
         { id: asstId, role: 'assistant', content: '', streaming: true },
       ]);
       setStreaming(true);
@@ -97,6 +100,7 @@ export default function useAssistant() {
           message: content,
           conversationId: conversationIdRef.current,
           editFromIndex,
+          attachmentIds,
           signal: controller.signal,
           onEvent: (event, data) => {
             if (event === 'meta') {

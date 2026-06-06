@@ -13,14 +13,22 @@ Cross-cutting: correlation IDs, feature-flag gating, per-user rate limiting.
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from fastapi.responses import StreamingResponse
+from typing import List, Optional
+
+from fastapi import (
+    APIRouter, BackgroundTasks, Depends, File, Form, HTTPException,
+    Request, Response, UploadFile,
+)
+from fastapi.responses import FileResponse, StreamingResponse
 
 from app.assistant import flags, ratelimit
 from app.assistant.caching import cache
 from app.assistant.config import config
 from app.assistant.core.orchestrator import Orchestrator
 from app.assistant.dependencies import get_user_context
+from app.assistant.files import attachment_store, service as attachment_service
+from app.assistant.files.service import ValidationError
+from app.assistant.files.storage import LocalStorage
 from app.assistant.memory import conversation_store
 from app.assistant.observability import correlation
 from app.assistant.observability.metrics import metrics
@@ -98,7 +106,8 @@ async def ask(req: AskRequest, request: Request, response: Response,
     if req.stream and config.STREAMING_ENABLED:
         return StreamingResponse(
             _orchestrator.stream_message(
-                ctx, req.message, req.conversation_id, edit_from_index=req.edit_from_index
+                ctx, req.message, req.conversation_id,
+                edit_from_index=req.edit_from_index, attachment_ids=req.attachment_ids,
             ),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "X-Request-ID": cid},
@@ -107,7 +116,8 @@ async def ask(req: AskRequest, request: Request, response: Response,
     response.headers["X-Request-ID"] = cid
     try:
         return await _orchestrator.handle_message(
-            ctx, req.message, req.conversation_id, edit_from_index=req.edit_from_index
+            ctx, req.message, req.conversation_id,
+            edit_from_index=req.edit_from_index, attachment_ids=req.attachment_ids,
         )
     except AssistantError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
@@ -136,3 +146,118 @@ async def delete_conversation(conversation_id: str, ctx: UserContext = Depends(g
     except AssistantError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     return {"deleted": True}
+
+
+# ── Multi-modal attachments (owner-scoped) ─────────────────────────────────
+def _ensure_attachments_enabled() -> None:
+    if not config.ATTACHMENTS_ENABLED:
+        raise HTTPException(status_code=403, detail="File uploads are disabled")
+
+
+@router.post("/attachments")
+async def upload_attachment(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    conversation_id: Optional[str] = Form(None),
+    ctx: UserContext = Depends(get_user_context),
+):
+    """Upload a single file. Returns immediately with status=processing; poll
+    GET /assistant/attachments/{id} until status=completed."""
+    _ensure_attachments_enabled()
+    try:
+        out = await attachment_service.save_and_dispatch(ctx, file, conversation_id, background_tasks)
+    except ValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return out.model_dump()
+
+
+@router.post("/attachments/batch")
+async def upload_attachments(
+    background_tasks: BackgroundTasks,
+    files: List[UploadFile] = File(...),
+    conversation_id: Optional[str] = Form(None),
+    ctx: UserContext = Depends(get_user_context),
+):
+    """Upload multiple files in one request (per-message multi-upload)."""
+    _ensure_attachments_enabled()
+    if len(files) > config.MAX_FILES_PER_MESSAGE:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Up to {config.MAX_FILES_PER_MESSAGE} files per message.",
+        )
+    results, errors = [], []
+    for f in files:
+        try:
+            out = await attachment_service.save_and_dispatch(ctx, f, conversation_id, background_tasks)
+            results.append(out.model_dump())
+        except ValidationError as exc:
+            errors.append({"filename": f.filename, "error": str(exc)})
+    return {"attachments": results, "errors": errors}
+
+
+@router.get("/attachments/{attachment_id}")
+async def get_attachment(attachment_id: str, ctx: UserContext = Depends(get_user_context)):
+    try:
+        doc = await attachment_store.get_for_user(ctx, attachment_id)
+    except AssistantError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    out = await attachment_service.to_out(ctx, doc)
+    return out.model_dump()
+
+
+@router.delete("/attachments/{attachment_id}")
+async def delete_attachment(attachment_id: str, ctx: UserContext = Depends(get_user_context)):
+    try:
+        doc = await attachment_store.delete_for_user(ctx, attachment_id)
+    except AssistantError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    # Best-effort purge of the stored file.
+    ref = doc.get("storage_ref")
+    if ref:
+        try:
+            from app.assistant.files.storage import get_storage
+            await get_storage().delete(ref)
+        except Exception:
+            pass
+    return {"deleted": True}
+
+
+@router.post("/attachments/{attachment_id}/analyze")
+async def analyze_attachment(
+    attachment_id: str,
+    background_tasks: BackgroundTasks,
+    ctx: UserContext = Depends(get_user_context),
+):
+    """Re-run extraction/summary for an attachment (e.g. after a transient failure)."""
+    _ensure_attachments_enabled()
+    try:
+        await attachment_service.reanalyze(ctx, attachment_id, background_tasks)
+    except AssistantError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    return {"status": "processing"}
+
+
+@router.get("/conversations/{conversation_id}/files")
+async def list_conversation_files(conversation_id: str, ctx: UserContext = Depends(get_user_context)):
+    docs = await attachment_store.list_for_conversation(ctx, conversation_id)
+    out = [(await attachment_service.to_out(ctx, d)).model_dump() for d in docs]
+    return {"files": out}
+
+
+@router.get("/files/local/{ref:path}")
+async def download_local_file(ref: str, ctx: UserContext = Depends(get_user_context)):
+    """Serve a locally-stored attachment (development storage backend only).
+
+    Owner-scoped: the requested storage ref must belong to an attachment owned
+    by the caller, so users can't read each other's files by guessing paths."""
+    from app.db.mongodb import get_collection
+
+    owned = await get_collection(config.ATTACHMENT_COLLECTION).find_one(
+        {"storage_ref": ref, "uploaded_by": ctx.user_id}
+    )
+    if not owned:
+        raise HTTPException(status_code=404, detail="File not found")
+    path = LocalStorage().local_path(ref)
+    if not path:
+        raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(path, filename=owned.get("filename"))
