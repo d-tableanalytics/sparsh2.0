@@ -3,8 +3,9 @@ import os
 from dotenv import load_dotenv
 from typing import Optional
 
-# Explicitly load .env file
-load_dotenv()
+# Explicitly load .env file (check for both .env and env)
+load_dotenv(".env")
+load_dotenv("env")
 
 class Settings(BaseSettings):
     MONGODB_URI: str = "mongodb://localhost:27017"
@@ -31,6 +32,19 @@ class Settings(BaseSettings):
     AWS_SECRET_ACCESS_KEY: Optional[str] = None
     AWS_REGION: Optional[str] = None
     S3_BUCKET_NAME: Optional[str] = None
+
+    # Attachment storage (multi-modal assistant uploads).
+    # ATTACHMENT_STORAGE_PROVIDER overrides AssistantConfig.STORAGE_PROVIDER when set
+    # ("local" for dev, "s3" for prod). LOCAL_STORAGE_DIR is where the local
+    # backend writes raw files (served back via the download route).
+    ATTACHMENT_STORAGE_PROVIDER: Optional[str] = None
+    LOCAL_STORAGE_DIR: str = "uploads/assistant"
+
+    # Optional explicit ffmpeg location (used for audio/video transcription when
+    # the binary isn't on the process PATH). Set either the full binary path or
+    # the directory containing it.
+    FFMPEG_BINARY: Optional[str] = None
+    FFMPEG_DIR: Optional[str] = None
 
     model_config = {
         "env_file": ".env",

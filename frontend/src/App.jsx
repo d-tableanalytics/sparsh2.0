@@ -34,8 +34,10 @@ import MyReports from './pages/MyReports';
 import MediaLibrary from './pages/MediaLibrary';
 import ForgotPassword from './pages/ForgotPassword';
 import PrivateRoute from './components/common/PrivateRoute';
+import AssistantWidget from './features/assistant';
 import './index.css';
 import { useAuth } from './context/AuthContext';
+import { UploadProvider } from './context/UploadContext';
 
 const AppRoutes = () => {
   const { user } = useAuth();
@@ -94,9 +96,12 @@ const App = () => {
     <ThemeProvider>
       <AuthProvider>
         <NotificationProvider>
-          <Router>
-            <AppRoutes />
-          </Router>
+          <UploadProvider>
+            <Router>
+              <AppRoutes />
+            </Router>
+            <AssistantWidget />
+          </UploadProvider>
           <NotificationModal />
         </NotificationProvider>
       </AuthProvider>
