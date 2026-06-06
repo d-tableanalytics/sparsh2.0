@@ -37,6 +37,7 @@ import PrivateRoute from './components/common/PrivateRoute';
 import AssistantWidget from './features/assistant';
 import './index.css';
 import { useAuth } from './context/AuthContext';
+import { UploadProvider } from './context/UploadContext';
 
 const AppRoutes = () => {
   const { user } = useAuth();
@@ -95,10 +96,12 @@ const App = () => {
     <ThemeProvider>
       <AuthProvider>
         <NotificationProvider>
-          <Router>
-            <AppRoutes />
+          <UploadProvider>
+            <Router>
+              <AppRoutes />
+            </Router>
             <AssistantWidget />
-          </Router>
+          </UploadProvider>
           <NotificationModal />
         </NotificationProvider>
       </AuthProvider>

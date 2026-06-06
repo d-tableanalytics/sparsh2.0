@@ -90,3 +90,58 @@ def delete_file_from_s3(s3_key: str) -> bool:
         print(f"Error deleting S3 object {s3_key}: {e}")
         return False
 
+def create_multipart_upload(filename: str, content_type: str) -> dict:
+    """Initialize a multipart upload and return the UploadId and generated S3 Key."""
+    s3_client = get_s3_client()
+    unique_filename = f"{uuid.uuid4()}_{filename}"
+    res = s3_client.create_multipart_upload(
+        Bucket=settings.S3_BUCKET_NAME,
+        Key=unique_filename,
+        ContentType=content_type
+    )
+    return {
+        "upload_id": res["UploadId"],
+        "key": unique_filename
+    }
+
+def upload_part(key: str, upload_id: str, part_number: int, file_obj) -> dict:
+    """Upload a single chunk/part to an ongoing multipart upload."""
+    s3_client = get_s3_client()
+    res = s3_client.upload_part(
+        Bucket=settings.S3_BUCKET_NAME,
+        Key=key,
+        PartNumber=part_number,
+        UploadId=upload_id,
+        Body=file_obj
+    )
+    return {"ETag": res["ETag"], "PartNumber": part_number}
+
+def complete_multipart_upload(key: str, upload_id: str, parts: list) -> dict:
+    """Complete the multipart upload once all parts are uploaded."""
+    s3_client = get_s3_client()
+    
+    # Parts must be sorted by PartNumber
+    sorted_parts = sorted(parts, key=lambda x: int(x["PartNumber"]))
+    
+    s3_client.complete_multipart_upload(
+        Bucket=settings.S3_BUCKET_NAME,
+        Key=key,
+        UploadId=upload_id,
+        MultipartUpload={'Parts': sorted_parts}
+    )
+    return {"key": key, "url": get_signed_url(key)}
+
+def abort_multipart_upload(key: str, upload_id: str) -> bool:
+    """Abort an ongoing multipart upload to free up partial storage."""
+    s3_client = get_s3_client()
+    try:
+        s3_client.abort_multipart_upload(
+            Bucket=settings.S3_BUCKET_NAME,
+            Key=key,
+            UploadId=upload_id
+        )
+        return True
+    except Exception as e:
+        print(f"Error aborting multipart upload {upload_id}: {e}")
+        return False
+

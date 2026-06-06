@@ -76,6 +76,7 @@ async def transcribe_media_file(local_file_path: str, progress_callback=None) ->
         from app.services.media_tools import resolve_ffmpeg
         ffmpeg_bin = resolve_ffmpeg() or "ffmpeg"
         out_pattern = os.path.join(temp_dir, "chunk_%04d.wav")
+        chunk_size_bytes = 10 * 1024 * 1024
         cmd = [
             ffmpeg_bin, "-i", local_file_path,
             "-f", "segment", "-segment_time", "60",

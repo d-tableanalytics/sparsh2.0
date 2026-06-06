@@ -34,6 +34,8 @@ async def upload_media(
     media_type: str = Form(...),
     name: str = Form(...),
     description: str = Form(""),
+    folder: Optional[str] = Form("/"),
+    tags: Optional[str] = Form(""),
     file: UploadFile = File(...),
     current_user: dict = Depends(get_current_user),
 ):
@@ -78,6 +80,8 @@ async def upload_media(
         "s3_key": result["key"],
         "uploaded_by": str(current_user["_id"]),
         "created_at": datetime.utcnow(),
+        "folder": (folder or "/").strip(),
+        "tags": [t.strip().lower() for t in tags.split(",") if t.strip()] if tags else []
     }
 
     col = get_collection("media_library")

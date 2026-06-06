@@ -6,3 +6,5 @@ from . import quarter
 from . import session_template
 from . import calendar_events
 from . import settings
+from . import media_ai
+from . import media_chunk
