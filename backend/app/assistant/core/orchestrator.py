@@ -48,9 +48,14 @@ class Orchestrator:
 
     # ── Shared setup ──────────────────────────────────────────────────────
     async def _prepare(
-        self, ctx: UserContext, message: str, conversation_id: Optional[str], meter: UsageMeter
-    ) -> Tuple[Conversation, List[dict], List[dict], str]:
+        self, ctx: UserContext, message: str, conversation_id: Optional[str], meter: UsageMeter,
+        edit_from_index: Optional[int] = None, attachment_ids: Optional[List[str]] = None,
+    ) -> Tuple[Conversation, List[dict], List[dict], str, list]:
         convo = await conversation_store.load_or_create(ctx, conversation_id)
+        # Edit-and-resend: drop the edited turn and everything after it before
+        # building context, so stale history isn't replayed to the model.
+        if edit_from_index is not None:
+            await conversation_store.truncate_messages(convo, edit_from_index)
         window = context_manager.build_window(convo)
 
         messages = [{"role": "system", "content": build_system_prompt(ctx)}]
@@ -65,16 +70,46 @@ class Orchestrator:
 
         messages.extend(window)
 
-        recent = "\n".join(
-            f"{m.role}: {m.content}" for m in convo.messages[-4:]
-        )
-        rw = await query_rewriter.rewrite(
-            self.llm, message, convo.summary or "", recent, meter=meter
-        )
-        effective = rw["rewritten_query"]
+        has_attachments = bool(config.ATTACHMENTS_ENABLED and attachment_ids)
 
-        messages.append({"role": "user", "content": effective})
-        return convo, messages, registry.openai_schema_for_role(ctx.role), effective
+        # An attachments-only turn (empty/whitespace message) defaults to a
+        # summary request. We skip the query rewriter entirely here: with no
+        # message it would otherwise hallucinate a question and derail the
+        # answer instead of describing the uploaded file.
+        if not (message or "").strip() and has_attachments:
+            effective = config.DEFAULT_ATTACHMENT_PROMPT
+        else:
+            recent = "\n".join(
+                f"{m.role}: {m.content}" for m in convo.messages[-4:]
+            )
+            rw = await query_rewriter.rewrite(
+                self.llm, message, convo.summary or "", recent, meter=meter
+            )
+            effective = rw["rewritten_query"]
+
+        # Multi-modal: fold uploaded-file content into this turn. Text is appended
+        # to the (rewritten) query; images become vision blocks. No attachments →
+        # the message stays a plain string, exactly as before.
+        attach_metas: list = []
+        if has_attachments:
+            from app.assistant.files import service as attachment_service
+            attach = await attachment_service.build_attachment_context(
+                ctx, attachment_ids, convo.id
+            )
+            attach_metas = attach["metas"]
+            user_text = effective + (attach["text_block"] or "")
+            if attach["images"]:
+                content = [{"type": "text", "text": user_text}]
+                for img in attach["images"]:
+                    content.append({"type": "image_url",
+                                    "image_url": {"url": img, "detail": "auto"}})
+                messages.append({"role": "user", "content": content})
+            else:
+                messages.append({"role": "user", "content": user_text})
+        else:
+            messages.append({"role": "user", "content": effective})
+
+        return convo, messages, registry.openai_schema_for_role(ctx.role), effective, attach_metas
 
     async def _run_tools(self, ctx, spec_calls, messages, sources, tools_used, attributions) -> None:
         """Execute a batch of tool calls and append their results to the transcript."""
@@ -106,8 +141,10 @@ class Orchestrator:
                 {"role": "tool", "tool_call_id": call.get("id") or name, "content": json.dumps(payload, default=str)}
             )
 
-    async def _persist(self, convo, user_msg, answer, meter, attributions=None) -> None:
-        await conversation_store.append_turn(convo, user_msg, answer, attributions=attributions)
+    async def _persist(self, convo, user_msg, answer, meter, attributions=None, attachments=None) -> None:
+        await conversation_store.append_turn(
+            convo, user_msg, answer, attributions=attributions, attachments=attachments
+        )
         # Reload-light: reflect the two new messages locally for title/summary decisions.
         convo.messages.append(_quick_msg("user", user_msg))
         convo.messages.append(_quick_msg("assistant", answer))
@@ -126,13 +163,17 @@ class Orchestrator:
 
     # ── Non-streaming ─────────────────────────────────────────────────────
     async def handle_message(
-        self, ctx: UserContext, message: str, conversation_id: Optional[str] = None
+        self, ctx: UserContext, message: str, conversation_id: Optional[str] = None,
+        edit_from_index: Optional[int] = None, attachment_ids: Optional[List[str]] = None,
     ) -> AskResponse:
         cid = get_correlation_id()
         started = time.perf_counter()
         meter = UsageMeter()
         errored = False
-        convo, messages, tool_schema, _ = await self._prepare(ctx, message, conversation_id, meter)
+        convo, messages, tool_schema, _, attach_metas = await self._prepare(
+            ctx, message, conversation_id, meter,
+            edit_from_index=edit_from_index, attachment_ids=attachment_ids,
+        )
 
         sources: set = set()
         tools_used: List[str] = []
@@ -166,7 +207,8 @@ class Orchestrator:
             if not vo["ok"]:
                 log_event("output_flagged", issues=vo["issues"], user=ctx.user_id)
 
-        await self._persist(convo, message, answer, meter, attributions=attributions)
+        await self._persist(convo, message, answer, meter, attributions=attributions,
+                            attachments=attach_metas)
         cost_estimate = await cost.record_cost(cid, ctx.user_id, meter)
 
         duration_ms = (time.perf_counter() - started) * 1000
@@ -192,12 +234,16 @@ class Orchestrator:
 
     # ── Streaming (SSE) ───────────────────────────────────────────────────
     async def stream_message(
-        self, ctx: UserContext, message: str, conversation_id: Optional[str] = None
+        self, ctx: UserContext, message: str, conversation_id: Optional[str] = None,
+        edit_from_index: Optional[int] = None, attachment_ids: Optional[List[str]] = None,
     ) -> AsyncIterator[str]:
         cid = get_correlation_id()
         started = time.perf_counter()
         meter = UsageMeter()
-        convo, messages, tool_schema, _ = await self._prepare(ctx, message, conversation_id, meter)
+        convo, messages, tool_schema, _, attach_metas = await self._prepare(
+            ctx, message, conversation_id, meter,
+            edit_from_index=edit_from_index, attachment_ids=attachment_ids,
+        )
         yield _sse("meta", {"conversation_id": convo.id, "correlation_id": cid})
 
         sources: set = set()
@@ -232,7 +278,8 @@ class Orchestrator:
             if not vo["ok"]:
                 log_event("output_flagged", issues=vo["issues"], user=ctx.user_id)
 
-        await self._persist(convo, message, answer, meter, attributions=attributions)
+        await self._persist(convo, message, answer, meter, attributions=attributions,
+                            attachments=attach_metas)
         cost_estimate = await cost.record_cost(cid, ctx.user_id, meter)
 
         duration_ms = (time.perf_counter() - started) * 1000

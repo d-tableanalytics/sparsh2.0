@@ -15,7 +15,7 @@ function getToken() {
  * onEvent(eventName, data) is called for: meta | tool | token | done.
  * Throws an Error (with .status / .retryAfter) on non-OK responses.
  */
-export async function streamAsk({ message, conversationId, signal, onEvent }) {
+export async function streamAsk({ message, conversationId, editFromIndex, attachmentIds, signal, onEvent }) {
   const res = await fetch(`${API_BASE}/assistant/ask`, {
     method: 'POST',
     headers: {
@@ -26,6 +26,10 @@ export async function streamAsk({ message, conversationId, signal, onEvent }) {
       message,
       conversation_id: conversationId || null,
       stream: true,
+      // Present only for edit-and-resend; truncates stored history server-side.
+      ...(editFromIndex != null ? { edit_from_index: editFromIndex } : {}),
+      // Previously-uploaded, fully-processed attachments to include as context.
+      ...(attachmentIds && attachmentIds.length ? { attachment_ids: attachmentIds } : {}),
     }),
     signal,
   });
@@ -110,11 +114,12 @@ function dispatchFrame(frame, onEvent) {
 }
 
 /** Non-streaming fallback. Returns { conversation_id, answer, sources, meta }. */
-export async function askOnce({ message, conversationId }) {
+export async function askOnce({ message, conversationId, editFromIndex }) {
   const res = await api.post('/assistant/ask', {
     message,
     conversation_id: conversationId || null,
     stream: false,
+    ...(editFromIndex != null ? { edit_from_index: editFromIndex } : {}),
   });
   return res.data;
 }
@@ -133,4 +138,47 @@ export async function getConversation(id) {
 export async function deleteConversation(id) {
   const res = await api.delete(`/assistant/conversations/${id}`);
   return res.data;
+}
+
+// ── Multi-modal attachments ────────────────────────────────────────────────
+
+/**
+ * Upload a single file as multipart. Returns the stub { id, status, ... }.
+ * onProgress(percent) is called during the upload (0–100).
+ */
+export async function uploadAttachment(file, conversationId, { onProgress, signal } = {}) {
+  const form = new FormData();
+  form.append('file', file);
+  if (conversationId) form.append('conversation_id', conversationId);
+  const res = await api.post('/assistant/attachments', form, {
+    signal,
+    onUploadProgress: (e) => {
+      if (onProgress && e.total) onProgress(Math.round((e.loaded / e.total) * 100));
+    },
+  });
+  return res.data;
+}
+
+/** Poll an attachment's processing status. Returns { id, status, summary, url, ... }. */
+export async function getAttachment(id) {
+  const res = await api.get(`/assistant/attachments/${id}`);
+  return res.data;
+}
+
+/** Delete an attachment (doc + stored file + retrieval chunks). */
+export async function deleteAttachment(id) {
+  const res = await api.delete(`/assistant/attachments/${id}`);
+  return res.data;
+}
+
+/** Re-run extraction for an attachment (retry processing). */
+export async function analyzeAttachment(id) {
+  const res = await api.post(`/assistant/attachments/${id}/analyze`);
+  return res.data;
+}
+
+/** List the files attached to a conversation. */
+export async function listConversationFiles(conversationId) {
+  const res = await api.get(`/assistant/conversations/${conversationId}/files`);
+  return res.data.files || [];
 }

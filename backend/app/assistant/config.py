@@ -54,6 +54,68 @@ class AssistantConfig:
     # Persistence.
     CONVERSATION_COLLECTION: str = "assistant_conversations"
 
+    # ── Multi-modal attachments ───────────────────────────────────────────
+    # Master switch for the file-upload subsystem (additive; safe to disable).
+    ATTACHMENTS_ENABLED: bool = True
+    ATTACHMENT_COLLECTION: str = "assistant_attachments"
+    # Per-conversation retrieval chunks backing search_uploaded_files.
+    ATTACHMENT_CHUNK_COLLECTION: str = "assistant_attachment_chunks"
+
+    # Storage backend: "local" (dev) or "s3" (prod). See files/storage.py.
+    STORAGE_PROVIDER: str = "s3"
+
+    # Upload limits (configurable; enforced server-side in files/service.py).
+    MAX_FILES_PER_MESSAGE: int = 25
+    MAX_FILE_SIZE_MB: int = 100
+    MAX_REQUEST_SIZE_MB: int = 500
+
+    # Default instruction used when a turn carries attachments but no text
+    # message (e.g. the user uploads a file and hits send with an empty box).
+    # Without this the empty message is run through the query rewriter, which
+    # invents a spurious question ("what is the latest message?") and derails
+    # the answer instead of describing the file.
+    DEFAULT_ATTACHMENT_PROMPT: str = (
+        "Please provide a clear, concise summary of the attached file(s), "
+        "highlighting the key points."
+    )
+
+    # Context-injection caps so large files never blow the model context window.
+    MAX_EXTRACTED_CHARS_PER_FILE: int = 24000
+    MAX_TOTAL_ATTACHMENT_CHARS: int = 60000
+    MAX_IMAGES_PER_TURN: int = 8
+
+    # Safe ZIP extraction guards (zip-bomb / zip-slip protection).
+    ZIP_MAX_ENTRIES: int = 200
+    ZIP_MAX_TOTAL_BYTES: int = 200 * 1024 * 1024  # 200 MB uncompressed
+
+    # Allowed upload extensions (lower-case, no dot). Mirrors the product spec.
+    ALLOWED_EXTENSIONS: set = {
+        # documents
+        "pdf", "doc", "docx", "txt", "md", "rtf",
+        # spreadsheets
+        "xls", "xlsx", "csv",
+        # presentations
+        "ppt", "pptx",
+        # images
+        "jpg", "jpeg", "png", "webp", "gif",
+        # audio
+        "mp3", "wav", "aac", "ogg", "m4a", "flac",
+        # video
+        "mp4", "mov", "avi", "mkv", "webm",
+        # development / code
+        "js", "jsx", "ts", "tsx", "py", "java", "php", "cpp", "c", "h",
+        "cs", "go", "rb", "rs", "kt", "swift", "sql", "sh",
+        "json", "xml", "yaml", "yml", "html", "css",
+        # archives
+        "zip", "rar", "7z",
+    }
+    # Always-blocked extensions (executables / installers / scripts), even if
+    # they slip past the allowlist via a double extension.
+    BLOCKED_EXTENSIONS: set = {
+        "exe", "dll", "bat", "cmd", "com", "scr", "msi", "msix",
+        "vbs", "ps1", "jar", "app", "deb", "rpm", "bin", "so", "dylib",
+    }
+
     # Response sizing defaults (response_formatter refines per query, Phase 2/3).
     SHORT_ANSWER_MAX_TOKENS: int = 200
     LONG_ANSWER_MAX_TOKENS: int = 1200

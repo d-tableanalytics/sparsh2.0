@@ -84,13 +84,18 @@ async def append_turn(
     user_msg: str,
     assistant_msg: str,
     attributions: Optional[list] = None,
+    attachments: Optional[list] = None,
 ) -> None:
     now = datetime.utcnow()
     assistant_doc = {"role": "assistant", "content": assistant_msg, "timestamp": now}
     if attributions:
         assistant_doc["attributions"] = attributions
+    user_doc = {"role": "user", "content": user_msg, "timestamp": now}
+    if attachments:
+        # Compact file descriptors so past turns can re-render their chips.
+        user_doc["attachments"] = attachments
     new_msgs = [
-        {"role": "user", "content": user_msg, "timestamp": now},
+        user_doc,
         assistant_doc,
     ]
     await get_collection(COLL).update_one(
@@ -101,6 +106,45 @@ async def append_turn(
             "$set": {"updated_at": now},
         },
     )
+
+
+async def truncate_messages(conversation: Conversation, index: int) -> int:
+    """Drop stored messages from `index` onward (for an edit-and-resend).
+
+    Keeps `messages[:index]`, updates the count, and mutates the in-memory
+    `conversation` so the caller's context window reflects the truncation.
+    Clears the rolling summary if the cut reaches into the summarized prefix,
+    so the summary never references content the user removed. Returns the
+    number of messages kept.
+    """
+    col = get_collection(COLL)
+    if index < 0:
+        index = 0
+    kept = conversation.messages[:index]
+    now = datetime.utcnow()
+
+    set_fields = {
+        "messages": [m.model_dump() for m in kept],
+        "message_count": len(kept),
+        "updated_at": now,
+    }
+
+    # If the summary covered messages at/after the cut, it's now stale.
+    doc = await col.find_one(
+        {"_id": _oid(conversation.id), "user_id": conversation.user_id}
+    )
+    if doc and (doc.get("summary_upto") or 0) > len(kept):
+        set_fields["summary"] = None
+        set_fields["summary_upto"] = 0
+        conversation.summary = None
+
+    await col.update_one(
+        {"_id": _oid(conversation.id), "user_id": conversation.user_id},
+        {"$set": set_fields},
+    )
+
+    conversation.messages = kept
+    return len(kept)
 
 
 async def set_title(conversation: Conversation, title: str) -> None:

@@ -240,6 +240,22 @@ async def main():
     check("same conversation reused", resp2.conversation_id == cid)
     check("history grew to 4 messages", stored["message_count"] == 4)
 
+    # 3b) Edit-and-resend: truncates stored history before regenerating.
+    print("\nEdit & resend:")
+    orch_edit = Orchestrator(llm=FakeLLM(complete_script=[
+        {"final": "Hi there!"},
+    ]))
+    # Edit the 2nd user turn (index 2): drop it + its answer, then resend.
+    resp_edit = await orch_edit.handle_message(
+        USER_A, "hello", conversation_id=cid, edit_from_index=2
+    )
+    stored = await fake.find_one({"_id": ObjectId(cid)})
+    check("edit reused same conversation", resp_edit.conversation_id == cid)
+    check("history truncated then re-appended (4 msgs)", stored["message_count"] == 4)
+    check("edited user message replaced old", stored["messages"][2]["content"] == "hello")
+    check("answer reflects edited prompt", stored["messages"][3]["content"] == "Hi there!")
+    check("turn before the edit preserved", stored["messages"][0]["content"] == "show my profile")
+
     # 4) Context windowing
     print("\nContext windowing:")
     convo = Conversation(

@@ -1,11 +1,14 @@
 import React, { useEffect, useRef } from 'react';
 import { Sparkles } from 'lucide-react';
+import { useAuth } from '../../../context/AuthContext';
 import MessageBubble from './MessageBubble';
 import TypingIndicator from './TypingIndicator';
 import SuggestedQuestions from './SuggestedQuestions';
 
-export default function MessageList({ messages, streaming, activeTool, onPickSuggestion }) {
+export default function MessageList({ messages, streaming, activeTool, onPickSuggestion, onEdit }) {
   const endRef = useRef(null);
+  const { user } = useAuth();
+  const isSuperAdmin = user?.role?.toLowerCase() === 'superadmin';
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
@@ -23,7 +26,9 @@ export default function MessageList({ messages, streaming, activeTool, onPickSug
         </div>
         <p className="mt-2 text-sm font-medium text-[var(--text-main)]">Ask Sparsh anything</p>
         <p className="text-xs text-[var(--text-muted)]">
-          Your sessions, quiz scores, progress, or what to study next.
+          {isSuperAdmin
+            ? 'Platform stats, companies, batches, and users.'
+            : 'Your sessions, quiz scores, progress, or what to study next.'}
         </p>
         <SuggestedQuestions onPick={onPickSuggestion} disabled={streaming} />
       </div>
@@ -33,7 +38,7 @@ export default function MessageList({ messages, streaming, activeTool, onPickSug
   return (
     <div className="flex flex-col gap-3 px-3 py-3">
       {messages.map((m) => (
-        <MessageBubble key={m.id} message={m} />
+        <MessageBubble key={m.id} message={m} onEdit={onEdit} disabled={streaming} />
       ))}
       {showTyping && (
         <div className="pl-9">

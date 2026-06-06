@@ -64,6 +64,7 @@ export default function useAssistant() {
             content: m.content || '',
             attributions,
             sources,
+            attachments: m.attachments || undefined,
           };
         }),
     );
@@ -74,16 +75,18 @@ export default function useAssistant() {
   }, []);
 
   const send = useCallback(
-    async (text) => {
+    async (text, { editFromIndex, attachments, attachmentIds } = {}) => {
       const content = (text || '').trim();
-      if (!content || streaming) return;
+      const hasAttachments = attachmentIds && attachmentIds.length > 0;
+      // Allow an attachment-only message (no text), but otherwise require text.
+      if ((!content && !hasAttachments) || streaming) return;
 
       setError(null);
       const userId = nextId('u');
       const asstId = nextId('a');
       setMessages((list) => [
         ...list,
-        { id: userId, role: 'user', content },
+        { id: userId, role: 'user', content, attachments: attachments || undefined },
         { id: asstId, role: 'assistant', content: '', streaming: true },
       ]);
       setStreaming(true);
@@ -96,6 +99,8 @@ export default function useAssistant() {
         await streamAsk({
           message: content,
           conversationId: conversationIdRef.current,
+          editFromIndex,
+          attachmentIds,
           signal: controller.signal,
           onEvent: (event, data) => {
             if (event === 'meta') {
@@ -142,6 +147,22 @@ export default function useAssistant() {
     [streaming, patch, rememberConversation],
   );
 
+  // Edit a previously sent user message: drop it and everything after it, then
+  // resend the new text so the assistant answers the revised question.
+  const editAndResend = useCallback(
+    (id, newText) => {
+      const content = (newText || '').trim();
+      if (!content || streaming) return;
+      // The on-screen list mirrors the stored conversation 1:1, so this index
+      // is also the backend message index to truncate from.
+      const idx = messages.findIndex((m) => m.id === id);
+      if (idx === -1) return;
+      setMessages((list) => list.slice(0, idx));
+      send(content, { editFromIndex: idx });
+    },
+    [messages, streaming, send],
+  );
+
   return {
     messages,
     streaming,
@@ -150,6 +171,7 @@ export default function useAssistant() {
     send,
     cancel,
     reset,
+    editAndResend,
     loadConversation,
     currentConversationId,
   };

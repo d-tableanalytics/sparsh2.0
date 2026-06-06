@@ -10,7 +10,15 @@ from app.services.s3_service import get_s3_client, get_signed_url, download_file
 from app.services.event_sync_service import sync_event_to_collection
 from app.config.settings import settings
 from boto3.s3.transfer import TransferConfig
-import speech_recognition as sr
+
+# `speech_recognition` is an OPTIONAL dependency (audio/video transcription only).
+# Import it lazily so that importing this module — and everything that depends on
+# it, e.g. app.services.gpt_service used for PDF/DOCX/image extraction — never
+# fails just because the transcription extras aren't installed on a given host.
+try:
+    import speech_recognition as sr
+except Exception:  # noqa: BLE001 — package missing/broken; degrade gracefully
+    sr = None
 
 async def upload_large_file_to_s3(local_path: str, filename: str, content_type: str) -> str:
     s3_client = get_s3_client()
@@ -39,6 +47,8 @@ async def upload_large_file_to_s3(local_path: str, filename: str, content_type: 
 
 
 def sync_transcribe_wav(filepath: str) -> str:
+    if sr is None:
+        raise RuntimeError("speech_recognition is not installed")
     recognizer = sr.Recognizer()
     with sr.AudioFile(filepath) as source:
         audio = recognizer.record(source)
@@ -60,12 +70,16 @@ async def transcribe_media_file(local_file_path: str, progress_callback=None) ->
     """
     final_transcription = ""
     with tempfile.TemporaryDirectory() as temp_dir:
-        # Segment output into size-based chunks (approx. 10 MB per chunk)
+        # Segment exactly 60 seconds of 16kHz mono audio. Resolve ffmpeg by path
+        # (not bare command) so a freshly-installed binary works without a PATH
+        # refresh / backend restart in a new shell.
+        from app.services.media_tools import resolve_ffmpeg
+        ffmpeg_bin = resolve_ffmpeg() or "ffmpeg"
         out_pattern = os.path.join(temp_dir, "chunk_%04d.wav")
         chunk_size_bytes = 10 * 1024 * 1024
         cmd = [
-            "ffmpeg", "-i", local_file_path,
-            "-f", "segment", "-segment_size", str(chunk_size_bytes),
+            ffmpeg_bin, "-i", local_file_path,
+            "-f", "segment", "-segment_time", "60",
             "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le",
             "-vn", out_pattern
         ]

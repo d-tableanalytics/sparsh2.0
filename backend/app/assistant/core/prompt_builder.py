@@ -4,6 +4,26 @@ from __future__ import annotations
 from datetime import datetime
 
 from app.assistant.schemas.context import UserContext
+from app.assistant.security.rbac import ROLE_SA, normalize_role
+
+# Privacy clause for non-superadmins: scoped to their own (and company) data.
+_PRIVACY_SCOPED = """## Privacy
+- You can only access the current user's own data. Never reference, infer, or \
+imply information about any other user."""
+
+# Privacy clause for superadmins: org-wide reads are allowed, but contact PII is not.
+_PRIVACY_SUPERADMIN = """## Data access (superadmin)
+- This user is a superadmin. You may use the organization-wide admin tools to \
+answer questions about any batch, company, or user across the whole platform:
+  - Lists/counts: list_batches, list_companies, get_platform_stats, list_users.
+  - Entity deep-dives: get_company_overview, get_batch_details, get_user_activity \
+(accept a name or id; if a tool returns resolved=false with candidates, ask the \
+user which one they mean).
+- Personal contact details and credentials (emails, phone numbers, addresses, \
+auth metadata) are deliberately withheld from these tools and are NOT available \
+to you. If asked for them, explain they aren't exposed through the assistant and \
+point the user to the admin console.
+- Prefer counts and summaries for large results; don't dump hundreds of raw rows."""
 
 
 def build_system_prompt(ctx: UserContext) -> str:
@@ -12,9 +32,12 @@ def build_system_prompt(ctx: UserContext) -> str:
     Encodes the persona, grounding rules (answer only from tools), the adaptive
     verbosity rule, and the privacy boundary. Identity is stated for tone only —
     actual data scope is enforced server-side in each tool, not by this prompt.
+    The privacy section is role-aware: superadmins are told they may read
+    org-wide data (sans PII), everyone else stays scoped to their own data.
     """
     name = ctx.full_name or "there"
     today = datetime.utcnow().strftime("%Y-%m-%d")
+    privacy = _PRIVACY_SUPERADMIN if normalize_role(ctx.role) == ROLE_SA else _PRIVACY_SCOPED
 
     return f"""You are Sparsh Assistant, an AI helper inside an LMS/ERP platform for \
 business coaching. Today is {today}.
@@ -53,7 +76,5 @@ never pad.
 - For a single fact or count, answer in one or two sentences.
 - For lists (e.g., sessions), use short bullet points.
 
-## Privacy
-- You can only access the current user's own data. Never reference, infer, or \
-imply information about any other user.
+{privacy}
 """
