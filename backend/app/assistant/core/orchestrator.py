@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import time
+import traceback
 from typing import AsyncIterator, List, Optional, Tuple
 
 from app.assistant.config import config
@@ -240,67 +241,92 @@ class Orchestrator:
         cid = get_correlation_id()
         started = time.perf_counter()
         meter = UsageMeter()
-        convo, messages, tool_schema, _, attach_metas = await self._prepare(
-            ctx, message, conversation_id, meter,
-            edit_from_index=edit_from_index, attachment_ids=attachment_ids,
-        )
-        yield _sse("meta", {"conversation_id": convo.id, "correlation_id": cid})
+        try:
+            convo, messages, tool_schema, _, attach_metas = await self._prepare(
+                ctx, message, conversation_id, meter,
+                edit_from_index=edit_from_index, attachment_ids=attachment_ids,
+            )
+            yield _sse("meta", {"conversation_id": convo.id, "correlation_id": cid})
 
-        sources: set = set()
-        tools_used: List[str] = []
-        attributions: List[dict] = []
-        answer_parts: List[str] = []
+            sources: set = set()
+            tools_used: List[str] = []
+            attributions: List[dict] = []
+            answer_parts: List[str] = []
 
-        for _ in range(config.MAX_TOOL_ITERATIONS):
-            tool_calls = None
-            streamed_any = False
-            async for event, payload in self.llm.complete_stream(
-                messages, tools=tool_schema or None, meter=meter
-            ):
-                if event == "content" and payload:
-                    streamed_any = True
-                    answer_parts.append(payload)
-                    yield _sse("token", {"text": payload})
-                elif event == "tool_calls":
-                    tool_calls = payload
+            for _ in range(config.MAX_TOOL_ITERATIONS):
+                tool_calls = None
+                streamed_any = False
+                async for event, payload in self.llm.complete_stream(
+                    messages, tools=tool_schema or None, meter=meter
+                ):
+                    if event == "content" and payload:
+                        streamed_any = True
+                        answer_parts.append(payload)
+                        yield _sse("token", {"text": payload})
+                    elif event == "tool_calls":
+                        tool_calls = payload
 
-            if tool_calls and not streamed_any:
-                messages.append(_assistant_tool_msg(None, tool_calls, from_stream=True))
-                for tc in tool_calls:
-                    yield _sse("tool", {"name": tc.get("name")})
-                await self._run_tools(ctx, tool_calls, messages, sources, tools_used, attributions)
-                continue
-            break  # produced the final answer
+                if tool_calls and not streamed_any:
+                    messages.append(_assistant_tool_msg(None, tool_calls, from_stream=True))
+                    for tc in tool_calls:
+                        yield _sse("tool", {"name": tc.get("name")})
+                    await self._run_tools(ctx, tool_calls, messages, sources, tools_used, attributions)
+                    continue
+                break  # produced the final answer
 
-        answer = "".join(answer_parts)
-        if config.GUARDRAILS_ENABLED:
-            vo = guardrails.validate_output(answer)
-            if not vo["ok"]:
-                log_event("output_flagged", issues=vo["issues"], user=ctx.user_id)
+            answer = "".join(answer_parts)
+            if config.GUARDRAILS_ENABLED:
+                vo = guardrails.validate_output(answer)
+                if not vo["ok"]:
+                    log_event("output_flagged", issues=vo["issues"], user=ctx.user_id)
 
-        await self._persist(convo, message, answer, meter, attributions=attributions,
-                            attachments=attach_metas)
-        cost_estimate = await cost.record_cost(cid, ctx.user_id, meter)
+            await self._persist(convo, message, answer, meter, attributions=attributions,
+                                attachments=attach_metas)
+            cost_estimate = await cost.record_cost(cid, ctx.user_id, meter)
 
-        duration_ms = (time.perf_counter() - started) * 1000
-        metrics.record_request(duration_ms, error=False)
-        log_event("request_complete", user=ctx.user_id, ms=round(duration_ms, 2),
-                  tools=tools_used, cost_usd=cost_estimate["total_usd"], streamed=True)
+            duration_ms = (time.perf_counter() - started) * 1000
+            metrics.record_request(duration_ms, error=False)
+            log_event("request_complete", user=ctx.user_id, ms=round(duration_ms, 2),
+                      tools=tools_used, cost_usd=cost_estimate["total_usd"], streamed=True)
 
-        yield _sse(
-            "done",
-            {
-                "conversation_id": convo.id,
-                "correlation_id": cid,
-                "sources": sorted(sources),
-                "tools_used": tools_used,
-                "attributions": attributions,
-                "usage": meter.as_dict(),
-                "cost": cost_estimate,
-                "latency_ms": round(duration_ms, 2),
-                "title": convo.title,
-            },
-        )
+            yield _sse(
+                "done",
+                {
+                    "conversation_id": convo.id,
+                    "correlation_id": cid,
+                    "sources": sorted(sources),
+                    "tools_used": tools_used,
+                    "attributions": attributions,
+                    "usage": meter.as_dict(),
+                    "cost": cost_estimate,
+                    "latency_ms": round(duration_ms, 2),
+                    "title": convo.title,
+                },
+            )
+        except Exception as exc:
+            # A streamed turn that blows up otherwise just severs the SSE
+            # connection, which the UI shows as an opaque "something went wrong".
+            # Log the full traceback server-side AND surface the real error in the
+            # chat so failures are diagnosable instead of silent.
+            tb = traceback.format_exc()
+            print(f"[ASSISTANT STREAM ERROR] cid={cid} {type(exc).__name__}: {exc}\n{tb}")
+            log_event("stream_error", user=ctx.user_id, error=f"{type(exc).__name__}: {exc}")
+            metrics.record_request((time.perf_counter() - started) * 1000, error=True)
+            yield _sse("token", {"text": f"\n\n⚠️ Assistant error: {type(exc).__name__}: {exc}"})
+            yield _sse(
+                "done",
+                {
+                    "conversation_id": conversation_id or "",
+                    "correlation_id": cid,
+                    "sources": [],
+                    "tools_used": [],
+                    "attributions": [],
+                    "usage": meter.as_dict(),
+                    "cost": {"total_usd": 0.0, "by_model": {}},
+                    "latency_ms": round((time.perf_counter() - started) * 1000, 2),
+                    "title": None,
+                },
+            )
 
 
 # ── small helpers ─────────────────────────────────────────────────────────

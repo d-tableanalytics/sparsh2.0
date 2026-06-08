@@ -312,7 +312,7 @@ async def gpt_session_respond(session_id: str, payload: dict, current_user: dict
     instructions = project.get("instruction", "You are a helpful assistant.")
     
     # 2. Generate AI Response
-    ai_msg = await generate_ai_response(instructions, context, user_message, conv["messages"], images=session_images if session_images else None)
+    ai_msg = await generate_ai_response(instructions, context, user_message, conv["messages"], images=session_images if session_images else None, role=current_user.get("role"))
     
     # 3. Save to History
     new_messages = conv["messages"]
@@ -380,7 +380,7 @@ async def rethink_gpt_session(session_id: str, payload: dict, current_user: dict
     instructions = project.get("instruction", "You are a helpful assistant.")
     
     # 2. Generate new response
-    ai_msg = await generate_ai_response(instructions, context, new_content, truncated_messages, images=session_images if session_images else None)
+    ai_msg = await generate_ai_response(instructions, context, new_content, truncated_messages, images=session_images if session_images else None, role=current_user.get("role"))
     
     # Update messages
     truncated_messages.append({"role": "user", "content": new_content, "timestamp": datetime.utcnow()})

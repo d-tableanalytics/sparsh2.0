@@ -11,6 +11,7 @@ from app.config.settings import settings
 from openai import AsyncOpenAI
 import numpy as np
 from app.services.transcription_service import transcribe_media_file
+from app.services.app_guide import build_app_guide
 
 async def extract_text_from_file(file_path: str, filename: str) -> dict:
     """
@@ -150,39 +151,53 @@ async def get_relevant_context(project_id: str, query: str, limit=5) -> str:
     context = "\n\n---\n\n".join([c["content"] for c in chunks])
     return context
 
-async def generate_ai_response(instructions: str, context: str, user_message: str, history: list, images: list = None):
+async def generate_ai_response(instructions: str, context: str, user_message: str, history: list, images: list = None, role: str = None):
     try:
         client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
-        
+
         has_context = bool(context and context.strip())
         knowledge_block = context if has_context else "[No knowledge base content matched this question.]"
+        app_guide = build_app_guide(role)
 
         system_prompt = f"""### SYSTEM INSTRUCTION
 {instructions}
 
 ### KNOWLEDGE CONTEXT
-The following snippets are the ONLY source of truth available to you. They are \
-extracted from the uploaded knowledge base (documents, spreadsheets, media \
-transcripts) for this project.
+The following snippets are extracted from the uploaded knowledge base (documents, \
+spreadsheets, media transcripts) for this project. They are your source of truth \
+for questions about this project's content.
 
 ---
 {knowledge_block}
 ---
 
+### SPARSH APPLICATION GUIDE
+You may ALSO answer questions about how to use the Sparsh platform itself (its \
+features, where to find them, and how-to), using only the guide below. It describes \
+how the application works — it is NOT live data, so never use it to state a user's \
+actual records. Treat it as a second source of truth, used ONLY for questions about \
+using the application.
+
+---
+{app_guide}
+---
+
 ### RESPONSE PROTOCOL (STRICT GROUNDING — READ CAREFULLY)
-1. **Answer ONLY from the KNOWLEDGE CONTEXT above.** Every fact in your reply \
-must be supported by those snippets. Do NOT use your own general/training \
-knowledge to answer the question, even if you are confident you know the answer.
-2. **Out-of-scope questions**: If the KNOWLEDGE CONTEXT does not contain the \
-information needed to answer (e.g. general trivia, definitions, or topics not \
-covered by the uploaded files), do NOT answer it. Instead reply briefly that the \
-question is outside the uploaded knowledge base, and invite the user to ask \
-something about the uploaded material. Never substitute general knowledge.
-3. **No fabrication**: Do not guess, infer beyond the snippets, or fill gaps with \
+1. **Answer ONLY from the two sources above** — the KNOWLEDGE CONTEXT (for this \
+project's content) or the SPARSH APPLICATION GUIDE (for how to use the platform). \
+Every fact in your reply must be supported by one of them. Do NOT use your own \
+general/training knowledge to answer, even if you are confident you know the answer.
+2. **Out-of-scope questions**: If NEITHER source covers the question (e.g. general \
+trivia, definitions, world knowledge, programming/tech concepts unrelated to \
+Sparsh such as "what is ORM" as a database concept, or topics not in the uploaded \
+files), do NOT answer it. Reply briefly that the question is outside this project's \
+knowledge base and what Sparsh can help with, and invite a relevant question. Never \
+substitute general knowledge.
+3. **No fabrication**: Do not guess, infer beyond the sources, or fill gaps with \
 assumptions. If only part of the answer is present, answer that part and say the \
-rest isn't in the knowledge base.
+rest isn't available. Never invent features or menu items not in the App Guide.
 4. **Detail**: When the answer IS supported, be comprehensive, structured, and \
-descriptive — but stay within what the snippets support.
+descriptive — but stay within what the sources support.
 5. **Tone**: Maintain a professional, executive, and coaching-oriented tone.
 """
         messages = [{"role": "system", "content": system_prompt}]
