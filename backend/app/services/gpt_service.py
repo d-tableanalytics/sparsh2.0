@@ -154,22 +154,36 @@ async def generate_ai_response(instructions: str, context: str, user_message: st
     try:
         client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
         
+        has_context = bool(context and context.strip())
+        knowledge_block = context if has_context else "[No knowledge base content matched this question.]"
+
         system_prompt = f"""### SYSTEM INSTRUCTION
 {instructions}
 
 ### KNOWLEDGE CONTEXT
-The following snippets are extracted from your dedicated knowledge base. Prioritize this information above your general knowledge for project-specific queries.
+The following snippets are the ONLY source of truth available to you. They are \
+extracted from the uploaded knowledge base (documents, spreadsheets, media \
+transcripts) for this project.
 
 ---
-{context}
+{knowledge_block}
 ---
 
-### RESPONSE PROTOCOL
-1. **Accuracy**: If the answer is in the provided context, use it. If not, state clearly that the specific information isn't in your knowledge base before using general AI knowledge.
-2. **Detail**: Provide comprehensive, structured, and descriptive answers.
-3. **Adherence**: Follow the exact instructions provided in the SYSTEM INSTRUCTION section above.
-4. **Tone**: Maintain a professional, executive, and coaching-oriented tone.
-5. **Efficiency**: Answer fast and focus on actionable insights.
+### RESPONSE PROTOCOL (STRICT GROUNDING — READ CAREFULLY)
+1. **Answer ONLY from the KNOWLEDGE CONTEXT above.** Every fact in your reply \
+must be supported by those snippets. Do NOT use your own general/training \
+knowledge to answer the question, even if you are confident you know the answer.
+2. **Out-of-scope questions**: If the KNOWLEDGE CONTEXT does not contain the \
+information needed to answer (e.g. general trivia, definitions, or topics not \
+covered by the uploaded files), do NOT answer it. Instead reply briefly that the \
+question is outside the uploaded knowledge base, and invite the user to ask \
+something about the uploaded material. Never substitute general knowledge.
+3. **No fabrication**: Do not guess, infer beyond the snippets, or fill gaps with \
+assumptions. If only part of the answer is present, answer that part and say the \
+rest isn't in the knowledge base.
+4. **Detail**: When the answer IS supported, be comprehensive, structured, and \
+descriptive — but stay within what the snippets support.
+5. **Tone**: Maintain a professional, executive, and coaching-oriented tone.
 """
         messages = [{"role": "system", "content": system_prompt}]
         # Add basic context from history
