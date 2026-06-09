@@ -211,6 +211,16 @@ async def build_attachment_context(
         await attachment_store.link_to_conversation(
             ctx, [str(d["_id"]) for d in docs], conversation_id
         )
+        # Backfill retrieval chunks for files that were processed before this
+        # conversation existed (their background job ran with conversation_id=None
+        # and skipped indexing). Without this, follow-up turns and large-file
+        # lookups via search_uploaded_files would find nothing.
+        for d in docs:
+            text = d.get("extracted_text") or ""
+            if text:
+                await attachment_store.ensure_chunks_for_conversation(
+                    conversation_id, str(d["_id"]), d.get("filename"), text
+                )
 
     parts, images, metas = [], [], []
     total = 0
@@ -242,8 +252,17 @@ async def build_attachment_context(
             parts.append(f"{header}\n{snippet}{note}")
         elif d.get("summary"):
             parts.append(f"{header}\n{d.get('summary')}")
+        elif d.get("status") == "failed":
+            parts.append(f"{header}\n[this file could not be processed: "
+                         f"{d.get('error') or 'unknown error'}]")
         elif d.get("status") != "completed":
-            parts.append(f"{header}\n[still processing]")
+            parts.append(f"{header}\n[still processing — ask again in a moment]")
+        else:
+            # Completed but no extractable text (scanned/image-only PDF, empty
+            # file, or password-protected). Still name the file so the model
+            # acknowledges it instead of claiming nothing was attached.
+            parts.append(f"{header}\n[no readable text could be extracted from this "
+                         f"file — it may be a scanned image, empty, or password-protected]")
 
     text_block = ""
     if parts:
