@@ -9,8 +9,8 @@ from app.utils.calendar_utils import find_user_by_id
 
 # Whitelisted, non-sensitive profile fields (serializer also drops secrets).
 PROFILE_FIELDS = [
-    "full_name", "first_name", "last_name", "email", "role", "tag",
-    "company_id", "designation", "department", "mobile",
+    "full_name", "first_name", "last_name", "role", "tag",
+    "company_id", "designation", "department",
     "batch_ids", "batch_id", "session_type", "is_active",
 ]
 

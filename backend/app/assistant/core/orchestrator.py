@@ -108,7 +108,51 @@ class Orchestrator:
             else:
                 messages.append({"role": "user", "content": user_text})
         else:
-            messages.append({"role": "user", "content": effective})
+            # Make files uploaded earlier in THIS conversation available on later
+            # turns (the composer tray clears after each send) WITHOUT letting them
+            # bleed into unrelated questions. The file text goes in a system message
+            # framed as optional reference: used only when the question is about the
+            # document; ignored for platform questions (dashboard, scores, sessions,
+            # batches, Support Engine modules), which use the structured tools.
+            from app.assistant.files import attachment_store
+            prior = await attachment_store.list_for_conversation(ctx, convo.id) if convo.id else []
+            ref_parts, ref_images, total = [], [], 0
+            for d in prior:
+                for img in (d.get("images") or []):
+                    if len(ref_images) < config.MAX_IMAGES_PER_TURN:
+                        ref_images.append(img)
+                text = (d.get("extracted_text") or "").strip()
+                if not text:
+                    continue
+                remaining = config.MAX_TOTAL_ATTACHMENT_CHARS - total
+                if remaining <= 0:
+                    break
+                snippet = text[: min(config.MAX_EXTRACTED_CHARS_PER_FILE, remaining)]
+                total += len(snippet)
+                ref_parts.append(f"## {d.get('filename')}\n{snippet}")
+            if ref_parts:
+                messages.append({
+                    "role": "system",
+                    "content": (
+                        "The user uploaded the file(s) below earlier in THIS "
+                        "conversation. Their text is an APPROVED source — use it to "
+                        "answer any question about the document or its contents, "
+                        "including questions phrased as 'my ...' that refer to what is "
+                        "in the file (e.g. the person's internships, skills, projects, "
+                        "education, experience). Do NOT say you can't access it. "
+                        "ONLY ignore this file and use the platform tools instead when "
+                        "the question is about live platform data: the dashboard, quiz "
+                        "scores, sessions, batches, attendance, or Support Engine "
+                        "modules.\n\n" + "\n\n".join(ref_parts)
+                    ),
+                })
+            if ref_images:
+                content = [{"type": "text", "text": effective}]
+                for img in ref_images:
+                    content.append({"type": "image_url", "image_url": {"url": img, "detail": "auto"}})
+                messages.append({"role": "user", "content": content})
+            else:
+                messages.append({"role": "user", "content": effective})
 
         return convo, messages, registry.openai_schema_for_role(ctx.role), effective, attach_metas
 
