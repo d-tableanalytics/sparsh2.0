@@ -9,6 +9,53 @@ const MAX_PARALLEL_CHUNKS = 3;
 const CHUNK_SIZE = 10 * 1024 * 1024; // 10MB
 const MAX_RETRIES = 3;
 
+const MEDIA_TYPE_FILE_RULES = {
+  image: {
+    extensions: ['jpg', 'jpeg', 'png', 'gif', 'webp'],
+    mimeTypes: ['image/jpeg', 'image/png', 'image/gif', 'image/webp'],
+  },
+  video: {
+    extensions: ['mp4', 'mov', 'avi', 'mkv', 'webm'],
+    mimeTypes: ['video/mp4', 'video/quicktime', 'video/x-msvideo', 'video/avi', 'video/msvideo', 'video/x-matroska', 'application/x-matroska', 'video/webm'],
+  },
+  audio: {
+    extensions: ['mp3', 'wav', 'aac', 'ogg'],
+    mimeTypes: ['audio/mpeg', 'audio/mp3', 'audio/wav', 'audio/x-wav', 'audio/aac', 'audio/aacp', 'audio/x-aac', 'audio/ogg', 'application/ogg'],
+  },
+  document: {
+    extensions: ['pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'txt'],
+    mimeTypes: [
+      'application/pdf',
+      'application/msword',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'application/vnd.ms-excel',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'application/vnd.ms-powerpoint',
+      'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+      'text/plain',
+    ],
+  },
+};
+
+const getFileExtension = (filename = '') =>
+  filename.includes('.') ? filename.split('.').pop().toLowerCase() : '';
+
+const validateFileForMediaType = (file, mediaType) => {
+  const rules = MEDIA_TYPE_FILE_RULES[mediaType];
+  if (!rules) return `Please select Image, Video, Audio, or Document before uploading.`;
+
+  const ext = getFileExtension(file.name);
+  const mimeType = (file.type || '').toLowerCase();
+  const validExtension = rules.extensions.includes(ext);
+  const validMime = rules.mimeTypes.includes(mimeType);
+
+  if (!validExtension || !validMime) {
+    return `${file.name} is not a valid ${mediaType} file. Allowed extensions: ${rules.extensions.join(', ')}.`;
+  }
+
+  return '';
+};
+
 // IndexedDB Helper
 const DB_NAME = 'MediaUploadQueueDB';
 const STORE_NAME = 'UploadQueue';
@@ -164,6 +211,16 @@ export const UploadProvider = ({ children }) => {
   };
 
   const enqueueFiles = async (uploads) => {
+    const invalidUpload = uploads.find(({ file, form }) =>
+      validateFileForMediaType(file, form.media_type)
+    );
+
+    if (invalidUpload) {
+      const message = validateFileForMediaType(invalidUpload.file, invalidUpload.form.media_type);
+      showError(message);
+      throw new Error(message);
+    }
+
     const newUploads = uploads.map(({ file, form, currentFolder }) =>
       createUploadItem(file, form, currentFolder)
     );
@@ -204,6 +261,7 @@ export const UploadProvider = ({ children }) => {
         const startFd = new FormData();
         startFd.append('filename', file.name);
         startFd.append('content_type', file.type || 'application/octet-stream');
+        startFd.append('media_type', uploadItem.media_type);
         
         const { data: startData } = await api.post('/media/chunk/start', startFd);
         currentUploadId = startData.upload_id;

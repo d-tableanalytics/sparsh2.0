@@ -20,6 +20,63 @@ const MEDIA_TYPES = [
   { value: 'other', label: 'Other', icon: FileIcon },
 ];
 
+const UPLOAD_MEDIA_TYPES = MEDIA_TYPES.filter((t) =>
+  ['video', 'audio', 'pdf', 'document', 'image', 'other'].includes(t.value)
+);
+
+const MEDIA_TYPE_FILE_RULES = {
+  image: {
+    extensions: ['jpg', 'jpeg', 'png', 'gif', 'webp'],
+    mimeTypes: ['image/jpeg', 'image/png', 'image/gif', 'image/webp'],
+  },
+  video: {
+    extensions: ['mp4', 'mov', 'avi', 'mkv', 'webm'],
+    mimeTypes: ['video/mp4', 'video/quicktime', 'video/x-msvideo', 'video/avi', 'video/msvideo', 'video/x-matroska', 'application/x-matroska', 'video/webm'],
+  },
+  audio: {
+    extensions: ['mp3', 'wav', 'aac', 'ogg'],
+    mimeTypes: ['audio/mpeg', 'audio/mp3', 'audio/wav', 'audio/x-wav', 'audio/aac', 'audio/aacp', 'audio/x-aac', 'audio/ogg', 'application/ogg'],
+  },
+  document: {
+    extensions: ['pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'txt'],
+    mimeTypes: [
+      'application/pdf',
+      'application/msword',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'application/vnd.ms-excel',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'application/vnd.ms-powerpoint',
+      'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+      'text/plain',
+    ],
+  },
+  pdf: {
+    extensions: ['pdf'],
+    mimeTypes: ['application/pdf'],
+  },
+};
+
+const getFileExtension = (filename = '') =>
+  filename.includes('.') ? filename.split('.').pop().toLowerCase() : '';
+
+const validateFileForMediaType = (file, mediaType) => {
+  if (mediaType === 'other') return '';
+
+  const rules = MEDIA_TYPE_FILE_RULES[mediaType];
+  if (!rules) return `Please select Image, Video, Audio, or Document before uploading.`;
+
+  const ext = getFileExtension(file.name);
+  const mimeType = (file.type || '').toLowerCase();
+  const validExtension = rules.extensions.includes(ext);
+  const validMime = rules.mimeTypes.includes(mimeType);
+
+  if (!validExtension || !validMime) {
+    return `${file.name} is not a valid ${mediaType} file. Allowed extensions: ${rules.extensions.join(', ')}.`;
+  }
+
+  return '';
+};
+
 const typeMeta = (type) =>
   MEDIA_TYPES.find((t) => t.value === type) || MEDIA_TYPES[MEDIA_TYPES.length - 1];
 
@@ -87,6 +144,18 @@ const MediaLibrary = () => {
   const setSelectedFiles = (selectedFiles) => {
     // For high volume uploads, support multiple files
     if (!selectedFiles.length) return;
+
+    const invalidFile = selectedFiles.find((selected) => validateFileForMediaType(selected, form.media_type));
+    if (invalidFile) {
+      showError(validateFileForMediaType(invalidFile, form.media_type));
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+        fileInputRef.current._filesToProcess = [];
+      }
+      setFile(null);
+      setSelectedFileCount(0);
+      return;
+    }
     
     // Process the first file for form preview, others will be queued directly
     setFile(selectedFiles[0]);
@@ -142,6 +211,9 @@ const MediaLibrary = () => {
     if (filesToUpload.length === 0) return showError('Please choose a file to upload');
     if (filesToUpload.length === 1 && !form.name.trim()) return showError('Please enter a name');
 
+    const invalidFile = filesToUpload.find((selected) => validateFileForMediaType(selected, form.media_type));
+    if (invalidFile) return showError(validateFileForMediaType(invalidFile, form.media_type));
+
     const uploadBatch = [];
 
     for (let i = 0; i < filesToUpload.length; i++) {
@@ -181,7 +253,11 @@ const MediaLibrary = () => {
     }
 
     // Add the whole batch at once so the upload manager can start files in parallel.
-    await enqueueFiles(uploadBatch);
+    try {
+      await enqueueFiles(uploadBatch);
+    } catch {
+      return;
+    }
     
     showSuccess(`${uploadBatch.length} file(s) added to the background upload queue.`);
 
@@ -282,7 +358,7 @@ const MediaLibrary = () => {
                 onChange={(e) => setForm({ ...form, media_type: e.target.value })}
                 className="w-full px-3 py-2.5 rounded-lg bg-[var(--input-bg)] border border-[var(--border)] text-[var(--text-main)] text-sm focus:outline-none focus:ring-2 focus:ring-[var(--sidebar-active-bg)]"
               >
-                {MEDIA_TYPES.map((t) => (
+                {UPLOAD_MEDIA_TYPES.map((t) => (
                   <option key={t.value} value={t.value}>{t.label}</option>
                 ))}
               </select>
@@ -366,6 +442,7 @@ const MediaLibrary = () => {
                 ref={fileInputRef}
                 type="file"
                 multiple
+                accept={MEDIA_TYPE_FILE_RULES[form.media_type]?.extensions.map((ext) => `.${ext}`).join(',')}
                 onChange={handleFileChange}
                 className="hidden"
               />

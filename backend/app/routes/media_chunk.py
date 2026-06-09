@@ -7,7 +7,7 @@ import json
 
 from app.db.mongodb import get_collection
 from app.controllers.auth_controller import get_current_user
-from app.routes.media import STAFF_ROLES, ALLOWED_TYPES, _serialize
+from app.routes.media import STAFF_ROLES, _serialize, validate_media_file_type
 from app.services.s3_service import (
     create_multipart_upload,
     upload_part,
@@ -21,11 +21,15 @@ router = APIRouter(prefix="/media/chunk", tags=["Media Chunk Uploads"])
 async def start_chunked_upload(
     filename: str = Form(...),
     content_type: str = Form(...),
+    media_type: Optional[str] = Form(None),
     current_user: dict = Depends(get_current_user)
 ):
     """Start a multipart S3 upload for large files."""
     if current_user.get("role") not in STAFF_ROLES:
         raise HTTPException(status_code=403, detail="Not authorized to upload media")
+
+    if media_type is not None:
+        validate_media_file_type(media_type, filename, content_type)
         
     try:
         loop = asyncio.get_running_loop()
@@ -34,6 +38,8 @@ async def start_chunked_upload(
             functools.partial(create_multipart_upload, filename, content_type),
         )
         return {"upload_id": res["upload_id"], "key": res["key"]}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -79,17 +85,17 @@ async def complete_chunked_upload(
         raise HTTPException(status_code=403, detail="Not authorized")
         
     try:
+        media_type = (media_type or "other").lower().strip()
+        validate_media_file_type(media_type, original_filename, content_type)
+
         parts_list = json.loads(parts)
         loop = asyncio.get_running_loop()
         s3_res = await loop.run_in_executor(
             None,
             functools.partial(complete_multipart_upload, key, upload_id, parts_list),
         )
-        
+
         # Save to DB
-        media_type = (media_type or "other").lower().strip()
-        if media_type not in ALLOWED_TYPES:
-            media_type = "other"
             
         doc = {
             "media_type": media_type,
@@ -112,6 +118,8 @@ async def complete_chunked_upload(
         serialized["url"] = s3_res["url"]
         return {"message": "File uploaded successfully", "media": serialized}
         
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

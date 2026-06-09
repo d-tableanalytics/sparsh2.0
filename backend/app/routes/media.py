@@ -4,6 +4,7 @@ from datetime import datetime
 from bson import ObjectId
 import functools
 import asyncio
+import os
 
 from app.db.mongodb import get_collection
 from app.controllers.auth_controller import get_current_user
@@ -19,6 +20,80 @@ router = APIRouter(prefix="/media", tags=["Media Library"])
 STAFF_ROLES = ["superadmin", "admin", "coach", "staff"]
 
 ALLOWED_TYPES = ["video", "audio", "pdf", "document", "image", "other"]
+
+MEDIA_TYPE_FILE_RULES = {
+    "image": {
+        "extensions": {"jpg", "jpeg", "png", "gif", "webp"},
+        "mime_types": {"image/jpeg", "image/png", "image/gif", "image/webp"},
+    },
+    "video": {
+        "extensions": {"mp4", "mov", "avi", "mkv", "webm"},
+        "mime_types": {
+            "video/mp4",
+            "video/quicktime",
+            "video/x-msvideo",
+            "video/avi",
+            "video/msvideo",
+            "video/x-matroska",
+            "application/x-matroska",
+            "video/webm",
+        },
+    },
+    "audio": {
+        "extensions": {"mp3", "wav", "aac", "ogg"},
+        "mime_types": {
+            "audio/mpeg",
+            "audio/mp3",
+            "audio/wav",
+            "audio/x-wav",
+            "audio/aac",
+            "audio/aacp",
+            "audio/x-aac",
+            "audio/ogg",
+            "application/ogg",
+        },
+    },
+    "document": {
+        "extensions": {"pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt"},
+        "mime_types": {
+            "application/pdf",
+            "application/msword",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "application/vnd.ms-excel",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "application/vnd.ms-powerpoint",
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            "text/plain",
+        },
+    },
+    "pdf": {
+        "extensions": {"pdf"},
+        "mime_types": {"application/pdf"},
+    },
+}
+
+
+def validate_media_file_type(media_type: str, filename: str, content_type: str) -> None:
+    normalized_type = (media_type or "").lower().strip()
+    if normalized_type == "other":
+        return
+
+    rules = MEDIA_TYPE_FILE_RULES.get(normalized_type)
+    if not rules:
+        raise HTTPException(
+            status_code=400,
+            detail="Please select Image, Video, Audio, or Document before uploading.",
+        )
+
+    extension = os.path.splitext(filename or "")[1].lower().lstrip(".")
+    normalized_mime = (content_type or "").lower().strip()
+
+    if extension not in rules["extensions"] or normalized_mime not in rules["mime_types"]:
+        allowed = ", ".join(sorted(rules["extensions"]))
+        raise HTTPException(
+            status_code=400,
+            detail=f"{filename} is not a valid {normalized_type} file. Allowed extensions: {allowed}.",
+        )
 
 
 def _serialize(doc: dict, with_url: bool = True) -> dict:
@@ -43,8 +118,7 @@ async def upload_media(
         raise HTTPException(status_code=403, detail="Not authorized to upload media")
 
     media_type = (media_type or "other").lower().strip()
-    if media_type not in ALLOWED_TYPES:
-        media_type = "other"
+    validate_media_file_type(media_type, file.filename, file.content_type or "")
 
     if not name or not name.strip():
         raise HTTPException(status_code=400, detail="Name is required")
