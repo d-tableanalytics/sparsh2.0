@@ -17,6 +17,7 @@ const SOURCE_LABELS = {
 };
 
 export default function SourceList({ sources = [] }) {
+  return null;
   if (!sources || sources.length === 0) return null;
 
   // De-duplicate friendly labels while preserving order.

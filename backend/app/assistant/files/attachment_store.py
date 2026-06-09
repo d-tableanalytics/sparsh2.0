@@ -189,6 +189,40 @@ async def save_chunks(conversation_id: Optional[str], attachment_id: str,
     await get_collection(CHUNK_COLL).insert_many(docs)
 
 
+async def ensure_chunks_for_conversation(
+    conversation_id: str, attachment_id: str, filename: str, text: str
+) -> None:
+    """Backfill retrieval chunks for an attachment under this conversation, if
+    none exist yet. Idempotent — safe to call on every turn.
+
+    Files uploaded in a brand-new chat are processed with conversation_id=None
+    (the conversation isn't created until the first message is sent), so
+    ``process_attachment`` skips chunk indexing. The first time the file is
+    actually used we learn the real conversation id and index here — otherwise
+    ``search_uploaded_files`` (and therefore every follow-up turn) finds nothing.
+    """
+    if not conversation_id or not text:
+        return
+    await ensure_indexes()
+    existing = await get_collection(CHUNK_COLL).count_documents(
+        {"conversation_id": conversation_id, "attachment_id": attachment_id}, limit=1
+    )
+    if existing:
+        return
+    from app.services.gpt_service import chunk_text
+    await save_chunks(conversation_id, attachment_id, filename, chunk_text(text))
+
+
+async def conversation_has_attachments(ctx: UserContext, conversation_id: str) -> bool:
+    """Whether this conversation has any of the caller's uploaded files. Used to
+    tell the model it can pull file content via search_uploaded_files on turns
+    where no new attachment was sent (the composer tray is cleared after a send)."""
+    count = await get_collection(COLL).count_documents(
+        {"uploaded_by": ctx.user_id, "conversation_id": conversation_id}, limit=1
+    )
+    return count > 0
+
+
 async def search_chunks(conversation_id: str, query: str, limit: int = 6) -> List[dict]:
     """Keyword retrieval over a conversation's attachment chunks (mirrors
     gpt_service.get_relevant_context)."""
