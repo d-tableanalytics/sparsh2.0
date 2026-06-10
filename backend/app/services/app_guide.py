@@ -32,7 +32,11 @@ from reusable **Session Templates** that carry **Tasks** and **Assessments**
   takes quizzes, tracks their own progress, and uses the Support Engine.
 
 ## Main areas (left sidebar)
-- **Dashboard** — key stats and recent activity.
+- **Dashboard** — key stats and recent activity. On screen it shows the
+  "Executive Overview" (KPI cards: registered entities, active batches, strategic
+  learners, session velocity), the "System Pulse" (14-day completion trend chart),
+  the "Coaching Mix" (session-type distribution), and the "Operational Timeline"
+  (upcoming events).
 - **Companies** — create/manage client organisations; staff can bulk-import members
   from an Excel template.
 - **Batches** — create cohorts and add companies to them; batches contain quarters.

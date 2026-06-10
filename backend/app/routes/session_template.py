@@ -8,6 +8,28 @@ from datetime import datetime
 
 router = APIRouter(prefix="/session-templates", tags=["Session Templates"])
 
+STAFF_ROLES = {"superadmin", "admin", "coach", "staff"}
+
+# Grading is server-side (calendar_events submit endpoint), so learners never
+# need the answer keys the templates carry. Strip them from reads for non-staff
+# — otherwise any learner JWT can fetch every quiz answer over REST (including
+# from inside the assessment player, which loads the template to render a quiz).
+_ANSWER_KEY_FIELDS = ("correct_option_index", "expected_answer", "expected_keywords", "checker_instructions")
+
+
+def _strip_answer_keys(template: dict, current_user: dict) -> dict:
+    if current_user.get("role") in STAFF_ROLES:
+        return template
+    for assessment in template.get("assessments") or []:
+        if not isinstance(assessment, dict):
+            continue
+        for q in assessment.get("questions") or []:
+            if isinstance(q, dict):
+                for field in _ANSWER_KEY_FIELDS:
+                    q.pop(field, None)
+    return template
+
+
 # ─── Create Session Template ───
 @router.post("", status_code=status.HTTP_201_CREATED)
 async def create_template(template: SessionTemplateCreate, current_user: dict = Depends(get_current_user)):
@@ -30,6 +52,7 @@ async def list_templates(current_user: dict = Depends(get_current_user)):
     templates = await templates_col.find().sort("created_at", -1).to_list(100)
     for t in templates:
         t["_id"] = str(t["_id"])
+        _strip_answer_keys(t, current_user)
     return templates
 
 # ─── Get Single Session Template ───
@@ -40,7 +63,7 @@ async def get_template(template_id: str, current_user: dict = Depends(get_curren
     if not template:
         raise HTTPException(status_code=404, detail="Template not found")
     template["_id"] = str(template["_id"])
-    return template
+    return _strip_answer_keys(template, current_user)
 
 # ─── Update Session Template ───
 @router.put("/{template_id}")
