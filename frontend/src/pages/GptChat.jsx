@@ -252,7 +252,7 @@ const GptChat = () => {
                 ref={fileInputRef} 
                 className="hidden" 
                 onChange={handleFileUpload}
-                accept=".pdf,.doc,.docx,.txt,.csv,.json,.xls,.xlsx,.png,.jpg,.jpeg,.webp,.gif"
+                accept=".pdf,.doc,.docx,.txt,.csv,.json,.xls,.xlsx,.png,.jpg,.jpeg,.webp,.gif,.mp3,.wav,.m4a,.aac,.ogg,.flac,.mp4,.mov,.avi,.mkv,.webm"
             />
             
             {/* 1. Left Sidebar: Support Engine Chats */}

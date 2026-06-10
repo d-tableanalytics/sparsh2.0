@@ -89,7 +89,7 @@ async def extract_text_from_file(file_path: str, filename: str) -> dict:
                     wb.close()
                 except Exception as excel_img_err:
                     print(f"Excel image extraction warning: {excel_img_err}")
-        elif ext in ['mp3', 'wav', 'm4a', 'aac', 'flac', 'mp4', 'mov', 'avi', 'mkv', 'webm']:
+        elif ext in ['mp3', 'wav', 'm4a', 'aac', 'ogg', 'flac', 'mp4', 'mov', 'avi', 'mkv', 'webm']:
             print(f"--- Transcribing Media Knowledge: {filename} ---")
             text = await transcribe_media_file(file_path)
             if not text:

@@ -25,6 +25,7 @@ MEDIA_TYPE_FILE_RULES = {
     "image": {
         "extensions": {"jpg", "jpeg", "png", "gif", "webp"},
         "mime_types": {"image/jpeg", "image/png", "image/gif", "image/webp"},
+        "mime_prefix": "image/",
     },
     "video": {
         "extensions": {"mp4", "mov", "avi", "mkv", "webm"},
@@ -38,9 +39,10 @@ MEDIA_TYPE_FILE_RULES = {
             "application/x-matroska",
             "video/webm",
         },
+        "mime_prefix": "video/",
     },
     "audio": {
-        "extensions": {"mp3", "wav", "aac", "ogg"},
+        "extensions": {"mp3", "wav", "aac", "ogg", "m4a", "flac"},
         "mime_types": {
             "audio/mpeg",
             "audio/mp3",
@@ -51,7 +53,14 @@ MEDIA_TYPE_FILE_RULES = {
             "audio/x-aac",
             "audio/ogg",
             "application/ogg",
+            # .m4a — browsers report it inconsistently across these three:
+            "audio/x-m4a",
+            "audio/m4a",
+            "audio/mp4",
+            "audio/flac",
+            "audio/x-flac",
         },
+        "mime_prefix": "audio/",
     },
     "document": {
         "extensions": {"pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt"},
@@ -88,7 +97,18 @@ def validate_media_file_type(media_type: str, filename: str, content_type: str) 
     extension = os.path.splitext(filename or "")[1].lower().lstrip(".")
     normalized_mime = (content_type or "").lower().strip()
 
-    if extension not in rules["extensions"] or normalized_mime not in rules["mime_types"]:
+    # The extension is authoritative. The MIME type only blocks when the browser
+    # actually sent a meaningful one that contradicts the category — browsers
+    # report types like .m4a inconsistently (audio/x-m4a, audio/mp4, or nothing
+    # at all on Windows), so requiring an exact MIME match rejects valid files.
+    mime_ok = (
+        not normalized_mime
+        or normalized_mime == "application/octet-stream"
+        or normalized_mime in rules["mime_types"]
+        or (rules.get("mime_prefix") and normalized_mime.startswith(rules["mime_prefix"]))
+    )
+
+    if extension not in rules["extensions"] or not mime_ok:
         allowed = ", ".join(sorted(rules["extensions"]))
         raise HTTPException(
             status_code=400,

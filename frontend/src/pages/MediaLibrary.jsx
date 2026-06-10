@@ -28,14 +28,19 @@ const MEDIA_TYPE_FILE_RULES = {
   image: {
     extensions: ['jpg', 'jpeg', 'png', 'gif', 'webp'],
     mimeTypes: ['image/jpeg', 'image/png', 'image/gif', 'image/webp'],
+    mimePrefix: 'image/',
   },
   video: {
     extensions: ['mp4', 'mov', 'avi', 'mkv', 'webm'],
     mimeTypes: ['video/mp4', 'video/quicktime', 'video/x-msvideo', 'video/avi', 'video/msvideo', 'video/x-matroska', 'application/x-matroska', 'video/webm'],
+    mimePrefix: 'video/',
   },
   audio: {
-    extensions: ['mp3', 'wav', 'aac', 'ogg'],
-    mimeTypes: ['audio/mpeg', 'audio/mp3', 'audio/wav', 'audio/x-wav', 'audio/aac', 'audio/aacp', 'audio/x-aac', 'audio/ogg', 'application/ogg'],
+    extensions: ['mp3', 'wav', 'aac', 'ogg', 'm4a', 'flac'],
+    // .m4a is reported inconsistently by browsers (audio/x-m4a, audio/m4a,
+    // audio/mp4 — or an empty type on Windows), hence the extra entries.
+    mimeTypes: ['audio/mpeg', 'audio/mp3', 'audio/wav', 'audio/x-wav', 'audio/aac', 'audio/aacp', 'audio/x-aac', 'audio/ogg', 'application/ogg', 'audio/x-m4a', 'audio/m4a', 'audio/mp4', 'audio/flac', 'audio/x-flac'],
+    mimePrefix: 'audio/',
   },
   document: {
     extensions: ['pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'txt'],
@@ -68,7 +73,14 @@ const validateFileForMediaType = (file, mediaType) => {
   const ext = getFileExtension(file.name);
   const mimeType = (file.type || '').toLowerCase();
   const validExtension = rules.extensions.includes(ext);
-  const validMime = rules.mimeTypes.includes(mimeType);
+  // Extension is authoritative; the MIME type only blocks when the browser
+  // sent a meaningful one that contradicts the category (it's often empty or
+  // nonstandard, e.g. for .m4a on Windows).
+  const validMime =
+    !mimeType ||
+    mimeType === 'application/octet-stream' ||
+    rules.mimeTypes.includes(mimeType) ||
+    (rules.mimePrefix && mimeType.startsWith(rules.mimePrefix));
 
   if (!validExtension || !validMime) {
     return `${file.name} is not a valid ${mediaType} file. Allowed extensions: ${rules.extensions.join(', ')}.`;
