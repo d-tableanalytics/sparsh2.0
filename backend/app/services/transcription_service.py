@@ -101,6 +101,34 @@ async def transcribe_audio_chunk(filepath: str) -> str:
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, sync_transcribe_wav, filepath)
 
+async def _convert_to_mp3(local_file_path: str, temp_dir: str) -> str:
+    """Convert M4A/AAC audio to MP3 before transcription.
+
+    Some M4A containers (variable-bitrate AAC, odd moov-atom placement from
+    phone recorders) trip up direct segmenting; a full decode → MP3 re-encode
+    normalizes them first. Returns the MP3 path, or the original path when the
+    file needs no conversion or conversion fails (the segmenting step then
+    works directly off the original, as before).
+    """
+    ext = os.path.splitext(local_file_path)[1].lower().lstrip(".")
+    if ext not in ("m4a", "aac"):
+        return local_file_path
+
+    from app.services.media_tools import resolve_ffmpeg
+    ffmpeg_bin = resolve_ffmpeg() or "ffmpeg"
+    mp3_path = os.path.join(temp_dir, "converted_input.mp3")
+    cmd = [ffmpeg_bin, "-y", "-i", local_file_path, "-vn", "-codec:a", "libmp3lame", "-q:a", "4", mp3_path]
+
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(
+        None, lambda: subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    )
+    if os.path.exists(mp3_path) and os.path.getsize(mp3_path) > 0:
+        print(f"Converted {ext} → mp3 for transcription: {os.path.basename(local_file_path)}")
+        return mp3_path
+    return local_file_path
+
+
 async def transcribe_media_file(local_file_path: str, progress_callback=None) -> str:
     """
     General purpose transcription for audio/video files.
@@ -122,11 +150,15 @@ async def transcribe_media_file(local_file_path: str, progress_callback=None) ->
         return whole or ""
 
     with tempfile.TemporaryDirectory() as temp_dir:
-        # Segment exactly 60 seconds of 16kHz mono audio.
+        # M4A/AAC first gets a clean MP3 intermediate (see _convert_to_mp3).
+        input_path = await _convert_to_mp3(local_file_path, temp_dir)
+
+        # Segment exactly 60 seconds of 16kHz mono audio. (ffmpeg_bin was already
+        # resolved above; we returned early via Whisper if it was unavailable.)
         out_pattern = os.path.join(temp_dir, "chunk_%04d.wav")
         chunk_size_bytes = 10 * 1024 * 1024
         cmd = [
-            ffmpeg_bin, "-i", local_file_path,
+            ffmpeg_bin, "-i", input_path,
             "-f", "segment", "-segment_time", "60",
             "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le",
             "-vn", out_pattern
@@ -225,6 +257,48 @@ async def process_background_upload_and_transcribe(
         if os.path.exists(local_file_path):
             try:
                 os.remove(local_file_path)
+            except Exception:
+                pass
+
+
+async def transcribe_media_library_item(media_id: str, s3_key: str, filename: str):
+    """Background task: transcribe an audio/video file uploaded to the Media
+    Library and save the transcript on its media_library document, so the
+    assistant can answer questions about the spoken content (the chatbot's
+    search_media_library tool searches the `transcription` field).
+    """
+    col = get_collection("media_library")
+    local_path = None
+    try:
+        tmp_dir = tempfile.gettempdir()
+        local_path = os.path.join(tmp_dir, f"medialib_{media_id}_{os.path.basename(filename)}")
+        loop = asyncio.get_event_loop()
+        downloaded = await loop.run_in_executor(None, download_file_from_s3, s3_key, local_path)
+        if not downloaded:
+            raise RuntimeError("Could not download file from S3 for transcription")
+
+        print(f"[media:{media_id}] Transcribing media-library upload {filename}...")
+        transcription = await transcribe_media_file(local_path)
+
+        await col.update_one(
+            {"_id": ObjectId(media_id)},
+            {"$set": {
+                "transcription": transcription or "",
+                "transcription_status": "completed" if transcription else "no_speech",
+                "transcribed_at": datetime.utcnow(),
+            }},
+        )
+        print(f"[media:{media_id}] Transcript saved ({len(transcription or '')} chars).")
+    except Exception as e:
+        print(f"[media:{media_id}] Transcription error: {e}")
+        await col.update_one(
+            {"_id": ObjectId(media_id)},
+            {"$set": {"transcription_status": "failed", "transcription_error": str(e)}},
+        )
+    finally:
+        if local_path and os.path.exists(local_path):
+            try:
+                os.remove(local_path)
             except Exception:
                 pass
 

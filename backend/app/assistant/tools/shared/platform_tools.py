@@ -94,15 +94,35 @@ async def get_session_templates(ctx: UserContext, name: Optional[str] = None, li
     )
 
 
+def _transcript_excerpt(text: str, query: str, width: int = 320) -> str:
+    """A short window of the transcript around the first query-term match, so
+    the model can quote what was actually said without the full transcript."""
+    if not text:
+        return ""
+    lowered = text.lower()
+    pos = -1
+    for term in re.findall(r"[a-z0-9]+", (query or "").lower()):
+        if len(term) > 3:
+            pos = lowered.find(term)
+            if pos != -1:
+                break
+    if pos == -1:
+        return text[:width]
+    start = max(0, pos - width // 2)
+    prefix = "..." if start > 0 else ""
+    return prefix + text[start:start + width] + ("..." if start + width < len(text) else "")
+
+
 @tool(
     name="search_media_library",
     description=(
-        "Search the shared Media Library's file catalog (videos, audio, PDFs, "
-        "documents, images) by name, tag, or type. Returns file metadata — name, "
-        "type, size, folder, tags, upload date — NOT the files themselves. Use for "
-        "'is there a video about X', 'what PDFs are in the media library', 'find "
-        "the recording of Y'. Tell the user to open the Media Library page to view "
-        "or play a file."
+        "Search the shared Media Library's files (videos, audio, PDFs, documents, "
+        "images) by name, tag, type — AND by what is SAID inside audio/video files "
+        "(their transcripts are searched too, with a matching excerpt returned). "
+        "Use for 'is there a video about X', 'which recording talks about Y', "
+        "'what did the audio say about Z', 'find the recording of W'. Returns file "
+        "metadata plus transcript excerpts — tell the user to open the Media "
+        "Library page to view or play a file."
     ),
     allowed_roles=["CU", "CA", "AD", "SA"],
     parameters={
@@ -123,7 +143,10 @@ async def search_media_library(
         mongo_q["media_type"] = media_type.strip().lower()
     if query and query.strip():
         rx = _safe_regex(query)
-        mongo_q["$or"] = [{"name": rx}, {"file_name": rx}, {"tags": rx}, {"description": rx}]
+        # Transcripts included: questions about the SPOKEN content of audio/video
+        # ("which recording talks about X") match here too.
+        mongo_q["$or"] = [{"name": rx}, {"file_name": rx}, {"tags": rx},
+                          {"description": rx}, {"transcription": rx}]
 
     docs = (
         await get_collection("media_library")
@@ -132,8 +155,9 @@ async def search_media_library(
         .limit(limit)
         .to_list(limit)
     )
-    items = [
-        {
+    items = []
+    for d in docs:
+        item = {
             "name": d.get("name"),
             "media_type": d.get("media_type"),
             "file_name": d.get("file_name"),
@@ -142,8 +166,12 @@ async def search_media_library(
             "tags": d.get("tags") or [],
             "uploaded_at": d.get("created_at"),
         }
-        for d in docs
-    ]
+        if d.get("transcription_status"):
+            item["transcription_status"] = d.get("transcription_status")
+        excerpt = _transcript_excerpt(d.get("transcription") or "", query or "")
+        if excerpt:
+            item["transcript_excerpt"] = excerpt
+        items.append(item)
 
     return ToolResult.ok(
         "search_media_library",
