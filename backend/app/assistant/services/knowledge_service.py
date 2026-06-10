@@ -105,6 +105,43 @@ def _keywords(query: str) -> List[str]:
     ]
 
 
+def _match_snippet(content: str, keywords: List[str], width: int = SNIPPET_MAX) -> str:
+    """A window of the chunk AROUND the first keyword match.
+
+    The previous snippet was always the chunk's first 500 chars — when the
+    match sat deeper in a ~4k-char chunk the model never saw the matching
+    text, which is exactly why file questions got vague answers."""
+    if not content:
+        return ""
+    low = content.lower()
+    pos = -1
+    for k in keywords:
+        pos = low.find(k)
+        if pos != -1:
+            break
+    if pos <= width // 4:  # match near the start (or none) — head is fine
+        return content[:width]
+    start = max(0, pos - width // 3)
+    tail = "..." if start + width < len(content) else ""
+    return "..." + content[start:start + width] + tail
+
+
+def _rank(chunks: List[dict], keywords: List[str]) -> List[tuple]:
+    """Score candidates by how many DISTINCT query terms they contain.
+
+    Filename hits weigh extra ('what's in the procurement file?') — the file's
+    name often carries the strongest signal the content lacks."""
+    scored = []
+    for c in chunks:
+        content_l = (c.get("content") or "").lower()
+        fname_l = (c.get("filename") or "").lower()
+        content_hits = sum(1 for k in keywords if k in content_l)
+        fname_hits = sum(1 for k in keywords if k in fname_l)
+        scored.append((content_hits * 2 + fname_hits * 3, c))
+    scored.sort(key=lambda t: -t[0])
+    return scored
+
+
 async def search(ctx: UserContext, query: str, limit: int = 5) -> RagRetrieval:
     accessible = await get_accessible_project_ids(ctx)
 
@@ -114,21 +151,39 @@ async def search(ctx: UserContext, query: str, limit: int = 5) -> RagRetrieval:
             return RagRetrieval(query=query, sources=[], retrieval_method="keyword")
         mongo["project_id"] = {"$in": list(accessible)}
 
+    col = get_collection(KNOWLEDGE_COLLECTION)
     keywords = _keywords(query)
-    if keywords:
-        mongo["content"] = {"$regex": "|".join(re.escape(k) for k in keywords), "$options": "i"}
 
-    chunks = await get_collection(KNOWLEDGE_COLLECTION).find(mongo).limit(limit).to_list(limit)
+    scored: List[tuple] = []
+    if keywords:
+        rx = {"$regex": "|".join(re.escape(k) for k in keywords), "$options": "i"}
+        # Candidate pool, then rank client-side: "first N matching any keyword"
+        # returned whichever file was uploaded first, not the relevant one.
+        # The pool is generous because it also fills in upload order — too small
+        # and later-uploaded files never reach the ranking stage at all.
+        pool = max(limit * 20, 100)
+        candidates = await col.find(
+            {**mongo, "$or": [{"content": rx}, {"filename": rx}]}
+        ).limit(pool).to_list(pool)
+        scored = _rank(candidates, keywords)
+
+    if not scored:
+        # No keyword hit (e.g. "summarize the project files") — surface the
+        # scope's leading chunks instead of returning nothing.
+        fallback = await col.find(mongo).limit(limit).to_list(limit)
+        scored = [(0, c) for c in fallback]
+
+    top = scored[:limit]
     sources = [
         RagSource(
             source_id=str(c.get("_id")),
             title=c.get("filename"),
-            snippet=(c.get("content") or "")[:SNIPPET_MAX],
-            score=None,
+            snippet=_match_snippet(c.get("content") or "", keywords),
+            score=float(s),
             document_id=c.get("file_id"),
             collection=KNOWLEDGE_COLLECTION,
             metadata={"project_id": c.get("project_id")},
         )
-        for c in chunks
+        for s, c in top
     ]
-    return RagRetrieval(query=query, sources=sources, retrieval_method="keyword")
+    return RagRetrieval(query=query, sources=sources, retrieval_method="keyword+rank")
