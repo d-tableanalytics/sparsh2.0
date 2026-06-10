@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, File, Form
 from typing import List, Optional
 from datetime import datetime
 from bson import ObjectId
@@ -126,6 +126,7 @@ def _serialize(doc: dict, with_url: bool = True) -> dict:
 
 @router.post("")
 async def upload_media(
+    background_tasks: BackgroundTasks,
     media_type: str = Form(...),
     name: str = Form(...),
     description: str = Form(""),
@@ -177,10 +178,22 @@ async def upload_media(
         "folder": (folder or "/").strip(),
         "tags": [t.strip().lower() for t in tags.split(",") if t.strip()] if tags else []
     }
+    if media_type in ("audio", "video"):
+        doc["transcription_status"] = "processing"
 
     col = get_collection("media_library")
     res = await col.insert_one(doc)
     doc["_id"] = res.inserted_id
+
+    # Audio/video: transcribe in the background (M4A is converted to MP3 first)
+    # and save the transcript on the document, so the assistant can answer
+    # questions about the spoken content.
+    if media_type in ("audio", "video"):
+        from app.services.transcription_service import transcribe_media_library_item
+        background_tasks.add_task(
+            transcribe_media_library_item, str(res.inserted_id), result["key"], file.filename or "media"
+        )
+
     serialized = _serialize(doc, with_url=False)
     serialized["url"] = result["url"]
     return {"message": "File uploaded successfully", "media": serialized}

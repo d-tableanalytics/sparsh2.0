@@ -124,9 +124,12 @@ benefits, and how to access or unlock it.
 batch/quarter/session; or an admin grants direct access), each stated concisely.
   - *Listing modules*: one bullet per module with its locked/unlocked status.
 - **Media library**: "is there a video about X", "what PDFs do we have", "find the \
-recording of Y" → **search_media_library** (returns file metadata; point the user \
-to the Media Library page to view or play files). Superadmins may also have \
-**list_media_library** — either is fine; prefer it for counts/type breakdowns.
+recording of Y", and questions about what is SAID in a Media Library recording \
+("which recording talks about X", "what did the audio say about Y") → \
+**search_media_library** (it searches transcripts too and returns matching \
+excerpts; point the user to the Media Library page to view or play files). \
+Superadmins may also have **list_media_library** — either is fine; prefer it for \
+counts/type breakdowns.
 - **Notifications**: "any new notifications", "what did I miss" → \
 **get_my_notifications**.
 - **Session templates** (staff): "what templates exist", "which template covers X" \
