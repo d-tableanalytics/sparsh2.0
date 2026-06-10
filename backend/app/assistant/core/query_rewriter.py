@@ -14,12 +14,52 @@ _FOLLOWUP_MARKERS = {
     "there", "then", "same", "one", "ones", "another", "more",
 }
 
+# Words that make a short message self-contained and org-wide ("show all
+# batches", "list every company", "platform overview"). When present without a
+# follow-up marker, the message is a complete command — NOT an ellipsis — so it
+# must never be rewritten with scope borrowed from the previous turn (that was
+# turning "show all batches" into "show all batches for <prev company>").
+_GLOBALIZERS = {
+    "all", "every", "everyone", "everything", "list", "total", "overall",
+    "platform", "entire", "whole",
+}
+
+# Greetings / gratitude / sign-offs. A message that is ONLY these is a social
+# turn, not a question: it must pass through untouched so the main model can
+# greet/acknowledge instead of the rewriter inventing a question from context
+# (which is what replayed the previous answer for "hi").
+_SOCIAL_WORDS = {
+    "hi", "hii", "hello", "helo", "hey", "heya", "yo", "hiya", "greetings",
+    "morning", "afternoon", "evening", "namaste", "hola",
+    "thanks", "thank", "thankyou", "thx", "thnx", "ty", "cheers",
+    "bye", "goodbye", "ok", "okay", "cool", "great", "nice", "welcome",
+}
+
+
+def _tokens(message: str) -> list:
+    """Lower-cased word tokens with surrounding punctuation/quotes stripped."""
+    return [w.strip("?.,!\"'`-/()").lower() for w in (message or "").split()]
+
+
+def is_social(message: str) -> bool:
+    """True when the WHOLE message is just greeting/gratitude/sign-off words
+    (e.g. 'hi', 'thanks!', '"Hi" / "Hello"'). Mixed messages like 'hi, how do I
+    create a batch?' are NOT social — they carry a real question."""
+    toks = [t for t in _tokens(message) if t]
+    return bool(toks) and all(t in _SOCIAL_WORDS for t in toks)
+
 
 def _needs_rewrite(message: str) -> bool:
-    words = [w.strip("?.,!").lower() for w in message.split()]
-    if len(words) <= 4:                       # very short → likely elliptical
+    words = [w for w in _tokens(message) if w]
+    if not words:
+        return False
+    if is_social(message):                    # greeting/thanks → never rewrite
+        return False
+    if any(w in _FOLLOWUP_MARKERS for w in words):  # genuine reference → resolve
         return True
-    return any(w in _FOLLOWUP_MARKERS for w in words)
+    if any(w in _GLOBALIZERS for w in words):  # self-contained global command → leave
+        return False
+    return len(words) <= 4                     # very short & elliptical → likely needs context
 
 
 async def rewrite(
@@ -44,9 +84,14 @@ async def rewrite(
 
     prompt = (
         "Rewrite the user's latest message into a single self-contained question, "
-        "resolving any pronouns or references using the conversation context. "
-        "If the message is already self-contained, or the context does not "
-        "clarify it, return the message exactly as it is. "
+        "resolving ONLY pronouns or references that clearly point at something in "
+        "the conversation context (it, that, this, them, the same one). "
+        "Do NOT add any company name, person, batch, filter, or scope that the "
+        "user did not mention in THIS message — e.g. if the latest message is "
+        "'show all batches', return 'show all batches', never 'show all batches "
+        "for <some company discussed earlier>'. "
+        "If the message is already self-contained, a greeting, or the context "
+        "does not clarify it, return the message exactly as it is. "
         "Return ONLY the rewritten question, nothing else.\n\n"
         f"Conversation context:\n{context}\n\n"
         f"Latest message: {message}"

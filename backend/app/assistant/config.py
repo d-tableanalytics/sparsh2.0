@@ -14,7 +14,9 @@ class AssistantConfig:
     UTILITY_MODEL: str = "gpt-4o-mini"   # query rewriting, summaries, titles
 
     # Agent loop guards.
-    MAX_TOOL_ITERATIONS: int = 5         # safety cap on tool-calling rounds
+    MAX_TOOL_ITERATIONS: int = 6         # safety cap on tool-calling rounds
+    #   (6 lets a multi-entity question — e.g. "compare two batches and a company" —
+    #   chain several tool calls without tripping the "couldn't finish" fallback.)
     TOOL_TIMEOUT_SECONDS: float = 8.0    # per-tool execution timeout (cross-cutting)
     LLM_TEMPERATURE: float = 0.3
 

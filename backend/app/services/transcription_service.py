@@ -20,6 +20,38 @@ try:
 except Exception:  # noqa: BLE001 — package missing/broken; degrade gracefully
     sr = None
 
+
+def whisper_available() -> bool:
+    """True when OpenAI Whisper can be used (the same key powers the assistant).
+
+    Whisper is the PRIMARY transcriber: far more accurate than the offline Google
+    recognizer, multilingual, and it accepts whole files (no ffmpeg needed for
+    files under the API's 25 MB limit). The Google path stays as a fallback.
+    """
+    return bool(getattr(settings, "OPENAI_API_KEY", None))
+
+
+async def _whisper_transcribe(filepath: str):
+    """Transcribe one file with OpenAI Whisper. Returns the text (possibly empty),
+    or None if Whisper is unavailable or the call fails — so callers can fall back
+    to the offline recognizer instead of erroring."""
+    if not whisper_available():
+        return None
+    try:
+        from openai import AsyncOpenAI  # lazy import (optional dependency)
+
+        client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+        with open(filepath, "rb") as fh:
+            resp = await client.audio.transcriptions.create(
+                model="whisper-1", file=fh, response_format="text"
+            )
+        # response_format="text" yields a plain string; guard for object shape too.
+        text = resp if isinstance(resp, str) else getattr(resp, "text", "") or ""
+        return text.strip()
+    except Exception as e:  # noqa: BLE001 — fall back to the offline recognizer
+        print(f"Whisper transcription failed ({e}); falling back to Google SR")
+        return None
+
 async def upload_large_file_to_s3(local_path: str, filename: str, content_type: str) -> str:
     s3_client = get_s3_client()
     bucket_name = settings.S3_BUCKET_NAME
@@ -61,6 +93,11 @@ def sync_transcribe_wav(filepath: str) -> str:
         return ""
 
 async def transcribe_audio_chunk(filepath: str) -> str:
+    # Whisper first (far more accurate, multilingual); fall back to the offline
+    # Google recognizer only if Whisper is unavailable or errors.
+    text = await _whisper_transcribe(filepath)
+    if text is not None:
+        return text
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, sync_transcribe_wav, filepath)
 
@@ -69,12 +106,23 @@ async def transcribe_media_file(local_file_path: str, progress_callback=None) ->
     General purpose transcription for audio/video files.
     """
     final_transcription = ""
+
+    # Resolve ffmpeg by path (not bare command) so a freshly-installed binary works
+    # without a PATH refresh / backend restart in a new shell.
+    from app.services.media_tools import resolve_ffmpeg
+    ffmpeg_bin = resolve_ffmpeg()
+
+    # No ffmpeg on this host: we can't segment, but Whisper accepts whole files
+    # (mp3/m4a/mp4/wav...) directly under its 25 MB limit. Try that before giving
+    # up — it removes the hard ffmpeg dependency for typical-sized uploads.
+    if not ffmpeg_bin:
+        whole = await _whisper_transcribe(local_file_path)
+        if progress_callback:
+            await progress_callback(95)
+        return whole or ""
+
     with tempfile.TemporaryDirectory() as temp_dir:
-        # Segment exactly 60 seconds of 16kHz mono audio. Resolve ffmpeg by path
-        # (not bare command) so a freshly-installed binary works without a PATH
-        # refresh / backend restart in a new shell.
-        from app.services.media_tools import resolve_ffmpeg
-        ffmpeg_bin = resolve_ffmpeg() or "ffmpeg"
+        # Segment exactly 60 seconds of 16kHz mono audio.
         out_pattern = os.path.join(temp_dir, "chunk_%04d.wav")
         chunk_size_bytes = 10 * 1024 * 1024
         cmd = [
