@@ -228,7 +228,9 @@ async def generate_ai_response(instructions: str, context: str, user_message: st
                 "Whenever the user asks about their (or, if their role permits, the "
                 "organisation's) LIVE LMS records — profile, batches, courses/"
                 "quarters, sessions, attendance, quiz/assessment results, learning "
-                "progress, tasks, study recommendations, or platform stats — CALL "
+                "progress, tasks, study recommendations, platform stats, their "
+                "notifications, media-library files, Support Engine project access, "
+                "session templates (staff), or recent activity (superadmin) — CALL "
                 "the matching tool and answer from its result. Data scope is "
                 "enforced server-side; never invent records, and if a tool returns "
                 "no data, say so plainly."
@@ -285,8 +287,9 @@ answer.
 they uploaded (in the project knowledge base or in this chat), answer it from the \
 snippets — regardless of the topic of that file.
 3. **LMS questions are in scope**: anything about the user's records or activity \
-in this LMS (sessions, attendance, quiz scores, progress, batches, tasks) should \
-be answered from the data tools when available — never from memory or assumption.
+in this LMS (sessions, attendance, quiz scores, progress, batches, tasks, \
+notifications, media-library files, Support Engine access) should be answered \
+from the data tools when available — never from memory or assumption.
 4. **Out-of-scope questions**: If NO source covers the question (e.g. general \
 trivia, definitions, world knowledge, programming/tech concepts unrelated to \
 Sparsh such as "what is ORM" as a database concept, or topics not in the uploaded \
