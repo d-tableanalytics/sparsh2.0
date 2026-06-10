@@ -21,8 +21,11 @@ _STAFF_ROLES = {ROLE_SA, ROLE_AD, "CO"}  # superadmin, admin, coach
         "active batches, total learners, session velocity in the last 30 days, "
         "attendance rate), the 14-day operational pulse (sessions completed per day), "
         "and the session-type breakdown (Strategic / Technical / Operational / Other). "
-        "Use for questions like 'what does my dashboard show', 'how many active batches', "
-        "'show me the session trend', 'what is my attendance rate', or any question "
+        "The dashboard screen labels these 'Executive Overview', 'System Pulse', "
+        "'Coaching Mix', and 'Operational Timeline' — use this tool whenever the "
+        "user mentions ANY of those names, or asks 'what does my dashboard show', "
+        "'how many active batches', 'show me the session trend', 'what is the "
+        "coaching/session mix', 'what is my attendance rate', or any question "
         "about overall platform metrics and activity."
     ),
     allowed_roles=["CU", "CA", "AD", "SA"],

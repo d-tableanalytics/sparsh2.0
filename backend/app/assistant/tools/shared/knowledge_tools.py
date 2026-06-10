@@ -10,10 +10,13 @@ from app.assistant.tools.registry import tool
 @tool(
     name="search_knowledge",
     description=(
-        "Search the knowledge base / learning materials to answer conceptual or "
-        "definition questions (e.g. 'what is polymorphism', 'explain X'). Returns "
-        "cited document snippets. Use this for general knowledge, NOT for the "
-        "user's personal records."
+        "Search the knowledge base / learning materials — the content of EVERY "
+        "file uploaded to Support Engine projects: PDFs, Word/Excel documents, "
+        "and the transcripts of uploaded audio/video recordings. Use for "
+        "conceptual questions ('what is X', 'explain Y') AND for questions about "
+        "uploaded files of any type ('summarize the audio in project X', 'what "
+        "does the recording say about Z', 'what's in the uploaded PDF'). Returns "
+        "cited document snippets. NOT for the user's personal records."
     ),
     allowed_roles=["CU", "CA", "AD", "SA"],
     parameters={"query": {"type": "string", "description": "What to look up in the knowledge base"}},
