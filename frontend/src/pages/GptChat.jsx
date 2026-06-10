@@ -97,19 +97,38 @@ const GptChat = () => {
 
     const handleFileUpload = async (e) => {
         const file = e.target.files[0];
-        if (!file || !sessionId) return;
-        
+        if (!file) return;
+
+        // Mirror handleSend: create a session on the fly, so attaching a file
+        // FIRST in a fresh chat works instead of silently doing nothing.
+        let currentSessionId = sessionId;
+        if (!currentSessionId) {
+            try {
+                const res = await api.post(`/gpt/chat/${id}/session`);
+                currentSessionId = res.data.id;
+            } catch (err) {
+                showError("Couldn't start a chat session for the upload");
+                return;
+            }
+        }
+
         const formData = new FormData();
         formData.append('file', file);
-        
+
         try {
             setUploading(true);
-            await api.post(`/gpt/chat/sessions/${sessionId}/upload`, formData);
-            const sysMsg = { role: 'assistant', content: `📎 Knowledge indexed: **${file.filename || file.name}** is now available in this session.`, timestamp: new Date(), system: true };
-            setMessages(prev => [...prev, sysMsg]);
+            await api.post(`/gpt/chat/sessions/${currentSessionId}/upload`, formData);
             showSuccess("File indexed successfully");
+            if (sessionId) {
+                const sysMsg = { role: 'assistant', content: `📎 Knowledge indexed: **${file.filename || file.name}** is now available in this session.`, timestamp: new Date(), system: true };
+                setMessages(prev => [...prev, sysMsg]);
+            } else {
+                // Fresh chat: enter the session we just created so the upload is used.
+                navigate(`/gpt/chat/${id}/${currentSessionId}`);
+                fetchSessions();
+            }
         } catch (err) {
-            showError("Upload failed");
+            showError(err.response?.data?.detail || "Upload failed");
         } finally {
             setUploading(false);
         }

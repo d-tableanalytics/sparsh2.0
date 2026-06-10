@@ -34,11 +34,21 @@ async def rewrite(
         return {"rewritten_query": message, "intent_hint": None, "rewritten": False}
 
     context = "\n".join(p for p in (conversation_summary, recent_context) if p)
+    if not context.strip():
+        # First message of a conversation: there is nothing to resolve against,
+        # and rewriting without context derails it (e.g. "hi" was being turned
+        # into "What would you like to discuss?", which the main model then
+        # treated as the user's actual question). Pass it through unchanged so
+        # direct first-attempt questions are answered as asked.
+        return {"rewritten_query": message, "intent_hint": None, "rewritten": False}
+
     prompt = (
         "Rewrite the user's latest message into a single self-contained question, "
         "resolving any pronouns or references using the conversation context. "
+        "If the message is already self-contained, or the context does not "
+        "clarify it, return the message exactly as it is. "
         "Return ONLY the rewritten question, nothing else.\n\n"
-        f"Conversation context:\n{context or '(none)'}\n\n"
+        f"Conversation context:\n{context}\n\n"
         f"Latest message: {message}"
     )
     rewritten = await llm.utility_complete(prompt, max_tokens=80, meter=meter)

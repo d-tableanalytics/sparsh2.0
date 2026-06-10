@@ -226,8 +226,12 @@ async def conversation_has_attachments(ctx: UserContext, conversation_id: str) -
 async def search_chunks(conversation_id: str, query: str, limit: int = 6) -> List[dict]:
     """Keyword retrieval over a conversation's attachment chunks (mirrors
     gpt_service.get_relevant_context)."""
+    from app.services.gpt_service import _kb_keywords
+
     col = get_collection(CHUNK_COLL)
-    keywords = [k for k in query.lower().split() if len(k) > 3]
+    # Word-tokenized + escaped: raw tokens like "c++" or "(forecast)" would
+    # otherwise produce an invalid $regex and fail the whole tool call.
+    keywords = _kb_keywords(query)
     if keywords:
         q = {"conversation_id": conversation_id,
              "content": {"$regex": "|".join(keywords), "$options": "i"}}
