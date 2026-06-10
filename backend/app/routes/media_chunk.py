@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, File, Form
 from typing import List, Optional
 from datetime import datetime
 import asyncio
@@ -67,6 +67,7 @@ async def upload_file_chunk(
 
 @router.post("/complete")
 async def complete_chunked_upload(
+    background_tasks: BackgroundTasks,
     upload_id: str = Form(...),
     key: str = Form(...),
     parts: str = Form(...), # JSON string of [{"ETag": "...", "PartNumber": 1}, ...]
@@ -111,9 +112,22 @@ async def complete_chunked_upload(
             "tags": [t.strip().lower() for t in tags.split(",") if t.strip()] if tags else []
         }
 
+        from app.services.media_index_service import index_media_library_item, INDEXABLE_TYPES
+        if media_type in INDEXABLE_TYPES:
+            doc["content_status"] = "processing"
+
         col = get_collection("media_library")
         res = await col.insert_one(doc)
         doc["_id"] = res.inserted_id
+
+        # Extract searchable text (document text or audio/video transcript) in the
+        # background so the assistant can answer questions about the file contents.
+        if media_type in INDEXABLE_TYPES:
+            background_tasks.add_task(
+                index_media_library_item, str(res.inserted_id), s3_res["key"],
+                original_filename or "media", media_type,
+            )
+
         serialized = _serialize(doc, with_url=False)
         serialized["url"] = s3_res["url"]
         return {"message": "File uploaded successfully", "media": serialized}

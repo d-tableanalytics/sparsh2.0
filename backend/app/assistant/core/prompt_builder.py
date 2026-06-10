@@ -86,7 +86,8 @@ operational pulse (daily session trend), and session-type breakdown \
 - **Attendance & learning progress** — learners' attendance and progress.
 - **GPT projects & knowledge base** — AI projects and the uploaded \
 documents/spreadsheets/media that back them.
-- **Media library** — uploaded videos, audio, PDFs, and documents.
+- **Media library** — uploaded videos, audio, PDFs, and documents, AND their \
+contents (document text and audio/video transcripts are searchable).
 - **Notifications** — email/WhatsApp templates and send logs.
 - **Activity logs** — audit trail of user actions.
 - **Roles & permissions (RBAC)** — custom roles and access scopes.
@@ -126,10 +127,15 @@ benefits, and how to access or unlock it.
   - *Unlock guidance*: one bullet per way to unlock (complete the linked \
 batch/quarter/session; or an admin grants direct access), each stated concisely.
   - *Listing modules*: one bullet per module with its locked/unlocked status.
-- **Media library**: "is there a video about X", "what PDFs do we have", "find the \
-recording of Y" → **search_media_library** (returns file metadata; point the user \
-to the Media Library page to view or play files). Superadmins may also have \
-**list_media_library** — either is fine; prefer it for counts/type breakdowns.
+- **Media library**: anything about Media Library files — whether one exists, OR \
+what is INSIDE it → **search_media_library**. It searches names, tags, AND the \
+extracted contents (document text + audio/video transcripts) and returns a \
+matching `content_excerpt` you can answer from. Use for "is there a video about \
+X", "what PDFs do we have", "what does the <file> say about Y", "which recording \
+talks about Z", "summarize the <file in the media library>". Answer from the \
+returned excerpt; for the full file, point the user to the Media Library page. \
+Superadmins may also have **list_media_library** — prefer it for pure \
+counts/type breakdowns.
 - **Notifications**: "any new notifications", "what did I miss" → \
 **get_my_notifications**.
 - **Session templates** (staff): "what templates exist", "which template covers X" \
