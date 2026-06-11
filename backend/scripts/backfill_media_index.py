@@ -14,8 +14,26 @@ from app.db.mongodb import connect_to_mongo, close_mongo_connection, get_collect
 from app.services.media_index_service import index_media_library_item, INDEXABLE_TYPES
 
 
+async def _connect_with_retry(attempts: int = 20, delay: int = 6) -> bool:
+    """Retry the DB connect through flaky/no-primary windows. Returns True once
+    a connection is established. The backfill itself is resumable, so even if the
+    cluster drops mid-run, re-running continues where it left off."""
+    from app.db.mongodb import db_connection
+    for i in range(attempts):
+        await connect_to_mongo()
+        if db_connection.db is not None:
+            return True
+        print(f"  DB not ready (attempt {i + 1}/{attempts}) — cluster has no "
+              f"primary; retrying in {delay}s...", flush=True)
+        await asyncio.sleep(delay)
+    return False
+
+
 async def main() -> None:
-    await connect_to_mongo()
+    if not await _connect_with_retry():
+        print("Could not reach a writable primary after retries. The Atlas "
+              "cluster is still down/electing — fix cluster health, then re-run.")
+        return
     try:
         col = get_collection("media_library")
         query = {

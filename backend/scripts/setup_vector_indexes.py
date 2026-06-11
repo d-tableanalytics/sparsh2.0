@@ -37,7 +37,10 @@ def _definition(filter_fields):
 
 
 def main() -> int:
-    client = MongoClient(settings.MONGODB_URI, tlsCAFile=certifi.where(), serverSelectionTimeoutMS=20000)
+    # Longer selection timeout so a flaky/electing node doesn't immediately fail
+    # the whole run; retryable reads/writes ride through brief blips.
+    client = MongoClient(settings.MONGODB_URI, tlsCAFile=certifi.where(),
+                         serverSelectionTimeoutMS=60000, retryWrites=True)
     db = client[settings.DATABASE_NAME]
     rc = 0
     for coll_name, index_name, filters in INDEXES:
