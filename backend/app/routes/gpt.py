@@ -202,8 +202,11 @@ async def upload_project_knowledge(
                     })
                 
                 if chunk_docs:
+                    # Embeddings for vector search (best-effort; keyword still works).
+                    from app.assistant.rag.embeddings import attach_embeddings
+                    chunk_docs = await attach_embeddings(chunk_docs)
                     await kb_col.insert_many(chunk_docs)
-                
+
                 await proj_col.update_one(
                     {"_id": ObjectId(p_id), "knowledge_files.id": f_id},
                     {"$set": {"knowledge_files.$.progress": 80}}

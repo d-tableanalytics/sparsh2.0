@@ -186,6 +186,9 @@ async def save_chunks(conversation_id: Optional[str], attachment_id: str,
          "filename": filename, "content": c, "created_at": datetime.utcnow()}
         for c in chunks
     ]
+    # Embeddings for vector search (best-effort; keyword search still works).
+    from app.assistant.rag.embeddings import attach_embeddings
+    docs = await attach_embeddings(docs)
     await get_collection(CHUNK_COLL).insert_many(docs)
 
 
@@ -223,9 +226,31 @@ async def conversation_has_attachments(ctx: UserContext, conversation_id: str) -
     return count > 0
 
 
+async def _vector_chunks(conversation_id: str, query: str, limit: int) -> List[dict]:
+    """Semantic retrieval over a conversation's attachment chunks. Scoped to the
+    conversation via an Atlas pre-filter. Returns [] → keyword fallback."""
+    try:
+        from app.assistant.rag.embeddings import embed_query
+        from app.assistant.rag.vector_store import vector_search
+        vec = await embed_query(query)
+        if not vec:
+            return []
+        return await vector_search(
+            CHUNK_COLL, config.ATTACHMENT_VECTOR_INDEX, vec, limit,
+            filter_expr={"conversation_id": conversation_id}, min_score=config.RAG_MIN_SCORE,
+        )
+    except Exception as e:  # noqa: BLE001
+        print(f"[rag] search_chunks vector path failed: {e}")
+        return []
+
+
 async def search_chunks(conversation_id: str, query: str, limit: int = 6) -> List[dict]:
-    """Keyword retrieval over a conversation's attachment chunks (mirrors
-    gpt_service.get_relevant_context)."""
+    """Retrieval over a conversation's attachment chunks — vector-first
+    (semantic), keyword fallback."""
+    vec_docs = await _vector_chunks(conversation_id, query, limit)
+    if vec_docs:
+        return vec_docs
+
     from app.services.gpt_service import _kb_keywords
 
     col = get_collection(CHUNK_COLL)

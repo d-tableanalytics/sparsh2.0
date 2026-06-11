@@ -14,7 +14,9 @@ class AssistantConfig:
     UTILITY_MODEL: str = "gpt-4o-mini"   # query rewriting, summaries, titles
 
     # Agent loop guards.
-    MAX_TOOL_ITERATIONS: int = 5         # safety cap on tool-calling rounds
+    MAX_TOOL_ITERATIONS: int = 6         # safety cap on tool-calling rounds
+    #   (6 lets a multi-entity question — e.g. "compare two batches and a company" —
+    #   chain several tool calls without tripping the "couldn't finish" fallback.)
     TOOL_TIMEOUT_SECONDS: float = 8.0    # per-tool execution timeout (cross-cutting)
     LLM_TEMPERATURE: float = 0.3
 
@@ -53,6 +55,30 @@ class AssistantConfig:
 
     # Persistence.
     CONVERSATION_COLLECTION: str = "assistant_conversations"
+
+    # ── RAG: semantic (vector) retrieval ──────────────────────────────────
+    # Master switch for vector search. When True, retrieval tools embed the
+    # query and run Atlas $vectorSearch first, then FALL BACK to keyword search
+    # on any miss/error/missing-embedding — so turning this off (or a missing
+    # index / API key) silently reverts to the existing keyword behaviour.
+    RAG_VECTOR_ENABLED: bool = True
+    EMBED_MODEL: str = "text-embedding-3-small"
+    EMBED_DIMS: int = 1536
+    EMBED_MAX_CHARS: int = 8000          # ~2k tokens; truncate before embedding
+    EMBED_BATCH: int = 100              # texts per embeddings API call
+    RAG_NUM_CANDIDATES_FACTOR: int = 20  # ANN candidate pool = factor * limit
+    # Minimum cosine score for a vector hit to "win" over keyword search. Floors
+    # out weak nearest-neighbour noise so that (a) during a partial backfill a
+    # garbage hit can't suppress keyword search of still-un-embedded docs, and
+    # (b) genuinely-unrelated queries fall through to keyword instead of
+    # returning irrelevant chunks. 0.30 keeps real matches (~0.4+) comfortably.
+    RAG_MIN_SCORE: float = 0.30
+    # Atlas Search vector index names (created by scripts/setup_vector_indexes.py).
+    KNOWLEDGE_VECTOR_INDEX: str = "kb_vector_index"
+    ATTACHMENT_VECTOR_INDEX: str = "attach_vector_index"
+    MEDIA_VECTOR_INDEX: str = "media_vector_index"
+    # Per-file content chunks for the Media Library (vector-searchable).
+    MEDIA_CHUNK_COLLECTION: str = "media_chunks"
 
     # ── Multi-modal attachments ───────────────────────────────────────────
     # Master switch for the file-upload subsystem (additive; safe to disable).

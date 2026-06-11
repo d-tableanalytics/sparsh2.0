@@ -216,20 +216,14 @@ async def extract(local_path: str, filename: str) -> Dict:
 
 
 async def _extract_media(local_path: str, filename: str, metadata: Dict) -> Dict:
-    """Transcribe an audio/video file, with explicit guards for the optional
-    dependencies (ffmpeg binary + speech_recognition). Always returns readable
-    text describing the outcome so the assistant can explain it to the user."""
+    """Transcribe an audio/video file. Transcription is possible when EITHER
+    OpenAI Whisper is configured (primary path — accepts whole files, no ffmpeg
+    needed under 25 MB) OR the offline stack is present (ffmpeg + speech_recognition).
+    Always returns readable text describing the outcome so the assistant can
+    explain it to the user."""
     from app.services.media_tools import ffmpeg_available
 
     kind = metadata.get("kind", "media")
-
-    if not ffmpeg_available():
-        return {
-            "text": f"[{filename}: this {kind} could not be transcribed because the "
-                    f"ffmpeg media tool is not installed on the server.]",
-            "images": [],
-            "metadata": {**metadata, "transcription": "ffmpeg_missing"},
-        }
 
     try:
         from app.services import transcription_service as ts
@@ -240,10 +234,25 @@ async def _extract_media(local_path: str, filename: str, metadata: Dict) -> Dict
             "metadata": {**metadata, "transcription": "unavailable"},
         }
 
-    if getattr(ts, "sr", None) is None:
+    whisper_ok = ts.whisper_available()
+    ffmpeg_ok = ffmpeg_available()
+    sr_ok = getattr(ts, "sr", None) is not None
+
+    # Without Whisper we fall back to the offline pipeline, which needs BOTH
+    # ffmpeg (to segment) and speech_recognition (to transcribe).
+    if not whisper_ok and not ffmpeg_ok:
+        return {
+            "text": f"[{filename}: this {kind} could not be transcribed — neither "
+                    f"OpenAI Whisper (no API key) nor the ffmpeg media tool is "
+                    f"available on the server.]",
+            "images": [],
+            "metadata": {**metadata, "transcription": "ffmpeg_missing"},
+        }
+    if not whisper_ok and not sr_ok:
         return {
             "text": f"[{filename}: this {kind} could not be transcribed because the "
-                    f"speech_recognition package is not installed on the server.]",
+                    f"speech_recognition package is not installed and OpenAI Whisper "
+                    f"is not configured on the server.]",
             "images": [],
             "metadata": {**metadata, "transcription": "sr_missing"},
         }

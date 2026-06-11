@@ -8,6 +8,10 @@ from __future__ import annotations
 import re
 from typing import Optional
 
+from bson import ObjectId
+from bson.errors import InvalidId
+
+from app.assistant.config import config
 from app.assistant.schemas.context import UserContext
 from app.assistant.schemas.tool_result import ToolResult
 from app.assistant.security.pii import redact
@@ -94,19 +98,103 @@ async def get_session_templates(ctx: UserContext, name: Optional[str] = None, li
     )
 
 
+def _content_excerpt(text: str, query: str, width: int = 600) -> str:
+    """A window of a file's extracted text AROUND the first query-term match,
+    so the model can answer from what's actually inside the file."""
+    if not text:
+        return ""
+    low = text.lower()
+    pos = -1
+    for term in re.findall(r"[a-z0-9]+", (query or "").lower()):
+        if len(term) > 3:
+            pos = low.find(term)
+            if pos != -1:
+                break
+    if pos <= width // 4:
+        return text[:width]
+    start = max(0, pos - width // 3)
+    tail = "..." if start + width < len(text) else ""
+    return "..." + text[start:start + width] + tail
+
+
+async def _media_vector_search(query: str, media_type: Optional[str], limit: int):
+    """Semantic search over media_chunks → enriched file items (best chunk per
+    file, in vector-rank order). Returns None if vectors are unavailable, or []
+    if nothing relevant matched — both → keyword fallback."""
+    try:
+        from app.assistant.rag.embeddings import embed_query
+        from app.assistant.rag.vector_store import vector_search
+
+        vec = await embed_query(query)
+        if not vec:
+            return None
+        filt = {"media_type": media_type.strip().lower()} if media_type and media_type.strip() else None
+        # Floor weak "nearest neighbour" hits so a pure listing query ("what PDFs
+        # do we have") falls through to the keyword/metadata path instead.
+        chunks = await vector_search(
+            config.MEDIA_CHUNK_COLLECTION, config.MEDIA_VECTOR_INDEX, vec,
+            limit * 4, filter_expr=filt, min_score=0.20,
+        )
+        if not chunks:
+            return []
+
+        best: dict = {}
+        for c in chunks:  # vector results are score-desc; keep first (best) per file
+            mid = c.get("media_id")
+            if mid and mid not in best:
+                best[mid] = c
+        ordered_ids = list(best.keys())[:limit]
+
+        oids = []
+        for m in ordered_ids:
+            try:
+                oids.append(ObjectId(m))
+            except (InvalidId, TypeError):
+                pass
+        docs = await get_collection("media_library").find({"_id": {"$in": oids}}).to_list(len(oids))
+        by_id = {str(d["_id"]): d for d in docs}
+
+        items = []
+        for mid in ordered_ids:  # preserve vector ranking
+            d = by_id.get(mid)
+            c = best[mid]
+            base = d or {"name": c.get("name"), "file_name": c.get("file_name"),
+                         "media_type": c.get("media_type")}
+            items.append({
+                "name": base.get("name"),
+                "media_type": base.get("media_type"),
+                "file_name": base.get("file_name"),
+                "size_bytes": base.get("size"),
+                "folder": base.get("folder"),
+                "tags": base.get("tags") or [],
+                "uploaded_at": base.get("created_at"),
+                "content_excerpt": (c.get("content") or "")[:600],
+                "match_score": round(float(c.get("vector_score") or 0.0), 3),
+            })
+        return items
+    except Exception as e:  # noqa: BLE001
+        print(f"[rag] search_media_library vector path failed: {e}")
+        return None
+
+
 @tool(
     name="search_media_library",
     description=(
-        "Search the shared Media Library's file catalog (videos, audio, PDFs, "
-        "documents, images) by name, tag, or type. Returns file metadata — name, "
-        "type, size, folder, tags, upload date — NOT the files themselves. Use for "
-        "'is there a video about X', 'what PDFs are in the media library', 'find "
-        "the recording of Y'. Tell the user to open the Media Library page to view "
-        "or play a file."
+        "Search the shared Media Library — by file name, tag, type, AND by the "
+        "TEXT INSIDE each file: document text (PDF/Word/Excel) and the speech "
+        "transcript of audio/video. Returns matching files with a content excerpt, "
+        "so you can ANSWER questions about what a file says, not just whether it "
+        "exists. Use for 'is there a video about X', 'what PDFs do we have', 'what "
+        "does the <file> say about Y', 'which recording talks about Z', 'summarize "
+        "the <file>'. For the full file, tell the user to open the Media Library "
+        "page."
     ),
-    allowed_roles=["CU", "CA", "AD", "SA"],
+    # Staff-only: the Media Library is a staff resource (sidebar gated to
+    # superadmin/admin/coach/staff), and full file CONTENTS are now exposed —
+    # learners must not read them via chat.
+    allowed_roles=["AD", "SA"],
     parameters={
-        "query": {"type": "string", "description": "Optional name/tag keyword to search for"},
+        "query": {"type": "string", "description": "Keyword(s) to search names, tags, and file contents for"},
         "media_type": {
             "type": "string",
             "description": "Optional filter: video, audio, pdf, document, image, or other",
@@ -118,12 +206,27 @@ async def search_media_library(
     ctx: UserContext, query: Optional[str] = None, media_type: Optional[str] = None, limit: int = 20
 ) -> ToolResult:
     limit = _clamp(limit, 20, 50)
+
+    # Vector-first when there's a content query; falls back to keyword below.
+    if query and query.strip():
+        vec_items = await _media_vector_search(query, media_type, limit)
+        if vec_items:
+            return ToolResult.ok(
+                "search_media_library",
+                {"files": vec_items, "total_returned": len(vec_items)},
+                sources=["media_library"],
+                count=len(vec_items),
+                scope_applied="shared-library",
+            )
+
     mongo_q: dict = {}
     if media_type and media_type.strip():
         mongo_q["media_type"] = media_type.strip().lower()
     if query and query.strip():
         rx = _safe_regex(query)
-        mongo_q["$or"] = [{"name": rx}, {"file_name": rx}, {"tags": rx}, {"description": rx}]
+        # Content_text included → questions about what's INSIDE files match here.
+        mongo_q["$or"] = [{"name": rx}, {"file_name": rx}, {"tags": rx},
+                          {"description": rx}, {"content_text": rx}]
 
     docs = (
         await get_collection("media_library")
@@ -132,8 +235,9 @@ async def search_media_library(
         .limit(limit)
         .to_list(limit)
     )
-    items = [
-        {
+    items = []
+    for d in docs:
+        item = {
             "name": d.get("name"),
             "media_type": d.get("media_type"),
             "file_name": d.get("file_name"),
@@ -142,8 +246,12 @@ async def search_media_library(
             "tags": d.get("tags") or [],
             "uploaded_at": d.get("created_at"),
         }
-        for d in docs
-    ]
+        if d.get("content_status"):
+            item["content_status"] = d.get("content_status")
+        excerpt = _content_excerpt(d.get("content_text") or "", query or "")
+        if excerpt:
+            item["content_excerpt"] = excerpt
+        items.append(item)
 
     return ToolResult.ok(
         "search_media_library",

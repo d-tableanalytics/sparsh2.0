@@ -76,11 +76,16 @@ async def get_dashboard_stats(ctx: UserContext) -> ToolResult:
         pulse_data.append({"date": day.strftime("%d %b"), "sessions_completed": count})
 
     # --- Session mix ---
+    # Personal to-do entries (type=="task") are NOT coaching sessions and would
+    # otherwise swamp the "Other" bucket, making the mix meaningless. Exclude them
+    # so the Coaching Mix reflects real session types only.
     mix_counts = {"Strategic": 0, "Technical": 0, "Operational": 0, "Other": 0}
     for col_name in session_cols:
         q2: dict = {} if is_staff else {"company_id": company_id}
-        async for session in get_collection(col_name).find(q2, {"session_type": 1}):
-            s_type = session.get("session_type", "")
+        async for session in get_collection(col_name).find(q2, {"session_type": 1, "type": 1}):
+            if session.get("type") == "task":
+                continue
+            s_type = session.get("session_type") or ""
             if any(kw in s_type for kw in ["Direct", "Strategy", "CEO"]):
                 mix_counts["Strategic"] += 1
             elif any(kw in s_type for kw in ["Review", "Module", "Session"]):

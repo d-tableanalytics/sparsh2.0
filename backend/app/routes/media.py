@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, File, Form
 from typing import List, Optional
 from datetime import datetime
 from bson import ObjectId
@@ -126,6 +126,7 @@ def _serialize(doc: dict, with_url: bool = True) -> dict:
 
 @router.post("")
 async def upload_media(
+    background_tasks: BackgroundTasks,
     media_type: str = Form(...),
     name: str = Form(...),
     description: str = Form(""),
@@ -178,9 +179,22 @@ async def upload_media(
         "tags": [t.strip().lower() for t in tags.split(",") if t.strip()] if tags else []
     }
 
+    from app.services.media_index_service import index_media_library_item, INDEXABLE_TYPES
+    if media_type in INDEXABLE_TYPES:
+        doc["content_status"] = "processing"
+
     col = get_collection("media_library")
     res = await col.insert_one(doc)
     doc["_id"] = res.inserted_id
+
+    # Extract the file's searchable text (document text or audio/video transcript)
+    # in the background so the assistant can answer questions about its contents.
+    if media_type in INDEXABLE_TYPES:
+        background_tasks.add_task(
+            index_media_library_item, str(res.inserted_id), result["key"],
+            file.filename or "media", media_type,
+        )
+
     serialized = _serialize(doc, with_url=False)
     serialized["url"] = result["url"]
     return {"message": "File uploaded successfully", "media": serialized}
@@ -223,4 +237,9 @@ async def delete_media(media_id: str, current_user: dict = Depends(get_current_u
         delete_file_from_s3(doc["s3_key"])
 
     await col.delete_one({"_id": ObjectId(media_id)})
+    # Cascade: drop the file's vector chunks so deleted content isn't retrievable.
+    from app.assistant.config import config as _assistant_config
+    await get_collection(_assistant_config.MEDIA_CHUNK_COLLECTION).delete_many(
+        {"media_id": media_id}
+    )
     return {"message": "Media deleted successfully"}
