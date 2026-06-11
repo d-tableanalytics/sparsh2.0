@@ -1,9 +1,18 @@
 import React from 'react';
 import { Plus, Trash2, MessageSquare, X } from 'lucide-react';
 
+// Treat a timezone-less timestamp as UTC. The API stores naive UTC datetimes;
+// without an offset the browser would parse them as local time and skew the
+// "x ago" label by the viewer's UTC offset.
+function asUtc(iso) {
+  if (typeof iso !== 'string') return iso;
+  const hasTz = /[zZ]|[+-]\d{2}:?\d{2}$/.test(iso);
+  return hasTz ? iso : `${iso}Z`;
+}
+
 function relativeTime(iso) {
   if (!iso) return '';
-  const then = new Date(iso).getTime();
+  const then = new Date(asUtc(iso)).getTime();
   if (Number.isNaN(then)) return '';
   const diff = Math.max(0, Date.now() - then);
   const mins = Math.floor(diff / 60000);
@@ -12,7 +21,7 @@ function relativeTime(iso) {
   const hrs = Math.floor(mins / 60);
   if (hrs < 24) return `${hrs}h ago`;
   const days = Math.floor(hrs / 24);
-  return days < 7 ? `${days}d ago` : new Date(iso).toLocaleDateString();
+  return days < 7 ? `${days}d ago` : new Date(asUtc(iso)).toLocaleDateString();
 }
 
 function Skeleton() {

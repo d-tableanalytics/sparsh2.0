@@ -26,6 +26,7 @@ from app.assistant.config import config
 from app.assistant.core import context_manager, query_rewriter
 from app.assistant.core.llm_client import LLMClient, UsageMeter
 from app.assistant.core.prompt_builder import build_system_prompt
+from app.assistant.services import support_engine_service
 from app.assistant.memory import conversation_store, summarizer
 from app.assistant.observability import cost
 from app.assistant.observability.correlation import get_correlation_id
@@ -59,7 +60,12 @@ class Orchestrator:
             await conversation_store.truncate_messages(convo, edit_from_index)
         window = context_manager.build_window(convo)
 
-        messages = [{"role": "system", "content": build_system_prompt(ctx)}]
+        # Discoverability hint: the names of the caller's Support Engine projects,
+        # so the model recognises a bare project name (e.g. "sourcing") as a
+        # module and routes it to get_support_engine_status instead of deflecting
+        # it or searching file content. Cached; degrades to no hint on error.
+        se_names = await support_engine_service.list_project_names(ctx)
+        messages = [{"role": "system", "content": build_system_prompt(ctx, se_names)}]
 
         # Input guardrail: detect (don't hard-block) likely prompt injection.
         if config.GUARDRAILS_ENABLED:

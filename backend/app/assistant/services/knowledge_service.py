@@ -83,12 +83,16 @@ async def get_accessible_project_ids(ctx: UserContext) -> Optional[Set[str]]:
 
 
 # Common words that add noise (not signal) to a content regex. Kept short on
-# purpose — over-filtering only hurts recall.
+# purpose — over-filtering only hurts recall. Includes a few meta words that
+# describe the *search* itself ("files", "say") rather than the content sought,
+# so "what do the files say about X" searches for X, not "files"/"say".
 _STOPWORDS = {
     "what", "when", "where", "which", "whom", "whose", "that", "this", "with",
     "from", "your", "you", "the", "and", "for", "are", "was", "were", "how",
     "does", "did", "can", "could", "would", "should", "about", "into", "tell",
     "give", "show", "explain", "please", "have", "has", "any", "some", "want",
+    "file", "files", "document", "documents", "say", "says", "said", "talk",
+    "talks", "mention", "mentions", "tell", "told", "content", "contents",
 }
 
 
@@ -105,6 +109,25 @@ def _keywords(query: str) -> List[str]:
     ]
 
 
+# How many candidate chunks to pull before ranking. The OR-regex is high-recall
+# but returns chunks in arbitrary storage order, so we over-fetch a pool and keep
+# the ones that cover the most of the query — otherwise a chunk that merely
+# contains one noise word can crowd out the chunk that actually answers it.
+_CANDIDATE_POOL = 40
+
+
+def _relevance(content: Optional[str], filename: Optional[str], keywords: List[str]) -> int:
+    """Score = total length of the DISTINCT query keywords the chunk covers.
+
+    Counting each keyword once stops a chunk that merely repeats one word from
+    winning; length-weighting lets a specific term ("screening") outweigh a
+    generic one. A filename match counts too (the term may be in the title).
+    """
+    hay = (content or "").lower()
+    fname = (filename or "").lower()
+    return sum(len(k) for k in keywords if k in hay or k in fname)
+
+
 async def search(ctx: UserContext, query: str, limit: int = 5) -> RagRetrieval:
     accessible = await get_accessible_project_ids(ctx)
 
@@ -118,17 +141,29 @@ async def search(ctx: UserContext, query: str, limit: int = 5) -> RagRetrieval:
     if keywords:
         mongo["content"] = {"$regex": "|".join(re.escape(k) for k in keywords), "$options": "i"}
 
-    chunks = await get_collection(KNOWLEDGE_COLLECTION).find(mongo).limit(limit).to_list(limit)
+    # Over-fetch, then rank by query coverage and keep the best `limit`. With no
+    # keywords (rare) there's nothing to rank — take the first `limit` as before.
+    pool = max(limit, _CANDIDATE_POOL) if keywords else limit
+    candidates = await get_collection(KNOWLEDGE_COLLECTION).find(mongo).limit(pool).to_list(pool)
+    if keywords:
+        scored = sorted(
+            ((_relevance(c.get("content"), c.get("filename"), keywords), c) for c in candidates),
+            key=lambda t: t[0],
+            reverse=True,
+        )[:limit]
+    else:
+        scored = [(None, c) for c in candidates[:limit]]
+
     sources = [
         RagSource(
             source_id=str(c.get("_id")),
             title=c.get("filename"),
             snippet=(c.get("content") or "")[:SNIPPET_MAX],
-            score=None,
+            score=score,
             document_id=c.get("file_id"),
             collection=KNOWLEDGE_COLLECTION,
             metadata={"project_id": c.get("project_id")},
         )
-        for c in chunks
+        for score, c in scored
     ]
     return RagRetrieval(query=query, sources=sources, retrieval_method="keyword")

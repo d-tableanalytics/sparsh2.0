@@ -16,7 +16,10 @@ from app.assistant.tools.registry import tool
         "conceptual questions ('what is X', 'explain Y') AND for questions about "
         "uploaded files of any type ('summarize the audio in project X', 'what "
         "does the recording say about Z', 'what's in the uploaded PDF'). Returns "
-        "cited document snippets. NOT for the user's personal records."
+        "cited document snippets. NOT for the user's personal records. NOTE: this "
+        "searches only the TEXT INSIDE files; it does NOT know Support Engine "
+        "project names or descriptions — to answer what a named project/module IS "
+        "or does, use get_support_engine_status instead."
     ),
     allowed_roles=["CU", "CA", "AD", "SA"],
     parameters={"query": {"type": "string", "description": "What to look up in the knowledge base"}},

@@ -13,7 +13,10 @@ export default function useConversation() {
     setLoading(true);
     setError(null);
     try {
-      setConversations(await listConversations());
+      const list = await listConversations();
+      // Guarantee newest-first ordering regardless of server order.
+      list.sort((a, b) => new Date(b.updated_at) - new Date(a.updated_at));
+      setConversations(list);
     } catch {
       setError('Could not load conversations.');
     } finally {

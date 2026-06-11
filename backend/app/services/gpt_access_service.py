@@ -49,7 +49,14 @@ async def get_projects_with_access(
     project — the gpt_projects docs embed heavy knowledge content, so the full
     fetch is ~10s. The assistant uses lightweight; the website needs full docs.
     """
-    project_projection = {"title": 1, "description": 1} if lightweight else None
+    # Lightweight still pulls instruction + conversation_starters (small prompt
+    # strings) so the assistant can explain what a project DOES, not just its
+    # one-line description. The ~10s cost is the embedded knowledge *content*,
+    # which these fields are not — so this stays light.
+    project_projection = (
+        {"title": 1, "description": 1, "instruction": 1, "conversation_starters": 1}
+        if lightweight else None
+    )
     projects = await get_collection("gpt_projects").find({}, project_projection).to_list(100)
 
     # Staff/admin: see all, nothing locked.
