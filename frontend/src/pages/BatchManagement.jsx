@@ -12,9 +12,9 @@ import {
 import { useAuth } from '../context/AuthContext';
 
 const statusConfig = {
-  active:    { bg: 'var(--status-active-bg)', text: 'var(--status-active-text)', border: 'var(--status-active-border)', icon: PlayCircle, label: 'Active' },
+  active: { bg: 'var(--status-active-bg)', text: 'var(--status-active-text)', border: 'var(--status-active-border)', icon: PlayCircle, label: 'Active' },
   completed: { bg: 'var(--accent-indigo-bg)', text: 'var(--accent-indigo)', border: 'var(--accent-indigo-border)', icon: CheckCircle2, label: 'Completed' },
-  paused:    { bg: 'var(--accent-yellow-bg)', text: 'var(--accent-yellow)', border: 'var(--accent-yellow-border)', icon: PauseCircle, label: 'Paused' },
+  paused: { bg: 'var(--accent-yellow-bg)', text: 'var(--accent-yellow)', border: 'var(--accent-yellow-border)', icon: PauseCircle, label: 'Paused' },
 };
 
 const BatchManagement = () => {
@@ -73,18 +73,18 @@ const BatchManagement = () => {
       showSuccess('Batch created successfully');
       setForm({ name: '', product_name: '', description: '', start_date: '', target_end_date: '', gpt_projects: [] });
       fetchData();
-    } catch (err) { 
+    } catch (err) {
       const detail = err.response?.data?.detail;
       const msg = Array.isArray(detail) ? detail.map(d => `${d.loc.join('.')}: ${d.msg}`).join(', ') : (detail || 'Failed to create batch');
-      showError(msg); 
+      showError(msg);
     }
   };
 
   const handleDelete = async (id) => {
-    try { 
-        await api.delete(`/batches/${id}`); 
-        showSuccess('Batch deleted successfully');
-        fetchData(); 
+    try {
+      await api.delete(`/batches/${id}`);
+      showSuccess('Batch deleted successfully');
+      fetchData();
     }
     catch { showError('Delete failed'); }
   };
@@ -224,28 +224,28 @@ const BatchManagement = () => {
           <div className="space-y-1">
             <label className="text-[10px] font-bold text-[var(--text-muted)] uppercase tracking-widest">Batch Name *</label>
             <input required className="w-full px-3 py-1.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-md text-[13px] text-[var(--text-main)] outline-none focus:border-[var(--accent-indigo)]"
-              value={form.name} onChange={e => setForm({...form, name: e.target.value})} />
+              value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} />
           </div>
           <div className="space-y-1">
             <label className="text-[10px] font-bold text-[var(--text-muted)] uppercase tracking-widest">Product Name *</label>
             <input required className="w-full px-3 py-1.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-md text-[13px] text-[var(--text-main)] outline-none focus:border-[var(--accent-indigo)]"
-              value={form.product_name} onChange={e => setForm({...form, product_name: e.target.value})} />
+              value={form.product_name} onChange={e => setForm({ ...form, product_name: e.target.value })} />
           </div>
           <div className="space-y-1">
             <label className="text-[10px] font-bold text-[var(--text-muted)] uppercase tracking-widest">Description</label>
             <textarea rows={2} className="w-full px-3 py-1.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-md text-[13px] text-[var(--text-main)] outline-none resize-none"
-              value={form.description} onChange={e => setForm({...form, description: e.target.value})} />
+              value={form.description} onChange={e => setForm({ ...form, description: e.target.value })} />
           </div>
           <div className="grid grid-cols-2 gap-4">
             <div className="space-y-1">
               <label className="text-[10px] font-bold text-[var(--text-muted)] uppercase tracking-widest">Start Date</label>
               <input type="date" className="w-full px-3 py-1.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-md text-[13px] text-[var(--text-main)] outline-none"
-                value={form.start_date} onChange={e => setForm({...form, start_date: e.target.value})} />
+                value={form.start_date} onChange={e => setForm({ ...form, start_date: e.target.value })} />
             </div>
             <div className="space-y-1">
               <label className="text-[10px] font-bold text-[var(--text-muted)] uppercase tracking-widest">Target End Date</label>
               <input type="date" className="w-full px-3 py-1.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-md text-[13px] text-[var(--text-main)] outline-none"
-                value={form.target_end_date} onChange={e => setForm({...form, target_end_date: e.target.value})} />
+                value={form.target_end_date} onChange={e => setForm({ ...form, target_end_date: e.target.value })} />
             </div>
           </div>
           <div className="space-y-1">
