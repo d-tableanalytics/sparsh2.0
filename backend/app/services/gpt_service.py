@@ -169,7 +169,7 @@ async def _vector_context(project_id: str, query: str, limit: int) -> list:
             return []
         docs = await vector_search(
             "KnowledgeBase", config.KNOWLEDGE_VECTOR_INDEX, vec, limit,
-            filter_expr={"project_id": project_id},
+            filter_expr={"project_id": project_id}, min_score=config.RAG_MIN_SCORE,
         )
         return [d.get("content", "") for d in docs if d.get("content")]
     except Exception as e:  # noqa: BLE001

@@ -67,6 +67,12 @@ class AssistantConfig:
     EMBED_MAX_CHARS: int = 8000          # ~2k tokens; truncate before embedding
     EMBED_BATCH: int = 100              # texts per embeddings API call
     RAG_NUM_CANDIDATES_FACTOR: int = 20  # ANN candidate pool = factor * limit
+    # Minimum cosine score for a vector hit to "win" over keyword search. Floors
+    # out weak nearest-neighbour noise so that (a) during a partial backfill a
+    # garbage hit can't suppress keyword search of still-un-embedded docs, and
+    # (b) genuinely-unrelated queries fall through to keyword instead of
+    # returning irrelevant chunks. 0.30 keeps real matches (~0.4+) comfortably.
+    RAG_MIN_SCORE: float = 0.30
     # Atlas Search vector index names (created by scripts/setup_vector_indexes.py).
     KNOWLEDGE_VECTOR_INDEX: str = "kb_vector_index"
     ATTACHMENT_VECTOR_INDEX: str = "attach_vector_index"

@@ -237,7 +237,7 @@ async def _vector_chunks(conversation_id: str, query: str, limit: int) -> List[d
             return []
         return await vector_search(
             CHUNK_COLL, config.ATTACHMENT_VECTOR_INDEX, vec, limit,
-            filter_expr={"conversation_id": conversation_id},
+            filter_expr={"conversation_id": conversation_id}, min_score=config.RAG_MIN_SCORE,
         )
     except Exception as e:  # noqa: BLE001
         print(f"[rag] search_chunks vector path failed: {e}")

@@ -158,7 +158,8 @@ async def _vector_search(query: str, accessible: Optional[Set[str]], limit: int)
         return []
     filt = {"project_id": {"$in": list(accessible)}} if accessible is not None else None
     docs = await vector_search(
-        KNOWLEDGE_COLLECTION, config.KNOWLEDGE_VECTOR_INDEX, vec, limit, filter_expr=filt
+        KNOWLEDGE_COLLECTION, config.KNOWLEDGE_VECTOR_INDEX, vec, limit,
+        filter_expr=filt, min_score=config.RAG_MIN_SCORE,
     )
     return [
         RagSource(

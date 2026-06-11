@@ -117,31 +117,6 @@ def _content_excerpt(text: str, query: str, width: int = 600) -> str:
     return "..." + text[start:start + width] + tail
 
 
-@tool(
-    name="search_media_library",
-    description=(
-        "Search the shared Media Library — by file name, tag, type, AND by the "
-        "TEXT INSIDE each file: document text (PDF/Word/Excel) and the speech "
-        "transcript of audio/video. Returns matching files with a content excerpt, "
-        "so you can ANSWER questions about what a file says, not just whether it "
-        "exists. Use for 'is there a video about X', 'what PDFs do we have', 'what "
-        "does the <file> say about Y', 'which recording talks about Z', 'summarize "
-        "the <file>'. For the full file, tell the user to open the Media Library "
-        "page."
-    ),
-    # Staff-only: the Media Library is a staff resource (sidebar gated to
-    # superadmin/admin/coach/staff), and full file CONTENTS are now exposed —
-    # learners must not read them via chat.
-    allowed_roles=["AD", "SA"],
-    parameters={
-        "query": {"type": "string", "description": "Keyword(s) to search names, tags, and file contents for"},
-        "media_type": {
-            "type": "string",
-            "description": "Optional filter: video, audio, pdf, document, image, or other",
-        },
-        "limit": {"type": "integer", "description": "Max files to return (default 20, max 50)"},
-    },
-)
 async def _media_vector_search(query: str, media_type: Optional[str], limit: int):
     """Semantic search over media_chunks → enriched file items (best chunk per
     file, in vector-rank order). Returns None if vectors are unavailable, or []
@@ -202,6 +177,31 @@ async def _media_vector_search(query: str, media_type: Optional[str], limit: int
         return None
 
 
+@tool(
+    name="search_media_library",
+    description=(
+        "Search the shared Media Library — by file name, tag, type, AND by the "
+        "TEXT INSIDE each file: document text (PDF/Word/Excel) and the speech "
+        "transcript of audio/video. Returns matching files with a content excerpt, "
+        "so you can ANSWER questions about what a file says, not just whether it "
+        "exists. Use for 'is there a video about X', 'what PDFs do we have', 'what "
+        "does the <file> say about Y', 'which recording talks about Z', 'summarize "
+        "the <file>'. For the full file, tell the user to open the Media Library "
+        "page."
+    ),
+    # Staff-only: the Media Library is a staff resource (sidebar gated to
+    # superadmin/admin/coach/staff), and full file CONTENTS are now exposed —
+    # learners must not read them via chat.
+    allowed_roles=["AD", "SA"],
+    parameters={
+        "query": {"type": "string", "description": "Keyword(s) to search names, tags, and file contents for"},
+        "media_type": {
+            "type": "string",
+            "description": "Optional filter: video, audio, pdf, document, image, or other",
+        },
+        "limit": {"type": "integer", "description": "Max files to return (default 20, max 50)"},
+    },
+)
 async def search_media_library(
     ctx: UserContext, query: Optional[str] = None, media_type: Optional[str] = None, limit: int = 20
 ) -> ToolResult:
