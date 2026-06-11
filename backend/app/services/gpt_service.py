@@ -125,8 +125,12 @@ async def process_knowledge_base(project_id: str, file_id: str, local_path: str,
             "content": c,
             "created_at": datetime.utcnow()
         })
-    
+
     if chunk_docs:
+        # Attach semantic embeddings for vector search (best-effort; keyword
+        # search still works if embedding is unavailable).
+        from app.assistant.rag.embeddings import attach_embeddings
+        chunk_docs = await attach_embeddings(chunk_docs)
         await col.insert_many(chunk_docs)
     
     # Cleanup local file
@@ -153,11 +157,37 @@ def _kb_keywords(query: str) -> list:
     return [re.escape(w) for w in words if len(w) > 3 and w not in _KB_STOPWORDS]
 
 
+async def _vector_context(project_id: str, query: str, limit: int) -> list:
+    """Semantic retrieval over a single project's KnowledgeBase chunks.
+    Returns [] when vectors are unavailable / nothing matches (→ keyword)."""
+    try:
+        from app.assistant.rag.embeddings import embed_query
+        from app.assistant.rag.vector_store import vector_search
+        from app.assistant.config import config
+        vec = await embed_query(query)
+        if not vec:
+            return []
+        docs = await vector_search(
+            "KnowledgeBase", config.KNOWLEDGE_VECTOR_INDEX, vec, limit,
+            filter_expr={"project_id": project_id},
+        )
+        return [d.get("content", "") for d in docs if d.get("content")]
+    except Exception as e:  # noqa: BLE001
+        print(f"[rag] get_relevant_context vector path failed: {e}")
+        return []
+
+
 async def get_relevant_context(project_id: str, query: str, limit=5) -> str:
+    """Context retrieval for the Support Engine chat.
+
+    Vector-first (semantic) with a keyword fallback, so it works even before the
+    vector index/embeddings exist.
     """
-    Simple keyword-based context retrieval (Mocking RAG for modularity).
-    In a full production version, this would use vector embeddings.
-    """
+    # Vector-first.
+    vec_chunks = await _vector_context(project_id, query, limit)
+    if vec_chunks:
+        return "\n\n---\n\n".join(vec_chunks)
+
     col = get_collection("KnowledgeBase")
     keywords = _kb_keywords(query)
 

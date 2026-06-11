@@ -237,4 +237,9 @@ async def delete_media(media_id: str, current_user: dict = Depends(get_current_u
         delete_file_from_s3(doc["s3_key"])
 
     await col.delete_one({"_id": ObjectId(media_id)})
+    # Cascade: drop the file's vector chunks so deleted content isn't retrievable.
+    from app.assistant.config import config as _assistant_config
+    await get_collection(_assistant_config.MEDIA_CHUNK_COLLECTION).delete_many(
+        {"media_id": media_id}
+    )
     return {"message": "Media deleted successfully"}

@@ -56,6 +56,24 @@ class AssistantConfig:
     # Persistence.
     CONVERSATION_COLLECTION: str = "assistant_conversations"
 
+    # ── RAG: semantic (vector) retrieval ──────────────────────────────────
+    # Master switch for vector search. When True, retrieval tools embed the
+    # query and run Atlas $vectorSearch first, then FALL BACK to keyword search
+    # on any miss/error/missing-embedding — so turning this off (or a missing
+    # index / API key) silently reverts to the existing keyword behaviour.
+    RAG_VECTOR_ENABLED: bool = True
+    EMBED_MODEL: str = "text-embedding-3-small"
+    EMBED_DIMS: int = 1536
+    EMBED_MAX_CHARS: int = 8000          # ~2k tokens; truncate before embedding
+    EMBED_BATCH: int = 100              # texts per embeddings API call
+    RAG_NUM_CANDIDATES_FACTOR: int = 20  # ANN candidate pool = factor * limit
+    # Atlas Search vector index names (created by scripts/setup_vector_indexes.py).
+    KNOWLEDGE_VECTOR_INDEX: str = "kb_vector_index"
+    ATTACHMENT_VECTOR_INDEX: str = "attach_vector_index"
+    MEDIA_VECTOR_INDEX: str = "media_vector_index"
+    # Per-file content chunks for the Media Library (vector-searchable).
+    MEDIA_CHUNK_COLLECTION: str = "media_chunks"
+
     # ── Multi-modal attachments ───────────────────────────────────────────
     # Master switch for the file-upload subsystem (additive; safe to disable).
     ATTACHMENTS_ENABLED: bool = True

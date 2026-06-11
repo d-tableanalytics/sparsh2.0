@@ -20,6 +20,7 @@ from datetime import datetime
 
 from bson import ObjectId
 
+from app.assistant.config import config
 from app.db.mongodb import get_collection
 from app.services.s3_service import download_file_from_s3
 
@@ -30,6 +31,40 @@ INDEXABLE_TYPES = {"audio", "video", "pdf", "document"}
 # Cap stored text so a huge spreadsheet can't bloat the document or, later, the
 # model prompt. ~120k chars is plenty for retrieval excerpts.
 MAX_CONTENT_CHARS = 120_000
+
+
+async def _reindex_media_chunks(media_doc: dict, text: str) -> None:
+    """Chunk a file's extracted text and (re)write embedded vector chunks to the
+    media_chunks collection, so the assistant can semantically search inside
+    Media Library files. Best-effort: keyword search on content_text still works
+    if this fails. Always clears the file's old chunks first (idempotent re-index).
+    """
+    media_id = str(media_doc["_id"])
+    chunk_col = get_collection(config.MEDIA_CHUNK_COLLECTION)
+    await chunk_col.delete_many({"media_id": media_id})
+    if not text:
+        return
+
+    from app.services.gpt_service import chunk_text
+    from app.assistant.rag.embeddings import attach_embeddings
+
+    # Smaller chunks than the Support Engine default → better retrieval precision.
+    pieces = chunk_text(text, chunk_size=250, overlap=40)
+    docs = [
+        {
+            "media_id": media_id,
+            "name": media_doc.get("name"),
+            "file_name": media_doc.get("file_name"),
+            "media_type": media_doc.get("media_type"),
+            "content": p,
+            "created_at": datetime.utcnow(),
+        }
+        for p in pieces
+    ]
+    docs = await attach_embeddings(docs)
+    if docs:
+        await chunk_col.insert_many(docs)
+    print(f"[media:{media_id}] wrote {len(docs)} vector chunk(s)")
 
 
 async def index_media_library_item(media_id: str, s3_key: str, filename: str, media_type: str) -> None:
@@ -68,6 +103,11 @@ async def index_media_library_item(media_id: str, s3_key: str, filename: str, me
             }},
         )
         print(f"[media:{media_id}] indexed {len(text)} chars from {filename}")
+
+        # Vector chunks for semantic search inside the file.
+        media_doc = await col.find_one({"_id": ObjectId(media_id)})
+        if media_doc:
+            await _reindex_media_chunks(media_doc, text)
     except Exception as e:  # noqa: BLE001 — record and move on; never fail silently
         print(f"[media:{media_id}] indexing error: {e}")
         await col.update_one(

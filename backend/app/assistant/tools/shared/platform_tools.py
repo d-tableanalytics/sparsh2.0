@@ -8,6 +8,10 @@ from __future__ import annotations
 import re
 from typing import Optional
 
+from bson import ObjectId
+from bson.errors import InvalidId
+
+from app.assistant.config import config
 from app.assistant.schemas.context import UserContext
 from app.assistant.schemas.tool_result import ToolResult
 from app.assistant.security.pii import redact
@@ -138,10 +142,83 @@ def _content_excerpt(text: str, query: str, width: int = 600) -> str:
         "limit": {"type": "integer", "description": "Max files to return (default 20, max 50)"},
     },
 )
+async def _media_vector_search(query: str, media_type: Optional[str], limit: int):
+    """Semantic search over media_chunks → enriched file items (best chunk per
+    file, in vector-rank order). Returns None if vectors are unavailable, or []
+    if nothing relevant matched — both → keyword fallback."""
+    try:
+        from app.assistant.rag.embeddings import embed_query
+        from app.assistant.rag.vector_store import vector_search
+
+        vec = await embed_query(query)
+        if not vec:
+            return None
+        filt = {"media_type": media_type.strip().lower()} if media_type and media_type.strip() else None
+        # Floor weak "nearest neighbour" hits so a pure listing query ("what PDFs
+        # do we have") falls through to the keyword/metadata path instead.
+        chunks = await vector_search(
+            config.MEDIA_CHUNK_COLLECTION, config.MEDIA_VECTOR_INDEX, vec,
+            limit * 4, filter_expr=filt, min_score=0.20,
+        )
+        if not chunks:
+            return []
+
+        best: dict = {}
+        for c in chunks:  # vector results are score-desc; keep first (best) per file
+            mid = c.get("media_id")
+            if mid and mid not in best:
+                best[mid] = c
+        ordered_ids = list(best.keys())[:limit]
+
+        oids = []
+        for m in ordered_ids:
+            try:
+                oids.append(ObjectId(m))
+            except (InvalidId, TypeError):
+                pass
+        docs = await get_collection("media_library").find({"_id": {"$in": oids}}).to_list(len(oids))
+        by_id = {str(d["_id"]): d for d in docs}
+
+        items = []
+        for mid in ordered_ids:  # preserve vector ranking
+            d = by_id.get(mid)
+            c = best[mid]
+            base = d or {"name": c.get("name"), "file_name": c.get("file_name"),
+                         "media_type": c.get("media_type")}
+            items.append({
+                "name": base.get("name"),
+                "media_type": base.get("media_type"),
+                "file_name": base.get("file_name"),
+                "size_bytes": base.get("size"),
+                "folder": base.get("folder"),
+                "tags": base.get("tags") or [],
+                "uploaded_at": base.get("created_at"),
+                "content_excerpt": (c.get("content") or "")[:600],
+                "match_score": round(float(c.get("vector_score") or 0.0), 3),
+            })
+        return items
+    except Exception as e:  # noqa: BLE001
+        print(f"[rag] search_media_library vector path failed: {e}")
+        return None
+
+
 async def search_media_library(
     ctx: UserContext, query: Optional[str] = None, media_type: Optional[str] = None, limit: int = 20
 ) -> ToolResult:
     limit = _clamp(limit, 20, 50)
+
+    # Vector-first when there's a content query; falls back to keyword below.
+    if query and query.strip():
+        vec_items = await _media_vector_search(query, media_type, limit)
+        if vec_items:
+            return ToolResult.ok(
+                "search_media_library",
+                {"files": vec_items, "total_returned": len(vec_items)},
+                sources=["media_library"],
+                count=len(vec_items),
+                scope_applied="shared-library",
+            )
+
     mongo_q: dict = {}
     if media_type and media_type.strip():
         mongo_q["media_type"] = media_type.strip().lower()

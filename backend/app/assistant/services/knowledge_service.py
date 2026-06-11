@@ -21,6 +21,7 @@ from bson import ObjectId
 from bson.errors import InvalidId
 
 from app.assistant.caching import cache
+from app.assistant.config import config
 from app.assistant.schemas.context import UserContext
 from app.assistant.schemas.rag import RagRetrieval, RagSource
 from app.assistant.security.rbac import ROLE_AD, ROLE_SA, normalize_role
@@ -28,6 +29,7 @@ from app.db.mongodb import get_collection
 
 KNOWLEDGE_COLLECTION = "KnowledgeBase"
 SNIPPET_MAX = 500
+VECTOR_SNIPPET_MAX = 1400  # vector returns the relevant chunk — keep more of it
 
 
 def _maybe_oid(value: str):
@@ -142,6 +144,36 @@ def _rank(chunks: List[dict], keywords: List[str]) -> List[tuple]:
     return scored
 
 
+async def _vector_search(query: str, accessible: Optional[Set[str]], limit: int) -> List[RagSource]:
+    """Semantic retrieval over KnowledgeBase, scoped to accessible projects.
+
+    Returns [] when vectors are unavailable or nothing matches, so the caller
+    falls back to keyword search. RBAC is enforced INSIDE the vector query via
+    an Atlas pre-filter on project_id — never relaxed."""
+    from app.assistant.rag.embeddings import embed_query
+    from app.assistant.rag.vector_store import vector_search
+
+    vec = await embed_query(query)
+    if not vec:
+        return []
+    filt = {"project_id": {"$in": list(accessible)}} if accessible is not None else None
+    docs = await vector_search(
+        KNOWLEDGE_COLLECTION, config.KNOWLEDGE_VECTOR_INDEX, vec, limit, filter_expr=filt
+    )
+    return [
+        RagSource(
+            source_id=str(c.get("_id")),
+            title=c.get("filename"),
+            snippet=(c.get("content") or "")[:VECTOR_SNIPPET_MAX],
+            score=round(float(c.get("vector_score") or 0.0), 4),
+            document_id=c.get("file_id"),
+            collection=KNOWLEDGE_COLLECTION,
+            metadata={"project_id": c.get("project_id")},
+        )
+        for c in docs
+    ]
+
+
 async def search(ctx: UserContext, query: str, limit: int = 5) -> RagRetrieval:
     accessible = await get_accessible_project_ids(ctx)
 
@@ -150,6 +182,11 @@ async def search(ctx: UserContext, query: str, limit: int = 5) -> RagRetrieval:
         if not accessible:
             return RagRetrieval(query=query, sources=[], retrieval_method="keyword")
         mongo["project_id"] = {"$in": list(accessible)}
+
+    # Vector-first (semantic); falls back to keyword on any miss/error.
+    vec_sources = await _vector_search(query, accessible, limit)
+    if vec_sources:
+        return RagRetrieval(query=query, sources=vec_sources, retrieval_method="vector")
 
     col = get_collection(KNOWLEDGE_COLLECTION)
     keywords = _keywords(query)
