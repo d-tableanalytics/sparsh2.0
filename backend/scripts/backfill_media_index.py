@@ -49,8 +49,18 @@ async def main() -> None:
             mid = str(d["_id"])
             name = d.get("file_name") or d.get("name") or "media"
             print(f"  [{done + 1}/{len(docs)}] {name} ({d.get('media_type')}) ...", flush=True)
-            # Reuse the exact production indexer (download → extract → save).
-            await index_media_library_item(mid, d["s3_key"], name, d.get("media_type"))
+            # Survive a mid-run cluster flap: on any error (usually a no-primary
+            # window), reconnect and retry the SAME file instead of crashing.
+            # The file's writes are idempotent (re-index clears its old chunks),
+            # so retrying can't duplicate data.
+            for attempt in range(4):
+                try:
+                    await index_media_library_item(mid, d["s3_key"], name, d.get("media_type"))
+                    break
+                except Exception as e:  # noqa: BLE001
+                    print(f"    file errored ({str(e)[:80]}); reconnecting & retrying "
+                          f"({attempt + 1}/4)...", flush=True)
+                    await _connect_with_retry()
             done += 1
 
         print(f"Done. Indexed {done} file(s).")
