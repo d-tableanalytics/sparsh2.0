@@ -106,7 +106,7 @@ const formatSize = (bytes) => {
 
 const MediaLibrary = () => {
   const { showSuccess, showError } = useNotification();
-  const { enqueueFiles } = useUploadQueue();
+  const { enqueueFiles, queue } = useUploadQueue();
   const fileInputRef = useRef(null);
   const conflictResolverRef = useRef(null);
 
@@ -152,6 +152,18 @@ const MediaLibrary = () => {
     fetchItems();
     fetchFolders();
   }, []);
+
+  // The upload manager runs in a separate context, so completed uploads don't
+  // land in this list on their own. Re-fetch whenever an upload finishes.
+  const prevCompletedCount = useRef(0);
+  useEffect(() => {
+    const completedCount = queue.filter((u) => u.status === 'completed').length;
+    if (completedCount > prevCompletedCount.current) {
+      fetchItems();
+      fetchFolders();
+    }
+    prevCompletedCount.current = completedCount;
+  }, [queue]);
 
   const setSelectedFiles = (selectedFiles) => {
     // For high volume uploads, support multiple files
