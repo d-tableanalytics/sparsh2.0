@@ -1,9 +1,19 @@
 import React from 'react';
 import { Plus, Trash2, MessageSquare, X } from 'lucide-react';
 
+// Backend sends naive UTC timestamps (no 'Z'/offset). Browsers parse those as
+// local time, skewing every entry by the user's UTC offset (e.g. +5:30 made
+// recent chats read "5h ago"). Treat a tz-less string as UTC.
+function parseUtc(iso) {
+  if (typeof iso === 'string' && !/[zZ]|[+-]\d{2}:?\d{2}$/.test(iso)) {
+    return new Date(`${iso}Z`).getTime();
+  }
+  return new Date(iso).getTime();
+}
+
 function relativeTime(iso) {
   if (!iso) return '';
-  const then = new Date(iso).getTime();
+  const then = parseUtc(iso);
   if (Number.isNaN(then)) return '';
   const diff = Math.max(0, Date.now() - then);
   const mins = Math.floor(diff / 60000);
@@ -12,7 +22,7 @@ function relativeTime(iso) {
   const hrs = Math.floor(mins / 60);
   if (hrs < 24) return `${hrs}h ago`;
   const days = Math.floor(hrs / 24);
-  return days < 7 ? `${days}d ago` : new Date(iso).toLocaleDateString();
+  return days < 7 ? `${days}d ago` : new Date(then).toLocaleDateString();
 }
 
 function Skeleton() {
