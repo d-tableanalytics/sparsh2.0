@@ -238,7 +238,7 @@ const TeamManagement = () => {
                              </div>
 
                              <form onSubmit={handleAddMember} className="p-8 overflow-y-auto space-y-5 scrollbar-thin scrollbar-thumb-gray-200">
-                                 <div className="grid grid-cols-2 gap-4">
+                                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                                      <div className="space-y-1.5">
                                          <label className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest px-1">First Name</label>
                                          <input required className="w-full bg-[var(--input-bg)] px-5 py-2.5 rounded-2xl border border-[var(--border)] text-[14px] font-black focus:border-[var(--accent-indigo)] outline-none" placeholder="e.g. Alan" value={memberForm.first_name} onChange={e => setMemberForm({...memberForm, first_name: e.target.value})} />
@@ -249,7 +249,7 @@ const TeamManagement = () => {
                                      </div>
                                  </div>
 
-                                 <div className="grid grid-cols-2 gap-4">
+                                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                                      <div className="space-y-1.5">
                                          <label className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest px-1">Work Email *</label>
                                          <input required type="email" className="w-full bg-[var(--input-bg)] px-5 py-2.5 rounded-2xl border border-[var(--border)] text-[14px] font-black focus:border-[var(--accent-indigo)] outline-none" placeholder="name@domain.com" value={memberForm.email} onChange={e => setMemberForm({...memberForm, email: e.target.value})} />
@@ -260,7 +260,7 @@ const TeamManagement = () => {
                                      </div>
                                  </div>
 
-                                 <div className="grid grid-cols-2 gap-4">
+                                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                                      <div className="space-y-1.5">
                                          <label className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest px-1">Temp Password *</label>
                                          <input required type="password" placeholder="Set temporary password..." className="w-full bg-[var(--input-bg)] px-5 py-2.5 rounded-2xl border border-[var(--border)] text-[14px] font-black focus:border-[var(--accent-indigo)] outline-none" value={memberForm.password} onChange={e => setMemberForm({...memberForm, password: e.target.value})} />
@@ -271,7 +271,7 @@ const TeamManagement = () => {
                                      </div>
                                  </div>
 
-                                 <div className="grid grid-cols-2 gap-4">
+                                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                                      <div className="space-y-1.5">
                                          <label className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest px-1">Session Type</label>
                                          <select className="w-full bg-[var(--input-bg)] px-5 py-2.5 rounded-2xl border border-[var(--border)] text-[14px] font-black focus:border-[var(--accent-indigo)] outline-none" value={memberForm.session_type} onChange={e => setMemberForm({...memberForm, session_type: e.target.value})}>

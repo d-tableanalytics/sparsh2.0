@@ -100,7 +100,7 @@ const UserManagement = () => {
 
             {/* Filters Bar */}
             <div className="flex flex-col md:flex-row items-center gap-4 bg-[var(--bg-card)] p-4 rounded-[24px] border border-[var(--border)] shadow-sm">
-                <div className="relative flex-1 group">
+                <div className="relative w-full md:flex-1 group">
                     <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-[var(--text-muted)] transition-colors group-focus-within:text-[var(--accent-indigo)]" size={18} />
                     <input 
                         placeholder="Search by name or email..." 
@@ -108,10 +108,10 @@ const UserManagement = () => {
                         value={searchTerm} onChange={e => setSearchTerm(e.target.value)}
                     />
                 </div>
-                <div className="flex items-center gap-2 overflow-x-auto no-scrollbar">
+                <div className="flex items-center gap-2 overflow-x-auto no-scrollbar w-full md:w-auto justify-start md:justify-end pb-1 md:pb-0">
                     {['All', 'Superadmin', 'Admin', 'Coach'].map(role => (
                         <button key={role} onClick={() => setFilterRole(role)}
-                            className={`px-6 py-2.5 rounded-xl text-[12px] font-black transition-all border ${filterRole === role ? 'bg-[var(--accent-indigo)] text-white border-[var(--accent-indigo)] shadow-lg shadow-indigo-200' : 'bg-[var(--bg-card)] text-[var(--text-muted)] border-[var(--border)] hover:border-[var(--accent-indigo)]'}`}>
+                            className={`px-6 py-2.5 rounded-xl text-[12px] font-black transition-all border shrink-0 ${filterRole === role ? 'bg-[var(--accent-indigo)] text-white border-[var(--accent-indigo)] shadow-lg shadow-indigo-200' : 'bg-[var(--bg-card)] text-[var(--text-muted)] border-[var(--border)] hover:border-[var(--accent-indigo)]'}`}>
                             {role}
                         </button>
                     ))}
@@ -188,7 +188,7 @@ const UserManagement = () => {
                             </div>
 
                             <form onSubmit={handleAddStaff} className="p-8 overflow-y-auto no-scrollbar space-y-6">
-                                <div className="grid grid-cols-2 gap-4">
+                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                                     <div className="space-y-1.5">
                                         <label className="text-[10px] font-black text-[var(--text-muted)] uppercase px-2">First Name</label>
                                         <input required className="w-full bg-[var(--input-bg)] px-4 py-2.5 rounded-xl border border-[var(--border)] text-[13px] font-bold" value={staffForm.first_name} onChange={e => setStaffForm({...staffForm, first_name: e.target.value})} />
@@ -199,7 +199,7 @@ const UserManagement = () => {
                                     </div>
                                 </div>
 
-                                <div className="grid grid-cols-2 gap-4">
+                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                                     <div className="space-y-1.5">
                                         <label className="text-[10px] font-black text-[var(--text-muted)] uppercase px-2">Email Identity</label>
                                         <input required type="email" className="w-full bg-[var(--input-bg)] px-4 py-2.5 rounded-xl border border-[var(--border)] text-[13px] font-bold" value={staffForm.email} onChange={e => setStaffForm({...staffForm, email: e.target.value})} />
@@ -210,7 +210,7 @@ const UserManagement = () => {
                                     </div>
                                 </div>
 
-                                <div className="grid grid-cols-2 gap-4">
+                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                                     <div className="space-y-1.5">
                                         <label className="text-[10px] font-black text-[var(--text-muted)] uppercase px-2">Direct Contact</label>
                                         <input type="tel" className="w-full bg-[var(--input-bg)] px-4 py-2.5 rounded-xl border border-[var(--border)] text-[13px] font-bold" value={staffForm.mobile} onChange={e => setStaffForm({...staffForm, mobile: e.target.value})} />
@@ -237,9 +237,9 @@ const UserManagement = () => {
                                             { id: 'logs', label: 'Log Access' },
                                             { id: 'templates', label: 'Template Designer' }
                                         ].map(mod => (
-                                            <div key={mod.id} className="flex items-center justify-between p-3 bg-[var(--bg-card)] rounded-2xl border border-[var(--border)] group">
+                                            <div key={mod.id} className="flex flex-col sm:flex-row sm:items-center justify-between p-3 gap-3 bg-[var(--bg-card)] rounded-2xl border border-[var(--border)] group">
                                                 <span className="text-[11px] font-black text-[var(--text-main)] group-hover:text-[var(--accent-indigo)]">{mod.label}</span>
-                                                <div className="flex items-center gap-4">
+                                                <div className="flex flex-wrap items-center gap-4">
                                                     {['create', 'read', 'update', 'delete'].map(action => (
                                                         <label key={action} className="flex items-center gap-1.5 cursor-pointer">
                                                             <input type="checkbox" 

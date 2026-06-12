@@ -3,12 +3,12 @@ import { useTheme } from '../../context/ThemeContext';
 import { useAuth } from '../../context/AuthContext';
 import { Link, useNavigate } from 'react-router-dom';
 import {
-  Sun, Moon, Bell, Search, ChevronDown, Settings, User, LogOut
+  Sun, Moon, Bell, Search, ChevronDown, Settings, User, LogOut, Menu
 } from 'lucide-react';
 import NotificationDrawer from './NotificationDrawer';
 import api from '../../services/api';
 
-const Navbar = () => {
+const Navbar = ({ onMenuClick }) => {
   const { theme, toggleTheme } = useTheme();
   const { user, logout } = useAuth();
 
@@ -36,9 +36,16 @@ const Navbar = () => {
   }, [user]);
 
   return (
-    <nav className="h-14 px-6 flex items-center justify-between border-b border-[var(--border)] bg-[var(--bg-card)] sticky top-0 z-30 transition-all duration-300">
-      <div className="flex-1 max-w-sm">
-        <div className="relative">
+    <nav className="py-2 md:py-0 h-auto md:h-14 px-6 flex items-center justify-between border-b border-[var(--border)] bg-[var(--bg-card)] sticky top-0 z-30 transition-all duration-300">
+      <div className="flex items-center gap-3 flex-1 max-w-sm">
+        <button
+          onClick={onMenuClick}
+          className="p-2 text-[var(--text-muted)] hover:text-[var(--text-main)] hover:bg-[var(--input-bg)] rounded-lg md:hidden transition-all cursor-pointer"
+          aria-label="Open Menu"
+        >
+          <Menu size={20} />
+        </button>
+        <div className="relative flex-1">
           <Search size={14} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-[var(--text-muted)]" />
           <input
             type="text"
@@ -48,7 +55,7 @@ const Navbar = () => {
         </div>
       </div>
 
-      <div className="flex items-center gap-4">
+      <div className="hidden md:flex items-center gap-4">
         <div className="flex items-center gap-1 bg-[var(--input-bg)] p-1 rounded-lg border border-[var(--input-border)]">
           <button
             onClick={toggleTheme}
@@ -75,12 +82,6 @@ const Navbar = () => {
             </span>
           )}
         </button>
-
-        <NotificationDrawer
-          isOpen={isNotificationsOpen}
-          onClose={() => setIsNotificationsOpen(false)}
-          onCountChange={setUnreadCount}
-        />
 
         {user?.role === 'superadmin' && (
           <Link to="/admin/settings" className="p-2 text-[var(--text-muted)] hover:text-[var(--accent-indigo)] hover:bg-[var(--accent-indigo-bg)] rounded-lg transition-all">
@@ -130,6 +131,12 @@ const Navbar = () => {
           )}
         </div>
       </div>
+
+      <NotificationDrawer
+        isOpen={isNotificationsOpen}
+        onClose={() => setIsNotificationsOpen(false)}
+        onCountChange={setUnreadCount}
+      />
     </nav>
   );
 };

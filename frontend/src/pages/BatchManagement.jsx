@@ -162,8 +162,8 @@ const BatchManagement = () => {
         </motion.div>
       ) : (
         /* Table View */
-        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="bg-[var(--bg-card)] border border-[var(--border)] rounded-xl overflow-hidden">
-          <table className="w-full">
+        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="bg-[var(--bg-card)] border border-[var(--border)] rounded-xl overflow-x-auto no-scrollbar">
+          <table className="w-full min-w-[700px]">
             <thead>
               <tr className="bg-[var(--table-header-bg)] border-b border-[var(--border)]">
                 <th className="px-5 py-3 text-left text-[11px] font-bold text-[var(--text-muted)] uppercase tracking-wider">Batch</th>
@@ -236,7 +236,7 @@ const BatchManagement = () => {
             <textarea rows={2} className="w-full px-3 py-1.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-md text-[13px] text-[var(--text-main)] outline-none resize-none"
               value={form.description} onChange={e => setForm({ ...form, description: e.target.value })} />
           </div>
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div className="space-y-1">
               <label className="text-[10px] font-bold text-[var(--text-muted)] uppercase tracking-widest">Start Date</label>
               <input type="date" className="w-full px-3 py-1.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-md text-[13px] text-[var(--text-main)] outline-none"
