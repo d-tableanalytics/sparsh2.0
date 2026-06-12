@@ -36,16 +36,16 @@ const Navbar = ({ onMenuClick }) => {
   }, [user]);
 
   return (
-    <nav className="py-2 md:py-0 h-auto md:h-14 px-6 flex items-center justify-between border-b border-[var(--border)] bg-[var(--bg-card)] sticky top-0 z-30 transition-all duration-300">
-      <div className="flex items-center gap-3 flex-1 max-w-sm">
+    <nav className="h-14 px-4 sm:px-6 flex items-center justify-between gap-3 border-b border-[var(--border)] bg-[var(--bg-card)] sticky top-0 z-30 transition-all duration-300">
+      <div className="flex items-center gap-3 flex-1 max-w-sm min-w-0">
         <button
           onClick={onMenuClick}
-          className="p-2 text-[var(--text-muted)] hover:text-[var(--text-main)] hover:bg-[var(--input-bg)] rounded-lg md:hidden transition-all cursor-pointer"
+          className="p-2 text-[var(--text-muted)] hover:text-[var(--text-main)] hover:bg-[var(--input-bg)] rounded-lg md:hidden transition-all cursor-pointer shrink-0"
           aria-label="Open Menu"
         >
           <Menu size={20} />
         </button>
-        <div className="relative flex-1">
+        <div className="relative flex-1 hidden sm:block">
           <Search size={14} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-[var(--text-muted)]" />
           <input
             type="text"
@@ -55,7 +55,7 @@ const Navbar = ({ onMenuClick }) => {
         </div>
       </div>
 
-      <div className="hidden md:flex items-center gap-4">
+      <div className="flex items-center gap-2 sm:gap-3 md:gap-4 shrink-0">
         <div className="flex items-center gap-1 bg-[var(--input-bg)] p-1 rounded-lg border border-[var(--input-border)]">
           <button
             onClick={toggleTheme}
@@ -89,7 +89,7 @@ const Navbar = ({ onMenuClick }) => {
           </Link>
         )}
 
-        <div className="h-6 w-px bg-[var(--border)] mx-1"></div>
+        <div className="h-6 w-px bg-[var(--border)] mx-1 hidden sm:block"></div>
 
         <div className="relative">
           <button

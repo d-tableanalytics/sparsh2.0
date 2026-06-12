@@ -1,11 +1,10 @@
 import React, { useState, useEffect } from 'react';
-import { NavLink, Link } from 'react-router-dom';
+import { NavLink } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   LayoutDashboard, Users, Briefcase, CheckSquare,
   Settings, Building2,
-  PieChart, MessageSquare, LogOut, Layers, Copy, Calendar, Sparkles, PlayCircle, Target, BarChart3, Library, X,
-  Sun, Moon, Bell, User
+  PieChart, MessageSquare, LogOut, Layers, Copy, Calendar, Sparkles, PlayCircle, Target, BarChart3, Library, X
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 
@@ -15,16 +14,12 @@ import logo3 from '../../assets/Sparsh Magic white  Logo PNG3.png';
 import dtableLogo from '../../assets/D-Table_Logo.png';
 import dtableFull from '../../assets/D-Table Analytics-Picsart-BackgroundRemover.jpeg';
 import { useTheme } from '../../context/ThemeContext';
-import NotificationDrawer from './NotificationDrawer';
-import api from '../../services/api';
 
 const Sidebar = ({ isMobileOpen, setIsMobileOpen }) => {
   const { user, logout } = useAuth();
-  const { theme, toggleTheme } = useTheme();
+  const { theme } = useTheme();
   const [isCollapsed, setIsCollapsed] = useState(true);
   const [isMobile, setIsMobile] = useState(false);
-  const [isNotificationsOpen, setIsNotificationsOpen] = useState(false);
-  const [unreadCount, setUnreadCount] = useState(0);
 
   useEffect(() => {
     const checkMobile = () => {
@@ -34,23 +29,6 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen }) => {
     window.addEventListener('resize', checkMobile);
     return () => window.removeEventListener('resize', checkMobile);
   }, []);
-
-  useEffect(() => {
-    const fetchUnreadCount = async () => {
-      try {
-        const response = await api.get('/notifications/unread-count');
-        setUnreadCount(response.data.count);
-      } catch (error) {
-        console.error('Error fetching unread count:', error);
-      }
-    };
-
-    if (user && isMobile) {
-      fetchUnreadCount();
-      const interval = setInterval(fetchUnreadCount, 30000);
-      return () => clearInterval(interval);
-    }
-  }, [user, isMobile]);
 
   const links = [
     { name: 'Dashboard', path: '/', icon: LayoutDashboard, roles: ['superadmin', 'admin', 'clientadmin', 'clientuser', 'coach', 'staff'] },
@@ -124,77 +102,6 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen }) => {
         </AnimatePresence>
       </div>
 
-      {/* Mobile Quick Actions / Profile Section */}
-      {isMobile && (
-        <div className="px-5 py-4 border-b border-[var(--sidebar-border)] space-y-4">
-          <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-lg flex items-center justify-center text-white font-bold text-[11px]" style={{ background: 'var(--avatar-bg)' }}>
-              {user?.full_name?.charAt(0) || 'U'}
-            </div>
-            <div className="flex flex-col">
-              <span className="text-[13px] font-bold text-[var(--text-main)] leading-none">{user?.full_name || 'Guest'}</span>
-              <span className="text-[10px] text-[var(--accent-indigo)] font-bold uppercase tracking-tight mt-1">{user?.role || 'User'}</span>
-            </div>
-          </div>
-
-          <div className="flex items-center justify-between pt-2">
-            {/* Theme Toggle */}
-            <div className="flex items-center gap-1 bg-[var(--input-bg)] p-1 rounded-lg border border-[var(--input-border)]">
-              <button
-                onClick={toggleTheme}
-                className={`p-1.5 rounded-md transition-all ${theme === 'light' ? 'bg-[var(--accent-orange-bg)] text-[var(--accent-orange)] shadow-sm' : 'text-[var(--text-muted)]'}`}
-              >
-                <Sun size={14} />
-              </button>
-              <button
-                onClick={toggleTheme}
-                className={`p-1.5 rounded-md transition-all ${theme === 'dark' ? 'bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] shadow-sm' : 'text-[var(--text-muted)]'}`}
-              >
-                <Moon size={14} />
-              </button>
-            </div>
-
-            {/* Notifications, Settings & Profile */}
-            <div className="flex items-center gap-1.5">
-              <button
-                onClick={() => {
-                  setIsNotificationsOpen(true);
-                  setIsMobileOpen(false);
-                }}
-                className="p-2 text-[var(--text-muted)] hover:text-[var(--accent-orange)] hover:bg-[var(--accent-orange-bg)] rounded-lg transition-all relative cursor-pointer"
-              >
-                <Bell size={18} />
-                {unreadCount > 0 && (
-                  <span className="absolute top-1 right-1 min-w-[16px] h-4 px-1 flex items-center justify-center bg-[var(--accent-red)] text-white text-[9px] font-bold border border-[var(--bg-card)] rounded-full">
-                    {unreadCount > 9 ? '9+' : unreadCount}
-                  </span>
-                )}
-              </button>
-
-              {user?.role === 'superadmin' && (
-                <Link
-                  to="/admin/settings"
-                  onClick={() => setIsMobileOpen(false)}
-                  className="p-2 text-[var(--text-muted)] hover:text-[var(--accent-indigo)] hover:bg-[var(--accent-indigo-bg)] rounded-lg transition-all"
-                  title="Settings"
-                >
-                  <Settings size={18} />
-                </Link>
-              )}
-
-              <Link
-                to="/profile"
-                onClick={() => setIsMobileOpen(false)}
-                className="p-2 text-[var(--text-muted)] hover:text-[var(--accent-indigo)] hover:bg-[var(--accent-indigo-bg)] rounded-lg transition-all"
-                title="Manage Profile"
-              >
-                <User size={18} />
-              </Link>
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* Main Links */}
       <nav className="flex-1 px-3 space-y-1 overflow-y-auto no-scrollbar">
         {filteredLinks.map((link) => (
@@ -256,13 +163,6 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen }) => {
           />
         </div>
       </div>
-
-      {/* Notification Drawer */}
-      <NotificationDrawer
-        isOpen={isNotificationsOpen}
-        onClose={() => setIsNotificationsOpen(false)}
-        onCountChange={setUnreadCount}
-      />
     </motion.aside>
   );
 };
