@@ -4,6 +4,7 @@ import subprocess
 import tempfile
 import uuid
 from datetime import datetime
+from typing import Any, Optional
 from bson import ObjectId
 from app.db.mongodb import get_collection
 from app.services.s3_service import get_s3_client, get_signed_url, download_file_from_s3
@@ -52,6 +53,106 @@ async def _whisper_transcribe(filepath: str):
         print(f"Whisper transcription failed ({e}); falling back to Google SR")
         return None
 
+
+def _get_attr(obj: Any, key: str, default=None):
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+
+def _fmt_time(value: Optional[float]) -> str:
+    if value is None:
+        return "?:??"
+    seconds = max(0, int(float(value)))
+    return f"{seconds // 60:02d}:{seconds % 60:02d}"
+
+
+def _extract_text(resp: Any) -> str:
+    if isinstance(resp, str):
+        return resp.strip()
+    return str(_get_attr(resp, "text", "") or "").strip()
+
+
+def _format_segments(resp: Any, default_speaker: str = "Speaker") -> Optional[str]:
+    segments = _get_attr(resp, "segments")
+    if not segments:
+        return None
+    lines = []
+    for i, seg in enumerate(segments, start=1):
+        text = str(_get_attr(seg, "text", "") or "").strip()
+        if not text:
+            continue
+        speaker = _get_attr(seg, "speaker") or f"{default_speaker} {i}"
+        start = _fmt_time(_get_attr(seg, "start"))
+        end = _fmt_time(_get_attr(seg, "end"))
+        lines.append(f"[{start}-{end}] {speaker}: {text}")
+    return "\n".join(lines).strip() or None
+
+
+async def _openai_transcribe(filepath: str, *, model: str, response_format: str, **kwargs):
+    if not whisper_available():
+        return None
+    from openai import AsyncOpenAI
+
+    client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+    with open(filepath, "rb") as fh:
+        return await client.audio.transcriptions.create(
+            model=model,
+            file=fh,
+            response_format=response_format,
+            **kwargs,
+        )
+
+
+async def _openai_best_transcribe(filepath: str) -> Optional[str]:
+    """Best-effort chain: diarization, high-quality transcription, timestamps."""
+    if not whisper_available():
+        return None
+
+    if getattr(settings, "ENABLE_AUDIO_DIARIZATION", True):
+        try:
+            resp = await _openai_transcribe(
+                filepath,
+                model=getattr(settings, "AUDIO_DIARIZATION_MODEL", "gpt-4o-transcribe-diarize"),
+                response_format="diarized_json",
+                chunking_strategy="auto",
+            )
+            diarized = _format_segments(resp)
+            if diarized:
+                return "[Speaker-aware transcript]\n" + diarized
+            text = _extract_text(resp)
+            if text:
+                return text
+        except Exception as e:  # noqa: BLE001
+            print(f"OpenAI diarized transcription failed ({e}); trying standard transcription")
+
+    try:
+        resp = await _openai_transcribe(
+            filepath,
+            model=getattr(settings, "AUDIO_TRANSCRIPTION_MODEL", "gpt-4o-transcribe"),
+            response_format="json",
+        )
+        text = _extract_text(resp)
+        if text:
+            return text
+    except Exception as e:  # noqa: BLE001
+        print(f"OpenAI standard transcription failed ({e}); trying Whisper timestamps")
+
+    try:
+        resp = await _openai_transcribe(
+            filepath,
+            model="whisper-1",
+            response_format="verbose_json",
+            timestamp_granularities=["segment"],
+        )
+        segmented = _format_segments(resp, default_speaker="Audio")
+        if segmented:
+            return "[Timestamped transcript]\n" + segmented
+        return _extract_text(resp) or None
+    except Exception as e:  # noqa: BLE001
+        print(f"Whisper timestamp transcription failed ({e}); trying legacy Whisper text")
+        return await _whisper_transcribe(filepath)
+
 async def upload_large_file_to_s3(local_path: str, filename: str, content_type: str) -> str:
     s3_client = get_s3_client()
     bucket_name = settings.S3_BUCKET_NAME
@@ -92,10 +193,66 @@ def sync_transcribe_wav(filepath: str) -> str:
         print(f"Google SR request error: {e}")
         return ""
 
+
+def _segment_label(index: int, seconds: int = 60) -> str:
+    start = index * seconds
+    end = start + seconds
+
+    def fmt(value: int) -> str:
+        return f"{value // 60:02d}:{value % 60:02d}"
+
+    return f"[Segment {index + 1} {fmt(start)}-{fmt(end)}]"
+
+
+async def _enrich_transcript(transcript: str) -> str:
+    """Create a compact, retrieval-friendly index for long audio/video.
+
+    This does not replace the transcript. It prepends a grounded map of what is
+    mentioned so later questions like "who was named?", "what characters are
+    there?", or "tell everything in the audio" retrieve the right evidence fast.
+    """
+    text = (transcript or "").strip()
+    if not text or not whisper_available():
+        return text
+    try:
+        from openai import AsyncOpenAI
+
+        client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+        sample = text[:120000]
+        resp = await client.chat.completions.create(
+            model=getattr(settings, "AUDIO_ENRICHMENT_MODEL", "gpt-4o-mini"),
+            temperature=0,
+            messages=[{
+                "role": "user",
+                "content": (
+                    "Analyze the transcript below for retrieval and question answering. "
+                    "Use ONLY the transcript. If a name, speaker, character, place, "
+                    "date, amount, decision, task, or topic is unclear, mark it as "
+                    "unclear instead of guessing.\n\n"
+                    "Return concise Markdown with these sections:\n"
+                    "## Audio Intelligence Index\n"
+                    "- Short summary\n"
+                    "- People / speakers / characters mentioned\n"
+                    "- Important topics and claims\n"
+                    "- Decisions, action items, dates, amounts, and deadlines\n"
+                    "- Key timeline moments with timestamps or segment labels if present\n\n"
+                    f"Transcript:\n{sample}"
+                ),
+            }],
+            max_tokens=900,
+        )
+        index = (resp.choices[0].message.content or "").strip()
+        if not index:
+            return text
+        return f"{index}\n\n## Full Transcript\n{text}"
+    except Exception as e:  # noqa: BLE001
+        print(f"Transcript enrichment failed ({e}); using raw transcript")
+        return text
+
 async def transcribe_audio_chunk(filepath: str) -> str:
-    # Whisper first (far more accurate, multilingual); fall back to the offline
-    # Google recognizer only if Whisper is unavailable or errors.
-    text = await _whisper_transcribe(filepath)
+    # OpenAI best chain first; fall back to the offline Google recognizer only
+    # if every OpenAI path is unavailable or errors.
+    text = await _openai_best_transcribe(filepath)
     if text is not None:
         return text
     loop = asyncio.get_event_loop()
@@ -116,10 +273,10 @@ async def transcribe_media_file(local_file_path: str, progress_callback=None) ->
     # (mp3/m4a/mp4/wav...) directly under its 25 MB limit. Try that before giving
     # up — it removes the hard ffmpeg dependency for typical-sized uploads.
     if not ffmpeg_bin:
-        whole = await _whisper_transcribe(local_file_path)
+        whole = await _openai_best_transcribe(local_file_path)
         if progress_callback:
             await progress_callback(95)
-        return whole or ""
+        return await _enrich_transcript(whole or "")
 
     with tempfile.TemporaryDirectory() as temp_dir:
         # Segment exactly 60 seconds of 16kHz mono audio.
@@ -149,9 +306,11 @@ async def transcribe_media_file(local_file_path: str, progress_callback=None) ->
                 tasks = [transcribe_audio_chunk(os.path.join(temp_dir, cf)) for cf in batch]
                 results = await asyncio.gather(*tasks, return_exceptions=True)
                 
-                for res in results:
+                for offset, res in enumerate(results):
                     if not isinstance(res, Exception) and res:
-                        valid_texts.append(res)
+                        valid_texts.append(
+                            f"{_segment_label(i + offset)}\n{str(res).strip()}"
+                        )
                         
                 if progress_callback:
                     # Report progress from 10% (ffmpeg done) up to 90%
@@ -159,8 +318,8 @@ async def transcribe_media_file(local_file_path: str, progress_callback=None) ->
                     await progress_callback(percent)
             
             
-            final_transcription = " ".join(valid_texts)
-    return final_transcription
+            final_transcription = "\n\n".join(valid_texts)
+    return await _enrich_transcript(final_transcription)
 
 async def process_background_upload_and_transcribe(
     event_id: str, 

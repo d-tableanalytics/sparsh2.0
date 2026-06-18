@@ -132,8 +132,12 @@ async def test_context_building():
     async def fake_link(ctx, ids, cid):
         return None
 
+    async def fake_ensure(cid, aid, filename, text):
+        return None
+
     attachment_store.get_many_for_user = fake_get_many
     attachment_store.link_to_conversation = fake_link
+    attachment_store.ensure_chunks_for_conversation = fake_ensure
 
     out = await attachment_service.build_attachment_context(USER, [str(oid)], "CONV1")
     check("text block names the file", "contract.pdf" in out["text_block"])
@@ -198,7 +202,7 @@ async def test_orchestrator_injection():
     query_rewriter.rewrite = _no_rewrite
 
     # Force an attachment context with an image so we can assert vision blocks.
-    async def _ctx(ctx, ids, cid):
+    async def _ctx(ctx, ids, cid, query=""):
         return {"text_block": "\n\n[Attached files]\n## a.png (image)\n",
                 "images": ["data:image/png;base64,ZZZ"],
                 "metas": [{"id": "att1", "filename": "a.png", "kind": "image"}]}
@@ -286,7 +290,7 @@ async def test_empty_message_defaults_to_summary():
         return {"rewritten": False, "rewritten_query": message}
     query_rewriter.rewrite = _spy_rewrite
 
-    async def _ctx(ctx, ids, cid):
+    async def _ctx(ctx, ids, cid, query=""):
         return {"text_block": "\n\n[Attached files]\n## report.pdf (document)\nbody text\n",
                 "images": [],
                 "metas": [{"id": "att1", "filename": "report.pdf", "kind": "document"}]}

@@ -109,6 +109,15 @@ async def set_extraction(
     )
 
 
+async def set_summary(attachment_id: str, summary: Optional[str]) -> None:
+    """Fill in the one-line summary after the file is already 'completed'.
+    Kept separate so summary generation never blocks the file becoming usable."""
+    await get_collection(COLL).update_one(
+        {"_id": _oid(attachment_id)},
+        {"$set": {"summary": summary, "updated_at": datetime.utcnow()}},
+    )
+
+
 async def set_failed(attachment_id: str, error: str) -> None:
     await get_collection(COLL).update_one(
         {"_id": _oid(attachment_id)},
@@ -177,15 +186,38 @@ async def delete_for_user(ctx: UserContext, attachment_id: str) -> dict:
 
 # ── Retrieval chunks (back the search_uploaded_files tool) ─────────────────
 async def save_chunks(conversation_id: Optional[str], attachment_id: str,
-                      filename: str, chunks: List[str]) -> None:
+                      filename: str, chunks: List) -> None:
     if not chunks or not conversation_id:
         return
     await ensure_indexes()
-    docs = [
-        {"conversation_id": conversation_id, "attachment_id": attachment_id,
-         "filename": filename, "content": c, "created_at": datetime.utcnow()}
-        for c in chunks
-    ]
+    now = datetime.utcnow()
+    docs = []
+    for i, chunk in enumerate(chunks):
+        if isinstance(chunk, dict):
+            content = (chunk.get("content") or "").strip()
+            meta = {k: v for k, v in chunk.items() if k != "content" and v is not None}
+        else:
+            content = str(chunk or "").strip()
+            meta = {"chunk_index": i}
+        if not content:
+            continue
+        docs.append({
+            "conversation_id": conversation_id,
+            "attachment_id": attachment_id,
+            "filename": filename,
+            "content": content,
+            "chunk_index": meta.get("chunk_index", i),
+            "page_start": meta.get("page_start"),
+            "page_end": meta.get("page_end"),
+            "char_start": meta.get("char_start"),
+            "char_end": meta.get("char_end"),
+            "created_at": now,
+        })
+    if not docs:
+        return
+    await get_collection(CHUNK_COLL).delete_many(
+        {"conversation_id": conversation_id, "attachment_id": attachment_id}
+    )
     # Embeddings for vector search (best-effort; keyword search still works).
     from app.assistant.rag.embeddings import attach_embeddings
     docs = await attach_embeddings(docs)
@@ -212,8 +244,8 @@ async def ensure_chunks_for_conversation(
     )
     if existing:
         return
-    from app.services.gpt_service import chunk_text
-    await save_chunks(conversation_id, attachment_id, filename, chunk_text(text))
+    from app.assistant.rag.chunking import smart_chunk_records
+    await save_chunks(conversation_id, attachment_id, filename, smart_chunk_records(text))
 
 
 async def conversation_has_attachments(ctx: UserContext, conversation_id: str) -> bool:
@@ -244,22 +276,65 @@ async def _vector_chunks(conversation_id: str, query: str, limit: int) -> List[d
         return []
 
 
-async def search_chunks(conversation_id: str, query: str, limit: int = 6) -> List[dict]:
+def _chunk_key(doc: dict) -> str:
+    return str(doc.get("_id") or f"{doc.get('attachment_id')}:{doc.get('chunk_index')}")
+
+
+def _keyword_score(doc: dict, keywords: List[str]) -> int:
+    content = (doc.get("content") or "").lower()
+    filename = (doc.get("filename") or "").lower()
+    score = 0
+    for k in keywords:
+        raw = k.replace("\\", "")
+        if raw and raw in content:
+            score += 3
+        if raw and raw in filename:
+            score += 2
+    return score
+
+
+def _rank_chunks(docs: List[dict], keywords: List[str]) -> List[dict]:
+    ranked = []
+    for doc in docs:
+        vector_score = float(doc.get("vector_score") or 0.0)
+        lexical = _keyword_score(doc, keywords)
+        doc["_retrieval_score"] = lexical + vector_score
+        ranked.append(doc)
+    ranked.sort(
+        key=lambda d: (
+            -float(d.get("_retrieval_score") or 0),
+            d.get("filename") or "",
+            int(d.get("chunk_index") or 0),
+        )
+    )
+    return ranked
+
+
+async def search_chunks(conversation_id: str, query: str, limit: int = 8) -> List[dict]:
     """Retrieval over a conversation's attachment chunks — vector-first
     (semantic), keyword fallback."""
-    vec_docs = await _vector_chunks(conversation_id, query, limit)
-    if vec_docs:
-        return vec_docs
-
     from app.services.gpt_service import _kb_keywords
 
     col = get_collection(CHUNK_COLL)
-    # Word-tokenized + escaped: raw tokens like "c++" or "(forecast)" would
-    # otherwise produce an invalid $regex and fail the whole tool call.
     keywords = _kb_keywords(query)
+    candidate_limit = max(limit * 4, 40)
+    docs_by_key = {}
+
+    for doc in await _vector_chunks(conversation_id, query, candidate_limit):
+        docs_by_key[_chunk_key(doc)] = doc
+
     if keywords:
         q = {"conversation_id": conversation_id,
              "content": {"$regex": "|".join(keywords), "$options": "i"}}
+        keyword_docs = await col.find(q).limit(candidate_limit).to_list(candidate_limit)
+        for doc in keyword_docs:
+            docs_by_key.setdefault(_chunk_key(doc), doc)
     else:
-        q = {"conversation_id": conversation_id}
-    return await col.find(q).limit(limit).to_list(limit)
+        if not docs_by_key:
+            fallback = await col.find({"conversation_id": conversation_id}).sort(
+                [("filename", 1), ("chunk_index", 1)]
+            ).limit(candidate_limit).to_list(candidate_limit)
+            for doc in fallback:
+                docs_by_key.setdefault(_chunk_key(doc), doc)
+
+    return _rank_chunks(list(docs_by_key.values()), keywords)[:limit]

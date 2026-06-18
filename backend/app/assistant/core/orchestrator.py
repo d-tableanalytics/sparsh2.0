@@ -95,7 +95,7 @@ class Orchestrator:
         if has_attachments:
             from app.assistant.files import service as attachment_service
             attach = await attachment_service.build_attachment_context(
-                ctx, attachment_ids, convo.id
+                ctx, attachment_ids, convo.id, query=effective
             )
             attach_metas = attach["metas"]
             user_text = effective + (attach["text_block"] or "")
@@ -115,21 +115,15 @@ class Orchestrator:
             # document; ignored for platform questions (dashboard, scores, sessions,
             # batches, Support Engine modules), which use the structured tools.
             from app.assistant.files import attachment_store
+            from app.assistant.files import service as attachment_service
             prior = await attachment_store.list_for_conversation(ctx, convo.id) if convo.id else []
-            ref_parts, ref_images, total = [], [], 0
+            ref_images = []
             for d in prior:
                 for img in (d.get("images") or []):
                     if len(ref_images) < config.MAX_IMAGES_PER_TURN:
                         ref_images.append(img)
-                text = (d.get("extracted_text") or "").strip()
-                if not text:
-                    continue
-                remaining = config.MAX_TOTAL_ATTACHMENT_CHARS - total
-                if remaining <= 0:
-                    break
-                snippet = text[: min(config.MAX_EXTRACTED_CHARS_PER_FILE, remaining)]
-                total += len(snippet)
-                ref_parts.append(f"## {d.get('filename')}\n{snippet}")
+            # Retrieval-first for large prior files; full text for small ones.
+            ref_parts = await attachment_service.gather_reference_parts(prior, convo.id, effective)
             if ref_parts:
                 messages.append({
                     "role": "system",
@@ -144,6 +138,39 @@ class Orchestrator:
                         "the question is about live platform data: the dashboard, quiz "
                         "scores, sessions, batches, attendance, or Support Engine "
                         "modules.\n\n" + "\n\n".join(ref_parts)
+                    ),
+                })
+            if prior:
+                messages.append({
+                    "role": "system",
+                    "content": (
+                        "UPLOADED-FILE PRIORITY MODE is active because the user "
+                        "uploaded file(s) in THIS conversation. This mode does NOT "
+                        "narrow what you may answer — Sparsh platform questions stay "
+                        "FULLY answerable, exactly as in a chat with no file. Resolve "
+                        "each question in this exact order, stopping at the first step "
+                        "that applies:\n"
+                        "(1) UPLOADED FILE FIRST — if the question is about the "
+                        "uploaded file, answer from its text, images, transcripts, "
+                        "and search_uploaded_files results. If the excerpts are not "
+                        "enough, call search_uploaded_files before saying it is not "
+                        "found.\n"
+                        "(2) SPARSH PLATFORM SECOND — if the question is about the "
+                        "Sparsh platform/system (the dashboard, registered entities, "
+                        "platform metrics, batches, companies, users, sessions, "
+                        "attendance, scores, Support Engine, other modules, or how "
+                        "the platform works), ANSWER IT using the structured data "
+                        "tools and the App Guide — just as you would with no file "
+                        "attached. A document being present NEVER makes a Sparsh "
+                        "question 'out of context', and you must NOT tell the user "
+                        "you can only answer from the document. NEVER refuse a Sparsh "
+                        "question just because it is not in the uploaded file.\n"
+                        "(3) OUT OF CONTEXT LAST — only if the question is about "
+                        "NEITHER the uploaded file NOR the Sparsh platform (e.g. "
+                        "general world knowledge or unrelated trivia), reply with the "
+                        "standard short out-of-context message.\n"
+                        "Never answer from general knowledge, training knowledge, or "
+                        "assumptions."
                     ),
                 })
             if ref_images:

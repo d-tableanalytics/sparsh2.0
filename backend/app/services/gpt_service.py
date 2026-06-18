@@ -29,13 +29,55 @@ async def extract_text_from_file(file_path: str, filename: str) -> dict:
                 mime_type = "image/jpeg" if ext in ['jpg', 'jpeg'] else f"image/{ext}"
                 images.append(f"data:{mime_type};base64,{base64_data}")
         elif ext == 'pdf':
-            with open(file_path, 'rb') as f:
-                reader = pypdf.PdfReader(f)
-                for page in reader.pages:
-                    text += (page.extract_text() or "") + "\n"
+            # Per-page HYBRID extraction for full accuracy on every page:
+            #   * pages with a real text layer  → PyMuPDF text (fast, free, exact)
+            #   * scanned / image-only pages     → OCR (Tesseract or vision OCR)
+            # PyMuPDF (fitz) also extracts text far more accurately than pypdf on
+            # multi-column / table-heavy PDFs. pypdf is the fallback if fitz fails.
+            MIN_PAGE_TEXT = 15  # chars below which a page is treated as image-only
+            page_texts = []
+            ocr_needed = []
+            used_fitz = False
+            try:
+                import fitz  # PyMuPDF
+                doc = fitz.open(file_path)
+                for i, page in enumerate(doc):
+                    t = page.get_text("text") or ""
+                    page_texts.append(t)
+                    if len(t.strip()) < MIN_PAGE_TEXT:
+                        ocr_needed.append(i)
+                doc.close()
+                used_fitz = True
+            except Exception as fitz_err:
+                print(f"PyMuPDF text extraction failed for {filename}, using pypdf: {fitz_err}")
+                with open(file_path, 'rb') as f:
+                    reader = pypdf.PdfReader(f)
+                    for page in reader.pages:
+                        page_texts.append(page.extract_text() or "")
 
-            # Image-based / scanned PDF (no real text layer): render each page
-            # to a PNG so the multimodal model can read it via the images path.
+            # OCR every image-only page (not just the first few) and merge the
+            # transcribed text back in page order.
+            if used_fitz and ocr_needed:
+                try:
+                    from app.services import ocr_service
+                    print(f"--- OCR {len(ocr_needed)} image page(s) of {filename} "
+                          f"via {ocr_service.ocr_engine_name()} ---")
+                    ocr_map = await ocr_service.ocr_pdf_pages(file_path, ocr_needed)
+                    for i, t in ocr_map.items():
+                        if 0 <= i < len(page_texts):
+                            page_texts[i] = t
+                except Exception as ocr_err:
+                    print(f"OCR failed for {filename}: {ocr_err}")
+
+            text = "\n\n".join(
+                f"[Page {i + 1}]\n{page_text.strip()}"
+                for i, page_text in enumerate(page_texts)
+                if page_text and page_text.strip()
+            )
+
+            # Last resort: a scanned PDF where OCR produced nothing (no engine and
+            # no API key). Render the first pages to images so the multimodal
+            # model can still read them inline.
             if len(text.strip()) < 20:
                 try:
                     import fitz  # PyMuPDF
@@ -320,12 +362,33 @@ snippets — regardless of the topic of that file.
 in this LMS (sessions, attendance, quiz scores, progress, batches, tasks, \
 notifications, media-library files, Support Engine access) should be answered \
 from the data tools when available — never from memory or assumption.
-4. **Out-of-scope questions**: If NO source covers the question (e.g. general \
-trivia, definitions, world knowledge, programming/tech concepts unrelated to \
-Sparsh such as "what is ORM" as a database concept, or topics not in the uploaded \
-files), do NOT answer it. Reply briefly that the question is outside this project's \
-knowledge base and what Sparsh can help with, and invite a relevant question. Never \
-substitute general knowledge.
+4. **Routing & priority order (apply in THIS exact order — stop at the first step that fits)**:
+   a. **Uploaded document FIRST**: if the question is about the uploaded content and \
+the KNOWLEDGE CONTEXT answers it, answer from the document only and stop. Do NOT \
+force an unrelated question to match the uploaded document.
+   b. **Sparsh environment/system SECOND**: if the uploaded document does NOT cover \
+the question, check whether it is about the Sparsh environment/system — this \
+includes the chatbot/assistant itself, the dashboard, modules, batches, users, \
+companies, analytics, the Support Engine, other platform features, uploaded-file \
+behaviour, and any system-related question. If it is, ANSWER it from the SPARSH \
+APPLICATION GUIDE and the LIVE LMS DATA tools. A Sparsh question must be answered \
+even when a document is uploaded — NEVER refuse it just because the answer is not \
+in the document.
+   c. **Clarification THIRD (when unclear)**: if the question is NOT answered by the \
+uploaded document AND is not clearly about the Sparsh environment, do NOT refuse \
+yet. Reply with EXACTLY this and then stop and wait for the user: \
+"This answer is not available in the uploaded document. Are you asking about the \
+Sparsh environment/system?"
+      - If the user then confirms it IS about Sparsh, answer it from the Sparsh \
+environment/system context (App Guide + tools).
+   d. **Out of context LAST**: if the user says it is NOT about Sparsh, or the \
+question is clearly unrelated to BOTH the uploaded document and the Sparsh \
+environment (e.g. general trivia, world knowledge, a programming/tech concept \
+unrelated to Sparsh such as "what is ORM" as a generic database term), reply with \
+EXACTLY: "This question is out of context because it is not related to the \
+uploaded document or Sparsh environment."
+   Never substitute general/training knowledge for anything outside both the \
+uploaded document and the Sparsh environment.
 5. **No fabrication**: Do not guess, infer beyond the sources, or fill gaps with \
 assumptions. If only part of the answer is present, answer that part and say the \
 rest isn't available. Never invent features, menu items, or records.

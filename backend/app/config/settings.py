@@ -26,6 +26,10 @@ class Settings(BaseSettings):
 
     # OpenAI
     OPENAI_API_KEY: Optional[str] = None
+    AUDIO_TRANSCRIPTION_MODEL: str = "gpt-4o-transcribe"
+    AUDIO_DIARIZATION_MODEL: str = "gpt-4o-transcribe-diarize"
+    AUDIO_ENRICHMENT_MODEL: str = "gpt-4o-mini"
+    ENABLE_AUDIO_DIARIZATION: bool = True
 
     # AWS
     AWS_ACCESS_KEY_ID: Optional[str] = None

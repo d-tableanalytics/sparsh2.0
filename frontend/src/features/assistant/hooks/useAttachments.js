@@ -11,6 +11,8 @@ import { kindOf } from '../utils/fileIcons';
 const MAX_FILES = 25;
 const MAX_FILE_MB = 100;
 const POLL_MS = 1500;
+// Stop polling after this long so a stuck file never spins forever.
+const MAX_POLL_MS = 3 * 60 * 1000; // 3 minutes
 
 let _seq = 0;
 const localId = () => `att-${Date.now()}-${_seq++}`;
@@ -42,7 +44,17 @@ export default function useAttachments() {
 
   const poll = useCallback(
     (lid, serverId) => {
+      const startedAt = Date.now();
       const tick = async () => {
+        // Give up gracefully instead of spinning forever on a stuck file.
+        if (Date.now() - startedAt > MAX_POLL_MS) {
+          stopPoll(lid);
+          update(lid, {
+            status: 'failed',
+            error: 'Taking too long to process — tap to retry.',
+          });
+          return;
+        }
         try {
           const data = await getAttachment(serverId);
           if (data.status === 'completed') {
@@ -72,7 +84,12 @@ export default function useAttachments() {
         update(lid, { id: stub.id, status: 'processing', progress: 100 });
         poll(lid, stub.id);
       } catch (e) {
-        const detail = e?.response?.data?.detail || 'Upload failed';
+        // A hung/slow server trips the axios timeout (ECONNABORTED) — surface a
+        // clear, retryable message instead of leaving the file stuck at 100%.
+        const timedOut = e?.code === 'ECONNABORTED' || /timeout/i.test(e?.message || '');
+        const detail = timedOut
+          ? 'Upload timed out — tap to retry.'
+          : e?.response?.data?.detail || 'Upload failed';
         update(lid, { status: 'failed', error: detail });
       }
     },

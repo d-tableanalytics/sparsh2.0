@@ -152,6 +152,10 @@ export async function uploadAttachment(file, conversationId, { onProgress, signa
   if (conversationId) form.append('conversation_id', conversationId);
   const res = await api.post('/assistant/attachments', form, {
     signal,
+    // Bound the whole request so a slow/hung server can't leave the file stuck
+    // at "100%" forever — the upload itself reports progress below, and the
+    // server's stub reply normally comes back in well under a second.
+    timeout: 120000,
     onUploadProgress: (e) => {
       if (onProgress && e.total) onProgress(Math.round((e.loaded / e.total) * 100));
     },

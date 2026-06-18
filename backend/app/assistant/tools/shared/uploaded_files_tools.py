@@ -19,7 +19,10 @@ from app.assistant.tools.registry import tool
         "Search the text of files the user uploaded in THIS conversation. Use it "
         "when the attached-file context looks truncated or you need a specific "
         "detail (a number, clause, definition, or section) from a large document, "
-        "spreadsheet, or archive. Returns matching snippets with their filename."
+        "spreadsheet, audio/video transcript, image OCR text, or archive. In "
+        "uploaded-file mode, if this search returns no support for the user's "
+        "question, say the answer was not found in the uploaded file(s); do not "
+        "answer from general knowledge. Returns matching snippets with metadata."
     ),
     allowed_roles=["CU", "CA", "AD", "SA"],
     parameters={
@@ -32,9 +35,15 @@ from app.assistant.tools.registry import tool
     required=["query", "conversation_id"],
 )
 async def search_uploaded_files(ctx: UserContext, query: str, conversation_id: str) -> ToolResult:
-    chunks = await attachment_store.search_chunks(conversation_id, query, limit=6)
+    chunks = await attachment_store.search_chunks(conversation_id, query, limit=12)
     snippets = [
-        {"filename": c.get("filename"), "content": c.get("content", "")}
+        {
+            "filename": c.get("filename"),
+            "content": c.get("content", ""),
+            "page_start": c.get("page_start"),
+            "page_end": c.get("page_end"),
+            "score": c.get("_retrieval_score") or c.get("vector_score"),
+        }
         for c in chunks
     ]
     filenames = sorted({c["filename"] for c in snippets if c.get("filename")})
