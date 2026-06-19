@@ -140,6 +140,27 @@ export async function deleteConversation(id) {
   return res.data;
 }
 
+// ── Chat export (PDF) ───────────────────────────────────────────────────────
+
+/**
+ * Export a conversation as a PDF. Returns { blob, filename }.
+ * The browser is responsible for triggering the actual download (see the hook).
+ */
+export async function exportConversationPdf(conversationId) {
+  const res = await api.post(
+    `/assistant/conversations/${conversationId}/export-pdf`,
+    null,
+    { responseType: 'blob' },
+  );
+  // Prefer the server-provided filename; fall back to a dated default.
+  const disposition = res.headers['content-disposition'] || '';
+  const match = /filename="?([^"]+)"?/.exec(disposition);
+  const filename =
+    (match && match[1]) ||
+    `chat-conversation-${new Date().toISOString().slice(0, 10)}.pdf`;
+  return { blob: res.data, filename };
+}
+
 // ── Multi-modal attachments ────────────────────────────────────────────────
 
 /**

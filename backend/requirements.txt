@@ -31,6 +31,8 @@ pandas==2.2.3
 openpyxl==3.1.5
 # Presentations (.ppt/.pptx) for assistant multi-modal attachments
 python-pptx==1.0.2
+# Generates downloadable PDFs of chat conversations (assistant "export chat as PDF")
+reportlab==4.5.1
 
 # ─── AI / ML ───
 openai>=1.93.0

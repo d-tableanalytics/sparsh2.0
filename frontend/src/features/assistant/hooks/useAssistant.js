@@ -1,5 +1,6 @@
 import { useCallback, useRef, useState } from 'react';
-import { streamAsk } from '../services/assistantApi';
+import { exportConversationPdf, streamAsk } from '../services/assistantApi';
+import { isPdfExportIntent } from '../utils/pdfIntent';
 
 let _seq = 0;
 const nextId = (p) => `${p}-${Date.now()}-${_seq++}`;
@@ -18,6 +19,8 @@ export default function useAssistant() {
 
   const conversationIdRef = useRef(null);
   const abortRef = useRef(null);
+  // Object URLs minted for generated PDFs, revoked on reset to avoid leaks.
+  const pdfUrlsRef = useRef([]);
 
   const rememberConversation = useCallback((id) => {
     if (!id) return;
@@ -35,6 +38,8 @@ export default function useAssistant() {
     abortRef.current?.abort();
     abortRef.current = null;
     conversationIdRef.current = null;
+    pdfUrlsRef.current.forEach((u) => URL.revokeObjectURL(u));
+    pdfUrlsRef.current = [];
     setCurrentConversationId(null);
     setMessages([]);
     setError(null);
@@ -45,6 +50,8 @@ export default function useAssistant() {
   // Hydrate from a loaded conversation (Milestone B).
   const loadConversation = useCallback((conversation) => {
     abortRef.current?.abort();
+    pdfUrlsRef.current.forEach((u) => URL.revokeObjectURL(u));
+    pdfUrlsRef.current = [];
     conversationIdRef.current = conversation.id;
     setCurrentConversationId(conversation.id);
     setError(null);
@@ -74,12 +81,63 @@ export default function useAssistant() {
     abortRef.current?.abort();
   }, []);
 
+  // Handle a "export this chat as PDF" request without touching the chat LLM
+  // flow: echo the user's request, show a "Generating PDF…" placeholder, then
+  // attach a downloadable PDF (or an error) to that same assistant message.
+  const exportPdf = useCallback(
+    async (text) => {
+      const content = (text || '').trim();
+      const userId = nextId('u');
+      const asstId = nextId('a');
+      setError(null);
+      setMessages((list) => [
+        ...list,
+        { id: userId, role: 'user', content },
+        { id: asstId, role: 'assistant', content: 'Generating PDF…', pdfPending: true },
+      ]);
+
+      const convId = conversationIdRef.current;
+      if (!convId) {
+        patch(asstId, {
+          pdfPending: false,
+          content: 'There’s no conversation to export yet. Send a message first, then ask again.',
+        });
+        return;
+      }
+
+      try {
+        const { blob, filename } = await exportConversationPdf(convId);
+        const url = URL.createObjectURL(blob);
+        pdfUrlsRef.current.push(url);
+        patch(asstId, {
+          pdfPending: false,
+          content: 'Here’s your conversation exported as a PDF.',
+          pdf: { url, filename },
+        });
+      } catch {
+        patch(asstId, {
+          pdfPending: false,
+          errored: true,
+          content: 'Sorry, I could not generate the PDF right now. Please try again.',
+        });
+      }
+    },
+    [patch],
+  );
+
   const send = useCallback(
     async (text, { editFromIndex, attachments, attachmentIds } = {}) => {
       const content = (text || '').trim();
       const hasAttachments = attachmentIds && attachmentIds.length > 0;
       // Allow an attachment-only message (no text), but otherwise require text.
       if ((!content && !hasAttachments) || streaming) return;
+
+      // Divert "export this chat to PDF" requests to the PDF flow. Only plain
+      // text (no attachments) is eligible, so normal chat is never affected.
+      if (!hasAttachments && editFromIndex == null && isPdfExportIntent(content)) {
+        exportPdf(content);
+        return;
+      }
 
       setError(null);
       const userId = nextId('u');
@@ -144,7 +202,7 @@ export default function useAssistant() {
         abortRef.current = null;
       }
     },
-    [streaming, patch, rememberConversation],
+    [streaming, patch, rememberConversation, exportPdf],
   );
 
   // Edit a previously sent user message: drop it and everything after it, then

@@ -4,6 +4,7 @@ import remarkGfm from 'remark-gfm';
 import { Bot, User, AlertCircle, Copy, Check, Pencil } from 'lucide-react';
 import SourceList from './SourceList';
 import MessageAttachments from './MessageAttachments';
+import PdfDownloadCard from './PdfDownloadCard';
 
 // Render every markdown link so it opens in a new tab; rel guards against
 // reverse-tabnabbing and referrer leakage.
@@ -135,6 +136,13 @@ export default function MessageBubble({ message, onEdit, disabled }) {
           </div>
         )}
       </div>
+
+      {/* PDF export (in-chat download) */}
+      {!isUser && (message.pdfPending || message.pdf) && (
+        <div className="pl-9">
+          <PdfDownloadCard pending={message.pdfPending} pdf={message.pdf} />
+        </div>
+      )}
 
       {/* Hover actions */}
       {!editing && (canCopy || canEdit) && (

@@ -13,6 +13,7 @@ Cross-cutting: correlation IDs, feature-flag gating, per-user rate limiting.
 """
 from __future__ import annotations
 
+from datetime import datetime
 from typing import List, Optional
 
 from fastapi import (
@@ -26,6 +27,7 @@ from app.assistant.caching import cache
 from app.assistant.config import config
 from app.assistant.core.orchestrator import Orchestrator
 from app.assistant.dependencies import get_user_context
+from app.assistant.export import build_conversation_pdf
 from app.assistant.files import attachment_store, service as attachment_service
 from app.assistant.files.service import ValidationError
 from app.assistant.files.storage import LocalStorage
@@ -146,6 +148,37 @@ async def delete_conversation(conversation_id: str, ctx: UserContext = Depends(g
     except AssistantError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     return {"deleted": True}
+
+
+@router.post("/conversations/{conversation_id}/export-pdf")
+async def export_conversation_pdf(
+    conversation_id: str, ctx: UserContext = Depends(get_user_context)
+):
+    """Render the (owner-scoped) conversation to a downloadable PDF.
+
+    Returns a `application/pdf` body with a Content-Disposition attachment so the
+    browser saves it as `chat-conversation-YYYY-MM-DD.pdf`. The core chat flow is
+    untouched — this only reads the persisted conversation.
+    """
+    try:
+        convo = await conversation_store.load_or_create(ctx, conversation_id)
+    except AssistantError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+    try:
+        pdf_bytes = build_conversation_pdf(convo)
+    except Exception:
+        raise HTTPException(status_code=500, detail="Could not generate the PDF.")
+
+    filename = f"chat-conversation-{datetime.utcnow():%Y-%m-%d}.pdf"
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Content-Length": str(len(pdf_bytes)),
+        },
+    )
 
 
 # ── Multi-modal attachments (owner-scoped) ─────────────────────────────────
