@@ -72,6 +72,9 @@ export default function useAssistant() {
             attributions,
             sources,
             attachments: m.attachments || undefined,
+            // A persisted PDF export turn re-renders a download button that
+            // re-fetches the file (the original blob URL is long gone).
+            pdfReload: m.export_kind === 'pdf' || undefined,
           };
         }),
     );
@@ -106,13 +109,15 @@ export default function useAssistant() {
       }
 
       try {
-        const { blob, filename } = await exportConversationPdf(convId);
+        const { blob, filename } = await exportConversationPdf(convId, content);
         const url = URL.createObjectURL(blob);
         pdfUrlsRef.current.push(url);
         patch(asstId, {
           pdfPending: false,
           content: 'Here’s your conversation exported as a PDF.',
           pdf: { url, filename },
+          // Persisted server-side too, so the card still works after a reload.
+          pdfReload: true,
         });
       } catch {
         patch(asstId, {
@@ -124,6 +129,27 @@ export default function useAssistant() {
     },
     [patch],
   );
+
+  // Re-fetch and download the conversation PDF (used by reloaded export cards,
+  // whose original in-memory blob URL no longer exists). Returns false on error.
+  const downloadPdf = useCallback(async () => {
+    const convId = conversationIdRef.current;
+    if (!convId) return false;
+    try {
+      const { blob, filename } = await exportConversationPdf(convId);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      return true;
+    } catch {
+      return false;
+    }
+  }, []);
 
   const send = useCallback(
     async (text, { editFromIndex, attachments, attachmentIds } = {}) => {
@@ -232,5 +258,6 @@ export default function useAssistant() {
     editAndResend,
     loadConversation,
     currentConversationId,
+    downloadPdf,
   };
 }

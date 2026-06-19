@@ -5,7 +5,7 @@ import MessageBubble from './MessageBubble';
 import TypingIndicator from './TypingIndicator';
 import SuggestedQuestions from './SuggestedQuestions';
 
-export default function MessageList({ messages, streaming, activeTool, onPickSuggestion, onEdit }) {
+export default function MessageList({ messages, streaming, activeTool, onPickSuggestion, onEdit, onDownloadPdf }) {
   const endRef = useRef(null);
   const { user } = useAuth();
   const isSuperAdmin = user?.role?.toLowerCase() === 'superadmin';
@@ -38,7 +38,7 @@ export default function MessageList({ messages, streaming, activeTool, onPickSug
   return (
     <div className="flex flex-col gap-3 px-3 py-3">
       {messages.map((m) => (
-        <MessageBubble key={m.id} message={m} onEdit={onEdit} disabled={streaming} />
+        <MessageBubble key={m.id} message={m} onEdit={onEdit} onDownloadPdf={onDownloadPdf} disabled={streaming} />
       ))}
       {showTyping && (
         <div className="pl-9">

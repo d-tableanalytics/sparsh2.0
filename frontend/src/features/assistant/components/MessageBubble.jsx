@@ -6,10 +6,32 @@ import SourceList from './SourceList';
 import MessageAttachments from './MessageAttachments';
 import PdfDownloadCard from './PdfDownloadCard';
 
-// Render every markdown link so it opens in a new tab; rel guards against
-// reverse-tabnabbing and referrer leakage.
+// Custom renderers for the assistant's markdown.
+//  - Links open in a new tab (rel guards against reverse-tabnabbing/referrer leak).
+//  - GFM tables (parsed by remark-gfm) get explicit borders, padding, cell text
+//    wrapping, and a horizontal-scroll wrapper so wide tables never overflow the
+//    chat bubble on desktop or mobile.
 const markdownComponents = {
   a: (props) => <a {...props} target="_blank" rel="noopener noreferrer" />,
+  table: (props) => (
+    <div className="my-2 max-w-full overflow-x-auto rounded-lg border border-[var(--border)]">
+      <table className="w-full border-collapse text-left text-xs" {...props} />
+    </div>
+  ),
+  thead: (props) => <thead className="bg-[var(--bg-card)]" {...props} />,
+  tr: (props) => <tr className="border-b border-[var(--border)] last:border-0" {...props} />,
+  th: (props) => (
+    <th
+      className="min-w-[110px] whitespace-normal break-words border-r border-[var(--border)] px-3 py-2 align-top font-semibold text-[var(--text-main)] last:border-r-0"
+      {...props}
+    />
+  ),
+  td: (props) => (
+    <td
+      className="min-w-[110px] max-w-[280px] whitespace-normal break-words border-r border-[var(--border)] px-3 py-2 align-top text-[var(--text-main)] last:border-r-0"
+      {...props}
+    />
+  ),
 };
 
 /**
@@ -17,7 +39,7 @@ const markdownComponents = {
  * is plain text. User messages can be copied and edited (which resends the turn);
  * assistant messages can be copied. Assistant messages also show source chips.
  */
-export default function MessageBubble({ message, onEdit, disabled }) {
+export default function MessageBubble({ message, onEdit, onDownloadPdf, disabled }) {
   const isUser = message.role === 'user';
   const [copied, setCopied] = useState(false);
   const [editing, setEditing] = useState(false);
@@ -138,9 +160,13 @@ export default function MessageBubble({ message, onEdit, disabled }) {
       </div>
 
       {/* PDF export (in-chat download) */}
-      {!isUser && (message.pdfPending || message.pdf) && (
+      {!isUser && (message.pdfPending || message.pdf || message.pdfReload) && (
         <div className="pl-9">
-          <PdfDownloadCard pending={message.pdfPending} pdf={message.pdf} />
+          <PdfDownloadCard
+            pending={message.pdfPending}
+            pdf={message.pdf}
+            onDownload={message.pdfReload && !message.pdf ? onDownloadPdf : undefined}
+          />
         </div>
       )}
 

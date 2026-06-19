@@ -13,7 +13,6 @@ Cross-cutting: correlation IDs, feature-flag gating, per-user rate limiting.
 """
 from __future__ import annotations
 
-from datetime import datetime
 from typing import List, Optional
 
 from fastapi import (
@@ -27,14 +26,14 @@ from app.assistant.caching import cache
 from app.assistant.config import config
 from app.assistant.core.orchestrator import Orchestrator
 from app.assistant.dependencies import get_user_context
-from app.assistant.export import build_conversation_pdf
+from app.assistant.export import build_conversation_pdf, ist_now
 from app.assistant.files import attachment_store, service as attachment_service
 from app.assistant.files.service import ValidationError
 from app.assistant.files.storage import LocalStorage
 from app.assistant.memory import conversation_store
 from app.assistant.observability import correlation
 from app.assistant.observability.metrics import metrics
-from app.assistant.schemas.chat import AskRequest
+from app.assistant.schemas.chat import AskRequest, ExportPdfRequest
 from app.assistant.schemas.context import UserContext
 from app.assistant.security.rbac import ROLE_AD, ROLE_SA, normalize_role
 from app.assistant.utils.exceptions import AssistantError
@@ -152,13 +151,17 @@ async def delete_conversation(conversation_id: str, ctx: UserContext = Depends(g
 
 @router.post("/conversations/{conversation_id}/export-pdf")
 async def export_conversation_pdf(
-    conversation_id: str, ctx: UserContext = Depends(get_user_context)
+    conversation_id: str,
+    payload: Optional[ExportPdfRequest] = None,
+    ctx: UserContext = Depends(get_user_context),
 ):
     """Render the (owner-scoped) conversation to a downloadable PDF.
 
     Returns a `application/pdf` body with a Content-Disposition attachment so the
-    browser saves it as `chat-conversation-YYYY-MM-DD.pdf`. The core chat flow is
-    untouched — this only reads the persisted conversation.
+    browser saves it as `chat-conversation-YYYY-MM-DD.pdf`. The PDF is built from
+    the conversation as-is; the export request/response turn is then persisted
+    (tagged `export_kind="pdf"`) so it survives a page reload. The core chat flow
+    is untouched.
     """
     try:
         convo = await conversation_store.load_or_create(ctx, conversation_id)
@@ -170,7 +173,20 @@ async def export_conversation_pdf(
     except Exception:
         raise HTTPException(status_code=500, detail="Could not generate the PDF.")
 
-    filename = f"chat-conversation-{datetime.utcnow():%Y-%m-%d}.pdf"
+    # Persist the export turn (best-effort — a logging failure must not block the
+    # download the user is waiting on).
+    try:
+        user_msg = (payload.user_message if payload else None) or "Export this chat as PDF"
+        await conversation_store.append_export_turn(
+            convo,
+            user_msg=user_msg.strip(),
+            assistant_msg="Here's your conversation exported as a PDF.",
+            export_kind="pdf",
+        )
+    except Exception:
+        pass
+
+    filename = f"chat-conversation-{ist_now():%Y-%m-%d}.pdf"
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",

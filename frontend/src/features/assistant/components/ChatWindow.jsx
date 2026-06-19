@@ -19,6 +19,7 @@ export default function ChatWindow({ onClose, expanded = false, onToggleExpand }
     editAndResend,
     loadConversation,
     currentConversationId,
+    downloadPdf,
   } = useAssistant();
 
   const conversations = useConversation();
@@ -133,6 +134,7 @@ export default function ChatWindow({ onClose, expanded = false, onToggleExpand }
           activeTool={activeTool}
           onPickSuggestion={send}
           onEdit={editAndResend}
+          onDownloadPdf={downloadPdf}
         />
       </div>
 

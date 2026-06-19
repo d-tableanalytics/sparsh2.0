@@ -108,6 +108,35 @@ async def append_turn(
     )
 
 
+async def append_export_turn(
+    conversation: Conversation,
+    user_msg: str,
+    assistant_msg: str,
+    export_kind: str,
+) -> None:
+    """Persist a generated-export turn (e.g. PDF) so it survives a page reload.
+
+    Mirrors `append_turn` but tags the assistant message with `export_kind`, which
+    the UI uses to re-render a download action instead of a dead blob URL.
+    """
+    now = datetime.utcnow()
+    user_doc = {"role": "user", "content": user_msg, "timestamp": now}
+    assistant_doc = {
+        "role": "assistant",
+        "content": assistant_msg,
+        "timestamp": now,
+        "export_kind": export_kind,
+    }
+    await get_collection(COLL).update_one(
+        {"_id": _oid(conversation.id), "user_id": conversation.user_id},
+        {
+            "$push": {"messages": {"$each": [user_doc, assistant_doc]}},
+            "$inc": {"message_count": 2},
+            "$set": {"updated_at": now},
+        },
+    )
+
+
 async def truncate_messages(conversation: Conversation, index: int) -> int:
     """Drop stored messages from `index` onward (for an edit-and-resend).
 

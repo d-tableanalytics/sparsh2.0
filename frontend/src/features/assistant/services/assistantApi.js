@@ -146,18 +146,20 @@ export async function deleteConversation(id) {
  * Export a conversation as a PDF. Returns { blob, filename }.
  * The browser is responsible for triggering the actual download (see the hook).
  */
-export async function exportConversationPdf(conversationId) {
+export async function exportConversationPdf(conversationId, userMessage) {
   const res = await api.post(
     `/assistant/conversations/${conversationId}/export-pdf`,
-    null,
+    userMessage ? { user_message: userMessage } : {},
     { responseType: 'blob' },
   );
   // Prefer the server-provided filename; fall back to a dated default.
   const disposition = res.headers['content-disposition'] || '';
   const match = /filename="?([^"]+)"?/.exec(disposition);
-  const filename =
-    (match && match[1]) ||
-    `chat-conversation-${new Date().toISOString().slice(0, 10)}.pdf`;
+  // The server names the file using IST; this fallback uses the browser's local
+  // date (not UTC) only if the header is missing/unparseable.
+  const d = new Date();
+  const localDate = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  const filename = (match && match[1]) || `chat-conversation-${localDate}.pdf`;
   return { blob: res.data, filename };
 }
 

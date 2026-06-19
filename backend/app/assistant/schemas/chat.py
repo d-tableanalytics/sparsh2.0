@@ -20,6 +20,14 @@ class AskRequest(BaseModel):
     attachment_ids: Optional[List[str]] = None
 
 
+class ExportPdfRequest(BaseModel):
+    """Optional body for the PDF export endpoint. `user_message` is the request
+    text the user typed (e.g. "is chat ka PDF bana do"), persisted so the export
+    turn survives a page reload."""
+
+    user_message: Optional[str] = None
+
+
 class ToolAttribution(BaseModel):
     """Which tool produced data backing an assistant turn (persisted per turn)."""
 
@@ -48,6 +56,9 @@ class ChatMessage(BaseModel):
     tool_calls: Optional[list] = None        # retained for transparency/debugging
     attributions: Optional[List[ToolAttribution]] = None   # set on assistant turns
     attachments: Optional[List[AttachmentMeta]] = None     # set on user turns w/ uploads
+    # Marks a generated export turn (e.g. "pdf") so the UI can re-render a
+    # download action after a reload instead of a dead in-memory blob URL.
+    export_kind: Optional[str] = None
 
 
 class AttachmentOut(BaseModel):
