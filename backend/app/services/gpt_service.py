@@ -101,13 +101,15 @@ async def extract_text_from_file(file_path: str, filename: str) -> dict:
                 df = pd.read_csv(file_path)
                 text = df.to_string()
             else:
-                # Read all sheets for text
-                xls = pd.ExcelFile(file_path)
-                sheet_texts = []
-                for sheet_name in xls.sheet_names:
-                    df = pd.read_excel(file_path, sheet_name=sheet_name)
-                    sheet_texts.append(f"[Sheet: {sheet_name}]\n{df.to_string()}")
-                text = "\n\n".join(sheet_texts)
+                # Read all sheets for text. Use a context manager and parse from
+                # the open handle so the file is released afterwards — otherwise
+                # Windows keeps it locked and temp cleanup raises PermissionError.
+                with pd.ExcelFile(file_path) as xls:
+                    sheet_texts = []
+                    for sheet_name in xls.sheet_names:
+                        df = xls.parse(sheet_name)
+                        sheet_texts.append(f"[Sheet: {sheet_name}]\n{df.to_string()}")
+                    text = "\n\n".join(sheet_texts)
                 
                 # Extract embedded images from Excel using openpyxl
                 try:

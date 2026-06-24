@@ -29,6 +29,8 @@ PyMuPDF==1.24.10
 python-docx==1.1.2
 pandas==2.2.3
 openpyxl==3.1.5
+# Legacy .xls (BIFF) support for pandas read_excel
+xlrd>=2.0.1
 # Presentations (.ppt/.pptx) for assistant multi-modal attachments
 python-pptx==1.0.2
 # Generates downloadable PDFs of chat conversations (assistant "export chat as PDF")
