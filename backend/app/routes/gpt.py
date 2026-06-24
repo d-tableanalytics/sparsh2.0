@@ -10,6 +10,7 @@ from app.services import gpt_access_service
 from app.services.s3_service import upload_file_to_s3, get_signed_url
 from app.models.gpt import GptProjectCreate, GptProjectUpdate, GptProjectResponse
 import os
+import re
 import tempfile
 import aiofiles
 
@@ -369,6 +370,28 @@ async def gpt_session_respond(session_id: str, payload: dict, current_user: dict
     
     return {"answer": ai_msg}
 
+# Embedded images are stored as separate session_knowledge entries named
+# "<filename> (image N)". Strip that suffix to recover the original file name.
+_IMAGE_SUFFIX_RE = re.compile(r"\s*\(image \d+\)$")
+
+
+def _summarize_attachments(session_knowledge):
+    """Collapse session_knowledge entries into one record per uploaded file."""
+    summary = {}
+    order = []
+    for entry in (session_knowledge or []):
+        raw_name = entry.get("name") or "file"
+        base = _IMAGE_SUFFIX_RE.sub("", raw_name)
+        content = entry.get("content") or ""
+        is_image = content.startswith("[IMAGE_BASE64]")
+        if base not in summary:
+            summary[base] = {"name": base, "has_image": False, "uploaded_at": entry.get("uploaded_at")}
+            order.append(base)
+        if is_image:
+            summary[base]["has_image"] = True
+    return [summary[b] for b in order]
+
+
 @router.get("/chat/sessions/{session_id}/history")
 async def get_session_history(session_id: str, current_user: dict = Depends(get_current_user)):
     conv_col = get_collection("gpt_conversations")
@@ -376,7 +399,37 @@ async def get_session_history(session_id: str, current_user: dict = Depends(get_
     conv = await conv_col.find_one({"_id": ObjectId(session_id), "user_id": str(current_user["_id"])})
     if not conv:
         raise HTTPException(status_code=404, detail="Session not found or access denied")
-    return {"messages": conv["messages"]}
+    return {
+        "messages": conv["messages"],
+        "attachments": _summarize_attachments(conv.get("session_knowledge")),
+    }
+
+
+@router.get("/chat/sessions/{session_id}/attachments")
+async def get_session_attachments(session_id: str, current_user: dict = Depends(get_current_user)):
+    conv_col = get_collection("gpt_conversations")
+    conv = await conv_col.find_one({"_id": ObjectId(session_id), "user_id": str(current_user["_id"])})
+    if not conv:
+        raise HTTPException(status_code=404, detail="Session not found or access denied")
+    return {"attachments": _summarize_attachments(conv.get("session_knowledge"))}
+
+
+@router.delete("/chat/sessions/{session_id}/attachments")
+async def delete_session_attachment(session_id: str, name: str, current_user: dict = Depends(get_current_user)):
+    """Remove an uploaded file (its text entry and any embedded-image entries)
+    from a chat session's knowledge."""
+    conv_col = get_collection("gpt_conversations")
+    conv = await conv_col.find_one({"_id": ObjectId(session_id), "user_id": str(current_user["_id"])})
+    if not conv:
+        raise HTTPException(status_code=404, detail="Session not found or access denied")
+
+    # Matches the file's text entry ("name") and its image entries ("name (image N)").
+    pattern = f"^{re.escape(name)}(\\s*\\(image \\d+\\))?$"
+    await conv_col.update_one(
+        {"_id": conv["_id"]},
+        {"$pull": {"session_knowledge": {"name": {"$regex": pattern}}}},
+    )
+    return {"message": f"Removed {name} from this session."}
 
 @router.delete("/chat/sessions/{session_id}")
 async def delete_gpt_session(session_id: str, current_user: dict = Depends(get_current_user)):
@@ -478,7 +531,6 @@ async def upload_session_context(
             # Nothing extractable (unsupported type, empty file, or extraction
             # failure). Telling the user the file "is available" would make every
             # follow-up question about it a confusing refusal — fail loudly.
-            if os.path.exists(tmp_path): os.remove(tmp_path)
             raise HTTPException(
                 status_code=415,
                 detail=(
@@ -496,11 +548,23 @@ async def upload_session_context(
         msg = f"File {file.filename} is now available in this chat engine session."
         if img_count:
             msg += f" ({img_count} embedded image{'s' if img_count > 1 else ''} also extracted)"
-        
-        if os.path.exists(tmp_path): os.remove(tmp_path)
+
         return {"message": msg}
     except HTTPException:
         raise  # don't re-wrap deliberate errors (e.g. the 415 above) as 500s
     except Exception as e:
-        if os.path.exists(tmp_path): os.remove(tmp_path)
         raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        # Best-effort cleanup. On Windows the extractor may still hold a brief
+        # lock, so retry a few times and never let cleanup raise (it must not
+        # mask the real result/error).
+        for _ in range(5):
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+                break
+            except PermissionError:
+                import time
+                time.sleep(0.1)
+            except Exception:
+                break
