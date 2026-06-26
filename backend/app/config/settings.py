@@ -20,9 +20,18 @@ class Settings(BaseSettings):
     SMTP_USERNAME: Optional[str] = None
     SMTP_PASSWORD: Optional[str] = None
     
+    # Maytapi (deprecated — replaced by Meta WhatsApp Cloud API below)
     MAYTAPI_PRODUCT_ID: Optional[str] = None
     MAYTAPI_PHONE_ID: Optional[str] = None
     MAYTAPI_TOKEN: Optional[str] = None
+
+    # WhatsApp Cloud API (Meta) — official Business Platform
+    WHATSAPP_PHONE_NUMBER_ID: Optional[str] = None
+    WHATSAPP_BUSINESS_ACCOUNT_ID: Optional[str] = None
+    WHATSAPP_ACCESS_TOKEN: Optional[str] = None
+    WHATSAPP_API_VERSION: str = "v21.0"
+    # Local numbers stored without a country code get this prefixed (India = 91).
+    WHATSAPP_DEFAULT_COUNTRY_CODE: str = "91"
 
     # OpenAI
     OPENAI_API_KEY: Optional[str] = None

@@ -162,6 +162,21 @@ const SettingsPage = () => {
         setEditingTemplate({...editingTemplate, body: newText});
     };
 
+    // ─── WhatsApp (Meta) ordered-parameter mapping helpers ───
+    const addMetaParam = () => {
+        if (!editingTemplate) return;
+        setEditingTemplate({ ...editingTemplate, meta_params: [...(editingTemplate.meta_params || []), ''] });
+    };
+    const updateMetaParam = (idx, value) => {
+        const arr = [...(editingTemplate.meta_params || [])];
+        arr[idx] = value;
+        setEditingTemplate({ ...editingTemplate, meta_params: arr });
+    };
+    const removeMetaParam = (idx) => {
+        const arr = (editingTemplate.meta_params || []).filter((_, i) => i !== idx);
+        setEditingTemplate({ ...editingTemplate, meta_params: arr });
+    };
+
     const filteredTemplates = templates.filter(t => 
         t.name.toLowerCase().includes(searchQuery.toLowerCase()) || 
         t.slug.toLowerCase().includes(searchQuery.toLowerCase())
@@ -321,7 +336,15 @@ const SettingsPage = () => {
                             <div className="p-4 space-y-3 border-b border-[var(--border)]">
                                 <div className="flex items-center justify-between">
                                     <h2 className="text-[12px] font-black text-[var(--text-main)] uppercase tracking-widest">Infrastructure</h2>
-                                    <span className="px-1.5 py-0.5 rounded-md bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] text-[8px] font-black uppercase">{scope}</span>
+                                    <div className="flex items-center gap-1.5">
+                                        <span className="px-1.5 py-0.5 rounded-md bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] text-[8px] font-black uppercase">{scope}</span>
+                                        {canUpdateTemplates && (
+                                            <button onClick={() => setShowCreateModal(true)} title="New template (Email / WhatsApp)"
+                                                className="flex items-center gap-0.5 px-1.5 py-0.5 rounded-md bg-[var(--accent-indigo)] text-white text-[8px] font-black uppercase tracking-wide hover:brightness-110 transition-all">
+                                                <Plus size={10}/> New
+                                            </button>
+                                        )}
+                                    </div>
                                 </div>
                                 <div className="relative">
                                     <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[var(--text-muted)]" size={12}/>
@@ -402,13 +425,69 @@ const SettingsPage = () => {
 
                                                 <div className="space-y-1.5">
                                                     <div className="flex items-center justify-between px-2">
-                                                        <label className="text-[9px] font-black text-[var(--text-muted)] uppercase tracking-widest">Canvas (HTML Supported)</label>
-                                                        <span className="text-[8px] font-black text-[var(--accent-indigo)] flex items-center gap-1"><Info size={10}/> FULL HTML WRAPPER ACTIVE</span>
+                                                        <label className="text-[9px] font-black text-[var(--text-muted)] uppercase tracking-widest">{editingTemplate.channel === 'whatsapp' ? 'Fallback Text (used only if no Meta template set)' : 'Canvas (HTML Supported)'}</label>
+                                                        <span className="text-[8px] font-black text-[var(--accent-indigo)] flex items-center gap-1"><Info size={10}/> {editingTemplate.channel === 'whatsapp' ? 'CONFIGURE META TEMPLATE BELOW ↓' : 'FULL HTML WRAPPER ACTIVE'}</span>
                                                     </div>
-                                                    <textarea id="template-editor" rows={18} value={editingTemplate.body} onChange={e => setEditingTemplate({...editingTemplate, body: e.target.value})}
+                                                    <textarea id="template-editor" rows={editingTemplate.channel === 'whatsapp' ? 4 : 18} value={editingTemplate.body} onChange={e => setEditingTemplate({...editingTemplate, body: e.target.value})}
                                                         className="w-full bg-[var(--input-bg)] p-6 border border-[var(--border)] rounded-[20px] font-medium text-[13px] leading-relaxed text-[var(--text-main)] outline-none focus:bg-[var(--bg-card)] focus:border-[var(--accent-indigo)] transition-all font-mono" />
                                                 </div>
                                             </div>
+
+                                            {/* WhatsApp Cloud API (Meta) configuration — staff scope only */}
+                                            {editingTemplate.channel === 'whatsapp' && (
+                                                <div className="bg-[var(--bg-card)] border border-green-200 rounded-[24px] p-6 space-y-4 shadow-sm">
+                                                    <div>
+                                                        <h3 className="text-[11px] font-black text-green-600 uppercase tracking-widest flex items-center gap-2">
+                                                            <Info size={12}/> WhatsApp Cloud API (Meta)
+                                                        </h3>
+                                                        <p className="text-[10px] font-medium text-[var(--text-muted)] leading-relaxed mt-1.5">
+                                                            Business-initiated WhatsApp must use a template you created &amp; got <b>approved in Meta WhatsApp Manager</b>. Enter that approved name + language, then map each <span className="font-mono font-black">{"{{1}}, {{2}}…"}</span> placeholder to a variable in order. Leave the name blank to fall back to the free-text body above (only delivered within Meta's 24h window).
+                                                        </p>
+                                                    </div>
+
+                                                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                                                        <div className="sm:col-span-2 space-y-1.5">
+                                                            <label className="text-[9px] font-black text-[var(--text-muted)] uppercase tracking-widest px-2">Meta Template Name</label>
+                                                            <input value={editingTemplate.meta_template_name || ''} onChange={e => setEditingTemplate({...editingTemplate, meta_template_name: e.target.value})}
+                                                                placeholder="e.g. task_created_staff"
+                                                                className="w-full bg-[var(--input-bg)] px-4 py-2.5 border border-[var(--border)] rounded-xl font-black text-[13px] text-[var(--text-main)] outline-none focus:border-green-500 transition-all font-mono" />
+                                                        </div>
+                                                        <div className="space-y-1.5">
+                                                            <label className="text-[9px] font-black text-[var(--text-muted)] uppercase tracking-widest px-2">Language</label>
+                                                            <input value={editingTemplate.meta_lang || 'en'} onChange={e => setEditingTemplate({...editingTemplate, meta_lang: e.target.value})}
+                                                                placeholder="en"
+                                                                className="w-full bg-[var(--input-bg)] px-4 py-2.5 border border-[var(--border)] rounded-xl font-black text-[13px] text-[var(--text-main)] outline-none focus:border-green-500 transition-all" />
+                                                        </div>
+                                                    </div>
+
+                                                    <div className="space-y-2">
+                                                        <div className="flex items-center justify-between px-2">
+                                                            <label className="text-[9px] font-black text-[var(--text-muted)] uppercase tracking-widest">Body Parameters (order = {"{{1}}, {{2}}…"})</label>
+                                                            <button onClick={addMetaParam} className="text-[9px] font-black text-green-600 uppercase tracking-widest flex items-center gap-1 hover:brightness-110 transition-all">
+                                                                <Plus size={11}/> Add Parameter
+                                                            </button>
+                                                        </div>
+                                                        {(editingTemplate.meta_params || []).length === 0 && (
+                                                            <p className="text-[10px] font-medium text-[var(--text-muted)] px-2 italic">No parameters mapped yet — add one for each {"{{n}}"} in your approved template.</p>
+                                                        )}
+                                                        <div className="space-y-2">
+                                                            {(editingTemplate.meta_params || []).map((param, idx) => (
+                                                                <div key={idx} className="flex items-center gap-2">
+                                                                    <span className="text-[11px] font-black text-green-600 w-10 shrink-0 font-mono">{"{{" + (idx + 1) + "}}"}</span>
+                                                                    <select value={param} onChange={e => updateMetaParam(idx, e.target.value)}
+                                                                        className="flex-1 bg-[var(--input-bg)] px-3 py-2 border border-[var(--border)] rounded-lg font-bold text-[12px] text-[var(--text-main)] outline-none focus:border-green-500 transition-all">
+                                                                        <option value="">— select variable —</option>
+                                                                        {getVarsForTemplate(editingTemplate.slug).map(v => (
+                                                                            <option key={v} value={v}>{v}</option>
+                                                                        ))}
+                                                                    </select>
+                                                                    <button onClick={() => removeMetaParam(idx)} className="text-[var(--text-muted)] hover:text-red-500 p-1 transition-all"><Trash2 size={14}/></button>
+                                                                </div>
+                                                            ))}
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            )}
                                         </div>
 
                                         {/* Compact Side Panel: Variables */}
