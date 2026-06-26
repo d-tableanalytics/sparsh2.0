@@ -131,21 +131,24 @@ async def notify_users_instant(event_dict: dict, action: str, creator_name: str)
             if not user_data: continue
 
             scope = event_dict.get("notification_scope", "staff")
+            # WhatsApp goes out ONLY when a staff member is the creator (scope == "staff").
+            # Learner-created tasks/sessions stay email + in-app only.
+            delivery = "both" if scope == "staff" else "email"
             if is_task:
-                if action == "created": await send_task_created_email(user_data, event_dict, creator_name)
-                elif action == "updated": await send_task_updated_email(user_data, event_dict, creator_name)
-                elif action == "deleted": await send_task_deleted_email(user_data, event_dict.get("title"), creator_name, scope)
+                if action == "created": await send_task_created_email(user_data, event_dict, creator_name, delivery)
+                elif action == "updated": await send_task_updated_email(user_data, event_dict, creator_name, delivery)
+                elif action == "deleted": await send_task_deleted_email(user_data, event_dict.get("title"), creator_name, delivery, scope)
             else:
-                if action == "created": await send_event_created_email(user_data, event_dict, creator_name, batch_name, quarter_name)
+                if action == "created": await send_event_created_email(user_data, event_dict, creator_name, batch_name, quarter_name, delivery)
                 elif action == "updated":
                     status = event_dict.get("status")
                     if status == "completed":
-                        await send_session_complete_email(user_data, event_dict)
+                        await send_session_complete_email(user_data, event_dict, delivery)
                     elif status == "canceled":
-                        await send_event_deleted_email(user_data, event_dict, creator_name, scope, batch_name, quarter_name)
+                        await send_event_deleted_email(user_data, event_dict, creator_name, scope, batch_name, quarter_name, delivery)
                     else:
-                        await send_event_updated_email(user_data, event_dict, creator_name, batch_name, quarter_name)
-                elif action == "deleted": await send_event_deleted_email(user_data, event_dict, creator_name, scope, batch_name, quarter_name)
+                        await send_event_updated_email(user_data, event_dict, creator_name, batch_name, quarter_name, delivery)
+                elif action == "deleted": await send_event_deleted_email(user_data, event_dict, creator_name, scope, batch_name, quarter_name, delivery)
         except Exception as e:
             print(f"Notification Error for {uid}: {e}")
             
