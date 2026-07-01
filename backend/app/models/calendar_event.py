@@ -49,12 +49,22 @@ class CalendarEventBase(BaseModel):
     # Delegation
     assigned_to: str = "myself" # myself, other
     target_staff_id: Optional[List[str]] = []
-    
+
     # Reminders
     reminders: List[Reminder] = []
-    
+
     color: str = "var(--accent-indigo)"
     bg: str = "var(--accent-indigo-bg)"
+
+    # ─── Task Management module additions (additive/optional; events are unaffected) ───
+    # Richer workflow state for type=="task" docs only. The legacy `status` field
+    # (schedule/completed/canceled/reschedule) stays authoritative for the Calendar page;
+    # the Task Management dashboard/lists read `workflow_status`, falling back to "pending"
+    # for any task created before this field existed.
+    workflow_status: str = "pending" # pending, accepted, in_progress, dependent_on_others, blocked, verification, completed
+    watchers: Optional[List[str]] = [] # user ids "in the loop" / subscribed to this task
+    tags: Optional[List[str]] = []
+    deleted_at: Optional[str] = None # soft-delete timestamp (ISO string); None = not deleted
 
 class CalendarEventCreate(CalendarEventBase):
     pass

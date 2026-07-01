@@ -32,6 +32,12 @@ import CompanyPortal from './pages/CompanyPortal';
 import AssessmentPlayer from './pages/AssessmentPlayer';
 import MyReports from './pages/MyReports';
 import MediaLibrary from './pages/MediaLibrary';
+import TaskDashboard from './pages/TaskDashboard';
+import MyTasks from './pages/MyTasks';
+import DelegatedTasks from './pages/DelegatedTasks';
+import SubscribedTasks from './pages/SubscribedTasks';
+import AllTasks from './pages/AllTasks';
+import DeletedTasks from './pages/DeletedTasks';
 import ForgotPassword from './pages/ForgotPassword';
 import PrivateRoute from './components/common/PrivateRoute';
 import AssistantWidget from './features/assistant';
@@ -62,6 +68,14 @@ const AppRoutes = () => {
       <Route path="/sessions/:sessionId" element={<PrivateRoute><SessionDetails /></PrivateRoute>} />
       <Route path="/sessions/:sessionId/resource/:resourceId" element={<PrivateRoute><ContentViewer /></PrivateRoute>} />
       <Route path="/calendar" element={<PrivateRoute><CalendarPage /></PrivateRoute>} />
+
+      {/* Task Management Module */}
+      <Route path="/tasks" element={<PrivateRoute><TaskDashboard /></PrivateRoute>} />
+      <Route path="/tasks/my" element={<PrivateRoute><MyTasks /></PrivateRoute>} />
+      <Route path="/tasks/delegated" element={<PrivateRoute><DelegatedTasks /></PrivateRoute>} />
+      <Route path="/tasks/subscribed" element={<PrivateRoute><SubscribedTasks /></PrivateRoute>} />
+      <Route path="/tasks/all" element={<PrivateRoute><AllTasks /></PrivateRoute>} />
+      <Route path="/tasks/deleted" element={<PrivateRoute><DeletedTasks /></PrivateRoute>} />
       <Route path="/sessions" element={<PrivateRoute><LearnerSessions /></PrivateRoute>} />
       <Route path="/company-portal" element={<PrivateRoute><CompanyPortal /></PrivateRoute>} />
       <Route path="/my-reports" element={<PrivateRoute><MyReports /></PrivateRoute>} />
