@@ -3,17 +3,104 @@ import { motion } from 'framer-motion';
 import {
   ListChecks, UserPlus, Filter as FilterIcon, Search, RefreshCw, Download,
   List as ListIcon, Table2, ArrowUpDown, Trash2, RotateCcw, MoreVertical,
-  Calendar as CalendarIcon, Pencil, X, Info,
+  Calendar as CalendarIcon, Pencil, X, Info, ChevronDown, Repeat,
 } from 'lucide-react';
 import api from '../../services/api';
 import { getTasks, softDeleteTask, restoreTask, updateTaskStatus } from '../../services/taskApi';
+import { getTaskCategories, getTaskTags } from '../../services/taskMetaApi';
 import { useNotification } from '../../context/NotificationContext';
 import { STATUS_CONFIG, LIST_CARD_ORDER, CARD_KEY_TO_STATUS, PRIORITY_CONFIG, WORKFLOW_STATUSES } from './statusConfig';
-import { getInitials, formatRelativeTime, formatFrequencyLabel, exportTasksToCsv } from './taskDisplayUtils';
+import { getInitials, formatRelativeTime, formatFrequencyLabel, exportTasksToCsv, groupTasksByRecurrence } from './taskDisplayUtils';
 import StatusSummaryCards from './StatusSummaryCards';
 import DateRangeFilter from './DateRangeFilter';
 import TaskFormModal from './TaskFormModal';
 import TaskDetailsModal from './TaskDetailsModal';
+
+// One row in the card/list view. Extracted so both a standalone task and a recurring
+// series' primary occurrence render identically; `groupBadge` adds the "×N / expand" control
+// for the row that represents a collapsed series, and `indent` visually nests the occurrences
+// once that series is expanded.
+const TaskRow = ({
+  task, scope, userMap, checked, onToggleSelect, onOpenDetails, onStatusChange,
+  isMenuOpen, onToggleMenu, onEdit, onDelete, onRestore, indent, groupBadge,
+}) => {
+  const cfg = STATUS_CONFIG[task.status] || STATUS_CONFIG.pending;
+  const priorityCfg = PRIORITY_CONFIG[task.priority] || PRIORITY_CONFIG.Normal;
+  const counterpartLabel = scope === 'delegated'
+    ? `To: ${(task.assignedTo || []).map(id => userMap[id] || id).join(', ') || '—'}`
+    : `From: ${userMap[task.assignedBy] || 'Someone'}`;
+  return (
+    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }}
+      className={`flex items-center gap-3 bg-[var(--bg-card)] border border-[var(--border)] rounded-2xl px-4 py-3.5 hover:shadow-md transition-all ${indent ? 'ml-8' : ''}`}>
+      {scope !== 'deleted' && (
+        <input type="checkbox" checked={checked} onChange={onToggleSelect} className="shrink-0" />
+      )}
+      <div className="w-9 h-9 rounded-full flex items-center justify-center text-white font-black text-[11px] shrink-0" style={{ background: 'var(--avatar-bg)' }}>
+        {getInitials(userMap[task.assignedBy] || task.title)}
+      </div>
+
+      <div className="min-w-0 flex-1 cursor-pointer" onClick={onOpenDetails}>
+        <p className="text-[11px] font-bold text-[var(--text-muted)] truncate">
+          {counterpartLabel} <span className="text-[13px] font-black text-[var(--text-main)] ml-1">{task.title}</span>
+        </p>
+      </div>
+
+      <div className="flex items-center gap-2 shrink-0 flex-wrap justify-end">
+        {groupBadge}
+        {scope === 'deleted' ? (
+          <span className="px-3 py-1 rounded-full text-[9px] font-black uppercase tracking-wider border" style={{ background: cfg.bg, color: cfg.color, borderColor: cfg.border }}>{cfg.label}</span>
+        ) : (
+          <select value={task.status} onChange={e => onStatusChange(e.target.value)} onClick={e => e.stopPropagation()}
+            className="px-3 py-1 rounded-full text-[9px] font-black uppercase tracking-wider border outline-none cursor-pointer"
+            style={{ background: cfg.bg, color: cfg.color, borderColor: cfg.border }}>
+            {WORKFLOW_STATUSES.map(s => <option key={s} value={s}>{STATUS_CONFIG[s].label}</option>)}
+          </select>
+        )}
+        <span className="px-2.5 py-1 rounded-full text-[9px] font-black uppercase tracking-wider bg-[var(--input-bg)] text-[var(--text-muted)] border border-[var(--border)]">
+          {formatFrequencyLabel(task.frequency)}
+        </span>
+        {task.end && (
+          <span className={`flex items-center gap-1 text-[10px] font-bold ${task.isOverdue ? 'text-[var(--accent-red)]' : 'text-[var(--text-muted)]'}`}>
+            <CalendarIcon size={11} /> {new Date(task.end).toLocaleDateString(undefined, { day: '2-digit', month: 'short' })}
+          </span>
+        )}
+        <span className="flex items-center gap-1 text-[10px] font-bold text-[var(--text-muted)]">
+          <span className="w-1.5 h-1.5 rounded-full" style={{ background: priorityCfg.color }} /> {task.priority || 'Normal'}
+        </span>
+        <span className="text-[10px] font-bold text-[var(--text-muted)] opacity-70">{formatRelativeTime(task.end || task.start)}</span>
+
+        <div className="relative">
+          <button onClick={(e) => { e.stopPropagation(); onToggleMenu(); }}
+            className="p-1.5 rounded-lg text-[var(--text-muted)] hover:bg-[var(--input-bg)]">
+            <MoreVertical size={15} />
+          </button>
+          {isMenuOpen && (
+            <div onClick={e => e.stopPropagation()}
+              className="absolute right-0 top-full mt-1 w-36 bg-[var(--bg-card)] border border-[var(--border)] rounded-xl shadow-xl z-20 overflow-hidden">
+              <button onClick={onOpenDetails} className="w-full flex items-center gap-2 px-3 py-2.5 text-[11px] font-bold text-[var(--text-main)] hover:bg-[var(--input-bg)]">
+                <Info size={13} /> Details
+              </button>
+              {scope === 'deleted' ? (
+                <button onClick={onRestore} className="w-full flex items-center gap-2 px-3 py-2.5 text-[11px] font-bold text-[var(--accent-indigo)] hover:bg-[var(--input-bg)]">
+                  <RotateCcw size={13} /> Restore
+                </button>
+              ) : task.isCreator ? (
+                <>
+                  <button onClick={onEdit} className="w-full flex items-center gap-2 px-3 py-2.5 text-[11px] font-bold text-[var(--text-main)] hover:bg-[var(--input-bg)]">
+                    <Pencil size={13} /> Edit
+                  </button>
+                  <button onClick={onDelete} className="w-full flex items-center gap-2 px-3 py-2.5 text-[11px] font-bold text-[var(--accent-red)] hover:bg-[var(--accent-red-bg)]">
+                    <Trash2 size={13} /> Delete
+                  </button>
+                </>
+              ) : null}
+            </div>
+          )}
+        </div>
+      </div>
+    </motion.div>
+  );
+};
 
 const SORT_OPTIONS = [
   { key: 'end', label: 'Target Date' },
@@ -54,6 +141,7 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
   const [modalOpen, setModalOpen] = useState(false);
   const [editingTask, setEditingTask] = useState(null);
   const [detailsTaskId, setDetailsTaskId] = useState(null);
+  const [expandedGroups, setExpandedGroups] = useState(new Set());
 
   const userMap = useMemo(() => {
     const m = {};
@@ -84,15 +172,29 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
     }
   }, [scope, period, startDate, endDate, assignedTo, category, tag, frequency, search]);
 
+  const [categories, setCategories] = useState([]);
+  const [tagOptions, setTagOptions] = useState([]);
+
+  // Categories/tags are persisted server-side (task_categories / task_tags collections) and
+  // shared across every task view — fetched once here rather than derived from whichever
+  // tasks this particular scoped/filtered list happens to have loaded.
+  const fetchTaxonomy = useCallback(async () => {
+    try {
+      const [catRes, tagRes] = await Promise.all([getTaskCategories(), getTaskTags()]);
+      setCategories((catRes.data || []).map(c => c.name));
+      setTagOptions((tagRes.data || []).map(t => t.name));
+    } catch {
+      // Non-fatal: task list/creation still works, just without a live options list.
+    }
+  }, []);
+
   useEffect(() => {
     api.get('/users?active_only=true').then(res => setUsers(res.data || [])).catch(() => {});
   }, []);
 
   useEffect(() => { fetchTasks(); }, [fetchTasks]);
+  useEffect(() => { fetchTaxonomy(); }, [fetchTaxonomy]);
   useEffect(() => { setSelected(new Set()); }, [scope, statusFilter]);
-
-  const categories = useMemo(() => Array.from(new Set(tasks.map(t => t.category).filter(Boolean))), [tasks]);
-  const tagOptions = useMemo(() => Array.from(new Set(tasks.flatMap(t => t.tags || []))), [tasks]);
 
   const summary = useMemo(() => {
     const s = { totalTasks: tasks.length, overdue: 0, pending: 0, accepted: 0, dependentOnOthers: 0, blocked: 0, inProgress: 0, verification: 0, completed: 0 };
@@ -131,6 +233,28 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
     });
     return rows;
   }, [tasks, statusFilter, sortKey, sortDir]);
+
+  // Collapses same-series occurrences (see groupTasksByRecurrence) into one row each,
+  // preserving visibleTasks' sort order via the first-seen occurrence in each group.
+  const groupedRows = useMemo(() => groupTasksByRecurrence(visibleTasks), [visibleTasks]);
+
+  const toggleGroupExpand = (key) => {
+    setExpandedGroups(prev => {
+      const next = new Set(prev);
+      next.has(key) ? next.delete(key) : next.add(key);
+      return next;
+    });
+  };
+
+  const toggleGroupSelect = (group) => {
+    const ids = group.items.map(t => t.id);
+    const allSelected = ids.every(id => selected.has(id));
+    setSelected(prev => {
+      const next = new Set(prev);
+      ids.forEach(id => (allSelected ? next.delete(id) : next.add(id)));
+      return next;
+    });
+  };
 
   const clearFilters = () => {
     setPeriod('all_time'); setStartDate(''); setEndDate('');
@@ -344,13 +468,26 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
               </tr>
             </thead>
             <tbody>
-              {visibleTasks.map(task => {
+              {groupedRows.map(group => {
+                const task = group.primary;
+                const isSeries = group.items.length > 1;
                 const cfg = STATUS_CONFIG[task.status] || STATUS_CONFIG.pending;
                 return (
-                  <tr key={task.id} className="border-b border-[var(--border)] last:border-0 hover:bg-[var(--input-bg)] transition-colors">
-                    <td className="px-4 py-3"><input type="checkbox" checked={selected.has(task.id)} onChange={() => toggleSelect(task.id)} /></td>
+                  <tr key={group.key} className="border-b border-[var(--border)] last:border-0 hover:bg-[var(--input-bg)] transition-colors">
                     <td className="px-4 py-3">
-                      <p className="text-[13px] font-bold text-[var(--text-main)]">{task.title}</p>
+                      <input type="checkbox" checked={isSeries ? group.items.every(t => selected.has(t.id)) : selected.has(task.id)}
+                        onChange={() => (isSeries ? toggleGroupSelect(group) : toggleSelect(task.id))} />
+                    </td>
+                    <td className="px-4 py-3">
+                      <p className="text-[13px] font-bold text-[var(--text-main)] flex items-center gap-1.5">
+                        {task.title}
+                        {isSeries && (
+                          <span title={`Recurring series: ${group.items.length} occurrences`}
+                            className="flex items-center gap-1 px-2 py-0.5 rounded-full text-[9px] font-black uppercase tracking-wider bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] border border-[var(--accent-indigo-border)]">
+                            <Repeat size={10} /> ×{group.items.length}
+                          </span>
+                        )}
+                      </p>
                       {task.isOverdue && <span className="text-[9px] font-black text-[var(--accent-red)] uppercase tracking-widest">Overdue</span>}
                     </td>
                     <td className="px-4 py-3 text-[12px] font-bold text-[var(--text-muted)]">{task.category || '—'}</td>
@@ -388,87 +525,46 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
           <label className="flex items-center gap-2 px-1 text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest">
             <input type="checkbox" checked={selected.size === visibleTasks.length} onChange={toggleSelectAll} /> Select All
           </label>
-          {visibleTasks.map(task => {
-            const cfg = STATUS_CONFIG[task.status] || STATUS_CONFIG.pending;
-            const priorityCfg = PRIORITY_CONFIG[task.priority] || PRIORITY_CONFIG.Normal;
-            const counterpartLabel = scope === 'delegated'
-              ? `To: ${(task.assignedTo || []).map(id => userMap[id] || id).join(', ') || '—'}`
-              : `From: ${userMap[task.assignedBy] || 'Someone'}`;
+          {groupedRows.map(group => {
+            const isSeries = group.items.length > 1;
+            const isExpanded = expandedGroups.has(group.key);
+            const rowProps = (task, { indent = false } = {}) => ({
+              task, scope, userMap, indent,
+              checked: selected.has(task.id),
+              onToggleSelect: () => toggleSelect(task.id),
+              onOpenDetails: () => setDetailsTaskId(task.id),
+              onStatusChange: (status) => handleStatusChange(task, status),
+              isMenuOpen: openMenuId === task.id,
+              onToggleMenu: () => setOpenMenuId(openMenuId === task.id ? null : task.id),
+              onEdit: () => { setEditingTask(task); setModalOpen(true); setOpenMenuId(null); },
+              onDelete: () => handleDelete(task),
+              onRestore: () => handleRestore(task),
+            });
             return (
-              <motion.div key={task.id} initial={{ opacity: 0 }} animate={{ opacity: 1 }}
-                className="flex items-center gap-3 bg-[var(--bg-card)] border border-[var(--border)] rounded-2xl px-4 py-3.5 hover:shadow-md transition-all">
-                {scope !== 'deleted' && (
-                  <input type="checkbox" checked={selected.has(task.id)} onChange={() => toggleSelect(task.id)} className="shrink-0" />
-                )}
-                <div className="w-9 h-9 rounded-full flex items-center justify-center text-white font-black text-[11px] shrink-0" style={{ background: 'var(--avatar-bg)' }}>
-                  {getInitials(userMap[task.assignedBy] || task.title)}
-                </div>
-
-                <div className="min-w-0 flex-1 cursor-pointer" onClick={() => setDetailsTaskId(task.id)}>
-                  <p className="text-[11px] font-bold text-[var(--text-muted)] truncate">
-                    {counterpartLabel} <span className="text-[13px] font-black text-[var(--text-main)] ml-1">{task.title}</span>
-                  </p>
-                </div>
-
-                <div className="flex items-center gap-2 shrink-0 flex-wrap justify-end">
-                  {scope === 'deleted' ? (
-                    <span className="px-3 py-1 rounded-full text-[9px] font-black uppercase tracking-wider border" style={{ background: cfg.bg, color: cfg.color, borderColor: cfg.border }}>{cfg.label}</span>
-                  ) : (
-                    <select value={task.status} onChange={e => handleStatusChange(task, e.target.value)} onClick={e => e.stopPropagation()}
-                      className="px-3 py-1 rounded-full text-[9px] font-black uppercase tracking-wider border outline-none cursor-pointer"
-                      style={{ background: cfg.bg, color: cfg.color, borderColor: cfg.border }}>
-                      {WORKFLOW_STATUSES.map(s => <option key={s} value={s}>{STATUS_CONFIG[s].label}</option>)}
-                    </select>
-                  )}
-                  <span className="px-2.5 py-1 rounded-full text-[9px] font-black uppercase tracking-wider bg-[var(--input-bg)] text-[var(--text-muted)] border border-[var(--border)]">
-                    {formatFrequencyLabel(task.frequency)}
-                  </span>
-                  {task.end && (
-                    <span className={`flex items-center gap-1 text-[10px] font-bold ${task.isOverdue ? 'text-[var(--accent-red)]' : 'text-[var(--text-muted)]'}`}>
-                      <CalendarIcon size={11} /> {new Date(task.end).toLocaleDateString(undefined, { day: '2-digit', month: 'short' })}
-                    </span>
-                  )}
-                  <span className="flex items-center gap-1 text-[10px] font-bold text-[var(--text-muted)]">
-                    <span className="w-1.5 h-1.5 rounded-full" style={{ background: priorityCfg.color }} /> {task.priority || 'Normal'}
-                  </span>
-                  <span className="text-[10px] font-bold text-[var(--text-muted)] opacity-70">{formatRelativeTime(task.end || task.start)}</span>
-
-                  <div className="relative">
-                    <button onClick={(e) => { e.stopPropagation(); setOpenMenuId(openMenuId === task.id ? null : task.id); }}
-                      className="p-1.5 rounded-lg text-[var(--text-muted)] hover:bg-[var(--input-bg)]">
-                      <MoreVertical size={15} />
+              <React.Fragment key={group.key}>
+                <TaskRow
+                  {...rowProps(group.primary)}
+                  checked={isSeries ? group.items.every(t => selected.has(t.id)) : selected.has(group.primary.id)}
+                  onToggleSelect={() => (isSeries ? toggleGroupSelect(group) : toggleSelect(group.primary.id))}
+                  groupBadge={isSeries && (
+                    <button onClick={(e) => { e.stopPropagation(); toggleGroupExpand(group.key); }} title="This is a recurring series — click to see/track each day"
+                      className="flex items-center gap-1 px-2.5 py-1 rounded-full text-[9px] font-black uppercase tracking-wider bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] border border-[var(--accent-indigo-border)]">
+                      <Repeat size={11} /> ×{group.items.length}
+                      <ChevronDown size={12} className={`transition-transform ${isExpanded ? 'rotate-180' : ''}`} />
                     </button>
-                    {openMenuId === task.id && (
-                      <div onClick={e => e.stopPropagation()}
-                        className="absolute right-0 top-full mt-1 w-36 bg-[var(--bg-card)] border border-[var(--border)] rounded-xl shadow-xl z-20 overflow-hidden">
-                        <button onClick={() => { setDetailsTaskId(task.id); setOpenMenuId(null); }} className="w-full flex items-center gap-2 px-3 py-2.5 text-[11px] font-bold text-[var(--text-main)] hover:bg-[var(--input-bg)]">
-                          <Info size={13} /> Details
-                        </button>
-                        {scope === 'deleted' ? (
-                          <button onClick={() => handleRestore(task)} className="w-full flex items-center gap-2 px-3 py-2.5 text-[11px] font-bold text-[var(--accent-indigo)] hover:bg-[var(--input-bg)]">
-                            <RotateCcw size={13} /> Restore
-                          </button>
-                        ) : task.isCreator ? (
-                          <>
-                            <button onClick={() => { setEditingTask(task); setModalOpen(true); setOpenMenuId(null); }} className="w-full flex items-center gap-2 px-3 py-2.5 text-[11px] font-bold text-[var(--text-main)] hover:bg-[var(--input-bg)]">
-                              <Pencil size={13} /> Edit
-                            </button>
-                            <button onClick={() => handleDelete(task)} className="w-full flex items-center gap-2 px-3 py-2.5 text-[11px] font-bold text-[var(--accent-red)] hover:bg-[var(--accent-red-bg)]">
-                              <Trash2 size={13} /> Delete
-                            </button>
-                          </>
-                        ) : null}
-                      </div>
-                    )}
-                  </div>
-                </div>
-              </motion.div>
+                  )}
+                />
+                {isSeries && isExpanded && group.items.map(task => (
+                  <TaskRow key={task.id} {...rowProps(task, { indent: true })} />
+                ))}
+              </React.Fragment>
             );
           })}
         </div>
       )}
 
-      <TaskFormModal isOpen={modalOpen} onClose={() => setModalOpen(false)} task={editingTask} onSaved={fetchTasks} categories={categories} tags={tagOptions} />
+      <TaskFormModal isOpen={modalOpen} onClose={() => setModalOpen(false)} task={editingTask} onSaved={fetchTasks}
+        categories={categories} tags={tagOptions} onTaxonomyChanged={fetchTaxonomy} />
       <TaskDetailsModal isOpen={!!detailsTaskId} taskId={detailsTaskId} onClose={() => setDetailsTaskId(null)} onChanged={fetchTasks} />
     </div>
   );

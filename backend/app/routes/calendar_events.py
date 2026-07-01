@@ -13,6 +13,7 @@ from app.services.activity_log_service import log_activity
 from app.services.gpt_service import grade_descriptive_answer
 from app.services.s3_service import upload_file_to_s3, get_signed_url
 from app.services.event_sync_service import sync_event_to_collection
+from app.routes.task_meta import sync_task_meta
 from bson import ObjectId
 from datetime import datetime, timedelta, timezone
 
@@ -320,15 +321,19 @@ async def create_event(event: CalendarEventCreate, background_tasks: BackgroundT
                     # action so the Task Management → Activity feed can pick them up.
                     is_task = event_dict.get("type") == "task"
                     await log_activity(current_user, "Create Recurring Tasks" if is_task else "Create Recurring", col_name, f"Generated {len(generated_events)} {'tasks' if is_task else 'events'} for {event_dict['title']}")
+                    if is_task:
+                        background_tasks.add_task(sync_task_meta, event_dict.get("category"), event_dict.get("tags"), str(current_user["_id"]))
                     return {"message": f"Successfully generated {len(generated_events)} recurring duties."}
         except Exception as e:
             print(f"RECURSIVE ENGINE FAILURE: {e}")
             # Fall back to single event creation below if recursion fails
-    
+
     result = await col.insert_one(event_dict)
     event_dict["id"] = str(result.inserted_id)
     background_tasks.add_task(notify_users_instant, event_dict, "created", creator_name)
     is_task = event_dict.get("type") == "task"
+    if is_task:
+        background_tasks.add_task(sync_task_meta, event_dict.get("category"), event_dict.get("tags"), str(current_user["_id"]))
     await log_activity(current_user, "Create Task" if is_task else "Create Event", col_name, f"{'Task' if is_task else 'Event'} created: {event_dict['title']}")
     return {"id": str(result.inserted_id), "message": f"Event created in {col_name}"}
 
@@ -372,6 +377,8 @@ async def update_event(event_id: str, updates: dict, background_tasks: Backgroun
     is_task = (projected.get("type") or existing.get("type")) == "task"
     _title = projected.get("title") or existing.get("title") or event_id
     await log_activity(current_user, "Update Task" if is_task else "Update Event", new_col_name, f"{'Task' if is_task else 'Event'} updated: {_title}")
+    if is_task and ("category" in updates or "tags" in updates):
+        background_tasks.add_task(sync_task_meta, projected.get("category"), projected.get("tags"), str(current_user["_id"]))
     creator_name = current_user.get("full_name") or current_user.get("first_name", "System Admin")
     final_doc["id"] = str(event_id)
     background_tasks.add_task(notify_users_instant, final_doc, "updated", creator_name)

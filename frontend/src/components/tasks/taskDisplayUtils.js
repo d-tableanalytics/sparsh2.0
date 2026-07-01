@@ -25,6 +25,26 @@ export const formatFrequencyLabel = (repeat) => {
   return repeat;
 };
 
+// A "Daily/Weekly/..." task with a deadline is materialized on the backend as one document
+// per occurrence (so each day can be tracked/completed independently), all sharing the same
+// recurringGroupId. List views collapse those into a single row so a 6-day daily task reads
+// as "one task", while still letting the individual occurrences be expanded and tracked.
+export const groupTasksByRecurrence = (tasks) => {
+  const order = [];
+  const groups = new Map();
+  tasks.forEach(t => {
+    const key = t.recurringGroupId || t.id;
+    if (!groups.has(key)) { groups.set(key, []); order.push(key); }
+    groups.get(key).push(t);
+  });
+  return order.map(key => {
+    const items = groups.get(key).sort((a, b) => new Date(a.start || 0) - new Date(b.start || 0));
+    // Prefer the next occurrence that isn't finished yet; fall back to the earliest one.
+    const primary = items.find(t => t.status !== 'completed') || items[0];
+    return { key, primary, items };
+  });
+};
+
 // No dedicated CSV/export library is installed anywhere in the project, so this uses
 // the plain Blob + anchor-download browser API rather than pulling in a new dependency.
 export const exportTasksToCsv = (tasks, userMap, filename = 'tasks.csv') => {

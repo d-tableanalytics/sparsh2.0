@@ -7,6 +7,7 @@ import {
 } from 'lucide-react';
 import api from '../../services/api';
 import { createTask, updateTask, uploadTaskAttachment, deleteTaskAttachment } from '../../services/taskApi';
+import { createTaskCategory, createTaskTag } from '../../services/taskMetaApi';
 import { useAuth } from '../../context/AuthContext';
 import { useNotification } from '../../context/NotificationContext';
 import PickerModal from './PickerModal';
@@ -80,7 +81,7 @@ const formatFileSize = (bytes) => (bytes || bytes === 0) ? `${(bytes / (1024 * 1
 // show up on the Calendar page and vice versa. `end` is the task's own due date/time
 // (top-level field); `start`/`repeat_end_date` below are the separate recurrence-series
 // bounds, matching the existing recurring-event engine's fields exactly.
-const TaskFormModal = ({ isOpen, onClose, onSaved, task = null, categories = [], tags: availableTags = [], groupId = null }) => {
+const TaskFormModal = ({ isOpen, onClose, onSaved, task = null, categories = [], tags: availableTags = [], groupId = null, onTaxonomyChanged }) => {
   const { user } = useAuth();
   const { showSuccess, showError } = useNotification();
   const [form, setForm] = useState(emptyForm);
@@ -159,6 +160,38 @@ const TaskFormModal = ({ isOpen, onClose, onSaved, task = null, categories = [],
   };
 
   const removeChecklistItem = (id) => setChecklist(c => c.filter(item => item.id !== id));
+
+  // Category/tags picked here are persisted immediately via the task_categories/task_tags
+  // APIs (not just local form state) so they survive a refresh and show up in every other
+  // task list/create view right away — see taskMetaApi.js. Re-saving an existing name is a
+  // harmless no-op (the backend get-or-creates by case-insensitive match).
+  const handleCategoryApply = async (val) => {
+    const name = (val || '').trim();
+    if (!name) return;
+    setForm(f => ({ ...f, category: name }));
+    const isNew = !categories.some(c => c.toLowerCase() === name.toLowerCase());
+    if (isNew) {
+      try {
+        await createTaskCategory(name);
+        onTaxonomyChanged?.();
+      } catch (err) {
+        showError(err.response?.data?.detail || 'Failed to save new category');
+      }
+    }
+  };
+
+  const handleTagsApply = async (selectedTags) => {
+    setForm(f => ({ ...f, tags: selectedTags }));
+    const newTags = selectedTags.filter(t => !availableTags.some(a => a.toLowerCase() === t.toLowerCase()));
+    if (newTags.length) {
+      try {
+        await Promise.all(newTags.map(t => createTaskTag(t)));
+        onTaxonomyChanged?.();
+      } catch (err) {
+        showError(err.response?.data?.detail || 'Failed to save new tag');
+      }
+    }
+  };
 
   // Multiple monthly dates can be selected (e.g. 3, 4, 5); "Last Day" is mutually
   // exclusive with picking specific dates, matching the reference behavior.
@@ -251,6 +284,17 @@ const TaskFormModal = ({ isOpen, onClose, onSaved, task = null, categories = [],
     const validationError = validate();
     if (validationError) return showError(validationError);
 
+    // A checklist item typed but not confirmed with Enter/Add would otherwise be silently
+    // dropped on save (it never made it into `checklist` state) — commit it now instead.
+    const pendingItemTitle = newChecklistItem.trim();
+    const checklistToSave = pendingItemTitle
+      ? [...checklist, { id: `new-${Date.now()}`, title: pendingItemTitle, completed: false }]
+      : checklist;
+    if (pendingItemTitle) {
+      setChecklist(checklistToSave);
+      setNewChecklistItem('');
+    }
+
     setSaving(true);
     try {
       const isRepeating = form.repeat !== 'Does not repeat';
@@ -274,7 +318,7 @@ const TaskFormModal = ({ isOpen, onClose, onSaved, task = null, categories = [],
         evidence_required: form.evidence_required,
         verification_required: form.verification_required,
         reminders: form.reminders,
-        checklist: checklist.map(c => ({
+        checklist: checklistToSave.map(c => ({
           id: c.id,
           title: c.title,
           completed: c.completed || false,
@@ -715,7 +759,7 @@ const TaskFormModal = ({ isOpen, onClose, onSaved, task = null, categories = [],
         isOpen={pickerOpen === 'category'} onClose={() => setPickerOpen(null)}
         title="Select Category" searchPlaceholder="Find category..." items={categoryItems}
         multi={false} selected={form.category} renderDot allowAddMore addMoreLabel="Add More"
-        onApply={(val) => setForm(f => ({ ...f, category: val || f.category }))}
+        onApply={handleCategoryApply}
       />
       <MiniDatePicker isOpen={deadlinePickerOpen} onClose={() => setDeadlinePickerOpen(false)}
         value={form.end} title="Select Due Date" onApply={(iso) => setForm(f => ({ ...f, end: iso }))} />
@@ -733,7 +777,7 @@ const TaskFormModal = ({ isOpen, onClose, onSaved, task = null, categories = [],
       <TaskTagsModal
         isOpen={tagsModalOpen} onClose={() => setTagsModalOpen(false)}
         tags={availableTags} selected={form.tags}
-        onApply={(sel) => setForm(f => ({ ...f, tags: sel }))}
+        onApply={handleTagsApply}
       />
       <VoiceNoteModal
         isOpen={voiceNoteOpen} onClose={() => setVoiceNoteOpen(false)}
