@@ -1,12 +1,14 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
 from typing import Optional
 from datetime import datetime, timedelta, timezone
 from bson import ObjectId
+import re
 
 from app.db.mongodb import get_collection
 from app.controllers.auth_controller import get_current_user
 from app.utils.calendar_utils import CALENDAR_COLLECTIONS, find_event_across_collections
 from app.services.activity_log_service import log_activity
+from app.services.s3_service import upload_file_to_s3_with_key
 
 router = APIRouter(prefix="/tasks", tags=["Tasks"])
 
@@ -130,6 +132,7 @@ async def _fetch_tasks(
     search: Optional[str] = None,
     start_iso: Optional[str] = None,
     end_iso: Optional[str] = None,
+    group_id: Optional[str] = None,
 ):
     user_id = str(current_user["_id"])
     role = current_user.get("role", "").lower()
@@ -175,6 +178,8 @@ async def _fetch_tasks(
         clauses.append({"repeat": frequency})
     if tag:
         clauses.append({"tags": {"$in": [tag]}})
+    if group_id:
+        clauses.append({"group_id": group_id})
     if assigned_to:
         clauses.append({"$or": [
             {"target_staff_id": assigned_to},
@@ -207,6 +212,9 @@ def _serialize_task(doc: dict, current_user_id: str) -> dict:
         "category": doc.get("category"),
         "tags": doc.get("tags") or [],
         "frequency": doc.get("repeat"),
+        "repeatEndDate": doc.get("repeat_end_date"),
+        "repeatInterval": doc.get("repeat_interval") or 1,
+        "repeatData": doc.get("repeat_data"),
         "priority": doc.get("priority") or "Normal",
         "description": doc.get("description"),
         "createdAt": doc.get("created_at"),
@@ -216,9 +224,47 @@ def _serialize_task(doc: dict, current_user_id: str) -> dict:
         "assignedTo": doc.get("target_staff_id") or [],
         "assignedBy": doc.get("user_id"),
         "watchers": doc.get("watchers") or [],
+        "groupId": doc.get("group_id"),
         "isCreator": doc.get("user_id") == current_user_id,
         "deletedAt": doc.get("deleted_at"),
     }
+
+
+def _serialize_task_detail(doc: dict, current_user_id: str) -> dict:
+    base = _serialize_task(doc, current_user_id)
+    base.update({
+        "evidenceRequired": doc.get("evidence_required", False),
+        "verificationRequired": doc.get("verification_required", False),
+        "color": doc.get("color"),
+        "checklist": doc.get("checklist") or [],
+        "attachments": doc.get("attachments") or [],
+        "remarks": doc.get("remarks") or [],
+        "statusHistory": doc.get("status_history") or [],
+    })
+    return base
+
+
+def _is_participant(existing: dict, current_user: dict) -> bool:
+    """Creator, admin, assignee, or watcher — the set of people allowed to collaborate
+    on a task (add checklist items, comment, attach files), broader than who can edit
+    the core task fields or change its status."""
+    user_id = str(current_user["_id"])
+    if current_user.get("role") == "superadmin":
+        return True
+    if existing.get("user_id") == user_id:
+        return True
+    if user_id in (existing.get("target_staff_id") or []):
+        return True
+    if user_id in (existing.get("watchers") or []):
+        return True
+    return False
+
+
+async def _get_task_or_404(task_id: str):
+    existing, col_name = await find_event_across_collections(task_id)
+    if not existing or existing.get("type") != "task":
+        raise HTTPException(status_code=404, detail="Task not found")
+    return existing, col_name
 
 
 @router.get("/dashboard")
@@ -312,23 +358,118 @@ async def list_tasks(
     period: Optional[str] = None,
     startDate: Optional[str] = None,
     endDate: Optional[str] = None,
+    groupId: Optional[str] = None,
     current_user: dict = Depends(get_current_user),
 ):
     start_iso, end_iso = _period_to_range(period, startDate, endDate)
-    docs = await _fetch_tasks(current_user, scope, category, tag, frequency, assignedTo, search, start_iso, end_iso)
+    docs = await _fetch_tasks(current_user, scope, category, tag, frequency, assignedTo, search, start_iso, end_iso, groupId)
     user_id = str(current_user["_id"])
     return [_serialize_task(d, user_id) for d in docs]
+
+
+# Actions written to `activity_logs` that represent task lifecycle events (see log_activity
+# calls in this file and the task-typed calendar_events create/update). The Activity feed is
+# scoped to exactly these so it stays task-specific and doesn't pull in session/auth logs.
+TASK_ACTIVITY_ACTIONS = [
+    "Create Task", "Create Recurring Tasks", "Update Task", "Update Task Status",
+    "Add Sub Task", "Comment on Task", "Attach File to Task",
+    "Soft Delete Task", "Restore Task",
+]
+
+
+@router.get("/activity")
+async def tasks_activity(
+    period: Optional[str] = None,
+    startDate: Optional[str] = None,
+    endDate: Optional[str] = None,
+    updatedBy: Optional[str] = None,
+    search: Optional[str] = None,
+    limit: int = 30,
+    skip: int = 0,
+    current_user: dict = Depends(get_current_user),
+):
+    """Task Management activity feed, read from the shared `activity_logs` collection.
+    Admins/staff see the whole org's task activity (and can filter by user); everyone else
+    only ever sees their own. Supports date-range, updated-by, search and pagination, and
+    returns a per-user summary for the dashboard cards."""
+    col = get_collection("activity_logs")
+    query = {"action": {"$in": TASK_ACTIVITY_ACTIONS}}
+
+    role = current_user.get("role", "").lower()
+    if role not in ADMIN_ROLES:
+        query["user_id"] = str(current_user["_id"])
+    elif updatedBy:
+        query["user_id"] = updatedBy
+
+    # Date range on `timestamp` (a real datetime, unlike the ISO-string task dates), so we
+    # convert _period_to_range's ISO output back into tz-aware UTC bounds for the comparison.
+    start_iso, end_iso = _period_to_range(period, startDate, endDate)
+    if start_iso and end_iso:
+        try:
+            start_dt = datetime.fromisoformat(start_iso)
+            end_dt = datetime.fromisoformat(end_iso)
+            if len(end_iso) <= 10:  # custom date-only end → include the whole day
+                end_dt = end_dt + timedelta(days=1) - timedelta(microseconds=1)
+            if start_dt.tzinfo is None:
+                start_dt = start_dt.replace(tzinfo=timezone.utc)
+            if end_dt.tzinfo is None:
+                end_dt = end_dt.replace(tzinfo=timezone.utc)
+            query["timestamp"] = {"$gte": start_dt, "$lte": end_dt}
+        except Exception:
+            pass
+
+    if search:
+        rgx = {"$regex": re.escape(search.strip()), "$options": "i"}
+        query["$or"] = [{"action": rgx}, {"details": rgx}, {"user_name": rgx}]
+
+    total = await col.count_documents(query)
+    docs = await col.find(query).sort("timestamp", -1).skip(max(0, skip)).limit(max(1, min(limit, 100))).to_list(100)
+
+    # Per-user activity counts over the whole filtered set (not just the current page).
+    agg = await col.aggregate([
+        {"$match": query},
+        {"$group": {"_id": {"user_id": "$user_id", "user_name": "$user_name"}, "count": {"$sum": 1}}},
+        {"$sort": {"count": -1}},
+        {"$limit": 12},
+    ]).to_list(12)
+
+    activities = [{
+        "id": str(d["_id"]),
+        "action": d.get("action"),
+        "details": d.get("details"),
+        "module": d.get("module"),
+        "updatedBy": d.get("user_id"),
+        "updatedByName": d.get("user_name"),
+        "updatedByEmail": d.get("user_email"),
+        "metadata": d.get("metadata") or {},
+        "updatedAt": d["timestamp"].isoformat() if d.get("timestamp") else None,
+    } for d in docs]
+
+    summary = [{
+        "userId": g["_id"].get("user_id"),
+        "userName": g["_id"].get("user_name") or "Unknown",
+        "count": g["count"],
+    } for g in agg]
+
+    return {"activities": activities, "summary": summary, "total": total}
+
+
+@router.get("/{task_id}")
+async def get_task_detail(task_id: str, current_user: dict = Depends(get_current_user)):
+    existing, _ = await _get_task_or_404(task_id)
+    if not _is_participant(existing, current_user):
+        raise HTTPException(status_code=403, detail="Not authorized to view this task")
+    return _serialize_task_detail(existing, str(current_user["_id"]))
 
 
 @router.patch("/{task_id}/status")
 async def update_task_status(task_id: str, body: dict, current_user: dict = Depends(get_current_user)):
     new_status = body.get("workflow_status")
+    reason = body.get("reason")
     if new_status not in WORKFLOW_STATUSES:
         raise HTTPException(status_code=400, detail=f"workflow_status must be one of {WORKFLOW_STATUSES}")
 
-    existing, col_name = await find_event_across_collections(task_id)
-    if not existing or existing.get("type") != "task":
-        raise HTTPException(status_code=404, detail="Task not found")
+    existing, col_name = await _get_task_or_404(task_id)
 
     user_id = str(current_user["_id"])
     is_admin = current_user.get("role") == "superadmin"
@@ -337,8 +478,9 @@ async def update_task_status(task_id: str, body: dict, current_user: dict = Depe
     if not (is_admin or is_creator or is_assignee):
         raise HTTPException(status_code=403, detail="Not authorized to update this task")
 
+    old_status = _resolve_workflow_status(existing)
     updates = {"workflow_status": new_status, "updated_at": datetime.now(timezone.utc)}
-    was_completed = _resolve_workflow_status(existing) == "completed"
+    was_completed = old_status == "completed"
     if new_status == "completed" and not was_completed:
         updates["completed_at"] = datetime.now(timezone.utc)
         updates["status"] = "completed"  # keep legacy Calendar page status in sync
@@ -346,9 +488,135 @@ async def update_task_status(task_id: str, body: dict, current_user: dict = Depe
         updates["completed_at"] = None
         updates["status"] = "schedule"
 
-    await get_collection(col_name).update_one({"_id": ObjectId(task_id)}, {"$set": updates})
+    history_entry = {
+        "old_status": old_status,
+        "new_status": new_status,
+        "changed_by": user_id,
+        "changed_by_name": current_user.get("full_name") or current_user.get("email"),
+        "reason": reason,
+        "changed_at": datetime.now(timezone.utc),
+    }
+
+    if old_status != new_status:
+        await get_collection(col_name).update_one(
+            {"_id": ObjectId(task_id)},
+            {"$set": updates, "$push": {"status_history": history_entry}},
+        )
+    else:
+        await get_collection(col_name).update_one({"_id": ObjectId(task_id)}, {"$set": updates})
+
     await log_activity(current_user, "Update Task Status", col_name, f"Task {task_id} -> {new_status}")
     return {"id": task_id, "workflow_status": new_status}
+
+
+@router.post("/{task_id}/checklist")
+async def add_checklist_item(task_id: str, body: dict, current_user: dict = Depends(get_current_user)):
+    title = (body.get("title") or "").strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="Checklist item title is required")
+
+    existing, col_name = await _get_task_or_404(task_id)
+    if not _is_participant(existing, current_user):
+        raise HTTPException(status_code=403, detail="Not authorized to update this task")
+
+    item = {"id": str(ObjectId()), "title": title, "completed": False, "completed_at": None}
+    await get_collection(col_name).update_one({"_id": ObjectId(task_id)}, {"$push": {"checklist": item}})
+    await log_activity(current_user, "Add Sub Task", col_name, f"Task {task_id}: {title}")
+    return item
+
+
+@router.patch("/{task_id}/checklist/{item_id}")
+async def update_checklist_item(task_id: str, item_id: str, body: dict, current_user: dict = Depends(get_current_user)):
+    existing, col_name = await _get_task_or_404(task_id)
+    if not _is_participant(existing, current_user):
+        raise HTTPException(status_code=403, detail="Not authorized to update this task")
+
+    checklist = existing.get("checklist") or []
+    item = next((c for c in checklist if c.get("id") == item_id), None)
+    if not item:
+        raise HTTPException(status_code=404, detail="Checklist item not found")
+
+    if "completed" in body:
+        item["completed"] = bool(body["completed"])
+        item["completed_at"] = datetime.now(timezone.utc).isoformat() if item["completed"] else None
+    if "title" in body and body["title"].strip():
+        item["title"] = body["title"].strip()
+
+    await get_collection(col_name).update_one({"_id": ObjectId(task_id)}, {"$set": {"checklist": checklist}})
+    return item
+
+
+@router.delete("/{task_id}/checklist/{item_id}")
+async def delete_checklist_item(task_id: str, item_id: str, current_user: dict = Depends(get_current_user)):
+    existing, col_name = await _get_task_or_404(task_id)
+    if not _is_participant(existing, current_user):
+        raise HTTPException(status_code=403, detail="Not authorized to update this task")
+
+    await get_collection(col_name).update_one(
+        {"_id": ObjectId(task_id)},
+        {"$pull": {"checklist": {"id": item_id}}},
+    )
+    return {"message": "Checklist item removed"}
+
+
+@router.post("/{task_id}/comments")
+async def add_task_comment(task_id: str, body: dict, current_user: dict = Depends(get_current_user)):
+    text = (body.get("text") or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Comment text is required")
+
+    existing, col_name = await _get_task_or_404(task_id)
+    if not _is_participant(existing, current_user):
+        raise HTTPException(status_code=403, detail="Not authorized to comment on this task")
+
+    comment = {
+        "id": str(ObjectId()),
+        "author_id": str(current_user["_id"]),
+        "author_name": current_user.get("full_name") or current_user.get("email"),
+        "text": text,
+        "created_at": datetime.now(timezone.utc),
+    }
+    await get_collection(col_name).update_one({"_id": ObjectId(task_id)}, {"$push": {"remarks": comment}})
+    await log_activity(current_user, "Comment on Task", col_name, f"Task {task_id}")
+    return comment
+
+
+@router.post("/{task_id}/attachments")
+async def upload_task_attachment(task_id: str, file: UploadFile = File(...), current_user: dict = Depends(get_current_user)):
+    existing, col_name = await _get_task_or_404(task_id)
+    if not _is_participant(existing, current_user):
+        raise HTTPException(status_code=403, detail="Not authorized to update this task")
+
+    try:
+        uploaded = upload_file_to_s3_with_key(file.file, file.filename, file.content_type)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    attachment = {
+        "id": str(ObjectId()),
+        "name": file.filename,
+        "size": file.size,
+        "key": uploaded["key"],
+        "url": uploaded["url"],
+        "uploaded_by": str(current_user["_id"]),
+        "uploaded_at": datetime.now(timezone.utc),
+    }
+    await get_collection(col_name).update_one({"_id": ObjectId(task_id)}, {"$push": {"attachments": attachment}})
+    await log_activity(current_user, "Attach File to Task", col_name, f"Task {task_id}: {file.filename}")
+    return attachment
+
+
+@router.delete("/{task_id}/attachments/{attachment_id}")
+async def delete_task_attachment(task_id: str, attachment_id: str, current_user: dict = Depends(get_current_user)):
+    existing, col_name = await _get_task_or_404(task_id)
+    if not _is_participant(existing, current_user):
+        raise HTTPException(status_code=403, detail="Not authorized to update this task")
+
+    await get_collection(col_name).update_one(
+        {"_id": ObjectId(task_id)},
+        {"$pull": {"attachments": {"id": attachment_id}}},
+    )
+    return {"message": "Attachment removed"}
 
 
 @router.delete("/{task_id}")

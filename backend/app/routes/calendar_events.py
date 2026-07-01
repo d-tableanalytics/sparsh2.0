@@ -166,6 +166,33 @@ async def notify_users_instant(event_dict: dict, action: str, creator_name: str)
         except Exception as e:
             print(f"Conflict Notification Error: {e}")
 
+def _next_occurrence(curr_dt, repeat_type, interval, repeat_data=None):
+    """Advance curr_dt by one recurrence step, or return None if repeat_type is unrecognized."""
+    if repeat_type == "Daily":
+        return curr_dt + timedelta(days=1)
+    if "Weekly" in repeat_type:
+        return curr_dt + timedelta(weeks=1)
+    if repeat_type == "Monthly":
+        month = curr_dt.month + 1; year = curr_dt.year + (month - 1) // 12; month = (month - 1) % 12 + 1; day = min(curr_dt.day, 28)
+        return curr_dt.replace(year=year, month=month, day=day)
+    if repeat_type == "Annually":
+        return curr_dt.replace(year=curr_dt.year + 1)
+    if repeat_type == "periodic":
+        return curr_dt + timedelta(days=interval)
+    if repeat_type == "Custom":
+        unit = (repeat_data or {}).get("customUnit", "Months")
+        if unit == "Weeks":
+            return curr_dt + timedelta(weeks=interval)
+        # "Months" picks specific date(s) of the month (repeat_data.monthlyDates/lastDay,
+        # same field Monthly uses) so it steps by month like Monthly does, just with a
+        # custom N-month interval instead of a fixed 1.
+        total_months = curr_dt.month - 1 + interval
+        year = curr_dt.year + total_months // 12
+        month = total_months % 12 + 1
+        day = min(curr_dt.day, 28)
+        return curr_dt.replace(year=year, month=month, day=day)
+    return None
+
 @router.post("/validate-conflict")
 async def validate_conflict(event_data: dict, current_user: dict = Depends(get_current_user)):
     # Add creator ID if not present
@@ -282,20 +309,17 @@ async def create_event(event: CalendarEventCreate, background_tasks: BackgroundT
                     if "_id" in new_ev: del new_ev["_id"]
                     generated_events.append(new_ev)
                     
-                    if repeat_type == "Daily": curr_dt += timedelta(days=1)
-                    elif "Weekly" in repeat_type: curr_dt += timedelta(weeks=1)
-                    elif repeat_type == "Monthly":
-                        month = curr_dt.month + 1; year = curr_dt.year + (month - 1) // 12; month = (month - 1) % 12 + 1; day = min(curr_dt.day, 28)
-                        curr_dt = curr_dt.replace(year=year, month=month, day=day)
-                    elif repeat_type == "Annually": curr_dt = curr_dt.replace(year=curr_dt.year + 1)
-                    elif repeat_type == "periodic": curr_dt += timedelta(days=interval)
-                    else: break
+                    next_dt = _next_occurrence(curr_dt, repeat_type, interval, event_dict.get("repeat_data"))
+                    if next_dt is None: break
+                    curr_dt = next_dt
                     if len(generated_events) > 365: break
                 
                 if generated_events:
                     await col.insert_many(generated_events)
-                    # Log activity for batch creation
-                    await log_activity(current_user, "Create Recurring", col_name, f"Generated {len(generated_events)} events for {event_dict['title']}")
+                    # Log activity for batch creation. Task-typed docs use a task-specific
+                    # action so the Task Management → Activity feed can pick them up.
+                    is_task = event_dict.get("type") == "task"
+                    await log_activity(current_user, "Create Recurring Tasks" if is_task else "Create Recurring", col_name, f"Generated {len(generated_events)} {'tasks' if is_task else 'events'} for {event_dict['title']}")
                     return {"message": f"Successfully generated {len(generated_events)} recurring duties."}
         except Exception as e:
             print(f"RECURSIVE ENGINE FAILURE: {e}")
@@ -304,7 +328,8 @@ async def create_event(event: CalendarEventCreate, background_tasks: BackgroundT
     result = await col.insert_one(event_dict)
     event_dict["id"] = str(result.inserted_id)
     background_tasks.add_task(notify_users_instant, event_dict, "created", creator_name)
-    await log_activity(current_user, "Create Event", col_name, f"Created in {col_name}: {event_dict['title']}")
+    is_task = event_dict.get("type") == "task"
+    await log_activity(current_user, "Create Task" if is_task else "Create Event", col_name, f"{'Task' if is_task else 'Event'} created: {event_dict['title']}")
     return {"id": str(result.inserted_id), "message": f"Event created in {col_name}"}
 
 @router.patch("/{event_id}")
@@ -344,7 +369,9 @@ async def update_event(event_id: str, updates: dict, background_tasks: Backgroun
         await get_collection(col_name).update_one({"_id": ObjectId(event_id)}, {"$set": updates})
         final_doc = projected
 
-    await log_activity(current_user, "Update Event", new_col_name, f"Updated event ID: {event_id}")
+    is_task = (projected.get("type") or existing.get("type")) == "task"
+    _title = projected.get("title") or existing.get("title") or event_id
+    await log_activity(current_user, "Update Task" if is_task else "Update Event", new_col_name, f"{'Task' if is_task else 'Event'} updated: {_title}")
     creator_name = current_user.get("full_name") or current_user.get("first_name", "System Admin")
     final_doc["id"] = str(event_id)
     background_tasks.add_task(notify_users_instant, final_doc, "updated", creator_name)
@@ -384,13 +411,9 @@ async def update_event(event_id: str, updates: dict, background_tasks: Backgroun
                         generated = []
                         curr_dt = current_end_dt
                         # Avoid duplicate on the current_end_dt itself
-                        if repeat_type == "Daily": curr_dt += timedelta(days=1)
-                        elif "Weekly" in repeat_type: curr_dt += timedelta(weeks=1)
-                        elif repeat_type == "Monthly":
-                            month = curr_dt.month + 1; year = curr_dt.year + (month - 1) // 12; month = (month - 1) % 12 + 1; day = min(curr_dt.day, 28)
-                            curr_dt = curr_dt.replace(year=year, month=month, day=day)
-                        elif repeat_type == "periodic": curr_dt += timedelta(days=interval)
-                        
+                        next_dt = _next_occurrence(curr_dt, repeat_type, interval, existing.get("repeat_data"))
+                        if next_dt is not None: curr_dt = next_dt
+
                         while curr_dt <= new_end_dt:
                             new_ev = {**existing, **updates}
                             new_ev["start"] = curr_dt.isoformat()
@@ -402,13 +425,9 @@ async def update_event(event_id: str, updates: dict, background_tasks: Backgroun
                             if "_id" in new_ev: del new_ev["_id"]
                             generated.append(new_ev)
                             
-                            if repeat_type == "Daily": curr_dt += timedelta(days=1)
-                            elif "Weekly" in repeat_type: curr_dt += timedelta(weeks=1)
-                            elif repeat_type == "Monthly":
-                                month = curr_dt.month + 1; year = curr_dt.year + (month - 1) // 12; month = (month - 1) % 12 + 1; day = min(curr_dt.day, 28)
-                                curr_dt = curr_dt.replace(year=year, month=month, day=day)
-                            elif repeat_type == "periodic": curr_dt += timedelta(days=interval)
-                            else: break
+                            next_dt = _next_occurrence(curr_dt, repeat_type, interval, existing.get("repeat_data"))
+                            if next_dt is None: break
+                            curr_dt = next_dt
                             if len(generated) > 365: break
                         
                         if generated:

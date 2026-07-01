@@ -64,7 +64,16 @@ class CalendarEventBase(BaseModel):
     workflow_status: str = "pending" # pending, accepted, in_progress, dependent_on_others, blocked, verification, completed
     watchers: Optional[List[str]] = [] # user ids "in the loop" / subscribed to this task
     tags: Optional[List[str]] = []
+    group_id: Optional[str] = None # Task Group this task belongs to (Groups sub-module); None = ungrouped
     deleted_at: Optional[str] = None # soft-delete timestamp (ISO string); None = not deleted
+
+    # ─── Task Details additions (checklist/attachments/comments/history) ───
+    evidence_required: bool = False
+    verification_required: bool = False
+    checklist: List[Dict] = [] # [{id, title, completed, completed_at}]
+    attachments: List[Dict] = [] # [{id, name, key, url, uploaded_by, uploaded_at}]
+    remarks: List[Dict] = [] # [{id, author_id, author_name, text, created_at}] - task comment thread
+    status_history: List[Dict] = [] # [{old_status, new_status, changed_by, changed_by_name, reason, changed_at}]
 
 class CalendarEventCreate(CalendarEventBase):
     pass

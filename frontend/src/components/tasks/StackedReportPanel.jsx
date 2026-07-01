@@ -15,10 +15,30 @@ export const REPORT_LEGEND = [
 
 const PAGE_SIZE = 6;
 
+const truncate = (str, n) => (str && str.length > n ? `${str.slice(0, n - 1)}…` : str);
+
 const StackedReportPanel = ({ title, axisLabel, rows }) => {
   const [page, setPage] = useState(0);
   const totalPages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
   const pageRows = useMemo(() => rows.slice(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE), [rows, page]);
+
+  // When rows carry a `sub` (e.g. an employee's designation) draw a two-line tick — bold
+  // name over a small role subtitle — matching the reference bar design. Look the subtitle
+  // up by label since recharts only hands the tick renderer the axis value.
+  const hasSub = pageRows.some(r => r.sub);
+  const subByLabel = useMemo(() => Object.fromEntries(pageRows.map(r => [r.label, r.sub])), [pageRows]);
+  const renderTwoLineTick = ({ x, y, payload }) => (
+    <g transform={`translate(${x},${y})`}>
+      <text x={0} y={0} dy={11} textAnchor="middle" fontSize={9} fontWeight={800} fill="var(--text-main)">
+        {truncate(payload.value, 14)}
+      </text>
+      {subByLabel[payload.value] ? (
+        <text x={0} y={0} dy={23} textAnchor="middle" fontSize={8} fill="var(--accent-indigo)">
+          {truncate(subByLabel[payload.value], 16)}
+        </text>
+      ) : null}
+    </g>
+  );
 
   return (
     <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-[24px] p-6">
@@ -38,13 +58,14 @@ const StackedReportPanel = ({ title, axisLabel, rows }) => {
       ) : (
         <div className="h-[220px]">
           <ResponsiveContainer width="100%" height="100%">
-            <BarChart data={pageRows} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+            <BarChart data={pageRows} margin={{ top: 8, right: 8, left: 0, bottom: 0 }} barCategoryGap="45%">
               <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
-              <XAxis dataKey="label" tick={{ fontSize: 9, fill: 'var(--text-muted)' }} interval={0} />
+              <XAxis dataKey="label" interval={0} height={hasSub ? 40 : 20}
+                tick={hasSub ? renderTwoLineTick : { fontSize: 9, fill: 'var(--text-muted)' }} />
               <YAxis tick={{ fontSize: 9, fill: 'var(--text-muted)' }} allowDecimals={false} />
               <Tooltip />
               {REPORT_LEGEND.map((l, i) => (
-                <Bar key={l.key} dataKey={l.key} stackId="a" fill={l.color} radius={i === REPORT_LEGEND.length - 1 ? [4, 4, 0, 0] : undefined} />
+                <Bar key={l.key} dataKey={l.key} stackId="a" fill={l.color} maxBarSize={28} radius={i === REPORT_LEGEND.length - 1 ? [4, 4, 0, 0] : undefined} />
               ))}
             </BarChart>
           </ResponsiveContainer>
