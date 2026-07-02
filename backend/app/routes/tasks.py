@@ -9,6 +9,7 @@ from app.controllers.auth_controller import get_current_user
 from app.utils.calendar_utils import CALENDAR_COLLECTIONS, find_event_across_collections
 from app.services.activity_log_service import log_activity
 from app.services.s3_service import upload_file_to_s3_with_key
+from app.routes.group import _is_member_or_manager
 
 router = APIRouter(prefix="/tasks", tags=["Tasks"])
 
@@ -164,6 +165,16 @@ async def _fetch_tasks(
             raise HTTPException(status_code=403, detail="Not authorized to view all tasks")
         if role != "superadmin" and company_id:
             clauses.append({"$or": [{"company_id": str(company_id)}, {"user_id": user_id}]})
+    elif scope == "group":
+        if not group_id:
+            raise HTTPException(status_code=400, detail="group_id is required for group scope")
+        group_doc = await get_collection("task_groups").find_one({"_id": ObjectId(group_id)})
+        if not group_doc:
+            raise HTTPException(status_code=404, detail="Group not found")
+        if not _is_member_or_manager(group_doc, current_user):
+            raise HTTPException(status_code=403, detail="Not authorized to view this group's tasks")
+        # No user-restricting clause -- membership is already verified above, and the
+        # generic `if group_id:` clause below scopes results to this group's tasks.
     elif scope == "deleted":
         if not is_admin_role:
             clauses.append({"$or": _visibility_clauses(user_id)})
@@ -387,17 +398,28 @@ async def tasks_activity(
     search: Optional[str] = None,
     limit: int = 30,
     skip: int = 0,
+    groupId: Optional[str] = None,
     current_user: dict = Depends(get_current_user),
 ):
     """Task Management activity feed, read from the shared `activity_logs` collection.
     Admins/staff see the whole org's task activity (and can filter by user); everyone else
-    only ever sees their own. Supports date-range, updated-by, search and pagination, and
-    returns a per-user summary for the dashboard cards."""
+    only ever sees their own -- UNLESS `groupId` is given (Group workspace's Timeline tab),
+    in which case any member of that group sees the whole group's task activity uniformly,
+    via `metadata.group_id` (populated by log_activity's `meta=` at the task-lifecycle call
+    sites). Supports date-range, updated-by, search and pagination, and returns a per-user
+    summary for the dashboard cards."""
     col = get_collection("activity_logs")
     query = {"action": {"$in": TASK_ACTIVITY_ACTIONS}}
 
     role = current_user.get("role", "").lower()
-    if role not in ADMIN_ROLES:
+    if groupId:
+        group_doc = await get_collection("task_groups").find_one({"_id": ObjectId(groupId)})
+        if not group_doc:
+            raise HTTPException(status_code=404, detail="Group not found")
+        if not _is_member_or_manager(group_doc, current_user):
+            raise HTTPException(status_code=403, detail="Not authorized to view this group's activity")
+        query["metadata.group_id"] = groupId
+    elif role not in ADMIN_ROLES:
         query["user_id"] = str(current_user["_id"])
     elif updatedBy:
         query["user_id"] = updatedBy
@@ -506,7 +528,8 @@ async def update_task_status(task_id: str, body: dict, current_user: dict = Depe
     else:
         await get_collection(col_name).update_one({"_id": ObjectId(task_id)}, {"$set": updates})
 
-    await log_activity(current_user, "Update Task Status", col_name, f"Task {task_id} -> {new_status}")
+    await log_activity(current_user, "Update Task Status", col_name, f"Task {task_id} -> {new_status}",
+                       meta={"task_id": task_id, "group_id": existing.get("group_id")})
     return {"id": task_id, "workflow_status": new_status}
 
 
@@ -522,7 +545,8 @@ async def add_checklist_item(task_id: str, body: dict, current_user: dict = Depe
 
     item = {"id": str(ObjectId()), "title": title, "completed": False, "completed_at": None}
     await get_collection(col_name).update_one({"_id": ObjectId(task_id)}, {"$push": {"checklist": item}})
-    await log_activity(current_user, "Add Sub Task", col_name, f"Task {task_id}: {title}")
+    await log_activity(current_user, "Add Sub Task", col_name, f"Task {task_id}: {title}",
+                       meta={"task_id": task_id, "group_id": existing.get("group_id")})
     return item
 
 
@@ -578,7 +602,8 @@ async def add_task_comment(task_id: str, body: dict, current_user: dict = Depend
         "created_at": datetime.now(timezone.utc),
     }
     await get_collection(col_name).update_one({"_id": ObjectId(task_id)}, {"$push": {"remarks": comment}})
-    await log_activity(current_user, "Comment on Task", col_name, f"Task {task_id}")
+    await log_activity(current_user, "Comment on Task", col_name, f"Task {task_id}",
+                       meta={"task_id": task_id, "group_id": existing.get("group_id")})
     return comment
 
 
@@ -603,7 +628,8 @@ async def upload_task_attachment(task_id: str, file: UploadFile = File(...), cur
         "uploaded_at": datetime.now(timezone.utc),
     }
     await get_collection(col_name).update_one({"_id": ObjectId(task_id)}, {"$push": {"attachments": attachment}})
-    await log_activity(current_user, "Attach File to Task", col_name, f"Task {task_id}: {file.filename}")
+    await log_activity(current_user, "Attach File to Task", col_name, f"Task {task_id}: {file.filename}",
+                       meta={"task_id": task_id, "group_id": existing.get("group_id")})
     return attachment
 
 
@@ -635,7 +661,8 @@ async def soft_delete_task(task_id: str, current_user: dict = Depends(get_curren
         {"_id": ObjectId(task_id)},
         {"$set": {"deleted_at": datetime.now(timezone.utc).isoformat()}},
     )
-    await log_activity(current_user, "Soft Delete Task", col_name, f"Task {task_id}")
+    await log_activity(current_user, "Soft Delete Task", col_name, f"Task {task_id}",
+                       meta={"task_id": task_id, "group_id": existing.get("group_id")})
     return {"message": "Task moved to Deleted Tasks"}
 
 
@@ -654,5 +681,6 @@ async def restore_task(task_id: str, current_user: dict = Depends(get_current_us
         {"_id": ObjectId(task_id)},
         {"$set": {"deleted_at": None}},
     )
-    await log_activity(current_user, "Restore Task", col_name, f"Task {task_id}")
+    await log_activity(current_user, "Restore Task", col_name, f"Task {task_id}",
+                       meta={"task_id": task_id, "group_id": existing.get("group_id")})
     return {"message": "Task restored"}

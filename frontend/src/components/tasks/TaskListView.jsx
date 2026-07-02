@@ -114,7 +114,7 @@ const TAB_KEYS = ['all', 'overdue', ...WORKFLOW_STATUSES];
 // each just passes a different `scope` to GET /api/tasks. Visual design follows the
 // reference "My Tasks" screenshot: dot-style summary cards, toolbar, scrollable status
 // tabs, and avatar/badge row cards.
-const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = true }) => {
+const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = true, groupId = null, embedded = false }) => {
   const { showSuccess, showError } = useNotification();
   const [tasks, setTasks] = useState([]);
   const [users, setUsers] = useState([]);
@@ -163,6 +163,7 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
         tag: tag || undefined,
         frequency: frequency || undefined,
         search: search || undefined,
+        groupId: groupId || undefined,
       });
       setTasks(res.data || []);
     } catch (err) {
@@ -170,7 +171,7 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
     } finally {
       setLoading(false);
     }
-  }, [scope, period, startDate, endDate, assignedTo, category, tag, frequency, search]);
+  }, [scope, period, startDate, endDate, assignedTo, category, tag, frequency, search, groupId]);
 
   const [categories, setCategories] = useState([]);
   const [tagOptions, setTagOptions] = useState([]);
@@ -326,98 +327,102 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
 
   return (
     <div className="space-y-5 pb-24" onClick={() => openMenuId && setOpenMenuId(null)}>
-      <div className="flex items-center gap-3">
-        <div className="w-11 h-11 rounded-2xl bg-[var(--accent-indigo)] text-white flex items-center justify-center shadow-lg shadow-[var(--accent-indigo)]/20">
-          <ListChecks size={20} />
-        </div>
-        <div>
-          <h1 className="text-xl font-black text-[var(--text-main)] tracking-tight">{heading}</h1>
-          <p className="text-[12px] text-[var(--text-muted)] font-bold">{subheading}</p>
-        </div>
-      </div>
+      {!embedded && (
+        <>
+          <div className="flex items-center gap-3">
+            <div className="w-11 h-11 rounded-2xl bg-[var(--accent-indigo)] text-white flex items-center justify-center shadow-lg shadow-[var(--accent-indigo)]/20">
+              <ListChecks size={20} />
+            </div>
+            <div>
+              <h1 className="text-xl font-black text-[var(--text-main)] tracking-tight">{heading}</h1>
+              <p className="text-[12px] text-[var(--text-muted)] font-bold">{subheading}</p>
+            </div>
+          </div>
+
+          {/* ─── Toolbar ─── */}
+          <div className="flex flex-wrap items-center gap-2.5 bg-[var(--bg-card)] border border-[var(--border)] rounded-2xl p-3">
+            {allowCreate && (
+              <button onClick={() => { setEditingTask(null); setModalOpen(true); }}
+                className="flex items-center gap-1.5 px-4 py-2.5 bg-[var(--accent-indigo)] text-white rounded-xl text-[11px] font-black uppercase tracking-widest shadow-sm hover:opacity-90 transition-all">
+                <UserPlus size={14} /> Assign Task
+              </button>
+            )}
+
+            <DateRangeFilter variant="dropdown" period={period} onPeriodChange={setPeriod} startDate={startDate} endDate={endDate}
+              onCustomChange={(field, value) => (field === 'startDate' ? setStartDate(value) : setEndDate(value))} />
+
+            <button onClick={() => setFiltersOpen(o => !o)}
+              className={`flex items-center gap-1.5 px-4 py-2.5 rounded-xl text-[11px] font-black uppercase tracking-widest transition-all ${filtersOpen ? 'bg-[var(--accent-indigo)] text-white' : 'bg-[var(--input-bg)] text-[var(--text-muted)] border border-[var(--border)]'}`}>
+              <FilterIcon size={14} /> Filter
+            </button>
+
+            <div className="relative flex-1 min-w-[160px]">
+              <Search size={13} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-[var(--text-muted)]" />
+              <input value={search} onChange={e => setSearch(e.target.value)} placeholder={`Search ${heading.toLowerCase()}...`}
+                className="w-full pl-9 pr-3 py-2.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-xl text-[12px] font-bold outline-none focus:border-[var(--accent-indigo)]" />
+            </div>
+
+            <button onClick={fetchTasks} title="Refresh" className="p-2.5 rounded-xl bg-[var(--input-bg)] border border-[var(--border)] text-[var(--text-muted)] hover:text-[var(--text-main)] transition-all">
+              <RefreshCw size={15} />
+            </button>
+
+            <button onClick={() => exportTasksToCsv(visibleTasks, userMap, `${heading.toLowerCase().replace(/\s+/g, '-')}.csv`)}
+              className="flex items-center gap-1.5 px-4 py-2.5 bg-[var(--accent-indigo)] text-white rounded-xl text-[11px] font-black uppercase tracking-widest shadow-sm hover:opacity-90 transition-all">
+              <Download size={14} /> Export
+            </button>
+
+            <div className="flex items-center gap-1 bg-[var(--input-bg)] border border-[var(--border)] p-1 rounded-xl">
+              <button onClick={() => setViewMode('list')} title="List view" className={`p-2 rounded-lg transition-all ${viewMode === 'list' ? 'bg-[var(--accent-indigo)] text-white' : 'text-[var(--text-muted)]'}`}>
+                <ListIcon size={15} />
+              </button>
+              <button onClick={() => setViewMode('table')} title="Table view" className={`p-2 rounded-lg transition-all ${viewMode === 'table' ? 'bg-[var(--accent-indigo)] text-white' : 'text-[var(--text-muted)]'}`}>
+                <Table2 size={15} />
+              </button>
+            </div>
+
+            <select value={sortKey} onChange={e => setSortKey(e.target.value)}
+              className="px-3 py-2.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-xl text-[12px] font-bold outline-none">
+              {SORT_OPTIONS.map(o => <option key={o.key} value={o.key}>{o.label}</option>)}
+            </select>
+            <button onClick={() => setSortDir(d => (d === 'asc' ? 'desc' : 'asc'))} title="Toggle sort direction"
+              className="p-2.5 rounded-xl bg-[var(--input-bg)] border border-[var(--border)] text-[var(--text-muted)] hover:text-[var(--text-main)] transition-all">
+              <ArrowUpDown size={15} />
+            </button>
+          </div>
+
+          {filtersOpen && (
+            <div className="flex flex-wrap items-center gap-3 bg-[var(--bg-card)] border border-[var(--border)] rounded-2xl p-4">
+              <select value={assignedTo} onChange={e => setAssignedTo(e.target.value)}
+                className="px-3 py-2.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-xl text-[12px] font-bold outline-none">
+                <option value="">Assigned To</option>
+                {users.map(u => <option key={u._id} value={u._id}>{u.full_name || u.email}</option>)}
+              </select>
+              <select value={category} onChange={e => setCategory(e.target.value)}
+                className="px-3 py-2.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-xl text-[12px] font-bold outline-none">
+                <option value="">Category</option>
+                {categories.map(c => <option key={c} value={c}>{c}</option>)}
+              </select>
+              <select value={tag} onChange={e => setTag(e.target.value)}
+                className="px-3 py-2.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-xl text-[12px] font-bold outline-none">
+                <option value="">Tag</option>
+                {tagOptions.map(t => <option key={t} value={t}>{t}</option>)}
+              </select>
+              <select value={frequency} onChange={e => setFrequency(e.target.value)}
+                className="px-3 py-2.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-xl text-[12px] font-bold outline-none">
+                <option value="">Frequency</option>
+                {['Does not repeat', 'Daily', 'Weekly', 'Monthly', 'Yearly'].map(f => <option key={f} value={f}>{f}</option>)}
+              </select>
+              {hasActiveFilters && (
+                <button onClick={clearFilters} className="flex items-center gap-1.5 px-4 py-2.5 rounded-xl text-[11px] font-black uppercase tracking-widest text-[var(--text-muted)] border border-[var(--border)] hover:bg-[var(--input-bg)]">
+                  <X size={13} /> Clear
+                </button>
+              )}
+            </div>
+          )}
+        </>
+      )}
 
       <StatusSummaryCards cardOrder={LIST_CARD_ORDER} summary={summary} activeKey={null} />
-
-      {/* ─── Toolbar ─── */}
-      <div className="flex flex-wrap items-center gap-2.5 bg-[var(--bg-card)] border border-[var(--border)] rounded-2xl p-3">
-        {allowCreate && (
-          <button onClick={() => { setEditingTask(null); setModalOpen(true); }}
-            className="flex items-center gap-1.5 px-4 py-2.5 bg-[var(--accent-indigo)] text-white rounded-xl text-[11px] font-black uppercase tracking-widest shadow-sm hover:opacity-90 transition-all">
-            <UserPlus size={14} /> Assign Task
-          </button>
-        )}
-
-        <DateRangeFilter variant="dropdown" period={period} onPeriodChange={setPeriod} startDate={startDate} endDate={endDate}
-          onCustomChange={(field, value) => (field === 'startDate' ? setStartDate(value) : setEndDate(value))} />
-
-        <button onClick={() => setFiltersOpen(o => !o)}
-          className={`flex items-center gap-1.5 px-4 py-2.5 rounded-xl text-[11px] font-black uppercase tracking-widest transition-all ${filtersOpen ? 'bg-[var(--accent-indigo)] text-white' : 'bg-[var(--input-bg)] text-[var(--text-muted)] border border-[var(--border)]'}`}>
-          <FilterIcon size={14} /> Filter
-        </button>
-
-        <div className="relative flex-1 min-w-[160px]">
-          <Search size={13} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-[var(--text-muted)]" />
-          <input value={search} onChange={e => setSearch(e.target.value)} placeholder={`Search ${heading.toLowerCase()}...`}
-            className="w-full pl-9 pr-3 py-2.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-xl text-[12px] font-bold outline-none focus:border-[var(--accent-indigo)]" />
-        </div>
-
-        <button onClick={fetchTasks} title="Refresh" className="p-2.5 rounded-xl bg-[var(--input-bg)] border border-[var(--border)] text-[var(--text-muted)] hover:text-[var(--text-main)] transition-all">
-          <RefreshCw size={15} />
-        </button>
-
-        <button onClick={() => exportTasksToCsv(visibleTasks, userMap, `${heading.toLowerCase().replace(/\s+/g, '-')}.csv`)}
-          className="flex items-center gap-1.5 px-4 py-2.5 bg-[var(--accent-indigo)] text-white rounded-xl text-[11px] font-black uppercase tracking-widest shadow-sm hover:opacity-90 transition-all">
-          <Download size={14} /> Export
-        </button>
-
-        <div className="flex items-center gap-1 bg-[var(--input-bg)] border border-[var(--border)] p-1 rounded-xl">
-          <button onClick={() => setViewMode('list')} title="List view" className={`p-2 rounded-lg transition-all ${viewMode === 'list' ? 'bg-[var(--accent-indigo)] text-white' : 'text-[var(--text-muted)]'}`}>
-            <ListIcon size={15} />
-          </button>
-          <button onClick={() => setViewMode('table')} title="Table view" className={`p-2 rounded-lg transition-all ${viewMode === 'table' ? 'bg-[var(--accent-indigo)] text-white' : 'text-[var(--text-muted)]'}`}>
-            <Table2 size={15} />
-          </button>
-        </div>
-
-        <select value={sortKey} onChange={e => setSortKey(e.target.value)}
-          className="px-3 py-2.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-xl text-[12px] font-bold outline-none">
-          {SORT_OPTIONS.map(o => <option key={o.key} value={o.key}>{o.label}</option>)}
-        </select>
-        <button onClick={() => setSortDir(d => (d === 'asc' ? 'desc' : 'asc'))} title="Toggle sort direction"
-          className="p-2.5 rounded-xl bg-[var(--input-bg)] border border-[var(--border)] text-[var(--text-muted)] hover:text-[var(--text-main)] transition-all">
-          <ArrowUpDown size={15} />
-        </button>
-      </div>
-
-      {filtersOpen && (
-        <div className="flex flex-wrap items-center gap-3 bg-[var(--bg-card)] border border-[var(--border)] rounded-2xl p-4">
-          <select value={assignedTo} onChange={e => setAssignedTo(e.target.value)}
-            className="px-3 py-2.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-xl text-[12px] font-bold outline-none">
-            <option value="">Assigned To</option>
-            {users.map(u => <option key={u._id} value={u._id}>{u.full_name || u.email}</option>)}
-          </select>
-          <select value={category} onChange={e => setCategory(e.target.value)}
-            className="px-3 py-2.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-xl text-[12px] font-bold outline-none">
-            <option value="">Category</option>
-            {categories.map(c => <option key={c} value={c}>{c}</option>)}
-          </select>
-          <select value={tag} onChange={e => setTag(e.target.value)}
-            className="px-3 py-2.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-xl text-[12px] font-bold outline-none">
-            <option value="">Tag</option>
-            {tagOptions.map(t => <option key={t} value={t}>{t}</option>)}
-          </select>
-          <select value={frequency} onChange={e => setFrequency(e.target.value)}
-            className="px-3 py-2.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-xl text-[12px] font-bold outline-none">
-            <option value="">Frequency</option>
-            {['Does not repeat', 'Daily', 'Weekly', 'Monthly', 'Yearly'].map(f => <option key={f} value={f}>{f}</option>)}
-          </select>
-          {hasActiveFilters && (
-            <button onClick={clearFilters} className="flex items-center gap-1.5 px-4 py-2.5 rounded-xl text-[11px] font-black uppercase tracking-widest text-[var(--text-muted)] border border-[var(--border)] hover:bg-[var(--input-bg)]">
-              <X size={13} /> Clear
-            </button>
-          )}
-        </div>
-      )}
 
       {/* ─── Status Tabs ─── */}
       <div className="flex items-center gap-1 overflow-x-auto pb-1 no-scrollbar">
@@ -564,7 +569,7 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
       )}
 
       <TaskFormModal isOpen={modalOpen} onClose={() => setModalOpen(false)} task={editingTask} onSaved={fetchTasks}
-        categories={categories} tags={tagOptions} onTaxonomyChanged={fetchTaxonomy} />
+        categories={categories} tags={tagOptions} onTaxonomyChanged={fetchTaxonomy} groupId={groupId} />
       <TaskDetailsModal isOpen={!!detailsTaskId} taskId={detailsTaskId} onClose={() => setDetailsTaskId(null)} onChanged={fetchTasks} />
     </div>
   );

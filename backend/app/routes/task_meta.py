@@ -5,6 +5,8 @@ from typing import List
 from bson import ObjectId
 from fastapi import APIRouter, Depends, HTTPException
 
+from pydantic import BaseModel
+
 from app.controllers.auth_controller import get_current_user
 from app.db.mongodb import get_collection
 from app.models.task_meta import NameCreate
@@ -14,13 +16,48 @@ router = APIRouter(tags=["Task Metadata"])
 MANAGE_ROLES = ["superadmin", "admin", "coach", "staff", "clientadmin"]
 
 
+class NameUpdate(BaseModel):
+    name: str | None = None
+    active: bool | None = None
+
+
 def _serialize(doc: dict) -> dict:
-    return {"id": str(doc["_id"]), "name": doc.get("name")}
+    # Missing `active` (older rows / ensure_name safety-net rows) counts as active.
+    return {"id": str(doc["_id"]), "name": doc.get("name"), "active": doc.get("active", True)}
 
 
-async def _list_names(collection_name: str) -> List[dict]:
-    docs = await get_collection(collection_name).find({}).sort("name", 1).to_list(1000)
+async def _list_names(collection_name: str, active_only: bool = False) -> List[dict]:
+    query = {"active": {"$ne": False}} if active_only else {}
+    docs = await get_collection(collection_name).find(query).sort("name", 1).to_list(1000)
     return [_serialize(d) for d in docs]
+
+
+async def _update_meta(collection_name: str, item_id: str, payload: "NameUpdate", label: str) -> dict:
+    col = get_collection(collection_name)
+    existing = await col.find_one({"_id": ObjectId(item_id)})
+    if not existing:
+        raise HTTPException(status_code=404, detail=f"{label} not found")
+
+    updates: dict = {}
+    if payload.name is not None:
+        new_name = payload.name.strip()
+        if not new_name:
+            raise HTTPException(status_code=400, detail="Name cannot be empty")
+        dup = await col.find_one({
+            "_id": {"$ne": ObjectId(item_id)},
+            "name": {"$regex": f"^{re.escape(new_name)}$", "$options": "i"},
+        })
+        if dup:
+            raise HTTPException(status_code=409, detail=f"A {label.lower()} with this name already exists")
+        updates["name"] = new_name
+    if payload.active is not None:
+        updates["active"] = payload.active
+
+    if not updates:
+        raise HTTPException(status_code=400, detail="No fields to update")
+
+    await col.update_one({"_id": ObjectId(item_id)}, {"$set": updates})
+    return _serialize({**existing, **updates})
 
 
 async def ensure_name(collection_name: str, name: str, user_id: str) -> dict:
@@ -36,7 +73,7 @@ async def ensure_name(collection_name: str, name: str, user_id: str) -> dict:
     if existing:
         return _serialize(existing)
 
-    doc = {"name": name, "created_by": user_id, "created_at": datetime.now(timezone.utc)}
+    doc = {"name": name, "active": True, "created_by": user_id, "created_at": datetime.now(timezone.utc)}
     result = await col.insert_one(doc)
     doc["_id"] = result.inserted_id
     return _serialize(doc)
@@ -62,13 +99,20 @@ def _can_manage(current_user: dict) -> bool:
 
 
 @router.get("/task-categories", response_model=List[dict])
-async def list_task_categories(current_user: dict = Depends(get_current_user)):
-    return await _list_names("task_categories")
+async def list_task_categories(active_only: bool = False, current_user: dict = Depends(get_current_user)):
+    return await _list_names("task_categories", active_only)
 
 
 @router.post("/task-categories", response_model=dict)
 async def create_task_category(payload: NameCreate, current_user: dict = Depends(get_current_user)):
     return await ensure_name("task_categories", payload.name, str(current_user["_id"]))
+
+
+@router.patch("/task-categories/{category_id}", response_model=dict)
+async def update_task_category(category_id: str, payload: NameUpdate, current_user: dict = Depends(get_current_user)):
+    if not _can_manage(current_user):
+        raise HTTPException(status_code=403, detail="Not authorized to update categories")
+    return await _update_meta("task_categories", category_id, payload, "Category")
 
 
 @router.delete("/task-categories/{category_id}")
@@ -82,13 +126,20 @@ async def delete_task_category(category_id: str, current_user: dict = Depends(ge
 
 
 @router.get("/task-tags", response_model=List[dict])
-async def list_task_tags(current_user: dict = Depends(get_current_user)):
-    return await _list_names("task_tags")
+async def list_task_tags(active_only: bool = False, current_user: dict = Depends(get_current_user)):
+    return await _list_names("task_tags", active_only)
 
 
 @router.post("/task-tags", response_model=dict)
 async def create_task_tag(payload: NameCreate, current_user: dict = Depends(get_current_user)):
     return await ensure_name("task_tags", payload.name, str(current_user["_id"]))
+
+
+@router.patch("/task-tags/{tag_id}", response_model=dict)
+async def update_task_tag(tag_id: str, payload: NameUpdate, current_user: dict = Depends(get_current_user)):
+    if not _can_manage(current_user):
+        raise HTTPException(status_code=403, detail="Not authorized to update tags")
+    return await _update_meta("task_tags", tag_id, payload, "Tag")
 
 
 @router.delete("/task-tags/{tag_id}")

@@ -64,6 +64,18 @@ export const LIST_CARD_ORDER = [
   ['completed', STATUS_CONFIG.completed],
 ];
 
+// 6-card order for the Group Dashboard tab (Overdue/Pending/In Progress/Completed/In
+// Time/Delayed) -- matches the reference screenshot's card set, reusing the same
+// dot-style StatusSummaryCards component/configs as everywhere else in the module.
+export const GROUP_DASHBOARD_CARD_ORDER = [
+  ['overdue', EXTRA_CARD_CONFIG.overdue],
+  ['pending', STATUS_CONFIG.pending],
+  ['inProgress', STATUS_CONFIG.in_progress],
+  ['completed', STATUS_CONFIG.completed],
+  ['inTime', EXTRA_CARD_CONFIG.inTime],
+  ['delayed', EXTRA_CARD_CONFIG.delayed],
+];
+
 export const PRIORITY_CONFIG = {
   Low: { color: 'var(--text-muted)' },
   Normal: { color: 'var(--accent-indigo)' },

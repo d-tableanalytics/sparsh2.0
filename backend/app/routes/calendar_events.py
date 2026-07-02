@@ -320,7 +320,8 @@ async def create_event(event: CalendarEventCreate, background_tasks: BackgroundT
                     # Log activity for batch creation. Task-typed docs use a task-specific
                     # action so the Task Management → Activity feed can pick them up.
                     is_task = event_dict.get("type") == "task"
-                    await log_activity(current_user, "Create Recurring Tasks" if is_task else "Create Recurring", col_name, f"Generated {len(generated_events)} {'tasks' if is_task else 'events'} for {event_dict['title']}")
+                    await log_activity(current_user, "Create Recurring Tasks" if is_task else "Create Recurring", col_name, f"Generated {len(generated_events)} {'tasks' if is_task else 'events'} for {event_dict['title']}",
+                                       meta={"group_id": event_dict.get("group_id")} if is_task else None)
                     if is_task:
                         background_tasks.add_task(sync_task_meta, event_dict.get("category"), event_dict.get("tags"), str(current_user["_id"]))
                     return {"message": f"Successfully generated {len(generated_events)} recurring duties."}
@@ -334,7 +335,8 @@ async def create_event(event: CalendarEventCreate, background_tasks: BackgroundT
     is_task = event_dict.get("type") == "task"
     if is_task:
         background_tasks.add_task(sync_task_meta, event_dict.get("category"), event_dict.get("tags"), str(current_user["_id"]))
-    await log_activity(current_user, "Create Task" if is_task else "Create Event", col_name, f"{'Task' if is_task else 'Event'} created: {event_dict['title']}")
+    await log_activity(current_user, "Create Task" if is_task else "Create Event", col_name, f"{'Task' if is_task else 'Event'} created: {event_dict['title']}",
+                       meta={"task_id": str(result.inserted_id), "group_id": event_dict.get("group_id")} if is_task else None)
     return {"id": str(result.inserted_id), "message": f"Event created in {col_name}"}
 
 @router.patch("/{event_id}")
@@ -376,7 +378,8 @@ async def update_event(event_id: str, updates: dict, background_tasks: Backgroun
 
     is_task = (projected.get("type") or existing.get("type")) == "task"
     _title = projected.get("title") or existing.get("title") or event_id
-    await log_activity(current_user, "Update Task" if is_task else "Update Event", new_col_name, f"{'Task' if is_task else 'Event'} updated: {_title}")
+    await log_activity(current_user, "Update Task" if is_task else "Update Event", new_col_name, f"{'Task' if is_task else 'Event'} updated: {_title}",
+                       meta={"task_id": event_id, "group_id": projected.get("group_id")} if is_task else None)
     if is_task and ("category" in updates or "tags" in updates):
         background_tasks.add_task(sync_task_meta, projected.get("category"), projected.get("tags"), str(current_user["_id"]))
     creator_name = current_user.get("full_name") or current_user.get("first_name", "System Admin")

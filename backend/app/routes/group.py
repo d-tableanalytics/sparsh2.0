@@ -5,7 +5,7 @@ from bson import ObjectId
 
 from app.db.mongodb import get_collection
 from app.controllers.auth_controller import get_current_user
-from app.models.group import GroupCreate, GroupUpdate
+from app.models.group import GroupCreate, GroupUpdate, GroupLink
 from app.services.activity_log_service import log_activity
 from app.utils.calendar_utils import CALENDAR_COLLECTIONS
 
@@ -24,6 +24,19 @@ def _can_manage(current_user: dict) -> bool:
     return bool(current_user.get("permissions", {}).get("tasks", {}).get("create"))
 
 
+def _is_member_or_manager(group_doc: dict, current_user: dict) -> bool:
+    """Any group member (or a manager) can view the group's tasks/activity and add
+    board cards/links — the same "any participant can add sub-items" rule tasks
+    already follow for checklist/comments/attachments. Reused by tasks.py's
+    scope=="group" and group_board.py so this authorization logic lives in one place."""
+    if _can_manage(current_user):
+        return True
+    user_id = str(current_user["_id"])
+    if group_doc.get("created_by") == user_id:
+        return True
+    return user_id in (group_doc.get("member_ids") or [])
+
+
 async def _task_count(group_id: str) -> int:
     total = 0
     for col_name in TASK_COLLECTIONS:
@@ -39,6 +52,9 @@ def _serialize(doc: dict, task_count: int = 0) -> dict:
         "name": doc.get("name"),
         "description": doc.get("description"),
         "member_ids": doc.get("member_ids") or [],
+        "icon": doc.get("icon"),
+        "color": doc.get("color"),
+        "links": doc.get("links") or [],
         "created_by": doc.get("created_by"),
         "created_by_name": doc.get("created_by_name"),
         "created_at": doc.get("created_at"),
@@ -79,6 +95,9 @@ async def create_group(payload: GroupCreate, current_user: dict = Depends(get_cu
         "name": name,
         "description": (payload.description or "").strip() or None,
         "member_ids": payload.member_ids or [],
+        "icon": payload.icon,
+        "color": payload.color,
+        "links": [],
         "created_by": str(current_user["_id"]),
         "created_by_name": current_user.get("full_name") or current_user.get("email"),
         "created_at": datetime.now(timezone.utc),
@@ -127,6 +146,46 @@ async def delete_group(group_id: str, current_user: dict = Depends(get_current_u
     if not existing:
         raise HTTPException(status_code=404, detail="Group not found")
 
+    # Orphan (don't delete) the group's tasks -- removing an organizational label should
+    # never destroy real task work. Board cards have no meaning without their group, so
+    # those are hard-deleted.
+    for col_name in TASK_COLLECTIONS:
+        await get_collection(col_name).update_many({"group_id": group_id}, {"$set": {"group_id": None}})
+    await get_collection("group_board_cards").delete_many({"group_id": group_id})
+
     await col.delete_one({"_id": ObjectId(group_id)})
     await log_activity(current_user, "Delete Group", "Group", f"Group removed: {existing.get('name')}")
     return {"message": "Group deleted"}
+
+
+@router.post("/{group_id}/links", response_model=dict)
+async def add_group_link(group_id: str, body: dict, current_user: dict = Depends(get_current_user)):
+    url = (body.get("url") or "").strip()
+    if not url:
+        raise HTTPException(status_code=400, detail="Link URL is required")
+    name = (body.get("name") or "").strip() or url
+
+    col = get_collection("task_groups")
+    existing = await col.find_one({"_id": ObjectId(group_id)})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Group not found")
+    if not _is_member_or_manager(existing, current_user):
+        raise HTTPException(status_code=403, detail="Not authorized to update this group")
+
+    link = {"id": str(ObjectId()), "name": name, "url": url}
+    await col.update_one({"_id": ObjectId(group_id)}, {"$push": {"links": link}})
+    await log_activity(current_user, "Add Group Link", "Group", f"Group {group_id}: {url}")
+    return link
+
+
+@router.delete("/{group_id}/links/{link_id}", response_model=dict)
+async def delete_group_link(group_id: str, link_id: str, current_user: dict = Depends(get_current_user)):
+    col = get_collection("task_groups")
+    existing = await col.find_one({"_id": ObjectId(group_id)})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Group not found")
+    if not _is_member_or_manager(existing, current_user):
+        raise HTTPException(status_code=403, detail="Not authorized to update this group")
+
+    await col.update_one({"_id": ObjectId(group_id)}, {"$pull": {"links": {"id": link_id}}})
+    return {"message": "Link removed"}
