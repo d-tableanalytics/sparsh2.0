@@ -225,6 +225,7 @@ def _serialize_task(doc: dict, current_user_id: str) -> dict:
         "assignedBy": doc.get("user_id"),
         "watchers": doc.get("watchers") or [],
         "groupId": doc.get("group_id"),
+        "recurringGroupId": doc.get("recurring_group_id"),
         "isCreator": doc.get("user_id") == current_user_id,
         "deletedAt": doc.get("deleted_at"),
     }

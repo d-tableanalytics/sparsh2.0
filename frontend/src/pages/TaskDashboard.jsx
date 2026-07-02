@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Table2, BarChart3 as BarChartIcon, Plus, ListChecks, Search } from 'lucide-react';
 import api from '../services/api';
 import { getTaskDashboard, getTasks } from '../services/taskApi';
+import { getTaskCategories, getTaskTags } from '../services/taskMetaApi';
 import { useAuth } from '../context/AuthContext';
 import { useNotification } from '../context/NotificationContext';
 import DateRangeFilter from '../components/tasks/DateRangeFilter';
@@ -115,17 +116,22 @@ const TaskDashboard = () => {
 
   useEffect(() => { fetchAll(); }, [fetchAll]);
 
-  const categories = useMemo(() => {
-    const set = new Set();
-    tabTasks.forEach(t => t.category && set.add(t.category));
-    return Array.from(set);
-  }, [tabTasks]);
+  const [categories, setCategories] = useState([]);
+  const [tags, setTags] = useState([]);
 
-  const tags = useMemo(() => {
-    const set = new Set();
-    tabTasks.forEach(t => (t.tags || []).forEach(tg => set.add(tg)));
-    return Array.from(set);
-  }, [tabTasks]);
+  // Persisted server-side (task_categories / task_tags) rather than derived from whichever
+  // tasks the active tab/filters happen to have loaded — see TaskListView.jsx's fetchTaxonomy.
+  const fetchTaxonomy = useCallback(async () => {
+    try {
+      const [catRes, tagRes] = await Promise.all([getTaskCategories(), getTaskTags()]);
+      setCategories((catRes.data || []).map(c => c.name));
+      setTags((tagRes.data || []).map(t => t.name));
+    } catch {
+      // Non-fatal
+    }
+  }, []);
+
+  useEffect(() => { fetchTaxonomy(); }, [fetchTaxonomy]);
 
   const clearFilters = () => {
     setFilters(emptyFilters);
@@ -510,7 +516,8 @@ const TaskDashboard = () => {
         </>
       )}
 
-      <TaskFormModal isOpen={modalOpen} onClose={() => setModalOpen(false)} onSaved={fetchAll} categories={categories} tags={tags} />
+      <TaskFormModal isOpen={modalOpen} onClose={() => setModalOpen(false)} onSaved={fetchAll}
+        categories={categories} tags={tags} onTaxonomyChanged={fetchTaxonomy} />
     </div>
   );
 };
