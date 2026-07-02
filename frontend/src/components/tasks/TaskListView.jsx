@@ -3,7 +3,7 @@ import { motion } from 'framer-motion';
 import {
   ListChecks, UserPlus, Filter as FilterIcon, Search, RefreshCw, Download,
   List as ListIcon, Table2, ArrowUpDown, Trash2, RotateCcw, MoreVertical,
-  Calendar as CalendarIcon, Pencil, X, Info, ChevronDown, Repeat,
+  Calendar as CalendarIcon, Eye, X, ChevronDown, Repeat,
 } from 'lucide-react';
 import api from '../../services/api';
 import { getTasks, softDeleteTask, restoreTask, updateTaskStatus } from '../../services/taskApi';
@@ -24,7 +24,7 @@ import TaskDetailsModal from './TaskDetailsModal';
 // once that series is expanded.
 const TaskRow = ({
   task, scope, userMap, checked, onToggleSelect, onOpenDetails, onStatusChange,
-  isMenuOpen, onToggleMenu, onEdit, onDelete, onRestore, indent, groupBadge, statusPending,
+  isMenuOpen, onToggleMenu, onRestore, indent, groupBadge, statusPending,
 }) => {
   const cfg = STATUS_CONFIG[task.status] || STATUS_CONFIG.pending;
   const priorityCfg = PRIORITY_CONFIG[task.priority] || PRIORITY_CONFIG.Normal;
@@ -79,23 +79,15 @@ const TaskRow = ({
           {isMenuOpen && (
             <div onClick={e => e.stopPropagation()}
               className="absolute right-0 top-full mt-1 w-36 bg-[var(--bg-card)] border border-[var(--border)] rounded-xl shadow-xl z-20 overflow-hidden">
+              {/* Single "View" action — Edit/Delete now live inside the detail screen. */}
               <button onClick={onOpenDetails} className="w-full flex items-center gap-2 px-3 py-2.5 text-[11px] font-bold text-[var(--text-main)] hover:bg-[var(--input-bg)]">
-                <Info size={13} /> Details
+                <Eye size={13} /> View
               </button>
-              {scope === 'deleted' ? (
+              {scope === 'deleted' && (
                 <button onClick={onRestore} className="w-full flex items-center gap-2 px-3 py-2.5 text-[11px] font-bold text-[var(--accent-indigo)] hover:bg-[var(--input-bg)]">
                   <RotateCcw size={13} /> Restore
                 </button>
-              ) : task.isCreator ? (
-                <>
-                  <button onClick={onEdit} className="w-full flex items-center gap-2 px-3 py-2.5 text-[11px] font-bold text-[var(--text-main)] hover:bg-[var(--input-bg)]">
-                    <Pencil size={13} /> Edit
-                  </button>
-                  <button onClick={onDelete} className="w-full flex items-center gap-2 px-3 py-2.5 text-[11px] font-bold text-[var(--accent-red)] hover:bg-[var(--accent-red-bg)]">
-                    <Trash2 size={13} /> Delete
-                  </button>
-                </>
-              ) : null}
+              )}
             </div>
           )}
         </div>
@@ -294,17 +286,6 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
   };
 
   const hasActiveFilters = period !== 'all_time' || assignedTo || category || tag || frequency || search || statusFilter !== 'all';
-
-  const handleDelete = async (task) => {
-    setOpenMenuId(null);
-    try {
-      await softDeleteTask(task.id);
-      showSuccess('Task moved to Deleted Tasks');
-      fetchTasks();
-    } catch (err) {
-      showError(err.response?.data?.detail || 'Failed to delete task');
-    }
-  };
 
   const handleRestore = async (task) => {
     setOpenMenuId(null);
@@ -555,12 +536,9 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
                     <td className="px-4 py-3 text-right">
                       {scope === 'deleted' ? (
                         <button onClick={() => handleRestore(task)} className="p-2 rounded-lg text-[var(--accent-indigo)] hover:bg-[var(--accent-indigo-bg)]" title="Restore"><RotateCcw size={14} /></button>
-                      ) : task.isCreator ? (
-                        <div className="flex items-center justify-end gap-1">
-                          <button onClick={() => { setEditingTask(task); setModalOpen(true); }} className="p-2 rounded-lg text-[var(--text-muted)] hover:bg-[var(--input-bg)]" title="Edit"><Pencil size={13} /></button>
-                          <button onClick={() => handleDelete(task)} className="p-2 rounded-lg text-[var(--accent-red)] hover:bg-[var(--accent-red-bg)]" title="Delete"><Trash2 size={13} /></button>
-                        </div>
-                      ) : null}
+                      ) : (
+                        <button onClick={() => setDetailsTaskId(task.id)} className="p-2 rounded-lg text-[var(--text-muted)] hover:text-[var(--accent-indigo)] hover:bg-[var(--accent-indigo-bg)]" title="View"><Eye size={14} /></button>
+                      )}
                     </td>
                   </tr>
                 );
@@ -585,8 +563,6 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
               onStatusChange: (status) => handleStatusChange(task, status),
               isMenuOpen: openMenuId === task.id,
               onToggleMenu: () => setOpenMenuId(openMenuId === task.id ? null : task.id),
-              onEdit: () => { setEditingTask(task); setModalOpen(true); setOpenMenuId(null); },
-              onDelete: () => handleDelete(task),
               onRestore: () => handleRestore(task),
             });
             return (
@@ -614,7 +590,8 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
 
       <TaskFormModal isOpen={modalOpen} onClose={() => setModalOpen(false)} task={editingTask} onSaved={fetchTasks}
         categories={categories} tags={tagOptions} onTaxonomyChanged={fetchTaxonomy} groupId={groupId} />
-      <TaskDetailsModal isOpen={!!detailsTaskId} taskId={detailsTaskId} onClose={() => setDetailsTaskId(null)} onChanged={fetchTasks} />
+      <TaskDetailsModal isOpen={!!detailsTaskId} taskId={detailsTaskId} onClose={() => setDetailsTaskId(null)} onChanged={fetchTasks}
+        onEdit={(t) => { setDetailsTaskId(null); setEditingTask(t); setModalOpen(true); }} />
     </div>
   );
 };

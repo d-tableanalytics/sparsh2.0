@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
-  ArrowLeft, Trash2, FileText, History, Info, Users, Layers, Plus,
+  ArrowLeft, Trash2, Pencil, FileText, History, Info, Users, Layers, Plus,
   Paperclip, MessageSquare, Send, CheckSquare, Square, X,
 } from 'lucide-react';
 import api from '../../services/api';
@@ -9,6 +9,7 @@ import {
   getTaskDetail, updateTaskStatus, addChecklistItem, updateChecklistItem,
   deleteChecklistItem, addTaskComment, uploadTaskAttachment, softDeleteTask,
 } from '../../services/taskApi';
+import { useAuth } from '../../context/AuthContext';
 import { useNotification } from '../../context/NotificationContext';
 import { STATUS_CONFIG, WORKFLOW_STATUSES } from './statusConfig';
 import { getInitials, formatFrequencyLabel } from './taskDisplayUtils';
@@ -16,7 +17,8 @@ import { getInitials, formatFrequencyLabel } from './taskDisplayUtils';
 // Full single-task view: description, revision (status) history, core info,
 // involved parties, sub-tasks/checklist, attachments, and a comment thread.
 // Opened from the row menu in TaskListView ("Details").
-const TaskDetailsModal = ({ isOpen, onClose, taskId, onChanged }) => {
+const TaskDetailsModal = ({ isOpen, onClose, taskId, onChanged, onEdit }) => {
+  const { user } = useAuth();
   const { showSuccess, showError } = useNotification();
   const [task, setTask] = useState(null);
   const [users, setUsers] = useState([]);
@@ -132,6 +134,9 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, onChanged }) => {
   };
 
   const cfg = task ? (STATUS_CONFIG[task.status] || STATUS_CONFIG.pending) : null;
+  // Edit/Delete are available to the creator and to admins (backend enforces the same on
+  // update/delete). Assignees / in-loop users can view + change status but not edit/delete.
+  const canManage = !!task && (task.isCreator || ['superadmin', 'admin'].includes(user?.role));
   const checklistDone = task ? (task.checklist || []).filter(c => c.completed).length : 0;
   const checklistTotal = task ? (task.checklist || []).length : 0;
 
@@ -165,8 +170,17 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, onChanged }) => {
                 <span className="px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider border bg-[var(--input-bg)] text-[var(--text-muted)] border-[var(--border)]">
                   {formatFrequencyLabel(task.frequency)}
                 </span>
-                {task.isCreator && (
-                  <button onClick={handleDelete} className="p-2 rounded-lg text-[var(--accent-red)] hover:bg-[var(--accent-red-bg)]" title="Delete task"><Trash2 size={15} /></button>
+                {canManage && (
+                  <>
+                    <button onClick={() => onEdit?.(task)}
+                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider border bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] border-[var(--accent-indigo-border)] hover:opacity-90">
+                      <Pencil size={13} /> Edit Task
+                    </button>
+                    <button onClick={handleDelete}
+                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider border bg-[var(--accent-red-bg)] text-[var(--accent-red)] border-[var(--accent-red-border)] hover:opacity-90">
+                      <Trash2 size={13} /> Delete Task
+                    </button>
+                  </>
                 )}
               </div>
             )}

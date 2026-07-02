@@ -24,6 +24,19 @@ router = APIRouter(prefix="/tasks", tags=["Tasks"])
 TASK_COLLECTIONS = CALENDAR_COLLECTIONS + ["calendar_events"]
 ADMIN_ROLES = ["superadmin", "admin", "coach", "staff"]
 
+# Only Super Admin + Sparsh Admin may see ALL tasks / the system-wide total. Every other
+# internal user (coach/staff/SMO/member/…) sees only their own related tasks. This is
+# deliberately narrower than ADMIN_ROLES, and role-based rather than permission-based, so a
+# default `calendar.read`/`tasks.read` grant can't leak org-wide task data.
+VIEW_ALL_ROLES = {"superadmin", "admin"}
+
+
+def _can_view_all_tasks(user: dict) -> bool:
+    if (user.get("role") or "").lower() in VIEW_ALL_ROLES:
+        return True
+    # Optional explicit grant for a specific non-admin who should see everything.
+    return bool(user.get("permissions", {}).get("tasks", {}).get("view_all_tasks"))
+
 # Richer workflow taken on by type=="task" docs. The legacy `status` field
 # (schedule/completed/canceled/reschedule) stays authoritative for the Calendar page.
 WORKFLOW_STATUSES = [
@@ -143,9 +156,6 @@ async def _fetch_tasks(
     group_id: Optional[str] = None,
 ):
     user_id = str(current_user["_id"])
-    role = current_user.get("role", "").lower()
-    company_id = current_user.get("company_id")
-    is_admin_role = role in ADMIN_ROLES
 
     clauses = [{"type": "task"}]
 
@@ -163,15 +173,14 @@ async def _fetch_tasks(
         clauses.append({"assigned_to": "other"})
     elif scope == "subscribed":
         clauses.append({"$or": [{"watchers": user_id}, {"watchers": {"$in": [user_id]}}]})
+    elif scope == "own":
+        # Everything the user is related to: created ∪ assigned ∪ in-loop.
+        clauses.append({"$or": _visibility_clauses(user_id)})
     elif scope == "all":
-        has_perm = (
-            current_user.get("permissions", {}).get("tasks", {}).get("read")
-            or current_user.get("permissions", {}).get("calendar", {}).get("read")
-        )
-        if not (role == "superadmin" or has_perm):
-            raise HTTPException(status_code=403, detail="Not authorized to view all tasks")
-        if role != "superadmin" and company_id:
-            clauses.append({"$or": [{"company_id": str(company_id)}, {"user_id": user_id}]})
+        # Only Super Admin + Sparsh Admin see every task system-wide. Everyone else silently
+        # falls back to their own tasks (no 403), so "All Tasks" never leaks others' data.
+        if not _can_view_all_tasks(current_user):
+            clauses.append({"$or": _visibility_clauses(user_id)})
     elif scope == "group":
         if not group_id:
             raise HTTPException(status_code=400, detail="group_id is required for group scope")
@@ -183,7 +192,7 @@ async def _fetch_tasks(
         # No user-restricting clause -- membership is already verified above, and the
         # generic `if group_id:` clause below scopes results to this group's tasks.
     elif scope == "deleted":
-        if not is_admin_role:
+        if not _can_view_all_tasks(current_user):
             clauses.append({"$or": _visibility_clauses(user_id)})
     else:
         raise HTTPException(status_code=400, detail="Invalid scope")
@@ -300,13 +309,11 @@ async def tasks_dashboard(
     reportType: Optional[str] = None,
     current_user: dict = Depends(require_task_access),
 ):
-    role = current_user.get("role", "").lower()
-    is_admin_role = role in ADMIN_ROLES
-
-    # reportType picks which visibility scope backs the numbers: admins/staff default to an
-    # org-wide view, everyone else only ever sees their own tasks regardless of tab clicked.
+    # reportType picks which visibility scope backs the numbers. Only Super Admin + Sparsh
+    # Admin get the org-wide "all" view; every other internal user's totals/analytics are
+    # scoped to their own related tasks (created ∪ assigned ∪ in-loop) via the "own" scope.
     scope_map = {"delegated": "delegated", "my_report": "my"}
-    scope = scope_map.get(reportType, "all" if is_admin_role else "my")
+    scope = scope_map.get(reportType, "all" if _can_view_all_tasks(current_user) else "own")
 
     start_iso, end_iso = _period_to_range(period, startDate, endDate)
     docs = await _fetch_tasks(current_user, scope, category, tag, frequency, assignedTo, search, start_iso, end_iso)
@@ -418,7 +425,6 @@ async def tasks_activity(
     col = get_collection("activity_logs")
     query = {"action": {"$in": TASK_ACTIVITY_ACTIONS}}
 
-    role = current_user.get("role", "").lower()
     if groupId:
         group_doc = await get_collection("task_groups").find_one({"_id": ObjectId(groupId)})
         if not group_doc:
@@ -426,7 +432,8 @@ async def tasks_activity(
         if not _is_member_or_manager(group_doc, current_user):
             raise HTTPException(status_code=403, detail="Not authorized to view this group's activity")
         query["metadata.group_id"] = groupId
-    elif role not in ADMIN_ROLES:
+    elif not _can_view_all_tasks(current_user):
+        # Only Super Admin + Sparsh Admin see the whole org's task activity; others see only their own.
         query["user_id"] = str(current_user["_id"])
     elif updatedBy:
         query["user_id"] = updatedBy
