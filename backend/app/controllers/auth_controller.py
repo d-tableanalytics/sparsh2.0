@@ -28,32 +28,107 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     encoded_jwt = jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
     return encoded_jwt
 
+async def get_user_from_token(token: str) -> Optional[dict]:
+    """Decode a JWT and resolve the user doc (staff first, then learners).
+    Returns None on any failure. Used where the token can't come from the
+    Authorization header — e.g. the SSE stream endpoint reads it from a query
+    param because EventSource can't set headers."""
+    if not token:
+        return None
+    try:
+        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+        email = payload.get("sub")
+        if not email:
+            return None
+    except JWTError:
+        return None
+
+    user = await get_collection("staff").find_one({"email": email})
+    if user:
+        user["_source_collection"] = "staff"
+    else:
+        user = await get_collection("learners").find_one({"email": email})
+        if user:
+            user["_source_collection"] = "learners"
+    return user
+
+
 async def get_current_user(token: str = Depends(oauth2_scheme)):
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
         headers={"WWW-Authenticate": "Bearer"},
     )
-    try:
-        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
-        email: str = payload.get("sub")
-        role: str = payload.get("role")
-        company_id: Optional[str] = payload.get("company_id")
-        if email is None:
-            raise credentials_exception
-        token_data = TokenData(email=email, role=role, company_id=company_id)
-    except JWTError:
-        raise credentials_exception
-    
-    # Search staff first
-    user = await get_collection("staff").find_one({"email": token_data.email})
-    if not user:
-        # Then learners
-        user = await get_collection("learners").find_one({"email": token_data.email})
-        
+    user = await get_user_from_token(token)
     if user is None:
         raise credentials_exception
     return user
+
+
+# ─── Task Management access gate (internal-Sparsh-only) ───
+# Internal = users in the `staff` collection (tag="staff"): superadmin/admin and any future
+# staff-side role. Client-side users (learners collection: clientadmin/clientuser) are blocked
+# from the entire Task Management / Delegation module unless explicitly granted the
+# `permissions.tasks.access_task_management` override. Super Admin is always allowed.
+INTERNAL_ROLES = {"superadmin", "admin", "coach", "staff"}
+TASK_ACCESS_DENIED_MESSAGE = "Task Management is only available for Sparsh internal teams."
+
+
+def is_internal_user(user: dict) -> bool:
+    if not user:
+        return False
+    if user.get("role") == "superadmin":
+        return True
+    # Explicit override so an admin can grant a specific client user access.
+    if user.get("permissions", {}).get("tasks", {}).get("access_task_management"):
+        return True
+    src = user.get("_source_collection")
+    if src == "staff":
+        return True
+    if src == "learners":
+        return False
+    # Fallback when the collection wasn't stamped (defensive): use tag, then role.
+    if user.get("tag") == "staff":
+        return True
+    if user.get("tag") == "learner":
+        return False
+    return user.get("role") in INTERNAL_ROLES
+
+
+async def require_task_access(current_user: dict = Depends(get_current_user)):
+    """Dependency that 403s any non-internal user. Returns the user so endpoints that
+    swap `Depends(get_current_user)` -> `Depends(require_task_access)` still receive it."""
+    if not is_internal_user(current_user):
+        raise HTTPException(status_code=403, detail=TASK_ACCESS_DENIED_MESSAGE)
+    return current_user
+
+
+TASK_RECIPIENT_DENIED_MESSAGE = (
+    "Task and Delegation module is only for Sparsh internal users. "
+    "Client-side users cannot be assigned or added in loop."
+)
+
+
+async def get_non_internal_user_ids(user_ids) -> list:
+    """Given a list of user id strings (task assignees + watchers), return those that are
+    NOT internal Sparsh users. Internal = present in the `staff` collection. Any id not
+    found in staff (i.e. a learner / client-side user, or a bogus id) is treated as
+    non-internal and returned so the caller can reject it."""
+    from bson import ObjectId
+    ids = [str(i) for i in (user_ids or []) if i]
+    if not ids:
+        return []
+    oids = []
+    for i in ids:
+        try:
+            oids.append(ObjectId(i))
+        except Exception:
+            pass
+    internal = set()
+    cursor = get_collection("staff").find({"_id": {"$in": oids}}, {"_id": 1})
+    async for u in cursor:
+        internal.add(str(u["_id"]))
+    return [i for i in ids if i not in internal]
 
 async def get_current_active_user(current_user: dict = Depends(get_current_user)):
     if not current_user.get("is_active", True):

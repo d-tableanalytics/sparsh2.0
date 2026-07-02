@@ -1,7 +1,10 @@
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, UploadFile, File, Form
 from typing import List, Optional
 from app.db.mongodb import get_collection
-from app.controllers.auth_controller import get_current_user
+from app.controllers.auth_controller import (
+    get_current_user, is_internal_user, TASK_ACCESS_DENIED_MESSAGE,
+    get_non_internal_user_ids, TASK_RECIPIENT_DENIED_MESSAGE,
+)
 from app.models.calendar_event import CalendarEventCreate, CalendarEventResponse
 from app.services.notification_service import (
     send_task_created_email, send_task_updated_email, send_task_deleted_email,
@@ -14,6 +17,7 @@ from app.services.gpt_service import grade_descriptive_answer
 from app.services.s3_service import upload_file_to_s3, get_signed_url
 from app.services.event_sync_service import sync_event_to_collection
 from app.routes.task_meta import sync_task_meta
+from app.services import task_events
 from bson import ObjectId
 from datetime import datetime, timedelta, timezone
 
@@ -229,6 +233,17 @@ async def create_event(event: CalendarEventCreate, background_tasks: BackgroundT
             raise HTTPException(status_code=403, detail="Not authorized to create events")
 
     event_dict = event.model_dump()
+
+    # Task Management is internal-Sparsh-only: block client-side users from creating tasks
+    # via this shared endpoint, while leaving normal calendar/session event creation intact.
+    if event_dict.get("type") == "task":
+        if not is_internal_user(current_user):
+            raise HTTPException(status_code=403, detail=TASK_ACCESS_DENIED_MESSAGE)
+        # Assignees and In-Loop/watchers must all be internal Sparsh users.
+        bad = await get_non_internal_user_ids((event_dict.get("target_staff_id") or []) + (event_dict.get("watchers") or []))
+        if bad:
+            raise HTTPException(status_code=403, detail=TASK_RECIPIENT_DENIED_MESSAGE)
+
     # Backdate validation logic... (omitted summary for brevity, keeping existing code)
     # [STRICT BACKDATE VALIDATION CODE REMAINS UNCHANGED]
     try:
@@ -324,6 +339,15 @@ async def create_event(event: CalendarEventCreate, background_tasks: BackgroundT
                                        meta={"group_id": event_dict.get("group_id")} if is_task else None)
                     if is_task:
                         background_tasks.add_task(sync_task_meta, event_dict.get("category"), event_dict.get("tags"), str(current_user["_id"]))
+                        await task_events.publish(task_events.recipients_for(event_dict), {
+                            "type": "task_created",
+                            "task_id": None,  # batch create -- client refetches the list
+                            "title": event_dict.get("title"),
+                            "assigned_to": event_dict.get("target_staff_id") or [],
+                            "assigned_by": event_dict.get("user_id"),
+                            "watchers": event_dict.get("watchers") or [],
+                            "actor_id": str(current_user["_id"]),
+                        })
                     return {"message": f"Successfully generated {len(generated_events)} recurring duties."}
         except Exception as e:
             print(f"RECURSIVE ENGINE FAILURE: {e}")
@@ -337,6 +361,16 @@ async def create_event(event: CalendarEventCreate, background_tasks: BackgroundT
         background_tasks.add_task(sync_task_meta, event_dict.get("category"), event_dict.get("tags"), str(current_user["_id"]))
     await log_activity(current_user, "Create Task" if is_task else "Create Event", col_name, f"{'Task' if is_task else 'Event'} created: {event_dict['title']}",
                        meta={"task_id": str(result.inserted_id), "group_id": event_dict.get("group_id")} if is_task else None)
+    if is_task:
+        await task_events.publish(task_events.recipients_for(event_dict), {
+            "type": "task_created",
+            "task_id": str(result.inserted_id),
+            "title": event_dict.get("title"),
+            "assigned_to": event_dict.get("target_staff_id") or [],
+            "assigned_by": event_dict.get("user_id"),
+            "watchers": event_dict.get("watchers") or [],
+            "actor_id": str(current_user["_id"]),
+        })
     return {"id": str(result.inserted_id), "message": f"Event created in {col_name}"}
 
 @router.patch("/{event_id}")
@@ -344,7 +378,24 @@ async def update_event(event_id: str, updates: dict, background_tasks: Backgroun
     existing, col_name = await find_event_across_collections(event_id)
     if not existing:
         raise HTTPException(status_code=404, detail="Event not found")
-        
+
+    # Task Management is internal-Sparsh-only: block client-side users from editing a task
+    # (or turning an event into a task) via this shared endpoint.
+    is_task_update = existing.get("type") == "task" or updates.get("type") == "task"
+    if is_task_update:
+        if not is_internal_user(current_user):
+            raise HTTPException(status_code=403, detail=TASK_ACCESS_DENIED_MESSAGE)
+        # If assignees / watchers are being changed, the new set must all be internal.
+        recipients = []
+        if "target_staff_id" in updates:
+            recipients += updates.get("target_staff_id") or []
+        if "watchers" in updates:
+            recipients += updates.get("watchers") or []
+        if recipients:
+            bad = await get_non_internal_user_ids(recipients)
+            if bad:
+                raise HTTPException(status_code=403, detail=TASK_RECIPIENT_DENIED_MESSAGE)
+
     is_admin = current_user.get("role") == "superadmin"
     has_update_perm = current_user.get("permissions", {}).get("calendar", {}).get("update")
     is_creator = existing.get("user_id") == str(current_user["_id"])
@@ -382,6 +433,20 @@ async def update_event(event_id: str, updates: dict, background_tasks: Backgroun
                        meta={"task_id": event_id, "group_id": projected.get("group_id")} if is_task else None)
     if is_task and ("category" in updates or "tags" in updates):
         background_tasks.add_task(sync_task_meta, projected.get("category"), projected.get("tags"), str(current_user["_id"]))
+    if is_task:
+        # Union old + new recipients so a user removed from assignees/watchers also refetches
+        # (and the task correctly drops off their list).
+        recipients = task_events.recipients_for(existing) | task_events.recipients_for(projected)
+        await task_events.publish(recipients, {
+            "type": "task_updated",
+            "task_id": event_id,
+            "status": projected.get("workflow_status"),
+            "title": _title,
+            "assigned_to": projected.get("target_staff_id") or [],
+            "assigned_by": projected.get("user_id"),
+            "watchers": projected.get("watchers") or [],
+            "actor_id": str(current_user["_id"]),
+        })
     creator_name = current_user.get("full_name") or current_user.get("first_name", "System Admin")
     final_doc["id"] = str(event_id)
     background_tasks.add_task(notify_users_instant, final_doc, "updated", creator_name)

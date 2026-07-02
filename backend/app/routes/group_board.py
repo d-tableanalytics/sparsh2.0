@@ -5,11 +5,12 @@ from bson import ObjectId
 from pydantic import BaseModel
 
 from app.db.mongodb import get_collection
-from app.controllers.auth_controller import get_current_user
+from app.controllers.auth_controller import get_current_user, require_task_access
 from app.models.group_board_card import BoardCardCreate, BoardCardUpdate
 from app.routes.group import _is_member_or_manager
 
-router = APIRouter(prefix="/groups/{group_id}/board", tags=["Group Board"])
+# Ideaboard is part of Task Management -> internal-Sparsh-only.
+router = APIRouter(prefix="/groups/{group_id}/board", tags=["Group Board"], dependencies=[Depends(require_task_access)])
 
 # Fixed columns (not user-configurable, per product decision) -- enforced here at the
 # route level rather than as a Pydantic Literal, matching how tasks.py enforces

@@ -43,6 +43,7 @@ import Holiday from './pages/Holiday';
 import DeletedTasks from './pages/DeletedTasks';
 import ForgotPassword from './pages/ForgotPassword';
 import PrivateRoute from './components/common/PrivateRoute';
+import RequireTaskAccess from './components/common/RequireTaskAccess';
 import AssistantWidget from './features/assistant';
 import './index.css';
 import { useAuth } from './context/AuthContext';
@@ -83,16 +84,16 @@ const AppRoutes = () => {
       <Route path="/sessions/:sessionId/resource/:resourceId" element={<PrivateRoute><ContentViewer /></PrivateRoute>} />
       <Route path="/calendar" element={<PrivateRoute><CalendarPage /></PrivateRoute>} />
 
-      {/* Task Management Module */}
-      <Route path="/tasks" element={<PrivateRoute><TaskDashboard /></PrivateRoute>} />
-      <Route path="/tasks/my" element={<PrivateRoute><MyTasks /></PrivateRoute>} />
-      <Route path="/tasks/delegated" element={<PrivateRoute><DelegatedTasks /></PrivateRoute>} />
-      <Route path="/tasks/subscribed" element={<PrivateRoute><SubscribedTasks /></PrivateRoute>} />
-      <Route path="/tasks/all" element={<PrivateRoute><AllTasks /></PrivateRoute>} />
-      <Route path="/tasks/groups" element={<PrivateRoute><TaskGroups /></PrivateRoute>} />
-      <Route path="/tasks/activity" element={<PrivateRoute><TaskActivity /></PrivateRoute>} />
-      <Route path="/tasks/holiday" element={<PrivateRoute><Holiday /></PrivateRoute>} />
-      <Route path="/tasks/deleted" element={<PrivateRoute><DeletedTasks /></PrivateRoute>} />
+      {/* Task Management Module — internal-Sparsh-only (RequireTaskAccess) */}
+      <Route path="/tasks" element={<PrivateRoute><RequireTaskAccess><TaskDashboard /></RequireTaskAccess></PrivateRoute>} />
+      <Route path="/tasks/my" element={<PrivateRoute><RequireTaskAccess><MyTasks /></RequireTaskAccess></PrivateRoute>} />
+      <Route path="/tasks/delegated" element={<PrivateRoute><RequireTaskAccess><DelegatedTasks /></RequireTaskAccess></PrivateRoute>} />
+      <Route path="/tasks/subscribed" element={<PrivateRoute><RequireTaskAccess><SubscribedTasks /></RequireTaskAccess></PrivateRoute>} />
+      <Route path="/tasks/all" element={<PrivateRoute><RequireTaskAccess><AllTasks /></RequireTaskAccess></PrivateRoute>} />
+      <Route path="/tasks/groups" element={<PrivateRoute><RequireTaskAccess><TaskGroups /></RequireTaskAccess></PrivateRoute>} />
+      <Route path="/tasks/activity" element={<PrivateRoute><RequireTaskAccess><TaskActivity /></RequireTaskAccess></PrivateRoute>} />
+      <Route path="/tasks/holiday" element={<PrivateRoute><RequireTaskAccess><Holiday /></RequireTaskAccess></PrivateRoute>} />
+      <Route path="/tasks/deleted" element={<PrivateRoute><RequireTaskAccess><DeletedTasks /></RequireTaskAccess></PrivateRoute>} />
       <Route path="/sessions" element={<PrivateRoute><LearnerSessions /></PrivateRoute>} />
       <Route path="/company-portal" element={<PrivateRoute><CompanyPortal /></PrivateRoute>} />
       <Route path="/my-reports" element={<PrivateRoute><MyReports /></PrivateRoute>} />

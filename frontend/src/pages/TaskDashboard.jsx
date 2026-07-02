@@ -1,8 +1,9 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Table2, BarChart3 as BarChartIcon, Plus, ListChecks, Search } from 'lucide-react';
 import api from '../services/api';
 import { getTaskDashboard, getTasks } from '../services/taskApi';
 import { getTaskCategories, getTaskTags } from '../services/taskMetaApi';
+import { openTaskEventStream } from '../services/taskEventsApi';
 import { useAuth } from '../context/AuthContext';
 import { useNotification } from '../context/NotificationContext';
 import DateRangeFilter from '../components/tasks/DateRangeFilter';
@@ -65,7 +66,7 @@ const TaskDashboard = () => {
   const [modalOpen, setModalOpen] = useState(false);
 
   useEffect(() => {
-    api.get('/users?active_only=true').then(res => setUsers(res.data || [])).catch(() => {});
+    api.get('/tasks/assignable-users').then(res => setUsers(res.data || [])).catch(() => {});
   }, []);
 
   const userMap = useMemo(() => {
@@ -115,6 +116,18 @@ const TaskDashboard = () => {
   }, [queryParams, viewType, activeTab]);
 
   useEffect(() => { fetchAll(); }, [fetchAll]);
+
+  // Real-time: debounced refresh of the dashboard when a task involving me changes.
+  const fetchAllRef = useRef(fetchAll);
+  useEffect(() => { fetchAllRef.current = fetchAll; }, [fetchAll]);
+  useEffect(() => {
+    let debounce = null;
+    const cleanup = openTaskEventStream(() => {
+      if (debounce) clearTimeout(debounce);
+      debounce = setTimeout(() => fetchAllRef.current?.(), 400);
+    });
+    return () => { if (debounce) clearTimeout(debounce); cleanup(); };
+  }, []);
 
   const [categories, setCategories] = useState([]);
   const [tags, setTags] = useState([]);

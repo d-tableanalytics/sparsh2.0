@@ -4,12 +4,14 @@ from datetime import datetime, timezone
 from bson import ObjectId
 
 from app.db.mongodb import get_collection
-from app.controllers.auth_controller import get_current_user
+from app.controllers.auth_controller import get_current_user, require_task_access
 from app.models.group import GroupCreate, GroupUpdate, GroupLink
 from app.services.activity_log_service import log_activity
 from app.utils.calendar_utils import CALENDAR_COLLECTIONS
 
-router = APIRouter(prefix="/groups", tags=["Groups"])
+# Task Groups are part of the Task Management module -> internal-Sparsh-only (see
+# require_task_access). Router-level dependency 403s client-side users on every endpoint.
+router = APIRouter(prefix="/groups", tags=["Groups"], dependencies=[Depends(require_task_access)])
 
 # Staff/admins manage groups; regular users can see groups they're a member of. Mirrors the
 # management-role convention used by the Holiday and Task modules.

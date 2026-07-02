@@ -114,7 +114,9 @@ const TaskFormModal = ({ isOpen, onClose, onSaved, task = null, categories = [],
 
   useEffect(() => {
     if (!isOpen) return;
-    api.get('/users?active_only=true').then(res => setStaffOptions(res.data || [])).catch(() => setStaffOptions([]));
+    // Only internal Sparsh users are assignable / can be added In Loop — client-side users
+    // must never appear here (backend also enforces this on save). See /tasks/assignable-users.
+    api.get('/tasks/assignable-users').then(res => setStaffOptions(res.data || [])).catch(() => setStaffOptions([]));
 
     if (task) {
       setForm({
