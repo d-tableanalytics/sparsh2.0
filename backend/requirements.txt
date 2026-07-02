@@ -25,7 +25,8 @@ aiofiles==24.1.0
 # ─── Document Parsing ───
 pypdf==5.1.0
 # Renders image-based/scanned PDFs to images so the multimodal model can read them
-PyMuPDF==1.24.10
+# 1.25.5 ships an abi3 wheel compatible with Python 3.13 (1.24.10 has no cp313 wheel)
+PyMuPDF==1.25.5
 python-docx==1.1.2
 pandas==2.2.3
 openpyxl==3.1.5
