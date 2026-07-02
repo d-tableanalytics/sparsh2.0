@@ -1,18 +1,27 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { X, Search, Save, Plus } from 'lucide-react';
+import { X, Search, Save, Plus, Check } from 'lucide-react';
 import { getInitials } from './taskDisplayUtils';
 
 // Shared search + scrollable-list + Cancel/Apply popover, used for the Assignee,
 // In Loop and Category pickers (they all share the same header/search/list/footer shape).
+//
+// `onAddNew` (optional): when provided, the "Add More" flow CREATES + APPENDS an item
+// (via the parent) and keeps the modal open WITHOUT changing the current selection —
+// so e.g. adding a new category never clears the already-selected one. Without it,
+// Add More falls back to the legacy behaviour (stage for multi / apply+close for single).
 const PickerModal = ({
   isOpen, onClose, title, searchPlaceholder = 'Search...', items, multi = true,
-  selected, onApply, renderAvatar = false, renderDot = false, allowAddMore = false, addMoreLabel = 'Add More',
+  selected, onApply, onAddNew, renderAvatar = false, renderDot = false, allowAddMore = false, addMoreLabel = 'Add More',
 }) => {
   const [search, setSearch] = useState('');
   const [pending, setPending] = useState(multi ? [] : null);
   const [newItemName, setNewItemName] = useState('');
   const [addingNew, setAddingNew] = useState(false);
+  // Names created via Add More this session — merged into the list so they show instantly,
+  // even before the parent's refetched `items` prop lands.
+  const [localExtra, setLocalExtra] = useState([]);
+  const selectedRef = useRef(null);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -20,12 +29,26 @@ const PickerModal = ({
     setSearch('');
     setAddingNew(false);
     setNewItemName('');
+    setLocalExtra([]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen]);
+
+  // Auto-scroll to the currently selected item when the modal opens.
+  useEffect(() => {
+    if (!isOpen) return undefined;
+    const t = setTimeout(() => selectedRef.current?.scrollIntoView({ block: 'nearest' }), 60);
+    return () => clearTimeout(t);
   }, [isOpen]);
 
   if (!isOpen) return null;
 
-  const filtered = items.filter(it =>
+  // Merge parent items with session-added names (deduped, case-insensitive).
+  const extraItems = localExtra
+    .filter((n) => !items.some((it) => String(it.id).toLowerCase() === n.toLowerCase()))
+    .map((n) => ({ id: n, primary: n }));
+  const allItems = [...items, ...extraItems];
+
+  const filtered = allItems.filter(it =>
     it.primary?.toLowerCase().includes(search.toLowerCase()) ||
     it.secondary?.toLowerCase().includes(search.toLowerCase())
   );
@@ -41,15 +64,22 @@ const PickerModal = ({
   const handleAddNew = () => {
     const name = newItemName.trim();
     if (!name) return;
+
+    // Preferred flow: create + append without disturbing the current selection.
+    if (onAddNew) {
+      Promise.resolve(onAddNew(name)).catch(() => {}); // parent handles create + list refresh + errors
+      setLocalExtra(prev => (prev.some(x => x.toLowerCase() === name.toLowerCase()) ? prev : [...prev, name]));
+      setNewItemName('');
+      setAddingNew(false);
+      return; // keep modal open, keep `pending` (selection) untouched
+    }
+
+    // Legacy fallback (unchanged) for pickers that don't pass onAddNew.
     if (multi) {
-      // Multiple picks are still pending until Apply Changes, so just stage it like any toggle.
       toggle(name);
       setNewItemName('');
       setAddingNew(false);
     } else {
-      // Single-select: the new name isn't in `items` (that list comes from the parent), so
-      // there's nothing to visibly highlight as "selected" — apply and close immediately
-      // instead of leaving the user to guess whether Add actually did anything.
       setNewItemName('');
       setAddingNew(false);
       onApply(name);
@@ -85,7 +115,7 @@ const PickerModal = ({
             {filtered.map(it => {
               const isSelected = multi ? pending.includes(it.id) : pending === it.id;
               return (
-                <button type="button" key={it.id} onClick={() => toggle(it.id)}
+                <button type="button" key={it.id} ref={isSelected ? selectedRef : null} onClick={() => toggle(it.id)}
                   className={`w-full flex items-center gap-3 px-2 py-2.5 rounded-xl text-left transition-all ${isSelected ? 'bg-[var(--accent-indigo-bg)]' : 'hover:bg-[var(--input-bg)]'}`}>
                   {renderAvatar && (
                     <div className="w-9 h-9 rounded-full flex items-center justify-center text-white font-black text-[11px] shrink-0" style={{ background: 'var(--avatar-bg)' }}>
@@ -93,15 +123,18 @@ const PickerModal = ({
                     </div>
                   )}
                   {renderDot && <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: 'var(--accent-indigo)' }} />}
-                  <div className="min-w-0">
+                  <div className="min-w-0 flex-1">
                     <p className={`text-[13px] font-bold truncate ${isSelected ? 'text-[var(--accent-indigo)]' : 'text-[var(--text-main)]'}`}>{it.primary}</p>
                     {it.secondary && <p className="text-[11px] font-medium text-[var(--text-muted)] truncate">{it.secondary}</p>}
                   </div>
+                  {isSelected && <Check size={16} className="text-[var(--accent-indigo)] shrink-0" />}
                 </button>
               );
             })}
             {filtered.length === 0 && (
-              <p className="text-center text-[11px] font-bold text-[var(--text-muted)] py-6">No matches</p>
+              <p className="text-center text-[11px] font-bold text-[var(--text-muted)] py-6">
+                {search ? 'No matches' : 'No items yet'}
+              </p>
             )}
           </div>
 

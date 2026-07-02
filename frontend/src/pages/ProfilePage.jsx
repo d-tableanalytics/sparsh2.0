@@ -5,10 +5,13 @@ import api from '../services/api';
 import {
   User, Mail, Phone, Shield, Briefcase, Lock, Loader2, LogOut, Pencil, Check, X,
   Building2, Calendar, KeyRound, ShieldCheck, PhoneCall, AlertCircle, IdCard,
+  MapPin, Globe, Heart, Cake, AtSign, Hash, Users as UsersIcon,
 } from 'lucide-react';
 import { motion } from 'framer-motion';
+import NotificationSettings from '../components/settings/NotificationSettings';
 
 // Fields the self-service PATCH /users/me endpoint accepts (see backend SelfProfileUpdate).
+// Everything NOT in here is rendered read-only / disabled (no backend support yet).
 const EDITABLE = {
   general: ['first_name', 'last_name', 'mobile', 'emergency_mobile'],
   professional: ['designation', 'department', 'reporting_manager', 'joining_date'],
@@ -25,25 +28,40 @@ const hydrate = (u) => ({
   joining_date: u?.joining_date ? String(u.joining_date).slice(0, 10) : '',
 });
 
-const inputCls =
-  'w-full px-3.5 py-2 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-xl text-[13px] font-medium text-[var(--text-main)] outline-none focus:border-[var(--accent-indigo)] transition-all';
+/**
+ * Every field renders as a form control so the layout always matches the reference.
+ *  - editable + section in edit mode  → enabled input/select
+ *  - otherwise                        → disabled control showing the value, or a
+ *                                       placeholder ("Not Provided" / "dd-mm-yyyy" /
+ *                                       "Select …") when there's no data.
+ * Unsupported fields (editable=false) stay disabled even in edit mode.
+ */
+const Field = ({ icon: Icon, label, value, editing, onChange, kind = 'text', options, placeholder = 'Not Provided', editable = true }) => {
+  const active = editable && editing;
+  const base = 'w-full px-3.5 py-2 border rounded-xl text-[13px] font-medium transition-all outline-none';
+  const enabledCls = 'bg-[var(--input-bg)] border-[var(--input-border)] text-[var(--text-main)] focus:border-[var(--accent-indigo)]';
+  const disabledCls = 'bg-[var(--input-bg)] border-[var(--border)] text-[var(--text-main)] opacity-70 cursor-not-allowed';
+  const cls = `${base} ${active ? enabledCls : disabledCls}`;
 
-// A label + value / input pair.
-const Field = ({ icon: Icon, label, value, editing, onChange, type = 'text', readOnly = false }) => (
-  <div className="space-y-1.5 min-w-0">
-    <label className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest">{label}</label>
-    {editing && !readOnly ? (
-      <input type={type} value={value || ''} onChange={(e) => onChange(e.target.value)} className={inputCls} />
-    ) : (
-      <div className="flex items-center gap-2.5 px-3.5 py-2 bg-[var(--input-bg)] border border-[var(--border)] rounded-xl">
-        {Icon && <Icon size={14} className="text-[var(--text-muted)] shrink-0" />}
-        <span className="text-[13px] font-bold text-[var(--text-main)] truncate">{value || '—'}</span>
-      </div>
-    )}
-  </div>
-);
+  return (
+    <div className="space-y-1.5 min-w-0">
+      <label className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest flex items-center gap-1.5">
+        {Icon && <Icon size={12} />} {label}
+      </label>
+      {kind === 'select' ? (
+        <select disabled={!active} value={value || ''} onChange={(e) => onChange && onChange(e.target.value)} className={cls}>
+          <option value="">{placeholder}</option>
+          {(options || []).map((o) => <option key={o} value={o}>{o}</option>)}
+        </select>
+      ) : active ? (
+        <input type={kind === 'date' ? 'date' : 'text'} value={value || ''} onChange={(e) => onChange && onChange(e.target.value)} className={cls} />
+      ) : (
+        <input type="text" disabled value={value || ''} placeholder={kind === 'date' ? 'dd-mm-yyyy' : placeholder} className={cls} />
+      )}
+    </div>
+  );
+};
 
-// A card section with an Edit / Save / Cancel header.
 const SectionCard = ({ icon: Icon, title, subtitle, editKey, editing, onEdit, onSave, onCancel, saving, editable = true, children }) => (
   <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-[24px] p-6 shadow-sm">
     <div className="flex items-start justify-between gap-3 mb-5">
@@ -87,7 +105,7 @@ const QuickInfo = ({ icon: Icon, label, value }) => (
     </div>
     <div className="min-w-0">
       <p className="text-[9px] font-black text-[var(--text-muted)] uppercase tracking-widest">{label}</p>
-      <p className="text-[12px] font-bold text-[var(--text-main)] truncate">{value || '—'}</p>
+      <p className="text-[12px] font-bold text-[var(--text-main)] truncate">{value || 'Not Provided'}</p>
     </div>
   </div>
 );
@@ -106,7 +124,6 @@ const ProfilePage = () => {
   useEffect(() => { if (user) setForm(hydrate(user)); }, [user]);
 
   const setField = (k, v) => setForm((f) => ({ ...f, [k]: v }));
-
   const cancelEdit = () => { setForm(hydrate(user)); setEditing(null); };
 
   const saveSection = async (sec) => {
@@ -114,7 +131,7 @@ const ProfilePage = () => {
     try {
       const payload = {};
       EDITABLE[sec].forEach((k) => { payload[k] = form[k]; });
-      await api.patch('/users/me', payload);
+      await api.patch('/users/me', payload); // only API-supported fields are ever sent
       await refreshUser();
       showSuccess('Profile updated successfully');
       setEditing(null);
@@ -140,7 +157,6 @@ const ProfilePage = () => {
     }
   };
 
-  // Loading skeleton
   if (!user) {
     return (
       <div className="max-w-6xl mx-auto grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -155,6 +171,8 @@ const ProfilePage = () => {
   const fullName = user.full_name || `${user.first_name || ''} ${user.last_name || ''}`.trim() || user.email || 'User';
   const isActive = user.is_active !== false;
   const permissions = user.permissions && typeof user.permissions === 'object' ? user.permissions : null;
+  const isEditingGeneral = editing === 'general';
+  const isEditingPro = editing === 'professional';
 
   return (
     <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} className="max-w-6xl mx-auto grid grid-cols-1 lg:grid-cols-3 gap-6 pb-10">
@@ -172,65 +190,76 @@ const ProfilePage = () => {
               {isActive ? 'Active' : 'Inactive'}
             </span>
           </div>
-          {user.department && (
-            <p className="mt-3 text-[11px] font-bold text-[var(--text-muted)] flex items-center justify-center gap-1.5">
-              <Briefcase size={12} /> {user.department}
-            </p>
-          )}
           <button onClick={logout}
             className="mt-5 w-full py-2.5 bg-[var(--accent-red-bg)] text-[var(--accent-red)] font-black text-[11px] uppercase tracking-widest rounded-xl flex items-center justify-center gap-2 hover:bg-[var(--accent-red)] hover:text-white transition-all">
             <LogOut size={15} /> Sign Out
           </button>
         </div>
 
-        {/* Quick info cards (only fields that exist) */}
+        {/* Quick info — reference fields (placeholder when data is absent) */}
         <div className="space-y-3">
-          {user.email && <QuickInfo icon={Mail} label="Email" value={user.email} />}
-          {user.mobile && <QuickInfo icon={Phone} label="Mobile" value={user.mobile} />}
-          {user.designation && <QuickInfo icon={IdCard} label="Designation" value={user.designation} />}
-          {user.role && <QuickInfo icon={Shield} label="Office Role" value={user.role} />}
+          <QuickInfo icon={Mail} label="Email" value={user.email} />
+          <QuickInfo icon={Hash} label="Employee ID" value={user.employee_id} />
+          <QuickInfo icon={Shield} label="Role" value={user.role} />
+          <QuickInfo icon={Briefcase} label="Department" value={user.department} />
         </div>
       </div>
 
       {/* ───────────── RIGHT: Sections ───────────── */}
       <div className="lg:col-span-2 space-y-6">
         {/* Section 1 — General Information */}
-        <SectionCard
-          icon={User} title="General Information" subtitle="Your basic identity and contact details."
-          editKey="general" editing={editing} onEdit={setEditing} onSave={() => saveSection('general')} onCancel={cancelEdit} saving={saving}
-        >
+        <SectionCard icon={User} title="General Information" subtitle="Your basic identity and contact details."
+          editKey="general" editing={editing} onEdit={setEditing} onSave={() => saveSection('general')} onCancel={cancelEdit} saving={saving}>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <Field icon={User} label="First Name" value={editing === 'general' ? form.first_name : user.first_name} editing={editing === 'general'} onChange={(v) => setField('first_name', v)} />
-            <Field icon={User} label="Last Name" value={editing === 'general' ? form.last_name : user.last_name} editing={editing === 'general'} onChange={(v) => setField('last_name', v)} />
-            <Field icon={Mail} label="Email (username)" value={user.email} editing={editing === 'general'} readOnly />
-            <Field icon={Phone} label="Mobile" value={editing === 'general' ? form.mobile : user.mobile} editing={editing === 'general'} onChange={(v) => setField('mobile', v)} />
-            <Field icon={PhoneCall} label="Emergency Mobile" value={editing === 'general' ? form.emergency_mobile : user.emergency_mobile} editing={editing === 'general'} onChange={(v) => setField('emergency_mobile', v)} />
+            <Field icon={User} label="First Name" value={isEditingGeneral ? form.first_name : user.first_name} editing={isEditingGeneral} onChange={(v) => setField('first_name', v)} />
+            <Field icon={User} label="Last Name" value={isEditingGeneral ? form.last_name : user.last_name} editing={isEditingGeneral} onChange={(v) => setField('last_name', v)} />
+            <Field icon={AtSign} label="Username" value={user.email} editable={false} />
+            <Field icon={Mail} label="Email" value={user.email} editable={false} />
+            <Field icon={Phone} label="Mobile Number" value={isEditingGeneral ? form.mobile : user.mobile} editing={isEditingGeneral} onChange={(v) => setField('mobile', v)} />
+            <Field icon={PhoneCall} label="Alternate Mobile" value={isEditingGeneral ? form.emergency_mobile : user.emergency_mobile} editing={isEditingGeneral} onChange={(v) => setField('emergency_mobile', v)} />
           </div>
         </SectionCard>
 
-        {/* Section 2 — Professional Information */}
-        <SectionCard
-          icon={Briefcase} title="Professional Information" subtitle="Role, department and reporting details."
-          editKey="professional" editing={editing} onEdit={setEditing} onSave={() => saveSection('professional')} onCancel={cancelEdit} saving={saving}
-        >
+        {/* Section 2 — Professional Profile */}
+        <SectionCard icon={Briefcase} title="Professional Profile" subtitle="Role, department and reporting details."
+          editKey="professional" editing={editing} onEdit={setEditing} onSave={() => saveSection('professional')} onCancel={cancelEdit} saving={saving}>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <Field icon={Shield} label="Role" value={user.role} editing={editing === 'professional'} readOnly />
-            <Field icon={Briefcase} label="Department" value={editing === 'professional' ? form.department : user.department} editing={editing === 'professional'} onChange={(v) => setField('department', v)} />
-            <Field icon={IdCard} label="Designation" value={editing === 'professional' ? form.designation : user.designation} editing={editing === 'professional'} onChange={(v) => setField('designation', v)} />
-            <Field icon={User} label="Reporting Manager" value={editing === 'professional' ? form.reporting_manager : user.reporting_manager} editing={editing === 'professional'} onChange={(v) => setField('reporting_manager', v)} />
-            <Field icon={Calendar} label="Joining Date" type="date" value={editing === 'professional' ? form.joining_date : (user.joining_date ? String(user.joining_date).slice(0, 10) : '')} editing={editing === 'professional'} onChange={(v) => setField('joining_date', v)} />
-            {user.session_type && <Field icon={Building2} label="Session Type" value={user.session_type} editing={editing === 'professional'} readOnly />}
+            <Field icon={Hash} label="Employee ID" value={user.employee_id} editable={false} />
+            <Field icon={Shield} label="Role" value={user.role} editable={false} />
+            <Field icon={IdCard} label="Designation" value={isEditingPro ? form.designation : user.designation} editing={isEditingPro} onChange={(v) => setField('designation', v)} />
+            <Field icon={Briefcase} label="Department" value={isEditingPro ? form.department : user.department} editing={isEditingPro} onChange={(v) => setField('department', v)} />
+            <Field icon={UsersIcon} label="Reporting Manager" value={isEditingPro ? form.reporting_manager : user.reporting_manager} editing={isEditingPro} onChange={(v) => setField('reporting_manager', v)} />
+            <Field icon={Calendar} label="Joining Date" kind="date" value={isEditingPro ? form.joining_date : (user.joining_date ? String(user.joining_date).slice(0, 10) : '')} editing={isEditingPro} onChange={(v) => setField('joining_date', v)} />
+            <Field icon={MapPin} label="Office Location" value={user.office_location} editable={false} />
+            <Field icon={Hash} label="Employee Code" value={user.employee_code} editable={false} />
           </div>
         </SectionCard>
 
-        {/*
-          Sections "Personal Information" and "Address" from the reference are intentionally
-          omitted: the current backend user model / PATCH /users/me expose no such fields
-          (gender, DOB, address, city, etc.), and the brief forbids inventing fake fields.
-        */}
+        {/* Section 3 — Personal Details (no backend support yet → read-only placeholders) */}
+        <SectionCard icon={Heart} title="Personal Details" subtitle="Personal information (managed by HR)." editable={false}>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <Field icon={AtSign} label="Personal Email" value={user.personal_email} editable={false} />
+            <Field icon={UsersIcon} label="Gender" kind="select" options={['Male', 'Female', 'Other']} placeholder="Select Gender" value={user.gender} editable={false} />
+            <Field icon={Cake} label="Date of Birth" kind="date" value={user.date_of_birth} editable={false} />
+            <Field icon={Heart} label="Marital Status" kind="select" options={['Single', 'Married', 'Other']} placeholder="Select Marital Status" value={user.marital_status} editable={false} />
+            <Field icon={Globe} label="Nationality" value={user.nationality} editable={false} />
+            <Field icon={Cake} label="Anniversary Date" kind="date" value={user.anniversary_date} editable={false} />
+          </div>
+        </SectionCard>
 
-        {/* Section 5 — Account Settings (Change Password) */}
-        <SectionCard icon={KeyRound} title="Account Settings" subtitle="Manage your credentials." editable={false}>
+        {/* Section 4 — Residential Address (no backend support yet → read-only placeholders) */}
+        <SectionCard icon={MapPin} title="Residential Address" subtitle="Address details (managed by HR)." editable={false}>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <Field icon={MapPin} label="Address" value={user.address} editable={false} />
+            <Field icon={Building2} label="City" value={user.city} editable={false} />
+            <Field icon={Building2} label="State" value={user.state} editable={false} />
+            <Field icon={Globe} label="Country" value={user.country} editable={false} />
+            <Field icon={Hash} label="Pincode" value={user.pincode} editable={false} />
+          </div>
+        </SectionCard>
+
+        {/* Section 5 — Account & Security */}
+        <SectionCard icon={KeyRound} title="Account & Security" subtitle="Manage your credentials." editable={false}>
           <form onSubmit={changePassword} className="space-y-4 max-w-md">
             {[
               ['current', 'Current Password'],
@@ -258,6 +287,9 @@ const ProfilePage = () => {
             </p>
           </div>
         </SectionCard>
+
+        {/* Notification Settings (real per-user preferences via /notifications/preferences) */}
+        <NotificationSettings />
 
         {/* Section 6 — System Access (permissions, read-only) */}
         {permissions && Object.keys(permissions).length > 0 && (
