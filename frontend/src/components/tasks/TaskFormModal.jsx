@@ -180,6 +180,21 @@ const TaskFormModal = ({ isOpen, onClose, onSaved, task = null, categories = [],
     }
   };
 
+  // "Add More" in the category picker: create + refresh the list only. Deliberately does
+  // NOT touch form.category, so the currently-selected category is preserved (the new one
+  // is just appended and available to pick). Backend get-or-creates, so re-adds are no-ops.
+  const handleCategoryAddNew = async (name) => {
+    const n = (name || '').trim();
+    if (!n) return;
+    const exists = categories.some(c => c.toLowerCase() === n.toLowerCase());
+    try {
+      if (!exists) await createTaskCategory(n);
+      onTaxonomyChanged?.();
+    } catch (err) {
+      showError(err.response?.data?.detail || 'Failed to save new category');
+    }
+  };
+
   const handleTagsApply = async (selectedTags) => {
     setForm(f => ({ ...f, tags: selectedTags }));
     const newTags = selectedTags.filter(t => !availableTags.some(a => a.toLowerCase() === t.toLowerCase()));
@@ -759,7 +774,7 @@ const TaskFormModal = ({ isOpen, onClose, onSaved, task = null, categories = [],
         isOpen={pickerOpen === 'category'} onClose={() => setPickerOpen(null)}
         title="Select Category" searchPlaceholder="Find category..." items={categoryItems}
         multi={false} selected={form.category} renderDot allowAddMore addMoreLabel="Add More"
-        onApply={handleCategoryApply}
+        onApply={handleCategoryApply} onAddNew={handleCategoryAddNew}
       />
       <MiniDatePicker isOpen={deadlinePickerOpen} onClose={() => setDeadlinePickerOpen(false)}
         value={form.end} title="Select Due Date" onApply={(iso) => setForm(f => ({ ...f, end: iso }))} />
