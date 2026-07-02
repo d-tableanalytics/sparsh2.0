@@ -51,6 +51,18 @@ class UserEditRequest(BaseModel):
 class UserStatusUpdate(BaseModel):
     is_active: bool
 
+class SelfProfileUpdate(BaseModel):
+    """Safe, self-editable profile fields for PATCH /users/me. Deliberately excludes
+    role / permissions / is_active / email — those stay admin-only via PUT /users/{id}."""
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    mobile: Optional[str] = None
+    emergency_mobile: Optional[str] = None
+    designation: Optional[str] = None
+    department: Optional[str] = None
+    reporting_manager: Optional[str] = None
+    joining_date: Optional[str] = None
+
 # ─── Current User ───
 @router.get("/me", response_model=UserResponse)
 async def read_users_me(current_user: dict = Depends(get_current_active_user)):
@@ -64,6 +76,35 @@ async def find_user_by_id(user_id: str):
         if user:
             return user, col_name
     return None, None
+
+# ─── Update Own Profile (self-service) ───
+# Any authenticated user can edit their own safe profile fields. Separate from
+# PUT /users/{id}, which restricts staff editing to superadmin and is meant for admins
+# managing *other* users. This never touches role/permissions/is_active/email.
+@router.patch("/me")
+async def update_my_profile(updates: SelfProfileUpdate, current_user: dict = Depends(get_current_active_user)):
+    user_id = str(current_user["_id"])
+    user, col_name = await find_user_by_id(user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    update_data = {k: v for k, v in updates.model_dump().items() if v is not None}
+    if not update_data:
+        raise HTTPException(status_code=400, detail="No fields to update")
+
+    # Recompute full_name when either name part changes (mirrors update_user).
+    if "first_name" in update_data or "last_name" in update_data:
+        fn = update_data.get("first_name", user.get("first_name")) or ""
+        ln = update_data.get("last_name", user.get("last_name")) or ""
+        update_data["full_name"] = f"{fn} {ln}".strip()
+
+    update_data["updated_at"] = datetime.utcnow()
+    await get_collection(col_name).update_one({"_id": ObjectId(user_id)}, {"$set": update_data})
+
+    refreshed = await get_collection(col_name).find_one({"_id": ObjectId(user_id)})
+    refreshed["_id"] = str(refreshed["_id"])
+    refreshed.pop("password", None)
+    return refreshed
 
 # ─── Get Single User ───
 @router.get("/{user_id}")

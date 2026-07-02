@@ -37,6 +37,7 @@ import MyTasks from './pages/MyTasks';
 import DelegatedTasks from './pages/DelegatedTasks';
 import SubscribedTasks from './pages/SubscribedTasks';
 import AllTasks from './pages/AllTasks';
+import TaskGroups from './pages/TaskGroups';
 import TaskActivity from './pages/TaskActivity';
 import Holiday from './pages/Holiday';
 import DeletedTasks from './pages/DeletedTasks';
@@ -88,6 +89,7 @@ const AppRoutes = () => {
       <Route path="/tasks/delegated" element={<PrivateRoute><DelegatedTasks /></PrivateRoute>} />
       <Route path="/tasks/subscribed" element={<PrivateRoute><SubscribedTasks /></PrivateRoute>} />
       <Route path="/tasks/all" element={<PrivateRoute><AllTasks /></PrivateRoute>} />
+      <Route path="/tasks/groups" element={<PrivateRoute><TaskGroups /></PrivateRoute>} />
       <Route path="/tasks/activity" element={<PrivateRoute><TaskActivity /></PrivateRoute>} />
       <Route path="/tasks/holiday" element={<PrivateRoute><Holiday /></PrivateRoute>} />
       <Route path="/tasks/deleted" element={<PrivateRoute><DeletedTasks /></PrivateRoute>} />

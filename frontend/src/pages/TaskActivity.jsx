@@ -1,47 +1,15 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import {
-  Activity, Search, RotateCcw, UserPlus, Pencil, RefreshCw, ListPlus,
-  MessageSquare, Paperclip, Trash2, Repeat, ChevronRight, History,
-} from 'lucide-react';
+import { Activity, Search, RotateCcw, ChevronRight, History } from 'lucide-react';
 import api from '../services/api';
 import { getTaskActivity } from '../services/taskApi';
 import { useAuth } from '../context/AuthContext';
 import { useNotification } from '../context/NotificationContext';
 import DateRangeFilter from '../components/tasks/DateRangeFilter';
 import { getInitials } from '../components/tasks/taskDisplayUtils';
+import { metaFor, extractStatusChange, formatDateTime } from '../components/tasks/activityDisplayUtils';
 
 const ADMIN_ROLES = ['superadmin', 'admin', 'coach', 'staff'];
 const PAGE_SIZE = 30;
-
-// Maps the raw `action` strings written to activity_logs (see log_activity calls in
-// backend tasks.py / calendar_events.py) to a friendly label, icon and accent colour.
-const ACTIVITY_META = {
-  'Create Task': { label: 'Task assigned', icon: UserPlus, color: 'var(--accent-green)' },
-  'Create Recurring Tasks': { label: 'Recurring tasks created', icon: Repeat, color: 'var(--accent-green)' },
-  'Update Task': { label: 'Task updated', icon: Pencil, color: 'var(--accent-indigo)' },
-  'Update Task Status': { label: 'Status changed', icon: RefreshCw, color: 'var(--accent-orange)' },
-  'Add Sub Task': { label: 'Sub-task added', icon: ListPlus, color: 'var(--accent-indigo)' },
-  'Comment on Task': { label: 'Comment added', icon: MessageSquare, color: 'var(--accent-indigo)' },
-  'Attach File to Task': { label: 'Attachment added', icon: Paperclip, color: 'var(--accent-indigo)' },
-  'Soft Delete Task': { label: 'Task deleted', icon: Trash2, color: 'var(--accent-red)' },
-  'Restore Task': { label: 'Task restored', icon: RotateCcw, color: 'var(--accent-green)' },
-};
-const metaFor = (action) => ACTIVITY_META[action] || { label: action || 'Activity', icon: Activity, color: 'var(--text-muted)' };
-
-// "Update Task Status" details read like "Task <id> -> completed" — pull the target status
-// out so it can render as a small status trail chip.
-const extractStatusChange = (details) => {
-  if (!details) return null;
-  const m = details.match(/->\s*([a-z_]+)/i);
-  return m ? m[1].replace(/_/g, ' ') : null;
-};
-
-const formatDateTime = (iso) => {
-  if (!iso) return '';
-  const d = new Date(iso);
-  if (isNaN(d.getTime())) return '';
-  return d.toLocaleString(undefined, { day: '2-digit', month: 'short', year: 'numeric', hour: 'numeric', minute: '2-digit' });
-};
 
 const TaskActivity = () => {
   const { user } = useAuth();

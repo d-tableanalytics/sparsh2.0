@@ -25,6 +25,11 @@ class UserBase(BaseModel):
     session_type: Optional[str] = "None" # Core, Support, Both, None
     designation: Optional[str] = None
     department: Optional[str] = "Other" # HOD, Implementor, EA, MD, Other
+
+    # Profile / HR fields (self-editable via PATCH /users/me — see user.py)
+    emergency_mobile: Optional[str] = None
+    reporting_manager: Optional[str] = None
+    joining_date: Optional[str] = None  # ISO "YYYY-MM-DD"
     
     # Highly Granular CRUD Permissions
     permissions: dict = {
