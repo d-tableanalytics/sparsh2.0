@@ -1,219 +1,293 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { useNotification } from '../context/NotificationContext';
 import api from '../services/api';
-import { 
-  User, Mail, Shield, Lock, Key, 
-  MapPin, Phone, Briefcase, Camera,
-  CheckCircle2, AlertCircle, Loader2,
-  ChevronRight, LogOut
+import {
+  User, Mail, Phone, Shield, Briefcase, Lock, Loader2, LogOut, Pencil, Check, X,
+  Building2, Calendar, KeyRound, ShieldCheck, PhoneCall, AlertCircle, IdCard,
 } from 'lucide-react';
-import { motion, AnimatePresence } from 'framer-motion';
+import { motion } from 'framer-motion';
 
-const SectionHeader = ({ icon: Icon, title, subtitle }) => (
-  <div className="flex items-center gap-3 mb-6">
-    <div className="w-10 h-10 rounded-xl bg-[var(--accent-indigo-bg)] flex items-center justify-center text-[var(--accent-indigo)]">
-      <Icon size={20} />
-    </div>
-    <div>
-      <h2 className="text-[15px] font-bold text-[var(--text-main)] tracking-tight">{title}</h2>
-      <p className="text-[11px] text-[var(--text-muted)] font-medium">{subtitle}</p>
-    </div>
+// Fields the self-service PATCH /users/me endpoint accepts (see backend SelfProfileUpdate).
+const EDITABLE = {
+  general: ['first_name', 'last_name', 'mobile', 'emergency_mobile'],
+  professional: ['designation', 'department', 'reporting_manager', 'joining_date'],
+};
+
+const hydrate = (u) => ({
+  first_name: u?.first_name || '',
+  last_name: u?.last_name || '',
+  mobile: u?.mobile || '',
+  emergency_mobile: u?.emergency_mobile || '',
+  designation: u?.designation || '',
+  department: u?.department || '',
+  reporting_manager: u?.reporting_manager || '',
+  joining_date: u?.joining_date ? String(u.joining_date).slice(0, 10) : '',
+});
+
+const inputCls =
+  'w-full px-3.5 py-2 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-xl text-[13px] font-medium text-[var(--text-main)] outline-none focus:border-[var(--accent-indigo)] transition-all';
+
+// A label + value / input pair.
+const Field = ({ icon: Icon, label, value, editing, onChange, type = 'text', readOnly = false }) => (
+  <div className="space-y-1.5 min-w-0">
+    <label className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest">{label}</label>
+    {editing && !readOnly ? (
+      <input type={type} value={value || ''} onChange={(e) => onChange(e.target.value)} className={inputCls} />
+    ) : (
+      <div className="flex items-center gap-2.5 px-3.5 py-2 bg-[var(--input-bg)] border border-[var(--border)] rounded-xl">
+        {Icon && <Icon size={14} className="text-[var(--text-muted)] shrink-0" />}
+        <span className="text-[13px] font-bold text-[var(--text-main)] truncate">{value || '—'}</span>
+      </div>
+    )}
   </div>
 );
 
-const ProfileField = ({ icon: Icon, label, value, color = "indigo" }) => (
-  <div className="flex items-center gap-4 p-3 bg-[var(--input-bg)] border border-[var(--border)] rounded-xl group transition-all hover:border-[var(--accent-indigo-border)]">
-    <div className={`w-8 h-8 rounded-lg flex items-center justify-center text-[var(--accent-${color})] bg-[var(--accent-${color}-bg)]`}>
-      <Icon size={14} />
+// A card section with an Edit / Save / Cancel header.
+const SectionCard = ({ icon: Icon, title, subtitle, editKey, editing, onEdit, onSave, onCancel, saving, editable = true, children }) => (
+  <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-[24px] p-6 shadow-sm">
+    <div className="flex items-start justify-between gap-3 mb-5">
+      <div className="flex items-center gap-3">
+        <div className="w-10 h-10 rounded-xl bg-[var(--accent-indigo-bg)] flex items-center justify-center text-[var(--accent-indigo)] shrink-0">
+          <Icon size={18} />
+        </div>
+        <div>
+          <h2 className="text-[15px] font-bold text-[var(--text-main)] tracking-tight">{title}</h2>
+          {subtitle && <p className="text-[11px] text-[var(--text-muted)] font-medium">{subtitle}</p>}
+        </div>
+      </div>
+      {editable && (
+        editing === editKey ? (
+          <div className="flex items-center gap-2 shrink-0">
+            <button onClick={onCancel} disabled={saving}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest text-[var(--text-muted)] border border-[var(--border)] hover:bg-[var(--input-bg)] transition-all disabled:opacity-50">
+              <X size={13} /> Cancel
+            </button>
+            <button onClick={onSave} disabled={saving}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest bg-[var(--accent-indigo)] text-white shadow-sm hover:opacity-90 transition-all disabled:opacity-50">
+              {saving ? <Loader2 size={13} className="animate-spin" /> : <Check size={13} />} Save
+            </button>
+          </div>
+        ) : (
+          <button onClick={() => onEdit(editKey)}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest text-[var(--accent-indigo)] bg-[var(--accent-indigo-bg)] hover:opacity-80 transition-all shrink-0">
+            <Pencil size={12} /> Edit
+          </button>
+        )
+      )}
     </div>
-    <div className="flex flex-col">
-      <span className="text-[10px] font-bold text-[var(--text-muted)] uppercase tracking-widest">{label}</span>
-      <span className="text-[13px] font-medium text-[var(--text-main)]">{value || 'Not provided'}</span>
+    {children}
+  </div>
+);
+
+const QuickInfo = ({ icon: Icon, label, value }) => (
+  <div className="flex items-center gap-3 p-3 bg-[var(--bg-card)] border border-[var(--border)] rounded-2xl shadow-sm">
+    <div className="w-9 h-9 rounded-xl bg-[var(--input-bg)] flex items-center justify-center text-[var(--accent-indigo)] shrink-0">
+      <Icon size={15} />
+    </div>
+    <div className="min-w-0">
+      <p className="text-[9px] font-black text-[var(--text-muted)] uppercase tracking-widest">{label}</p>
+      <p className="text-[12px] font-bold text-[var(--text-main)] truncate">{value || '—'}</p>
     </div>
   </div>
 );
 
 const ProfilePage = () => {
-  const { user, logout } = useAuth();
+  const { user, logout, refreshUser } = useAuth();
   const { showSuccess, showError } = useNotification();
-  
-  const [passwordForm, setPasswordForm] = useState({
-    currentPassword: '',
-    newPassword: '',
-    confirmPassword: ''
-  });
-  const [isChanging, setIsChanging] = useState(false);
 
-  const handlePasswordChange = async (e) => {
-    e.preventDefault();
-    if (passwordForm.newPassword !== passwordForm.confirmPassword) {
-      showError("Passwords do not match");
-      return;
-    }
+  const [editing, setEditing] = useState(null); // 'general' | 'professional' | null
+  const [form, setForm] = useState(hydrate(null));
+  const [saving, setSaving] = useState(false);
 
-    setIsChanging(true);
+  const [pwd, setPwd] = useState({ current: '', next: '', confirm: '' });
+  const [changingPwd, setChangingPwd] = useState(false);
+
+  useEffect(() => { if (user) setForm(hydrate(user)); }, [user]);
+
+  const setField = (k, v) => setForm((f) => ({ ...f, [k]: v }));
+
+  const cancelEdit = () => { setForm(hydrate(user)); setEditing(null); };
+
+  const saveSection = async (sec) => {
+    setSaving(true);
     try {
-      await api.patch('/auth/change-password', {
-        current_password: passwordForm.currentPassword,
-        new_password: passwordForm.newPassword
-      });
-      showSuccess("Password updated successfully");
-      setPasswordForm({ currentPassword: '', newPassword: '', confirmPassword: '' });
-    } catch (error) {
-      showError(error.response?.data?.detail || "Failed to update password");
+      const payload = {};
+      EDITABLE[sec].forEach((k) => { payload[k] = form[k]; });
+      await api.patch('/users/me', payload);
+      await refreshUser();
+      showSuccess('Profile updated successfully');
+      setEditing(null);
+    } catch (err) {
+      showError(err.response?.data?.detail || 'Failed to update profile');
     } finally {
-      setIsChanging(false);
+      setSaving(false);
     }
   };
 
+  const changePassword = async (e) => {
+    e.preventDefault();
+    if (pwd.next !== pwd.confirm) { showError('Passwords do not match'); return; }
+    setChangingPwd(true);
+    try {
+      await api.patch('/auth/change-password', { current_password: pwd.current, new_password: pwd.next });
+      showSuccess('Password updated successfully');
+      setPwd({ current: '', next: '', confirm: '' });
+    } catch (err) {
+      showError(err.response?.data?.detail || 'Failed to update password');
+    } finally {
+      setChangingPwd(false);
+    }
+  };
+
+  // Loading skeleton
+  if (!user) {
+    return (
+      <div className="max-w-6xl mx-auto grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <div className="h-64 rounded-3xl bg-[var(--input-bg)] animate-pulse" />
+        <div className="lg:col-span-2 space-y-6">
+          {[0, 1].map((i) => <div key={i} className="h-56 rounded-3xl bg-[var(--input-bg)] animate-pulse" />)}
+        </div>
+      </div>
+    );
+  }
+
+  const fullName = user.full_name || `${user.first_name || ''} ${user.last_name || ''}`.trim() || user.email || 'User';
+  const isActive = user.is_active !== false;
+  const permissions = user.permissions && typeof user.permissions === 'object' ? user.permissions : null;
+
   return (
-    <motion.div 
-      initial={{ opacity: 0, y: 20 }} 
-      animate={{ opacity: 1, y: 0 }}
-      className="max-w-4xl mx-auto space-y-6"
-    >
-      {/* ───── Hero Profile Section ───── */}
-      <div className="relative overflow-hidden bg-[var(--bg-card)] border border-[var(--border)] rounded-3xl p-8 shadow-sm">
-        <div className="absolute top-0 right-0 w-64 h-64 bg-gradient-to-br from-[var(--accent-indigo-bg)] to-transparent rounded-full -mr-32 -mt-32 opacity-50 blur-3xl"></div>
-        
-        <div className="relative flex flex-col md:flex-row items-center gap-8">
-          <div className="relative group">
-            <div className="w-24 h-24 rounded-2xl bg-[var(--avatar-bg)] flex items-center justify-center text-white text-3xl font-black shadow-xl ring-4 ring-[var(--bg-card)]">
-              {user?.full_name?.charAt(0) || 'U'}
-            </div>
-            <button className="absolute -bottom-2 -right-2 p-2 bg-[var(--accent-indigo)] text-white rounded-lg shadow-lg hover:scale-110 transition-all opacity-0 group-hover:opacity-100">
-              <Camera size={14} />
-            </button>
+    <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} className="max-w-6xl mx-auto grid grid-cols-1 lg:grid-cols-3 gap-6 pb-10">
+      {/* ───────────── LEFT: Profile summary ───────────── */}
+      <div className="lg:col-span-1 space-y-4 lg:sticky lg:top-24 self-start">
+        <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-[24px] p-6 shadow-sm text-center">
+          <div className="w-24 h-24 mx-auto rounded-2xl bg-[var(--avatar-bg)] flex items-center justify-center text-white text-3xl font-black shadow-xl ring-4 ring-[var(--bg-card)]">
+            {(fullName.charAt(0) || 'U').toUpperCase()}
           </div>
+          <h1 className="mt-4 text-xl font-black text-[var(--text-main)] tracking-tight truncate">{fullName}</h1>
+          <p className="text-[12px] font-bold text-[var(--text-muted)] truncate">{user.email}</p>
+          <div className="flex flex-wrap items-center justify-center gap-2 mt-3">
+            <span className="px-2.5 py-1 rounded-lg text-[10px] font-black uppercase tracking-widest bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)]">{user.role || '—'}</span>
+            <span className="px-2.5 py-1 rounded-lg text-[10px] font-black uppercase tracking-widest" style={{ color: isActive ? 'var(--accent-green)' : 'var(--accent-red)', background: 'var(--input-bg)' }}>
+              {isActive ? 'Active' : 'Inactive'}
+            </span>
+          </div>
+          {user.department && (
+            <p className="mt-3 text-[11px] font-bold text-[var(--text-muted)] flex items-center justify-center gap-1.5">
+              <Briefcase size={12} /> {user.department}
+            </p>
+          )}
+          <button onClick={logout}
+            className="mt-5 w-full py-2.5 bg-[var(--accent-red-bg)] text-[var(--accent-red)] font-black text-[11px] uppercase tracking-widest rounded-xl flex items-center justify-center gap-2 hover:bg-[var(--accent-red)] hover:text-white transition-all">
+            <LogOut size={15} /> Sign Out
+          </button>
+        </div>
 
-          <div className="flex-1 text-center md:text-left">
-            <h1 className="text-2xl font-black text-[var(--text-main)] tracking-tight mb-1">{user?.full_name}</h1>
-            <div className="flex flex-wrap justify-center md:justify-start items-center gap-3">
-              <span className="px-3 py-1 bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] text-[10px] font-black uppercase tracking-widest rounded-full border border-[var(--accent-indigo-border)]">
-                {user?.role}
-              </span>
-              <span className="flex items-center gap-1.5 text-[12px] font-bold text-[var(--text-muted)]">
-                <CheckCircle2 size={14} className="text-[var(--accent-green)]" /> Verified Account
-              </span>
-            </div>
-          </div>
-
-          <div className="flex gap-3">
-            <button 
-              onClick={logout}
-              className="px-5 py-2.5 bg-[var(--accent-red-bg)] text-[var(--accent-red)] font-bold text-[13px] rounded-xl flex items-center gap-2 hover:bg-[var(--accent-red)] hover:text-white transition-all shadow-sm"
-            >
-              <LogOut size={16} /> Sign Out
-            </button>
-          </div>
+        {/* Quick info cards (only fields that exist) */}
+        <div className="space-y-3">
+          {user.email && <QuickInfo icon={Mail} label="Email" value={user.email} />}
+          {user.mobile && <QuickInfo icon={Phone} label="Mobile" value={user.mobile} />}
+          {user.designation && <QuickInfo icon={IdCard} label="Designation" value={user.designation} />}
+          {user.role && <QuickInfo icon={Shield} label="Office Role" value={user.role} />}
         </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* ───── Personal Information ───── */}
-        <div className="lg:col-span-2 space-y-6">
-          <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-2xl p-6 shadow-sm">
-            <SectionHeader 
-              icon={User} 
-              title="Personal Information" 
-              subtitle="Basic identity and contact details managed by HR."
-            />
-            
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <ProfileField icon={Mail} label="Email Address" value={user?.email} />
-              <ProfileField icon={Phone} label="Mobile" value={user?.mobile} color="orange" />
-              <ProfileField icon={Shield} label="Account Type" value={user?.role} color="green" />
-              <ProfileField icon={Briefcase} label="Designation" value={user?.designation} color="red" />
-            </div>
+      {/* ───────────── RIGHT: Sections ───────────── */}
+      <div className="lg:col-span-2 space-y-6">
+        {/* Section 1 — General Information */}
+        <SectionCard
+          icon={User} title="General Information" subtitle="Your basic identity and contact details."
+          editKey="general" editing={editing} onEdit={setEditing} onSave={() => saveSection('general')} onCancel={cancelEdit} saving={saving}
+        >
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <Field icon={User} label="First Name" value={editing === 'general' ? form.first_name : user.first_name} editing={editing === 'general'} onChange={(v) => setField('first_name', v)} />
+            <Field icon={User} label="Last Name" value={editing === 'general' ? form.last_name : user.last_name} editing={editing === 'general'} onChange={(v) => setField('last_name', v)} />
+            <Field icon={Mail} label="Email (username)" value={user.email} editing={editing === 'general'} readOnly />
+            <Field icon={Phone} label="Mobile" value={editing === 'general' ? form.mobile : user.mobile} editing={editing === 'general'} onChange={(v) => setField('mobile', v)} />
+            <Field icon={PhoneCall} label="Emergency Mobile" value={editing === 'general' ? form.emergency_mobile : user.emergency_mobile} editing={editing === 'general'} onChange={(v) => setField('emergency_mobile', v)} />
           </div>
+        </SectionCard>
 
-          <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-2xl p-6 shadow-sm">
-            <SectionHeader 
-              icon={MapPin} 
-              title="Work Details" 
-              subtitle="Regional configuration and department assignment."
-            />
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <ProfileField icon={Briefcase} label="Department" value={user?.department} color="indigo" />
-              <ProfileField icon={CheckCircle2} label="Session Type" value={user?.session_type} color="orange" />
-            </div>
+        {/* Section 2 — Professional Information */}
+        <SectionCard
+          icon={Briefcase} title="Professional Information" subtitle="Role, department and reporting details."
+          editKey="professional" editing={editing} onEdit={setEditing} onSave={() => saveSection('professional')} onCancel={cancelEdit} saving={saving}
+        >
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <Field icon={Shield} label="Role" value={user.role} editing={editing === 'professional'} readOnly />
+            <Field icon={Briefcase} label="Department" value={editing === 'professional' ? form.department : user.department} editing={editing === 'professional'} onChange={(v) => setField('department', v)} />
+            <Field icon={IdCard} label="Designation" value={editing === 'professional' ? form.designation : user.designation} editing={editing === 'professional'} onChange={(v) => setField('designation', v)} />
+            <Field icon={User} label="Reporting Manager" value={editing === 'professional' ? form.reporting_manager : user.reporting_manager} editing={editing === 'professional'} onChange={(v) => setField('reporting_manager', v)} />
+            <Field icon={Calendar} label="Joining Date" type="date" value={editing === 'professional' ? form.joining_date : (user.joining_date ? String(user.joining_date).slice(0, 10) : '')} editing={editing === 'professional'} onChange={(v) => setField('joining_date', v)} />
+            {user.session_type && <Field icon={Building2} label="Session Type" value={user.session_type} editing={editing === 'professional'} readOnly />}
           </div>
-        </div>
+        </SectionCard>
 
-        {/* ───── Change Password (Interactive Section) ───── */}
-        <div className="space-y-6">
-          <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-2xl p-6 shadow-sm sticky top-24">
-            <SectionHeader 
-              icon={Key} 
-              title="Security" 
-              subtitle="Manage your credentials."
-            />
+        {/*
+          Sections "Personal Information" and "Address" from the reference are intentionally
+          omitted: the current backend user model / PATCH /users/me expose no such fields
+          (gender, DOB, address, city, etc.), and the brief forbids inventing fake fields.
+        */}
 
-            <form onSubmit={handlePasswordChange} className="space-y-4">
-              <div className="space-y-1">
-                <label className="text-[10px] font-bold text-[var(--text-muted)] uppercase tracking-widest ml-1">Current Password</label>
-                <div className="relative group">
-                  <Lock size={14} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-[var(--text-muted)] group-focus-within:text-[var(--accent-indigo)] transition-all" />
-                  <input 
-                    type="password"
-                    required
-                    value={passwordForm.currentPassword}
-                    onChange={(e) => setPasswordForm({...passwordForm, currentPassword: e.target.value})}
-                    placeholder="••••••••"
-                    className="w-full pl-10 pr-4 py-2 bg-[var(--input-bg)] border border-[var(--border)] rounded-xl outline-none focus:border-[var(--accent-indigo)] text-[13px] font-medium text-[var(--text-main)] transition-all"
-                  />
+        {/* Section 5 — Account Settings (Change Password) */}
+        <SectionCard icon={KeyRound} title="Account Settings" subtitle="Manage your credentials." editable={false}>
+          <form onSubmit={changePassword} className="space-y-4 max-w-md">
+            {[
+              ['current', 'Current Password'],
+              ['next', 'New Password'],
+              ['confirm', 'Confirm New Password'],
+            ].map(([key, label]) => (
+              <div key={key} className="space-y-1.5">
+                <label className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest">{label}</label>
+                <div className="relative">
+                  <Lock size={14} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-[var(--text-muted)]" />
+                  <input type="password" required value={pwd[key]} onChange={(e) => setPwd({ ...pwd, [key]: e.target.value })}
+                    className="w-full pl-10 pr-4 py-2 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-xl outline-none focus:border-[var(--accent-indigo)] text-[13px] font-medium text-[var(--text-main)] transition-all" />
                 </div>
               </div>
-
-              <div className="space-y-1">
-                <label className="text-[10px] font-bold text-[var(--text-muted)] uppercase tracking-widest ml-1">New Password</label>
-                <div className="relative group">
-                  <Lock size={14} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-[var(--text-muted)] group-focus-within:text-[var(--accent-indigo)] transition-all" />
-                  <input 
-                    type="password"
-                    required
-                    value={passwordForm.newPassword}
-                    onChange={(e) => setPasswordForm({...passwordForm, newPassword: e.target.value})}
-                    placeholder="Minimal 8 chars"
-                    className="w-full pl-10 pr-4 py-2 bg-[var(--input-bg)] border border-[var(--border)] rounded-xl outline-none focus:border-[var(--accent-indigo)] text-[13px] font-medium text-[var(--text-main)] transition-all"
-                  />
-                </div>
-              </div>
-
-              <div className="space-y-1">
-                <label className="text-[10px] font-bold text-[var(--text-muted)] uppercase tracking-widest ml-1">Confirm New Password</label>
-                <div className="relative group">
-                  <Lock size={14} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-[var(--text-muted)] group-focus-within:text-[var(--accent-indigo)] transition-all" />
-                  <input 
-                    type="password"
-                    required
-                    value={passwordForm.confirmPassword}
-                    onChange={(e) => setPasswordForm({...passwordForm, confirmPassword: e.target.value})}
-                    placeholder="Re-type password"
-                    className="w-full pl-10 pr-4 py-2 bg-[var(--input-bg)] border border-[var(--border)] rounded-xl outline-none focus:border-[var(--accent-indigo)] text-[13px] font-medium text-[var(--text-main)] transition-all"
-                  />
-                </div>
-              </div>
-
-              <button 
-                type="submit" 
-                disabled={isChanging}
-                className="w-full py-2.5 bg-gradient-to-r from-[var(--accent-indigo)] to-[var(--accent-indigo-border)] text-white font-black text-[13px] rounded-xl shadow-lg shadow-indigo-500/20 hover:opacity-90 transition-all flex items-center justify-center gap-2 disabled:opacity-50"
-              >
-                {isChanging ? <Loader2 size={16} className="animate-spin" /> : <Lock size={16} />}
-                Update Credentials
-              </button>
-            </form>
-
-            <div className="mt-6 p-4 bg-[var(--accent-orange-bg)] border border-[var(--accent-orange-border)] rounded-xl flex items-start gap-3">
-              <AlertCircle size={16} className="text-[var(--accent-orange)] shrink-0 mt-0.5" />
-              <p className="text-[11px] font-medium text-[var(--accent-orange)] leading-relaxed">
-                Password changes take effect immediately on all sessions. You may need to re-login on other devices.
-              </p>
-            </div>
+            ))}
+            <button type="submit" disabled={changingPwd}
+              className="flex items-center gap-2 px-6 py-2.5 bg-[var(--accent-indigo)] text-white font-black text-[11px] uppercase tracking-widest rounded-xl shadow-sm hover:opacity-90 transition-all disabled:opacity-50">
+              {changingPwd ? <Loader2 size={14} className="animate-spin" /> : <Lock size={14} />} Update Password
+            </button>
+          </form>
+          <div className="mt-5 p-3.5 bg-[var(--accent-orange-bg)] border border-[var(--accent-orange-border)] rounded-xl flex items-start gap-2.5">
+            <AlertCircle size={15} className="text-[var(--accent-orange)] shrink-0 mt-0.5" />
+            <p className="text-[11px] font-medium text-[var(--accent-orange)] leading-relaxed">
+              Password changes take effect immediately. You may need to re-login on other devices.
+            </p>
           </div>
-        </div>
+        </SectionCard>
+
+        {/* Section 6 — System Access (permissions, read-only) */}
+        {permissions && Object.keys(permissions).length > 0 && (
+          <SectionCard icon={ShieldCheck} title="System Access" subtitle="Your module permissions (read-only)." editable={false}>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              {Object.entries(permissions).map(([mod, actions]) => (
+                <div key={mod} className="p-3.5 bg-[var(--input-bg)] border border-[var(--border)] rounded-2xl">
+                  <p className="text-[11px] font-black text-[var(--text-main)] uppercase tracking-widest mb-2">{mod}</p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {['create', 'read', 'update', 'delete'].map((a) => {
+                      const on = actions && actions[a];
+                      return (
+                        <span key={a}
+                          className="px-2 py-0.5 rounded-lg text-[9px] font-black uppercase tracking-widest"
+                          style={{
+                            color: on ? 'var(--accent-green)' : 'var(--text-muted)',
+                            background: on ? 'var(--accent-green-bg)' : 'var(--input-bg)',
+                            border: `1px solid ${on ? 'var(--accent-green-border)' : 'var(--border)'}`,
+                            opacity: on ? 1 : 0.5,
+                          }}>
+                          {a}
+                        </span>
+                      );
+                    })}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </SectionCard>
+        )}
       </div>
     </motion.div>
   );

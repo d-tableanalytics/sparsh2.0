@@ -2,8 +2,11 @@ import React, { useState, useEffect } from 'react';
 import api from '../services/api';
 import { useAuth } from '../context/AuthContext';
 import { useNotification } from '../context/NotificationContext';
-import { ShieldCheck, Plus, Trash2, Mail, Save, ToggleLeft as ToggleOff, ToggleRight as ToggleOn, Settings, Building2, UserCircle2, Search, Info } from 'lucide-react';
+import { ShieldCheck, Plus, Trash2, Mail, Save, ToggleLeft as ToggleOff, ToggleRight as ToggleOn, Search, Info, UserCircle2, FolderTree, Tag } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
+import GeneralSection from '../components/settings/GeneralSection';
+import MetaListSection from '../components/settings/MetaListSection';
+import PasswordCard from '../components/settings/PasswordCard';
 
 const SettingsPage = () => {
     const { user } = useAuth();
@@ -11,27 +14,39 @@ const SettingsPage = () => {
     const [config, setConfig] = useState({ allow_backdate: false, exception_users: [] });
     const [newEmail, setNewEmail] = useState('');
     const [loading, setLoading] = useState(true);
-    
+
     // Notification Templates State
-    const [activeTab, setActiveTab] = useState(user?.role === 'superadmin' ? 'backdate' : 'templates');
     const [templates, setTemplates] = useState([]);
     const [editingTemplate, setEditingTemplate] = useState(null);
-    
+
     // Auto-detect scope: Client roles = company, Staff roles = staff
     const scope = user?.role?.toLowerCase().includes('client') ? 'company' : 'staff';
-    
+
     const [companies, setCompanies] = useState([]);
     const [selectedCompanyId, setSelectedCompanyId] = useState('');
     const [showCreateModal, setShowCreateModal] = useState(false);
     const [newTemplateForm, setNewTemplateForm] = useState({ name: '', slug: 'task_created', channel: 'both' });
     const [searchQuery, setSearchQuery] = useState('');
-    
+
     // Permission Checks
     const canUpdateSettings = user?.role === 'superadmin' || user?.permissions?.settings?.update;
     const canReadTemplates = user?.role === 'superadmin' || user?.role === 'clientadmin' || user?.permissions?.templates?.read;
     const canUpdateTemplates = user?.role === 'superadmin' || user?.role === 'clientadmin' || user?.permissions?.templates?.update;
     const canDeleteTemplates = user?.role === 'superadmin' || user?.role === 'clientadmin' || user?.permissions?.templates?.delete;
     const canReadCompanies = user?.role === 'superadmin' || user?.permissions?.companies?.read;
+    const canManageMeta = ['superadmin', 'admin', 'coach', 'staff', 'clientadmin'].includes((user?.role || '').toLowerCase());
+    const isSuperadmin = user?.role === 'superadmin';
+
+    // Left-sidebar sections (role/permission filtered)
+    const SECTIONS = [
+        { key: 'general', label: 'General', icon: UserCircle2, visible: true },
+        { key: 'notifications', label: 'Notifications', icon: Mail, visible: canReadTemplates },
+        { key: 'security', label: 'Security', icon: ShieldCheck, visible: true },
+        { key: 'categories', label: 'Categories', icon: FolderTree, visible: true },
+        { key: 'tags', label: 'Tags', icon: Tag, visible: true },
+    ].filter((s) => s.visible);
+
+    const [section, setSection] = useState('general');
 
     const templateVariables = {
         task: ['task_name', 'topic', 'task_category', 'critical_level', 'assigned_user', 'assigned_by', 'deadline', 'date', 'day', 'time', 'description', 'task_status', 'session_type'],
@@ -93,8 +108,8 @@ const SettingsPage = () => {
     }, [user]);
 
     useEffect(() => {
-        if (activeTab === 'templates' && canReadTemplates) fetchTemplates();
-    }, [activeTab, scope, selectedCompanyId, canReadTemplates]);
+        if (section === 'notifications' && canReadTemplates) fetchTemplates();
+    }, [section, scope, selectedCompanyId, canReadTemplates]);
 
     const fetchTemplates = async () => {
         try {
@@ -132,7 +147,7 @@ const SettingsPage = () => {
     const handleCreateTemplate = async () => {
         try {
             const channels = newTemplateForm.channel === 'both' ? ['email', 'whatsapp'] : [newTemplateForm.channel];
-            
+
             for (const channel of channels) {
                 const payload = {
                     name: `${newTemplateForm.name} (${channel.toUpperCase()})`,
@@ -177,8 +192,8 @@ const SettingsPage = () => {
         setEditingTemplate({ ...editingTemplate, meta_params: arr });
     };
 
-    const filteredTemplates = templates.filter(t => 
-        t.name.toLowerCase().includes(searchQuery.toLowerCase()) || 
+    const filteredTemplates = templates.filter(t =>
+        t.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
         t.slug.toLowerCase().includes(searchQuery.toLowerCase())
     );
 
@@ -207,7 +222,7 @@ const SettingsPage = () => {
             ];
 
             const channels = ['email', 'whatsapp'];
-            
+
             for (const t of triggers) {
                 for (const channel of channels) {
                     const payload = {
@@ -215,8 +230,8 @@ const SettingsPage = () => {
                         slug: `${t.slug}_${channel}`,
                         channel: channel,
                         subject: channel === 'email' ? `Notification: ${t.name}` : undefined,
-                        body: channel === 'email' 
-                            ? "Hello {{name}},\n\nThis is an automated notification regarding your session/task. Please log in to your portal for details." 
+                        body: channel === 'email'
+                            ? "Hello {{name}},\n\nThis is an automated notification regarding your session/task. Please log in to your portal for details."
                             : "Hello {{name}},\n\nYou have an update regarding: " + t.name,
                         scope: 'company',
                         company_id: user.company_id
@@ -234,302 +249,353 @@ const SettingsPage = () => {
     };
 
     if (loading) return (
-        <div className="h-screen flex items-center justify-center bg-[var(--bg-main)]">
+        <div className="h-[calc(100vh-56px)] flex items-center justify-center bg-[var(--bg-main)]">
             <div className="flex flex-col items-center gap-4">
                 <div className="w-10 h-10 border-4 border-[var(--accent-indigo)] border-t-transparent rounded-full animate-spin"/>
-                <p className="text-[9px] font-black text-[var(--accent-indigo)] uppercase tracking-[0.3em] animate-pulse">Initializing Comm Layer...</p>
+                <p className="text-[9px] font-black text-[var(--accent-indigo)] uppercase tracking-[0.3em] animate-pulse">Loading Settings...</p>
             </div>
         </div>
     );
 
+    // Reusable sidebar nav buttons (vertical desktop + horizontal mobile)
+    const NavButton = ({ s, mobile }) => {
+        const active = section === s.key;
+        return (
+            <button
+                onClick={() => setSection(s.key)}
+                className={`flex items-center gap-2.5 rounded-xl font-black uppercase tracking-widest transition-all shrink-0 ${
+                    mobile ? 'px-3.5 py-2 text-[10px]' : 'w-full px-3.5 py-2.5 text-[11px]'
+                } ${active
+                    ? 'bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] shadow-sm'
+                    : 'text-[var(--text-muted)] hover:bg-[var(--input-bg)] hover:text-[var(--text-main)]'}`}
+            >
+                <s.icon size={15} /> {s.label}
+            </button>
+        );
+    };
+
     return (
-        <div className="flex flex-col h-[calc(100vh-56px)] bg-[var(--bg-main)] overflow-hidden">
-            {/* Top Navigation - Secondary Navbar */}
-            <div className="flex items-center gap-2 px-6 py-2.5 bg-[var(--bg-card)] border-b border-[var(--border)] overflow-x-auto no-scrollbar">
-                {user?.role === 'superadmin' && (
-                    <button 
-                        onClick={() => setActiveTab('backdate')} 
-                        className={`flex items-center gap-2 px-4 py-1.5 rounded-lg text-[11px] font-black transition-all shrink-0 uppercase tracking-widest ${activeTab === 'backdate' ? 'bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] shadow-sm' : 'text-[var(--text-muted)] hover:bg-[var(--input-bg)]'}`}>
-                        <ShieldCheck size={14}/> Security Rules
-                    </button>
-                )}
-                {canReadTemplates && (
-                    <button 
-                        onClick={() => setActiveTab('templates')} 
-                        className={`flex items-center gap-2 px-4 py-1.5 rounded-lg text-[11px] font-black transition-all shrink-0 uppercase tracking-widest ${activeTab === 'templates' ? 'bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] shadow-sm' : 'text-[var(--text-muted)] hover:bg-[var(--input-bg)]'}`}>
-                        <Mail size={14}/> Comms Templates
-                    </button>
-                )}
-                
-                {activeTab === 'templates' && scope === 'company' && user?.role !== 'clientadmin' && (user?.role === 'superadmin' || canReadCompanies) && (
-                    <div className="flex items-center gap-2 ml-4 pl-4 border-l border-[var(--border)]">
-                        <span className="text-[9px] font-black text-[var(--text-muted)] uppercase tracking-widest">Client</span>
-                        <select value={selectedCompanyId} onChange={(e) => setSelectedCompanyId(e.target.value)}
-                            className="bg-[var(--input-bg)] border border-[var(--border)] px-3 py-1 rounded-lg text-[10px] font-bold text-[var(--text-main)] outline-none focus:border-[var(--accent-indigo)]">
-                            <option value="">Select Company...</option>
-                            {companies.map(c => <option key={c._id} value={c._id}>{c.name}</option>)}
-                        </select>
-                    </div>
-                )}
+        <div className="flex flex-col md:flex-row h-[calc(100vh-56px)] bg-[var(--bg-main)] overflow-hidden">
+            {/* Left settings sidebar (desktop) */}
+            <aside className="hidden md:flex w-60 shrink-0 border-r border-[var(--border)] bg-[var(--bg-card)] flex-col">
+                <div className="p-5 border-b border-[var(--border)]">
+                    <h1 className="text-lg font-black text-[var(--text-main)] tracking-tight">Settings</h1>
+                    <p className="text-[11px] font-medium text-[var(--text-muted)]">Manage your workspace</p>
+                </div>
+                <nav className="p-3 space-y-1 overflow-y-auto no-scrollbar">
+                    {SECTIONS.map((s) => <NavButton key={s.key} s={s} />)}
+                </nav>
+            </aside>
+
+            {/* Mobile horizontal tabs */}
+            <div className="md:hidden flex items-center gap-2 px-4 py-2.5 bg-[var(--bg-card)] border-b border-[var(--border)] overflow-x-auto no-scrollbar">
+                {SECTIONS.map((s) => <NavButton key={s.key} s={s} mobile />)}
             </div>
 
-            {/* Main Workspace */}
-            <div className="flex-1 overflow-hidden relative">
-                {activeTab === 'backdate' ? (
-                    <div className="p-4 max-w-5xl mx-auto w-full h-full overflow-y-auto no-scrollbar pb-20">
-                        <div className="mb-6 flex items-center justify-between">
-                            <div>
-                                <h1 className="text-lg font-black text-[var(--text-main)] tracking-tight">System Permissions</h1>
-                                <p className="text-[11px] font-medium text-[var(--text-muted)] italic">Global overrides and security exception logic.</p>
+            {/* Content */}
+            <main className="flex-1 overflow-hidden flex flex-col">
+                {section === 'notifications' ? (
+                    <div className="flex flex-col h-full overflow-hidden">
+                        {/* Company selector for staff roles managing client templates */}
+                        {scope === 'company' && user?.role !== 'clientadmin' && (user?.role === 'superadmin' || canReadCompanies) && (
+                            <div className="flex items-center gap-2 px-6 py-2.5 bg-[var(--bg-card)] border-b border-[var(--border)]">
+                                <span className="text-[9px] font-black text-[var(--text-muted)] uppercase tracking-widest">Client</span>
+                                <select value={selectedCompanyId} onChange={(e) => setSelectedCompanyId(e.target.value)}
+                                    className="bg-[var(--input-bg)] border border-[var(--border)] px-3 py-1 rounded-lg text-[10px] font-bold text-[var(--text-main)] outline-none focus:border-[var(--accent-indigo)]">
+                                    <option value="">Select Company...</option>
+                                    {companies.map(c => <option key={c._id} value={c._id}>{c.name}</option>)}
+                                </select>
                             </div>
-                            {canUpdateSettings && (
-                                <button onClick={handleSave} className="bg-[var(--accent-indigo)] text-white px-6 py-2 rounded-xl font-black text-[11px] shadow-lg shadow-indigo-500/20 uppercase tracking-widest">
-                                    Save Config
-                                </button>
-                            )}
-                        </div>
-
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                            {/* Toggle Block */}
-                            <div className="p-6 bg-[var(--bg-card)] border border-[var(--border)] rounded-[24px] flex items-center justify-between shadow-sm">
-                                <div className="space-y-1">
-                                    <h2 className="text-[13px] font-black text-[var(--text-main)]">Allow History Creation</h2>
-                                    <p className="text-[10px] font-medium text-[var(--text-muted)] max-w-sm">Enable session/task scheduling in the past.</p>
-                                </div>
-                                <div className="cursor-pointer" onClick={() => canUpdateSettings && setConfig({...config, allow_backdate: !config.allow_backdate})}>
-                                    {config.allow_backdate ? <ToggleOn size={32} className="text-[var(--accent-indigo)]" /> : <ToggleOff size={32} className="text-gray-200" />}
-                                </div>
-                            </div>
-
-                            {/* Exception Block */}
-                            <div className="p-6 bg-[var(--bg-card)] border border-[var(--border)] rounded-[24px] space-y-4 shadow-sm">
-                                <div className="space-y-1">
-                                    <h2 className="text-[13px] font-black text-[var(--text-main)] uppercase tracking-tight">Access Whitelist</h2>
-                                    <p className="text-[10px] font-medium text-[var(--text-muted)]">Users with permanent backdate permission.</p>
-                                </div>
-
-                                <div className="flex gap-2">
-                                    <input placeholder="Auth email..." value={newEmail} onChange={e => setNewEmail(e.target.value)} disabled={!canUpdateSettings}
-                                        className="flex-1 bg-[var(--input-bg)] border border-[var(--border)] px-3 py-2 rounded-xl text-[12px] font-medium outline-none focus:bg-[var(--bg-card)] focus:border-[var(--accent-indigo)] disabled:opacity-50" />
-                                    <button onClick={() => { if(newEmail) setConfig({...config, exception_users: [...config.exception_users, newEmail]}); setNewEmail(''); }}
-                                        disabled={!canUpdateSettings}
-                                        className="bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] px-4 rounded-xl font-black text-[10px] uppercase tracking-widest border border-[var(--accent-indigo-border)] disabled:opacity-50">
-                                        Authorize
-                                    </button>
-                                </div>
-
-                                <div className="space-y-2 max-h-40 overflow-y-auto no-scrollbar">
-                                    {config.exception_users.map(email => (
-                                        <div key={email} className="flex items-center justify-between p-2 bg-[var(--input-bg)] rounded-xl group border border-transparent">
-                                            <span className="text-[11px] font-bold text-[var(--text-main)]">{email}</span>
-                                            <button onClick={() => setConfig({...config, exception_users: config.exception_users.filter(e => e !== email)})} className="text-gray-300 hover:text-red-500 transition-all"><Trash2 size={12}/></button>
-                                        </div>
-                                    ))}
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                ) : (
-                    <div className="flex h-full overflow-hidden">
-                        {/* Compact Sidebar: Template Selection */}
-                        <div className="w-64 border-r border-[var(--border)] flex flex-col bg-[var(--bg-card)]">
-                            <div className="p-4 space-y-3 border-b border-[var(--border)]">
-                                <div className="flex items-center justify-between">
-                                    <h2 className="text-[12px] font-black text-[var(--text-main)] uppercase tracking-widest">Infrastructure</h2>
-                                    <div className="flex items-center gap-1.5">
-                                        <span className="px-1.5 py-0.5 rounded-md bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] text-[8px] font-black uppercase">{scope}</span>
-                                        {canUpdateTemplates && (
-                                            <button onClick={() => setShowCreateModal(true)} title="New template (Email / WhatsApp)"
-                                                className="flex items-center gap-0.5 px-1.5 py-0.5 rounded-md bg-[var(--accent-indigo)] text-white text-[8px] font-black uppercase tracking-wide hover:brightness-110 transition-all">
-                                                <Plus size={10}/> New
-                                            </button>
-                                        )}
-                                    </div>
-                                </div>
-                                <div className="relative">
-                                    <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[var(--text-muted)]" size={12}/>
-                                    <input placeholder="Search..." value={searchQuery} onChange={e => setSearchQuery(e.target.value)}
-                                        className="w-full pl-8 pr-3 py-1.5 bg-[var(--input-bg)] rounded-lg text-[11px] font-bold outline-none border border-transparent focus:border-[var(--border)]" />
-                                </div>
-                            </div>
-
-                            <div className="flex-1 overflow-y-auto no-scrollbar p-2 space-y-1">
-                                {filteredTemplates.length > 0 ? (
-                                    filteredTemplates.map(t => (
-                                        <button key={t._id} onClick={() => setEditingTemplate(t)}
-                                            className={`w-full p-3 rounded-xl flex flex-col gap-0.5 text-left transition-all group border-2 ${editingTemplate?._id === t._id ? 'bg-white border-[var(--accent-indigo)] shadow-md' : 'bg-transparent border-transparent hover:bg-[var(--input-bg)]'}`}>
-                                            <div className="flex items-center justify-between">
-                                                <span className={`text-[11px] font-black transition-colors ${editingTemplate?._id === t._id ? 'text-[var(--accent-indigo)]' : 'text-[var(--text-main)]'}`}>{t.name} {"{"}{t.channel?.toUpperCase() || 'EMAIL'}{"}"}</span>
-                                                {canDeleteTemplates && (
-                                                    <Trash2 size={12} className="text-gray-200 hover:text-red-500 transition-all cursor-pointer" onClick={(e) => { e.stopPropagation(); deleteTemplate(t._id); }} />
-                                                )}
-                                            </div>
-                                            <span className="text-[9px] font-medium text-[var(--text-muted)] uppercase italic">/{t.slug}</span>
-                                        </button>
-                                    ))
-                                ) : (
-                                    <div className="mt-10 text-center px-4 space-y-3">
-                                        <p className="text-[9px] font-black text-gray-300 uppercase tracking-widest italic">Inventory Empty</p>
-                                        <div className="flex flex-col gap-2">
-                                            {canUpdateTemplates && (
-                                                <button onClick={() => setShowCreateModal(true)} className="text-[10px] font-black text-[var(--accent-indigo)] hover:underline">+ New Template</button>
-                                            )}
-                                            {(user?.role === 'superadmin' || user?.role === 'clientadmin' || user?.permissions?.settings?.update) && (
-                                                <button onClick={user?.role === 'clientadmin' ? handleInitializeClientDefaults : handleInitializeDefaults} className="text-[9px] font-black text-[var(--accent-green)] hover:underline uppercase tracking-tighter">Initialize Defaults</button>
-                                            )}
-                                        </div>
-                                    </div>
-                                )}
-                            </div>
-                        </div>
-
-                        {/* Dense Editor Workspace */}
-                        <div className="flex-1 bg-[var(--bg-main)] overflow-y-auto p-6 no-scrollbar">
-                            {editingTemplate ? (
-                                <div className="max-w-6xl mx-auto space-y-4 pb-10">
+                        )}
+                        <div className="flex flex-1 overflow-hidden">
+                            {/* Compact Sidebar: Template Selection */}
+                            <div className="w-64 border-r border-[var(--border)] flex flex-col bg-[var(--bg-card)]">
+                                <div className="p-4 space-y-3 border-b border-[var(--border)]">
                                     <div className="flex items-center justify-between">
-                                        <div className="flex items-center gap-3">
-                                            <div className="w-10 h-10 rounded-xl bg-[var(--bg-card)] border border-[var(--border)] flex items-center justify-center text-[var(--accent-indigo)]">
-                                                <Mail size={20}/>
-                                            </div>
-                                            <div>
-                                                <h2 className="text-lg font-black text-[var(--text-main)] leading-tight">{editingTemplate.name}</h2>
-                                                <div className="flex items-center gap-2 mt-0.5">
-                                                    <span className="text-[8px] font-black px-1.5 py-0.5 rounded bg-gray-100 text-gray-400 uppercase tracking-tighter">/{editingTemplate.slug}</span>
-                                                    <span className={`text-[8px] font-black px-1.5 py-0.5 rounded uppercase tracking-tighter ${editingTemplate.channel === 'whatsapp' ? 'bg-green-50 text-green-500' : 'bg-indigo-50 text-indigo-500'}`}>{editingTemplate.channel || 'EMAIL'}</span>
-                                                    <span className="text-[8px] font-black px-1.5 py-0.5 rounded bg-amber-50 text-amber-500 uppercase tracking-tighter">{editingTemplate.scope}</span>
-                                                </div>
-                                            </div>
-                                        </div>
-                                        <div className="flex items-center gap-2">
-                                            <button onClick={() => setEditingTemplate(null)} className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest hover:text-red-500 mr-2 transition-all">Discard</button>
+                                        <h2 className="text-[12px] font-black text-[var(--text-main)] uppercase tracking-widest">Infrastructure</h2>
+                                        <div className="flex items-center gap-1.5">
+                                            <span className="px-1.5 py-0.5 rounded-md bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] text-[8px] font-black uppercase">{scope}</span>
                                             {canUpdateTemplates && (
-                                                <button onClick={handleTemplateSave} className="bg-[var(--accent-indigo)] text-white px-5 py-2 rounded-xl font-black text-[11px] shadow-lg shadow-indigo-500/20 flex items-center gap-2 hover:brightness-110 transition-all uppercase tracking-widest">
-                                                    <Save size={14}/> Sync Template
+                                                <button onClick={() => setShowCreateModal(true)} title="New template (Email / WhatsApp)"
+                                                    className="flex items-center gap-0.5 px-1.5 py-0.5 rounded-md bg-[var(--accent-indigo)] text-white text-[8px] font-black uppercase tracking-wide hover:brightness-110 transition-all">
+                                                    <Plus size={10}/> New
                                                 </button>
                                             )}
                                         </div>
                                     </div>
+                                    <div className="relative">
+                                        <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[var(--text-muted)]" size={12}/>
+                                        <input placeholder="Search..." value={searchQuery} onChange={e => setSearchQuery(e.target.value)}
+                                            className="w-full pl-8 pr-3 py-1.5 bg-[var(--input-bg)] rounded-lg text-[11px] font-bold outline-none border border-transparent focus:border-[var(--border)]" />
+                                    </div>
+                                </div>
 
-                                    <div className="grid grid-cols-1 xl:grid-cols-4 gap-6 items-start">
-                                        {/* Main Editor */}
-                                        <div className="xl:col-span-3 space-y-4">
-                                            <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-[24px] p-6 space-y-4 shadow-sm">
-                                                {editingTemplate.channel !== 'whatsapp' && (
-                                                    <div className="space-y-1.5">
-                                                        <label className="text-[9px] font-black text-[var(--text-muted)] uppercase tracking-widest px-2">Email Subject Header</label>
-                                                        <input value={editingTemplate.subject} onChange={e => setEditingTemplate({...editingTemplate, subject: e.target.value})}
-                                                            className="w-full bg-[var(--input-bg)] px-4 py-2.5 border border-[var(--border)] rounded-xl font-black text-[13px] text-[var(--text-main)] outline-none focus:bg-[var(--bg-card)] focus:border-[var(--accent-indigo)] transition-all" />
-                                                    </div>
+                                <div className="flex-1 overflow-y-auto no-scrollbar p-2 space-y-1">
+                                    {filteredTemplates.length > 0 ? (
+                                        filteredTemplates.map(t => (
+                                            <button key={t._id} onClick={() => setEditingTemplate(t)}
+                                                className={`w-full p-3 rounded-xl flex flex-col gap-0.5 text-left transition-all group border-2 ${editingTemplate?._id === t._id ? 'bg-white border-[var(--accent-indigo)] shadow-md' : 'bg-transparent border-transparent hover:bg-[var(--input-bg)]'}`}>
+                                                <div className="flex items-center justify-between">
+                                                    <span className={`text-[11px] font-black transition-colors ${editingTemplate?._id === t._id ? 'text-[var(--accent-indigo)]' : 'text-[var(--text-main)]'}`}>{t.name} {"{"}{t.channel?.toUpperCase() || 'EMAIL'}{"}"}</span>
+                                                    {canDeleteTemplates && (
+                                                        <Trash2 size={12} className="text-gray-200 hover:text-red-500 transition-all cursor-pointer" onClick={(e) => { e.stopPropagation(); deleteTemplate(t._id); }} />
+                                                    )}
+                                                </div>
+                                                <span className="text-[9px] font-medium text-[var(--text-muted)] uppercase italic">/{t.slug}</span>
+                                            </button>
+                                        ))
+                                    ) : (
+                                        <div className="mt-10 text-center px-4 space-y-3">
+                                            <p className="text-[9px] font-black text-gray-300 uppercase tracking-widest italic">Inventory Empty</p>
+                                            <div className="flex flex-col gap-2">
+                                                {canUpdateTemplates && (
+                                                    <button onClick={() => setShowCreateModal(true)} className="text-[10px] font-black text-[var(--accent-indigo)] hover:underline">+ New Template</button>
                                                 )}
+                                                {(user?.role === 'superadmin' || user?.role === 'clientadmin' || user?.permissions?.settings?.update) && (
+                                                    <button onClick={user?.role === 'clientadmin' ? handleInitializeClientDefaults : handleInitializeDefaults} className="text-[9px] font-black text-[var(--accent-green)] hover:underline uppercase tracking-tighter">Initialize Defaults</button>
+                                                )}
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
 
-                                                <div className="space-y-1.5">
-                                                    <div className="flex items-center justify-between px-2">
-                                                        <label className="text-[9px] font-black text-[var(--text-muted)] uppercase tracking-widest">{editingTemplate.channel === 'whatsapp' ? 'Fallback Text (used only if no Meta template set)' : 'Canvas (HTML Supported)'}</label>
-                                                        <span className="text-[8px] font-black text-[var(--accent-indigo)] flex items-center gap-1"><Info size={10}/> {editingTemplate.channel === 'whatsapp' ? 'CONFIGURE META TEMPLATE BELOW ↓' : 'FULL HTML WRAPPER ACTIVE'}</span>
+                            {/* Dense Editor Workspace */}
+                            <div className="flex-1 bg-[var(--bg-main)] overflow-y-auto p-6 no-scrollbar">
+                                {editingTemplate ? (
+                                    <div className="max-w-6xl mx-auto space-y-4 pb-10">
+                                        <div className="flex items-center justify-between">
+                                            <div className="flex items-center gap-3">
+                                                <div className="w-10 h-10 rounded-xl bg-[var(--bg-card)] border border-[var(--border)] flex items-center justify-center text-[var(--accent-indigo)]">
+                                                    <Mail size={20}/>
+                                                </div>
+                                                <div>
+                                                    <h2 className="text-lg font-black text-[var(--text-main)] leading-tight">{editingTemplate.name}</h2>
+                                                    <div className="flex items-center gap-2 mt-0.5">
+                                                        <span className="text-[8px] font-black px-1.5 py-0.5 rounded bg-gray-100 text-gray-400 uppercase tracking-tighter">/{editingTemplate.slug}</span>
+                                                        <span className={`text-[8px] font-black px-1.5 py-0.5 rounded uppercase tracking-tighter ${editingTemplate.channel === 'whatsapp' ? 'bg-green-50 text-green-500' : 'bg-indigo-50 text-indigo-500'}`}>{editingTemplate.channel || 'EMAIL'}</span>
+                                                        <span className="text-[8px] font-black px-1.5 py-0.5 rounded bg-amber-50 text-amber-500 uppercase tracking-tighter">{editingTemplate.scope}</span>
                                                     </div>
-                                                    <textarea id="template-editor" rows={editingTemplate.channel === 'whatsapp' ? 4 : 18} value={editingTemplate.body} onChange={e => setEditingTemplate({...editingTemplate, body: e.target.value})}
-                                                        className="w-full bg-[var(--input-bg)] p-6 border border-[var(--border)] rounded-[20px] font-medium text-[13px] leading-relaxed text-[var(--text-main)] outline-none focus:bg-[var(--bg-card)] focus:border-[var(--accent-indigo)] transition-all font-mono" />
                                                 </div>
                                             </div>
+                                            <div className="flex items-center gap-2">
+                                                <button onClick={() => setEditingTemplate(null)} className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest hover:text-red-500 mr-2 transition-all">Discard</button>
+                                                {canUpdateTemplates && (
+                                                    <button onClick={handleTemplateSave} className="bg-[var(--accent-indigo)] text-white px-5 py-2 rounded-xl font-black text-[11px] shadow-lg shadow-indigo-500/20 flex items-center gap-2 hover:brightness-110 transition-all uppercase tracking-widest">
+                                                        <Save size={14}/> Sync Template
+                                                    </button>
+                                                )}
+                                            </div>
+                                        </div>
 
-                                            {/* WhatsApp Cloud API (Meta) configuration — staff scope only */}
-                                            {editingTemplate.channel === 'whatsapp' && (
-                                                <div className="bg-[var(--bg-card)] border border-green-200 rounded-[24px] p-6 space-y-4 shadow-sm">
-                                                    <div>
-                                                        <h3 className="text-[11px] font-black text-green-600 uppercase tracking-widest flex items-center gap-2">
-                                                            <Info size={12}/> WhatsApp Cloud API (Meta)
-                                                        </h3>
-                                                        <p className="text-[10px] font-medium text-[var(--text-muted)] leading-relaxed mt-1.5">
-                                                            Business-initiated WhatsApp must use a template you created &amp; got <b>approved in Meta WhatsApp Manager</b>. Enter that approved name + language, then map each <span className="font-mono font-black">{"{{1}}, {{2}}…"}</span> placeholder to a variable in order. Leave the name blank to fall back to the free-text body above (only delivered within Meta's 24h window).
-                                                        </p>
-                                                    </div>
-
-                                                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                                                        <div className="sm:col-span-2 space-y-1.5">
-                                                            <label className="text-[9px] font-black text-[var(--text-muted)] uppercase tracking-widest px-2">Meta Template Name</label>
-                                                            <input value={editingTemplate.meta_template_name || ''} onChange={e => setEditingTemplate({...editingTemplate, meta_template_name: e.target.value})}
-                                                                placeholder="e.g. task_created_staff"
-                                                                className="w-full bg-[var(--input-bg)] px-4 py-2.5 border border-[var(--border)] rounded-xl font-black text-[13px] text-[var(--text-main)] outline-none focus:border-green-500 transition-all font-mono" />
-                                                        </div>
+                                        <div className="grid grid-cols-1 xl:grid-cols-4 gap-6 items-start">
+                                            {/* Main Editor */}
+                                            <div className="xl:col-span-3 space-y-4">
+                                                <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-[24px] p-6 space-y-4 shadow-sm">
+                                                    {editingTemplate.channel !== 'whatsapp' && (
                                                         <div className="space-y-1.5">
-                                                            <label className="text-[9px] font-black text-[var(--text-muted)] uppercase tracking-widest px-2">Language</label>
-                                                            <input value={editingTemplate.meta_lang || 'en'} onChange={e => setEditingTemplate({...editingTemplate, meta_lang: e.target.value})}
-                                                                placeholder="en"
-                                                                className="w-full bg-[var(--input-bg)] px-4 py-2.5 border border-[var(--border)] rounded-xl font-black text-[13px] text-[var(--text-main)] outline-none focus:border-green-500 transition-all" />
+                                                            <label className="text-[9px] font-black text-[var(--text-muted)] uppercase tracking-widest px-2">Email Subject Header</label>
+                                                            <input value={editingTemplate.subject} onChange={e => setEditingTemplate({...editingTemplate, subject: e.target.value})}
+                                                                className="w-full bg-[var(--input-bg)] px-4 py-2.5 border border-[var(--border)] rounded-xl font-black text-[13px] text-[var(--text-main)] outline-none focus:bg-[var(--bg-card)] focus:border-[var(--accent-indigo)] transition-all" />
                                                         </div>
-                                                    </div>
+                                                    )}
 
-                                                    <div className="space-y-2">
+                                                    <div className="space-y-1.5">
                                                         <div className="flex items-center justify-between px-2">
-                                                            <label className="text-[9px] font-black text-[var(--text-muted)] uppercase tracking-widest">Body Parameters (order = {"{{1}}, {{2}}…"})</label>
-                                                            <button onClick={addMetaParam} className="text-[9px] font-black text-green-600 uppercase tracking-widest flex items-center gap-1 hover:brightness-110 transition-all">
-                                                                <Plus size={11}/> Add Parameter
-                                                            </button>
+                                                            <label className="text-[9px] font-black text-[var(--text-muted)] uppercase tracking-widest">{editingTemplate.channel === 'whatsapp' ? 'Fallback Text (used only if no Meta template set)' : 'Canvas (HTML Supported)'}</label>
+                                                            <span className="text-[8px] font-black text-[var(--accent-indigo)] flex items-center gap-1"><Info size={10}/> {editingTemplate.channel === 'whatsapp' ? 'CONFIGURE META TEMPLATE BELOW ↓' : 'FULL HTML WRAPPER ACTIVE'}</span>
                                                         </div>
-                                                        {(editingTemplate.meta_params || []).length === 0 && (
-                                                            <p className="text-[10px] font-medium text-[var(--text-muted)] px-2 italic">No parameters mapped yet — add one for each {"{{n}}"} in your approved template.</p>
-                                                        )}
-                                                        <div className="space-y-2">
-                                                            {(editingTemplate.meta_params || []).map((param, idx) => (
-                                                                <div key={idx} className="flex items-center gap-2">
-                                                                    <span className="text-[11px] font-black text-green-600 w-10 shrink-0 font-mono">{"{{" + (idx + 1) + "}}"}</span>
-                                                                    <select value={param} onChange={e => updateMetaParam(idx, e.target.value)}
-                                                                        className="flex-1 bg-[var(--input-bg)] px-3 py-2 border border-[var(--border)] rounded-lg font-bold text-[12px] text-[var(--text-main)] outline-none focus:border-green-500 transition-all">
-                                                                        <option value="">— select variable —</option>
-                                                                        {getVarsForTemplate(editingTemplate.slug).map(v => (
-                                                                            <option key={v} value={v}>{v}</option>
-                                                                        ))}
-                                                                    </select>
-                                                                    <button onClick={() => removeMetaParam(idx)} className="text-[var(--text-muted)] hover:text-red-500 p-1 transition-all"><Trash2 size={14}/></button>
-                                                                </div>
-                                                            ))}
-                                                        </div>
+                                                        <textarea id="template-editor" rows={editingTemplate.channel === 'whatsapp' ? 4 : 18} value={editingTemplate.body} onChange={e => setEditingTemplate({...editingTemplate, body: e.target.value})}
+                                                            className="w-full bg-[var(--input-bg)] p-6 border border-[var(--border)] rounded-[20px] font-medium text-[13px] leading-relaxed text-[var(--text-main)] outline-none focus:bg-[var(--bg-card)] focus:border-[var(--accent-indigo)] transition-all font-mono" />
                                                     </div>
                                                 </div>
+
+                                                {/* WhatsApp Cloud API (Meta) configuration */}
+                                                {editingTemplate.channel === 'whatsapp' && (
+                                                    <div className="bg-[var(--bg-card)] border border-green-200 rounded-[24px] p-6 space-y-4 shadow-sm">
+                                                        <div>
+                                                            <h3 className="text-[11px] font-black text-green-600 uppercase tracking-widest flex items-center gap-2">
+                                                                <Info size={12}/> WhatsApp Cloud API (Meta)
+                                                            </h3>
+                                                            <p className="text-[10px] font-medium text-[var(--text-muted)] leading-relaxed mt-1.5">
+                                                                Business-initiated WhatsApp must use a template you created &amp; got <b>approved in Meta WhatsApp Manager</b>. Enter that approved name + language, then map each <span className="font-mono font-black">{"{{1}}, {{2}}…"}</span> placeholder to a variable in order. Leave the name blank to fall back to the free-text body above (only delivered within Meta's 24h window).
+                                                            </p>
+                                                        </div>
+
+                                                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                                                            <div className="sm:col-span-2 space-y-1.5">
+                                                                <label className="text-[9px] font-black text-[var(--text-muted)] uppercase tracking-widest px-2">Meta Template Name</label>
+                                                                <input value={editingTemplate.meta_template_name || ''} onChange={e => setEditingTemplate({...editingTemplate, meta_template_name: e.target.value})}
+                                                                    placeholder="e.g. task_created_staff"
+                                                                    className="w-full bg-[var(--input-bg)] px-4 py-2.5 border border-[var(--border)] rounded-xl font-black text-[13px] text-[var(--text-main)] outline-none focus:border-green-500 transition-all font-mono" />
+                                                            </div>
+                                                            <div className="space-y-1.5">
+                                                                <label className="text-[9px] font-black text-[var(--text-muted)] uppercase tracking-widest px-2">Language</label>
+                                                                <input value={editingTemplate.meta_lang || 'en'} onChange={e => setEditingTemplate({...editingTemplate, meta_lang: e.target.value})}
+                                                                    placeholder="en"
+                                                                    className="w-full bg-[var(--input-bg)] px-4 py-2.5 border border-[var(--border)] rounded-xl font-black text-[13px] text-[var(--text-main)] outline-none focus:border-green-500 transition-all" />
+                                                            </div>
+                                                        </div>
+
+                                                        <div className="space-y-2">
+                                                            <div className="flex items-center justify-between px-2">
+                                                                <label className="text-[9px] font-black text-[var(--text-muted)] uppercase tracking-widest">Body Parameters (order = {"{{1}}, {{2}}…"})</label>
+                                                                <button onClick={addMetaParam} className="text-[9px] font-black text-green-600 uppercase tracking-widest flex items-center gap-1 hover:brightness-110 transition-all">
+                                                                    <Plus size={11}/> Add Parameter
+                                                                </button>
+                                                            </div>
+                                                            {(editingTemplate.meta_params || []).length === 0 && (
+                                                                <p className="text-[10px] font-medium text-[var(--text-muted)] px-2 italic">No parameters mapped yet — add one for each {"{{n}}"} in your approved template.</p>
+                                                            )}
+                                                            <div className="space-y-2">
+                                                                {(editingTemplate.meta_params || []).map((param, idx) => (
+                                                                    <div key={idx} className="flex items-center gap-2">
+                                                                        <span className="text-[11px] font-black text-green-600 w-10 shrink-0 font-mono">{"{{" + (idx + 1) + "}}"}</span>
+                                                                        <select value={param} onChange={e => updateMetaParam(idx, e.target.value)}
+                                                                            className="flex-1 bg-[var(--input-bg)] px-3 py-2 border border-[var(--border)] rounded-lg font-bold text-[12px] text-[var(--text-main)] outline-none focus:border-green-500 transition-all">
+                                                                            <option value="">— select variable —</option>
+                                                                            {getVarsForTemplate(editingTemplate.slug).map(v => (
+                                                                                <option key={v} value={v}>{v}</option>
+                                                                            ))}
+                                                                        </select>
+                                                                        <button onClick={() => removeMetaParam(idx)} className="text-[var(--text-muted)] hover:text-red-500 p-1 transition-all"><Trash2 size={14}/></button>
+                                                                    </div>
+                                                                ))}
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                )}
+                                            </div>
+
+                                            {/* Compact Side Panel: Variables */}
+                                            <div className="space-y-4">
+                                                <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-[24px] p-4 shadow-sm">
+                                                    <h3 className="text-[10px] font-black text-[var(--text-main)] uppercase tracking-widest border-b border-[var(--border)] pb-3 mb-3 flex items-center gap-2"> <Plus size={12}/> Placeholders</h3>
+                                                    <div className="flex flex-wrap gap-1.5">
+                                                        {getVarsForTemplate(editingTemplate.slug).map(v => (
+                                                            <button key={v} onClick={() => insertVariable(v)}
+                                                                className="px-2 py-1 bg-[var(--input-bg)] hover:bg-[var(--accent-indigo-bg)] hover:text-[var(--accent-indigo)] rounded-lg border border-[var(--border)] text-[9px] font-black transition-all">
+                                                                {"{{" + v + "}}"}
+                                                            </button>
+                                                        ))}
+                                                    </div>
+                                                    <div className="mt-6 p-3 bg-indigo-50/30 rounded-xl border border-indigo-100/50">
+                                                         <p className="text-[9px] font-black text-indigo-400 uppercase tracking-tighter mb-1">Navigation Tip</p>
+                                                         <p className="text-[9px] font-medium text-indigo-300 leading-tight">
+                                                             Type {"{{"} in editor to see all placeholders. Click any tag to auto-inject.
+                                                         </p>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                ) : (
+                                    <div className="h-full flex flex-col items-center justify-center text-center opacity-30">
+                                        <div className="w-20 h-20 border-2 border-dashed border-gray-400 rounded-full flex items-center justify-center">
+                                            <Mail size={32} className="text-gray-400" />
+                                        </div>
+                                        <h3 className="mt-6 text-sm font-black text-[var(--text-main)] uppercase tracking-[0.2em]">Communication Hub</h3>
+                                        <p className="text-[11px] font-medium text-[var(--text-muted)] mt-1">Select a template from the left panel to begin editing.</p>
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+                    </div>
+                ) : (
+                    <div className="flex-1 overflow-y-auto no-scrollbar p-6">
+                        {section === 'general' && <GeneralSection />}
+
+                        {section === 'security' && (
+                            <div className="max-w-4xl mx-auto w-full space-y-5">
+                                <PasswordCard />
+
+                                {isSuperadmin && (
+                                    <div className="space-y-4">
+                                        <div className="flex items-center justify-between">
+                                            <div>
+                                                <h2 className="text-[15px] font-bold text-[var(--text-main)] tracking-tight">System Permissions</h2>
+                                                <p className="text-[11px] font-medium text-[var(--text-muted)] italic">Global overrides and security exception logic.</p>
+                                            </div>
+                                            {canUpdateSettings && (
+                                                <button onClick={handleSave} className="bg-[var(--accent-indigo)] text-white px-6 py-2 rounded-xl font-black text-[11px] shadow-lg shadow-indigo-500/20 uppercase tracking-widest">
+                                                    Save Config
+                                                </button>
                                             )}
                                         </div>
 
-                                        {/* Compact Side Panel: Variables */}
-                                        <div className="space-y-4">
-                                            <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-[24px] p-4 shadow-sm">
-                                                <h3 className="text-[10px] font-black text-[var(--text-main)] uppercase tracking-widest border-b border-[var(--border)] pb-3 mb-3 flex items-center gap-2"> <Plus size={12}/> Placeholders</h3>
-                                                <div className="flex flex-wrap gap-1.5">
-                                                    {getVarsForTemplate(editingTemplate.slug).map(v => (
-                                                        <button key={v} onClick={() => insertVariable(v)}
-                                                            className="px-2 py-1 bg-[var(--input-bg)] hover:bg-[var(--accent-indigo-bg)] hover:text-[var(--accent-indigo)] rounded-lg border border-[var(--border)] text-[9px] font-black transition-all">
-                                                            {"{{" + v + "}}"}
-                                                        </button>
-                                                    ))}
+                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                            {/* Toggle Block */}
+                                            <div className="p-6 bg-[var(--bg-card)] border border-[var(--border)] rounded-[24px] flex items-center justify-between shadow-sm">
+                                                <div className="space-y-1">
+                                                    <h3 className="text-[13px] font-black text-[var(--text-main)]">Allow History Creation</h3>
+                                                    <p className="text-[10px] font-medium text-[var(--text-muted)] max-w-sm">Enable session/task scheduling in the past.</p>
                                                 </div>
-                                                <div className="mt-6 p-3 bg-indigo-50/30 rounded-xl border border-indigo-100/50">
-                                                     <p className="text-[9px] font-black text-indigo-400 uppercase tracking-tighter mb-1">Navigation Tip</p>
-                                                     <p className="text-[9px] font-medium text-indigo-300 leading-tight">
-                                                         Type {"{{"} in editor to see all placeholders. Click any tag to auto-inject.
-                                                     </p>
+                                                <div className="cursor-pointer" onClick={() => canUpdateSettings && setConfig({...config, allow_backdate: !config.allow_backdate})}>
+                                                    {config.allow_backdate ? <ToggleOn size={32} className="text-[var(--accent-indigo)]" /> : <ToggleOff size={32} className="text-gray-200" />}
+                                                </div>
+                                            </div>
+
+                                            {/* Exception Block */}
+                                            <div className="p-6 bg-[var(--bg-card)] border border-[var(--border)] rounded-[24px] space-y-4 shadow-sm">
+                                                <div className="space-y-1">
+                                                    <h3 className="text-[13px] font-black text-[var(--text-main)] uppercase tracking-tight">Access Whitelist</h3>
+                                                    <p className="text-[10px] font-medium text-[var(--text-muted)]">Users with permanent backdate permission.</p>
+                                                </div>
+
+                                                <div className="flex gap-2">
+                                                    <input placeholder="Auth email..." value={newEmail} onChange={e => setNewEmail(e.target.value)} disabled={!canUpdateSettings}
+                                                        className="flex-1 bg-[var(--input-bg)] border border-[var(--border)] px-3 py-2 rounded-xl text-[12px] font-medium outline-none focus:bg-[var(--bg-card)] focus:border-[var(--accent-indigo)] disabled:opacity-50" />
+                                                    <button onClick={() => { if(newEmail) setConfig({...config, exception_users: [...config.exception_users, newEmail]}); setNewEmail(''); }}
+                                                        disabled={!canUpdateSettings}
+                                                        className="bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] px-4 rounded-xl font-black text-[10px] uppercase tracking-widest border border-[var(--accent-indigo-border)] disabled:opacity-50">
+                                                        Authorize
+                                                    </button>
+                                                </div>
+
+                                                <div className="space-y-2 max-h-40 overflow-y-auto no-scrollbar">
+                                                    {config.exception_users.map(email => (
+                                                        <div key={email} className="flex items-center justify-between p-2 bg-[var(--input-bg)] rounded-xl group border border-transparent">
+                                                            <span className="text-[11px] font-bold text-[var(--text-main)]">{email}</span>
+                                                            <button onClick={() => setConfig({...config, exception_users: config.exception_users.filter(e => e !== email)})} className="text-gray-300 hover:text-red-500 transition-all"><Trash2 size={12}/></button>
+                                                        </div>
+                                                    ))}
                                                 </div>
                                             </div>
                                         </div>
                                     </div>
-                                </div>
-                            ) : (
-                                <div className="h-full flex flex-col items-center justify-center text-center opacity-30">
-                                    <div className="w-20 h-20 border-2 border-dashed border-gray-400 rounded-full flex items-center justify-center">
-                                        <Mail size={32} className="text-gray-400" />
-                                    </div>
-                                    <h3 className="mt-6 text-sm font-black text-[var(--text-main)] uppercase tracking-[0.2em]">Communication Hub</h3>
-                                    <p className="text-[11px] font-medium text-[var(--text-muted)] mt-1">Select a core infrastructure from the left panel to begin editing.</p>
-                                </div>
-                            )}
-                        </div>
+                                )}
+                            </div>
+                        )}
+
+                        {section === 'categories' && (
+                            <MetaListSection
+                                title="Categories"
+                                subtitle="Task categories used across the workspace."
+                                endpoint="/task-categories"
+                                icon={FolderTree}
+                                canManage={canManageMeta}
+                                label="Category"
+                            />
+                        )}
+
+                        {section === 'tags' && (
+                            <MetaListSection
+                                title="Tags"
+                                subtitle="Task tags used across the workspace."
+                                endpoint="/task-tags"
+                                icon={Tag}
+                                canManage={canManageMeta}
+                                label="Tag"
+                            />
+                        )}
                     </div>
                 )}
-            </div>
+            </main>
 
             {/* Create Template Modal */}
             <AnimatePresence>
                 {showCreateModal && (
-                    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} 
+                    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
                         className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
                         <motion.div initial={{ scale: 0.9, y: 20 }} animate={{ scale: 1, y: 0 }} exit={{ scale: 0.9, y: 20 }}
                             className="bg-white w-full max-w-sm rounded-[32px] overflow-hidden shadow-2xl">
