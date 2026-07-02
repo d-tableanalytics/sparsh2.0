@@ -198,10 +198,10 @@ const EmployeeReport = () => {
       </div>
 
       {/* Performance graphs */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <div className="lg:col-span-2 bg-[var(--bg-card)] border border-[var(--border)] rounded-[28px] p-6 shadow-sm h-[300px] flex flex-col">
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
+        <div className="md:col-span-2 xl:col-span-2 bg-[var(--bg-card)] border border-[var(--border)] rounded-[28px] p-6 shadow-sm h-[300px] flex flex-col">
           <h3 className="text-lg font-black text-[var(--text-main)] uppercase italic tracking-tight mb-4">Monthly Progress</h3>
-          <div className="flex-1 min-h-0">
+          <div className="flex-1 min-h-0 min-w-0">
             <ResponsiveContainer width="100%" height="100%">
               <LineChart data={detail.trends || []}>
                 <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="var(--border)" opacity={0.3} />
@@ -217,7 +217,7 @@ const EmployeeReport = () => {
         </div>
         <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-[28px] p-6 shadow-sm h-[300px] flex flex-col">
           <h3 className="text-lg font-black text-[var(--text-main)] uppercase italic tracking-tight mb-4">Attendance Trend</h3>
-          <div className="flex-1 min-h-0">
+          <div className="flex-1 min-h-0 min-w-0">
             <ResponsiveContainer width="100%" height="100%">
               <AreaChart data={detail.trends || []}>
                 <defs>

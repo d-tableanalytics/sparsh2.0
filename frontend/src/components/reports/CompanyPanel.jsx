@@ -8,6 +8,7 @@ import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
 } from 'recharts';
 import { getCompanyDashboard, getCompanyEmployees } from '../../services/reportApi';
+import { truncate } from './chartKit';
 
 const tooltipStyle = {
   borderRadius: '16px', border: '1px solid var(--border)',
@@ -24,7 +25,7 @@ const Card = ({ title, subtitle, children, className = '' }) => (
       <h4 className="text-[15px] font-black text-[var(--text-main)] uppercase italic tracking-tight">{title}</h4>
       {subtitle && <p className="text-[10px] text-[var(--text-muted)] font-bold uppercase tracking-wider opacity-60">{subtitle}</p>}
     </div>
-    <div className="flex-1 w-full min-h-0">{children}</div>
+    <div className="flex-1 w-full min-h-0 min-w-0">{children}</div>
   </div>
 );
 
@@ -105,8 +106,8 @@ const CompanyPanel = ({ companyId, period, startDate, endDate, onOpenEmployee })
       </div>
 
       {/* Charts row 1 */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
-        <Card title="Monthly Learning Progress" subtitle="Avg assessment score" className="lg:col-span-2 h-[300px]">
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5">
+        <Card title="Monthly Learning Progress" subtitle="Avg assessment score" className="md:col-span-2 xl:col-span-2 h-[300px]">
           <ResponsiveContainer width="100%" height="100%">
             <LineChart data={data.monthly || []}>
               <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="var(--border)" opacity={0.3} />
@@ -131,7 +132,7 @@ const CompanyPanel = ({ companyId, period, startDate, endDate, onOpenEmployee })
       </div>
 
       {/* Charts row 2 */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
         <Card title="Session Attendance" subtitle="Monthly attendance %" className="h-[280px]">
           <ResponsiveContainer width="100%" height="100%">
             <AreaChart data={data.monthly || []}>
@@ -165,13 +166,13 @@ const CompanyPanel = ({ companyId, period, startDate, endDate, onOpenEmployee })
       </div>
 
       {/* Charts row 3 */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5">
         <Card title="Department Distribution" subtitle="Employees per department" className="lg:col-span-1 h-[280px]">
           <ResponsiveContainer width="100%" height="100%">
             <BarChart data={data.departmentDistribution || []} layout="vertical" margin={{ left: 8, right: 12 }}>
               <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="var(--border)" opacity={0.3} />
               <XAxis type="number" tick={{ fontSize: 9, fill: 'var(--text-muted)' }} allowDecimals={false} />
-              <YAxis type="category" dataKey="name" width={80} tick={{ fontSize: 9, fill: 'var(--text-muted)', fontWeight: 800 }} />
+              <YAxis type="category" dataKey="name" width={90} tickFormatter={truncate} tick={{ fontSize: 9, fill: 'var(--text-muted)', fontWeight: 800 }} />
               <Tooltip contentStyle={tooltipStyle} cursor={{ fill: 'var(--input-bg)' }} />
               <Bar dataKey="value" fill="var(--accent-indigo)" radius={[0, 5, 5, 0]} />
             </BarChart>
@@ -198,7 +199,7 @@ const CompanyPanel = ({ companyId, period, startDate, endDate, onOpenEmployee })
           <ResponsiveContainer width="100%" height="100%">
             <BarChart data={data.batchPerformance || []}>
               <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="var(--border)" opacity={0.3} />
-              <XAxis dataKey="name" tick={{ fontSize: 8, fill: 'var(--text-muted)' }} interval={0} />
+              <XAxis dataKey="name" tick={{ fontSize: 9, fill: 'var(--text-muted)' }} interval="preserveStartEnd" tickFormatter={(v) => truncate(v, 10)} />
               <YAxis tick={{ fontSize: 9, fill: 'var(--text-muted)' }} allowDecimals={false} />
               <Tooltip contentStyle={tooltipStyle} />
               <Legend iconType="circle" wrapperStyle={{ fontSize: '9px', fontWeight: 900, textTransform: 'uppercase' }} />
@@ -210,13 +211,13 @@ const CompanyPanel = ({ companyId, period, startDate, endDate, onOpenEmployee })
       </div>
 
       {/* Performers */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
         <Card title="Top Performers" subtitle="Highest productivity" className="h-[260px]">
           <ResponsiveContainer width="100%" height="100%">
             <BarChart data={data.topPerformers || []} layout="vertical" margin={{ left: 8, right: 16 }}>
               <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="var(--border)" opacity={0.3} />
               <XAxis type="number" domain={[0, 100]} tick={{ fontSize: 9, fill: 'var(--text-muted)' }} />
-              <YAxis type="category" dataKey="name" width={80} tick={{ fontSize: 10, fill: 'var(--text-muted)', fontWeight: 800 }} />
+              <YAxis type="category" dataKey="name" width={90} tickFormatter={truncate} tick={{ fontSize: 10, fill: 'var(--text-muted)', fontWeight: 800 }} />
               <Tooltip contentStyle={tooltipStyle} cursor={{ fill: 'var(--input-bg)' }} />
               <Bar dataKey="score" fill="var(--accent-green)" radius={[0, 6, 6, 0]} />
             </BarChart>
@@ -227,7 +228,7 @@ const CompanyPanel = ({ companyId, period, startDate, endDate, onOpenEmployee })
             <BarChart data={data.lowestPerformers || []} layout="vertical" margin={{ left: 8, right: 16 }}>
               <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="var(--border)" opacity={0.3} />
               <XAxis type="number" domain={[0, 100]} tick={{ fontSize: 9, fill: 'var(--text-muted)' }} />
-              <YAxis type="category" dataKey="name" width={80} tick={{ fontSize: 10, fill: 'var(--text-muted)', fontWeight: 800 }} />
+              <YAxis type="category" dataKey="name" width={90} tickFormatter={truncate} tick={{ fontSize: 10, fill: 'var(--text-muted)', fontWeight: 800 }} />
               <Tooltip contentStyle={tooltipStyle} cursor={{ fill: 'var(--input-bg)' }} />
               <Bar dataKey="score" fill="var(--accent-red)" radius={[0, 6, 6, 0]} />
             </BarChart>

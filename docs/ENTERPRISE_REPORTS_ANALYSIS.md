@@ -177,6 +177,60 @@ Additive & namespaced (extends existing): new service modules `report_service_co
 
 ---
 
+## Addendum D — "LMS-wise" reporting (analysis + critical finding)
+
+A spec requests a third report level — **LMS-wise reporting** — with an LMS filter (Company → LMS → Department), an LMS dashboard (users/courses/completion/certificates/learning-hours), LMS charts, and an LMS performance table.
+
+### D.1 🚨 Critical finding: there is no "LMS" entity in this system
+Verified by code search: `lms` appears only as a **permission-module label** in `models/rbac.py` and inside GPT/assistant prompt text — **not** as a collection, model, or per-company platform. There is also **no `course`, `certificate`, or `learning_hours`** field anywhere. The `group` module added recently is **task groups** (member sets for task coordination), not learning.
+
+Therefore, as literally specified, an "LMS filter listing LMS platforms associated with a company" and cards like **Total Courses / Assigned Courses / Completed Courses / Certificates Earned / Total Learning Hours** have **no data source**. Building them as-is would show fabricated or empty values.
+
+### D.2 What the "learning" domain actually is here
+The training/learning structure that DOES exist and is company-associated:
+```
+Company ─< Batch (training program/cohort) ─< Quarter ─< Session (calendar event, type=event, session_template)
+                                                             ├─ attendance (present/absent)
+                                                             └─ LearnerAssessments (percentage, passed)
+```
+The closest real analogue to "an LMS instance a company is enrolled in" is a **Batch** (a training program). A company can belong to multiple batches (`batches.companies[]`).
+
+### D.3 Recommended mapping: **LMS = Batch (training program)**
+Interpret "LMS-wise" as **Batch-wise** reporting. This reuses existing batch/session/assessment/attendance data, needs no new data model, and is fully backward-compatible.
+
+**Filter hierarchy:** Company → **LMS (Batch)** → Department. When no company is selected the LMS dropdown lists all batches; when a company is selected it lists only that company's batches (`batches.companies[] contains company_id`) — exactly the requested cascading behavior.
+
+### D.4 Data-availability under the Batch mapping
+| Requested LMS metric | Status | Source |
+|---|---|---|
+| Total / Active / Inactive Users | 🟨 | batch companies' learners (`is_active`) |
+| Total "Courses" | 🟨 | sessions (or session templates) in the batch |
+| Assigned / Completed / In-Progress "Courses" | 🟨 | session completion via `company_session_progress` / event `status` |
+| Completion Rate, Avg Score | 🟨/✅ | computed / `LearnerAssessments.percentage` |
+| **Certificates Earned** | 🟥 | no certificate entity → omit or 0 |
+| **Total Learning Hours** | 🟥 | not tracked → omit or "—" |
+| Performance Index | 🟨 | computed (existing productivity formula) |
+| Charts (completion/activity/enrollment/score dist./top users/depts/courses…) | 🟨 | sessions + assessments + attendance scoped to the batch |
+| LMS table (name, company, users, completion %, avg score, last activity, status) | 🟨 | batch + scoped rollups (Learning Hours/Certificates columns omitted) |
+
+### D.5 Reuse & new APIs (additive, `/api/reports/*`)
+- Reuse: existing batch analytics (`/quarters/{id}/analytics`, company dashboard), `compute_*` helpers, `LearnerAssessments`, `attendance`.
+- New: `GET /reports/lms` (list batches as "LMS" rows, optional `company_id` scope), `GET /reports/lms/{batch_id}` (LMS dashboard), `GET /reports/lms/{batch_id}/employees`. Extend `/reports/export` + filters with `batch_id` (LMS).
+
+### D.6 UI plan (reuse existing)
+- Add an **LMS dropdown** (reuse `FilterDropdown`) between Company and Department; cascades off the selected company; searchable.
+- Selecting an LMS renders an **LMS panel** (reuse the `CompanyPanel` structure: KPI cards + charts + performance table) scoped to the batch.
+- Drill-down: Overall → Company → LMS(Batch) → Department → Employee, inheriting filters via URL params. Export respects Company + LMS + Department + Date. Loading skeletons + empty state ("No LMS data").
+
+### D.7 Decisions needed before building
+1. **Mapping:** Adopt **LMS = Batch** (recommended, reuses data) — or define LMS as another entity (e.g., GPT project), or build a brand-new LMS/course module first (large)?
+2. **Certificates & Learning Hours:** Omit for v1 (recommended) — or add new data capture (certificate issuance + time tracking; sizable backend work)?
+3. **"Courses":** map to **sessions** (per-batch scheduled sessions) or **session templates**? (recommended: sessions.)
+
+*No code written for LMS reporting yet — pending the mapping decision, since the literal "LMS" entity does not exist in the current data model.*
+
+---
+
 ## Addendum C — Company → Employee BI drill-down (E2 + E3 detailed design)
 
 A fourth spec ("Sparsh Magic LMS Enterprise Reports — Company → Employee → Complete Analytics") requests the **drill-down BI experience**: Reports → All Companies → Select Company → Company Dashboard → Select Employee → Complete Employee Report → Assignment/Assessment/Attendance/Timeline. This is exactly roadmap phases **E2 (Company)** and **E3 (Employee)**. This addendum is the pre-code design for those two phases.

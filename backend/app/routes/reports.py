@@ -17,6 +17,7 @@ from app.controllers.auth_controller import check_role
 from app.utils.calendar_utils import find_event_across_collections
 from app.services import report_service as rs
 from app.services import report_company_service as rcs
+from app.services import report_lms_service as rls
 
 router = APIRouter(prefix="/reports", tags=["Reports"])
 
@@ -262,6 +263,72 @@ async def reports_company_employees(
 
 
 # --------------------------------------------------------------------------- #
+# LMS (= Batch) reporting                                                      #
+# --------------------------------------------------------------------------- #
+@router.get("/lms")
+async def reports_lms_list(
+    company_id: Optional[str] = None,
+    search: Optional[str] = None,
+    sort: Optional[str] = Query("completionRate"),
+    order: Optional[str] = Query("desc"),
+    skip: int = 0,
+    limit: int = 25,
+    current_user: dict = Depends(admin_only),
+):
+    users = await rs.load_users()
+    rows = await rls.compute_lms_list(users, company_id=company_id)
+    if search:
+        s = search.lower()
+        rows = [r for r in rows if s in (r["name"] or "").lower()]
+    rows = _sort_rows(rows, sort, order)
+    total = len(rows)
+    page = rows[skip: skip + limit] if limit else rows
+    return {"items": page, "total": total, "skip": skip, "limit": limit}
+
+
+@router.get("/lms/{batch_id}")
+async def reports_lms_dashboard(
+    batch_id: str,
+    period: Optional[str] = None,
+    startDate: Optional[str] = None,
+    endDate: Optional[str] = None,
+    current_user: dict = Depends(admin_only),
+):
+    start_iso, end_iso = rs.period_range(period, startDate, endDate)
+    users = await rs.load_users()
+    tasks = await rs.fetch_tasks(start_iso, end_iso)
+    return await rls.compute_lms_dashboard(batch_id, tasks, users)
+
+
+@router.get("/lms/{batch_id}/employees")
+async def reports_lms_employees(
+    batch_id: str,
+    period: Optional[str] = None,
+    startDate: Optional[str] = None,
+    endDate: Optional[str] = None,
+    search: Optional[str] = None,
+    sort: Optional[str] = Query("score"),
+    order: Optional[str] = Query("desc"),
+    skip: int = 0,
+    limit: int = 25,
+    current_user: dict = Depends(admin_only),
+):
+    start_iso, end_iso = rs.period_range(period, startDate, endDate)
+    users = await rs.load_users()
+    tasks = await rs.fetch_tasks(start_iso, end_iso)
+    rows = await rls.compute_lms_employees(batch_id, tasks, users)
+    if search:
+        s = search.lower()
+        rows = [r for r in rows if s in (r["name"] or "").lower() or s in (r.get("email") or "").lower()]
+    rows = _sort_rows(rows, sort, order)
+    total = len(rows)
+    for i, r in enumerate(rows):
+        r["rank"] = i + 1
+    page = rows[skip: skip + limit] if limit else rows
+    return {"items": page, "total": total, "skip": skip, "limit": limit}
+
+
+# --------------------------------------------------------------------------- #
 # E3 — Employee                                                                #
 # --------------------------------------------------------------------------- #
 @router.get("/employees/{user_id}")
@@ -351,12 +418,17 @@ async def reports_export(
     startDate: Optional[str] = None,
     endDate: Optional[str] = None,
     department: Optional[str] = None,
+    lms: Optional[str] = None,
     current_user: dict = Depends(admin_only),
 ):
     start_iso, end_iso = rs.period_range(period, startDate, endDate)
     users = await rs.load_users()
     tasks = await rs.fetch_tasks(start_iso, end_iso)
-    rows = rs.compute_doers(tasks, users)
+    # Respect the LMS (batch) filter when present, else the org-wide doer set.
+    if lms:
+        rows = await rls.compute_lms_employees(lms, tasks, users)
+    else:
+        rows = rs.compute_doers(tasks, users)
     if department:
         rows = [r for r in rows if r["department"] == department]
     for i, r in enumerate(rows):

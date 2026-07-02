@@ -28,6 +28,16 @@ export const getCompanyDashboard = (companyId, params) =>
 export const getCompanyEmployees = (companyId, params) =>
   api.get(`/reports/companies/${companyId}/employees`, { params }).then((r) => r.data);
 
+// LMS (= Batch)
+export const getLmsList = (params) =>
+  api.get('/reports/lms', { params }).then((r) => r.data);
+
+export const getLmsDashboard = (batchId, params) =>
+  api.get(`/reports/lms/${batchId}`, { params }).then((r) => r.data);
+
+export const getLmsEmployees = (batchId, params) =>
+  api.get(`/reports/lms/${batchId}/employees`, { params }).then((r) => r.data);
+
 // E3 — Employee
 export const getEmployeeReport = (userId, params) =>
   api.get(`/reports/employees/${userId}`, { params }).then((r) => r.data);

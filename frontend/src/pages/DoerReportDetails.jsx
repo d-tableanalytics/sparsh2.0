@@ -148,10 +148,10 @@ const DoerReportDetails = () => {
       </div>
 
       {/* Trends */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <div className="lg:col-span-2 bg-[var(--bg-card)] border border-[var(--border)] rounded-[28px] p-6 shadow-sm h-[320px] flex flex-col">
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
+        <div className="md:col-span-2 xl:col-span-2 bg-[var(--bg-card)] border border-[var(--border)] rounded-[28px] p-6 shadow-sm h-[320px] flex flex-col">
           <h3 className="text-lg font-black text-[var(--text-main)] uppercase italic tracking-tight mb-4">Monthly Score Trend</h3>
-          <div className="flex-1 min-h-0">
+          <div className="flex-1 min-h-0 min-w-0">
             <ResponsiveContainer width="100%" height="100%">
               <LineChart data={detail.trends || []}>
                 <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="var(--border)" opacity={0.3} />
@@ -168,7 +168,7 @@ const DoerReportDetails = () => {
 
         <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-[28px] p-6 shadow-sm h-[320px] flex flex-col">
           <h3 className="text-lg font-black text-[var(--text-main)] uppercase italic tracking-tight mb-4">Task Status</h3>
-          <div className="flex-1 min-h-0">
+          <div className="flex-1 min-h-0 min-w-0">
             <ResponsiveContainer width="100%" height="100%">
               <PieChart>
                 <Pie data={statusPie} innerRadius={55} outerRadius={90} paddingAngle={6} dataKey="value" stroke="none" animationDuration={1400}>

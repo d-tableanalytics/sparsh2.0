@@ -14,10 +14,13 @@ import {
 import { useAuth } from '../context/AuthContext';
 import { useNotification } from '../context/NotificationContext';
 import {
-  getEnterpriseOverview, getCompanyReport, getDoers, getCompanies, exportReport,
+  getEnterpriseOverview, getCompanyReport, getDoers, getCompanies, getLmsList, exportReport,
 } from '../services/reportApi';
 import CompanyPanel from '../components/reports/CompanyPanel';
+import LmsPanel from '../components/reports/LmsPanel';
+import LmsListPanel from '../components/reports/LmsListPanel';
 import FilterDropdown from '../components/reports/FilterDropdown';
+import { truncate } from '../components/reports/chartKit';
 
 const PERIODS = [
   { value: 'all_time', label: 'All Time' },
@@ -39,7 +42,7 @@ const ChartCard = ({ title, subtitle, children, className = '' }) => (
       <h3 className="text-lg font-black text-[var(--text-main)] uppercase italic tracking-tight">{title}</h3>
       {subtitle && <p className="text-[11px] text-[var(--text-muted)] font-bold uppercase tracking-wider opacity-60">{subtitle}</p>}
     </div>
-    <div className="flex-1 w-full min-h-0">{children}</div>
+    <div className="flex-1 w-full min-h-0 min-w-0">{children}</div>
   </div>
 );
 
@@ -68,6 +71,7 @@ const ReportsDashboard = () => {
   const { showError } = useNotification();
   const navigate = useNavigate();
 
+  const [viewMode, setViewMode] = useState('company'); // 'company' | 'lms'
   const [period, setPeriod] = useState('this_month');
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
@@ -82,6 +86,8 @@ const ReportsDashboard = () => {
   const [company, setCompany] = useState(null);
   const [companies, setCompanies] = useState([]);
   const [selectedCompanyId, setSelectedCompanyId] = useState('');
+  const [lmsList, setLmsList] = useState([]);
+  const [selectedLmsId, setSelectedLmsId] = useState('');
   const [doers, setDoers] = useState({ items: [], total: 0 });
   const [loading, setLoading] = useState(true);
   const [exporting, setExporting] = useState('');
@@ -106,12 +112,13 @@ const ReportsDashboard = () => {
   const baseParams = useMemo(() => {
     const p = { period };
     if (department) p.department = department;
+    if (selectedLmsId) p.lms = selectedLmsId;
     if (period === 'custom' && customStart && customEnd) {
       p.startDate = customStart;
       p.endDate = customEnd;
     }
     return p;
-  }, [period, department, customStart, customEnd]);
+  }, [period, department, selectedLmsId, customStart, customEnd]);
 
   const fetchTopLevel = useCallback(async () => {
     try {
@@ -151,6 +158,13 @@ const ReportsDashboard = () => {
   useEffect(() => {
     getCompanies({ limit: 500 }).then((r) => setCompanies(r.items || [])).catch(() => {});
   }, []);
+
+  // LMS (batch) list — cascades off the selected company; reset LMS when company changes
+  useEffect(() => {
+    setSelectedLmsId('');
+    const params = { limit: 500, ...(selectedCompanyId ? { company_id: selectedCompanyId } : {}) };
+    getLmsList(params).then((r) => setLmsList(r.items || [])).catch(() => setLmsList([]));
+  }, [selectedCompanyId]);
 
   const departments = company?.departments || [];
   const topPerformers = useMemo(
@@ -200,8 +214,35 @@ const ReportsDashboard = () => {
         <div>
           <h1 className="text-3xl font-black text-[var(--text-main)] tracking-tight">Reports & Analytics</h1>
           <p className="text-[14px] text-[var(--text-muted)] font-bold">Company and employee performance across all tasks.</p>
+          {/* Report type switch */}
+          <div className="inline-flex items-center gap-1 mt-3 bg-[var(--input-bg)] border border-[var(--border)] p-1 rounded-xl">
+            {[['company', 'Company Wise'], ['lms', 'LMS Wise']].map(([v, label]) => (
+              <button
+                key={v}
+                onClick={() => { setViewMode(v); if (v === 'company') setSelectedLmsId(''); }}
+                className={`px-4 py-2 rounded-lg text-[11px] font-black uppercase tracking-widest transition-all ${
+                  viewMode === v ? 'bg-[var(--accent-indigo)] text-white shadow-sm' : 'text-[var(--text-muted)] hover:text-[var(--text-main)]'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
         </div>
         <div className="flex flex-wrap items-center gap-2.5">
+          {/* LMS filter — only in LMS-wise mode (shown first, per spec) */}
+          {viewMode === 'lms' && (
+            <FilterDropdown
+              value={selectedLmsId}
+              onChange={setSelectedLmsId}
+              icon={Layers}
+              optionIcon={Layers}
+              searchable
+              placeholder="All LMS"
+              searchPlaceholder="Search LMS..."
+              options={[{ value: '', label: 'All LMS' }, ...lmsList.map((l) => ({ value: l.id, label: l.name, sublabel: l.companyCount === 1 ? l.company : undefined }))]}
+            />
+          )}
           <FilterDropdown
             value={selectedCompanyId}
             onChange={setSelectedCompanyId}
@@ -271,7 +312,19 @@ const ReportsDashboard = () => {
         </div>
       </div>
 
-      {selectedCompanyId ? (
+      {viewMode === 'lms' ? (
+        selectedLmsId ? (
+          <LmsPanel
+            batchId={selectedLmsId}
+            period={period}
+            startDate={customStart}
+            endDate={customEnd}
+            onOpenEmployee={(id) => navigate(`/admin/reports/employee/${id}`)}
+          />
+        ) : (
+          <LmsListPanel companyId={selectedCompanyId} onSelect={setSelectedLmsId} />
+        )
+      ) : selectedCompanyId ? (
         <CompanyPanel
           companyId={selectedCompanyId}
           period={period}
@@ -295,8 +348,8 @@ const ReportsDashboard = () => {
       </div>
 
       {/* Company charts */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <ChartCard title="Monthly Completion" subtitle="Assigned vs Completed" className="lg:col-span-2 h-[360px]">
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
+        <ChartCard title="Monthly Completion" subtitle="Assigned vs Completed" className="md:col-span-2 xl:col-span-2 h-[360px]">
           <ResponsiveContainer width="100%" height="100%">
             <AreaChart data={company?.monthly || []}>
               <defs>
@@ -333,12 +386,12 @@ const ReportsDashboard = () => {
         </ChartCard>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <ChartCard title="Department Comparison" subtitle="Completed vs Pending by department" className="lg:col-span-2 h-[340px]">
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
+        <ChartCard title="Department Comparison" subtitle="Completed vs Pending by department" className="md:col-span-2 xl:col-span-2 h-[340px]">
           <ResponsiveContainer width="100%" height="100%">
             <BarChart data={departments} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
               <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="var(--border)" opacity={0.3} />
-              <XAxis dataKey="name" tick={{ fontSize: 9, fill: 'var(--text-muted)', fontWeight: 800 }} interval={0} />
+              <XAxis dataKey="name" tick={{ fontSize: 9, fill: 'var(--text-muted)', fontWeight: 800 }} interval="preserveStartEnd" tickFormatter={(v) => truncate(v, 10)} />
               <YAxis tick={{ fontSize: 9, fill: 'var(--text-muted)' }} allowDecimals={false} />
               <Tooltip contentStyle={tooltipStyle} />
               <Legend iconType="circle" wrapperStyle={{ fontSize: '10px', fontWeight: 900, textTransform: 'uppercase' }} />
@@ -361,7 +414,7 @@ const ReportsDashboard = () => {
         </ChartCard>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         <ChartCard title="Company Growth Trend" subtitle="Cumulative tasks over time" className="h-[320px]">
           <ResponsiveContainer width="100%" height="100%">
             <LineChart data={company?.monthly || []}>
@@ -379,7 +432,7 @@ const ReportsDashboard = () => {
             <BarChart data={topPerformers} layout="vertical" margin={{ top: 4, right: 16, left: 8, bottom: 4 }}>
               <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="var(--border)" opacity={0.3} />
               <XAxis type="number" domain={[0, 100]} tick={{ fontSize: 9, fill: 'var(--text-muted)' }} />
-              <YAxis type="category" dataKey="name" width={70} tick={{ fontSize: 10, fill: 'var(--text-muted)', fontWeight: 800 }} />
+              <YAxis type="category" dataKey="name" width={90} tickFormatter={truncate} tick={{ fontSize: 10, fill: 'var(--text-muted)', fontWeight: 800 }} />
               <Tooltip contentStyle={tooltipStyle} cursor={{ fill: 'var(--input-bg)' }} />
               <Bar dataKey="score" fill="var(--accent-indigo)" radius={[0, 6, 6, 0]} animationDuration={1200} />
             </BarChart>
