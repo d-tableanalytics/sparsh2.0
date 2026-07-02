@@ -2,12 +2,22 @@ import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { X, Plus, Trash2, Bell, Mail, MessageSquare, Clock, CheckCircle } from 'lucide-react';
 
+// offset_minutes is what's actually persisted (see Reminder model in calendar_event.py);
+// offset_unit is UI-only (silently dropped by the backend's pydantic model on save) so a
+// reminder edited/reloaded later re-derives its display unit from offset_minutes via inferUnit.
+const UNIT_MINUTES = { Minutes: 1, Hours: 60, Days: 1440 };
+const inferUnit = (mins) => {
+    if (mins && mins % 1440 === 0) return 'Days';
+    if (mins && mins % 60 === 0) return 'Hours';
+    return 'Minutes';
+};
+
 const ReminderModal = ({ isOpen, onClose, reminders, onApply }) => {
     const [localReminders, setLocalReminders] = useState([]);
 
     useEffect(() => {
         if (isOpen) {
-            setLocalReminders(reminders || []);
+            setLocalReminders((reminders || []).map(r => ({ ...r, offset_unit: r.offset_unit || inferUnit(r.offset_minutes) })));
         }
     }, [isOpen, reminders]);
 
@@ -17,6 +27,7 @@ const ReminderModal = ({ isOpen, onClose, reminders, onApply }) => {
             reminder_type: 'both',
             timing_type: 'before',
             offset_minutes: 10,
+            offset_unit: 'Minutes',
             sent: false,
             parent_type: 'event' // will be set correctly on save
         }]);
@@ -97,17 +108,29 @@ const ReminderModal = ({ isOpen, onClose, reminders, onApply }) => {
                                     <label className="text-[10px] font-black text-gray-400 uppercase px-1">Offset (Time Amount)</label>
                                     <div className="flex flex-col gap-3">
                                         <div className="flex items-center gap-3">
-                                            <input type="number" value={r.offset_minutes} onChange={e => updateReminder(r.id, {offset_minutes: e.target.value})}
+                                            <input type="number" min="1"
+                                                value={Math.round(r.offset_minutes / UNIT_MINUTES[r.offset_unit || 'Minutes'])}
+                                                onChange={e => updateReminder(r.id, {offset_minutes: (parseInt(e.target.value) || 0) * UNIT_MINUTES[r.offset_unit || 'Minutes']})}
                                                 className="flex-1 px-4 py-2.5 border border-gray-200 rounded-xl text-sm font-bold outline-none"
                                                 style={{ backgroundColor: '#f3f4f6', color: '#1f2937' }} />
-                                            <span className="text-[10px] font-black text-gray-400 uppercase">Minutes</span>
+                                            <select value={r.offset_unit || 'Minutes'}
+                                                onChange={e => {
+                                                    const amount = Math.round(r.offset_minutes / UNIT_MINUTES[r.offset_unit || 'Minutes']);
+                                                    updateReminder(r.id, {offset_unit: e.target.value, offset_minutes: amount * UNIT_MINUTES[e.target.value]});
+                                                }}
+                                                className="px-3 py-2.5 border border-gray-200 rounded-xl text-[11px] font-black uppercase outline-none"
+                                                style={{ backgroundColor: '#f3f4f6', color: '#1f2937' }}>
+                                                <option value="Minutes">Minutes</option>
+                                                <option value="Hours">Hours</option>
+                                                <option value="Days">Days</option>
+                                            </select>
                                         </div>
                                         <div className="flex flex-wrap gap-2">
                                             {[
-                                                {l: '5m', v: 5}, {l: '15m', v: 15}, {l: '30m', v: 30}, 
-                                                {l: '1h', v: 60}, {l: '2h', v: 120}, {l: '1d', v: 1440}, {l: '2d', v: 2880}
+                                                {l: '5m', v: 5, unit: 'Minutes'}, {l: '15m', v: 15, unit: 'Minutes'}, {l: '30m', v: 30, unit: 'Minutes'},
+                                                {l: '1h', v: 60, unit: 'Hours'}, {l: '2h', v: 120, unit: 'Hours'}, {l: '1d', v: 1440, unit: 'Days'}, {l: '2d', v: 2880, unit: 'Days'}
                                             ].map(opt => (
-                                                <button key={opt.l} onClick={() => updateReminder(r.id, {offset_minutes: opt.v})}
+                                                <button key={opt.l} onClick={() => updateReminder(r.id, {offset_minutes: opt.v, offset_unit: opt.unit})}
                                                     className={`px-3 py-2 text-[10px] font-black rounded-lg border transition-all ${r.offset_minutes == opt.v ? 'bg-emerald-500 text-white border-emerald-500' : 'bg-gray-100 text-gray-400 border-gray-200 hover:border-emerald-200'}`}
                                                     style={r.offset_minutes == opt.v ? {} : { color: '#9ca3af', backgroundColor: '#f3f4f6' }}>
                                                     {opt.l}

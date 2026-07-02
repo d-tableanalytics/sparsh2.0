@@ -3,7 +3,7 @@ import { motion } from 'framer-motion';
 import {
   ListChecks, UserPlus, Filter as FilterIcon, Search, RefreshCw, Download,
   List as ListIcon, Table2, ArrowUpDown, Trash2, RotateCcw, MoreVertical,
-  Calendar as CalendarIcon, Pencil, X,
+  Calendar as CalendarIcon, Pencil, X, Info,
 } from 'lucide-react';
 import api from '../../services/api';
 import { getTasks, softDeleteTask, restoreTask, updateTaskStatus } from '../../services/taskApi';
@@ -13,6 +13,7 @@ import { getInitials, formatRelativeTime, formatFrequencyLabel, exportTasksToCsv
 import StatusSummaryCards from './StatusSummaryCards';
 import DateRangeFilter from './DateRangeFilter';
 import TaskFormModal from './TaskFormModal';
+import TaskDetailsModal from './TaskDetailsModal';
 
 const SORT_OPTIONS = [
   { key: 'end', label: 'Target Date' },
@@ -52,6 +53,7 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
   const [openMenuId, setOpenMenuId] = useState(null);
   const [modalOpen, setModalOpen] = useState(false);
   const [editingTask, setEditingTask] = useState(null);
+  const [detailsTaskId, setDetailsTaskId] = useState(null);
 
   const userMap = useMemo(() => {
     const m = {};
@@ -402,7 +404,7 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
                   {getInitials(userMap[task.assignedBy] || task.title)}
                 </div>
 
-                <div className="min-w-0 flex-1">
+                <div className="min-w-0 flex-1 cursor-pointer" onClick={() => setDetailsTaskId(task.id)}>
                   <p className="text-[11px] font-bold text-[var(--text-muted)] truncate">
                     {counterpartLabel} <span className="text-[13px] font-black text-[var(--text-main)] ml-1">{task.title}</span>
                   </p>
@@ -439,6 +441,9 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
                     {openMenuId === task.id && (
                       <div onClick={e => e.stopPropagation()}
                         className="absolute right-0 top-full mt-1 w-36 bg-[var(--bg-card)] border border-[var(--border)] rounded-xl shadow-xl z-20 overflow-hidden">
+                        <button onClick={() => { setDetailsTaskId(task.id); setOpenMenuId(null); }} className="w-full flex items-center gap-2 px-3 py-2.5 text-[11px] font-bold text-[var(--text-main)] hover:bg-[var(--input-bg)]">
+                          <Info size={13} /> Details
+                        </button>
                         {scope === 'deleted' ? (
                           <button onClick={() => handleRestore(task)} className="w-full flex items-center gap-2 px-3 py-2.5 text-[11px] font-bold text-[var(--accent-indigo)] hover:bg-[var(--input-bg)]">
                             <RotateCcw size={13} /> Restore
@@ -452,9 +457,7 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
                               <Trash2 size={13} /> Delete
                             </button>
                           </>
-                        ) : (
-                          <span className="block px-3 py-2.5 text-[10px] font-bold text-[var(--text-muted)]">No actions</span>
-                        )}
+                        ) : null}
                       </div>
                     )}
                   </div>
@@ -465,7 +468,8 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
         </div>
       )}
 
-      <TaskFormModal isOpen={modalOpen} onClose={() => setModalOpen(false)} task={editingTask} onSaved={fetchTasks} />
+      <TaskFormModal isOpen={modalOpen} onClose={() => setModalOpen(false)} task={editingTask} onSaved={fetchTasks} categories={categories} tags={tagOptions} />
+      <TaskDetailsModal isOpen={!!detailsTaskId} taskId={detailsTaskId} onClose={() => setDetailsTaskId(null)} onChanged={fetchTasks} />
     </div>
   );
 };

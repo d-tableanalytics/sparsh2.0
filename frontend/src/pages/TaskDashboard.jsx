@@ -8,6 +8,7 @@ import DateRangeFilter from '../components/tasks/DateRangeFilter';
 import TaskFormModal from '../components/tasks/TaskFormModal';
 import StatusSummaryCards from '../components/tasks/StatusSummaryCards';
 import StackedReportPanel from '../components/tasks/StackedReportPanel';
+import TaskDonutPanel from '../components/tasks/TaskDonutPanel';
 import { SUMMARY_CARD_ORDER, STATUS_CONFIG, CARD_KEY_TO_STATUS } from '../components/tasks/statusConfig';
 
 const ADMIN_ROLES = ['superadmin', 'admin', 'coach', 'staff'];
@@ -34,6 +35,13 @@ const TABS = [
 ];
 
 const emptyFilters = { assignedTo: '', category: '', tag: '', frequency: '' };
+
+// Dashboard view modes for the lower report section. The donut summary above the filters
+// stays visible in both; this toggle only switches the tabular report vs. the stacked bars.
+const VIEW_OPTIONS = [
+  { key: 'table', label: 'Table', icon: Table2 },
+  { key: 'barChart', label: 'Bar Chart', icon: BarChartIcon },
+];
 
 const TaskDashboard = () => {
   const { user } = useAuth();
@@ -62,6 +70,13 @@ const TaskDashboard = () => {
   const userMap = useMemo(() => {
     const m = {};
     users.forEach(u => { m[u._id] = u.full_name || u.email; });
+    return m;
+  }, [users]);
+
+  // Display-name → designation, used to render the role subtitle under each employee bar.
+  const designationByName = useMemo(() => {
+    const m = {};
+    users.forEach(u => { m[u.full_name || u.email] = u.designation || ''; });
     return m;
   }, [users]);
 
@@ -163,8 +178,13 @@ const TaskDashboard = () => {
   const [chartDelegatedTasks, setChartDelegatedTasks] = useState([]);
   const [chartLoading, setChartLoading] = useState(false);
 
+  // Bar and Line views both derive their series from the same fetched task lists; Pie uses
+  // dashboard.summary (already loaded on every fetch) and Table needs neither, so only pull
+  // the heavier all/delegated lists when a series-based view is actually showing.
+  const needsChartData = viewType === 'barChart' || viewType === 'lineChart';
+
   useEffect(() => {
-    if (viewType !== 'chart') return;
+    if (!needsChartData) return;
     let cancelled = false;
     setChartLoading(true);
     Promise.all([
@@ -178,7 +198,7 @@ const TaskDashboard = () => {
       .finally(() => { if (!cancelled) setChartLoading(false); });
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [viewType, queryParams, isAdminRole]);
+  }, [needsChartData, queryParams, isAdminRole]);
 
   const groupStacked = (tasks, labelFn) => {
     const map = new Map();
@@ -195,8 +215,10 @@ const TaskDashboard = () => {
 
   const employeeRows = useMemo(() => {
     const map = groupStacked(chartAllTasks, t => (t.assignedTo?.length ? (userMap[t.assignedTo[0]] || 'Unknown') : 'Myself'));
-    return Array.from(map.values()).sort((a, b) => b.total - a.total);
-  }, [chartAllTasks, userMap]);
+    return Array.from(map.values())
+      .map(r => ({ ...r, sub: designationByName[r.label] || '' }))
+      .sort((a, b) => b.total - a.total);
+  }, [chartAllTasks, userMap, designationByName]);
 
   const categoryRows = useMemo(() => {
     const map = groupStacked(chartAllTasks, t => t.category || 'Uncategorized');
@@ -233,8 +255,43 @@ const TaskDashboard = () => {
 
   const delegatedChartRows = useMemo(() => {
     const map = groupStacked(chartDelegatedTasks, t => (t.assignedTo?.length ? (userMap[t.assignedTo[0]] || 'Unknown') : 'Unassigned'));
-    return Array.from(map.values()).sort((a, b) => b.total - a.total);
-  }, [chartDelegatedTasks, userMap]);
+    return Array.from(map.values())
+      .map(r => ({ ...r, sub: designationByName[r.label] || '' }))
+      .sort((a, b) => b.total - a.total);
+  }, [chartDelegatedTasks, userMap, designationByName]);
+
+  // ─── Donut breakdowns (shown above the toggle in both views) ───
+  // Sourced from the same server-computed `dashboard.summary` the cards use, so the donut
+  // slices always agree with the summary card counts for the current period/filters.
+  const donutPanels = useMemo(() => {
+    const s = dashboard.summary || {};
+    const total = s.totalTasks || 0;
+    const completed = s.completed || 0;
+    return [
+      {
+        title: 'Overdue, Pending & In-Progress',
+        slices: [
+          { label: 'Overdue', value: s.overdue || 0, color: 'var(--accent-red)' },
+          { label: 'Pending', value: s.pending || 0, color: 'var(--accent-orange)' },
+          { label: 'In Progress', value: s.inProgress || 0, color: 'var(--accent-yellow)' },
+        ],
+      },
+      {
+        title: 'Completed & Not Completed',
+        slices: [
+          { label: 'Completed', value: completed, color: 'var(--accent-green)' },
+          { label: 'Not Completed', value: Math.max(0, total - completed), color: 'var(--accent-red)' },
+        ],
+      },
+      {
+        title: 'In-Time & Delayed',
+        slices: [
+          { label: 'In-Time', value: s.inTime || 0, color: 'var(--accent-green)' },
+          { label: 'Delayed', value: s.delayed || 0, color: 'var(--text-muted)' },
+        ],
+      },
+    ];
+  }, [dashboard.summary]);
 
   return (
     <div className="space-y-6 pb-24">
@@ -243,6 +300,10 @@ const TaskDashboard = () => {
           <h1 className="text-3xl font-black text-[var(--text-main)] tracking-tight">Task Dashboard</h1>
           <p className="text-[13px] text-[var(--text-muted)] font-bold">Organization task performance overview</p>
         </div>
+        <button onClick={() => setModalOpen(true)}
+          className="flex items-center gap-2 px-5 py-2.5 bg-[var(--accent-indigo)] text-white rounded-xl text-[11px] font-black uppercase tracking-widest shadow-sm hover:opacity-90 transition-all shrink-0">
+          <Plus size={16} /> Create Task
+        </button>
       </div>
 
       <DateRangeFilter
@@ -253,14 +314,23 @@ const TaskDashboard = () => {
         onCustomChange={(field, value) => (field === 'startDate' ? setStartDate(value) : setEndDate(value))}
       />
 
-      {/* ─── Summary Cards ─── */}
-      <StatusSummaryCards
-        cardOrder={SUMMARY_CARD_ORDER}
-        summary={dashboard.summary}
-        activeKey={activeCardKey}
-        onSelect={(key) => setActiveCardKey(prev => (prev === key ? null : key))}
-        columnsClass="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-4"
-      />
+      {/* ─── Summary Cards (hidden in Bar Chart view) ─── */}
+      {viewType !== 'barChart' && (
+        <StatusSummaryCards
+          cardOrder={SUMMARY_CARD_ORDER}
+          summary={dashboard.summary}
+          activeKey={activeCardKey}
+          onSelect={(key) => setActiveCardKey(prev => (prev === key ? null : key))}
+          columnsClass="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-4"
+        />
+      )}
+
+      {/* ─── Donut Breakdowns (Bar Chart view only) ─── */}
+      {viewType === 'barChart' && (
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
+          {donutPanels.map(p => <TaskDonutPanel key={p.title} title={p.title} slices={p.slices} />)}
+        </div>
+      )}
 
       {/* ─── Filters ─── */}
       <div className="flex flex-wrap items-center gap-3 bg-[var(--bg-card)] border border-[var(--border)] rounded-2xl p-4">
@@ -291,23 +361,29 @@ const TaskDashboard = () => {
         </select>
         {(search || filters.assignedTo || filters.category || filters.tag || filters.frequency || activeCardKey) && (
           <button onClick={clearFilters}
-            className="px-4 py-2.5 rounded-xl text-[11px] font-black uppercase tracking-widest text-[var(--text-muted)] border border-[var(--border)] hover:bg-[var(--input-bg)]">
+            className="ml-auto px-4 py-2.5 rounded-xl text-[11px] font-black uppercase tracking-widest text-[var(--text-muted)] border border-[var(--border)] hover:bg-[var(--input-bg)]">
             Clear
           </button>
         )}
+      </div>
 
-        <div className="ml-auto flex items-center gap-1 bg-[var(--input-bg)] border border-[var(--border)] p-1 rounded-xl">
-          <button onClick={() => setViewType('table')} className={`p-2 rounded-lg transition-all ${viewType === 'table' ? 'bg-[var(--accent-indigo)] text-white' : 'text-[var(--text-muted)]'}`}>
-            <Table2 size={16} />
-          </button>
-          <button onClick={() => setViewType('chart')} className={`p-2 rounded-lg transition-all ${viewType === 'chart' ? 'bg-[var(--accent-indigo)] text-white' : 'text-[var(--text-muted)]'}`}>
-            <BarChartIcon size={16} />
-          </button>
+      {/* ─── View Toggle (Table / Bar Chart — one visible at a time) ─── */}
+      <div className="flex justify-center">
+        <div className="flex items-center gap-1 bg-[var(--input-bg)] border border-[var(--border)] p-1 rounded-xl">
+          {VIEW_OPTIONS.map(v => {
+            const Icon = v.icon;
+            return (
+              <button key={v.key} onClick={() => setViewType(v.key)}
+                className={`flex items-center gap-2 px-5 py-2 rounded-lg text-[11px] font-black uppercase tracking-widest transition-all ${viewType === v.key ? 'bg-[var(--accent-green)] text-white shadow-sm' : 'text-[var(--text-muted)] hover:text-[var(--text-main)]'}`}>
+                <Icon size={15} /> {v.label}
+              </button>
+            );
+          })}
         </div>
       </div>
 
-      {viewType === 'chart' ? (
-        /* ─── Bar Chart view: one stacked-bar panel per report, all shown together ─── */
+      {/* ─── Bar Chart view: one stacked-bar panel per report ─── */}
+      {viewType === 'barChart' && (
         chartLoading ? (
           <div className="p-16 text-center text-[var(--text-muted)] text-[12px] font-bold bg-[var(--bg-card)] border border-[var(--border)] rounded-[28px]">Loading reports...</div>
         ) : (
@@ -319,7 +395,10 @@ const TaskDashboard = () => {
             <StackedReportPanel title="Delegated Tasks Report" axisLabel="Assigned To" rows={delegatedChartRows} />
           </div>
         )
-      ) : (
+      )}
+
+      {/* ─── Table view ─── */}
+      {viewType === 'table' && (
         <>
           {/* ─── Tabs ─── */}
           <div className="flex flex-wrap bg-[var(--bg-card)] border border-[var(--border)] p-1 rounded-xl shadow-sm gap-1">
@@ -431,11 +510,7 @@ const TaskDashboard = () => {
         </>
       )}
 
-      <button onClick={() => setModalOpen(true)}
-        className="fixed bottom-8 right-8 w-14 h-14 rounded-full bg-[var(--accent-indigo)] text-white flex items-center justify-center shadow-2xl hover:scale-110 active:scale-95 transition-all z-40">
-        <Plus size={24} />
-      </button>
-      <TaskFormModal isOpen={modalOpen} onClose={() => setModalOpen(false)} onSaved={fetchAll} />
+      <TaskFormModal isOpen={modalOpen} onClose={() => setModalOpen(false)} onSaved={fetchAll} categories={categories} tags={tags} />
     </div>
   );
 };
