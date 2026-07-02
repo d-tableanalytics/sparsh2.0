@@ -59,6 +59,7 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen }) => {
         { name: 'Deleted Tasks', path: '/tasks/deleted', icon: Trash2 },
       ],
     },
+    { name: 'Reports', path: '/admin/reports', icon: BarChart3, roles: ['superadmin', 'admin'] },
     { name: 'Company Settings', path: '/settings', icon: Settings, roles: ['clientadmin'] },
     { name: 'Support Engine', path: '/gpt', icon: Sparkles, roles: ['superadmin', 'admin', 'clientadmin', 'clientuser', 'coach', 'staff'] },
     { name: 'Media Library', path: '/media', icon: Library, roles: ['superadmin', 'admin', 'coach', 'staff'] },

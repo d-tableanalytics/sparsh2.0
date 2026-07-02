@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { lazy, Suspense } from 'react';
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider } from './context/AuthContext';
 import { ThemeProvider } from './context/ThemeContext';
@@ -48,10 +48,21 @@ import './index.css';
 import { useAuth } from './context/AuthContext';
 import { UploadProvider } from './context/UploadContext';
 
+// Admin Reports & Analytics module (superadmin only) — lazy-loaded to keep it out
+// of the main bundle since it pulls in extra recharts chart types.
+const ReportsDashboard = lazy(() => import('./pages/ReportsDashboard'));
+const DoerReportDetails = lazy(() => import('./pages/DoerReportDetails'));
+const EmployeeReport = lazy(() => import('./pages/EmployeeReport'));
+
+const RouteFallback = () => (
+  <div className="py-20 text-center text-[13px] font-bold text-[var(--text-muted)]">Loading…</div>
+);
+
 const AppRoutes = () => {
   const { user } = useAuth();
 
   return (
+    <Suspense fallback={<RouteFallback />}>
     <Routes>
       <Route path="/login" element={user ? <Navigate to="/" /> : <Login />} />
       <Route path="/forgot-password" element={<ForgotPassword />} />
@@ -90,6 +101,11 @@ const AppRoutes = () => {
       {/* Admin Side: Staff Management */}
       <Route path="/admin/users" element={<PrivateRoute><UserManagement /></PrivateRoute>} />
       <Route path="/admin/users/:userId" element={<PrivateRoute><UserDetails /></PrivateRoute>} />
+
+      {/* Admin Reports & Analytics (superadmin only; guarded inside the pages too) */}
+      <Route path="/admin/reports" element={<PrivateRoute><ReportsDashboard /></PrivateRoute>} />
+      <Route path="/admin/reports/employee/:userId" element={<PrivateRoute><EmployeeReport /></PrivateRoute>} />
+      <Route path="/admin/reports/:doerId" element={<PrivateRoute><DoerReportDetails /></PrivateRoute>} />
       <Route path="/admin/settings" element={<Navigate to="/settings" />} />
       <Route path="/settings" element={<PrivateRoute><SettingsPage /></PrivateRoute>} />
       <Route path="/profile" element={<PrivateRoute><ProfilePage /></PrivateRoute>} />
@@ -108,6 +124,7 @@ const AppRoutes = () => {
       {/* Catch-all */}
       <Route path="*" element={<Navigate to={user ? "/" : "/login"} />} />
     </Routes>
+    </Suspense>
   );
 };
 
