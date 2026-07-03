@@ -222,33 +222,42 @@ async def validate_conflict(event_data: dict, current_user: dict = Depends(get_c
 
 @router.post("", response_model=dict)
 async def create_event(event: CalendarEventCreate, background_tasks: BackgroundTasks, current_user: dict = Depends(get_current_user)):
+    event_dict = event.model_dump()
+
     # ─── Permission Check ───
     user_role = current_user.get("role", "").lower()
     has_create_perm = current_user.get("permissions", {}).get("calendar", {}).get("create")
-    
-    if user_role != "superadmin":
-        # Allow Client Users (Learners) and Client Admins to create events
-        # Staff roles (admin, coach, staff) still require the explicit permission bit
-        if not has_create_perm and user_role not in ["clientuser", "clientadmin"]:
-            raise HTTPException(status_code=403, detail="Not authorized to create events")
 
-    event_dict = event.model_dump()
-
-    # Task Management is internal-Sparsh-only: block client-side users from creating tasks
-    # via this shared endpoint, while leaving normal calendar/session event creation intact.
     if event_dict.get("type") == "task":
+        # Task & Delegation is internal-Sparsh-only, but ANY internal Sparsh user may create
+        # and assign tasks — the generic `calendar.create` permission bit is NOT required here.
+        # (A staff/coach/SMO/member without that bit was previously getting "Not authorized to
+        # create events" when hitting Assign Task.) Client-side users stay blocked.
         if not is_internal_user(current_user):
             raise HTTPException(status_code=403, detail=TASK_ACCESS_DENIED_MESSAGE)
         # Assignees and In-Loop/watchers must all be internal Sparsh users.
         bad = await get_non_internal_user_ids((event_dict.get("target_staff_id") or []) + (event_dict.get("watchers") or []))
         if bad:
             raise HTTPException(status_code=403, detail=TASK_RECIPIENT_DENIED_MESSAGE)
+    elif user_role != "superadmin":
+        # Non-task calendar / session events keep the original permission model.
+        # Allow Client Users (Learners) and Client Admins to create events;
+        # staff roles (admin, coach, staff) still require the explicit permission bit.
+        if not has_create_perm and user_role not in ["clientuser", "clientadmin"]:
+            raise HTTPException(status_code=403, detail="Not authorized to create events")
 
     # Backdate validation logic... (omitted summary for brevity, keeping existing code)
     # [STRICT BACKDATE VALIDATION CODE REMAINS UNCHANGED]
     try:
+        now = datetime.utcnow()
         event_start = datetime.fromisoformat(event_dict["start"].replace("Z", "+00:00")).replace(tzinfo=None)
-        if event_start < datetime.utcnow():
+        # A task's `start` is a creation / recurrence-anchor reference stamped at "now", not a
+        # scheduled calendar slot. Comparing it to the exact submit-time `utcnow()` falsely
+        # flags every task as backdated (the stamp is always a few seconds old by the time it
+        # reaches here). So for tasks, only block genuinely past DATES (yesterday or earlier);
+        # calendar / session events keep the strict timestamp check.
+        is_backdated = (event_start.date() < now.date()) if event_dict.get("type") == "task" else (event_start < now)
+        if is_backdated:
             settings_col = get_collection("system_settings")
             settings = await settings_col.find_one({"setting_name": "backdate_control"})
             allow = False

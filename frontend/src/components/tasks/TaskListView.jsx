@@ -45,6 +45,15 @@ const TaskRow = ({
         <p className="text-[11px] font-bold text-[var(--text-muted)] truncate">
           {counterpartLabel} <span className="text-[13px] font-black text-[var(--text-main)] ml-1">{task.title}</span>
         </p>
+        {(task.tags || []).length > 0 && (
+          <div className="mt-1 flex flex-wrap gap-1">
+            {task.tags.map(tag => (
+              <span key={tag} className="px-2 py-0.5 rounded-full text-[8px] font-black uppercase tracking-wider bg-[var(--accent-green-bg)] text-[var(--accent-green)] border border-[var(--accent-green-border)]">
+                {tag}
+              </span>
+            ))}
+          </div>
+        )}
       </div>
 
       <div className="flex items-center gap-2 shrink-0 flex-wrap justify-end">

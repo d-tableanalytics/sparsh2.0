@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   ArrowLeft, Trash2, Pencil, FileText, History, Info, Users, Layers, Plus,
-  Paperclip, MessageSquare, Send, CheckSquare, Square, X,
+  Paperclip, MessageSquare, Send, CheckSquare, Square, X, Tags as TagsIcon,
 } from 'lucide-react';
 import api from '../../services/api';
 import {
@@ -257,6 +257,22 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, onChanged, onEdit }) => {
                     <div><p className="text-[9px] font-black text-[var(--text-muted)] uppercase">Evidence</p><p className="font-bold text-[var(--text-main)]">{task.evidenceRequired ? 'Required' : 'Optional'}</p></div>
                     <div><p className="text-[9px] font-black text-[var(--text-muted)] uppercase">Verification</p><p className="font-bold text-[var(--text-main)]">{task.verificationRequired ? 'Required' : 'Not Required'}</p></div>
                   </div>
+                  {/* Tags — mirrors the green pill style used in the task form; shows every tag
+                      saved on the task (persists across refresh since it reads task.tags). */}
+                  <div>
+                    <p className="text-[9px] font-black text-[var(--text-muted)] uppercase mb-1.5">Tags</p>
+                    {(task.tags || []).length > 0 ? (
+                      <div className="flex flex-wrap gap-1.5">
+                        {task.tags.map(tag => (
+                          <span key={tag} className="flex items-center gap-1 px-2.5 py-1 rounded-full text-[9px] font-black uppercase tracking-wider bg-[var(--accent-green)] text-white border border-[var(--accent-green)]">
+                            <TagsIcon size={10} /> {tag}
+                          </span>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="text-[12px] font-bold text-[var(--text-main)]">—</p>
+                    )}
+                  </div>
                 </div>
 
                 {/* Involved Parties */}
@@ -302,11 +318,23 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, onChanged, onEdit }) => {
 
               {/* Check Points (checklist) */}
               <div className="bg-[var(--input-bg)] border border-[var(--border)] rounded-2xl p-4">
-                <p className="flex items-center gap-1.5 text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest mb-3">
-                  <CheckSquare size={13} /> Check Points ({checklistDone}/{checklistTotal})
-                </p>
+                <div className="flex items-center justify-between mb-3">
+                  <p className="flex items-center gap-1.5 text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest">
+                    <CheckSquare size={13} /> Check Points ({checklistDone}/{checklistTotal})
+                  </p>
+                  {checklistTotal > 0 && (
+                    <span className="text-[10px] font-black text-[var(--accent-indigo)]">{Math.round((checklistDone / checklistTotal) * 100)}%</span>
+                  )}
+                </div>
+                {checklistTotal > 0 && (
+                  <div className="h-1.5 w-full rounded-full bg-[var(--bg-card)] overflow-hidden mb-3">
+                    <div className="h-full rounded-full bg-[var(--accent-indigo)] transition-all duration-300"
+                      style={{ width: `${(checklistDone / checklistTotal) * 100}%` }} />
+                  </div>
+                )}
                 {checklistTotal === 0 ? (
-                  <div className="py-6 flex flex-col items-center justify-center border-2 border-dashed border-[var(--border)] rounded-xl gap-2">
+                  <div className="py-6 flex flex-col items-center justify-center border-2 border-dashed border-[var(--border)] rounded-xl gap-2 mb-3">
+                    <CheckSquare size={24} className="text-[var(--text-muted)] opacity-30" />
                     <p className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest opacity-70">No check points yet</p>
                   </div>
                 ) : (
@@ -327,7 +355,8 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, onChanged, onEdit }) => {
                     onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); handleAddSubtask(); } }}
                     placeholder="Add a check point..."
                     className="flex-1 px-3 py-2 bg-[var(--bg-card)] border border-[var(--border)] rounded-lg text-[12px] font-bold outline-none focus:border-[var(--accent-indigo)]" />
-                  <button type="button" onClick={handleAddSubtask} className="p-2 bg-[var(--accent-indigo)] text-white rounded-lg"><Plus size={15} /></button>
+                  <button type="button" onClick={handleAddSubtask} disabled={!newSubtask.trim()}
+                    className="p-2 bg-[var(--accent-indigo)] text-white rounded-lg disabled:opacity-40 disabled:cursor-not-allowed"><Plus size={15} /></button>
                 </div>
               </div>
 
@@ -337,17 +366,17 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, onChanged, onEdit }) => {
                   <p className="flex items-center gap-1.5 text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest">
                     <Layers size={13} /> Subtasks ({(task.subtasks || []).length})
                   </p>
-                  {canManage && (
-                    <button type="button" onClick={() => setSubtaskFormOpen(true)}
-                      className="flex items-center gap-1.5 px-3 py-1.5 bg-[var(--accent-indigo)] text-white rounded-lg text-[10px] font-black uppercase tracking-widest">
-                      <Plus size={13} /> Add Subtask
-                    </button>
-                  )}
+                  <button type="button" onClick={() => setSubtaskFormOpen(true)}
+                    className="flex items-center gap-1.5 px-3 py-1.5 bg-[var(--accent-indigo)] text-white rounded-lg text-[10px] font-black uppercase tracking-widest">
+                    <Plus size={13} /> Add Subtask
+                  </button>
                 </div>
                 {(task.subtasks || []).length === 0 ? (
-                  <div className="py-6 flex flex-col items-center justify-center border-2 border-dashed border-[var(--border)] rounded-xl">
-                    <p className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest opacity-70">No subtasks yet</p>
-                  </div>
+                  <button type="button" onClick={() => setSubtaskFormOpen(true)}
+                    className="w-full py-6 flex flex-col items-center justify-center border-2 border-dashed border-[var(--border)] rounded-xl gap-2 hover:border-[var(--accent-indigo)] transition-colors">
+                    <Layers size={24} className="text-[var(--text-muted)] opacity-30" />
+                    <p className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest opacity-70">No subtasks yet — tap to add</p>
+                  </button>
                 ) : (
                   <div className="space-y-1.5">
                     {task.subtasks.map(st => {
@@ -425,6 +454,27 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, onChanged, onEdit }) => {
                     className="flex-1 px-3 py-2 bg-[var(--bg-card)] border border-[var(--border)] rounded-lg text-[12px] font-bold outline-none focus:border-[var(--accent-indigo)]" />
                   <button type="button" onClick={handleAddComment} disabled={posting} className="p-2 bg-[var(--accent-indigo)] text-white rounded-lg disabled:opacity-60"><Send size={15} /></button>
                 </div>
+              </div>
+
+              {/* Bottom action area — Cancel just closes the view (no save/delete); Edit/Delete
+                  mirror the header actions for managers so the primary actions sit together. */}
+              <div className="flex items-center justify-between gap-3 pt-1">
+                <button type="button" onClick={onClose}
+                  className="flex items-center gap-1.5 px-5 py-2.5 rounded-xl text-[10px] font-black uppercase tracking-widest border bg-[var(--input-bg)] text-[var(--text-muted)] border-[var(--border)] hover:text-[var(--text-main)] transition-colors">
+                  <X size={13} /> Cancel
+                </button>
+                {canManage && (
+                  <div className="flex items-center gap-2">
+                    <button type="button" onClick={() => onEdit?.(task)}
+                      className="flex items-center gap-1.5 px-4 py-2.5 rounded-xl text-[10px] font-black uppercase tracking-wider border bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] border-[var(--accent-indigo-border)] hover:opacity-90">
+                      <Pencil size={13} /> Edit Task
+                    </button>
+                    <button type="button" onClick={handleDelete}
+                      className="flex items-center gap-1.5 px-4 py-2.5 rounded-xl text-[10px] font-black uppercase tracking-wider border bg-[var(--accent-red-bg)] text-[var(--accent-red)] border-[var(--accent-red-border)] hover:opacity-90">
+                      <Trash2 size={13} /> Delete Task
+                    </button>
+                  </div>
+                )}
               </div>
             </div>
           )}

@@ -800,8 +800,12 @@ const TaskFormModal = ({ isOpen, onClose, onSaved, task = null, categories = [],
       <MiniDatePicker isOpen={startDatePickerOpen} onClose={() => setStartDatePickerOpen(false)}
         value={form.start} title="Repeat Start Date" onApply={(iso) => setForm(f => ({ ...f, start: iso }))}
         holidayDates={holidayDates} weeklyOffs={WEEKLY_OFFS} onBlocked={showError} />
+      {/* Repeat End Date: holidays are marked (indicator + label) but still selectable —
+          the end date is only the series boundary; the recurring engine skips holiday
+          occurrences within the range. */}
       <MiniDatePicker isOpen={repeatEndPickerOpen} onClose={() => setRepeatEndPickerOpen(false)}
-        value={form.repeat_end_date} title="Repeat End Date" onApply={(iso) => setForm(f => ({ ...f, repeat_end_date: iso }))} />
+        value={form.repeat_end_date} title="Repeat End Date" onApply={(iso) => setForm(f => ({ ...f, repeat_end_date: iso }))}
+        holidayDates={holidayDates} weeklyOffs={WEEKLY_OFFS} onBlocked={showError} />
       <ReminderModal isOpen={reminderModalOpen} onClose={() => setReminderModalOpen(false)}
         reminders={form.reminders} onApply={(reminders) => setForm(f => ({ ...f, reminders: reminders.map(r => ({ ...r, parent_type: 'task' })) }))} />
       <ReferenceLinksModal
