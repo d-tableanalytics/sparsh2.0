@@ -57,7 +57,7 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen }) => {
         { name: 'Subscribed Tasks', path: '/tasks/subscribed', icon: Bell },
         { name: 'All Tasks', path: '/tasks/all', icon: Layers },
         { name: 'Groups', path: '/tasks/groups', icon: UsersRound },
-        { name: 'Holiday', path: '/tasks/holiday', icon: CalendarDays },
+        { name: 'Holiday', path: '/tasks/holiday', icon: CalendarDays, roles: ['superadmin', 'admin'] },
         { name: 'Activity', path: '/tasks/activity', icon: Activity },
         { name: 'Deleted Tasks', path: '/tasks/deleted', icon: Trash2 },
       ],
@@ -174,7 +174,7 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen }) => {
                       exit={{ height: 0, opacity: 0 }}
                       className="overflow-hidden pl-4 space-y-1 mt-1"
                     >
-                      {link.submodules.map((sub) => (
+                      {link.submodules.filter((sub) => !sub.roles || sub.roles.includes(user?.role)).map((sub) => (
                         <NavLink
                           key={sub.path}
                           to={sub.path}

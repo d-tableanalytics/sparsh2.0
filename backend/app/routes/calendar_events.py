@@ -288,6 +288,11 @@ async def create_event(event: CalendarEventCreate, background_tasks: BackgroundT
     if repeat_type != "Does not repeat" and end_date_str:
         # Generate a unique series ID to group these occurrences
         event_dict["recurring_group_id"] = str(ObjectId())
+
+    # Recurring TASKS create only the FIRST occurrence here; a nightly job rolls the series
+    # forward one occurrence at a time (see recurring_task_service.generate_due_recurring_tasks),
+    # so we never bulk-create duplicate tasks. Events keep the original bulk-generation below.
+    if repeat_type != "Does not repeat" and end_date_str and event_dict.get("type") != "task":
         try:
             # Standardize Start Date
             raw_start = event_dict["start"].replace("Z", "+00:00")
