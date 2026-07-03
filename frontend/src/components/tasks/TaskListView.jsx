@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback, useMemo } from 'react';
+import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { motion } from 'framer-motion';
 import {
   ListChecks, UserPlus, Filter as FilterIcon, Search, RefreshCw, Download,
@@ -8,6 +8,8 @@ import {
 import api from '../../services/api';
 import { getTasks, softDeleteTask, restoreTask, updateTaskStatus } from '../../services/taskApi';
 import { getTaskCategories, getTaskTags } from '../../services/taskMetaApi';
+import { openTaskEventStream } from '../../services/taskEventsApi';
+import { useAuth } from '../../context/AuthContext';
 import { useNotification } from '../../context/NotificationContext';
 import { STATUS_CONFIG, LIST_CARD_ORDER, CARD_KEY_TO_STATUS, PRIORITY_CONFIG, WORKFLOW_STATUSES } from './statusConfig';
 import { getInitials, formatRelativeTime, formatFrequencyLabel, exportTasksToCsv, groupTasksByRecurrence } from './taskDisplayUtils';
@@ -22,7 +24,7 @@ import TaskDetailsModal from './TaskDetailsModal';
 // once that series is expanded.
 const TaskRow = ({
   task, scope, userMap, checked, onToggleSelect, onOpenDetails, onStatusChange,
-  isMenuOpen, onToggleMenu, onEdit, onDelete, onRestore, indent, groupBadge,
+  isMenuOpen, onToggleMenu, onEdit, onDelete, onRestore, indent, groupBadge, statusPending,
 }) => {
   const cfg = STATUS_CONFIG[task.status] || STATUS_CONFIG.pending;
   const priorityCfg = PRIORITY_CONFIG[task.priority] || PRIORITY_CONFIG.Normal;
@@ -50,8 +52,8 @@ const TaskRow = ({
         {scope === 'deleted' ? (
           <span className="px-3 py-1 rounded-full text-[9px] font-black uppercase tracking-wider border" style={{ background: cfg.bg, color: cfg.color, borderColor: cfg.border }}>{cfg.label}</span>
         ) : (
-          <select value={task.status} onChange={e => onStatusChange(e.target.value)} onClick={e => e.stopPropagation()}
-            className="px-3 py-1 rounded-full text-[9px] font-black uppercase tracking-wider border outline-none cursor-pointer"
+          <select value={task.status} onChange={e => onStatusChange(e.target.value)} onClick={e => e.stopPropagation()} disabled={statusPending}
+            className="px-3 py-1 rounded-full text-[9px] font-black uppercase tracking-wider border outline-none cursor-pointer disabled:opacity-60 disabled:cursor-wait"
             style={{ background: cfg.bg, color: cfg.color, borderColor: cfg.border }}>
             {WORKFLOW_STATUSES.map(s => <option key={s} value={s}>{STATUS_CONFIG[s].label}</option>)}
           </select>
@@ -115,6 +117,7 @@ const TAB_KEYS = ['all', 'overdue', ...WORKFLOW_STATUSES];
 // reference "My Tasks" screenshot: dot-style summary cards, toolbar, scrollable status
 // tabs, and avatar/badge row cards.
 const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = true, groupId = null, embedded = false }) => {
+  const { user } = useAuth();
   const { showSuccess, showError } = useNotification();
   const [tasks, setTasks] = useState([]);
   const [users, setUsers] = useState([]);
@@ -142,6 +145,7 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
   const [editingTask, setEditingTask] = useState(null);
   const [detailsTaskId, setDetailsTaskId] = useState(null);
   const [expandedGroups, setExpandedGroups] = useState(new Set());
+  const [completing, setCompleting] = useState(new Set()); // task ids with an in-flight status change
 
   const userMap = useMemo(() => {
     const m = {};
@@ -190,12 +194,38 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
   }, []);
 
   useEffect(() => {
-    api.get('/users?active_only=true').then(res => setUsers(res.data || [])).catch(() => {});
+    api.get('/tasks/assignable-users').then(res => setUsers(res.data || [])).catch(() => {});
   }, []);
 
   useEffect(() => { fetchTasks(); }, [fetchTasks]);
   useEffect(() => { fetchTaxonomy(); }, [fetchTaxonomy]);
   useEffect(() => { setSelected(new Set()); }, [scope, statusFilter]);
+
+  // ─── Real-time: refetch (debounced) when a task involving me changes elsewhere ───
+  // The server (SSE) is the source of truth, so a debounced refetch keeps the current tab
+  // correct without fragile client-side list merging (no dupes; tasks that left this
+  // tab drop off). Keep fetchTasks in a ref so the stream isn't reopened on every filter change.
+  const fetchTasksRef = useRef(fetchTasks);
+  useEffect(() => { fetchTasksRef.current = fetchTasks; }, [fetchTasks]);
+  const currentUserId = user?._id || user?.id;
+  useEffect(() => {
+    let debounce = null;
+    const TOASTS = {
+      task_created: 'New task assigned',
+      task_assigned: 'New task assigned',
+      task_completed: 'A task was completed',
+      task_deleted: 'A task was removed',
+    };
+    const cleanup = openTaskEventStream((type, data) => {
+      if (debounce) clearTimeout(debounce);
+      debounce = setTimeout(() => fetchTasksRef.current?.(), 300);
+      // Don't toast the user for their own action (they already see the optimistic update).
+      const isSelf = data?.actor_id && currentUserId && String(data.actor_id) === String(currentUserId);
+      if (!isSelf && TOASTS[type]) showSuccess(TOASTS[type]);
+    });
+    return () => { if (debounce) clearTimeout(debounce); cleanup(); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentUserId]);
 
   const summary = useMemo(() => {
     const s = { totalTasks: tasks.length, overdue: 0, pending: 0, accepted: 0, dependentOnOthers: 0, blocked: 0, inProgress: 0, verification: 0, completed: 0 };
@@ -288,11 +318,24 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
   };
 
   const handleStatusChange = async (task, status) => {
+    if (completing.has(task.id)) return; // guard against double-click / duplicate requests
+    const prevStatus = task.status;
+    // Optimistic: reflect the new status immediately, mark in-flight.
+    setCompleting(prev => new Set(prev).add(task.id));
+    setTasks(ts => ts.map(t => (t.id === task.id ? { ...t, status } : t)));
     try {
       await updateTaskStatus(task.id, status);
-      fetchTasks();
+      fetchTasks(); // reconcile with server (also picked up via SSE for other users)
     } catch (err) {
+      // Revert optimistic change on failure.
+      setTasks(ts => ts.map(t => (t.id === task.id ? { ...t, status: prevStatus } : t)));
       showError(err.response?.data?.detail || 'Failed to update status');
+    } finally {
+      setCompleting(prev => {
+        const next = new Set(prev);
+        next.delete(task.id);
+        return next;
+      });
     }
   };
 
@@ -502,8 +545,8 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
                       {scope === 'deleted' ? (
                         <span className="px-3 py-1.5 rounded-lg text-[10px] font-black border" style={{ background: cfg.bg, color: cfg.color, borderColor: cfg.border }}>{cfg.label}</span>
                       ) : (
-                        <select value={task.status} onChange={e => handleStatusChange(task, e.target.value)}
-                          className="px-3 py-1.5 rounded-lg text-[10px] font-black border outline-none cursor-pointer"
+                        <select value={task.status} onChange={e => handleStatusChange(task, e.target.value)} disabled={completing.has(task.id)}
+                          className="px-3 py-1.5 rounded-lg text-[10px] font-black border outline-none cursor-pointer disabled:opacity-60 disabled:cursor-wait"
                           style={{ background: cfg.bg, color: cfg.color, borderColor: cfg.border }}>
                           {WORKFLOW_STATUSES.map(s => <option key={s} value={s}>{STATUS_CONFIG[s].label}</option>)}
                         </select>
@@ -535,6 +578,7 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
             const isExpanded = expandedGroups.has(group.key);
             const rowProps = (task, { indent = false } = {}) => ({
               task, scope, userMap, indent,
+              statusPending: completing.has(task.id),
               checked: selected.has(task.id),
               onToggleSelect: () => toggleSelect(task.id),
               onOpenDetails: () => setDetailsTaskId(task.id),

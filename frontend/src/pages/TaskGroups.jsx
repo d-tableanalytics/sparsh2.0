@@ -35,7 +35,9 @@ const TaskGroups = () => {
 
   useEffect(() => { fetchGroups(); }, [fetchGroups]);
   useEffect(() => {
-    api.get('/users?active_only=true').then(res => setUsers(res.data || [])).catch(() => {});
+    // Groups are part of the internal-only Task module — member/assignee pickers list only
+    // internal Sparsh users (client-side users never appear). See /tasks/assignable-users.
+    api.get('/tasks/assignable-users').then(res => setUsers(res.data || [])).catch(() => {});
   }, []);
 
   const userMap = useMemo(() => {

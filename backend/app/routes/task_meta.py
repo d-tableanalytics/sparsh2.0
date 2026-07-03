@@ -7,13 +7,17 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from pydantic import BaseModel
 
-from app.controllers.auth_controller import get_current_user
+from app.controllers.auth_controller import get_current_user, require_task_access, is_internal_user
 from app.db.mongodb import get_collection
 from app.models.task_meta import NameCreate
 
-router = APIRouter(tags=["Task Metadata"])
+# Categories/Tags are Task Management settings -> internal-Sparsh-only. `sync_task_meta`
+# (imported by calendar_events on task save) calls the helpers directly, not the routes,
+# so it is unaffected by this router-level gate.
+router = APIRouter(tags=["Task Metadata"], dependencies=[Depends(require_task_access)])
 
-MANAGE_ROLES = ["superadmin", "admin", "coach", "staff", "clientadmin"]
+# Managing (create/edit/delete) categories & tags additionally requires an internal admin.
+MANAGE_ROLES = ["superadmin", "admin", "coach", "staff"]
 
 
 class NameUpdate(BaseModel):

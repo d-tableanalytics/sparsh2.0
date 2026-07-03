@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import api from '../services/api';
 import { useAuth } from '../context/AuthContext';
 import { useNotification } from '../context/NotificationContext';
+import { canAccessTaskManagement, canManageTaskSettings } from '../utils/taskAccess';
 import { ShieldCheck, Plus, Trash2, Mail, Save, ToggleLeft as ToggleOff, ToggleRight as ToggleOn, Search, Info, UserCircle2, FolderTree, Tag } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import GeneralSection from '../components/settings/GeneralSection';
@@ -34,7 +35,9 @@ const SettingsPage = () => {
     const canUpdateTemplates = user?.role === 'superadmin' || user?.role === 'clientadmin' || user?.permissions?.templates?.update;
     const canDeleteTemplates = user?.role === 'superadmin' || user?.role === 'clientadmin' || user?.permissions?.templates?.delete;
     const canReadCompanies = user?.role === 'superadmin' || user?.permissions?.companies?.read;
-    const canManageMeta = ['superadmin', 'admin', 'coach', 'staff', 'clientadmin'].includes((user?.role || '').toLowerCase());
+    // Task settings (categories/tags) are internal-Sparsh-only, matching the module gate.
+    const canAccessTasks = canAccessTaskManagement(user);
+    const canManageMeta = canManageTaskSettings(user);
     const isSuperadmin = user?.role === 'superadmin';
 
     // Left-sidebar sections (role/permission filtered)
@@ -42,8 +45,8 @@ const SettingsPage = () => {
         { key: 'general', label: 'General', icon: UserCircle2, visible: true },
         { key: 'notifications', label: 'Notifications', icon: Mail, visible: canReadTemplates },
         { key: 'security', label: 'Security', icon: ShieldCheck, visible: true },
-        { key: 'categories', label: 'Categories', icon: FolderTree, visible: true },
-        { key: 'tags', label: 'Tags', icon: Tag, visible: true },
+        { key: 'categories', label: 'Categories', icon: FolderTree, visible: canAccessTasks },
+        { key: 'tags', label: 'Tags', icon: Tag, visible: canAccessTasks },
     ].filter((s) => s.visible);
 
     const [section, setSection] = useState('general');

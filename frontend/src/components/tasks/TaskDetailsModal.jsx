@@ -47,7 +47,7 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, onChanged }) => {
   useEffect(() => {
     if (!isOpen) return;
     fetchDetail();
-    api.get('/users?active_only=true').then(res => setUsers(res.data || [])).catch(() => {});
+    api.get('/tasks/assignable-users').then(res => setUsers(res.data || [])).catch(() => {});
   }, [isOpen, fetchDetail]);
 
   if (!isOpen) return null;

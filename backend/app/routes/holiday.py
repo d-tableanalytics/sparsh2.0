@@ -4,18 +4,21 @@ from datetime import datetime, timezone
 from bson import ObjectId
 
 from app.db.mongodb import get_collection
-from app.controllers.auth_controller import get_current_user
+from app.controllers.auth_controller import get_current_user, is_internal_user
 from app.models.holiday import HolidayCreate, HolidayUpdate
 from app.services.activity_log_service import log_activity
 
 router = APIRouter(prefix="/holidays", tags=["Holidays"])
 
-# Roles allowed to create/update/delete holidays. Any authenticated user can read them
-# (they need to see the holiday calendar); only staff/admins can manage the master list.
-MANAGE_ROLES = ["superadmin", "admin", "coach", "staff", "clientadmin"]
+# Holiday management is a Task Management setting -> internal-Sparsh-only writes.
+# Any authenticated user can still READ holidays (client calendars display them); only
+# internal staff/admins can manage the master list.
+MANAGE_ROLES = ["superadmin", "admin", "coach", "staff"]
 
 
 def _can_manage(current_user: dict) -> bool:
+    if not is_internal_user(current_user):
+        return False
     role = (current_user.get("role") or "").lower()
     if role in MANAGE_ROLES:
         return True

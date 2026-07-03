@@ -1,15 +1,22 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
+from fastapi.responses import StreamingResponse
 from typing import Optional
 from datetime import datetime, timedelta, timezone
 from bson import ObjectId
+import asyncio
+import json
 import re
 
 from app.db.mongodb import get_collection
-from app.controllers.auth_controller import get_current_user
+from app.controllers.auth_controller import (
+    get_current_user, get_user_from_token, require_task_access,
+    is_internal_user, TASK_ACCESS_DENIED_MESSAGE,
+)
 from app.utils.calendar_utils import CALENDAR_COLLECTIONS, find_event_across_collections
 from app.services.activity_log_service import log_activity
 from app.services.s3_service import upload_file_to_s3_with_key
 from app.routes.group import _is_member_or_manager
+from app.services import task_events
 
 router = APIRouter(prefix="/tasks", tags=["Tasks"])
 
@@ -291,7 +298,7 @@ async def tasks_dashboard(
     search: Optional[str] = None,
     viewType: Optional[str] = None,
     reportType: Optional[str] = None,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_task_access),
 ):
     role = current_user.get("role", "").lower()
     is_admin_role = role in ADMIN_ROLES
@@ -371,7 +378,7 @@ async def list_tasks(
     startDate: Optional[str] = None,
     endDate: Optional[str] = None,
     groupId: Optional[str] = None,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_task_access),
 ):
     start_iso, end_iso = _period_to_range(period, startDate, endDate)
     docs = await _fetch_tasks(current_user, scope, category, tag, frequency, assignedTo, search, start_iso, end_iso, groupId)
@@ -399,7 +406,7 @@ async def tasks_activity(
     limit: int = 30,
     skip: int = 0,
     groupId: Optional[str] = None,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_task_access),
 ):
     """Task Management activity feed, read from the shared `activity_logs` collection.
     Admins/staff see the whole org's task activity (and can filter by user); everyone else
@@ -477,8 +484,57 @@ async def tasks_activity(
     return {"activities": activities, "summary": summary, "total": total}
 
 
+# Real-time task event stream (SSE). Defined BEFORE /{task_id} so "stream" isn't captured
+# as a task id. EventSource can't set an Authorization header, so the JWT comes in via the
+# `token` query param. Emits task_created/updated/completed/deleted to the logged-in user's
+# open streams (see app/services/task_events.py + emit points in this file + calendar_events.py).
+@router.get("/stream")
+async def task_event_stream(token: str = Query(...)):
+    user = await get_user_from_token(token)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid or missing token")
+    if not is_internal_user(user):
+        raise HTTPException(status_code=403, detail=TASK_ACCESS_DENIED_MESSAGE)
+    user_id = str(user["_id"])
+
+    async def event_gen():
+        q = task_events.subscribe(user_id)
+        try:
+            yield ": ok\n\n"  # initial comment so the client's onopen fires promptly
+            while True:
+                try:
+                    event = await asyncio.wait_for(q.get(), timeout=25.0)
+                    yield f"event: {event.get('type', 'message')}\ndata: {json.dumps(event, default=str)}\n\n"
+                except asyncio.TimeoutError:
+                    yield ": ping\n\n"  # keepalive so proxies don't drop the idle connection
+        finally:
+            task_events.unsubscribe(user_id, q)
+
+    return StreamingResponse(
+        event_gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"},
+    )
+
+
+# Internal users who can be picked in a task's Assigned To / In Loop dropdowns. Defined
+# before /{task_id} (literal path) and gated by require_task_access, so any internal task
+# creator can load it (unlike GET /users, which needs the users.read permission). Returns
+# ONLY staff-collection (internal Sparsh) users — client-side users never appear here.
+@router.get("/assignable-users")
+async def list_assignable_users(current_user: dict = Depends(require_task_access)):
+    docs = await get_collection("staff").find({"is_active": {"$ne": False}}).to_list(1000)
+    return [{
+        "_id": str(u["_id"]),
+        "full_name": u.get("full_name") or u.get("first_name") or u.get("email"),
+        "email": u.get("email"),
+        "role": u.get("role"),
+        "designation": u.get("designation"),
+    } for u in docs]
+
+
 @router.get("/{task_id}")
-async def get_task_detail(task_id: str, current_user: dict = Depends(get_current_user)):
+async def get_task_detail(task_id: str, current_user: dict = Depends(require_task_access)):
     existing, _ = await _get_task_or_404(task_id)
     if not _is_participant(existing, current_user):
         raise HTTPException(status_code=403, detail="Not authorized to view this task")
@@ -486,7 +542,7 @@ async def get_task_detail(task_id: str, current_user: dict = Depends(get_current
 
 
 @router.patch("/{task_id}/status")
-async def update_task_status(task_id: str, body: dict, current_user: dict = Depends(get_current_user)):
+async def update_task_status(task_id: str, body: dict, current_user: dict = Depends(require_task_access)):
     new_status = body.get("workflow_status")
     reason = body.get("reason")
     if new_status not in WORKFLOW_STATUSES:
@@ -506,9 +562,11 @@ async def update_task_status(task_id: str, body: dict, current_user: dict = Depe
     was_completed = old_status == "completed"
     if new_status == "completed" and not was_completed:
         updates["completed_at"] = datetime.now(timezone.utc)
+        updates["completed_by"] = user_id
         updates["status"] = "completed"  # keep legacy Calendar page status in sync
     elif was_completed and new_status != "completed":
         updates["completed_at"] = None
+        updates["completed_by"] = None
         updates["status"] = "schedule"
 
     history_entry = {
@@ -530,11 +588,23 @@ async def update_task_status(task_id: str, body: dict, current_user: dict = Depe
 
     await log_activity(current_user, "Update Task Status", col_name, f"Task {task_id} -> {new_status}",
                        meta={"task_id": task_id, "group_id": existing.get("group_id")})
+
+    # Real-time: notify creator + assignees + watchers so their lists update without a refresh.
+    await task_events.publish(task_events.recipients_for(existing), {
+        "type": "task_completed" if new_status == "completed" else "task_updated",
+        "task_id": task_id,
+        "status": new_status,
+        "title": existing.get("title"),
+        "assigned_to": existing.get("target_staff_id") or [],
+        "assigned_by": existing.get("user_id"),
+        "watchers": existing.get("watchers") or [],
+        "actor_id": user_id,
+    })
     return {"id": task_id, "workflow_status": new_status}
 
 
 @router.post("/{task_id}/checklist")
-async def add_checklist_item(task_id: str, body: dict, current_user: dict = Depends(get_current_user)):
+async def add_checklist_item(task_id: str, body: dict, current_user: dict = Depends(require_task_access)):
     title = (body.get("title") or "").strip()
     if not title:
         raise HTTPException(status_code=400, detail="Checklist item title is required")
@@ -551,7 +621,7 @@ async def add_checklist_item(task_id: str, body: dict, current_user: dict = Depe
 
 
 @router.patch("/{task_id}/checklist/{item_id}")
-async def update_checklist_item(task_id: str, item_id: str, body: dict, current_user: dict = Depends(get_current_user)):
+async def update_checklist_item(task_id: str, item_id: str, body: dict, current_user: dict = Depends(require_task_access)):
     existing, col_name = await _get_task_or_404(task_id)
     if not _is_participant(existing, current_user):
         raise HTTPException(status_code=403, detail="Not authorized to update this task")
@@ -572,7 +642,7 @@ async def update_checklist_item(task_id: str, item_id: str, body: dict, current_
 
 
 @router.delete("/{task_id}/checklist/{item_id}")
-async def delete_checklist_item(task_id: str, item_id: str, current_user: dict = Depends(get_current_user)):
+async def delete_checklist_item(task_id: str, item_id: str, current_user: dict = Depends(require_task_access)):
     existing, col_name = await _get_task_or_404(task_id)
     if not _is_participant(existing, current_user):
         raise HTTPException(status_code=403, detail="Not authorized to update this task")
@@ -585,7 +655,7 @@ async def delete_checklist_item(task_id: str, item_id: str, current_user: dict =
 
 
 @router.post("/{task_id}/comments")
-async def add_task_comment(task_id: str, body: dict, current_user: dict = Depends(get_current_user)):
+async def add_task_comment(task_id: str, body: dict, current_user: dict = Depends(require_task_access)):
     text = (body.get("text") or "").strip()
     if not text:
         raise HTTPException(status_code=400, detail="Comment text is required")
@@ -608,7 +678,7 @@ async def add_task_comment(task_id: str, body: dict, current_user: dict = Depend
 
 
 @router.post("/{task_id}/attachments")
-async def upload_task_attachment(task_id: str, file: UploadFile = File(...), current_user: dict = Depends(get_current_user)):
+async def upload_task_attachment(task_id: str, file: UploadFile = File(...), current_user: dict = Depends(require_task_access)):
     existing, col_name = await _get_task_or_404(task_id)
     if not _is_participant(existing, current_user):
         raise HTTPException(status_code=403, detail="Not authorized to update this task")
@@ -634,7 +704,7 @@ async def upload_task_attachment(task_id: str, file: UploadFile = File(...), cur
 
 
 @router.delete("/{task_id}/attachments/{attachment_id}")
-async def delete_task_attachment(task_id: str, attachment_id: str, current_user: dict = Depends(get_current_user)):
+async def delete_task_attachment(task_id: str, attachment_id: str, current_user: dict = Depends(require_task_access)):
     existing, col_name = await _get_task_or_404(task_id)
     if not _is_participant(existing, current_user):
         raise HTTPException(status_code=403, detail="Not authorized to update this task")
@@ -647,7 +717,7 @@ async def delete_task_attachment(task_id: str, attachment_id: str, current_user:
 
 
 @router.delete("/{task_id}")
-async def soft_delete_task(task_id: str, current_user: dict = Depends(get_current_user)):
+async def soft_delete_task(task_id: str, current_user: dict = Depends(require_task_access)):
     existing, col_name = await find_event_across_collections(task_id)
     if not existing or existing.get("type") != "task":
         raise HTTPException(status_code=404, detail="Task not found")
@@ -663,11 +733,21 @@ async def soft_delete_task(task_id: str, current_user: dict = Depends(get_curren
     )
     await log_activity(current_user, "Soft Delete Task", col_name, f"Task {task_id}",
                        meta={"task_id": task_id, "group_id": existing.get("group_id")})
+
+    await task_events.publish(task_events.recipients_for(existing), {
+        "type": "task_deleted",
+        "task_id": task_id,
+        "title": existing.get("title"),
+        "assigned_to": existing.get("target_staff_id") or [],
+        "assigned_by": existing.get("user_id"),
+        "watchers": existing.get("watchers") or [],
+        "actor_id": str(current_user["_id"]),
+    })
     return {"message": "Task moved to Deleted Tasks"}
 
 
 @router.post("/{task_id}/restore")
-async def restore_task(task_id: str, current_user: dict = Depends(get_current_user)):
+async def restore_task(task_id: str, current_user: dict = Depends(require_task_access)):
     existing, col_name = await find_event_across_collections(task_id)
     if not existing or existing.get("type") != "task":
         raise HTTPException(status_code=404, detail="Task not found")

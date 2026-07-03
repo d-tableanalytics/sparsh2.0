@@ -8,6 +8,7 @@ import {
   Forward, Bell, Trash2, ChevronDown, Activity, CalendarDays, UsersRound
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
+import { canAccessTaskManagement } from '../../utils/taskAccess';
 
 import logo1 from '../../assets/Sparsh Magic  Logo PNG1.png';
 import logo2 from '../../assets/Sparsh Magic  Logo PNG2.png';
@@ -45,8 +46,10 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen }) => {
     { name: 'Team', path: '/team', icon: Users, roles: ['clientadmin'] },
     { name: 'Calendar', path: '/calendar', icon: Calendar, roles: ['superadmin', 'admin', 'clientadmin', 'clientuser', 'coach', 'staff'], permissionKey: 'calendar' },
     {
+      // Internal-Sparsh-only module — visibility governed by canAccessTaskManagement (not a
+      // plain role list) so client-side users never see it. See utils/taskAccess.js.
       name: 'Task Management', path: '/tasks', icon: CheckSquare,
-      roles: ['superadmin', 'admin', 'clientadmin', 'clientuser', 'coach', 'staff'], permissionKey: 'tasks',
+      roles: [], visibleFn: canAccessTaskManagement,
       submodules: [
         { name: 'Dashboard', path: '/tasks', icon: LayoutDashboard },
         { name: 'My Tasks', path: '/tasks/my', icon: CheckSquare },
@@ -66,6 +69,9 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen }) => {
   ];
 
   const filteredLinks = links.filter(link => {
+    // Links with a custom visibility predicate (e.g. Task Management) are gated solely by it.
+    if (link.visibleFn) return link.visibleFn(user);
+
     const isClientRole = ['clientadmin', 'clientuser'].includes(user?.role);
     const isAdminLink = ['Companies', 'Batches', 'Session Templates', 'User Management'].includes(link.name);
 

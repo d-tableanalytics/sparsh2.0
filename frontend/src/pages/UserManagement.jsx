@@ -44,8 +44,10 @@ const UserManagement = () => {
     const fetchData = async () => {
         try {
             const res = await api.get('/users');
-            // Filter only Staff roles
-            const staffRoles = ['superadmin', 'admin', 'coach'];
+            // Filter only internal Staff roles. Must match the roles the Add-Staff form can
+            // create (coach/admin/staff/superadmin) — 'staff' ("Team Staff") was missing here,
+            // so newly-added Team Staff users were saved but hidden from this list.
+            const staffRoles = ['superadmin', 'admin', 'coach', 'staff'];
             const staff = res.data.filter(u => staffRoles.includes(u.role?.toLowerCase()));
             setUsers(staff);
         } catch (err) {
