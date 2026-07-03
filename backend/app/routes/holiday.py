@@ -10,19 +10,14 @@ from app.services.activity_log_service import log_activity
 
 router = APIRouter(prefix="/holidays", tags=["Holidays"])
 
-# Holiday management is a Task Management setting -> internal-Sparsh-only writes.
-# Any authenticated user can still READ holidays (client calendars display them); only
-# internal staff/admins can manage the master list.
-MANAGE_ROLES = ["superadmin", "admin", "coach", "staff"]
+# Holiday management is restricted to Super Admin / Admin only. Any authenticated user can
+# still READ holidays (client calendars + the task due-date picker block holiday dates for
+# everyone); only superadmin/admin can create/update/delete the master list.
+MANAGE_ROLES = ["superadmin", "admin"]
 
 
 def _can_manage(current_user: dict) -> bool:
-    if not is_internal_user(current_user):
-        return False
-    role = (current_user.get("role") or "").lower()
-    if role in MANAGE_ROLES:
-        return True
-    return bool(current_user.get("permissions", {}).get("tasks", {}).get("create"))
+    return (current_user.get("role") or "").lower() in MANAGE_ROLES
 
 
 def _serialize(doc: dict) -> dict:
@@ -62,7 +57,7 @@ async def list_holidays(
     elif month:
         query["holiday_date"] = {"$regex": f"^\\d{{4}}-{month:02d}"}
 
-    docs = await col.find(query).sort("holiday_date", 1).to_list(1000)
+    docs = await col.find(query).sort("holiday_date", -1).to_list(1000)
     return [_serialize(d) for d in docs]
 
 

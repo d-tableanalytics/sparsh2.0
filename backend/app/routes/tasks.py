@@ -24,6 +24,19 @@ router = APIRouter(prefix="/tasks", tags=["Tasks"])
 TASK_COLLECTIONS = CALENDAR_COLLECTIONS + ["calendar_events"]
 ADMIN_ROLES = ["superadmin", "admin", "coach", "staff"]
 
+# Only Super Admin + Sparsh Admin may see ALL tasks / the system-wide total. Every other
+# internal user (coach/staff/SMO/member/…) sees only their own related tasks. This is
+# deliberately narrower than ADMIN_ROLES, and role-based rather than permission-based, so a
+# default `calendar.read`/`tasks.read` grant can't leak org-wide task data.
+VIEW_ALL_ROLES = {"superadmin", "admin"}
+
+
+def _can_view_all_tasks(user: dict) -> bool:
+    if (user.get("role") or "").lower() in VIEW_ALL_ROLES:
+        return True
+    # Optional explicit grant for a specific non-admin who should see everything.
+    return bool(user.get("permissions", {}).get("tasks", {}).get("view_all_tasks"))
+
 # Richer workflow taken on by type=="task" docs. The legacy `status` field
 # (schedule/completed/canceled/reschedule) stays authoritative for the Calendar page.
 WORKFLOW_STATUSES = [
@@ -143,9 +156,6 @@ async def _fetch_tasks(
     group_id: Optional[str] = None,
 ):
     user_id = str(current_user["_id"])
-    role = current_user.get("role", "").lower()
-    company_id = current_user.get("company_id")
-    is_admin_role = role in ADMIN_ROLES
 
     clauses = [{"type": "task"}]
 
@@ -163,15 +173,14 @@ async def _fetch_tasks(
         clauses.append({"assigned_to": "other"})
     elif scope == "subscribed":
         clauses.append({"$or": [{"watchers": user_id}, {"watchers": {"$in": [user_id]}}]})
+    elif scope == "own":
+        # Everything the user is related to: created ∪ assigned ∪ in-loop.
+        clauses.append({"$or": _visibility_clauses(user_id)})
     elif scope == "all":
-        has_perm = (
-            current_user.get("permissions", {}).get("tasks", {}).get("read")
-            or current_user.get("permissions", {}).get("calendar", {}).get("read")
-        )
-        if not (role == "superadmin" or has_perm):
-            raise HTTPException(status_code=403, detail="Not authorized to view all tasks")
-        if role != "superadmin" and company_id:
-            clauses.append({"$or": [{"company_id": str(company_id)}, {"user_id": user_id}]})
+        # Only Super Admin + Sparsh Admin see every task system-wide. Everyone else silently
+        # falls back to their own tasks (no 403), so "All Tasks" never leaks others' data.
+        if not _can_view_all_tasks(current_user):
+            clauses.append({"$or": _visibility_clauses(user_id)})
     elif scope == "group":
         if not group_id:
             raise HTTPException(status_code=400, detail="group_id is required for group scope")
@@ -183,7 +192,7 @@ async def _fetch_tasks(
         # No user-restricting clause -- membership is already verified above, and the
         # generic `if group_id:` clause below scopes results to this group's tasks.
     elif scope == "deleted":
-        if not is_admin_role:
+        if not _can_view_all_tasks(current_user):
             clauses.append({"$or": _visibility_clauses(user_id)})
     else:
         raise HTTPException(status_code=400, detail="Invalid scope")
@@ -243,10 +252,24 @@ def _serialize_task(doc: dict, current_user_id: str) -> dict:
         "assignedBy": doc.get("user_id"),
         "watchers": doc.get("watchers") or [],
         "groupId": doc.get("group_id"),
+        "parentTaskId": doc.get("parent_task_id"),
         "recurringGroupId": doc.get("recurring_group_id"),
         "isCreator": doc.get("user_id") == current_user_id,
         "deletedAt": doc.get("deleted_at"),
     }
+
+
+async def _fetch_subtasks(parent_id: str, current_user_id: str):
+    """Child tasks (parent_task_id == parent_id) across the task collections, oldest first."""
+    out = []
+    for col_name in TASK_COLLECTIONS:
+        docs = await get_collection(col_name).find({
+            "type": "task", "parent_task_id": parent_id, "deleted_at": None,
+        }).to_list(500)
+        for d in docs:
+            out.append(_serialize_task(d, current_user_id))
+    out.sort(key=lambda t: str(t.get("createdAt") or ""))
+    return out
 
 
 def _serialize_task_detail(doc: dict, current_user_id: str) -> dict:
@@ -300,13 +323,11 @@ async def tasks_dashboard(
     reportType: Optional[str] = None,
     current_user: dict = Depends(require_task_access),
 ):
-    role = current_user.get("role", "").lower()
-    is_admin_role = role in ADMIN_ROLES
-
-    # reportType picks which visibility scope backs the numbers: admins/staff default to an
-    # org-wide view, everyone else only ever sees their own tasks regardless of tab clicked.
+    # reportType picks which visibility scope backs the numbers. Only Super Admin + Sparsh
+    # Admin get the org-wide "all" view; every other internal user's totals/analytics are
+    # scoped to their own related tasks (created ∪ assigned ∪ in-loop) via the "own" scope.
     scope_map = {"delegated": "delegated", "my_report": "my"}
-    scope = scope_map.get(reportType, "all" if is_admin_role else "my")
+    scope = scope_map.get(reportType, "all" if _can_view_all_tasks(current_user) else "own")
 
     start_iso, end_iso = _period_to_range(period, startDate, endDate)
     docs = await _fetch_tasks(current_user, scope, category, tag, frequency, assignedTo, search, start_iso, end_iso)
@@ -418,7 +439,6 @@ async def tasks_activity(
     col = get_collection("activity_logs")
     query = {"action": {"$in": TASK_ACTIVITY_ACTIONS}}
 
-    role = current_user.get("role", "").lower()
     if groupId:
         group_doc = await get_collection("task_groups").find_one({"_id": ObjectId(groupId)})
         if not group_doc:
@@ -426,7 +446,8 @@ async def tasks_activity(
         if not _is_member_or_manager(group_doc, current_user):
             raise HTTPException(status_code=403, detail="Not authorized to view this group's activity")
         query["metadata.group_id"] = groupId
-    elif role not in ADMIN_ROLES:
+    elif not _can_view_all_tasks(current_user):
+        # Only Super Admin + Sparsh Admin see the whole org's task activity; others see only their own.
         query["user_id"] = str(current_user["_id"])
     elif updatedBy:
         query["user_id"] = updatedBy
@@ -538,7 +559,10 @@ async def get_task_detail(task_id: str, current_user: dict = Depends(require_tas
     existing, _ = await _get_task_or_404(task_id)
     if not _is_participant(existing, current_user):
         raise HTTPException(status_code=403, detail="Not authorized to view this task")
-    return _serialize_task_detail(existing, str(current_user["_id"]))
+    uid = str(current_user["_id"])
+    detail = _serialize_task_detail(existing, uid)
+    detail["subtasks"] = await _fetch_subtasks(task_id, uid)
+    return detail
 
 
 @router.patch("/{task_id}/status")
@@ -561,6 +585,15 @@ async def update_task_status(task_id: str, body: dict, current_user: dict = Depe
     updates = {"workflow_status": new_status, "updated_at": datetime.now(timezone.utc)}
     was_completed = old_status == "completed"
     if new_status == "completed" and not was_completed:
+        # Completion rule: every check point (checklist item) must be done first.
+        items = existing.get("checklist") or []
+        pending_items = [c for c in items if not (isinstance(c, dict) and c.get("completed"))]
+        if pending_items:
+            done = len(items) - len(pending_items)
+            raise HTTPException(
+                status_code=400,
+                detail=f"Complete all check points before completing this task ({done}/{len(items)} done).",
+            )
         updates["completed_at"] = datetime.now(timezone.utc)
         updates["completed_by"] = user_id
         updates["status"] = "completed"  # keep legacy Calendar page status in sync

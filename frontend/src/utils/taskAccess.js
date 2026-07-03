@@ -19,4 +19,10 @@ const MANAGE_ROLES = new Set(['superadmin', 'admin', 'coach', 'staff']);
 export const canManageTaskSettings = (user) =>
   canAccessTaskManagement(user) && (user?.role === 'superadmin' || MANAGE_ROLES.has(user?.role));
 
+// Only Super Admin + Sparsh Admin (or an explicit permissions.tasks.view_all_tasks grant)
+// may see all tasks / the system-wide total. Mirrors backend tasks.py:_can_view_all_tasks.
+// Every other internal user is scoped to their own related tasks (enforced server-side).
+export const canViewAllTasks = (user) =>
+  user?.role === 'superadmin' || user?.role === 'admin' || !!user?.permissions?.tasks?.view_all_tasks;
+
 export const TASK_ACCESS_DENIED_MESSAGE = 'Task Management is only available for Sparsh internal teams.';
