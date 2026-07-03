@@ -1,5 +1,21 @@
 import api from './api';
 
+// Client-side CSV download (used for company-scoped exports that the server export
+// endpoint doesn't cover). rows = array of arrays; headers = array of strings.
+export const downloadCsv = (filename, headers, rows) => {
+  const esc = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+  const csv = [headers, ...rows].map((r) => r.map(esc).join(',')).join('\n');
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+};
+
 // Admin Reports & Analytics API (superadmin only on the backend).
 // Thin wrappers over the shared axios instance so JWT + error handling are reused.
 
