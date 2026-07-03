@@ -13,6 +13,7 @@ import { useAuth } from '../../context/AuthContext';
 import { useNotification } from '../../context/NotificationContext';
 import { STATUS_CONFIG, WORKFLOW_STATUSES } from './statusConfig';
 import { getInitials, formatFrequencyLabel } from './taskDisplayUtils';
+import TaskFormModal from './TaskFormModal';
 
 // Full single-task view: description, revision (status) history, core info,
 // involved parties, sub-tasks/checklist, attachments, and a comment thread.
@@ -26,6 +27,11 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, onChanged, onEdit }) => {
   const [newSubtask, setNewSubtask] = useState('');
   const [newComment, setNewComment] = useState('');
   const [posting, setPosting] = useState(false);
+  // Real subtasks (child tasks): add-form + nested detail view + taxonomy for the form.
+  const [subtaskFormOpen, setSubtaskFormOpen] = useState(false);
+  const [subtaskDetailId, setSubtaskDetailId] = useState(null);
+  const [metaCats, setMetaCats] = useState([]);
+  const [metaTags, setMetaTags] = useState([]);
 
   const userMap = React.useMemo(() => {
     const m = {};
@@ -50,11 +56,23 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, onChanged, onEdit }) => {
     if (!isOpen) return;
     fetchDetail();
     api.get('/tasks/assignable-users').then(res => setUsers(res.data || [])).catch(() => {});
+    // Categories/tags for the "Add Subtask" form.
+    api.get('/task-categories').then(r => setMetaCats((r.data || []).map(c => c.name).filter(Boolean))).catch(() => {});
+    api.get('/task-tags').then(r => setMetaTags((r.data || []).map(t => t.name).filter(Boolean))).catch(() => {});
   }, [isOpen, fetchDetail]);
 
   if (!isOpen) return null;
 
   const handleStatusChange = async (status) => {
+    // Completion rule: a task can't be marked Completed until all check points are done.
+    if (status === 'completed') {
+      const items = task?.checklist || [];
+      const pending = items.filter(c => !c.completed);
+      if (pending.length) {
+        showError(`Complete all check points first (${items.length - pending.length}/${items.length} done).`);
+        return;
+      }
+    }
     try {
       await updateTaskStatus(taskId, status);
       fetchDetail();
@@ -141,6 +159,7 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, onChanged, onEdit }) => {
   const checklistTotal = task ? (task.checklist || []).length : 0;
 
   return (
+    <>
     <AnimatePresence>
       <div className="fixed inset-0 z-[300] flex items-center justify-center p-4">
         <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={onClose} className="absolute inset-0 bg-black/50 backdrop-blur-sm" />
@@ -281,14 +300,14 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, onChanged, onEdit }) => {
                 </div>
               </div>
 
-              {/* Sub Tasks */}
+              {/* Check Points (checklist) */}
               <div className="bg-[var(--input-bg)] border border-[var(--border)] rounded-2xl p-4">
                 <p className="flex items-center gap-1.5 text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest mb-3">
-                  <Layers size={13} /> Sub Tasks ({checklistDone}/{checklistTotal})
+                  <CheckSquare size={13} /> Check Points ({checklistDone}/{checklistTotal})
                 </p>
                 {checklistTotal === 0 ? (
                   <div className="py-6 flex flex-col items-center justify-center border-2 border-dashed border-[var(--border)] rounded-xl gap-2">
-                    <p className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest opacity-70">No sub tasks yet</p>
+                    <p className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest opacity-70">No check points yet</p>
                   </div>
                 ) : (
                   <div className="space-y-1.5 mb-3">
@@ -306,10 +325,49 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, onChanged, onEdit }) => {
                 <div className="flex items-center gap-2">
                   <input value={newSubtask} onChange={e => setNewSubtask(e.target.value)}
                     onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); handleAddSubtask(); } }}
-                    placeholder="Add a sub task..."
+                    placeholder="Add a check point..."
                     className="flex-1 px-3 py-2 bg-[var(--bg-card)] border border-[var(--border)] rounded-lg text-[12px] font-bold outline-none focus:border-[var(--accent-indigo)]" />
                   <button type="button" onClick={handleAddSubtask} className="p-2 bg-[var(--accent-indigo)] text-white rounded-lg"><Plus size={15} /></button>
                 </div>
+              </div>
+
+              {/* Subtasks (real child tasks linked by parent_task_id) */}
+              <div className="bg-[var(--input-bg)] border border-[var(--border)] rounded-2xl p-4">
+                <div className="flex items-center justify-between mb-3">
+                  <p className="flex items-center gap-1.5 text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest">
+                    <Layers size={13} /> Subtasks ({(task.subtasks || []).length})
+                  </p>
+                  {canManage && (
+                    <button type="button" onClick={() => setSubtaskFormOpen(true)}
+                      className="flex items-center gap-1.5 px-3 py-1.5 bg-[var(--accent-indigo)] text-white rounded-lg text-[10px] font-black uppercase tracking-widest">
+                      <Plus size={13} /> Add Subtask
+                    </button>
+                  )}
+                </div>
+                {(task.subtasks || []).length === 0 ? (
+                  <div className="py-6 flex flex-col items-center justify-center border-2 border-dashed border-[var(--border)] rounded-xl">
+                    <p className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest opacity-70">No subtasks yet</p>
+                  </div>
+                ) : (
+                  <div className="space-y-1.5">
+                    {task.subtasks.map(st => {
+                      const scfg = STATUS_CONFIG[st.status] || STATUS_CONFIG.pending;
+                      return (
+                        <button type="button" key={st.id} onClick={() => setSubtaskDetailId(st.id)}
+                          className="w-full flex items-center gap-2.5 bg-[var(--bg-card)] rounded-lg px-3 py-2.5 text-left hover:border-[var(--accent-indigo)] border border-transparent transition-all">
+                          <span className="w-2 h-2 rounded-full shrink-0" style={{ background: scfg.color }} />
+                          <span className="flex-1 min-w-0">
+                            <span className="block text-[12px] font-bold text-[var(--text-main)] truncate">{st.title}</span>
+                            {(st.assignedTo || []).length > 0 && (
+                              <span className="block text-[10px] text-[var(--text-muted)] truncate">{st.assignedTo.map(id => userMap[id] || id).join(', ')}</span>
+                            )}
+                          </span>
+                          <span className="px-2 py-0.5 rounded-lg text-[9px] font-black uppercase tracking-wider shrink-0" style={{ color: scfg.color, background: 'var(--input-bg)' }}>{scfg.label}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
 
               {/* Attachments */}
@@ -373,6 +431,28 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, onChanged, onEdit }) => {
         </motion.div>
       </div>
     </AnimatePresence>
+
+    {/* Add Subtask — a real child task linked by parent_task_id */}
+    <TaskFormModal
+      isOpen={subtaskFormOpen}
+      parentId={taskId}
+      categories={metaCats}
+      tags={metaTags}
+      onClose={() => setSubtaskFormOpen(false)}
+      onSaved={() => { setSubtaskFormOpen(false); fetchDetail(); onChanged?.(); }}
+    />
+
+    {/* Nested subtask detail (its own status / check points / subtasks) */}
+    {subtaskDetailId && (
+      <TaskDetailsModal
+        isOpen
+        taskId={subtaskDetailId}
+        onClose={() => setSubtaskDetailId(null)}
+        onChanged={() => { fetchDetail(); onChanged?.(); }}
+        onEdit={onEdit}
+      />
+    )}
+    </>
   );
 };
 

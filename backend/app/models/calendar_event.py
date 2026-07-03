@@ -65,6 +65,7 @@ class CalendarEventBase(BaseModel):
     watchers: Optional[List[str]] = [] # user ids "in the loop" / subscribed to this task
     tags: Optional[List[str]] = []
     group_id: Optional[str] = None # Task Group this task belongs to (Groups sub-module); None = ungrouped
+    parent_task_id: Optional[str] = None # Parent task id for a subtask; None = top-level task
     deleted_at: Optional[str] = None # soft-delete timestamp (ISO string); None = not deleted
 
     # ─── Task Details additions (checklist/attachments/comments/history) ───

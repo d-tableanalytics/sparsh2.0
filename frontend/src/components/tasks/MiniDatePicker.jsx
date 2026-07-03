@@ -8,7 +8,12 @@ const isSameDay = (a, b) => a && b && a.getFullYear() === b.getFullYear() && a.g
 
 // Hand-rolled month-grid date/time picker (no date-picker library installed in this
 // project) matching the reference "Select Due Date" popover.
-const MiniDatePicker = ({ isOpen, onClose, value, onApply, title = 'Select Due Date' }) => {
+// `holidayDates`: array of "YYYY-MM-DD" strings. `weeklyOffs`: array of weekday numbers
+// (0=Sun) to block. `onBlocked(message)`: called when a blocked date is picked.
+// `blockHolidays`: when true (default) holidays are un-selectable (due/start pickers); when
+// false, holidays are still visibly marked but remain selectable — used for the Repeat End
+// Date, which is only a series boundary (the recurring engine skips holiday occurrences).
+const MiniDatePicker = ({ isOpen, onClose, value, onApply, title = 'Select Due Date', holidayDates = [], weeklyOffs = [], onBlocked, blockHolidays = true }) => {
   const [viewMonth, setViewMonth] = useState(0);
   const [viewYear, setViewYear] = useState(2000);
   const [selectedDate, setSelectedDate] = useState(new Date());
@@ -27,6 +32,17 @@ const MiniDatePicker = ({ isOpen, onClose, value, onApply, title = 'Select Due D
 
   if (!isOpen) return null;
 
+  const holidaySet = new Set(holidayDates);
+  const keyOf = (dt) => `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
+  const blockedInfo = (dt) => {
+    const isHoliday = holidaySet.has(keyOf(dt));
+    if (isHoliday && blockHolidays) return { blocked: true, holiday: true, msg: 'Holiday detected! Please select another date.', label: 'Holiday' };
+    if (weeklyOffs.includes(dt.getDay())) return { blocked: true, msg: 'Weekly off! Please select another date.', label: 'Weekly off' };
+    // Marked but selectable (repeat end date): the recurring engine skips holiday occurrences.
+    if (isHoliday) return { blocked: false, holiday: true, label: 'Holiday' };
+    return { blocked: false };
+  };
+
   const daysInMonth = new Date(viewYear, viewMonth + 1, 0).getDate();
   const firstDayOfWeek = new Date(viewYear, viewMonth, 1).getDay();
   const today = new Date();
@@ -43,6 +59,9 @@ const MiniDatePicker = ({ isOpen, onClose, value, onApply, title = 'Select Due D
   };
 
   const handleApply = () => {
+    const sd = new Date(viewYear, viewMonth, selectedDate.getDate());
+    const info = blockedInfo(sd);
+    if (info.blocked) { onBlocked?.(info.msg); return; }
     const [h, min] = time.split(':').map(Number);
     const final = new Date(viewYear, viewMonth, selectedDate.getDate(), h, min);
     onApply(final.toISOString());
@@ -90,19 +109,30 @@ const MiniDatePicker = ({ isOpen, onClose, value, onApply, title = 'Select Due D
                     const cellDate = new Date(viewYear, viewMonth, d);
                     const isToday = isSameDay(cellDate, today);
                     const isSelected = isSameDay(cellDate, selectedDate) && !isToday;
-                    const isWeekend = cellDate.getDay() === 0;
+                    const info = blockedInfo(cellDate);
+                    const onCell = () => (info.blocked ? onBlocked?.(info.msg) : setSelectedDate(cellDate));
                     return (
-                      <button type="button" key={i} onClick={() => setSelectedDate(cellDate)}
-                        className={`aspect-square flex items-center justify-center rounded-full text-[11px] font-bold transition-all ${
-                          isToday ? 'bg-[var(--accent-indigo)] text-white'
+                      <button type="button" key={i} onClick={onCell} title={info.label}
+                        className={`relative aspect-square flex items-center justify-center rounded-full text-[11px] font-bold transition-all ${
+                          info.blocked ? 'text-[var(--accent-red)] bg-[var(--accent-red-bg)] opacity-70 cursor-not-allowed line-through'
+                            : isToday ? 'bg-[var(--accent-indigo)] text-white'
                             : isSelected ? 'bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)]'
-                            : isWeekend ? 'text-[var(--accent-red)]' : 'text-[var(--text-main)]'
+                            : info.holiday ? 'text-[var(--accent-red)] bg-[var(--accent-red-bg)]'
+                            : 'text-[var(--text-main)]'
                         }`}>
                         {d}
+                        {info.holiday && !info.blocked && (
+                          <span className="absolute bottom-1 left-1/2 -translate-x-1/2 w-1 h-1 rounded-full bg-[var(--accent-red)]" />
+                        )}
                       </button>
                     );
                   })}
                 </div>
+                {holidayDates.length > 0 && (
+                  <div className="mt-3 flex items-center gap-1.5 text-[9px] font-black text-[var(--text-muted)] uppercase tracking-widest">
+                    <span className="w-2 h-2 rounded-full bg-[var(--accent-red)]" /> Holiday
+                  </div>
+                )}
               </>
             ) : (
               <input type="time" value={time} onChange={e => setTime(e.target.value)}

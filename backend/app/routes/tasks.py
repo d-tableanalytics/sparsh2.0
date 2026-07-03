@@ -252,10 +252,24 @@ def _serialize_task(doc: dict, current_user_id: str) -> dict:
         "assignedBy": doc.get("user_id"),
         "watchers": doc.get("watchers") or [],
         "groupId": doc.get("group_id"),
+        "parentTaskId": doc.get("parent_task_id"),
         "recurringGroupId": doc.get("recurring_group_id"),
         "isCreator": doc.get("user_id") == current_user_id,
         "deletedAt": doc.get("deleted_at"),
     }
+
+
+async def _fetch_subtasks(parent_id: str, current_user_id: str):
+    """Child tasks (parent_task_id == parent_id) across the task collections, oldest first."""
+    out = []
+    for col_name in TASK_COLLECTIONS:
+        docs = await get_collection(col_name).find({
+            "type": "task", "parent_task_id": parent_id, "deleted_at": None,
+        }).to_list(500)
+        for d in docs:
+            out.append(_serialize_task(d, current_user_id))
+    out.sort(key=lambda t: str(t.get("createdAt") or ""))
+    return out
 
 
 def _serialize_task_detail(doc: dict, current_user_id: str) -> dict:
@@ -545,7 +559,10 @@ async def get_task_detail(task_id: str, current_user: dict = Depends(require_tas
     existing, _ = await _get_task_or_404(task_id)
     if not _is_participant(existing, current_user):
         raise HTTPException(status_code=403, detail="Not authorized to view this task")
-    return _serialize_task_detail(existing, str(current_user["_id"]))
+    uid = str(current_user["_id"])
+    detail = _serialize_task_detail(existing, uid)
+    detail["subtasks"] = await _fetch_subtasks(task_id, uid)
+    return detail
 
 
 @router.patch("/{task_id}/status")
@@ -568,6 +585,15 @@ async def update_task_status(task_id: str, body: dict, current_user: dict = Depe
     updates = {"workflow_status": new_status, "updated_at": datetime.now(timezone.utc)}
     was_completed = old_status == "completed"
     if new_status == "completed" and not was_completed:
+        # Completion rule: every check point (checklist item) must be done first.
+        items = existing.get("checklist") or []
+        pending_items = [c for c in items if not (isinstance(c, dict) and c.get("completed"))]
+        if pending_items:
+            done = len(items) - len(pending_items)
+            raise HTTPException(
+                status_code=400,
+                detail=f"Complete all check points before completing this task ({done}/{len(items)} done).",
+            )
         updates["completed_at"] = datetime.now(timezone.utc)
         updates["completed_by"] = user_id
         updates["status"] = "completed"  # keep legacy Calendar page status in sync

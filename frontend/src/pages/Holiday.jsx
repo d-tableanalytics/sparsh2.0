@@ -1,11 +1,13 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { Navigate } from 'react-router-dom';
 import { CalendarDays, Plus, Search, Pencil, Trash2, X } from 'lucide-react';
 import { getHolidays, deleteHoliday } from '../services/holidayApi';
 import { useAuth } from '../context/AuthContext';
 import { useNotification } from '../context/NotificationContext';
 import HolidayFormModal from '../components/holiday/HolidayFormModal';
 
-const MANAGE_ROLES = ['superadmin', 'admin', 'coach', 'staff', 'clientadmin'];
+// Holiday module is restricted to Super Admin / Admin only (view + manage).
+const MANAGE_ROLES = ['superadmin', 'admin'];
 const HOLIDAY_TYPES = ['National', 'Festival', 'Company', 'Optional'];
 
 const todayKey = () => new Date().toISOString().slice(0, 10);
@@ -86,6 +88,9 @@ const Holiday = () => {
       setDeleting(false);
     }
   };
+
+  // Page guard: only Super Admin / Admin can open the Holiday module.
+  if (user && !MANAGE_ROLES.includes(user?.role?.toLowerCase())) return <Navigate to="/" replace />;
 
   return (
     <div className="space-y-5 pb-24">

@@ -8,6 +8,7 @@ import {
 import api from '../../services/api';
 import { createTask, updateTask, uploadTaskAttachment, deleteTaskAttachment } from '../../services/taskApi';
 import { createTaskCategory, createTaskTag } from '../../services/taskMetaApi';
+import { getHolidays } from '../../services/holidayApi';
 import { useAuth } from '../../context/AuthContext';
 import { useNotification } from '../../context/NotificationContext';
 import PickerModal from './PickerModal';
@@ -81,7 +82,7 @@ const formatFileSize = (bytes) => (bytes || bytes === 0) ? `${(bytes / (1024 * 1
 // show up on the Calendar page and vice versa. `end` is the task's own due date/time
 // (top-level field); `start`/`repeat_end_date` below are the separate recurrence-series
 // bounds, matching the existing recurring-event engine's fields exactly.
-const TaskFormModal = ({ isOpen, onClose, onSaved, task = null, categories = [], tags: availableTags = [], groupId = null, onTaxonomyChanged }) => {
+const TaskFormModal = ({ isOpen, onClose, onSaved, task = null, categories = [], tags: availableTags = [], groupId = null, parentId = null, onTaxonomyChanged }) => {
   const { user } = useAuth();
   const { showSuccess, showError } = useNotification();
   const [form, setForm] = useState(emptyForm);
@@ -102,6 +103,11 @@ const TaskFormModal = ({ isOpen, onClose, onSaved, task = null, categories = [],
   const [repeatEndPickerOpen, setRepeatEndPickerOpen] = useState(false);
   const [reminderModalOpen, setReminderModalOpen] = useState(false);
   const [extraOpen, setExtraOpen] = useState(false);
+
+  // Holidays + weekly-offs block task due/start dates in the picker. weeklyOffs defaults to
+  // Sunday (0) — there is no persisted per-user weekly-off setting in the backend yet.
+  const [holidayDates, setHolidayDates] = useState([]);
+  const WEEKLY_OFFS = [0];
   const [repeatDropdownOpen, setRepeatDropdownOpen] = useState(false);
   const [customIntervalOpen, setCustomIntervalOpen] = useState(false);
   const [customUnitOpen, setCustomUnitOpen] = useState(false);
@@ -111,6 +117,14 @@ const TaskFormModal = ({ isOpen, onClose, onSaved, task = null, categories = [],
 
   const fileInputRef = useRef(null);
   const imageInputRef = useRef(null);
+
+  // Fetch holidays when the form opens so the due/start date pickers can block them.
+  useEffect(() => {
+    if (!isOpen) return;
+    getHolidays().then(res => {
+      setHolidayDates((res.data || []).map(h => h.holiday_date).filter(Boolean));
+    }).catch(() => setHolidayDates([]));
+  }, [isOpen]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -332,6 +346,8 @@ const TaskFormModal = ({ isOpen, onClose, onSaved, task = null, categories = [],
         // Tag the task to a group when opened from the Groups workspace (else keep the
         // task's existing group on edit, or ungrouped for a normal create).
         group_id: groupId || task?.groupId || undefined,
+        // Link this task to a parent when opened as "Add Subtask" (else keep existing on edit).
+        parent_task_id: parentId || task?.parentTaskId || undefined,
         evidence_required: form.evidence_required,
         verification_required: form.verification_required,
         reminders: form.reminders,
@@ -411,11 +427,11 @@ const TaskFormModal = ({ isOpen, onClose, onSaved, task = null, categories = [],
                 className="w-full bg-transparent outline-none text-[12px] font-medium leading-relaxed placeholder:text-[var(--text-muted)] placeholder:opacity-50 text-[var(--text-main)] resize-none" />
             </div>
 
-            {/* Checklist */}
+            {/* Check Points (formerly "Checklist") */}
             <div className="px-6 pt-4">
               <button type="button" onClick={() => setChecklistOpen(o => !o)}
                 className="w-full flex items-center justify-between text-[12px] font-black text-[var(--accent-indigo)] uppercase tracking-widest">
-                <span className="flex items-center gap-1.5"><Plus size={14} /> Add Checklist {checklist.length > 0 && `(${checklist.length})`}</span>
+                <span className="flex items-center gap-1.5"><Plus size={14} /> Add Check Points {checklist.length > 0 && `(${checklist.length})`}</span>
                 <ChevronDown size={16} className={`transition-transform ${checklistOpen ? 'rotate-180' : ''}`} />
               </button>
               {checklistOpen && (
@@ -779,11 +795,17 @@ const TaskFormModal = ({ isOpen, onClose, onSaved, task = null, categories = [],
         onApply={handleCategoryApply} onAddNew={handleCategoryAddNew}
       />
       <MiniDatePicker isOpen={deadlinePickerOpen} onClose={() => setDeadlinePickerOpen(false)}
-        value={form.end} title="Select Due Date" onApply={(iso) => setForm(f => ({ ...f, end: iso }))} />
+        value={form.end} title="Select Due Date" onApply={(iso) => setForm(f => ({ ...f, end: iso }))}
+        holidayDates={holidayDates} weeklyOffs={WEEKLY_OFFS} onBlocked={showError} />
       <MiniDatePicker isOpen={startDatePickerOpen} onClose={() => setStartDatePickerOpen(false)}
-        value={form.start} title="Repeat Start Date" onApply={(iso) => setForm(f => ({ ...f, start: iso }))} />
+        value={form.start} title="Repeat Start Date" onApply={(iso) => setForm(f => ({ ...f, start: iso }))}
+        holidayDates={holidayDates} weeklyOffs={WEEKLY_OFFS} onBlocked={showError} />
+      {/* Repeat End Date: holidays are marked (indicator + label) but still selectable —
+          the end date is only the series boundary; the recurring engine skips holiday
+          occurrences within the range. */}
       <MiniDatePicker isOpen={repeatEndPickerOpen} onClose={() => setRepeatEndPickerOpen(false)}
-        value={form.repeat_end_date} title="Repeat End Date" onApply={(iso) => setForm(f => ({ ...f, repeat_end_date: iso }))} />
+        value={form.repeat_end_date} title="Repeat End Date" onApply={(iso) => setForm(f => ({ ...f, repeat_end_date: iso }))}
+        holidayDates={holidayDates} blockHolidays={false} />
       <ReminderModal isOpen={reminderModalOpen} onClose={() => setReminderModalOpen(false)}
         reminders={form.reminders} onApply={(reminders) => setForm(f => ({ ...f, reminders: reminders.map(r => ({ ...r, parent_type: 'task' })) }))} />
       <ReferenceLinksModal
