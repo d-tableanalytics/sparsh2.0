@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Search, ChevronDown, Building2, Download, FileDown, FileSpreadsheet, FileText } from 'lucide-react';
 import { getCompanies, exportCompanies } from '../../services/reportApi';
 import { fmtDate } from './reportPeriods';
+import CompanyModal from './CompanyModal';
 
 const COLS = [
   ['name', 'Company Name'], ['employees', 'Total Emp'], ['activeEmployees', 'Active Emp'],
@@ -17,6 +18,7 @@ const CompanyTable = ({ params, expandedId, onToggle }) => {
   const [error, setError] = useState(false);
   const [search, setSearch] = useState('');
   const [page, setPage] = useState(0);
+  const [modalCompany, setModalCompany] = useState(null);
   const PAGE_SIZE = 10;
 
   const load = useCallback(async () => {
@@ -92,19 +94,25 @@ const CompanyTable = ({ params, expandedId, onToggle }) => {
           <table className="w-full text-left min-w-[1300px]">
             <thead>
               <tr className="border-b border-[var(--border)] bg-[var(--input-bg)]">
-                <th className="px-3 py-3 text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest">#</th>
-                {COLS.map(([k, label]) => <th key={k} className="px-3 py-3 text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest whitespace-nowrap">{label}</th>)}
-                <th className="px-3 py-3 text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest text-center">Action</th>
+                <th className="sticky left-0 z-20 bg-[var(--input-bg)] w-[46px] min-w-[46px] px-3 py-3 text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest">#</th>
+                {COLS.map(([k, label]) => <th key={k} className={`px-3 py-3 text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest whitespace-nowrap ${k === 'name' ? 'sticky left-[46px] z-20 bg-[var(--input-bg)]' : ''}`}>{label}</th>)}
+                <th className="sticky right-0 z-20 bg-[var(--input-bg)] border-l border-[var(--border)] px-3 py-3 text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest text-center">Action</th>
               </tr>
             </thead>
             <tbody>
               {paged.map((c, i) => {
-                const isOpen = expandedId === c.id;
+                const isActive = modalCompany?.id === c.id;
+                const stickyBg = isActive ? 'bg-[var(--accent-indigo-bg)]' : 'bg-[var(--bg-card)]';
                 return (
-                  <tr key={c.id} onClick={() => onToggle(isOpen ? null : c)}
-                    className={`border-b border-[var(--border)] last:border-0 cursor-pointer transition-colors ${isOpen ? 'bg-[var(--accent-indigo-bg)]' : 'hover:bg-[var(--input-bg)]'}`}>
-                    <td className="px-3 py-3 text-[12px] font-black text-[var(--text-muted)]">{page * PAGE_SIZE + i + 1}</td>
-                    <td className={`${cell} font-black`}>{c.name}</td>
+                  <tr key={c.id} onClick={() => setModalCompany(c)}
+                    className={`group border-b border-[var(--border)] last:border-0 cursor-pointer transition-colors ${isActive ? 'bg-[var(--accent-indigo-bg)]' : 'hover:bg-[var(--input-bg)]'}`}>
+                    <td className={`sticky left-0 z-10 ${stickyBg} group-hover:bg-[var(--input-bg)] w-[46px] min-w-[46px] px-3 py-3 text-[12px] font-black text-[var(--text-muted)]`}>{page * PAGE_SIZE + i + 1}</td>
+                    <td className={`${cell} font-black sticky left-[46px] z-10 ${stickyBg} group-hover:bg-[var(--input-bg)]`}>
+                      <button onClick={(ev) => { ev.stopPropagation(); setModalCompany(c); }}
+                        className="text-left hover:text-[var(--accent-indigo)] hover:underline transition-colors" title="View company report">
+                        {c.name}
+                      </button>
+                    </td>
                     <td className={cell}>{c.employees}</td>
                     <td className={`${cell} text-[var(--text-muted)]`}>—</td>
                     <td className={cell}>{c.assigned}</td>
@@ -119,8 +127,8 @@ const CompanyTable = ({ params, expandedId, onToggle }) => {
                     <td className={cell}>{c.score}%</td>
                     <td className={`${cell} text-[var(--accent-indigo)]`}>{c.score}%</td>
                     <td className={`${cell} text-[var(--text-muted)]`}>{fmtDate(c.lastActivity)}</td>
-                    <td className="px-3 py-3 text-center">
-                      <ChevronDown size={16} className={`inline text-[var(--text-muted)] transition-transform ${isOpen ? 'rotate-180 text-[var(--accent-indigo)]' : ''}`} />
+                    <td className={`sticky right-0 z-10 ${stickyBg} group-hover:bg-[var(--input-bg)] border-l border-[var(--border)] px-3 py-3 text-center`}>
+                      <span className="text-[10px] font-black uppercase tracking-widest text-[var(--accent-indigo)]">View</span>
                     </td>
                   </tr>
                 );
@@ -139,6 +147,13 @@ const CompanyTable = ({ params, expandedId, onToggle }) => {
           </div>
         </div>
       )}
+
+      {/* Selected-company Employee-wise Report modal (real data, filter-aware) */}
+      <CompanyModal
+        company={modalCompany}
+        params={params}
+        onClose={() => setModalCompany(null)}
+      />
     </div>
   );
 };

@@ -186,18 +186,18 @@ const EmployeeWise = ({ params, onOpenEmployee }) => {
                     const sortable = !NO_SORT.has(key);
                     return (
                       <th key={key} onClick={() => sortable && handleSort(key)}
-                        className={`px-4 py-3 text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest whitespace-nowrap select-none ${sortable ? 'cursor-pointer hover:text-[var(--text-main)]' : ''}`}>
+                        className={`px-4 py-3 text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest whitespace-nowrap select-none ${sortable ? 'cursor-pointer hover:text-[var(--text-main)]' : ''} ${key === 'name' ? 'sticky left-0 z-20 bg-[var(--input-bg)]' : ''}`}>
                         <span className="inline-flex items-center gap-1">{label}{sort === key && <ArrowUpDown size={11} />}</span>
                       </th>
                     );
                   })}
-                  <th className="px-4 py-3 text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest text-center">Action</th>
+                  <th className="sticky right-0 z-20 bg-[var(--input-bg)] border-l border-[var(--border)] px-4 py-3 text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest text-center">Action</th>
                 </tr>
               </thead>
               <tbody>
                 {items.map((e) => (
-                  <tr key={e.id} className="border-b border-[var(--border)] last:border-0 hover:bg-[var(--input-bg)] transition-colors">
-                    <td className="px-4 py-3 whitespace-nowrap">
+                  <tr key={e.id} className="group border-b border-[var(--border)] last:border-0 hover:bg-[var(--input-bg)] transition-colors">
+                    <td className="sticky left-0 z-10 bg-[var(--bg-card)] group-hover:bg-[var(--input-bg)] px-4 py-3 whitespace-nowrap">
                       <p className="text-[13px] font-bold text-[var(--text-main)]">{e.name}</p>
                       <p className="text-[10px] text-[var(--text-muted)]">{e.email}</p>
                     </td>
@@ -220,7 +220,7 @@ const EmployeeWise = ({ params, onOpenEmployee }) => {
                     <td className="px-4 py-3">
                       <span className="px-2 py-1 rounded-lg text-[10px] font-black uppercase tracking-wider" style={{ color: RATING_COLOR[e.rating], background: 'var(--input-bg)' }}>{e.rating}</span>
                     </td>
-                    <td className="px-4 py-3 text-center">
+                    <td className="sticky right-0 z-10 bg-[var(--bg-card)] group-hover:bg-[var(--input-bg)] border-l border-[var(--border)] px-4 py-3 text-center">
                       <button onClick={() => onOpenEmployee(e.id)} title="View details"
                         className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest text-[var(--accent-indigo)] hover:bg-[var(--accent-indigo-bg)] transition-colors whitespace-nowrap">
                         View <ChevronRight size={13} />
@@ -244,6 +244,7 @@ const EmployeeWise = ({ params, onOpenEmployee }) => {
           </div>
         </div>
       )}
+
     </div>
   );
 };

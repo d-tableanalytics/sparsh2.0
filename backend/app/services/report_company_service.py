@@ -17,7 +17,7 @@ v1 gaps surfaced as null/"—": Employee ID, profile photo, started/submitted/
 reviewed/approved dates, check-in/out & duration, learning hours, assessment
 time-taken. Joining date proxies to user.created_at.
 """
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 
 from bson import ObjectId
@@ -242,11 +242,35 @@ async def compute_company_dashboard(company_id: str, tasks: List[dict], users: D
     productivity = round(sum(e["score"] for e in employees) / len(employees)) if employees else 0
     learners = sum(1 for uid in emp_ids if users[uid].get("tag") == "learner")
 
+    # Active users = activity (login/learning) within the last 30 days (real, from activity_logs).
+    activity = await rs._activity_by_user(emp_ids)
+    cutoff_key = (now - timedelta(days=30)).strftime("%Y-%m-%d")
+    active_users = 0
+    for uid in emp_ids:
+        act = activity.get(uid, {})
+        latest = str(act.get("lastActivity") or act.get("lastLogin") or "")
+        if latest and latest[:10] >= cutoff_key:
+            active_users += 1
+
+    # Active batches = company batches with status "active".
+    active_batches = 0
+    if batch_ids:
+        try:
+            active_batches = await get_collection("batches").count_documents(
+                {"_id": {"$in": [ObjectId(b) for b in batch_ids]}, "status": "active"})
+        except Exception:
+            active_batches = 0
+    completed_sessions = sum(v["completed"] for v in batch_session_counts.values())
+
     kpis = {
         "totalEmployees": len(emp_ids),
+        "activeUsers": active_users,
         "totalCoaches": len(coaches),
         "totalLearners": learners,
         "totalSessions": sessions_total,
+        "activeCourses": max(0, sessions_total - completed_sessions),
+        "totalBatches": len(batch_ids),
+        "activeBatches": active_batches,
         "totalAssignments": assigned,
         "completedAssignments": completed,
         "pendingAssignments": pending,

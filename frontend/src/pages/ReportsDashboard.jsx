@@ -8,7 +8,6 @@ import { useAuth } from '../context/AuthContext';
 import FilterDropdown from '../components/reports/FilterDropdown';
 import SummaryCards from '../components/reports/SummaryCards';
 import CompanyTable from '../components/reports/CompanyTable';
-import EmployeeTable from '../components/reports/EmployeeTable';
 import EmployeeWise from '../components/reports/EmployeeWise';
 import ActivityReport from '../components/reports/ActivityReport';
 import SessionReport from '../components/reports/SessionReport';
@@ -47,7 +46,6 @@ const ReportsDashboard = () => {
   const [endDate, setEndDate] = useState('');
   const [department, setDepartment] = useState('');
   const [departments, setDepartments] = useState([]);
-  const [expandedCompany, setExpandedCompany] = useState(null);
   const [exportOpen, setExportOpen] = useState(false);
   const [exporting, setExporting] = useState('');
   const exportRef = useRef(null);
@@ -66,7 +64,6 @@ const ReportsDashboard = () => {
   }, [period, startDate, endDate]);
 
   useEffect(() => { loadDepartments(); }, [loadDepartments]);
-  useEffect(() => { setExpandedCompany(null); }, [period, startDate, endDate, department]);
 
   useEffect(() => {
     if (!exportOpen) return undefined;
@@ -184,23 +181,20 @@ const ReportsDashboard = () => {
               {/* Dashboard cards — task/calendar KPIs (period-scoped) */}
               <SummaryCards params={baseParams} />
 
-              {/* Company Calendar Performance (expand a company → its employees' task detail) */}
-              <CompanyTable params={baseParams} expandedId={expandedCompany?.id} onToggle={setExpandedCompany} />
-              {expandedCompany && (
-                <EmployeeTable company={expandedCompany} params={baseParams} onOpenEmployee={(id) => navigate(`/admin/reports/employee/${id}`)} />
-              )}
+              {/* Company Calendar Performance — click a company → Employee-wise Report modal */}
+              <CompanyTable params={baseParams} />
 
               {/* Employee Calendar Performance (org-wide, all employees/learners) */}
               <div className="bg-[#ffffff] rounded-[24px] border border-[var(--border)] p-4">
                 <h3 className="text-[15px] font-black text-[var(--text-main)] uppercase italic tracking-tight mb-3">Employee Calendar Performance</h3>
-                <EmployeeWise params={baseParams} onOpenEmployee={(id) => navigate(`/admin/reports/employee/${id}`)} />
+                <EmployeeWise params={baseParams} onOpenEmployee={(id) => navigate(`/members/${id}`)} />
               </div>
             </>
           )}
 
           {calSub === 'activity' && <ActivityReport params={baseParams} />}
           {calSub === 'session' && <SessionReport />}
-          {calSub === 'task' && <TaskReport params={baseParams} onOpenEmployee={(id) => navigate(`/admin/reports/employee/${id}`)} />}
+          {calSub === 'task' && <TaskReport params={baseParams} onOpenEmployee={(id) => navigate(`/members/${id}`)} />}
         </>
       )}
 

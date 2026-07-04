@@ -1,75 +1,27 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { Search, ChevronDown, ArrowUpDown, Users, ExternalLink, Loader2, Download, FileDown, FileSpreadsheet, FileText } from 'lucide-react';
-import { getCompanyEmployees, getEmployeeAssignments, exportCompanyEmployees } from '../../services/reportApi';
-import { fmtDate } from './reportPeriods';
+import { Search, ChevronDown, ArrowUpDown, Users, ExternalLink, Download, FileDown, FileSpreadsheet, FileText } from 'lucide-react';
+import { getCompanyEmployees, exportCompanyEmployees } from '../../services/reportApi';
+import TaskRows from './TaskRows';
 
-const RATING_COLOR = {
-  Excellent: 'var(--accent-green)', Good: 'var(--accent-indigo)',
-  Average: 'var(--accent-orange)', 'Needs Attention': 'var(--accent-red)',
-};
-const STATUS_COLOR = {
-  pending: 'var(--accent-orange)', accepted: 'var(--accent-indigo)', in_progress: 'var(--accent-indigo)',
-  dependent_on_others: 'var(--accent-yellow)', blocked: 'var(--accent-red)',
-  verification: 'var(--accent-yellow)', completed: 'var(--accent-green)',
-};
-
+// Columns match the reference layout: #, Name, Emp ID, Dept, Designation, Assigned, Completed,
+// Pending, Overdue, Attendance %, Assessment, Courses, Actions.
 const COLS = [
   ['name', 'Employee Name'], ['empId', 'Employee ID'], ['department', 'Department'], ['designation', 'Designation'],
   ['assigned', 'Assigned'], ['completed', 'Completed'], ['pending', 'Pending'], ['overdue', 'Overdue'],
   ['attendanceRate', 'Attendance %'], ['avgAssessment', 'Assessment'], ['coursesCompleted', 'Courses'],
-  ['sessionsAttended', 'Sessions'], ['score', 'Productivity'], ['rating', 'Rating'], ['lastActivity', 'Last Activity'],
 ];
-const SORTABLE = new Set(['assigned', 'completed', 'pending', 'overdue', 'attendanceRate', 'avgAssessment', 'score']);
+const SORTABLE = new Set(['assigned', 'completed', 'pending', 'overdue', 'attendanceRate', 'avgAssessment']);
 
-const TaskRows = ({ employeeId, params }) => {
-  const [tasks, setTasks] = useState(null);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    let alive = true;
-    getEmployeeAssignments(employeeId, { ...params, limit: 50 })
-      .then((r) => { if (alive) setTasks(r.items || []); })
-      .catch(() => { if (alive) setTasks([]); })
-      .finally(() => { if (alive) setLoading(false); });
-    return () => { alive = false; };
-  }, [employeeId, params]);
-
-  if (loading) return <div className="flex items-center gap-2 py-4 px-4 text-[12px] font-bold text-[var(--text-muted)]"><Loader2 size={14} className="animate-spin" /> Loading tasks…</div>;
-  if (!tasks || tasks.length === 0) return <p className="py-4 px-4 text-[12px] font-bold text-[var(--text-muted)]">No tasks in this period.</p>;
-
-  return (
-    <div className="overflow-x-auto bg-[var(--bg-main)] rounded-xl border border-[var(--border)] m-2">
-      <table className="w-full text-left min-w-[900px]">
-        <thead>
-          <tr className="border-b border-[var(--border)]">
-            {['Task Name', 'Module', 'Assigned', 'Due', 'Completed', 'Priority', 'Status', 'Assigned By', 'Score'].map((h) => (
-              <th key={h} className="px-3 py-2 text-[9px] font-black text-[var(--text-muted)] uppercase tracking-widest whitespace-nowrap">{h}</th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {tasks.map((t) => (
-            <tr key={t.id} className="border-b border-[var(--border)] last:border-0">
-              <td className="px-3 py-2 text-[12px] font-bold text-[var(--text-main)] max-w-[200px] truncate">{t.title}</td>
-              <td className="px-3 py-2 text-[11px] font-bold text-[var(--text-muted)]">{t.module}</td>
-              <td className="px-3 py-2 text-[11px] text-[var(--text-muted)] whitespace-nowrap">{fmtDate(t.assignedDate)}</td>
-              <td className="px-3 py-2 text-[11px] text-[var(--text-muted)] whitespace-nowrap">{fmtDate(t.dueDate)}</td>
-              <td className="px-3 py-2 text-[11px] text-[var(--text-muted)] whitespace-nowrap">{fmtDate(t.completedDate)}</td>
-              <td className="px-3 py-2 text-[11px] font-bold text-[var(--text-muted)]">{t.priority}</td>
-              <td className="px-3 py-2">
-                <span className="px-2 py-0.5 rounded-lg text-[9px] font-black uppercase tracking-wider" style={{ color: STATUS_COLOR[t.status], background: 'var(--input-bg)' }}>{t.statusLabel}</span>
-              </td>
-              <td className="px-3 py-2 text-[11px] font-bold text-[var(--text-muted)]">{t.assignedBy || '—'}</td>
-              <td className="px-3 py-2 text-[12px] font-black text-[var(--text-main)]">{t.score ?? '—'}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
+// Attendance-percentage color bands, consistent with the rest of the reports.
+const attColor = (r) => {
+  const v = Number(r) || 0;
+  if (v >= 90) return 'var(--accent-green)';
+  if (v >= 75) return 'var(--accent-yellow)';
+  if (v >= 60) return 'var(--accent-orange)';
+  return 'var(--accent-red)';
 };
 
-const EmployeeTable = ({ company, params, onOpenEmployee }) => {
+const EmployeeTable = ({ company, params, onOpenEmployee, embedded = false }) => {
   const [data, setData] = useState({ items: [], total: 0 });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
@@ -119,13 +71,17 @@ const EmployeeTable = ({ company, params, onOpenEmployee }) => {
   };
 
   return (
-    <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-[24px] overflow-hidden shadow-sm">
-      <div className="flex flex-wrap items-center justify-between gap-3 p-5 border-b border-[var(--border)]">
-        <h3 className="text-[15px] font-black text-[var(--text-main)] uppercase italic tracking-tight">
-          Employee-wise Report · <span className="text-[var(--accent-indigo)]">{company.name}</span>
-        </h3>
-        <div className="flex items-center gap-2">
-          <div className="relative" ref={exportRef}>
+    <div className={embedded ? '' : 'bg-[var(--bg-card)] border border-[var(--border)] rounded-[24px] overflow-hidden shadow-sm'}>
+      <div className={`flex flex-wrap items-center justify-between gap-3 ${embedded ? 'pb-3' : 'p-5 border-b border-[var(--border)]'}`}>
+        {embedded ? (
+          <span className="text-[11px] font-black text-[var(--text-muted)] uppercase tracking-widest">{data.total} Employees</span>
+        ) : (
+          <h3 className="text-[15px] font-black text-[var(--text-main)] uppercase italic tracking-tight">
+            Employee-wise Report · <span className="text-[var(--accent-indigo)]">{company.name}</span>
+          </h3>
+        )}
+        <div className="flex items-center gap-2 flex-wrap w-full sm:w-auto">
+          <div className="relative shrink-0" ref={exportRef}>
             <button onClick={() => setExportOpen((o) => !o)} disabled={!!exporting || (data.items || []).length === 0}
               className="flex items-center gap-1.5 px-4 py-2.5 bg-[var(--accent-indigo)] text-white rounded-xl text-[11px] font-black uppercase tracking-widest shadow-sm hover:opacity-90 transition-all disabled:opacity-50">
               <Download size={14} /> {exporting ? 'Exporting…' : 'Export'} <ChevronDown size={13} className={`transition-transform ${exportOpen ? 'rotate-180' : ''}`} />
@@ -140,7 +96,7 @@ const EmployeeTable = ({ company, params, onOpenEmployee }) => {
               </div>
             )}
           </div>
-          <div className="relative min-w-[220px]">
+          <div className="relative flex-1 min-w-[150px]">
             <Search size={13} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-[var(--text-muted)]" />
             <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search employee..."
               className="w-full pl-9 pr-3 py-2.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-xl text-[12px] font-bold outline-none focus:border-[var(--accent-indigo)]" />
@@ -155,57 +111,104 @@ const EmployeeTable = ({ company, params, onOpenEmployee }) => {
       ) : (data.items || []).length === 0 ? (
         <div className="py-14 text-center"><Users size={36} className="mx-auto mb-3 text-[var(--text-muted)] opacity-30" /><p className="text-[13px] font-bold text-[var(--text-muted)]">No employees found.</p></div>
       ) : (
-        <div className="overflow-x-auto">
-          <table className="w-full text-left min-w-[1300px]">
-            <thead>
-              <tr className="border-b border-[var(--border)] bg-[var(--input-bg)]">
-                <th className="px-3 py-3 text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest">#</th>
-                {COLS.map(([k, label]) => (
-                  <th key={k} onClick={() => handleSort(k)} className={`px-3 py-3 text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest whitespace-nowrap ${SORTABLE.has(k) ? 'cursor-pointer hover:text-[var(--text-main)]' : ''}`}>
-                    <span className="inline-flex items-center gap-1">{label}{sort === k && <ArrowUpDown size={10} />}</span>
-                  </th>
-                ))}
-                <th className="px-3 py-3 text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest text-center">Action</th>
-              </tr>
-            </thead>
-            <tbody>
-              {data.items.map((e, i) => {
-                const isOpen = expandedEmp === e.id;
-                return (
-                  <React.Fragment key={e.id}>
-                    <tr className={`border-b border-[var(--border)] transition-colors ${isOpen ? 'bg-[var(--accent-indigo-bg)]' : 'hover:bg-[var(--input-bg)]'}`}>
-                      <td className="px-3 py-3 text-[12px] font-black text-[var(--text-muted)]">{page * PAGE_SIZE + i + 1}</td>
-                      <td className={`${cell} font-black`}>{e.name}</td>
-                      <td className={`${cell} text-[var(--text-muted)]`}>—</td>
-                      <td className={cell}>{e.department}</td>
-                      <td className={`${cell} text-[var(--text-muted)]`}>—</td>
-                      <td className={cell}>{e.assigned}</td>
-                      <td className={`${cell} text-[var(--accent-green)]`}>{e.completed}</td>
-                      <td className={`${cell} text-[var(--accent-orange)]`}>{e.pending}</td>
-                      <td className={`${cell} text-[var(--accent-red)]`}>{e.overdue}</td>
-                      <td className={cell}>{e.attendanceRate}%</td>
-                      <td className={cell}>{e.avgAssessment}%</td>
-                      <td className={`${cell} text-[var(--text-muted)]`}>—</td>
-                      <td className={`${cell} text-[var(--text-muted)]`}>—</td>
-                      <td className={cell}>{e.score}%</td>
-                      <td className="px-3 py-3"><span className="px-2 py-1 rounded-lg text-[10px] font-black uppercase" style={{ color: RATING_COLOR[e.rating], background: 'var(--input-bg)' }}>{e.rating}</span></td>
-                      <td className={`${cell} text-[var(--text-muted)]`}>—</td>
-                      <td className="px-3 py-3 text-center whitespace-nowrap">
-                        <button onClick={() => onOpenEmployee(e.id)} title="Open full report" className="p-1 text-[var(--text-muted)] hover:text-[var(--accent-indigo)]"><ExternalLink size={14} /></button>
-                        <button onClick={() => setExpandedEmp(isOpen ? null : e.id)} title="Task details" className="p-1"><ChevronDown size={16} className={`text-[var(--text-muted)] transition-transform ${isOpen ? 'rotate-180 text-[var(--accent-indigo)]' : ''}`} /></button>
-                      </td>
-                    </tr>
-                    {isOpen && (
-                      <tr className="bg-[var(--bg-main)]">
-                        <td colSpan={COLS.length + 2} className="p-0"><TaskRows employeeId={e.id} params={params} /></td>
+        <>
+          {/* Desktop / tablet: horizontal-scroll table (scroll contained inside this wrapper) */}
+          <div className="hidden md:block overflow-x-auto">
+            <table className="w-full text-left min-w-[1040px]">
+              <thead>
+                <tr className="border-b border-[var(--border)] bg-[var(--input-bg)]">
+                  <th className="sticky left-0 z-20 bg-[var(--input-bg)] w-[46px] min-w-[46px] px-3 py-3 text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest">#</th>
+                  {COLS.map(([k, label]) => (
+                    <th key={k} onClick={() => handleSort(k)} className={`px-3 py-3 text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest whitespace-nowrap ${SORTABLE.has(k) ? 'cursor-pointer hover:text-[var(--text-main)]' : ''} ${k === 'name' ? 'sticky left-[46px] z-20 bg-[var(--input-bg)]' : ''}`}>
+                      <span className="inline-flex items-center gap-1">{label}{sort === k && <ArrowUpDown size={10} />}</span>
+                    </th>
+                  ))}
+                  <th className="sticky right-0 z-20 bg-[var(--input-bg)] border-l border-[var(--border)] px-3 py-3 text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest text-center">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.items.map((e, i) => {
+                  const isOpen = expandedEmp === e.id;
+                  const stickyBg = isOpen ? 'bg-[var(--accent-indigo-bg)]' : 'bg-[var(--bg-card)]';
+                  return (
+                    <React.Fragment key={e.id}>
+                      <tr
+                        onClick={() => setExpandedEmp(isOpen ? null : e.id)}
+                        role="button" tabIndex={0} aria-expanded={isOpen}
+                        onKeyDown={(ev) => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); setExpandedEmp(isOpen ? null : e.id); } }}
+                        className={`group border-b border-[var(--border)] cursor-pointer transition-colors outline-none focus-visible:bg-[var(--input-bg)] ${isOpen ? 'bg-[var(--accent-indigo-bg)]' : 'hover:bg-[var(--input-bg)]'}`}>
+                        <td className={`sticky left-0 z-10 ${stickyBg} group-hover:bg-[var(--input-bg)] w-[46px] min-w-[46px] px-3 py-3 text-[12px] font-black text-[var(--text-muted)]`}>{page * PAGE_SIZE + i + 1}</td>
+                        <td className={`${cell} font-black sticky left-[46px] z-10 ${stickyBg} group-hover:bg-[var(--input-bg)]`}>{e.name}</td>
+                        <td className={`${cell} text-[var(--text-muted)]`}>—</td>
+                        <td className={cell}>{e.department}</td>
+                        <td className={`${cell} text-[var(--text-muted)]`}>—</td>
+                        <td className={cell}>{e.assigned}</td>
+                        <td className={`${cell} text-[var(--accent-green)]`}>{e.completed}</td>
+                        <td className={`${cell} text-[var(--accent-orange)]`}>{e.pending}</td>
+                        <td className={`${cell} text-[var(--accent-red)]`}>{e.overdue}</td>
+                        <td className="px-3 py-3 text-[12px] font-black whitespace-nowrap" style={{ color: attColor(e.attendanceRate) }}>{e.attendanceRate}%</td>
+                        <td className={cell}>{e.avgAssessment}%</td>
+                        <td className={`${cell} text-[var(--text-muted)]`}>—</td>
+                        <td className={`sticky right-0 z-10 ${stickyBg} group-hover:bg-[var(--input-bg)] border-l border-[var(--border)] px-3 py-3 text-center whitespace-nowrap`}>
+                          <button onClick={(ev) => { ev.stopPropagation(); onOpenEmployee(e.id); }} title="Open full report" className="p-1 text-[var(--text-muted)] hover:text-[var(--accent-indigo)]"><ExternalLink size={14} /></button>
+                        </td>
                       </tr>
-                    )}
-                  </React.Fragment>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
+                      {isOpen && (
+                        <tr className="bg-[var(--bg-main)]">
+                          <td colSpan={COLS.length + 2} className="p-0"><TaskRows employeeId={e.id} params={params} /></td>
+                        </tr>
+                      )}
+                    </React.Fragment>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+
+          {/* Mobile: stacked cards (tap card → task details below; no wide table → no overflow) */}
+          <div className="md:hidden space-y-3">
+            {data.items.map((e, i) => {
+              const isOpen = expandedEmp === e.id;
+              return (
+                <div key={e.id} className="border border-[var(--border)] rounded-2xl bg-[var(--bg-card)] overflow-hidden">
+                  <div
+                    role="button" tabIndex={0} aria-expanded={isOpen}
+                    onClick={() => setExpandedEmp(isOpen ? null : e.id)}
+                    onKeyDown={(ev) => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); setExpandedEmp(isOpen ? null : e.id); } }}
+                    className="p-3 cursor-pointer outline-none focus-visible:bg-[var(--input-bg)]">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="min-w-0">
+                        <p className="text-[13px] font-black text-[var(--text-main)] truncate">{page * PAGE_SIZE + i + 1}. {e.name}</p>
+                        <p className="text-[11px] font-bold text-[var(--text-muted)] truncate">{e.department}</p>
+                      </div>
+                      <div className="flex items-center gap-1 shrink-0">
+                        <button onClick={(ev) => { ev.stopPropagation(); onOpenEmployee(e.id); }} title="Open full report"
+                          className="p-2 rounded-lg border border-[var(--border)] text-[var(--text-muted)] hover:text-[var(--accent-indigo)]"><ExternalLink size={14} /></button>
+                        <ChevronDown size={18} className={`transition-transform ${isOpen ? 'rotate-180 text-[var(--accent-indigo)]' : 'text-[var(--text-muted)]'}`} />
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-3 gap-2 mt-3">
+                      {[
+                        ['Assigned', e.assigned, 'var(--text-main)'],
+                        ['Completed', e.completed, 'var(--accent-green)'],
+                        ['Pending', e.pending, 'var(--accent-orange)'],
+                        ['Overdue', e.overdue, 'var(--accent-red)'],
+                        ['Attendance', `${e.attendanceRate}%`, attColor(e.attendanceRate)],
+                        ['Assessment', `${e.avgAssessment}%`, 'var(--text-main)'],
+                      ].map(([label, val, color]) => (
+                        <div key={label} className="bg-[var(--input-bg)] rounded-xl py-2 text-center">
+                          <p className="text-[14px] font-black" style={{ color }}>{val}</p>
+                          <p className="text-[8px] font-black text-[var(--text-muted)] uppercase tracking-wider">{label}</p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                  {isOpen && <div className="border-t border-[var(--border)]"><TaskRows employeeId={e.id} params={params} /></div>}
+                </div>
+              );
+            })}
+          </div>
+        </>
       )}
 
       {data.total > PAGE_SIZE && (
