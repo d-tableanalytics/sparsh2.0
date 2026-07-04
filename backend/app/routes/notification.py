@@ -21,6 +21,41 @@ class NotificationResponse(BaseModel):
     class Config:
         populate_by_name = True
 
+# ─── Per-user Notification Preferences (Settings ▸ Notifications) ───
+# Stored in the `notification_preferences` collection keyed by user_id, so we don't have to
+# touch the staff/learners user schema. Every key defaults to True when no doc exists yet.
+PREFERENCE_KEYS = [
+    "email_notifications", "task_reminders", "delegation_updates",
+    "subscription_updates", "holiday_alerts",
+]
+
+
+class NotificationPreferences(BaseModel):
+    email_notifications: bool = True
+    task_reminders: bool = True
+    delegation_updates: bool = True
+    subscription_updates: bool = True
+    holiday_alerts: bool = True
+
+
+@router.get("/preferences")
+async def get_notification_preferences(current_user: dict = Depends(get_current_user)):
+    user_id = str(current_user["_id"])
+    doc = await get_collection("notification_preferences").find_one({"user_id": user_id})
+    return {k: (doc.get(k, True) if doc else True) for k in PREFERENCE_KEYS}
+
+
+@router.put("/preferences")
+async def update_notification_preferences(prefs: NotificationPreferences, current_user: dict = Depends(get_current_user)):
+    user_id = str(current_user["_id"])
+    data = prefs.model_dump()
+    data["updated_at"] = datetime.utcnow()
+    await get_collection("notification_preferences").update_one(
+        {"user_id": user_id}, {"$set": {**data, "user_id": user_id}}, upsert=True
+    )
+    return {k: prefs.model_dump()[k] for k in PREFERENCE_KEYS}
+
+
 @router.get("/", response_model=List[dict])
 async def get_notifications(current_user: dict = Depends(get_current_user)):
     user_id = str(current_user["_id"])

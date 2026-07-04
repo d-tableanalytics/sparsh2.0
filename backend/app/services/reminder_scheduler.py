@@ -11,9 +11,21 @@ from app.utils.calendar_utils import CALENDAR_COLLECTIONS, find_user_by_id
 
 async def start_reminder_scheduler():
     logger.info("Starting reminder scheduler background worker...")
+    last_recurring_day = None
     while True:
         try:
             await check_and_trigger_reminders()
+
+            # Once per day (first tick after midnight, and at startup), roll recurring
+            # task series forward — creating each day's/week's/month's next occurrence.
+            today = datetime.utcnow().date()
+            if today != last_recurring_day:
+                try:
+                    from app.services.recurring_task_service import generate_due_recurring_tasks
+                    await generate_due_recurring_tasks()
+                    last_recurring_day = today
+                except Exception as e:
+                    logger.error(f"Error generating recurring tasks: {e}")
         except Exception as e:
             logger.error(f"Error in reminder scheduler: {e}")
         await asyncio.sleep(60) # Check every minute

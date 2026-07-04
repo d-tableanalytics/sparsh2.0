@@ -158,12 +158,21 @@ const CalendarPage = () => {
                 api.get(usersEndpoint), api.get('/settings/backdate-control'),
                 api.get('/gpt/projects')
             ]);
-            setEvents(evRes.data.map(e => ({
-                id: e.id, title: e.title, start: e.start, end: e.end,
-                backgroundColor: 'transparent', borderColor: 'transparent',
-                textColor: 'var(--text-main)', allDay: e.allDay,
-                extendedProps: { ...e.extendedProps, id: e.id, dotColor: getRescheduleColor(e.extendedProps?.status || e.status, e.extendedProps?.type || e.type, e.color, e.extendedProps?.isCreator) }
-            })));
+            setEvents(evRes.data.map(e => {
+                const evType = e.extendedProps?.type || e.type;
+                // Tasks have no user-facing "start" of their own (that field is only the
+                // recurrence-series start, defaulted to creation time — see TaskFormModal);
+                // the date the user actually picked is the due date (`end`, "Set Deadline").
+                // Anchor the calendar's day-cell placement to that instead, so a task shows
+                // up under the day it's due, not the day it happened to be created.
+                const displayStart = (evType === 'task' && e.end) ? e.end : e.start;
+                return {
+                    id: e.id, title: e.title, start: displayStart, end: e.end,
+                    backgroundColor: 'transparent', borderColor: 'transparent',
+                    textColor: 'var(--text-main)', allDay: e.allDay,
+                    extendedProps: { ...e.extendedProps, id: e.id, dotColor: getRescheduleColor(e.extendedProps?.status || e.status, e.extendedProps?.type || e.type, e.color, e.extendedProps?.isCreator) }
+                };
+            }));
             setBatches(bRes.data); setQuarters(qRes.data); setTemplates(tRes.data); setAllUsers(uRes.data);
             setBackdateSettings(sRes.data); setGptProjects(gRes.data);
         } catch (err) { console.error(err); }
