@@ -1,5 +1,21 @@
 import api from './api';
 
+// Client-side CSV download (used for company-scoped exports that the server export
+// endpoint doesn't cover). rows = array of arrays; headers = array of strings.
+export const downloadCsv = (filename, headers, rows) => {
+  const esc = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+  const csv = [headers, ...rows].map((r) => r.map(esc).join(',')).join('\n');
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+};
+
 // Admin Reports & Analytics API (superadmin only on the backend).
 // Thin wrappers over the shared axios instance so JWT + error handling are reused.
 
@@ -17,6 +33,69 @@ export const getDepartmentsReport = (params) =>
 
 export const getDoers = (params) =>
   api.get('/reports/doers', { params }).then((r) => r.data);
+
+// Comprehensive employee/learner report (includes users with zero tasks).
+export const getEmployeesWide = (params) =>
+  api.get('/reports/employees-wide', { params }).then((r) => r.data);
+
+// Streams the Company-wise report as CSV / XLSX / PDF and triggers a download.
+export const exportCompanies = async ({ format = 'csv', ...params }) => {
+  const res = await api.get('/reports/companies/export', {
+    params: { format, ...params },
+    responseType: 'blob',
+  });
+  const blob = new Blob([res.data]);
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `company_report.${format}`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+};
+
+// Streams one company's employees as CSV / XLSX / PDF and triggers a download.
+export const exportCompanyEmployees = async (companyId, { format = 'csv', ...params }) => {
+  const res = await api.get(`/reports/companies/${companyId}/employees/export`, {
+    params: { format, ...params },
+    responseType: 'blob',
+  });
+  const blob = new Blob([res.data]);
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `employee_report.${format}`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+};
+
+// Streams the comprehensive employee report as CSV / XLSX / PDF and triggers a download.
+export const exportEmployeesWide = async ({ format = 'csv', ...params }) => {
+  const res = await api.get('/reports/employees-wide/export', {
+    params: { format, ...params },
+    responseType: 'blob',
+  });
+  const blob = new Blob([res.data]);
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `employee_report.${format}`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+};
+
+// Activity report (login/usage from activity_logs).
+export const getActivityReport = (params) =>
+  api.get('/reports/activity', { params }).then((r) => r.data);
+
+// Session report (LMS sessions + attendance + duration).
+export const getSessionReport = (params) =>
+  api.get('/reports/sessions', { params }).then((r) => r.data);
 
 // E2 — Companies
 export const getCompanies = (params) =>
