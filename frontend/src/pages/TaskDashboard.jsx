@@ -12,6 +12,7 @@ import StatusSummaryCards from '../components/tasks/StatusSummaryCards';
 import StackedReportPanel from '../components/tasks/StackedReportPanel';
 import TaskDonutPanel from '../components/tasks/TaskDonutPanel';
 import { SUMMARY_CARD_ORDER, STATUS_CONFIG, CARD_KEY_TO_STATUS } from '../components/tasks/statusConfig';
+import { formatDate } from '../components/tasks/taskDisplayUtils';
 
 const ADMIN_ROLES = ['superadmin', 'admin', 'coach', 'staff'];
 
@@ -515,7 +516,7 @@ const TaskDashboard = () => {
                         </td>
                         <td className="px-5 py-3.5 text-[12px] font-bold text-[var(--text-muted)]">{t.category || '—'}</td>
                         <td className="px-5 py-3.5 text-[12px] font-bold text-[var(--text-muted)]">{(t.assignedTo || []).map(id => userMap[id] || id).join(', ') || 'Myself'}</td>
-                        <td className="px-5 py-3.5 text-[12px] font-bold text-[var(--text-muted)]">{t.end ? new Date(t.end).toLocaleDateString() : '—'}</td>
+                        <td className="px-5 py-3.5 text-[12px] font-bold text-[var(--text-muted)]">{t.end ? formatDate(t.end) : '—'}</td>
                         <td className="px-5 py-3.5">
                           <span className="px-3 py-1.5 rounded-lg text-[10px] font-black border" style={{ background: cfg.bg, color: cfg.color, borderColor: cfg.border }}>{cfg.label}</span>
                         </td>

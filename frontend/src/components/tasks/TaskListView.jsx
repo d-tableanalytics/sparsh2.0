@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import { motion } from 'framer-motion';
 import {
   ListChecks, UserPlus, Filter as FilterIcon, Search, RefreshCw, Download,
-  List as ListIcon, Table2, ArrowUpDown, Trash2, RotateCcw, MoreVertical,
+  List as ListIcon, Table2, ArrowUpDown, Trash2, RotateCcw,
   Calendar as CalendarIcon, Eye, X, ChevronDown, Repeat,
 } from 'lucide-react';
 import api from '../../services/api';
@@ -11,12 +11,13 @@ import { getTaskCategories, getTaskTags } from '../../services/taskMetaApi';
 import { openTaskEventStream } from '../../services/taskEventsApi';
 import { useAuth } from '../../context/AuthContext';
 import { useNotification } from '../../context/NotificationContext';
-import { STATUS_CONFIG, LIST_CARD_ORDER, CARD_KEY_TO_STATUS, PRIORITY_CONFIG, WORKFLOW_STATUSES } from './statusConfig';
-import { getInitials, formatRelativeTime, formatFrequencyLabel, exportTasksToCsv, groupTasksByRecurrence } from './taskDisplayUtils';
+import { STATUS_CONFIG, LIST_CARD_ORDER, CARD_KEY_TO_STATUS, PRIORITY_CONFIG, WORKFLOW_STATUSES, statusOptions, statusOptionLabel, REASON_REQUIRED_STATUSES } from './statusConfig';
+import { getInitials, formatRelativeTime, formatFrequencyLabel, formatDate, exportTasksToCsv, groupTasksByRecurrence } from './taskDisplayUtils';
 import StatusSummaryCards from './StatusSummaryCards';
 import DateRangeFilter from './DateRangeFilter';
 import TaskFormModal from './TaskFormModal';
 import TaskDetailsModal from './TaskDetailsModal';
+import StatusReasonModal from './StatusReasonModal';
 
 // One row in the card/list view. Extracted so both a standalone task and a recurring
 // series' primary occurrence render identically; `groupBadge` adds the "×N / expand" control
@@ -24,7 +25,7 @@ import TaskDetailsModal from './TaskDetailsModal';
 // once that series is expanded.
 const TaskRow = ({
   task, scope, userMap, checked, onToggleSelect, onOpenDetails, onStatusChange,
-  isMenuOpen, onToggleMenu, onRestore, indent, groupBadge, statusPending,
+  onRestore, indent, groupBadge, statusPending, isAssigner,
 }) => {
   const cfg = STATUS_CONFIG[task.status] || STATUS_CONFIG.pending;
   const priorityCfg = PRIORITY_CONFIG[task.priority] || PRIORITY_CONFIG.Normal;
@@ -45,6 +46,15 @@ const TaskRow = ({
         <p className="text-[11px] font-bold text-[var(--text-muted)] truncate">
           {counterpartLabel} <span className="text-[13px] font-black text-[var(--text-main)] ml-1">{task.title}</span>
         </p>
+        {(task.tags || []).length > 0 && (
+          <div className="mt-1 flex flex-wrap gap-1">
+            {task.tags.map(tag => (
+              <span key={tag} className="px-2 py-0.5 rounded-full text-[8px] font-black uppercase tracking-wider bg-[var(--accent-green-bg)] text-[var(--accent-green)] border border-[var(--accent-green-border)]">
+                {tag}
+              </span>
+            ))}
+          </div>
+        )}
       </div>
 
       <div className="flex items-center gap-2 shrink-0 flex-wrap justify-end">
@@ -55,7 +65,7 @@ const TaskRow = ({
           <select value={task.status} onChange={e => onStatusChange(e.target.value)} onClick={e => e.stopPropagation()} disabled={statusPending}
             className="px-3 py-1 rounded-full text-[9px] font-black uppercase tracking-wider border outline-none cursor-pointer disabled:opacity-60 disabled:cursor-wait"
             style={{ background: cfg.bg, color: cfg.color, borderColor: cfg.border }}>
-            {WORKFLOW_STATUSES.map(s => <option key={s} value={s}>{STATUS_CONFIG[s].label}</option>)}
+            {statusOptions(task.status).map(s => <option key={s} value={s}>{statusOptionLabel(s, { verificationRequired: task.verificationRequired, isAssigner })}</option>)}
           </select>
         )}
         <span className="px-2.5 py-1 rounded-full text-[9px] font-black uppercase tracking-wider bg-[var(--input-bg)] text-[var(--text-muted)] border border-[var(--border)]">
@@ -63,7 +73,7 @@ const TaskRow = ({
         </span>
         {task.end && (
           <span className={`flex items-center gap-1 text-[10px] font-bold ${task.isOverdue ? 'text-[var(--accent-red)]' : 'text-[var(--text-muted)]'}`}>
-            <CalendarIcon size={11} /> {new Date(task.end).toLocaleDateString(undefined, { day: '2-digit', month: 'short' })}
+            <CalendarIcon size={11} /> {formatDate(task.end)}
           </span>
         )}
         <span className="flex items-center gap-1 text-[10px] font-bold text-[var(--text-muted)]">
@@ -71,26 +81,19 @@ const TaskRow = ({
         </span>
         <span className="text-[10px] font-bold text-[var(--text-muted)] opacity-70">{formatRelativeTime(task.end || task.start)}</span>
 
-        <div className="relative">
-          <button onClick={(e) => { e.stopPropagation(); onToggleMenu(); }}
-            className="p-1.5 rounded-lg text-[var(--text-muted)] hover:bg-[var(--input-bg)]">
-            <MoreVertical size={15} />
+        {/* Direct action buttons — the old kebab dropdown (which only held "View") is gone;
+            clicking the row body opens details too, so this is just a redundant quick action. */}
+        {scope === 'deleted' ? (
+          <button onClick={(e) => { e.stopPropagation(); onRestore(); }} title="Restore"
+            className="p-1.5 rounded-lg text-[var(--accent-indigo)] hover:bg-[var(--accent-indigo-bg)]">
+            <RotateCcw size={15} />
           </button>
-          {isMenuOpen && (
-            <div onClick={e => e.stopPropagation()}
-              className="absolute right-0 top-full mt-1 w-36 bg-[var(--bg-card)] border border-[var(--border)] rounded-xl shadow-xl z-20 overflow-hidden">
-              {/* Single "View" action — Edit/Delete now live inside the detail screen. */}
-              <button onClick={onOpenDetails} className="w-full flex items-center gap-2 px-3 py-2.5 text-[11px] font-bold text-[var(--text-main)] hover:bg-[var(--input-bg)]">
-                <Eye size={13} /> View
-              </button>
-              {scope === 'deleted' && (
-                <button onClick={onRestore} className="w-full flex items-center gap-2 px-3 py-2.5 text-[11px] font-bold text-[var(--accent-indigo)] hover:bg-[var(--input-bg)]">
-                  <RotateCcw size={13} /> Restore
-                </button>
-              )}
-            </div>
-          )}
-        </div>
+        ) : (
+          <button onClick={(e) => { e.stopPropagation(); onOpenDetails(); }} title="View"
+            className="p-1.5 rounded-lg text-[var(--text-muted)] hover:text-[var(--accent-indigo)] hover:bg-[var(--input-bg)]">
+            <Eye size={15} />
+          </button>
+        )}
       </div>
     </motion.div>
   );
@@ -110,6 +113,7 @@ const TAB_KEYS = ['all', 'overdue', ...WORKFLOW_STATUSES];
 // tabs, and avatar/badge row cards.
 const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = true, groupId = null, embedded = false }) => {
   const { user } = useAuth();
+  const isAdmin = ['superadmin', 'admin'].includes(user?.role);
   const { showSuccess, showError } = useNotification();
   const [tasks, setTasks] = useState([]);
   const [users, setUsers] = useState([]);
@@ -127,8 +131,10 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
   const [search, setSearch] = useState('');
 
   const [statusFilter, setStatusFilter] = useState('all');
-  const [sortKey, setSortKey] = useState('end');
-  const [sortDir, setSortDir] = useState('asc');
+  // Default to newest-created first so the latest task is always on top (#15). The backend
+  // already returns tasks created-desc; this keeps that order as the default client sort too.
+  const [sortKey, setSortKey] = useState('createdAt');
+  const [sortDir, setSortDir] = useState('desc');
   const [viewMode, setViewMode] = useState('list');
 
   const [selected, setSelected] = useState(new Set());
@@ -138,6 +144,8 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
   const [detailsTaskId, setDetailsTaskId] = useState(null);
   const [expandedGroups, setExpandedGroups] = useState(new Set());
   const [completing, setCompleting] = useState(new Set()); // task ids with an in-flight status change
+  const [reasonTarget, setReasonTarget] = useState(null); // { task, status } awaiting Doer Name + Reason
+  const [savingReason, setSavingReason] = useState(false);
 
   const userMap = useMemo(() => {
     const m = {};
@@ -298,20 +306,33 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
     }
   };
 
-  const handleStatusChange = async (task, status) => {
+  // Dependent on Other / Blocked need a Doer Name + Reason first — open the modal; every
+  // other status applies immediately.
+  const handleStatusChange = (task, status) => {
+    if (REASON_REQUIRED_STATUSES.includes(status)) {
+      setReasonTarget({ task, status });
+      return;
+    }
+    doStatusUpdate(task, status);
+  };
+
+  const doStatusUpdate = async (task, status, { reason, doerName, doerId } = {}) => {
     if (completing.has(task.id)) return; // guard against double-click / duplicate requests
     const prevStatus = task.status;
     // Optimistic: reflect the new status immediately, mark in-flight.
     setCompleting(prev => new Set(prev).add(task.id));
     setTasks(ts => ts.map(t => (t.id === task.id ? { ...t, status } : t)));
+    if (reasonTarget) setSavingReason(true);
     try {
-      await updateTaskStatus(task.id, status);
+      await updateTaskStatus(task.id, status, reason, doerName, doerId);
+      setReasonTarget(null);
       fetchTasks(); // reconcile with server (also picked up via SSE for other users)
     } catch (err) {
       // Revert optimistic change on failure.
       setTasks(ts => ts.map(t => (t.id === task.id ? { ...t, status: prevStatus } : t)));
       showError(err.response?.data?.detail || 'Failed to update status');
     } finally {
+      setSavingReason(false);
       setCompleting(prev => {
         const next = new Set(prev);
         next.delete(task.id);
@@ -521,7 +542,7 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
                     </td>
                     <td className="px-4 py-3 text-[12px] font-bold text-[var(--text-muted)]">{task.category || '—'}</td>
                     <td className="px-4 py-3 text-[12px] font-bold text-[var(--text-muted)]">{(task.assignedTo || []).map(id => userMap[id] || id).join(', ') || 'Myself'}</td>
-                    <td className="px-4 py-3 text-[12px] font-bold text-[var(--text-muted)]">{task.end ? new Date(task.end).toLocaleDateString() : '—'}</td>
+                    <td className="px-4 py-3 text-[12px] font-bold text-[var(--text-muted)]">{task.end ? formatDate(task.end) : '—'}</td>
                     <td className="px-4 py-3">
                       {scope === 'deleted' ? (
                         <span className="px-3 py-1.5 rounded-lg text-[10px] font-black border" style={{ background: cfg.bg, color: cfg.color, borderColor: cfg.border }}>{cfg.label}</span>
@@ -529,7 +550,7 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
                         <select value={task.status} onChange={e => handleStatusChange(task, e.target.value)} disabled={completing.has(task.id)}
                           className="px-3 py-1.5 rounded-lg text-[10px] font-black border outline-none cursor-pointer disabled:opacity-60 disabled:cursor-wait"
                           style={{ background: cfg.bg, color: cfg.color, borderColor: cfg.border }}>
-                          {WORKFLOW_STATUSES.map(s => <option key={s} value={s}>{STATUS_CONFIG[s].label}</option>)}
+                          {statusOptions(task.status).map(s => <option key={s} value={s}>{statusOptionLabel(s, { verificationRequired: task.verificationRequired, isAssigner: task.isCreator || isAdmin })}</option>)}
                         </select>
                       )}
                     </td>
@@ -557,12 +578,11 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
             const rowProps = (task, { indent = false } = {}) => ({
               task, scope, userMap, indent,
               statusPending: completing.has(task.id),
+              isAssigner: task.isCreator || isAdmin,
               checked: selected.has(task.id),
               onToggleSelect: () => toggleSelect(task.id),
               onOpenDetails: () => setDetailsTaskId(task.id),
               onStatusChange: (status) => handleStatusChange(task, status),
-              isMenuOpen: openMenuId === task.id,
-              onToggleMenu: () => setOpenMenuId(openMenuId === task.id ? null : task.id),
               onRestore: () => handleRestore(task),
             });
             return (
@@ -592,6 +612,15 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
         categories={categories} tags={tagOptions} onTaxonomyChanged={fetchTaxonomy} groupId={groupId} />
       <TaskDetailsModal isOpen={!!detailsTaskId} taskId={detailsTaskId} onClose={() => setDetailsTaskId(null)} onChanged={fetchTasks}
         onEdit={(t) => { setDetailsTaskId(null); setEditingTask(t); setModalOpen(true); }} />
+      {/* Doer Name + Reason capture for Dependent on Other / Blocked (from either list dropdown). */}
+      <StatusReasonModal
+        isOpen={!!reasonTarget}
+        status={reasonTarget?.status}
+        users={users}
+        saving={savingReason}
+        onClose={() => setReasonTarget(null)}
+        onSubmit={({ reason, doerName, doerId }) => doStatusUpdate(reasonTarget.task, reasonTarget.status, { reason, doerName, doerId })}
+      />
     </div>
   );
 };

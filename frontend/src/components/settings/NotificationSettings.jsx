@@ -19,7 +19,7 @@ const Toggle = ({ checked, onChange }) => (
     aria-checked={!!checked}
     onClick={() => onChange(!checked)}
     className={`relative w-11 h-6 rounded-full transition-colors duration-300 shrink-0 outline-none cursor-pointer ${
-      checked ? 'bg-[var(--accent-green)]' : 'bg-[var(--border)]'
+      checked ? 'bg-[var(--accent-indigo)]' : 'bg-[var(--border)]'
     }`}
   >
     <span className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform duration-300 ${checked ? 'translate-x-5' : 'translate-x-0'}`} />
@@ -89,7 +89,7 @@ const NotificationSettings = () => {
 
   const SaveButton = (
     <button onClick={save} disabled={saving || loading}
-      className="flex items-center gap-2 px-6 py-2.5 bg-[var(--accent-green)] text-white font-black text-[12px] uppercase tracking-widest rounded-xl shadow-sm hover:opacity-90 transition-all disabled:opacity-50 shrink-0 w-full sm:w-auto justify-center">
+      className="flex items-center gap-2 px-6 py-2.5 bg-[var(--accent-indigo)] text-white font-black text-[12px] uppercase tracking-widest rounded-xl shadow-sm hover:opacity-90 transition-all disabled:opacity-50 shrink-0 w-full sm:w-auto justify-center">
       {saving ? <Loader2 size={15} className="animate-spin" /> : <Save size={15} />} Save Changes
     </button>
   );
@@ -98,7 +98,7 @@ const NotificationSettings = () => {
     <div className="space-y-6">
       {/* Page header */}
       <div className="flex items-center gap-3">
-        <div className="w-11 h-11 rounded-xl bg-[var(--accent-green-bg)] flex items-center justify-center text-[var(--accent-green)] shrink-0">
+        <div className="w-11 h-11 rounded-xl bg-[var(--accent-indigo-bg)] flex items-center justify-center text-[var(--accent-indigo)] shrink-0">
           <Settings size={22} />
         </div>
         <div>
@@ -119,7 +119,7 @@ const NotificationSettings = () => {
 
         {/* Tab label */}
         <div className="border-b border-[var(--border)] mt-6 mb-5">
-          <span className="inline-block pb-2.5 text-[11px] font-black uppercase tracking-widest text-[var(--accent-green)] border-b-2 border-[var(--accent-green)]">
+          <span className="inline-block pb-2.5 text-[11px] font-black uppercase tracking-widest text-[var(--accent-indigo)] border-b-2 border-[var(--accent-indigo)]">
             General Preferences
           </span>
         </div>
@@ -150,7 +150,7 @@ const NotificationSettings = () => {
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 items-center">
           {/* Daily Reminder Time — UI-only display */}
           <div className="flex items-center gap-3">
-            <div className="w-11 h-11 rounded-2xl bg-[var(--accent-green)] flex items-center justify-center text-white shrink-0 shadow-sm"><Clock size={20} /></div>
+            <div className="w-11 h-11 rounded-2xl bg-[var(--accent-indigo)] flex items-center justify-center text-white shrink-0 shadow-sm"><Clock size={20} /></div>
             <div className="min-w-0">
               <p className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest">Daily Reminder Time</p>
               <p className="text-[16px] font-black text-[var(--text-main)] flex items-center gap-1.5">{reminderTime} <Clock size={14} className="text-[var(--text-muted)]" /></p>
@@ -174,8 +174,8 @@ const NotificationSettings = () => {
                 <button type="button" onClick={() => toggleDay(day)} title={day}
                   className={`w-12 h-12 sm:w-14 sm:h-14 rounded-2xl border flex items-center justify-center transition-all ${
                     on
-                      ? 'bg-[var(--accent-green)] border-[var(--accent-green)] text-white shadow-sm'
-                      : 'bg-[var(--bg-card)] border-[var(--border)] hover:border-[var(--accent-green)]'
+                      ? 'bg-[var(--accent-indigo)] border-[var(--accent-indigo)] text-white shadow-sm'
+                      : 'bg-[var(--bg-card)] border-[var(--border)] hover:border-[var(--accent-indigo)]'
                   }`}>
                   {on && <Check size={22} strokeWidth={3} />}
                 </button>

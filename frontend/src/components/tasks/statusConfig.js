@@ -1,5 +1,5 @@
 import {
-  Clock, CheckCircle2, PlayCircle, Link2, Ban, Eye, CheckCircle, AlertTriangle,
+  Clock, CheckCircle2, PlayCircle, Link2, Ban, Eye, CheckCircle, AlertTriangle, RotateCcw,
 } from 'lucide-react';
 
 // Central status → visual mapping for the Task Management module. Deliberately reuses
@@ -9,12 +9,13 @@ import {
 // sidebar branding.
 export const STATUS_CONFIG = {
   pending: { label: 'Pending', shortLabel: 'Pending', icon: Clock, color: 'var(--text-muted)', bg: 'var(--input-bg)', border: 'var(--border)' },
-  accepted: { label: 'Accepted', shortLabel: 'Accepted', icon: CheckCircle2, color: 'var(--accent-indigo)', bg: 'var(--accent-indigo-bg)', border: 'var(--accent-indigo-border)' },
+  accepted: { label: 'Accept', shortLabel: 'Accept', icon: CheckCircle2, color: 'var(--accent-indigo)', bg: 'var(--accent-indigo-bg)', border: 'var(--accent-indigo-border)' },
   in_progress: { label: 'In Progress', shortLabel: 'In Progress', icon: PlayCircle, color: 'var(--accent-orange)', bg: 'var(--accent-orange-bg)', border: 'var(--accent-orange-border)' },
-  dependent_on_others: { label: 'Dependent on Others', shortLabel: 'Dependent', icon: Link2, color: 'var(--accent-yellow)', bg: 'var(--accent-yellow-bg)', border: 'var(--accent-yellow-border)' },
+  dependent_on_others: { label: 'Dependent on Other', shortLabel: 'Dependent', icon: Link2, color: 'var(--accent-yellow)', bg: 'var(--accent-yellow-bg)', border: 'var(--accent-yellow-border)' },
   blocked: { label: 'Blocked', shortLabel: 'Blocked', icon: Ban, color: 'var(--accent-red)', bg: 'var(--accent-red-bg)', border: 'var(--accent-red-border)' },
-  verification: { label: 'Verification', shortLabel: 'Verification', icon: Eye, color: 'var(--accent-indigo)', bg: 'var(--accent-indigo-bg)', border: 'var(--accent-indigo-border)' },
+  verification: { label: 'Pending Verification', shortLabel: 'Verification', icon: Eye, color: 'var(--accent-indigo)', bg: 'var(--accent-indigo-bg)', border: 'var(--accent-indigo-border)' },
   completed: { label: 'Completed', shortLabel: 'Completed', icon: CheckCircle, color: 'var(--accent-green)', bg: 'var(--accent-green-bg)', border: 'var(--accent-green-border)' },
+  in_progress_reopened: { label: 'In Progress (Reopened)', shortLabel: 'Reopened', icon: RotateCcw, color: 'var(--accent-orange)', bg: 'var(--accent-orange-bg)', border: 'var(--accent-orange-border)' },
 };
 
 export const EXTRA_CARD_CONFIG = {
@@ -83,3 +84,26 @@ export const PRIORITY_CONFIG = {
 };
 
 export const WORKFLOW_STATUSES = Object.keys(STATUS_CONFIG);
+
+// The initial statuses a user can actively pick from the status control: Accept,
+// Dependent on Other, Blocked, Completed. "pending"/"in_progress"/"verification"/
+// "in_progress_reopened" are at-rest or system/assigner-driven states, never directly
+// selectable.
+export const SELECTABLE_STATUSES = ['accepted', 'dependent_on_others', 'blocked', 'completed'];
+
+// Statuses that require a Doer Name + Reason before they can be saved.
+export const REASON_REQUIRED_STATUSES = ['dependent_on_others', 'blocked'];
+
+// Options to show in a status <select>: the 4 selectable statuses, plus the task's current
+// status prepended when it isn't one of them (so the control still displays e.g. "Pending"
+// or "In Progress (Reopened)" correctly instead of falling back to a blank/mismatched value).
+export const statusOptions = (current) =>
+  SELECTABLE_STATUSES.includes(current) ? SELECTABLE_STATUSES : [current, ...SELECTABLE_STATUSES];
+
+// Label for a status option, verification-aware: an ASSIGNEE (not the assigner) on a
+// verification-required task submits for verification rather than completing directly, so
+// the "completed" option reads "Submit for Verification" for them.
+export const statusOptionLabel = (statusKey, { verificationRequired = false, isAssigner = false } = {}) => {
+  if (statusKey === 'completed' && verificationRequired && !isAssigner) return 'Submit for Verification';
+  return STATUS_CONFIG[statusKey]?.label || statusKey;
+};

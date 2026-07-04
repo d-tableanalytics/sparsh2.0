@@ -117,18 +117,11 @@ async def reports_doers(
     tasks = await rs.fetch_tasks(start_iso, end_iso)
     rows = rs.compute_doers(tasks, users)
 
-    # Attach each employee's company name (for the Employee-Wise "Company" column).
-    company_names = await rcs._company_name_map()
-    for r in rows:
-        cid = users.get(r["id"], {}).get("company_id")
-        r["company"] = company_names.get(cid) if cid else None
-
     if department:
         rows = [r for r in rows if r["department"] == department]
     if search:
         s = search.lower()
-        rows = [r for r in rows if s in (r["name"] or "").lower() or s in (r.get("email") or "").lower()
-                or s in (r.get("company") or "").lower()]
+        rows = [r for r in rows if s in (r["name"] or "").lower() or s in (r.get("email") or "").lower()]
 
     rows = _sort_rows(rows, sort, order)
     total = len(rows)

@@ -1,9 +1,9 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   X, Plus, ChevronDown, Paperclip, Users, CalendarClock, Flag,
   Tag, Bell, ShieldCheck, FileCheck2, CheckCircle2, Circle, Clock,
-  MoreHorizontal, Link2, Image as ImageIcon, Tags as TagsIcon, Save, Mic, Trash2,
+  Link2, Tags as TagsIcon, Save, Mic, Trash2,
 } from 'lucide-react';
 import api from '../../services/api';
 import { createTask, updateTask, uploadTaskAttachment, deleteTaskAttachment } from '../../services/taskApi';
@@ -14,9 +14,9 @@ import { useNotification } from '../../context/NotificationContext';
 import PickerModal from './PickerModal';
 import MiniDatePicker from './MiniDatePicker';
 import ReminderModal from '../calendar/ReminderModal';
-import ReferenceLinksModal from './ReferenceLinksModal';
 import TaskTagsModal from './TaskTagsModal';
 import VoiceNoteModal from './VoiceNoteModal';
+import { formatDate, formatDateTime, getAttachmentKind } from './taskDisplayUtils';
 
 const PRIORITY_CYCLE = ['Low', 'Normal', 'High'];
 
@@ -102,7 +102,6 @@ const TaskFormModal = ({ isOpen, onClose, onSaved, task = null, categories = [],
   const [startDatePickerOpen, setStartDatePickerOpen] = useState(false);
   const [repeatEndPickerOpen, setRepeatEndPickerOpen] = useState(false);
   const [reminderModalOpen, setReminderModalOpen] = useState(false);
-  const [extraOpen, setExtraOpen] = useState(false);
 
   // Holidays + weekly-offs block task due/start dates in the picker. weeklyOffs defaults to
   // Sunday (0) — there is no persisted per-user weekly-off setting in the backend yet.
@@ -111,12 +110,8 @@ const TaskFormModal = ({ isOpen, onClose, onSaved, task = null, categories = [],
   const [repeatDropdownOpen, setRepeatDropdownOpen] = useState(false);
   const [customIntervalOpen, setCustomIntervalOpen] = useState(false);
   const [customUnitOpen, setCustomUnitOpen] = useState(false);
-  const [linksModalOpen, setLinksModalOpen] = useState(false);
   const [tagsModalOpen, setTagsModalOpen] = useState(false);
   const [voiceNoteOpen, setVoiceNoteOpen] = useState(false);
-
-  const fileInputRef = useRef(null);
-  const imageInputRef = useRef(null);
 
   // Fetch holidays when the form opens so the due/start date pickers can block them.
   useEffect(() => {
@@ -163,7 +158,6 @@ const TaskFormModal = ({ isOpen, onClose, onSaved, task = null, categories = [],
     setChecklistOpen(false);
     setNewChecklistItem('');
     setPickerOpen(null);
-    setExtraOpen(false);
   }, [isOpen, task]);
 
   if (!isOpen) return null;
@@ -412,7 +406,7 @@ const TaskFormModal = ({ isOpen, onClose, onSaved, task = null, categories = [],
             <button onClick={onClose} className="p-1.5 rounded-full hover:bg-[var(--bg-card)] text-[var(--text-muted)] hover:text-[var(--text-main)] transition-colors"><X size={18} /></button>
           </div>
 
-          <form onSubmit={handleSubmit} onClick={() => { setRepeatDropdownOpen(false); setExtraOpen(false); setCustomIntervalOpen(false); setCustomUnitOpen(false); }}>
+          <form onSubmit={handleSubmit} onClick={() => { setRepeatDropdownOpen(false); setCustomIntervalOpen(false); setCustomUnitOpen(false); }}>
             {/* Title */}
             <div className="px-6 pt-4 pb-3 border-b border-[var(--border)] transition-colors focus-within:border-[var(--accent-indigo)]">
               <input autoFocus value={form.title} onChange={e => setForm({ ...form, title: e.target.value })}
@@ -471,33 +465,50 @@ const TaskFormModal = ({ isOpen, onClose, onSaved, task = null, categories = [],
                 <span className="flex items-center gap-1.5 text-[11px] font-black text-[var(--accent-green)] uppercase tracking-widest">
                   <Paperclip size={13} /> Attachments ({attachments.length + pendingFiles.length})
                 </span>
-                <label className="text-[10px] font-black text-[var(--accent-green)] uppercase tracking-widest cursor-pointer">
-                  + Add More
-                  <input type="file" className="hidden" onChange={handleFileChosen} disabled={uploading} />
-                </label>
               </div>
               {(attachments.length > 0 || pendingFiles.length > 0) && (
                 <div className="mb-2 space-y-2">
-                  {attachments.map(a => (
-                    <div key={a.id} className="flex items-center gap-3 px-4 py-3 bg-[var(--bg-card)] border border-[var(--border)] rounded-2xl">
-                      {a.type === 'link' ? <Link2 size={16} className="shrink-0 text-[var(--accent-green)]" /> : <Paperclip size={16} className="shrink-0 text-[var(--accent-green)]" />}
-                      <a href={a.url} target="_blank" rel="noreferrer" className="min-w-0 flex-1">
-                        <p className="text-[12px] font-bold text-[var(--text-main)] truncate hover:text-[var(--accent-indigo)]">{a.name}</p>
-                        {formatFileSize(a.size) && <p className="text-[10px] font-semibold text-[var(--text-muted)]">{formatFileSize(a.size)}</p>}
-                      </a>
-                      <button type="button" onClick={() => handleRemoveAttachment(a)} className="p-1.5 text-[var(--text-muted)] hover:text-[var(--accent-red)] shrink-0"><Trash2 size={15} /></button>
-                    </div>
-                  ))}
-                  {pendingFiles.map((f, i) => (
-                    <div key={i} className="flex items-center gap-3 px-4 py-3 bg-[var(--bg-card)] border border-[var(--border)] rounded-2xl">
-                      <Paperclip size={16} className="shrink-0 text-[var(--accent-green)]" />
-                      <div className="min-w-0 flex-1">
-                        <p className="text-[12px] font-bold text-[var(--text-main)] truncate">{f.name}</p>
-                        <p className="text-[10px] font-semibold text-[var(--text-muted)]">{formatFileSize(f.size)} · will upload on save</p>
+                  {attachments.map(a => {
+                    // Uploaded files can preview inline: audio → player, image → thumbnail;
+                    // links/docs stay as an open-in-new-tab link (browser previews the doc).
+                    const kind = a.type === 'link' ? 'link' : getAttachmentKind(a.name);
+                    return (
+                      <div key={a.id} className="flex items-center gap-3 px-4 py-3 bg-[var(--bg-card)] border border-[var(--border)] rounded-2xl">
+                        {kind === 'link' ? <Link2 size={16} className="shrink-0 text-[var(--accent-green)]" /> : <Paperclip size={16} className="shrink-0 text-[var(--accent-green)]" />}
+                        <div className="min-w-0 flex-1">
+                          <a href={a.url} target="_blank" rel="noreferrer" className="block">
+                            <p className="text-[12px] font-bold text-[var(--text-main)] truncate hover:text-[var(--accent-indigo)]">{a.name}</p>
+                            {formatFileSize(a.size) && <p className="text-[10px] font-semibold text-[var(--text-muted)]">{formatFileSize(a.size)}</p>}
+                          </a>
+                          {kind === 'audio' && <audio className="mt-2 w-full h-9" controls src={a.url} />}
+                          {kind === 'image' && (
+                            <a href={a.url} target="_blank" rel="noreferrer">
+                              <img src={a.url} alt={a.name} className="mt-2 max-h-32 rounded-lg border border-[var(--border)]" />
+                            </a>
+                          )}
+                        </div>
+                        <button type="button" onClick={() => handleRemoveAttachment(a)} className="p-1.5 text-[var(--text-muted)] hover:text-[var(--accent-red)] shrink-0"><Trash2 size={15} /></button>
                       </div>
-                      <button type="button" onClick={() => removePendingFile(i)} className="p-1.5 text-[var(--text-muted)] hover:text-[var(--accent-red)] shrink-0"><Trash2 size={15} /></button>
-                    </div>
-                  ))}
+                    );
+                  })}
+                  {pendingFiles.map((f, i) => {
+                    // Not-yet-uploaded files (incl. a fresh voice note) preview from a local
+                    // object URL so the user can review/listen before saving.
+                    const kind = getAttachmentKind(f.name);
+                    const localUrl = (kind === 'audio' || kind === 'image') ? URL.createObjectURL(f) : null;
+                    return (
+                      <div key={i} className="flex items-center gap-3 px-4 py-3 bg-[var(--bg-card)] border border-[var(--border)] rounded-2xl">
+                        <Paperclip size={16} className="shrink-0 text-[var(--accent-green)]" />
+                        <div className="min-w-0 flex-1">
+                          <p className="text-[12px] font-bold text-[var(--text-main)] truncate">{f.name}</p>
+                          <p className="text-[10px] font-semibold text-[var(--text-muted)]">{formatFileSize(f.size)} · will upload on save</p>
+                          {kind === 'audio' && localUrl && <audio className="mt-2 w-full h-9" controls src={localUrl} />}
+                          {kind === 'image' && localUrl && <img src={localUrl} alt={f.name} className="mt-2 max-h-32 rounded-lg border border-[var(--border)]" />}
+                        </div>
+                        <button type="button" onClick={() => removePendingFile(i)} className="p-1.5 text-[var(--text-muted)] hover:text-[var(--accent-red)] shrink-0"><Trash2 size={15} /></button>
+                      </div>
+                    );
+                  })}
                 </div>
               )}
               <label className="flex flex-col items-center justify-center gap-1.5 py-6 border-2 border-dashed border-[var(--border)] rounded-2xl cursor-pointer hover:border-[var(--accent-indigo)] transition-colors">
@@ -516,7 +527,7 @@ const TaskFormModal = ({ isOpen, onClose, onSaved, task = null, categories = [],
 
               <button type="button" onClick={() => setDeadlinePickerOpen(true)}
                 className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[10px] font-black uppercase tracking-wider border transition-all ${form.end ? 'border-[var(--accent-indigo)] text-[var(--accent-indigo)]' : 'border-[var(--border)] text-[var(--text-muted)]'}`}>
-                <CalendarClock size={12} /> {form.end ? new Date(form.end).toLocaleString(undefined, { day: '2-digit', month: 'short', year: 'numeric', hour: 'numeric', minute: '2-digit' }) : 'Set Deadline'}
+                <CalendarClock size={12} /> {form.end ? formatDateTime(form.end) : 'Set Deadline'}
               </button>
 
               <button type="button" onClick={() => setForm(f => ({ ...f, priority: PRIORITY_CYCLE[(PRIORITY_CYCLE.indexOf(f.priority) + 1) % 3] }))}
@@ -542,6 +553,12 @@ const TaskFormModal = ({ isOpen, onClose, onSaved, task = null, categories = [],
               <button type="button" onClick={() => setForm(f => ({ ...f, verification_required: !f.verification_required }))}
                 className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[10px] font-black uppercase tracking-wider border transition-all ${form.verification_required ? 'bg-[var(--accent-indigo)] text-white border-[var(--accent-indigo)]' : 'border-[var(--border)] text-[var(--text-muted)]'}`}>
                 {form.verification_required ? <CheckCircle2 size={12} /> : <ShieldCheck size={12} />} Verification
+              </button>
+
+              {/* Tag — sits right beside Verification; opens the same Task Tags picker as Extra Options → Add Tags. */}
+              <button type="button" onClick={() => setTagsModalOpen(true)}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[10px] font-black uppercase tracking-wider border transition-all ${form.tags.length ? 'border-[var(--accent-green)] text-[var(--accent-green)]' : 'border-[var(--border)] text-[var(--text-muted)]'}`}>
+                <TagsIcon size={12} /> {form.tags.length ? `Tag (${form.tags.length})` : 'Tag'}
               </button>
             </div>
 
@@ -577,12 +594,12 @@ const TaskFormModal = ({ isOpen, onClose, onSaved, task = null, categories = [],
 
                     <button type="button" onClick={() => setStartDatePickerOpen(true)}
                       className={`flex items-center gap-1.5 px-3 py-1.5 bg-[var(--bg-card)] border rounded-full text-[10px] font-black uppercase tracking-wider ${form.start ? 'border-[var(--accent-indigo)] text-[var(--accent-indigo)]' : 'border-[var(--border)] text-[var(--text-muted)]'}`}>
-                      <CalendarClock size={12} /> {form.start ? new Date(form.start).toLocaleDateString() : 'Start Date *'}
+                      <CalendarClock size={12} /> {form.start ? formatDate(form.start) : 'Start Date *'}
                     </button>
 
                     <button type="button" onClick={() => setRepeatEndPickerOpen(true)}
                       className="flex items-center gap-1.5 px-3 py-1.5 bg-[var(--bg-card)] border border-[var(--border)] rounded-full text-[10px] font-black text-[var(--text-muted)]">
-                      <CalendarClock size={12} /> {form.repeat_end_date ? new Date(form.repeat_end_date).toLocaleDateString() : 'End Date'}
+                      <CalendarClock size={12} /> {form.repeat_end_date ? formatDate(form.repeat_end_date) : 'End Date'}
                     </button>
                   </>
                 )}
@@ -742,29 +759,6 @@ const TaskFormModal = ({ isOpen, onClose, onSaved, task = null, categories = [],
                   className="p-2 rounded-lg text-[var(--text-muted)] hover:bg-[var(--input-bg)]">
                   <Mic size={18} />
                 </button>
-                <button type="button" onClick={() => setExtraOpen(o => !o)} title="More options"
-                  className="p-2 rounded-lg text-[var(--text-muted)] hover:bg-[var(--input-bg)]">
-                  <MoreHorizontal size={18} />
-                </button>
-                {extraOpen && (
-                  <div className="absolute bottom-full left-0 mb-2 w-44 bg-[var(--bg-card)] border border-[var(--border)] rounded-xl shadow-xl overflow-hidden z-20">
-                    <p className="px-3 pt-2.5 pb-1 text-[9px] font-black text-[var(--text-muted)] uppercase tracking-widest">Extra Options</p>
-                    <button type="button" onClick={() => { setLinksModalOpen(true); setExtraOpen(false); }} className="w-full flex items-center gap-2 px-3 py-2.5 text-[11px] font-bold text-[var(--text-main)] hover:bg-[var(--input-bg)]">
-                      <Link2 size={13} /> Add Link
-                    </button>
-                    <button type="button" onClick={() => { fileInputRef.current?.click(); setExtraOpen(false); }} className="w-full flex items-center gap-2 px-3 py-2.5 text-[11px] font-bold text-[var(--text-main)] hover:bg-[var(--input-bg)]">
-                      <Paperclip size={13} /> Add Attachment
-                    </button>
-                    <button type="button" onClick={() => { imageInputRef.current?.click(); setExtraOpen(false); }} className="w-full flex items-center gap-2 px-3 py-2.5 text-[11px] font-bold text-[var(--text-main)] hover:bg-[var(--input-bg)]">
-                      <ImageIcon size={13} /> Upload Image
-                    </button>
-                    <button type="button" onClick={() => { setTagsModalOpen(true); setExtraOpen(false); }} className="w-full flex items-center gap-2 px-3 py-2.5 text-[11px] font-bold text-[var(--text-main)] hover:bg-[var(--input-bg)]">
-                      <TagsIcon size={13} /> Add Tags
-                    </button>
-                  </div>
-                )}
-                <input ref={fileInputRef} type="file" className="hidden" onChange={handleFileChosen} />
-                <input ref={imageInputRef} type="file" accept="image/*" className="hidden" onChange={handleFileChosen} />
               </div>
 
               <button type="submit" disabled={saving}
@@ -800,15 +794,14 @@ const TaskFormModal = ({ isOpen, onClose, onSaved, task = null, categories = [],
       <MiniDatePicker isOpen={startDatePickerOpen} onClose={() => setStartDatePickerOpen(false)}
         value={form.start} title="Repeat Start Date" onApply={(iso) => setForm(f => ({ ...f, start: iso }))}
         holidayDates={holidayDates} weeklyOffs={WEEKLY_OFFS} onBlocked={showError} />
+      {/* Repeat End Date: holidays are marked (indicator + label) but still selectable —
+          the end date is only the series boundary; the recurring engine skips holiday
+          occurrences within the range. */}
       <MiniDatePicker isOpen={repeatEndPickerOpen} onClose={() => setRepeatEndPickerOpen(false)}
-        value={form.repeat_end_date} title="Repeat End Date" onApply={(iso) => setForm(f => ({ ...f, repeat_end_date: iso }))} />
+        value={form.repeat_end_date} title="Repeat End Date" onApply={(iso) => setForm(f => ({ ...f, repeat_end_date: iso }))}
+        holidayDates={holidayDates} weeklyOffs={WEEKLY_OFFS} onBlocked={showError} />
       <ReminderModal isOpen={reminderModalOpen} onClose={() => setReminderModalOpen(false)}
         reminders={form.reminders} onApply={(reminders) => setForm(f => ({ ...f, reminders: reminders.map(r => ({ ...r, parent_type: 'task' })) }))} />
-      <ReferenceLinksModal
-        isOpen={linksModalOpen} onClose={() => setLinksModalOpen(false)}
-        links={attachments.filter(a => a.type === 'link')}
-        onApply={(newLinks) => setAttachments(a => [...a.filter(x => x.type !== 'link'), ...newLinks])}
-      />
       <TaskTagsModal
         isOpen={tagsModalOpen} onClose={() => setTagsModalOpen(false)}
         tags={availableTags} selected={form.tags}

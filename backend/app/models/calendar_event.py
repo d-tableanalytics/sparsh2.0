@@ -72,9 +72,16 @@ class CalendarEventBase(BaseModel):
     evidence_required: bool = False
     verification_required: bool = False
     checklist: List[Dict] = [] # [{id, title, completed, completed_at}]
-    attachments: List[Dict] = [] # [{id, name, key, url, uploaded_by, uploaded_at}]
+    attachments: List[Dict] = [] # [{id, name, key, url, uploaded_by, uploaded_at}] - assignment-time attachments
     remarks: List[Dict] = [] # [{id, author_id, author_name, text, created_at}] - task comment thread
     status_history: List[Dict] = [] # [{old_status, new_status, changed_by, changed_by_name, reason, changed_at}]
+
+    # ─── Delegation-flow additions (additive/optional; existing tasks default to []) ───
+    # Evidence uploaded while COMPLETING the task, kept separate from `attachments`
+    # (the assignment-time files) so the two never mix in the UI.
+    completion_attachments: List[Dict] = [] # [{id, name, key, url, uploaded_by, uploaded_at}]
+    # Deadline (`end`) revision trail — only the assigner/delegator can revise.
+    deadline_history: List[Dict] = [] # [{old_end, new_end, reason, revised_by, revised_by_name, revised_at}]
 
 class CalendarEventCreate(CalendarEventBase):
     pass

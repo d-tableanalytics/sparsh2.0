@@ -8,6 +8,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import GeneralSection from '../components/settings/GeneralSection';
 import MetaListSection from '../components/settings/MetaListSection';
 import PasswordCard from '../components/settings/PasswordCard';
+import NotificationSettings from '../components/settings/NotificationSettings';
 
 const SettingsPage = () => {
     const { user } = useAuth();
@@ -43,7 +44,9 @@ const SettingsPage = () => {
     // Left-sidebar sections (role/permission filtered)
     const SECTIONS = [
         { key: 'general', label: 'General', icon: UserCircle2, visible: true },
-        { key: 'notifications', label: 'Notifications', icon: Mail, visible: canReadTemplates },
+        // Personal alert preferences are for everyone; the admin template editor below is
+        // still permission-gated within the section itself.
+        { key: 'notifications', label: 'Notifications', icon: Mail, visible: true },
         { key: 'security', label: 'Security', icon: ShieldCheck, visible: true },
         { key: 'categories', label: 'Categories', icon: FolderTree, visible: canAccessTasks },
         { key: 'tags', label: 'Tags', icon: Tag, visible: canAccessTasks },
@@ -298,7 +301,17 @@ const SettingsPage = () => {
             {/* Content */}
             <main className="flex-1 overflow-hidden flex flex-col">
                 {section === 'notifications' ? (
-                    <div className="flex flex-col h-full overflow-hidden">
+                    <div className="flex-1 overflow-y-auto no-scrollbar p-6 space-y-6">
+                        {/* Personal alert preferences — shown to every user (matches the design). */}
+                        <NotificationSettings />
+
+                        {/* Admin template editor stays below, only for template-permission users. */}
+                        {canReadTemplates && (
+                        <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-[24px] shadow-sm overflow-hidden flex flex-col h-[78vh]">
+                            <div className="px-6 py-4 border-b border-[var(--border)] shrink-0">
+                                <h2 className="text-lg font-black text-[var(--text-main)] tracking-tight">Notification Templates</h2>
+                                <p className="text-[11px] font-medium text-[var(--text-muted)]">Manage the email &amp; WhatsApp templates sent to users.</p>
+                            </div>
                         {/* Company selector for staff roles managing client templates */}
                         {scope === 'company' && user?.role !== 'clientadmin' && (user?.role === 'superadmin' || canReadCompanies) && (
                             <div className="flex items-center gap-2 px-6 py-2.5 bg-[var(--bg-card)] border-b border-[var(--border)]">
@@ -503,10 +516,12 @@ const SettingsPage = () => {
                                 )}
                             </div>
                         </div>
+                        </div>
+                        )}
                     </div>
                 ) : (
                     <div className="flex-1 overflow-y-auto no-scrollbar p-6">
-                        {section === 'general' && <GeneralSection />}
+                        {section === 'general' && <GeneralSection onNavigateSection={setSection} />}
 
                         {section === 'security' && (
                             <div className="max-w-4xl mx-auto w-full space-y-5">

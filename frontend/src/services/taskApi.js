@@ -8,8 +8,13 @@ export const getTasks = (params) => api.get('/tasks', { params });
 export const getTaskDashboard = (params) => api.get('/tasks/dashboard', { params });
 export const getTaskActivity = (params) => api.get('/tasks/activity', { params });
 export const getTaskDetail = (taskId) => api.get(`/tasks/${taskId}`);
-export const updateTaskStatus = (taskId, workflow_status, reason) =>
-  api.patch(`/tasks/${taskId}/status`, { workflow_status, reason });
+// `doerName`/`doerId` are required (with `reason`) for Dependent on Other / Blocked; ignored
+// otherwise. For Dependent on Other, a `doerId` reassigns the task to that doer (backend rule).
+export const updateTaskStatus = (taskId, workflow_status, reason, doerName, doerId) =>
+  api.patch(`/tasks/${taskId}/status`, { workflow_status, reason, doer_name: doerName, doer_id: doerId });
+// Deadline / Date Revision — assigner/delegator only (backend-enforced).
+export const reviseTaskDeadline = (taskId, end, reason) =>
+  api.patch(`/tasks/${taskId}/deadline`, { end, reason });
 export const softDeleteTask = (taskId) => api.delete(`/tasks/${taskId}`);
 export const restoreTask = (taskId) => api.post(`/tasks/${taskId}/restore`);
 
@@ -29,3 +34,13 @@ export const uploadTaskAttachment = (taskId, file) => {
 };
 
 export const deleteTaskAttachment = (taskId, attachmentId) => api.delete(`/tasks/${taskId}/attachments/${attachmentId}`);
+
+// Completion Evidence — uploaded while completing the task, stored separately from the
+// assignment-time attachments above (see backend/app/routes/tasks.py).
+export const uploadCompletionAttachment = (taskId, file) => {
+  const form = new FormData();
+  form.append('file', file);
+  return api.post(`/tasks/${taskId}/completion-attachments`, form);
+};
+
+export const deleteCompletionAttachment = (taskId, attachmentId) => api.delete(`/tasks/${taskId}/completion-attachments/${attachmentId}`);

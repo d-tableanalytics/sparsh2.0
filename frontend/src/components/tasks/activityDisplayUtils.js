@@ -33,5 +33,7 @@ export const formatDateTime = (iso) => {
   if (!iso) return '';
   const d = new Date(iso);
   if (isNaN(d.getTime())) return '';
-  return d.toLocaleString(undefined, { day: '2-digit', month: 'short', year: 'numeric', hour: 'numeric', minute: '2-digit' });
+  // DD/MM/YYYY HH:mm — consistent with the rest of the Task/Delegation module.
+  const pad2 = (n) => String(n).padStart(2, '0');
+  return `${pad2(d.getDate())}/${pad2(d.getMonth() + 1)}/${d.getFullYear()} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
 };
