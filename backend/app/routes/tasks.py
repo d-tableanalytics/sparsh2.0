@@ -11,6 +11,7 @@ from app.db.mongodb import get_collection
 from app.controllers.auth_controller import (
     get_current_user, get_user_from_token, require_task_access,
     is_internal_user, TASK_ACCESS_DENIED_MESSAGE,
+    get_non_internal_user_ids, TASK_RECIPIENT_DENIED_MESSAGE,
 )
 from app.utils.calendar_utils import CALENDAR_COLLECTIONS, find_event_across_collections
 from app.services.activity_log_service import log_activity
@@ -39,9 +40,11 @@ def _can_view_all_tasks(user: dict) -> bool:
 
 # Richer workflow taken on by type=="task" docs. The legacy `status` field
 # (schedule/completed/canceled/reschedule) stays authoritative for the Calendar page.
+# "in_progress_reopened" is only reached via the assigner's Reopen action on a task that
+# went to verification — never a directly-picked status.
 WORKFLOW_STATUSES = [
     "pending", "accepted", "in_progress", "dependent_on_others",
-    "blocked", "verification", "completed",
+    "blocked", "verification", "completed", "in_progress_reopened",
 ]
 
 
@@ -224,6 +227,9 @@ async def _fetch_tasks(
         for d in docs:
             d["_source_col"] = col_name
             results.append(d)
+    # Latest-created first everywhere the task list is used. ObjectId encodes creation
+    # time, so this holds even for a doc with a missing/malformed `created_at`.
+    results.sort(key=lambda d: d["_id"], reverse=True)
     return results
 
 
@@ -256,6 +262,10 @@ def _serialize_task(doc: dict, current_user_id: str) -> dict:
         "recurringGroupId": doc.get("recurring_group_id"),
         "isCreator": doc.get("user_id") == current_user_id,
         "deletedAt": doc.get("deleted_at"),
+        # Exposed on the list payload too (not just detail) so list dropdowns can apply the
+        # verification-aware labels / role-based options without a second fetch.
+        "verificationRequired": doc.get("verification_required", False),
+        "evidenceRequired": doc.get("evidence_required", False),
     }
 
 
@@ -280,8 +290,10 @@ def _serialize_task_detail(doc: dict, current_user_id: str) -> dict:
         "color": doc.get("color"),
         "checklist": doc.get("checklist") or [],
         "attachments": doc.get("attachments") or [],
+        "completionAttachments": doc.get("completion_attachments") or [],
         "remarks": doc.get("remarks") or [],
         "statusHistory": doc.get("status_history") or [],
+        "deadlineHistory": doc.get("deadline_history") or [],
     })
     return base
 
@@ -568,11 +580,27 @@ async def get_task_detail(task_id: str, current_user: dict = Depends(require_tas
 @router.patch("/{task_id}/status")
 async def update_task_status(task_id: str, body: dict, current_user: dict = Depends(require_task_access)):
     new_status = body.get("workflow_status")
-    reason = body.get("reason")
+    reason = (body.get("reason") or "").strip() or None
+    doer_name = (body.get("doer_name") or "").strip() or None
+    doer_id = (body.get("doer_id") or "").strip() or None
     if new_status not in WORKFLOW_STATUSES:
         raise HTTPException(status_code=400, detail=f"workflow_status must be one of {WORKFLOW_STATUSES}")
 
+    # "Dependent on Other" and "Blocked" must carry who it's waiting on (Doer Name) + why (Reason).
+    if new_status in ("dependent_on_others", "blocked") and (not doer_name or not reason):
+        label = "Dependent on Other" if new_status == "dependent_on_others" else "Blocked"
+        raise HTTPException(status_code=400, detail=f"Doer Name and Reason are required to set status to {label}.")
+
     existing, col_name = await _get_task_or_404(task_id)
+
+    # Dependent on Other may reassign the task to the picked doer (must be an internal Sparsh
+    # user, same rule as create/update). Blocked captures the doer name only — no reassignment.
+    reassign_doer = None
+    if new_status == "dependent_on_others" and doer_id and doer_id not in (existing.get("target_staff_id") or []):
+        bad = await get_non_internal_user_ids([doer_id])
+        if bad:
+            raise HTTPException(status_code=403, detail=TASK_RECIPIENT_DENIED_MESSAGE)
+        reassign_doer = doer_id
 
     user_id = str(current_user["_id"])
     is_admin = current_user.get("role") == "superadmin"
@@ -582,9 +610,15 @@ async def update_task_status(task_id: str, body: dict, current_user: dict = Depe
         raise HTTPException(status_code=403, detail="Not authorized to update this task")
 
     old_status = _resolve_workflow_status(existing)
-    updates = {"workflow_status": new_status, "updated_at": datetime.now(timezone.utc)}
-    was_completed = old_status == "completed"
-    if new_status == "completed" and not was_completed:
+    # Only the assigner/delegator (creator) or an admin may finalize or reopen a task that
+    # has been submitted for verification — never the assignee alone.
+    is_assigner_or_admin = is_admin or is_creator
+    if old_status == "verification" and not is_assigner_or_admin:
+        raise HTTPException(status_code=403, detail="Only the assigner can verify, finalize, or reopen this task.")
+    if new_status == "in_progress_reopened" and not is_assigner_or_admin:
+        raise HTTPException(status_code=403, detail="Only the assigner can reopen this task.")
+
+    if new_status == "completed":
         # Completion rule: every check point (checklist item) must be done first.
         items = existing.get("checklist") or []
         pending_items = [c for c in items if not (isinstance(c, dict) and c.get("completed"))]
@@ -594,6 +628,23 @@ async def update_task_status(task_id: str, body: dict, current_user: dict = Depe
                 status_code=400,
                 detail=f"Complete all check points before completing this task ({done}/{len(items)} done).",
             )
+        # Evidence Required: at least one completion-time upload must exist before the
+        # task can be completed (kept separate from assignment-time `attachments`).
+        if existing.get("evidence_required") and not (existing.get("completion_attachments") or []):
+            raise HTTPException(status_code=400, detail="Evidence upload is required before completing this task.")
+        # Verification Required: the assignee can only submit their side as done — final
+        # completion is the assigner/admin's call. So route the assignee's "completed" to
+        # the "verification" hand-off state instead of finalizing it.
+        if existing.get("verification_required") and not is_assigner_or_admin:
+            new_status = "verification"
+
+    updates = {"workflow_status": new_status, "updated_at": datetime.now(timezone.utc)}
+    if reassign_doer:
+        # Reassign to the picked doer (existing delegation shape: assigned_to="other").
+        updates["target_staff_id"] = [reassign_doer]
+        updates["assigned_to"] = "other"
+    was_completed = old_status == "completed"
+    if new_status == "completed" and not was_completed:
         updates["completed_at"] = datetime.now(timezone.utc)
         updates["completed_by"] = user_id
         updates["status"] = "completed"  # keep legacy Calendar page status in sync
@@ -608,6 +659,8 @@ async def update_task_status(task_id: str, body: dict, current_user: dict = Depe
         "changed_by": user_id,
         "changed_by_name": current_user.get("full_name") or current_user.get("email"),
         "reason": reason,
+        "doer_name": doer_name,
+        "doer_id": doer_id,
         "changed_at": datetime.now(timezone.utc),
     }
 
@@ -623,12 +676,16 @@ async def update_task_status(task_id: str, body: dict, current_user: dict = Depe
                        meta={"task_id": task_id, "group_id": existing.get("group_id")})
 
     # Real-time: notify creator + assignees + watchers so their lists update without a refresh.
-    await task_events.publish(task_events.recipients_for(existing), {
+    # On reassignment, union old + new recipients so the task both drops off the previous
+    # assignee's list and appears on the new doer's.
+    projected = {**existing, **updates}
+    recipients = task_events.recipients_for(existing) | task_events.recipients_for(projected)
+    await task_events.publish(recipients, {
         "type": "task_completed" if new_status == "completed" else "task_updated",
         "task_id": task_id,
         "status": new_status,
         "title": existing.get("title"),
-        "assigned_to": existing.get("target_staff_id") or [],
+        "assigned_to": projected.get("target_staff_id") or [],
         "assigned_by": existing.get("user_id"),
         "watchers": existing.get("watchers") or [],
         "actor_id": user_id,
@@ -747,6 +804,98 @@ async def delete_task_attachment(task_id: str, attachment_id: str, current_user:
         {"$pull": {"attachments": {"id": attachment_id}}},
     )
     return {"message": "Attachment removed"}
+
+
+# ─── Completion Evidence ───
+# Same shape/flow as the /attachments endpoints above, but stored in a separate
+# `completion_attachments` array so assignment-time files and completion evidence never
+# mix in the UI. Evidence Required's completion gate reads this array (see update_task_status).
+@router.post("/{task_id}/completion-attachments")
+async def upload_completion_attachment(task_id: str, file: UploadFile = File(...), current_user: dict = Depends(require_task_access)):
+    existing, col_name = await _get_task_or_404(task_id)
+    if not _is_participant(existing, current_user):
+        raise HTTPException(status_code=403, detail="Not authorized to update this task")
+
+    try:
+        uploaded = upload_file_to_s3_with_key(file.file, file.filename, file.content_type)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    attachment = {
+        "id": str(ObjectId()),
+        "name": file.filename,
+        "size": file.size,
+        "key": uploaded["key"],
+        "url": uploaded["url"],
+        "uploaded_by": str(current_user["_id"]),
+        "uploaded_at": datetime.now(timezone.utc),
+    }
+    await get_collection(col_name).update_one({"_id": ObjectId(task_id)}, {"$push": {"completion_attachments": attachment}})
+    await log_activity(current_user, "Attach File to Task", col_name, f"Task {task_id}: completion evidence {file.filename}",
+                       meta={"task_id": task_id, "group_id": existing.get("group_id")})
+    return attachment
+
+
+@router.delete("/{task_id}/completion-attachments/{attachment_id}")
+async def delete_completion_attachment(task_id: str, attachment_id: str, current_user: dict = Depends(require_task_access)):
+    existing, col_name = await _get_task_or_404(task_id)
+    if not _is_participant(existing, current_user):
+        raise HTTPException(status_code=403, detail="Not authorized to update this task")
+
+    await get_collection(col_name).update_one(
+        {"_id": ObjectId(task_id)},
+        {"$pull": {"completion_attachments": {"id": attachment_id}}},
+    )
+    return {"message": "Completion evidence removed"}
+
+
+# ─── Deadline / Date Revision ───
+# Only the assigner/delegator (creator) or an admin may revise a task's deadline (`end`).
+# The assignee can see the revised date (it's part of the normal detail payload) but the
+# UI never surfaces this action to them.
+@router.patch("/{task_id}/deadline")
+async def revise_task_deadline(task_id: str, body: dict, current_user: dict = Depends(require_task_access)):
+    new_end = body.get("end")
+    reason = (body.get("reason") or "").strip() or None
+    if not new_end:
+        raise HTTPException(status_code=400, detail="A new deadline (end) is required")
+
+    existing, col_name = await _get_task_or_404(task_id)
+
+    is_admin = current_user.get("role") == "superadmin"
+    is_creator = existing.get("user_id") == str(current_user["_id"])
+    if not (is_admin or is_creator):
+        raise HTTPException(status_code=403, detail="Only the assigner can revise this task's deadline")
+
+    old_end = existing.get("end")
+    if old_end == new_end:
+        return {"id": task_id, "end": new_end}
+
+    revision = {
+        "old_end": old_end,
+        "new_end": new_end,
+        "reason": reason,
+        "revised_by": str(current_user["_id"]),
+        "revised_by_name": current_user.get("full_name") or current_user.get("email"),
+        "revised_at": datetime.now(timezone.utc),
+    }
+    await get_collection(col_name).update_one(
+        {"_id": ObjectId(task_id)},
+        {"$set": {"end": new_end, "updated_at": datetime.now(timezone.utc)}, "$push": {"deadline_history": revision}},
+    )
+    await log_activity(current_user, "Update Task", col_name, f"Task {task_id}: deadline revised",
+                       meta={"task_id": task_id, "group_id": existing.get("group_id")})
+
+    await task_events.publish(task_events.recipients_for(existing), {
+        "type": "task_updated",
+        "task_id": task_id,
+        "title": existing.get("title"),
+        "assigned_to": existing.get("target_staff_id") or [],
+        "assigned_by": existing.get("user_id"),
+        "watchers": existing.get("watchers") or [],
+        "actor_id": str(current_user["_id"]),
+    })
+    return {"id": task_id, "end": new_end}
 
 
 @router.delete("/{task_id}")

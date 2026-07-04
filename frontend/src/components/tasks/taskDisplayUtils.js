@@ -25,6 +25,38 @@ export const formatFrequencyLabel = (repeat) => {
   return repeat;
 };
 
+// Shared date formatting for the whole Task/Delegation module — always DD/MM/YYYY (and
+// DD/MM/YYYY HH:mm for timestamps), regardless of the browser's locale.
+const pad2 = (n) => String(n).padStart(2, '0');
+
+export const formatDate = (value) => {
+  if (!value) return '—';
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return '—';
+  return `${pad2(d.getDate())}/${pad2(d.getMonth() + 1)}/${d.getFullYear()}`;
+};
+
+export const formatDateTime = (value) => {
+  if (!value) return '—';
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return '—';
+  return `${formatDate(d)} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+};
+
+// Extension-based sniff so attachment lists can preview inline (audio player / image
+// thumbnail) instead of just a filename link. No file-type library is installed anywhere
+// in the project, so this is a plain, dependency-free check.
+const AUDIO_EXT = /\.(webm|mp3|wav|m4a|ogg|aac)$/i;
+const IMAGE_EXT = /\.(png|jpe?g|gif|webp|svg|bmp)$/i;
+const PDF_EXT = /\.pdf$/i;
+
+export const getAttachmentKind = (name = '') => {
+  if (AUDIO_EXT.test(name)) return 'audio';
+  if (IMAGE_EXT.test(name)) return 'image';
+  if (PDF_EXT.test(name)) return 'pdf';
+  return 'other';
+};
+
 // A "Daily/Weekly/..." task with a deadline is materialized on the backend as one document
 // per occurrence (so each day can be tracked/completed independently), all sharing the same
 // recurringGroupId. List views collapse those into a single row so a 6-day daily task reads
