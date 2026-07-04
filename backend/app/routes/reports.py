@@ -10,9 +10,11 @@ import csv
 import io
 from typing import Optional
 
+from bson import ObjectId
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
+from app.db.mongodb import get_collection
 from app.controllers.auth_controller import check_role
 from app.utils.calendar_utils import find_event_across_collections
 from app.services import report_service as rs
@@ -137,6 +139,102 @@ async def reports_doers(
     return {"items": page, "total": total, "skip": skip, "limit": limit}
 
 
+@router.get("/employees-wide")
+async def reports_employees_wide(
+    period: Optional[str] = None,
+    startDate: Optional[str] = None,
+    endDate: Optional[str] = None,
+    department: Optional[str] = None,
+    company_id: Optional[str] = None,
+    status: Optional[str] = None,           # active | inactive
+    search: Optional[str] = None,
+    sort: Optional[str] = Query("score"),
+    order: Optional[str] = Query("desc"),
+    skip: int = 0,
+    limit: int = 25,
+    current_user: dict = Depends(admin_only),
+):
+    """Comprehensive employee/learner report — includes users with zero tasks (task doers
+    were the old blind spot). Real task + attendance/session + assessment + activity data."""
+    start_iso, end_iso = rs.period_range(period, startDate, endDate)
+    users = await rs.load_users()
+    tasks = await rs.fetch_tasks(start_iso, end_iso)
+    rows = await rs.compute_employees_wide(tasks, users)
+
+    if department:
+        rows = [r for r in rows if r["department"] == department]
+    if company_id:
+        rows = [r for r in rows if r.get("companyId") == company_id]
+    if status:
+        want_active = status.lower() == "active"
+        rows = [r for r in rows if bool(r["isActive"]) == want_active]
+    if search:
+        s = search.lower()
+        rows = [r for r in rows if s in (r["name"] or "").lower()
+                or s in (r.get("email") or "").lower()
+                or s in (r.get("company") or "").lower()
+                or s in (str(r.get("employeeId") or "")).lower()]
+
+    rows = _sort_rows(rows, sort, order)
+    total = len(rows)
+    for i, r in enumerate(rows):
+        r["rank"] = i + 1
+    page = rows[skip: skip + limit] if limit else rows
+    return {"items": page, "total": total, "skip": skip, "limit": limit}
+
+
+@router.get("/activity")
+async def reports_activity(
+    department: Optional[str] = None,
+    company_id: Optional[str] = None,
+    search: Optional[str] = None,
+    sort: Optional[str] = Query("lastActivity"),
+    order: Optional[str] = Query("desc"),
+    skip: int = 0,
+    limit: int = 25,
+    current_user: dict = Depends(admin_only),
+):
+    """Activity report — real login/usage from activity_logs + attendance/assessments."""
+    users = await rs.load_users()
+    result = await rs.compute_activity(users)
+    rows = result["items"]
+    if department:
+        rows = [r for r in rows if r["department"] == department]
+    if search:
+        s = search.lower()
+        rows = [r for r in rows if s in (r["name"] or "").lower()
+                or s in (r.get("email") or "").lower() or s in (r.get("company") or "").lower()]
+    rows = _sort_rows(rows, sort, order)
+    total = len(rows)
+    page = rows[skip: skip + limit] if limit else rows
+    return {"summary": result["summary"], "items": page, "total": total, "skip": skip, "limit": limit}
+
+
+@router.get("/sessions")
+async def reports_sessions(
+    search: Optional[str] = None,
+    status: Optional[str] = None,
+    sort: Optional[str] = Query("date"),
+    order: Optional[str] = Query("desc"),
+    skip: int = 0,
+    limit: int = 25,
+    current_user: dict = Depends(admin_only),
+):
+    """Session report — LMS sessions with attendance % and duration."""
+    users = await rs.load_users()
+    result = await rs.compute_sessions(users)
+    rows = result["items"]
+    if status:
+        rows = [r for r in rows if (r.get("status") or "").lower() == status.lower()]
+    if search:
+        s = search.lower()
+        rows = [r for r in rows if s in (r["name"] or "").lower()]
+    rows = _sort_rows(rows, sort, order)
+    total = len(rows)
+    page = rows[skip: skip + limit] if limit else rows
+    return {"summary": result["summary"], "monthly": result["monthly"], "items": page, "total": total, "skip": skip, "limit": limit}
+
+
 @router.get("/doers/{doer_id}")
 async def reports_doer_detail(
     doer_id: str,
@@ -225,6 +323,45 @@ async def reports_companies(
     return {"items": page, "total": total, "skip": skip, "limit": limit}
 
 
+_COMPANY_EXPORT_COLUMNS = [
+    ("rank", "Rank"), ("name", "Company"), ("status", "Status"), ("employees", "Total Employees"),
+    ("assigned", "Total Tasks"), ("completed", "Completed"), ("pending", "Pending"), ("overdue", "Overdue"),
+    ("attendanceRate", "Attendance %"), ("avgAssessment", "Assessment %"), ("completionRate", "Completion %"),
+    ("sessions", "Sessions"), ("score", "Productivity %"), ("rating", "Rating"),
+]
+
+
+@router.get("/companies/export")
+async def reports_companies_export(
+    format: str = Query("csv", pattern="^(csv|xlsx|pdf)$"),
+    period: Optional[str] = None,
+    startDate: Optional[str] = None,
+    endDate: Optional[str] = None,
+    search: Optional[str] = None,
+    sort: Optional[str] = Query("score"),
+    order: Optional[str] = Query("desc"),
+    current_user: dict = Depends(admin_only),
+):
+    """Export the Company-wise report (CSV / Excel / PDF), respecting filters."""
+    start_iso, end_iso = rs.period_range(period, startDate, endDate)
+    users = await rs.load_users()
+    tasks = await rs.fetch_tasks(start_iso, end_iso)
+    rows = await rcs.compute_companies(tasks, users)
+    if search:
+        s = search.lower()
+        rows = [r for r in rows if s in (r["name"] or "").lower()]
+    rows = _sort_rows(rows, sort, order)
+    for i, r in enumerate(rows):
+        r["rank"] = i + 1
+
+    if format == "csv":
+        return _export_csv(rows, columns=_COMPANY_EXPORT_COLUMNS, filename="company_report.csv")
+    if format == "xlsx":
+        return _export_xlsx(rows, columns=_COMPANY_EXPORT_COLUMNS, filename="company_report.xlsx", sheet_title="Companies")
+    return _export_pdf(rows, columns=_COMPANY_EXPORT_COLUMNS, filename="company_report.pdf",
+                       title="Company-wise Report", subtitle=f"Companies: {len(rows)}")
+
+
 @router.get("/companies/{company_id}")
 async def reports_company_dashboard(
     company_id: str,
@@ -267,6 +404,52 @@ async def reports_company_employees(
         r["rank"] = i + 1
     page = rows[skip: skip + limit] if limit else rows
     return {"items": page, "total": total, "skip": skip, "limit": limit}
+
+
+_COMPANY_EMP_EXPORT_COLUMNS = [
+    ("rank", "Rank"), ("name", "Employee"), ("email", "Email"), ("department", "Department"),
+    ("assigned", "Assigned"), ("completed", "Completed"), ("pending", "Pending"), ("overdue", "Overdue"),
+    ("attendanceRate", "Attendance %"), ("avgAssessment", "Assessment %"), ("completionRate", "Completion %"),
+    ("score", "Productivity %"), ("rating", "Rating"),
+]
+
+
+@router.get("/companies/{company_id}/employees/export")
+async def reports_company_employees_export(
+    company_id: str,
+    format: str = Query("csv", pattern="^(csv|xlsx|pdf)$"),
+    period: Optional[str] = None,
+    startDate: Optional[str] = None,
+    endDate: Optional[str] = None,
+    search: Optional[str] = None,
+    sort: Optional[str] = Query("score"),
+    order: Optional[str] = Query("desc"),
+    current_user: dict = Depends(admin_only),
+):
+    """Export one company's employees (CSV / Excel / PDF), respecting filters."""
+    start_iso, end_iso = rs.period_range(period, startDate, endDate)
+    users = await rs.load_users()
+    tasks = await rs.fetch_tasks(start_iso, end_iso)
+    scoped = [uid for uid, u in users.items() if u.get("company_id") == company_id]
+    att = await rcs._attendance_by_user(scoped)
+    assess = await rcs._assessments_by_user(scoped)
+    rows = rcs.compute_company_employees(company_id, tasks, users, att, assess)
+    if search:
+        s = search.lower()
+        rows = [r for r in rows if s in (r["name"] or "").lower() or s in (r.get("email") or "").lower()]
+    rows = _sort_rows(rows, sort, order)
+    for i, r in enumerate(rows):
+        r["rank"] = i + 1
+
+    company = await get_collection("companies").find_one({"_id": ObjectId(company_id)}) if ObjectId.is_valid(company_id) else None
+    cname = (company or {}).get("name", "company")
+    base = f"employee_report_{_safe_filename(cname)}"
+    if format == "csv":
+        return _export_csv(rows, columns=_COMPANY_EMP_EXPORT_COLUMNS, filename=f"{base}.csv")
+    if format == "xlsx":
+        return _export_xlsx(rows, columns=_COMPANY_EMP_EXPORT_COLUMNS, filename=f"{base}.xlsx", sheet_title="Employees")
+    return _export_pdf(rows, columns=_COMPANY_EMP_EXPORT_COLUMNS, filename=f"{base}.pdf",
+                       title=f"Employee-wise Report — {cname}", subtitle=f"Employees: {len(rows)}")
 
 
 # --------------------------------------------------------------------------- #
@@ -453,6 +636,58 @@ _EMP_ASSIGNMENT_COLUMNS = [
     ("assignedDate", "Assigned"), ("dueDate", "Due"), ("completedDate", "Completed"),
     ("statusLabel", "Status"), ("priority", "Priority"), ("score", "Score"),
 ]
+
+
+_EMP_WIDE_COLUMNS = [
+    ("rank", "Rank"), ("name", "Employee"), ("email", "Email"), ("employeeId", "Emp ID"),
+    ("company", "Company"), ("department", "Department"), ("designation", "Designation"),
+    ("assigned", "Task Assigned"), ("completed", "Task Completed"), ("pending", "Pending"), ("overdue", "Overdue"),
+    ("totalSessions", "Total Sessions"), ("sessionsAttended", "Attended"), ("sessionsMissed", "Missed"),
+    ("attendanceRate", "Attendance %"), ("avgAssessment", "Assessment %"), ("completionRate", "Completion %"),
+    ("totalLogins", "Logins"), ("lastLogin", "Last Login"), ("lastActivity", "Last Activity"), ("rating", "Status"),
+]
+
+
+@router.get("/employees-wide/export")
+async def reports_employees_wide_export(
+    format: str = Query("csv", pattern="^(csv|xlsx|pdf)$"),
+    period: Optional[str] = None,
+    startDate: Optional[str] = None,
+    endDate: Optional[str] = None,
+    department: Optional[str] = None,
+    company_id: Optional[str] = None,
+    status: Optional[str] = None,
+    search: Optional[str] = None,
+    current_user: dict = Depends(admin_only),
+):
+    """Export the comprehensive employee/learner report (CSV / Excel / PDF), respecting filters."""
+    start_iso, end_iso = rs.period_range(period, startDate, endDate)
+    users = await rs.load_users()
+    tasks = await rs.fetch_tasks(start_iso, end_iso)
+    rows = await rs.compute_employees_wide(tasks, users)
+
+    if department:
+        rows = [r for r in rows if r["department"] == department]
+    if company_id:
+        rows = [r for r in rows if r.get("companyId") == company_id]
+    if status:
+        want_active = status.lower() == "active"
+        rows = [r for r in rows if bool(r["isActive"]) == want_active]
+    if search:
+        s = search.lower()
+        rows = [r for r in rows if s in (r["name"] or "").lower()
+                or s in (r.get("email") or "").lower() or s in (r.get("company") or "").lower()]
+    for i, r in enumerate(rows):
+        r["rank"] = i + 1
+        r["lastLogin"] = str(r.get("lastLogin") or "")
+        r["lastActivity"] = str(r.get("lastActivity") or "")
+
+    if format == "csv":
+        return _export_csv(rows, columns=_EMP_WIDE_COLUMNS, filename="employee_report.csv")
+    if format == "xlsx":
+        return _export_xlsx(rows, columns=_EMP_WIDE_COLUMNS, filename="employee_report.xlsx", sheet_title="Employees")
+    return _export_pdf(rows, columns=_EMP_WIDE_COLUMNS, filename="employee_report.pdf",
+                       title="Employee Report", subtitle=f"Employees: {len(rows)}")
 
 
 def _safe_filename(name: str) -> str:

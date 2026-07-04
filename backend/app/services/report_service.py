@@ -15,7 +15,7 @@ Design notes (grounded in docs/ADMIN_REPORTS_MODULE_ANALYSIS.md):
     the data model (v1 decision) — timelines are reconstructed from `created_at`,
     `activity_logs` status changes, and `completed_at`.
 """
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional, Dict, List
 
 from app.db.mongodb import get_collection
@@ -401,6 +401,263 @@ def compute_doers(tasks: List[dict], users: Dict[str, dict]) -> List[dict]:
     for i, r in enumerate(rows):
         r["rank"] = i + 1
     return rows
+
+
+# --------------------------------------------------------------------------- #
+# Employee-Wise (all employees/learners, not just task doers)                  #
+# --------------------------------------------------------------------------- #
+def _rate(part, total):
+    return round(part / total * 100, 1) if total else 0.0
+
+
+def _avg(vals):
+    vals = [v for v in vals if v is not None]
+    return round(sum(vals) / len(vals), 1) if vals else 0.0
+
+
+async def _attendance_by_user(user_ids: List[str]) -> Dict[str, list]:
+    if not user_ids:
+        return {}
+    docs = await get_collection("attendance").find({"user_id": {"$in": user_ids}}).to_list(200000)
+    out: Dict[str, list] = {}
+    for a in docs:
+        out.setdefault(str(a.get("user_id")), []).append(a)
+    return out
+
+
+async def _assessments_by_user(user_ids: List[str]) -> Dict[str, list]:
+    if not user_ids:
+        return {}
+    docs = await get_collection("LearnerAssessments").find({"user_id": {"$in": user_ids}}).to_list(200000)
+    out: Dict[str, list] = {}
+    for a in docs:
+        out.setdefault(str(a.get("user_id")), []).append(a)
+    return out
+
+
+async def _activity_by_user(user_ids: List[str]) -> Dict[str, dict]:
+    """Last login, last activity and login count per user — from the real activity_logs feed."""
+    if not user_ids:
+        return {}
+    docs = await get_collection("activity_logs").find(
+        {"user_id": {"$in": user_ids}},
+        {"user_id": 1, "action": 1, "timestamp": 1},
+    ).to_list(300000)
+    out: Dict[str, dict] = {}
+    for a in docs:
+        uid = str(a.get("user_id"))
+        ts = a.get("timestamp")
+        if ts is None:
+            continue
+        k = str(ts)  # compare as string to avoid naive/aware datetime TypeErrors
+        cur = out.setdefault(uid, {"lastLogin": None, "lastActivity": None, "totalLogins": 0, "_actk": "", "_logk": ""})
+        if k > cur["_actk"]:
+            cur["_actk"] = k
+            cur["lastActivity"] = ts
+        if a.get("action") == "User Login":
+            cur["totalLogins"] += 1
+            if k > cur["_logk"]:
+                cur["_logk"] = k
+                cur["lastLogin"] = ts
+    for v in out.values():
+        v.pop("_actk", None)
+        v.pop("_logk", None)
+    return out
+
+
+async def compute_employees_wide(tasks: List[dict], users: Dict[str, dict]) -> List[dict]:
+    """Every employee/learner (even with zero tasks) with real task + session/attendance +
+    assessment + activity metrics merged. Learning Hours omitted (no data source)."""
+    now = datetime.utcnow()
+    stats: Dict[str, dict] = {}
+    for doc in tasks:
+        for did in doer_ids(doc):
+            _apply(stats.setdefault(did, _new_stat()), doc, now)
+
+    ids = list(users.keys())
+    att_by_user = await _attendance_by_user(ids)
+    assess_by_user = await _assessments_by_user(ids)
+    activity = await _activity_by_user(ids)
+    comp_docs = await get_collection("companies").find({}, {"name": 1}).to_list(5000)
+    company_names = {str(c["_id"]): (c.get("name") or "Company") for c in comp_docs}
+
+    rows = []
+    for uid, u in users.items():
+        fin = _finalize(stats.get(uid) or _new_stat())
+        att = att_by_user.get(uid, [])
+        total_sess = len(att)
+        pres = sum(1 for a in att if a.get("status") == "present")
+        ass = assess_by_user.get(uid, [])
+        act = activity.get(uid, {})
+        cid = u.get("company_id")
+        rows.append({
+            "id": uid,
+            "employeeId": u.get("employee_id") or u.get("employeeId") or "",
+            "name": u.get("name", "Unknown"),
+            "email": u.get("email"),
+            "role": u.get("role"),
+            "tag": u.get("tag"),
+            "department": u.get("department", "Other"),
+            "designation": u.get("designation") or "",
+            "companyId": cid,
+            "company": company_names.get(cid) if cid else None,
+            "isActive": u.get("is_active", True),
+            # Task performance (real)
+            "assigned": fin["assigned"], "completed": fin["completed"],
+            "pending": fin["pending"], "overdue": fin["overdue"],
+            "completionRate": fin["completionRate"], "score": fin["score"], "rating": fin["rating"],
+            # Session / attendance participation (real)
+            "totalSessions": total_sess,
+            "sessionsAttended": pres,
+            "sessionsMissed": total_sess - pres,
+            "attendanceRate": _rate(pres, total_sess),
+            # Assessment (real)
+            "avgAssessment": _avg([x.get("percentage", 0) for x in ass]),
+            # Activity (real, from activity_logs)
+            "totalLogins": act.get("totalLogins", 0),
+            "lastLogin": act.get("lastLogin"),
+            "lastActivity": act.get("lastActivity"),
+        })
+    rows.sort(key=lambda r: (r["score"], r["completed"], r["attendanceRate"]), reverse=True)
+    for i, r in enumerate(rows):
+        r["rank"] = i + 1
+    return rows
+
+
+def _ts_key(ts) -> str:
+    """Comparable YYYY-MM-DD... key from a datetime or iso string (tz-safe, string compare)."""
+    return str(ts) if ts else ""
+
+
+async def compute_activity(users: Dict[str, dict]) -> dict:
+    """Activity report — real login/usage signals from activity_logs + attendance/assessments.
+    Learning Time is omitted (no duration data source)."""
+    now = datetime.utcnow()
+    ids = list(users.keys())
+    activity = await _activity_by_user(ids)
+    att_by_user = await _attendance_by_user(ids)
+    assess_by_user = await _assessments_by_user(ids)
+    comp_docs = await get_collection("companies").find({}, {"name": 1}).to_list(5000)
+    company_names = {str(c["_id"]): (c.get("name") or "Company") for c in comp_docs}
+
+    cutoff_key = (now - timedelta(days=30)).strftime("%Y-%m-%d")
+    rows = []
+    active30 = 0
+    total_logins = 0
+    for uid, u in users.items():
+        act = activity.get(uid, {})
+        att = att_by_user.get(uid, [])
+        ass = assess_by_user.get(uid, [])
+        # Last course/learning access = latest attendance date or assessment submission.
+        course_dates = [_ts_key(a.get("date")) for a in att]
+        course_dates += [_ts_key(x.get("submitted_at")) for x in ass]
+        last_course = max([c for c in course_dates if c], default=None)
+        last_login = act.get("lastLogin")
+        last_activity = act.get("lastActivity")
+        logins = act.get("totalLogins", 0)
+        total_logins += logins
+        latest_key = max(_ts_key(last_activity), _ts_key(last_login), last_course or "")
+        is_active = bool(latest_key) and latest_key[:10] >= cutoff_key
+        if is_active:
+            active30 += 1
+        rows.append({
+            "id": uid,
+            "name": u.get("name", "Unknown"),
+            "email": u.get("email"),
+            "company": company_names.get(u.get("company_id")) if u.get("company_id") else None,
+            "department": u.get("department", "Other"),
+            "lastLogin": last_login,
+            "lastCourseAccess": last_course,
+            "lastActivity": last_activity,
+            "loginCount": logins,
+            "active": is_active,
+        })
+    rows.sort(key=lambda r: _ts_key(r["lastActivity"]), reverse=True)
+    total_users = len(rows)
+    return {
+        "summary": {
+            "totalUsers": total_users,
+            "activeUsers": active30,          # activity within last 30 days
+            "inactiveUsers": total_users - active30,
+            "totalLogins": total_logins,
+        },
+        "items": rows,
+    }
+
+
+async def compute_sessions(users: Dict[str, dict]) -> dict:
+    """Session report — LMS sessions (calendar events type=event) with attendance + duration."""
+    now = datetime.utcnow()
+    sessions = []
+    for col in SESSION_COLLECTIONS:
+        evs = await get_collection(col).find({"type": "event"}).to_list(30000)
+        sessions.extend(evs)
+
+    # attendance.session_id does not map to calendar-event _id in this data, so we also index
+    # by session_name for a best-effort per-session link. The overall rate uses ALL records.
+    att_docs = await get_collection("attendance").find({}).to_list(300000)
+    att_by_session: Dict[str, list] = {}
+    att_by_name: Dict[str, list] = {}
+    overall_present = sum(1 for a in att_docs if a.get("status") == "present")
+    overall_total = len(att_docs)
+    for a in att_docs:
+        att_by_session.setdefault(str(a.get("session_id")), []).append(a)
+        if a.get("session_name"):
+            att_by_name.setdefault(str(a.get("session_name")).strip().lower(), []).append(a)
+
+    completed = upcoming = missed = 0
+    durations = []
+    monthly: Dict[tuple, dict] = {}
+    rows = []
+    for s in sessions:
+        sid = str(s["_id"])
+        start = _parse_iso(s.get("start"))
+        end = _parse_iso(s.get("end"))
+        status = s.get("status")
+        is_completed = status == "completed"
+        if is_completed:
+            completed += 1
+        elif start and start > now:
+            upcoming += 1
+        elif start and start <= now:
+            missed += 1  # past session not marked completed
+        dur = None
+        if start and end and end > start:
+            dur = (end - start).total_seconds() / 60.0
+            durations.append(dur)
+        title = (s.get("title") or "Session")
+        att = att_by_session.get(sid) or att_by_name.get(title.strip().lower(), [])
+        pres = sum(1 for a in att if a.get("status") == "present")
+        rows.append({
+            "id": sid,
+            "name": title,
+            "date": s.get("start"),
+            "status": status or "scheduled",
+            "attended": pres,
+            "absent": len(att) - pres,
+            "attendanceRate": _rate(pres, len(att)),
+            "durationMin": round(dur) if dur is not None else None,
+        })
+        if start:
+            k, label = _month_key(start)
+            m = monthly.setdefault(k, {"_s": k, "name": label, "sessions": 0, "completed": 0})
+            m["sessions"] += 1
+            if is_completed:
+                m["completed"] += 1
+    rows.sort(key=lambda r: _ts_key(r["date"]), reverse=True)
+    return {
+        "summary": {
+            "totalSessions": len(sessions),
+            "completedSessions": completed,
+            "upcomingSessions": upcoming,
+            "missedSessions": missed,
+            "attendanceRate": _rate(overall_present, overall_total),
+            "avgDurationMin": round(sum(durations) / len(durations)) if durations else None,
+        },
+        "monthly": [{"name": m["name"], "sessions": m["sessions"], "completed": m["completed"]}
+                    for m in sorted(monthly.values(), key=lambda x: x["_s"])],
+        "items": rows,
+    }
 
 
 def _task_module(doc: dict) -> str:

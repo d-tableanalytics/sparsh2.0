@@ -34,6 +34,69 @@ export const getDepartmentsReport = (params) =>
 export const getDoers = (params) =>
   api.get('/reports/doers', { params }).then((r) => r.data);
 
+// Comprehensive employee/learner report (includes users with zero tasks).
+export const getEmployeesWide = (params) =>
+  api.get('/reports/employees-wide', { params }).then((r) => r.data);
+
+// Streams the Company-wise report as CSV / XLSX / PDF and triggers a download.
+export const exportCompanies = async ({ format = 'csv', ...params }) => {
+  const res = await api.get('/reports/companies/export', {
+    params: { format, ...params },
+    responseType: 'blob',
+  });
+  const blob = new Blob([res.data]);
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `company_report.${format}`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+};
+
+// Streams one company's employees as CSV / XLSX / PDF and triggers a download.
+export const exportCompanyEmployees = async (companyId, { format = 'csv', ...params }) => {
+  const res = await api.get(`/reports/companies/${companyId}/employees/export`, {
+    params: { format, ...params },
+    responseType: 'blob',
+  });
+  const blob = new Blob([res.data]);
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `employee_report.${format}`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+};
+
+// Streams the comprehensive employee report as CSV / XLSX / PDF and triggers a download.
+export const exportEmployeesWide = async ({ format = 'csv', ...params }) => {
+  const res = await api.get('/reports/employees-wide/export', {
+    params: { format, ...params },
+    responseType: 'blob',
+  });
+  const blob = new Blob([res.data]);
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `employee_report.${format}`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+};
+
+// Activity report (login/usage from activity_logs).
+export const getActivityReport = (params) =>
+  api.get('/reports/activity', { params }).then((r) => r.data);
+
+// Session report (LMS sessions + attendance + duration).
+export const getSessionReport = (params) =>
+  api.get('/reports/sessions', { params }).then((r) => r.data);
+
 // E2 — Companies
 export const getCompanies = (params) =>
   api.get('/reports/companies', { params }).then((r) => r.data);

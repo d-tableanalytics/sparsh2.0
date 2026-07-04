@@ -1,6 +1,6 @@
-import React, { useState, useEffect, useCallback } from 'react';
-import { Search, ChevronDown, ArrowUpDown, Users, ExternalLink, Loader2 } from 'lucide-react';
-import { getCompanyEmployees, getEmployeeAssignments } from '../../services/reportApi';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { Search, ChevronDown, ArrowUpDown, Users, ExternalLink, Loader2, Download, FileDown, FileSpreadsheet, FileText } from 'lucide-react';
+import { getCompanyEmployees, getEmployeeAssignments, exportCompanyEmployees } from '../../services/reportApi';
 import { fmtDate } from './reportPeriods';
 
 const RATING_COLOR = {
@@ -100,16 +100,51 @@ const EmployeeTable = ({ company, params, onOpenEmployee }) => {
 
   const cell = 'px-3 py-3 text-[12px] font-bold text-[var(--text-main)] whitespace-nowrap';
 
+  // Export this company's employees (CSV / Excel / PDF), respecting current filters/search.
+  const [exportOpen, setExportOpen] = useState(false);
+  const [exporting, setExporting] = useState('');
+  const exportRef = useRef(null);
+  useEffect(() => {
+    if (!exportOpen) return undefined;
+    const h = (e) => { if (exportRef.current && !exportRef.current.contains(e.target)) setExportOpen(false); };
+    document.addEventListener('mousedown', h);
+    return () => document.removeEventListener('mousedown', h);
+  }, [exportOpen]);
+
+  const doExport = async (format) => {
+    setExportOpen(false); setExporting(format);
+    try { await exportCompanyEmployees(company.id, { format, ...params, search, sort, order }); }
+    catch (e) { /* handled globally */ }
+    finally { setExporting(''); }
+  };
+
   return (
     <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-[24px] overflow-hidden shadow-sm">
       <div className="flex flex-wrap items-center justify-between gap-3 p-5 border-b border-[var(--border)]">
         <h3 className="text-[15px] font-black text-[var(--text-main)] uppercase italic tracking-tight">
           Employee-wise Report · <span className="text-[var(--accent-indigo)]">{company.name}</span>
         </h3>
-        <div className="relative min-w-[220px]">
-          <Search size={13} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-[var(--text-muted)]" />
-          <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search employee..."
-            className="w-full pl-9 pr-3 py-2.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-xl text-[12px] font-bold outline-none focus:border-[var(--accent-indigo)]" />
+        <div className="flex items-center gap-2">
+          <div className="relative" ref={exportRef}>
+            <button onClick={() => setExportOpen((o) => !o)} disabled={!!exporting || (data.items || []).length === 0}
+              className="flex items-center gap-1.5 px-4 py-2.5 bg-[var(--accent-indigo)] text-white rounded-xl text-[11px] font-black uppercase tracking-widest shadow-sm hover:opacity-90 transition-all disabled:opacity-50">
+              <Download size={14} /> {exporting ? 'Exporting…' : 'Export'} <ChevronDown size={13} className={`transition-transform ${exportOpen ? 'rotate-180' : ''}`} />
+            </button>
+            {exportOpen && (
+              <div className="absolute right-0 mt-2 w-40 bg-[var(--bg-card)] border border-[var(--border)] rounded-xl shadow-lg z-50 overflow-hidden">
+                {[['csv', 'CSV', FileDown], ['xlsx', 'Excel', FileSpreadsheet], ['pdf', 'PDF', FileText]].map(([fmt, label, Icon]) => (
+                  <button key={fmt} onClick={() => doExport(fmt)} className="w-full flex items-center gap-2 px-4 py-2.5 text-[11px] font-black uppercase tracking-widest text-[var(--text-muted)] hover:bg-[var(--input-bg)] hover:text-[var(--text-main)] transition-all">
+                    <Icon size={14} /> {label}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+          <div className="relative min-w-[220px]">
+            <Search size={13} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-[var(--text-muted)]" />
+            <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search employee..."
+              className="w-full pl-9 pr-3 py-2.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-xl text-[12px] font-bold outline-none focus:border-[var(--accent-indigo)]" />
+          </div>
         </div>
       </div>
 

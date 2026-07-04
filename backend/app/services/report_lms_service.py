@@ -37,6 +37,17 @@ def _learners_by_company(users: Dict[str, dict]) -> Dict[str, list]:
     return out
 
 
+def _att_status(rate: float) -> str:
+    """Attendance status bands (spec): >=90 Excellent, 75-89 Good, 60-74 Average, <60 Poor."""
+    if rate >= 90:
+        return "Excellent"
+    if rate >= 75:
+        return "Good"
+    if rate >= 60:
+        return "Average"
+    return "Poor"
+
+
 async def _batch_sessions(batch_id: str):
     """Return (session_ids, total, completed, last_start_iso, sessions[])."""
     s_ids, total, completed, last = [], 0, 0, None
@@ -65,6 +76,14 @@ async def compute_lms_list(users: Dict[str, dict], company_id: Optional[str] = N
     learners_by_company = _learners_by_company(users)
     company_names = await _company_name_map()
 
+    # Attendance (real records): load once for every learner across all batches, then scope
+    # per-batch to that batch's sessions when computing each course's average attendance.
+    all_user_ids = set()
+    for b in batches:
+        for cid in [str(c) for c in (b.get("companies") or [])]:
+            all_user_ids.update(learners_by_company.get(cid, []))
+    att_by_user = await rcs._attendance_by_user(list(all_user_ids))
+
     rows = []
     for b in batches:
         bid = str(b["_id"])
@@ -78,6 +97,20 @@ async def compute_lms_list(users: Dict[str, dict], company_id: Optional[str] = N
             ass = await get_collection("LearnerAssessments").find({"session_id": {"$in": s_ids}}).to_list(8000)
             avg_score = rcs._avg([a.get("percentage", 0) for a in ass])
 
+        # Per-course attendance: each learner's present/total over this batch's sessions.
+        s_id_set = set(s_ids)
+        learner_rates, below75 = [], 0
+        if s_id_set:
+            for uid in user_ids:
+                uatt = [a for a in att_by_user.get(uid, []) if str(a.get("session_id")) in s_id_set]
+                if not uatt:
+                    continue
+                rate = sum(1 for a in uatt if a.get("status") == "present") / len(uatt) * 100
+                learner_rates.append(rate)
+                if rate < 75:
+                    below75 += 1
+        avg_attendance = round(sum(learner_rates) / len(learner_rates), 1) if learner_rates else 0.0
+
         rows.append({
             "id": bid,
             "name": b.get("name") or b.get("product_name") or "LMS",
@@ -90,6 +123,9 @@ async def compute_lms_list(users: Dict[str, dict], company_id: Optional[str] = N
             "coursesCompleted": completed,
             "completionRate": rcs._rate(completed, total),
             "avgScore": avg_score,
+            "avgAttendance": avg_attendance,
+            "learnersBelow75": below75,
+            "learnersWithAttendance": len(learner_rates),
             "lastActivity": last,
             "status": b.get("status", "active"),
             # certificates / learningHours intentionally omitted (no data source)
@@ -274,6 +310,14 @@ async def compute_lms_employees(batch_id: str, tasks: List[dict], users: Dict[st
     learners_by_company = _learners_by_company(users)
     emp_ids = [uid for cid in comp_ids for uid in learners_by_company.get(cid, [])]
 
+    company_names = await _company_name_map()
+    batch_name = (batch or {}).get("name") or (batch or {}).get("product_name") or "LMS"
+
+    # Scope attendance to this course's (batch's) sessions so Total/Attended/Missed reflect
+    # the course, not the learner's org-wide attendance.
+    s_ids, _, _, _, _ = await _batch_sessions(batch_id)
+    s_id_set = set(s_ids)
+
     att_by_user = await rcs._attendance_by_user(emp_ids)
     assess_by_user = await rcs._assessments_by_user(emp_ids)
 
@@ -292,15 +336,23 @@ async def compute_lms_employees(batch_id: str, tasks: List[dict], users: Dict[st
         for t in tbd.get(uid, []):
             rs._apply(st, t, now)
         fin = rs._finalize(st)
-        att = att_by_user.get(uid, [])
+        att = [a for a in att_by_user.get(uid, []) if str(a.get("session_id")) in s_id_set] if s_id_set else []
+        total_sess = len(att)
         pres = sum(1 for a in att if a.get("status") == "present")
+        att_rate = rcs._rate(pres, total_sess)
         ass = assess_by_user.get(uid, [])
         rows.append({
             "id": uid, "name": u.get("name", "Unknown"), "email": u.get("email"),
             "department": u.get("department", "Other"),
+            "company": company_names.get(u.get("company_id"), "—"),
+            "course": batch_name, "batch": batch_name,
             "assigned": fin["assigned"], "completed": fin["completed"], "pending": fin["pending"],
             "overdue": fin["overdue"], "completionRate": fin["completionRate"],
-            "attendanceRate": rcs._rate(pres, len(att)),
+            "totalSessions": total_sess,
+            "sessionsAttended": pres,
+            "sessionsMissed": total_sess - pres,
+            "attendanceRate": att_rate,
+            "attendanceStatus": _att_status(att_rate),
             "avgAssessment": rcs._avg([x.get("percentage", 0) for x in ass]),
             "score": fin["score"], "rating": fin["rating"],
         })

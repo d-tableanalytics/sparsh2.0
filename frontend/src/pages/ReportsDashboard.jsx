@@ -2,25 +2,46 @@ import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import { useNavigate, Navigate } from 'react-router-dom';
 import {
   CalendarDays, Users, Download, ChevronDown, FileDown, FileSpreadsheet, FileText, RotateCcw,
+  CalendarClock, GraduationCap,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import FilterDropdown from '../components/reports/FilterDropdown';
 import SummaryCards from '../components/reports/SummaryCards';
 import CompanyTable from '../components/reports/CompanyTable';
 import EmployeeTable from '../components/reports/EmployeeTable';
+import EmployeeWise from '../components/reports/EmployeeWise';
+import ActivityReport from '../components/reports/ActivityReport';
+import SessionReport from '../components/reports/SessionReport';
+import TaskReport from '../components/reports/TaskReport';
 import LmsReport from '../components/reports/LmsReport';
 import { PERIOD_OPTIONS, rangeParams } from '../components/reports/reportPeriods';
 import { getDepartmentsReport, exportReport } from '../services/reportApi';
 
 const PILLS = ['today', 'yesterday', 'this_week', 'last_week', 'this_month', 'last_month'];
 
-// Calendar-wise Report: sticky filters → summary cards → expandable company table →
-// employee table (expand → task details). Tables only, no charts. Superadmin + Admin.
+// Sub-reports inside the Calendar Wise tab.
+const CAL_SUBS = [
+  { key: 'performance', label: 'Calendar Performance' },
+  { key: 'activity', label: 'Activity Report' },
+  { key: 'session', label: 'Session Report' },
+  { key: 'task', label: 'Task Report' },
+];
+
+// Two top-level report tabs (per the restructure): Calendar-wise (task/calendar analytics)
+// and LMS-wise (learning analytics). Each is a rich, multi-section report.
+const TABS = [
+  { key: 'calendar', label: 'Calendar Wise Report', icon: CalendarClock },
+  { key: 'lms', label: 'LMS Wise Report', icon: GraduationCap },
+];
+
+// Calendar-wise = summary cards → company performance (expand → employee tasks) → employee
+// performance. LMS-wise = the full LMS analytics report. Superadmin + Admin only.
 const ReportsDashboard = () => {
   const { user } = useAuth();
   const navigate = useNavigate();
 
-  const [reportType, setReportType] = useState('calendar'); // 'calendar' | 'lms'
+  const [tab, setTab] = useState('calendar'); // 'calendar' | 'lms'
+  const [calSub, setCalSub] = useState('performance'); // sub-report within Calendar Wise
   const [period, setPeriod] = useState('this_month');
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
@@ -75,17 +96,9 @@ const ReportsDashboard = () => {
       <div className="flex items-center justify-between gap-3">
         <div>
           <h1 className="text-2xl font-black text-[var(--text-main)] tracking-tight">Reports &amp; Analytics</h1>
-          <div className="inline-flex items-center gap-1 mt-2 bg-[var(--input-bg)] border border-[var(--border)] p-1 rounded-xl">
-            {[['calendar', 'Calendar-wise Report'], ['lms', 'LMS-wise Report']].map(([v, label]) => (
-              <button key={v} onClick={() => setReportType(v)}
-                className={`px-4 py-2 rounded-lg text-[11px] font-black uppercase tracking-widest transition-all ${
-                  reportType === v ? 'bg-[var(--accent-indigo)] text-white shadow-sm' : 'text-[var(--text-muted)] hover:text-[var(--text-main)]'
-                }`}>
-                {label}
-              </button>
-            ))}
-          </div>
+          <p className="text-[12px] font-bold text-[var(--text-muted)] mt-0.5">Enterprise analytics — live company, employee, LMS, calendar &amp; task performance.</p>
         </div>
+        {tab === 'calendar' && (
         <div className="relative" ref={exportRef}>
           <button onClick={() => setExportOpen((o) => !o)} disabled={!!exporting}
             className="flex items-center gap-1.5 px-4 py-2.5 bg-[var(--accent-indigo)] text-white rounded-xl text-[11px] font-black uppercase tracking-widest shadow-sm hover:opacity-90 transition-all disabled:opacity-50">
@@ -101,6 +114,22 @@ const ReportsDashboard = () => {
             </div>
           )}
         </div>
+        )}
+      </div>
+
+      {/* Report tabs (horizontally scrollable on small screens) */}
+      <div className="flex items-center gap-1 overflow-x-auto no-scrollbar bg-[var(--input-bg)] border border-[var(--border)] p-1 rounded-2xl">
+        {TABS.map((t) => {
+          const Icon = t.icon;
+          return (
+            <button key={t.key} onClick={() => setTab(t.key)}
+              className={`flex items-center gap-1.5 shrink-0 px-3.5 py-2 rounded-xl text-[11px] font-black uppercase tracking-widest transition-all ${
+                tab === t.key ? 'bg-[var(--accent-indigo)] text-white shadow-sm' : 'text-[var(--text-muted)] hover:text-[var(--text-main)]'
+              }`}>
+              <Icon size={13} /> {t.label}
+            </button>
+          );
+        })}
       </div>
 
       {/* Sticky filters */}
@@ -135,21 +164,48 @@ const ReportsDashboard = () => {
         </div>
       </div>
 
-      {reportType === 'lms' ? (
-        <LmsReport params={baseParams} />
-      ) : (
+      {/* ─── Tab 1 · Calendar Wise Report (4 sub-reports) ─── */}
+      {tab === 'calendar' && (
         <>
-          {/* Summary KPI cards (period-scoped, no charts) */}
-          <SummaryCards params={baseParams} />
+          {/* Sub-report nav */}
+          <div className="flex items-center gap-1 overflow-x-auto no-scrollbar bg-[var(--input-bg)] border border-[var(--border)] p-1 rounded-2xl">
+            {CAL_SUBS.map((sd) => (
+              <button key={sd.key} onClick={() => setCalSub(sd.key)}
+                className={`shrink-0 px-3.5 py-2 rounded-xl text-[11px] font-black uppercase tracking-widest transition-all ${
+                  calSub === sd.key ? 'bg-[var(--accent-indigo)] text-white shadow-sm' : 'text-[var(--text-muted)] hover:text-[var(--text-main)]'
+                }`}>
+                {sd.label}
+              </button>
+            ))}
+          </div>
 
-          {/* Company-wise report (expand → employee table) */}
-          <CompanyTable params={baseParams} expandedId={expandedCompany?.id} onToggle={setExpandedCompany} />
+          {calSub === 'performance' && (
+            <>
+              {/* Dashboard cards — task/calendar KPIs (period-scoped) */}
+              <SummaryCards params={baseParams} />
 
-          {expandedCompany && (
-            <EmployeeTable company={expandedCompany} params={baseParams} onOpenEmployee={(id) => navigate(`/admin/reports/employee/${id}`)} />
+              {/* Company Calendar Performance (expand a company → its employees' task detail) */}
+              <CompanyTable params={baseParams} expandedId={expandedCompany?.id} onToggle={setExpandedCompany} />
+              {expandedCompany && (
+                <EmployeeTable company={expandedCompany} params={baseParams} onOpenEmployee={(id) => navigate(`/admin/reports/employee/${id}`)} />
+              )}
+
+              {/* Employee Calendar Performance (org-wide, all employees/learners) */}
+              <div className="bg-[#ffffff] rounded-[24px] border border-[var(--border)] p-4">
+                <h3 className="text-[15px] font-black text-[var(--text-main)] uppercase italic tracking-tight mb-3">Employee Calendar Performance</h3>
+                <EmployeeWise params={baseParams} onOpenEmployee={(id) => navigate(`/admin/reports/employee/${id}`)} />
+              </div>
+            </>
           )}
+
+          {calSub === 'activity' && <ActivityReport params={baseParams} />}
+          {calSub === 'session' && <SessionReport />}
+          {calSub === 'task' && <TaskReport params={baseParams} onOpenEmployee={(id) => navigate(`/admin/reports/employee/${id}`)} />}
         </>
       )}
+
+      {/* ─── Tab 2 · LMS Wise Report ─── */}
+      {tab === 'lms' && <LmsReport params={baseParams} />}
     </div>
   );
 };
