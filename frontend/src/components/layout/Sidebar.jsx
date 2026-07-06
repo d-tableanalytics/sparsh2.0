@@ -29,7 +29,7 @@ const Sidebar = () => {
     { name: 'Training Roadmap', path: '/company-portal', icon: Target, roles: ['clientadmin', 'clientuser'] },
     { name: 'Live Sessions', path: '/sessions', icon: PlayCircle, roles: ['clientadmin', 'clientuser'] },
     { name: 'My Progress', path: '/my-reports', icon: BarChart3, roles: ['clientadmin', 'clientuser'] },
-    { name: 'Performance Matrix', path: '/orm', icon: Database, roles: ['clientadmin'] },
+    { name: 'Organization Result Matrix (ORM)', path: '/orm', icon: Database, roles: ['clientadmin'] },
     { name: 'ORM Sheet', path: '/orm/sheet', icon: CheckSquare, roles: ['clientadmin', 'clientuser'] },
     { name: 'Team', path: '/team', icon: Users, roles: ['clientadmin'] },
     { name: 'Calendar', path: '/calendar', icon: Calendar, roles: ['superadmin', 'admin', 'clientadmin', 'clientuser', 'coach', 'staff'], permissionKey: 'calendar' },

@@ -1,11 +1,13 @@
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import api from '../../services/api';
-import { 
-  ClipboardList, Calendar, CheckCircle2, AlertCircle, 
-  Lock, Save, Award, ChevronRight, Check, X, ShieldAlert 
+import {
+  ClipboardList, Calendar, CheckCircle2, AlertCircle,
+  Lock, Save, Award, ChevronRight, Check, X, ShieldAlert,
+  FileDown, FileUp
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
+import * as XLSX from 'xlsx';
 
 const ORMSheet = () => {
   const { user } = useAuth();
@@ -286,6 +288,129 @@ const ORMSheet = () => {
     });
   };
 
+  // ─── Excel template: download a format shaped to this subsection, upload to fill ───
+  // Builds the {headers, rows} for the current parameter type from the live responses
+  // (which are seeded from the company's ORM design), so the template matches the setup.
+  const buildExportSheet = () => {
+    if (isBudget) {
+      const headers = ['S.No', 'Particulars', 'Particulars Head', 'Head Subhead', 'Rate', 'Target', 'Actual', 'Gap', 'Raised By', 'Raised To', 'Reason'];
+      const rows = responses.map(r => ({
+        'S.No': r.sno, 'Particulars': r.particulars || '', 'Particulars Head': r.head || '', 'Head Subhead': r.subhead || '',
+        'Rate': r.rate || 0, 'Target': r.target || 0, 'Actual': r.actual ?? '', 'Gap': r.gap ?? 0,
+        'Raised By': r.raised_by || '', 'Raised To': r.raised_to || '', 'Reason': r.reason || ''
+      }));
+      return { headers, rows };
+    }
+    if (isEngagement) {
+      const headers = ['S.No', 'Question', 'Min Marks', 'Marks Given', 'Review'];
+      const rows = responses.map(r => ({ 'S.No': r.sno, 'Question': r.question || '', 'Min Marks': r.min_marks || 0, 'Marks Given': r.marks_given ?? '', 'Review': r.review || '' }));
+      return { headers, rows };
+    }
+    if (isRevenue) {
+      const headers = ['Target', 'Achievement', 'Remarks'];
+      const r = responses[0] || {};
+      return { headers, rows: [{ 'Target': r.target || 0, 'Achievement': r.achievement ?? '', 'Remarks': r.remarks || '' }] };
+    }
+    if (isNps) {
+      const headers = ['Target', 'Achievement', 'Google Sheet ID', 'Google Form ID', 'Remarks'];
+      const r = responses[0] || {};
+      return { headers, rows: [{ 'Target': r.target || 0, 'Achievement': r.achievement ?? '', 'Google Sheet ID': r.sheet_id || '', 'Google Form ID': r.form_id || '', 'Remarks': r.remarks || '' }] };
+    }
+    // Process score (default audit checklist)
+    const headers = ['S.No', 'Check Points', 'MM', 'Yes / No', 'Remarks'];
+    const rows = responses.map(r => ({ 'S.No': r.sno, 'Check Points': r.checkpoint || '', 'MM': r.max_marks || 0, 'Yes / No': r.response || 'No', 'Remarks': r.remarks || '' }));
+    return { headers, rows };
+  };
+
+  const handleExportTemplate = () => {
+    const { headers, rows } = buildExportSheet();
+    const data = rows.length ? rows : [Object.fromEntries(headers.map(h => [h, '']))];
+    const ws = XLSX.utils.json_to_sheet(data, { header: headers });
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'ORM Data');
+    const safeName = `${selectedSub?.name || 'ORM'}_${period}`.replace(/[^\w-]+/g, '_');
+    XLSX.writeFile(wb, `${safeName}_Template.xlsx`);
+  };
+
+  // Merge uploaded rows onto the existing responses. Structural fields (checkpoints,
+  // questions, targets, rates) stay from the config; only doer-entered values are taken
+  // from the file so the upload can't tamper with the company's ORM design.
+  const applyImportedRows = (imported) => {
+    if (alreadySubmitted) return;
+    const pick = (row, ...keys) => {
+      for (const k of keys) {
+        if (row[k] !== undefined && row[k] !== null && row[k] !== '') return row[k];
+      }
+      return undefined;
+    };
+
+    if (isRevenue || isNps) {
+      const row = imported[0] || {};
+      setResponses(prev => {
+        const base = prev[0] || { sno: 1, target: parseFloat(selectedSub?.target) || 0 };
+        const next = { ...base, achievement: parseFloat(pick(row, 'Achievement')) || 0 };
+        const remarks = pick(row, 'Remarks');
+        if (remarks !== undefined) next.remarks = remarks;
+        if (isNps) {
+          const sheetId = pick(row, 'Google Sheet ID', 'Sheet ID', 'sheet_id');
+          const formId = pick(row, 'Google Form ID', 'Form ID', 'form_id');
+          if (sheetId !== undefined) next.sheet_id = sheetId;
+          if (formId !== undefined) next.form_id = formId;
+        }
+        return [next];
+      });
+      setSuccessMsg('Data imported from Excel. Review the values, then Submit to lock.');
+      return;
+    }
+
+    setResponses(prev => prev.map((r, idx) => {
+      const match = imported.find(row => String(pick(row, 'S.No', 'sno') ?? '').trim() === String(r.sno).trim()) || imported[idx] || {};
+      if (isBudget) {
+        const target = parseFloat(r.target) || 0;
+        const actual = parseFloat(pick(match, 'Actual')) || 0;
+        return {
+          ...r,
+          actual,
+          gap: parseFloat((target - actual).toFixed(2)),
+          raised_by: pick(match, 'Raised By') ?? r.raised_by,
+          raised_to: pick(match, 'Raised To') ?? r.raised_to,
+          reason: pick(match, 'Reason') ?? r.reason,
+        };
+      }
+      if (isEngagement) {
+        const max = parseFloat(r.min_marks) || 0;
+        let mg = parseFloat(pick(match, 'Marks Given')) || 0;
+        mg = Math.max(0, Math.min(max, mg));
+        return { ...r, marks_given: mg, review: pick(match, 'Review') ?? r.review };
+      }
+      // Process score
+      const raw = pick(match, 'Yes / No', 'Yes/No', 'Response');
+      const response = raw !== undefined ? (String(raw).trim().toLowerCase().startsWith('y') ? 'Yes' : 'No') : r.response;
+      return { ...r, response, remarks: pick(match, 'Remarks') ?? r.remarks };
+    }));
+    setSuccessMsg('Data imported from Excel. Review the values, then Submit to lock.');
+  };
+
+  const handleImportTemplate = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    setErrorMsg('');
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      try {
+        const wb = XLSX.read(evt.target.result, { type: 'binary' });
+        const ws = wb.Sheets[wb.SheetNames[0]];
+        const rows = XLSX.utils.sheet_to_json(ws, { defval: '' });
+        applyImportedRows(rows);
+      } catch (err) {
+        console.error('Import failed:', err);
+        setErrorMsg('Could not read the Excel file. Please use the downloaded format template.');
+      }
+    };
+    reader.readAsBinaryString(file);
+    e.target.value = '';
+  };
+
   // Compute live scores
   const totalMaxMarks = responses.reduce((acc, r) => acc + (parseFloat(r.max_marks) || 0), 0);
   const totalObtainedMarks = responses.reduce((acc, r) => {
@@ -537,6 +662,28 @@ const ORMSheet = () => {
                   ) : hasContent ? (
                     /* Editable Form View */
                     <div className="flex-1 flex flex-col justify-between space-y-6">
+                      {/* Excel Template Toolbar: download format shaped to this subsection, upload filled data */}
+                      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 bg-[var(--input-bg)]/20 border border-[var(--border)] rounded-2xl px-4 py-3">
+                        <div className="flex items-center gap-2">
+                          <FileDown size={14} className="text-purple-500" />
+                          <span className="text-[10px] font-black uppercase tracking-wider text-[var(--text-muted)]">
+                            Bulk entry — download the format, fill it offline, and upload
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={handleExportTemplate}
+                            className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-[10px] font-black uppercase tracking-wider shadow-lg shadow-blue-500/20 transition-all"
+                          >
+                            <FileDown size={13} /> Download Format
+                          </button>
+                          <label className="flex items-center gap-2 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-[10px] font-black uppercase tracking-wider shadow-lg shadow-emerald-500/20 cursor-pointer transition-all">
+                            <FileUp size={13} /> Upload Filled
+                            <input type="file" className="hidden" accept=".xlsx, .xls" onChange={handleImportTemplate} />
+                          </label>
+                        </div>
+                      </div>
+
                       <div className="overflow-x-auto">
                         {isBudget ? (
                           <table className="w-full text-left border-collapse min-w-[900px]">

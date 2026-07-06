@@ -23,6 +23,43 @@ def _current_period() -> str:
     return datetime.utcnow().strftime("%Y-%m")
 
 
+def _in_target_window(now: datetime = None) -> bool:
+    """Target/achievement edits are only allowed inside the monthly window that
+    opens on the 25th and closes on the 10th of the following month."""
+    now = now or datetime.utcnow()
+    return now.day >= 25 or now.day <= 10
+
+
+def _num(v) -> float:
+    try:
+        return float(v or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _target_or_achievement_changed(prior_params, new_params) -> bool:
+    """True if any subsection's target or achievement value differs from what is
+    stored (or a new subsection introduces a non-zero value)."""
+    prior = {}
+    for p in prior_params or []:
+        for s in p.get("subsections", []):
+            prior[(p.get("id"), s.get("id"))] = s
+
+    for p in new_params or []:
+        for s in p.get("subsections", []):
+            key = (p.get("id"), s.get("id"))
+            old = prior.get(key)
+            if old is None:
+                if _num(s.get("target")) != 0 or _num(s.get("achievement")) != 0:
+                    return True
+                continue
+            if _num(s.get("target")) != _num(old.get("target")):
+                return True
+            if _num(s.get("achievement")) != _num(old.get("achievement")):
+                return True
+    return False
+
+
 def _overlay_values(parameters, values, fields=None):
     """Overlay month-specific values from `values` (a {subsection_id: {...}} map)
     onto the shared structure in-place."""
@@ -92,6 +129,18 @@ async def save_orm(request: ORMCreateRequest, current_user: dict = Depends(get_c
     # Check if ORM already exists for this company
     existing = await col.find_one({"company_id": request.company_id})
 
+    # Client admins may only change target/achievement VALUES while the target
+    # window is open (25th → 10th). Structural edits (weightages, assignments,
+    # checklists, frequency) stay editable. Staff (superadmin/admin) bypass this
+    # to handle exceptions and to apply approved change requests.
+    if current_user.get("role") == "clientadmin" and not _in_target_window():
+        prior_params = existing.get("parameters", []) if existing else []
+        if _target_or_achievement_changed(prior_params, orm_data.get("parameters", [])):
+            raise HTTPException(
+                status_code=403,
+                detail="Target window is closed. Targets and achievements can only be changed from the 25th to the 10th of each month. Submit a target-change request for staff approval.",
+            )
+
     if existing:
         await col.update_one(
             {"company_id": request.company_id},
@@ -144,5 +193,6 @@ async def get_orm(company_id: str, period: str = None, current_user: dict = Depe
 
     orm["period"] = period
     orm["is_current_period"] = period == current_period
+    orm["target_window_open"] = _in_target_window()
     orm["parameters"] = parameters
     return orm

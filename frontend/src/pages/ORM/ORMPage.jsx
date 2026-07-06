@@ -1,11 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { 
-  Plus, Trash2, Save, ChevronDown, ChevronRight, 
+import {
+  Plus, Trash2, Save, ChevronDown, ChevronRight,
   Target, BarChart3, PieChart, Info, AlertCircle, CheckCircle2,
   TrendingUp, TrendingDown, Layers, Calculator, Users, UserPlus, X,
   Calendar, Clock, BellRing, Settings2, ClipboardCheck, FileDown, FileUp,
-  ExternalLink, FileText
+  ExternalLink, FileText, Lock, Send
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import api from '../../services/api';
@@ -775,6 +775,116 @@ const AuditModal = ({ isOpen, onClose, subsection, onSave, paramId, paramName })
   );
 };
 
+const RequestChangeModal = ({ isOpen, onClose, parameters, period, onSubmitted }) => {
+  const { showSuccess, showError } = useNotification();
+
+  const options = [];
+  (parameters || []).forEach(p =>
+    (p.subsections || []).forEach(s =>
+      options.push({ paramId: p.id, paramName: p.name, subId: s.id, subName: s.name, target: s.target, achievement: s.achievement })
+    )
+  );
+
+  const [selKey, setSelKey] = useState(options[0] ? `${options[0].paramId}::${options[0].subId}` : '');
+  const [field, setField] = useState('target');
+  const [value, setValue] = useState('');
+  const [reason, setReason] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  const sel = options.find(o => `${o.paramId}::${o.subId}` === selKey);
+  const currentValue = sel ? (field === 'target' ? sel.target : sel.achievement) : '';
+
+  const submit = async () => {
+    if (!sel) { showError('Select a subsection'); return; }
+    if (value === '' || Number.isNaN(parseFloat(value))) { showError('Enter a valid new value'); return; }
+    if (!reason.trim()) { showError('Please provide a reason for the change'); return; }
+    setSaving(true);
+    try {
+      await api.post('/orm-target-requests', {
+        period,
+        reason: reason.trim(),
+        changes: [{
+          parameter_id: sel.paramId,
+          subsection_id: sel.subId,
+          parameter_name: sel.paramName,
+          subsection_name: sel.subName,
+          field,
+          current_value: parseFloat(currentValue) || 0,
+          requested_value: parseFloat(value),
+        }],
+      });
+      showSuccess('Target change request submitted for staff approval');
+      onSubmitted && onSubmitted();
+      onClose();
+    } catch (e) {
+      showError(e.response?.data?.detail || 'Failed to submit request');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <AnimatePresence>
+      {isOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={onClose} className="absolute inset-0 bg-black/60 backdrop-blur-sm" />
+          <motion.div initial={{ scale: 0.9, opacity: 0, y: 20 }} animate={{ scale: 1, opacity: 1, y: 0 }} exit={{ scale: 0.9, opacity: 0, y: 20 }} className="relative w-full max-w-lg bg-[var(--bg-card)] rounded-[28px] border border-[var(--border)] shadow-2xl overflow-hidden">
+            <div className="p-6 border-b border-[var(--border)] bg-[var(--input-bg)]/30 flex justify-between items-center">
+              <div className="flex items-center gap-3">
+                <div className="p-2 bg-amber-500/10 rounded-xl text-amber-600"><Send size={20} /></div>
+                <div>
+                  <h2 className="text-lg font-black text-[var(--text-main)]">Request Target Change</h2>
+                  <p className="text-[10px] font-bold text-[var(--text-muted)] uppercase tracking-widest">Window closed · sent to staff for approval</p>
+                </div>
+              </div>
+              <button onClick={onClose} className="p-2 hover:bg-red-500/10 text-red-500 rounded-xl transition-all"><X size={18} /></button>
+            </div>
+
+            <div className="p-6 space-y-4">
+              {options.length === 0 ? (
+                <p className="text-xs font-bold text-[var(--text-muted)] text-center py-6">No subsections available to request changes for.</p>
+              ) : (
+                <>
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-black uppercase text-[var(--text-muted)]">Subsection</label>
+                    <select value={selKey} onChange={e => setSelKey(e.target.value)} className="w-full bg-[var(--input-bg)] border border-[var(--border)] rounded-xl px-3 py-2 text-xs font-bold text-[var(--text-main)] outline-none focus:border-amber-500">
+                      {options.map(o => <option key={`${o.paramId}::${o.subId}`} value={`${o.paramId}::${o.subId}`}>{o.paramName} — {o.subName}</option>)}
+                    </select>
+                  </div>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="space-y-1">
+                      <label className="text-[10px] font-black uppercase text-[var(--text-muted)]">Field</label>
+                      <select value={field} onChange={e => setField(e.target.value)} className="w-full bg-[var(--input-bg)] border border-[var(--border)] rounded-xl px-3 py-2 text-xs font-bold text-[var(--text-main)] outline-none focus:border-amber-500">
+                        <option value="target">Target</option>
+                        <option value="achievement">Achievement</option>
+                      </select>
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-[10px] font-black uppercase text-[var(--text-muted)]">New Value</label>
+                      <input type="number" value={value} onChange={e => setValue(e.target.value)} placeholder={`Current: ${currentValue ?? 0}`} className="w-full bg-[var(--input-bg)] border border-[var(--border)] rounded-xl px-3 py-2 text-xs font-black text-[var(--text-main)] outline-none focus:border-amber-500" />
+                    </div>
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-black uppercase text-[var(--text-muted)]">Reason</label>
+                    <textarea value={reason} onChange={e => setReason(e.target.value)} rows={3} placeholder="Explain why this change is needed outside the target window..." className="w-full bg-[var(--input-bg)] border border-[var(--border)] rounded-xl px-3 py-2 text-xs font-bold text-[var(--text-main)] outline-none focus:border-amber-500 resize-none" />
+                  </div>
+                </>
+              )}
+            </div>
+
+            <div className="p-6 border-t border-[var(--border)] bg-[var(--input-bg)]/30 flex justify-end gap-3">
+              <button onClick={onClose} className="px-6 py-2.5 bg-[var(--input-bg)] border border-[var(--border)] text-[var(--text-muted)] rounded-xl text-xs font-black uppercase">Cancel</button>
+              <button onClick={submit} disabled={saving || options.length === 0} className="px-8 py-2.5 bg-amber-600 hover:bg-amber-700 text-white rounded-xl text-xs font-black uppercase tracking-widest shadow-lg shadow-amber-500/20 flex items-center gap-2 disabled:opacity-50">
+                <Send size={14} /> {saving ? 'Submitting...' : 'Submit Request'}
+              </button>
+            </div>
+          </motion.div>
+        </div>
+      )}
+    </AnimatePresence>
+  );
+};
+
 const ORMDesigner = () => {
   const navigate = useNavigate();
   const { user } = useAuth();
@@ -784,6 +894,14 @@ const ORMDesigner = () => {
   const [isSaving, setIsSaving] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [activeAudit, setActiveAudit] = useState(null);
+  const [showRequestModal, setShowRequestModal] = useState(false);
+  const [pendingRequests, setPendingRequests] = useState([]);
+  // Target window (25th → 10th). Seeded client-side, refreshed from the API which
+  // is the enforcing source of truth.
+  const [windowOpen, setWindowOpen] = useState(() => {
+    const d = new Date().getDate();
+    return d >= 25 || d <= 10;
+  });
 
   // Month selector: lets admins view past months (read-only) or edit the current month.
   const monthOptions = React.useMemo(() => {
@@ -823,6 +941,9 @@ const ORMDesigner = () => {
       setIsLoading(true);
       try {
         const response = await api.get(`/orm/${user.company_id}`, { params: { period: selectedPeriod } });
+        if (typeof response.data.target_window_open === 'boolean') {
+          setWindowOpen(response.data.target_window_open);
+        }
         if (response.data.parameters && response.data.parameters.length > 0) {
           setParameters(response.data.parameters);
         } else {
@@ -888,6 +1009,18 @@ const ORMDesigner = () => {
   };
 
   const isAdmin = ['superadmin', 'admin', 'clientadmin'].includes(user?.role);
+  const isStaff = ['superadmin', 'admin'].includes(user?.role);
+  // Client admins can only edit targets/achievements while the window is open.
+  // Staff bypass it (they handle exceptions via the approval flow).
+  const windowLocked = !isStaff && !windowOpen;
+
+  // Client admins: surface how many of their target-change requests are still pending.
+  useEffect(() => {
+    if (!user || isStaff) return;
+    api.get('/orm-target-requests', { params: { status_filter: 'pending' } })
+      .then(r => setPendingRequests(r.data.requests || []))
+      .catch(() => {});
+  }, [user?._id, isStaff, showRequestModal]);
 
   const canEdit = (assignedUserIds) => {
     if (!user) return false;
@@ -916,6 +1049,10 @@ const ORMDesigner = () => {
   const handleSave = async () => {
     if (!isCurrentPeriod) {
       showError('Past months are read-only. Switch to the current month to make changes.');
+      return;
+    }
+    if (windowLocked) {
+      showError('Target window is closed (opens 25th–10th). Submit a change request for staff approval.');
       return;
     }
     setIsSaving(true);
@@ -1027,7 +1164,7 @@ const ORMDesigner = () => {
         <div>
           <h1 className="text-3xl font-black text-[var(--text-main)] flex items-center gap-3">
             <Layers className="text-blue-500" />
-            Performance Matrix
+            Organization Result Matrix (ORM)
           </h1>
           <p className="text-[var(--text-muted)] mt-1 font-bold">Monitor and update your ORM achievement scores</p>
         </div>
@@ -1067,7 +1204,7 @@ const ORMDesigner = () => {
           >
             <FileText size={16} /> Download PDF
           </button>
-          {isCurrentPeriod && (
+          {isCurrentPeriod && !windowLocked && (
             <button
               onClick={handleSave}
               disabled={isSaving}
@@ -1077,8 +1214,40 @@ const ORMDesigner = () => {
               {isSaving ? 'Syncing...' : 'Save Matrix'}
             </button>
           )}
+          {isCurrentPeriod && windowLocked && (
+            <button
+              onClick={() => setShowRequestModal(true)}
+              className="flex items-center gap-2 px-5 py-2.5 bg-amber-600 hover:bg-amber-700 text-white rounded-2xl transition-all font-black text-xs uppercase tracking-widest shadow-lg shadow-amber-500/20"
+            >
+              <Send size={16} /> Request Change
+            </button>
+          )}
         </div>
       </div>
+
+      {/* Target window banner (client admins, current month, window closed) */}
+      {isCurrentPeriod && windowLocked && (
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-amber-500/10 border border-amber-500/20 rounded-2xl px-5 py-4">
+          <div className="flex items-center gap-3">
+            <div className="p-2 bg-amber-500/15 rounded-xl text-amber-600"><Lock size={18} /></div>
+            <div>
+              <p className="text-xs font-black uppercase tracking-wider text-amber-700">Target window is closed</p>
+              <p className="text-[11px] font-bold text-[var(--text-muted)]">
+                Targets & achievements can be edited from the 25th to the 10th of each month. For exceptions, submit a change request for staff approval.
+                {pendingRequests.length > 0 && (
+                  <span className="ml-1 text-amber-700">You have {pendingRequests.length} pending request{pendingRequests.length > 1 ? 's' : ''}.</span>
+                )}
+              </p>
+            </div>
+          </div>
+          <button
+            onClick={() => setShowRequestModal(true)}
+            className="shrink-0 flex items-center gap-2 px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-xl text-[11px] font-black uppercase tracking-widest shadow-lg shadow-amber-500/20"
+          >
+            <Send size={14} /> Request Target Change
+          </button>
+        </div>
+      )}
 
       {/* Summary Cards */}
       <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
@@ -1136,7 +1305,7 @@ const ORMDesigner = () => {
                             <td className="py-4 px-4">
                                 <div className="flex items-center gap-2">
                                     <span className="text-xs font-black text-[var(--text-main)]">{sub.name}</span>
-                                    {sub.hasAudit && isCurrentPeriod && (
+                                    {sub.hasAudit && isCurrentPeriod && !windowLocked && (
                                         <button
                                             onClick={() => setActiveAudit({ paramId: param.id, sub })}
                                             className="inline-flex items-center gap-1.5 px-2 py-1 bg-amber-500 text-white rounded-lg text-[9px] font-black uppercase shadow-lg shadow-amber-500/20 hover:scale-105 transition-all"
@@ -1151,7 +1320,7 @@ const ORMDesigner = () => {
                             <td className="py-4 px-4">
                                 <input
                                     type="number" value={sub.target}
-                                    disabled={!isAdmin || !isCurrentPeriod}
+                                    disabled={!isAdmin || !isCurrentPeriod || windowLocked}
                                     onChange={(e) => updateSubsection(param.id, sub.id, 'target', e.target.value)}
                                     className="w-20 bg-[var(--input-bg)] border border-[var(--border)] rounded-xl px-2 py-1 text-xs font-black outline-none focus:border-blue-500 disabled:opacity-50"
                                 />
@@ -1160,7 +1329,7 @@ const ORMDesigner = () => {
                                 <div className="flex items-center gap-2">
                                     <input
                                         type="number" value={sub.achievement}
-                                        disabled={param.id === 'p1' || !canEdit(sub.assignedUsers) || sub.hasAudit || !isCurrentPeriod}
+                                        disabled={param.id === 'p1' || !canEdit(sub.assignedUsers) || sub.hasAudit || !isCurrentPeriod || windowLocked}
                                         onChange={(e) => updateSubsection(param.id, sub.id, 'achievement', e.target.value)}
                                         className={`w-20 bg-[var(--input-bg)] border border-[var(--border)] rounded-xl px-2 py-1 text-xs font-black outline-none focus:border-blue-500 ${(param.id === 'p1' || sub.hasAudit) ? 'opacity-50 cursor-not-allowed text-amber-600 border-amber-500/30' : ''} disabled:opacity-50`}
                                     />
@@ -1193,8 +1362,17 @@ const ORMDesigner = () => {
         ))}
       </div>
 
+      <RequestChangeModal
+        key={`req-${selectedPeriod}-${showRequestModal}`}
+        isOpen={showRequestModal}
+        onClose={() => setShowRequestModal(false)}
+        parameters={visibleParameters}
+        period={selectedPeriod}
+        onSubmitted={() => {}}
+      />
+
       {activeAudit && (
-        <AuditModal 
+        <AuditModal
             isOpen={!!activeAudit}
             onClose={() => setActiveAudit(null)}
             subsection={activeAudit.sub}

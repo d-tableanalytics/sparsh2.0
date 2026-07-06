@@ -10,9 +10,11 @@ import {
   ArrowLeft, Pencil, Trash2, Download, Upload, Plus, User, Lock,
   CheckCircle2, XCircle, PauseCircle, ChevronDown, Save, X,
   FileSpreadsheet, AlertTriangle, ExternalLink, Layers, Calendar,
-  Target, BookOpen, ChevronRight, CheckCircle, Circle, UploadCloud, FileText, Bot
+  Target, BookOpen, ChevronRight, CheckCircle, Circle, UploadCloud, FileText, Bot, Inbox
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import ORMReportTab from '../components/company/ORMReportTab';
+import ORMTargetRequestsTab from '../components/company/ORMTargetRequestsTab';
 import {
   BarChart, Bar, LineChart, Line, PieChart, Pie, Cell,
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
@@ -137,6 +139,7 @@ const CompanyDetails = () => {
   const canDelete = user?.role === 'superadmin' || user?.permissions?.companies?.delete;
   const canReadUsers = user?.role === 'superadmin' || user?.permissions?.users?.read;
   const canReadAnalytics = user?.role === 'superadmin' || user?.permissions?.companies?.read;
+  const isStaff = ['superadmin', 'admin'].includes(user?.role);
 
   const fetchData = async () => {
     try {
@@ -396,6 +399,8 @@ const CompanyDetails = () => {
           { id: 'dashboard', label: 'Company Dashboard', icon: BarChart3, show: canReadAnalytics },
           { id: 'members', label: 'Team Members', icon: Users, show: canReadUsers },
           { id: 'batches', label: 'Batches', icon: Layers, show: canReadAnalytics },
+          { id: 'orm', label: 'ORM Report', icon: Target, show: canReadAnalytics },
+          { id: 'orm-requests', label: 'Target Requests', icon: Inbox, show: isStaff },
         ].filter(t => t.show).map(tab => (
           <button key={tab.id} onClick={() => setActiveTab(tab.id)}
             className={`flex items-center gap-2 px-5 py-2.5 rounded-lg text-[12px] font-bold transition-all ${
@@ -927,6 +932,16 @@ const CompanyDetails = () => {
               )}
             </div>
           </motion.div>
+        )}
+
+        {/* ════════════ ORM REPORT TAB ════════════ */}
+        {activeTab === 'orm' && (
+          <ORMReportTab key="orm" companyId={companyId} companyName={company.name} />
+        )}
+
+        {/* ════════════ ORM TARGET REQUESTS TAB ════════════ */}
+        {activeTab === 'orm-requests' && isStaff && (
+          <ORMTargetRequestsTab key="orm-requests" companyId={companyId} />
         )}
       </AnimatePresence>
 
