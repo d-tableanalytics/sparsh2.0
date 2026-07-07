@@ -118,7 +118,7 @@ const NotificationDrawer = ({ isOpen, onClose, onCountChange }) => {
             <div className="flex items-center gap-1">
               <button 
                 onClick={markAllRead}
-                className="p-2 text-[var(--text-muted)] hover:text-[var(--accent-indigo)] hover:bg-[var(--accent-indigo-bg)] rounded-lg transition-all"
+                className="p-0 text-[var(--text-muted)] hover:text-[var(--accent-indigo)] hover:bg-[var(--accent-indigo-bg)] rounded-lg transition-all"
                 title="Mark all as read"
               >
                 <CheckCircle size={18} />

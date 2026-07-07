@@ -6,6 +6,7 @@ from app.models.notification import NotificationTemplate
 from datetime import datetime
 from bson import ObjectId
 from typing import List, Optional
+from pydantic import BaseModel
 
 router = APIRouter(prefix="/settings", tags=["Settings"])
 
@@ -109,11 +110,66 @@ async def update_template(template_id: str, template: dict = Body(...), current_
     if role != "superadmin" and role != "clientadmin" and not can_update:
         raise HTTPException(status_code=403, detail="Unauthorized")
 
-    update_data = {k: v for k, v in template.items() if k not in ["_id", "created_at", "created_by"]}
+    # `is_active` is intentionally excluded here: template status may ONLY be changed via
+    # the strictly-gated PATCH /templates/{id}/status endpoint (Admin & Super Admin only).
+    # This prevents a staff user with `templates.update` from flipping status through Sync.
+    IMMUTABLE_VIA_UPDATE = {"_id", "created_at", "created_by", "is_active"}
+    update_data = {k: v for k, v in template.items() if k not in IMMUTABLE_VIA_UPDATE}
     update_data["updated_at"] = datetime.utcnow()
-    
+
     await col.update_one({"_id": ObjectId(template_id)}, {"$set": update_data})
     return {"message": "Template updated"}
+
+# ─── Active / Inactive status (Admin & Super Admin only) ───
+# Only Super Admin and Admin roles may flip a template's status. This is a
+# deliberately STRICTER gate than update_template: a staff member who merely
+# holds the granular `templates.update` permission must NOT be able to toggle
+# status. Client Admins may only toggle templates belonging to their own company.
+TEMPLATE_STATUS_ADMIN_ROLES = {"superadmin", "admin", "clientadmin"}
+
+
+class TemplateStatusUpdate(BaseModel):
+    is_active: bool
+
+
+@router.patch("/templates/{template_id}/status")
+async def update_template_status(
+    template_id: str,
+    payload: TemplateStatusUpdate = Body(...),
+    current_user: dict = Depends(get_current_user),
+):
+    try:
+        oid = ObjectId(template_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid template id")
+
+    role = current_user.get("role")
+    if role not in TEMPLATE_STATUS_ADMIN_ROLES:
+        raise HTTPException(
+            status_code=403,
+            detail="Only Admin and Super Admin can change template status",
+        )
+
+    col = get_collection("notification_templates")
+    existing = await col.find_one({"_id": oid})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Template not found")
+
+    # Client Admins are scoped to their own company's templates.
+    if role == "clientadmin" and existing.get("company_id") != current_user.get("company_id"):
+        raise HTTPException(status_code=403, detail="Unauthorized")
+
+    await col.update_one(
+        {"_id": oid},
+        {"$set": {"is_active": payload.is_active, "updated_at": datetime.utcnow()}},
+    )
+
+    return {
+        "success": True,
+        "message": "Template status updated successfully",
+        "is_active": payload.is_active,
+    }
+
 
 @router.delete("/templates/{template_id}")
 async def delete_template(template_id: str, current_user: dict = Depends(get_current_user)):

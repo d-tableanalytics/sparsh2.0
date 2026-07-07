@@ -205,22 +205,37 @@ DEFAULT_TEMPLATES = {
 }
 
 async def fetch_template(slug: str, company_id: str = None):
+    """Resolve the notification template that should be used for `slug`.
+
+    Precedence: company-scoped doc → staff-scoped doc → hardcoded DEFAULT.
+    IMPORTANT (Active/Inactive feature): the resolution deliberately does NOT
+    filter on `is_active` in the query. Instead we resolve the doc that *would*
+    be used and, if an admin has deactivated it (is_active == False), we return
+    None so the caller skips sending entirely — an inactive template must never
+    fall through to a lower-precedence template or the hardcoded default.
+    Missing `is_active` is treated as active so legacy docs keep working."""
     col = get_collection("notification_templates")
+
+    doc = None
     if company_id:
-        t = await col.find_one({
-            "slug": slug, 
-            "company_id": str(company_id), 
-            "scope": "company", 
-            "is_active": True
+        doc = await col.find_one({
+            "slug": slug,
+            "company_id": str(company_id),
+            "scope": "company",
         })
-        if t: return t
-    
-    res = await col.find_one({
-        "slug": slug, 
-        "scope": "staff", 
-        "is_active": True
-    })
-    if res: return res
+
+    if doc is None:
+        doc = await col.find_one({
+            "slug": slug,
+            "scope": "staff",
+        })
+
+    if doc is not None:
+        # Respect the per-template Active/Inactive switch. Inactive => skip sending.
+        if not doc.get("is_active", True):
+            return None
+        return doc
+
     return DEFAULT_TEMPLATES.get(slug)
 
 def render_template(template_body: str, context: Dict[str, Any]):
@@ -287,27 +302,106 @@ async def send_email_notification(to_email: str, subject: str, message: str, use
         await log_notification(user_id, to_email, "email", slug, message, "failed", str(e))
         return False
 
+# ─── Meta WhatsApp Cloud API helpers ───
+def _normalize_wa_phone(phone: str) -> str:
+    """Return an E.164-style number (digits only) Meta will accept.
+    Strips spaces/+/-, drops leading zeros, and prefixes the default country
+    code for bare local (10-digit) numbers."""
+    if not phone:
+        return ""
+    digits = "".join(ch for ch in str(phone) if ch.isdigit()).lstrip("0")
+    if len(digits) == 10:
+        digits = f"{settings.WHATSAPP_DEFAULT_COUNTRY_CODE}{digits}"
+    return digits
+
+def _wa_configured() -> bool:
+    return bool(settings.WHATSAPP_ACCESS_TOKEN and settings.WHATSAPP_PHONE_NUMBER_ID)
+
+def _wa_endpoint() -> str:
+    return f"https://graph.facebook.com/{settings.WHATSAPP_API_VERSION}/{settings.WHATSAPP_PHONE_NUMBER_ID}/messages"
+
+def _wa_headers() -> dict:
+    return {"Authorization": f"Bearer {settings.WHATSAPP_ACCESS_TOKEN}", "Content-Type": "application/json"}
+
 async def send_whatsapp_notification(phone: str, message: str, user_id: str = None, slug: str = "manual"):
-    if not settings.MAYTAPI_TOKEN or not settings.MAYTAPI_PRODUCT_ID or not settings.MAYTAPI_PHONE_ID:
-        logger.warning("Maytapi credentials not configured")
+    """Free-form WhatsApp text via Meta Cloud API.
+    NOTE: Meta only delivers free-form text inside the 24h customer-service
+    window. For business-initiated notifications use send_whatsapp_template()."""
+    if not _wa_configured():
+        logger.warning("WhatsApp Cloud API credentials not configured")
         return False
-    
+
+    to = _normalize_wa_phone(phone)
+    if not to:
+        logger.warning(f"WhatsApp skip: invalid phone '{phone}'")
+        return False
+
     try:
-        url = f"https://api.maytapi.com/api/v1/{settings.MAYTAPI_PRODUCT_ID}/{settings.MAYTAPI_PHONE_ID}/sendMessage"
-        headers = {"Content-Type": "application/json", "x-maytapi-key": settings.MAYTAPI_TOKEN}
-        payload = {"to_number": phone, "type": "text", "text": message}
-        response = requests.post(url, json=payload, headers=headers)
+        payload = {
+            "messaging_product": "whatsapp",
+            "recipient_type": "individual",
+            "to": to,
+            "type": "text",
+            "text": {"preview_url": False, "body": message},
+        }
+        response = requests.post(_wa_endpoint(), json=payload, headers=_wa_headers(), timeout=20)
         if response.status_code == 200:
-            await log_notification(user_id, phone, "whatsapp", slug, message, "sent")
+            await log_notification(user_id, to, "whatsapp", slug, message, "sent")
             return True
-        else:
-            error = f"Maytapi error: {response.status_code} - {response.text}"
-            logger.error(error)
-            await log_notification(user_id, phone, "whatsapp", slug, message, "failed", error)
-            return False
+        error = f"WhatsApp API error: {response.status_code} - {response.text}"
+        logger.error(error)
+        await log_notification(user_id, to, "whatsapp", slug, message, "failed", error)
+        return False
     except Exception as e:
         logger.error(f"Failed to send WhatsApp message: {e}")
-        await log_notification(user_id, phone, "whatsapp", slug, message, "failed", str(e))
+        await log_notification(user_id, to, "whatsapp", slug, message, "failed", str(e))
+        return False
+
+async def send_whatsapp_template(phone: str, template_name: str, language: str, params: list,
+                                 user_id: str = None, slug: str = "manual"):
+    """Business-initiated WhatsApp via a Meta-approved template.
+    `params` are positional body values mapped to {{1}}, {{2}}, ... in the
+    approved template."""
+    if not _wa_configured():
+        logger.warning("WhatsApp Cloud API credentials not configured")
+        return False
+
+    to = _normalize_wa_phone(phone)
+    if not to:
+        logger.warning(f"WhatsApp skip: invalid phone '{phone}'")
+        return False
+
+    params = params or []
+    components = []
+    if params:
+        components = [{
+            "type": "body",
+            "parameters": [{"type": "text", "text": str(p)} for p in params],
+        }]
+    log_text = f"[template:{template_name}] " + " | ".join(str(p) for p in params)
+
+    try:
+        payload = {
+            "messaging_product": "whatsapp",
+            "to": to,
+            "type": "template",
+            "template": {
+                "name": template_name,
+                "language": {"code": language or "en"},
+                "components": components,
+            },
+        }
+        response = requests.post(_wa_endpoint(), json=payload, headers=_wa_headers(), timeout=20)
+        if response.status_code == 200:
+            await log_notification(user_id, to, "whatsapp", slug, log_text, "sent")
+            return True
+        error = f"WhatsApp template error: {response.status_code} - {response.text}"
+        logger.error(error)
+        await log_notification(user_id, to, "whatsapp", slug, log_text, "failed", error)
+        return False
+    except Exception as e:
+        logger.error(f"Failed to send WhatsApp template: {e}")
+        await log_notification(user_id, to, "whatsapp", slug, log_text, "failed", str(e))
         return False
 
 async def send_notification_from_template(user_obj: dict, template_slug: str, context: Dict[str, Any], delivery_type: str = "both", scope_override: str = None):
@@ -336,9 +430,23 @@ async def send_notification_from_template(user_obj: dict, template_slug: str, co
         print(f"[DEBUG-NOTIFY] Email skip: target={email}, template={bool(email_t)}")
 
     if delivery_type in ["whatsapp", "both"] and phone and whatsapp_t:
-        rendered_body = render_template(whatsapp_t["body"], context)
-        results["whatsapp"] = await send_whatsapp_notification(phone, rendered_body, user_id, whatsapp_t.get("slug", f"{template_slug}_whatsapp"))
-    
+        wa_slug = whatsapp_t.get("slug", f"{template_slug}_whatsapp")
+        meta_name = whatsapp_t.get("meta_template_name")
+        if meta_name:
+            # Business-initiated → must use a Meta-approved template with positional params.
+            params = [str(context.get(k, "")) for k in whatsapp_t.get("meta_params", [])]
+            print(f"[DEBUG-NOTIFY] WhatsApp template='{meta_name}' lang={whatsapp_t.get('meta_lang', 'en')} params={params} -> {phone}")
+            results["whatsapp"] = await send_whatsapp_template(
+                phone, meta_name, whatsapp_t.get("meta_lang", "en"), params, user_id, wa_slug)
+        else:
+            # Fallback: free-form text (only delivered within the 24h window).
+            print(f"[DEBUG-NOTIFY] WhatsApp free-text fallback (no meta_template_name set) -> {phone}")
+            rendered_body = render_template(whatsapp_t["body"], context)
+            results["whatsapp"] = await send_whatsapp_notification(phone, rendered_body, user_id, wa_slug)
+        print(f"[DEBUG-NOTIFY] WhatsApp send result: {results.get('whatsapp')}")
+    elif delivery_type in ["whatsapp", "both"]:
+        print(f"[DEBUG-NOTIFY] WhatsApp skip: phone={phone}, template={bool(whatsapp_t)}")
+
     return results
 
 def to_ist(dt: datetime) -> datetime:
@@ -373,7 +481,7 @@ async def send_notification(user_obj: dict, subject: str, message: str, delivery
         results["whatsapp"] = await send_whatsapp_notification(phone, message)
     return results
 
-async def send_task_created_email(user_obj: dict, task_data: dict, creator_name: str):
+async def send_task_created_email(user_obj: dict, task_data: dict, creator_name: str, delivery_type: str = "email"):
     dt_str = task_data.get("start", "")
     try:
         dt = datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
@@ -411,9 +519,9 @@ async def send_task_created_email(user_obj: dict, task_data: dict, creator_name:
         type="info",
         meta={"task_id": str(task_data.get("_id", ""))}
     )
-    return await send_notification_from_template(user_obj, "task_created", context, "email", task_data.get("notification_scope"))
+    return await send_notification_from_template(user_obj, "task_created", context, delivery_type, task_data.get("notification_scope"))
 
-async def send_task_updated_email(user_obj: dict, task_data: dict, updated_by: str):
+async def send_task_updated_email(user_obj: dict, task_data: dict, updated_by: str, delivery_type: str = "email"):
     dt_str = task_data.get("start", "")
     try:
         dt = datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
@@ -444,11 +552,11 @@ async def send_task_updated_email(user_obj: dict, task_data: dict, updated_by: s
         "name": user_obj.get("full_name") or user_obj.get("first_name", "User"),
         "event_title": task_data.get("title")
     }
-    return await send_notification_from_template(user_obj, "task_updated", context, "email", task_data.get("notification_scope"))
+    return await send_notification_from_template(user_obj, "task_updated", context, delivery_type, task_data.get("notification_scope"))
 
-async def send_task_deleted_email(user_obj: dict, task_name: str, deleted_by: str):
-    context = {"task_name": task_name, "deleted_by": deleted_by}
-    return await send_notification_from_template(user_obj, "task_deleted", context, "email")
+async def send_task_deleted_email(user_obj: dict, task_name: str, deleted_by: str, delivery_type: str = "email", scope: str = None):
+    context = {"task_name": task_name, "deleted_by": deleted_by, "name": user_obj.get("full_name") or user_obj.get("first_name", "User")}
+    return await send_notification_from_template(user_obj, "task_deleted", context, delivery_type, scope)
 
 async def send_user_updated_email(user_obj: dict, updated_by: str):
     context = {
@@ -484,7 +592,7 @@ async def send_company_registration_email(admin_obj: dict, company_name: str, ra
     }
     return await send_notification_from_template(admin_obj, "company_registration", context, "email")
 
-async def send_event_created_email(user_obj: dict, event_data: dict, creator_name: str, batch_name: str = "TBD", quarter: str = "TBD"):
+async def send_event_created_email(user_obj: dict, event_data: dict, creator_name: str, batch_name: str = "TBD", quarter: str = "TBD", delivery_type: str = "email"):
     try:
         dt_str = event_data.get("start", "")
         dt = datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
@@ -518,9 +626,9 @@ async def send_event_created_email(user_obj: dict, event_data: dict, creator_nam
         type="success",
         meta={"event_id": str(event_data.get("_id", ""))}
     )
-    return await send_notification_from_template(user_obj, "event_created", context, "email", event_data.get("notification_scope"))
+    return await send_notification_from_template(user_obj, "event_created", context, delivery_type, event_data.get("notification_scope"))
 
-async def send_event_updated_email(user_obj: dict, event_data: dict, updated_by: str, batch_name: str = "TBD", quarter: str = "TBD"):
+async def send_event_updated_email(user_obj: dict, event_data: dict, updated_by: str, batch_name: str = "TBD", quarter: str = "TBD", delivery_type: str = "email"):
     try:
         dt_str = event_data.get("start", "")
         dt = datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
@@ -546,9 +654,9 @@ async def send_event_updated_email(user_obj: dict, event_data: dict, updated_by:
     except Exception as e:
         logger.error(f"Error parsing date for email: {e}")
         context = {"session_type": "Session", "meeting_link": event_data.get("meeting_link", ""), "topic": event_data.get("title"), "date": "TBD", "day": "TBD", "time": "TBD", "description": ""}
-    return await send_notification_from_template(user_obj, "event_updated", context, "email", event_data.get("notification_scope"))
+    return await send_notification_from_template(user_obj, "event_updated", context, delivery_type, event_data.get("notification_scope"))
 
-async def send_event_deleted_email(user_obj: dict, event_data: dict, deleted_by: str, scope: str = "staff", batch_name: str = "TBD", quarter: str = "TBD"):
+async def send_event_deleted_email(user_obj: dict, event_data: dict, deleted_by: str, scope: str = "staff", batch_name: str = "TBD", quarter: str = "TBD", delivery_type: str = "email"):
     try:
         # If event_data is just a string (old behavior fallback), handle it
         if isinstance(event_data, str):
@@ -580,7 +688,7 @@ async def send_event_deleted_email(user_obj: dict, event_data: dict, deleted_by:
         logger.error(f"Error preparing delete email: {e}")
         context = {"event_title": "Scheduled Session", "deleted_by": deleted_by, "name": "User"}
 
-    return await send_notification_from_template(user_obj, "event_deleted", context, "email", scope)
+    return await send_notification_from_template(user_obj, "event_deleted", context, delivery_type, scope)
 
 async def send_reminder_email(user_obj: dict, event: dict):
     is_task = event.get("type") == "task"
@@ -658,7 +766,7 @@ async def send_attendance_absent_email(user_obj: dict, event_data: dict):
     }
     return await send_notification_from_template(user_obj, "attendance_absent", context, "email", event_data.get("notification_scope"))
 
-async def send_session_complete_email(user_obj: dict, event_data: dict):
+async def send_session_complete_email(user_obj: dict, event_data: dict, delivery_type: str = "email"):
     print(f"[DEBUG-COMPLETE] Sending mail to {user_obj.get('email')} for {event_data.get('title')}")
     context = {
         "user_name": user_obj.get("full_name") or user_obj.get("first_name", "User"),
@@ -667,7 +775,7 @@ async def send_session_complete_email(user_obj: dict, event_data: dict):
         "event_title": event_data.get("title"),
         "event_time": format_datetime_standard(event_data.get("start"))
     }
-    return await send_notification_from_template(user_obj, "session_complete", context, "email", event_data.get("notification_scope"))
+    return await send_notification_from_template(user_obj, "session_complete", context, delivery_type, event_data.get("notification_scope"))
 
 async def send_otp_email(email: str, otp: str, user_obj: dict = None):
     context = {"otp": otp}

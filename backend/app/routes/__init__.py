@@ -12,3 +12,5 @@ from . import notification
 from . import orm
 from . import orm_sheet
 from . import orm_requests
+from . import media_ai
+from . import media_chunk

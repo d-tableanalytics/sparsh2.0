@@ -79,7 +79,11 @@ async def get_dashboard_stats(current_user: dict = Depends(get_current_user)):
             
         cursor = get_collection(col_name).find(query)
         async for session in cursor:
-            s_type = session.get("session_type", "Other")
+            # Skip personal to-do entries (type=="task"): they are not coaching
+            # sessions and otherwise dominate the "Other" slice, making the mix
+            # meaningless. (Mirrors the assistant's get_dashboard_stats.)
+            if session.get("type") == "task": continue
+            s_type = session.get("session_type") or "Other"
             if any(kw in s_type for kw in ["Direct", "Strategy", "CEO"]): mix_counts["Strategic"] += 1
             elif any(kw in s_type for kw in ["Review", "Module", "Session"]): mix_counts["Technical"] += 1
             elif any(kw in s_type for kw in ["Support", "Check"]): mix_counts["Operational"] += 1

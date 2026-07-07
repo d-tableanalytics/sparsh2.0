@@ -4,7 +4,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
 from app.db.mongodb import connect_to_mongo, close_mongo_connection
-from app.routes import auth, user, company, batch, quarter, session_template, calendar_events, settings, gpt, dashboard, notification, orm, orm_sheet, orm_requests
+from app.routes import auth, user, company, batch, quarter, session_template, calendar_events, settings, gpt, dashboard, notification, media, media_ai, media_chunk, tasks, holiday, group, task_meta, reports
+from app.assistant.router import router as assistant_router
 
 from app.services.reminder_scheduler import start_reminder_scheduler
 import asyncio
@@ -54,10 +55,19 @@ app.include_router(calendar_events.router, prefix="/api")
 app.include_router(settings.router, prefix="/api")
 app.include_router(gpt.router, prefix="/api")
 app.include_router(dashboard.router, prefix="/api")
+app.include_router(tasks.router, prefix="/api")
+app.include_router(reports.router, prefix="/api")
+app.include_router(holiday.router, prefix="/api")
+app.include_router(group.router, prefix="/api")
+app.include_router(task_meta.router, prefix="/api")
 app.include_router(notification.router, prefix="/api")
 app.include_router(orm.router, prefix="/api")
 app.include_router(orm_sheet.router, prefix="/api")
 app.include_router(orm_requests.router, prefix="/api")
+app.include_router(media.router, prefix="/api")
+app.include_router(media_ai.router, prefix="/api")
+app.include_router(media_chunk.router, prefix="/api")
+app.include_router(assistant_router, prefix="/api")
 
 @app.get("/")
 async def root():

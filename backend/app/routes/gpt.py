@@ -4,9 +4,13 @@ from datetime import datetime
 from bson import ObjectId
 from app.db.mongodb import get_collection
 from app.controllers.auth_controller import get_current_user
+from app.assistant.dependencies import get_user_context
+from app.assistant.schemas.context import UserContext
+from app.services import gpt_access_service
 from app.services.s3_service import upload_file_to_s3, get_signed_url
 from app.models.gpt import GptProjectCreate, GptProjectUpdate, GptProjectResponse
 import os
+import re
 import tempfile
 import aiofiles
 
@@ -14,152 +18,21 @@ router = APIRouter(prefix="/gpt", tags=["gpt"])
 
 @router.get("/projects", response_model=List[dict])
 async def get_gpt_projects(current_user: dict = Depends(get_current_user)):
-    col = get_collection("gpt_projects")
-    projects = await col.find({}).to_list(100)
-    
-    # If Admin/Staff, return all
-    if current_user.get("role") in ["superadmin", "admin", "coach", "staff"]:
-        for p in projects:
-            p["id"] = str(p["_id"])
-            p["locked"] = False
-            del p["_id"]
-        return projects
-
-    # For Learners: Complex Access Logic
-    user_id = str(current_user["_id"])
-    company_id = current_user.get("company_id")
-    
-    # 1. Fetch special permissions
-    perm_col = get_collection("gpt_permissions")
-    special_perms = await perm_col.find({
-        "$or": [
-            {"entity_id": user_id, "entity_type": "user"},
-            {"entity_id": company_id, "entity_type": "company"}
-        ]
-    }).to_list(100)
-    unlocked_project_ids = {p["project_id"] for p in special_perms}
-
-    # 2. Resolve all relevant Batches (Directly assigned or via Company)
-    # Get direct batch IDs from user document
+    # Access/unlock logic lives in the shared service so the website and the
+    # assistant's support-engine guidance stay in lockstep.
     direct_batch_ids = current_user.get("batch_ids") or []
     if not isinstance(direct_batch_ids, list):
         direct_batch_ids = [direct_batch_ids]
-    
     single_batch_id = current_user.get("batch_id")
     if single_batch_id and single_batch_id not in direct_batch_ids:
         direct_batch_ids.append(single_batch_id)
-        
-    all_batch_oids = [ObjectId(bid) for bid in direct_batch_ids if bid]
-    
-    # Also find batches where the user's company is assigned
-    if company_id:
-        company_batches = await get_collection("batches").find({"companies": str(company_id)}).to_list(100)
-        for b in company_batches:
-            if b["_id"] not in all_batch_oids:
-                all_batch_oids.append(b["_id"])
 
-    # 3. Analyze Batch Level Access
-    batches = await get_collection("batches").find({"_id": {"$in": all_batch_oids}}).to_list(100)
-    batch_linked = {} # project_id -> is_completed
-    batch_str_ids = [str(b["_id"]) for b in batches]
-
-    for b in batches:
-        # Robust status check
-        status = b.get("status", "").lower()
-        is_completed = (status == "completed")
-        
-        # Legacy support (singular field)
-        old_pid = b.get("gpt_project_id")
-        if old_pid:
-            batch_linked[str(old_pid)] = batch_linked.get(str(old_pid), False) or is_completed
-            
-        # Multi support (list of objects)
-        for p_link in b.get("gpt_projects", []):
-            pid = p_link.get("id")
-            if pid:
-                batch_linked[str(pid)] = batch_linked.get(str(pid), False) or is_completed
-
-    # 4. Analyze Quarter Level Access
-    # Quarters are linked via batch_id (string)
-    quarters = await get_collection("quarters").find({"batch_id": {"$in": batch_str_ids}}).to_list(200)
-    quarter_linked = {}
-    for q in quarters:
-        status = q.get("status", "").lower()
-        is_completed = (status == "completed")
-        
-        # Legacy support
-        old_pid = q.get("gpt_project_id")
-        if old_pid:
-            quarter_linked[str(old_pid)] = quarter_linked.get(str(old_pid), False) or is_completed
-            
-        # Multi support
-        for p_link in q.get("gpt_projects", []):
-            pid = p_link.get("id")
-            if pid:
-                quarter_linked[str(pid)] = quarter_linked.get(str(pid), False) or is_completed
-
-    # 5. Analyze Session Level Access
-    from app.utils.calendar_utils import CALENDAR_COLLECTIONS
-    session_collections = CALENDAR_COLLECTIONS + ["calendar_events"]
-    session_linked = {}
-    
-    # Optimization: Only search sessions if the user is a learner in them
-    for col_name in session_collections:
-        sessions = await get_collection(col_name).find({
-            "$or": [
-                {"user_id": user_id},
-                {"assigned_member_ids": user_id},
-                {"coach_ids": user_id}
-            ]
-        }).to_list(500)
-        for s in sessions:
-            status = s.get("status", "").lower()
-            is_completed = (status == "completed")
-            
-            # Legacy support
-            old_pid = s.get("gpt_project_id")
-            if old_pid:
-                session_linked[str(old_pid)] = session_linked.get(str(old_pid), False) or is_completed
-            
-            # Multi support
-            for p_link in s.get("gpt_projects", []):
-                pid = p_link.get("id")
-                if pid:
-                    session_linked[str(pid)] = session_linked.get(str(pid), False) or is_completed
-
-    # 6. Assemble Result
-    result = []
-    
-    for p in projects:
-        pid = str(p["_id"])
-        
-        # Check if project should be visible (is in path)
-        # Note: unlocked_project_ids contains strings from special permissions
-        is_in_path = (pid in batch_linked) or (pid in quarter_linked) or (pid in session_linked) or (pid in unlocked_project_ids)
-        
-        if is_in_path:
-            p["id"] = pid
-            if "_id" in p: del p["_id"]
-            
-            # Determine if locked
-            is_unlocked = (
-                (pid in unlocked_project_ids) or
-                batch_linked.get(pid, False) or
-                quarter_linked.get(pid, False) or
-                session_linked.get(pid, False)
-            )
-            
-            p["locked"] = not is_unlocked
-            
-            # Metadata about WHY it's locked/available
-            if p["locked"]:
-                if pid in batch_linked: p["lock_reason"] = "Batch Level Access (Complete Batch to Unlock)"
-                elif pid in quarter_linked: p["lock_reason"] = "Quarter Level Access (Complete Quarter to Unlock)"
-                elif pid in session_linked: p["lock_reason"] = "Session Level Access (Complete Session to Unlock)"
-            
-            result.append(p)
-            
-    return result
+    return await gpt_access_service.get_projects_with_access(
+        user_id=str(current_user["_id"]),
+        role=current_user.get("role"),
+        company_id=current_user.get("company_id"),
+        direct_batch_ids=[bid for bid in direct_batch_ids if bid],
+    )
 
 # ─── Permissions Endpoints ───
 @router.post("/permissions/grant")
@@ -295,7 +168,24 @@ async def upload_project_knowledge(
                 result = await extract_text_from_file(path, filename)
                 text = result.get("text", "")
                 chunks = chunk_text(text)
-                
+
+                if not chunks:
+                    # Nothing indexable (unsupported type, image-only/scanned file,
+                    # or empty extraction). Marking it "ready" would invite
+                    # questions the bot must then refuse — surface it instead.
+                    await proj_col.update_one(
+                        {"_id": ObjectId(p_id), "knowledge_files.id": f_id},
+                        {"$set": {
+                            "knowledge_files.$.status": "failed",
+                            "knowledge_files.$.error": (
+                                "No readable text could be extracted from this file, "
+                                "so it can't be used to answer questions. Supported: "
+                                "PDF, Word, TXT, CSV/Excel, and audio/video files."
+                            ),
+                        }}
+                    )
+                    return
+
                 await proj_col.update_one(
                     {"_id": ObjectId(p_id), "knowledge_files.id": f_id},
                     {"$set": {"knowledge_files.$.progress": 60}}
@@ -313,8 +203,11 @@ async def upload_project_knowledge(
                     })
                 
                 if chunk_docs:
+                    # Embeddings for vector search (best-effort; keyword still works).
+                    from app.assistant.rag.embeddings import attach_embeddings
+                    chunk_docs = await attach_embeddings(chunk_docs)
                     await kb_col.insert_many(chunk_docs)
-                
+
                 await proj_col.update_one(
                     {"_id": ObjectId(p_id), "knowledge_files.id": f_id},
                     {"$set": {"knowledge_files.$.progress": 80}}
@@ -408,8 +301,35 @@ async def create_new_gpt_session(project_id: str, current_user: dict = Depends(g
     res = await col.insert_one(new_session)
     return {"id": str(res.inserted_id)}
 
+def _fold_session_knowledge(context: str, conv: dict) -> tuple:
+    """Append chat-uploaded files to the context with size caps, so one large
+    upload can't blow the model's context window and permanently break every
+    later message in the session. Returns (context, session_images)."""
+    MAX_ENTRY_CHARS = 20000
+    MAX_TOTAL_CHARS = 60000
+    MAX_IMAGES = 8
+    session_images = []
+    total = 0
+    for sk in conv.get("session_knowledge") or []:
+        content = sk.get("content") or ""
+        if content.startswith("[IMAGE_BASE64]"):
+            if len(session_images) < MAX_IMAGES:
+                session_images.append(content.replace("[IMAGE_BASE64]", "", 1))
+            continue
+        if total >= MAX_TOTAL_CHARS:
+            context += f"\n\n[Session Context - {sk['name']}]: [omitted — session upload size limit reached]"
+            continue
+        snippet = content[:MAX_ENTRY_CHARS]
+        if len(content) > MAX_ENTRY_CHARS:
+            snippet += "\n[...truncated — the file continues beyond the size limit...]"
+        total += len(snippet)
+        context += f"\n\n[Session Context - {sk['name']}]:\n{snippet}"
+    return context, session_images
+
+
 @router.post("/chat/sessions/{session_id}/respond")
-async def gpt_session_respond(session_id: str, payload: dict, current_user: dict = Depends(get_current_user)):
+async def gpt_session_respond(session_id: str, payload: dict, current_user: dict = Depends(get_current_user),
+                              ctx: UserContext = Depends(get_user_context)):
     user_message = payload.get("message")
     if not user_message:
         raise HTTPException(status_code=400, detail="Message required")
@@ -424,15 +344,9 @@ async def gpt_session_respond(session_id: str, payload: dict, current_user: dict
     # 1. Fetch relevant knowledge (RAG)
     from app.services.gpt_service import get_relevant_context, generate_ai_response
     
-    # Combined knowledge: Project RAG + Session Knowledge
+    # Combined knowledge: Project RAG + Session Knowledge (size-capped)
     context = await get_relevant_context(project_id, user_message)
-    session_images = []
-    if conv.get("session_knowledge"):
-        for sk in conv["session_knowledge"]:
-            if sk["content"].startswith("[IMAGE_BASE64]"):
-                session_images.append(sk["content"].replace("[IMAGE_BASE64]", "", 1))
-            else:
-                context += f"\n\n[Session Context - {sk['name']}]:\n{sk['content']}"
+    context, session_images = _fold_session_knowledge(context, conv)
 
     # Get project instructions
     proj_col = get_collection("gpt_projects")
@@ -441,8 +355,8 @@ async def gpt_session_respond(session_id: str, payload: dict, current_user: dict
         raise HTTPException(status_code=404, detail="GPT Project not found")
     instructions = project.get("instruction", "You are a helpful assistant.")
     
-    # 2. Generate AI Response
-    ai_msg = await generate_ai_response(instructions, context, user_message, conv["messages"], images=session_images if session_images else None)
+    # 2. Generate AI Response (ctx links the chat to the live LMS data tools)
+    ai_msg = await generate_ai_response(instructions, context, user_message, conv["messages"], images=session_images if session_images else None, role=current_user.get("role"), ctx=ctx)
     
     # 3. Save to History
     new_messages = conv["messages"]
@@ -456,6 +370,28 @@ async def gpt_session_respond(session_id: str, payload: dict, current_user: dict
     
     return {"answer": ai_msg}
 
+# Embedded images are stored as separate session_knowledge entries named
+# "<filename> (image N)". Strip that suffix to recover the original file name.
+_IMAGE_SUFFIX_RE = re.compile(r"\s*\(image \d+\)$")
+
+
+def _summarize_attachments(session_knowledge):
+    """Collapse session_knowledge entries into one record per uploaded file."""
+    summary = {}
+    order = []
+    for entry in (session_knowledge or []):
+        raw_name = entry.get("name") or "file"
+        base = _IMAGE_SUFFIX_RE.sub("", raw_name)
+        content = entry.get("content") or ""
+        is_image = content.startswith("[IMAGE_BASE64]")
+        if base not in summary:
+            summary[base] = {"name": base, "has_image": False, "uploaded_at": entry.get("uploaded_at")}
+            order.append(base)
+        if is_image:
+            summary[base]["has_image"] = True
+    return [summary[b] for b in order]
+
+
 @router.get("/chat/sessions/{session_id}/history")
 async def get_session_history(session_id: str, current_user: dict = Depends(get_current_user)):
     conv_col = get_collection("gpt_conversations")
@@ -463,7 +399,37 @@ async def get_session_history(session_id: str, current_user: dict = Depends(get_
     conv = await conv_col.find_one({"_id": ObjectId(session_id), "user_id": str(current_user["_id"])})
     if not conv:
         raise HTTPException(status_code=404, detail="Session not found or access denied")
-    return {"messages": conv["messages"]}
+    return {
+        "messages": conv["messages"],
+        "attachments": _summarize_attachments(conv.get("session_knowledge")),
+    }
+
+
+@router.get("/chat/sessions/{session_id}/attachments")
+async def get_session_attachments(session_id: str, current_user: dict = Depends(get_current_user)):
+    conv_col = get_collection("gpt_conversations")
+    conv = await conv_col.find_one({"_id": ObjectId(session_id), "user_id": str(current_user["_id"])})
+    if not conv:
+        raise HTTPException(status_code=404, detail="Session not found or access denied")
+    return {"attachments": _summarize_attachments(conv.get("session_knowledge"))}
+
+
+@router.delete("/chat/sessions/{session_id}/attachments")
+async def delete_session_attachment(session_id: str, name: str, current_user: dict = Depends(get_current_user)):
+    """Remove an uploaded file (its text entry and any embedded-image entries)
+    from a chat session's knowledge."""
+    conv_col = get_collection("gpt_conversations")
+    conv = await conv_col.find_one({"_id": ObjectId(session_id), "user_id": str(current_user["_id"])})
+    if not conv:
+        raise HTTPException(status_code=404, detail="Session not found or access denied")
+
+    # Matches the file's text entry ("name") and its image entries ("name (image N)").
+    pattern = f"^{re.escape(name)}(\\s*\\(image \\d+\\))?$"
+    await conv_col.update_one(
+        {"_id": conv["_id"]},
+        {"$pull": {"session_knowledge": {"name": {"$regex": pattern}}}},
+    )
+    return {"message": f"Removed {name} from this session."}
 
 @router.delete("/chat/sessions/{session_id}")
 async def delete_gpt_session(session_id: str, current_user: dict = Depends(get_current_user)):
@@ -475,7 +441,8 @@ async def delete_gpt_session(session_id: str, current_user: dict = Depends(get_c
     return {"message": "Session deleted"}
 
 @router.patch("/chat/sessions/{session_id}/rethink")
-async def rethink_gpt_session(session_id: str, payload: dict, current_user: dict = Depends(get_current_user)):
+async def rethink_gpt_session(session_id: str, payload: dict, current_user: dict = Depends(get_current_user),
+                              ctx: UserContext = Depends(get_user_context)):
     message_idx = payload.get("index") # Index of the message to rethink from
     new_content = payload.get("content")
     if message_idx is None or new_content is None:
@@ -493,24 +460,18 @@ async def rethink_gpt_session(session_id: str, payload: dict, current_user: dict
     # Truncate conversation from the edited message
     truncated_messages = messages[:message_idx]
     
-    # 1. RAG and AI generation with the NEW content
+    # 1. RAG and AI generation with the NEW content (session knowledge size-capped)
     from app.services.gpt_service import get_relevant_context, generate_ai_response
     context = await get_relevant_context(conv["project_id"], new_content)
-    session_images = []
-    if conv.get("session_knowledge"):
-        for sk in conv["session_knowledge"]:
-            if sk["content"].startswith("[IMAGE_BASE64]"):
-                session_images.append(sk["content"].replace("[IMAGE_BASE64]", "", 1))
-            else:
-                context += f"\n\n[Session Context - {sk['name']}]:\n{sk['content']}"
+    context, session_images = _fold_session_knowledge(context, conv)
     
     # Get project instructions
     proj_col = get_collection("gpt_projects")
     project = await proj_col.find_one({"_id": ObjectId(conv["project_id"])})
     instructions = project.get("instruction", "You are a helpful assistant.")
     
-    # 2. Generate new response
-    ai_msg = await generate_ai_response(instructions, context, new_content, truncated_messages, images=session_images if session_images else None)
+    # 2. Generate new response (ctx links the chat to the live LMS data tools)
+    ai_msg = await generate_ai_response(instructions, context, new_content, truncated_messages, images=session_images if session_images else None, role=current_user.get("role"), ctx=ctx)
     
     # Update messages
     truncated_messages.append({"role": "user", "content": new_content, "timestamp": datetime.utcnow()})
@@ -566,19 +527,44 @@ async def upload_session_context(
                 "uploaded_at": datetime.utcnow()
             })
         
-        if knowledge_entries:
-            await conv_col.update_one(
-                {"_id": conv["_id"]},
-                {"$push": {"session_knowledge": {"$each": knowledge_entries}}}
+        if not knowledge_entries:
+            # Nothing extractable (unsupported type, empty file, or extraction
+            # failure). Telling the user the file "is available" would make every
+            # follow-up question about it a confusing refusal — fail loudly.
+            raise HTTPException(
+                status_code=415,
+                detail=(
+                    f"Couldn't read any content from {file.filename}. Supported: "
+                    "PDF, Word, TXT, CSV/Excel, images, and audio/video files."
+                ),
             )
-        
+
+        await conv_col.update_one(
+            {"_id": conv["_id"]},
+            {"$push": {"session_knowledge": {"$each": knowledge_entries}}}
+        )
+
         img_count = len(result["images"])
         msg = f"File {file.filename} is now available in this chat engine session."
         if img_count:
             msg += f" ({img_count} embedded image{'s' if img_count > 1 else ''} also extracted)"
-        
-        if os.path.exists(tmp_path): os.remove(tmp_path)
+
         return {"message": msg}
+    except HTTPException:
+        raise  # don't re-wrap deliberate errors (e.g. the 415 above) as 500s
     except Exception as e:
-        if os.path.exists(tmp_path): os.remove(tmp_path)
         raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        # Best-effort cleanup. On Windows the extractor may still hold a brief
+        # lock, so retry a few times and never let cleanup raise (it must not
+        # mask the real result/error).
+        for _ in range(5):
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+                break
+            except PermissionError:
+                import time
+                time.sleep(0.1)
+            except Exception:
+                break

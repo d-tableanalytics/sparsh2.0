@@ -10,6 +10,10 @@ class NotificationTemplate(BaseModel):
     subject: Optional[str] = None
     body: str  # Template with placeholders: Hello {{name}}, ...
     variables: List[str] = [] # ["name", "event_title", "time"]
+    # WhatsApp Cloud API (Meta) — used when channel == "whatsapp".
+    meta_template_name: Optional[str] = None  # name of the Meta-approved template
+    meta_lang: Optional[str] = "en"           # template language code
+    meta_params: List[str] = []               # context keys mapped to {{1}}, {{2}}, ... in order
     is_active: bool = True
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)

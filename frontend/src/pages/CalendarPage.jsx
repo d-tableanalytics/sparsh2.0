@@ -158,12 +158,21 @@ const CalendarPage = () => {
                 api.get(usersEndpoint), api.get('/settings/backdate-control'),
                 api.get('/gpt/projects')
             ]);
-            setEvents(evRes.data.map(e => ({
-                id: e.id, title: e.title, start: e.start, end: e.end,
-                backgroundColor: 'transparent', borderColor: 'transparent',
-                textColor: 'var(--text-main)', allDay: e.allDay,
-                extendedProps: { ...e.extendedProps, id: e.id, dotColor: getRescheduleColor(e.extendedProps?.status || e.status, e.extendedProps?.type || e.type, e.color, e.extendedProps?.isCreator) }
-            })));
+            setEvents(evRes.data.map(e => {
+                const evType = e.extendedProps?.type || e.type;
+                // Tasks have no user-facing "start" of their own (that field is only the
+                // recurrence-series start, defaulted to creation time — see TaskFormModal);
+                // the date the user actually picked is the due date (`end`, "Set Deadline").
+                // Anchor the calendar's day-cell placement to that instead, so a task shows
+                // up under the day it's due, not the day it happened to be created.
+                const displayStart = (evType === 'task' && e.end) ? e.end : e.start;
+                return {
+                    id: e.id, title: e.title, start: displayStart, end: e.end,
+                    backgroundColor: 'transparent', borderColor: 'transparent',
+                    textColor: 'var(--text-main)', allDay: e.allDay,
+                    extendedProps: { ...e.extendedProps, id: e.id, dotColor: getRescheduleColor(e.extendedProps?.status || e.status, e.extendedProps?.type || e.type, e.color, e.extendedProps?.isCreator) }
+                };
+            }));
             setBatches(bRes.data); setQuarters(qRes.data); setTemplates(tRes.data); setAllUsers(uRes.data);
             setBackdateSettings(sRes.data); setGptProjects(gRes.data);
         } catch (err) { console.error(err); }
@@ -547,27 +556,33 @@ const CalendarPage = () => {
     return (
         <div className="space-y-6 flex flex-col min-h-screen pb-20">
 
-            <div className="flex items-center justify-between px-2">
-                <div>
-                    <h1 className="text-xl font-black text-[var(--text-main)] tracking-tight uppercase">
-                        Organization Calendar <span className="text-[var(--accent-indigo)] px-2">•</span> 
-                        {currentViewDate.toLocaleDateString(undefined, { month: 'long', year: 'numeric' })}
-                    </h1>
-                    <p className="text-[12px] text-[var(--text-muted)] font-bold italic tracking-wide">Elite session governance & operational accountability engine.</p>
+            <div className="flex flex-col gap-3 px-2">
+                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                    <div>
+                        <h1 className="text-lg sm:text-xl font-black text-[var(--text-main)] tracking-tight uppercase">
+                            Calendar <span className="text-[var(--accent-indigo)] px-1 hidden sm:inline">•</span>
+                            <span className="hidden sm:inline">{currentViewDate.toLocaleDateString(undefined, { month: 'long', year: 'numeric' })}</span>
+                        </h1>
+                        <p className="text-[11px] text-[var(--text-muted)] font-bold italic tracking-wide hidden sm:block">Elite session governance & operational accountability engine.</p>
+                    </div>
                 </div>
-                <div className="flex items-center gap-3">
+
+                {/* Controls Row - scrollable on mobile */}
+                <div className="flex items-center gap-2 overflow-x-auto no-scrollbar pb-1">
                     {/* Focus Toggle */}
                     {(role === 'superadmin' || role === 'admin' || role === 'clientadmin') && (
-                        <div className="flex items-center gap-1.5 p-1.5 bg-white/40 backdrop-blur-md border border-white/40 rounded-2xl shadow-sm">
-                             <button onClick={() => setViewMode('personal')} className={`px-4 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all ${viewMode === 'personal' ? 'bg-[var(--accent-indigo)] text-white shadow-lg shadow-indigo-100' : 'text-[var(--text-muted)] hover:text-indigo-50'}`}>
-                                 <UserCircle2 size={13} /> MY FOCUS
+                        <div className="flex items-center gap-1 p-1 bg-white/40 backdrop-blur-md border border-white/40 rounded-xl shadow-sm shrink-0">
+                             <button onClick={() => setViewMode('personal')} className={`px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all ${viewMode === 'personal' ? 'bg-[var(--accent-indigo)] text-white shadow-lg shadow-indigo-100' : 'text-[var(--text-muted)]'}`}>
+                                 MY
                              </button>
-                             <button onClick={() => setViewMode('team')} className={`px-4 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all ${viewMode === 'team' ? 'bg-orange-600 text-white shadow-lg shadow-orange-100 font-black' : 'text-[var(--text-muted)] hover:text-orange-600'}`}>
-                                 <Users2 size={13} /> TEAM VIEW
+                             <button onClick={() => setViewMode('team')} className={`px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all ${viewMode === 'team' ? 'bg-orange-600 text-white shadow-lg shadow-orange-100' : 'text-[var(--text-muted)]'}`}>
+                                 TEAM
                              </button>
                         </div>
                     )}
-                    <div className="flex items-center bg-[var(--bg-card)] border border-[var(--border)] rounded-xl p-1 shadow-sm">
+
+                    {/* View Mode Toggle */}
+                    <div className="flex items-center bg-[var(--bg-card)] border border-[var(--border)] rounded-xl p-1 shadow-sm shrink-0">
                         {['dayGridMonth', 'timeGridWeek', 'timeGridDay', 'multiMonthYear'].map((view) => (
                             <button
                                 key={view}
@@ -575,22 +590,28 @@ const CalendarPage = () => {
                                     setViewName(view);
                                     calendarRef.current.getApi().changeView(view);
                                 }}
-                                className={`px-4 py-1.5 rounded-lg text-[11px] font-black uppercase tracking-widest transition-all ${viewName === view ? 'bg-[var(--accent-indigo)] text-white shadow-lg shadow-indigo-100' : 'text-[var(--text-muted)] hover:text-[var(--text-main)] hover:bg-[var(--input-bg)]'}`}
+                                className={`px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all ${viewName === view ? 'bg-[var(--accent-indigo)] text-white shadow-lg shadow-indigo-100' : 'text-[var(--text-muted)] hover:text-[var(--text-main)] hover:bg-[var(--input-bg)]'}`}
                             >
-                                {view === 'dayGridMonth' ? 'Month' : view === 'timeGridWeek' ? 'Week' : view === 'timeGridDay' ? 'Day' : 'Year'}
+                                {view === 'dayGridMonth' ? 'Mo' : view === 'timeGridWeek' ? 'Wk' : view === 'timeGridDay' ? 'Dy' : 'Yr'}
                             </button>
                         ))}
                     </div>
 
-                    <button onClick={() => calendarRef.current.getApi().today()} className="h-10 px-4 bg-[var(--bg-card)] border border-[var(--border)] text-[var(--text-main)] rounded-xl text-[12px] font-black hover:border-[var(--accent-indigo)]">Today</button>
-                    <div className="flex items-center bg-[var(--bg-card)] border border-[var(--border)] rounded-xl p-1 shadow-sm">
-                        <button onClick={() => calendarRef.current.getApi().prev()} className="p-2 text-[var(--text-muted)] hover:text-[var(--accent-indigo)]"><ChevronLeft size={16} /></button>
-                        <button onClick={() => calendarRef.current.getApi().next()} className="p-2 text-[var(--text-muted)] hover:text-[var(--accent-indigo)]"><ChevronRight size={16} /></button>
+                    {/* Today + Nav */}
+                    <button onClick={() => calendarRef.current.getApi().today()} className="shrink-0 h-9 px-3 bg-[var(--bg-card)] border border-[var(--border)] text-[var(--text-main)] rounded-xl text-[11px] font-black hover:border-[var(--accent-indigo)] transition-all">Today</button>
+                    <div className="flex items-center bg-[var(--bg-card)] border border-[var(--border)] rounded-xl p-1 shadow-sm shrink-0">
+                        <button onClick={() => calendarRef.current.getApi().prev()} className="p-1.5 text-[var(--text-muted)] hover:text-[var(--accent-indigo)]"><ChevronLeft size={15} /></button>
+                        <button onClick={() => calendarRef.current.getApi().next()} className="p-1.5 text-[var(--text-muted)] hover:text-[var(--accent-indigo)]"><ChevronRight size={15} /></button>
                     </div>
+
+                    {/* Month label on mobile only */}
+                    <span className="text-[11px] font-black text-[var(--text-muted)] shrink-0 sm:hidden">
+                        {currentViewDate.toLocaleDateString(undefined, { month: 'short', year: 'numeric' })}
+                    </span>
                 </div>
             </div>
 
-            <div className="flex-1 bg-[var(--bg-card)] border border-[var(--border)] rounded-[40px] overflow-hidden shadow-2xl p-6 fc-theme-orlando relative">
+            <div className="flex-1 bg-[var(--bg-card)] border border-[var(--border)] rounded-[24px] md:rounded-[40px] overflow-hidden shadow-2xl p-3 md:p-6 fc-theme-orlando relative">
                 {loading && (<div className="absolute inset-0 flex items-center justify-center bg-[var(--bg-card)]/80 backdrop-blur-sm z-[100]"> <div className="w-12 h-12 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin"></div> </div>)}
                 {/* ─── Stats Dashboard Row ─── */}
                 <div className="flex flex-nowrap items-center gap-3 mb-6 p-1 overflow-x-auto no-scrollbar scroll-smooth">
@@ -616,7 +637,7 @@ const CalendarPage = () => {
 
                         return (
                             <button key={s.id} onClick={() => setStatFilter(isActive ? null : s.filter)}
-                                className={`flex flex-col min-w-[130px] p-4 rounded-[24px] border-2 transition-all duration-300 transform active:scale-95 text-left grow basis-0 ${isActive ? activeColorMap[s.color] : colorMap[s.color]}`}>
+                                className={`flex flex-col min-w-[110px] p-3 rounded-[20px] border-2 transition-all duration-300 transform active:scale-95 text-left shrink-0 ${isActive ? activeColorMap[s.color] : colorMap[s.color]}`}>
                                 <div className="flex items-center justify-between mb-2">
                                     <div className={`p-1.5 rounded-lg ${isActive ? 'bg-white/20' : 'bg-white shadow-sm'}`}>{s.icon}</div>
                                     <span className="text-[18px] font-black leading-none">{s.count}</span>

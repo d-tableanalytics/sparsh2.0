@@ -8,7 +8,7 @@ import {
     MessageSquare, RefreshCcw, HelpCircle, 
     Command, Database, ShieldCheck, Plus, ChevronLeft,
     Search, MoreVertical, Trash2, Edit, MessageCircle,
-    Terminal, Zap, Info
+    Terminal, Zap, Info, X, FileText, Image as ImageIcon
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import ReactMarkdown from 'react-markdown';
@@ -30,6 +30,7 @@ const GptChat = () => {
     const [editingIdx, setEditingIdx] = useState(null);
     const [editInput, setEditInput] = useState('');
     const [uploading, setUploading] = useState(false);
+    const [attachments, setAttachments] = useState([]);
     const scrollRef = useRef(null);
     const abortControllerRef = useRef(null);
     const fileInputRef = useRef(null);
@@ -60,6 +61,7 @@ const GptChat = () => {
     const fetchSessionHistory = async () => {
         if (!sessionId) {
             setMessages([]);
+            setAttachments([]);
             setLoading(false);
             return;
         }
@@ -67,11 +69,33 @@ const GptChat = () => {
             setLoading(true);
             const res = await api.get(`/gpt/chat/sessions/${sessionId}/history`);
             setMessages(res.data.messages || []);
+            setAttachments(res.data.attachments || []);
         } catch (err) {
             console.error("Session history fetch error:", err);
             setMessages([]);
+            setAttachments([]);
         } finally {
             setLoading(false);
+        }
+    };
+
+    const fetchAttachments = async (sId = sessionId) => {
+        if (!sId) return;
+        try {
+            const res = await api.get(`/gpt/chat/sessions/${sId}/attachments`);
+            setAttachments(res.data.attachments || []);
+        } catch (err) {
+            console.error("Attachments fetch error:", err);
+        }
+    };
+
+    const handleRemoveAttachment = async (name) => {
+        try {
+            await api.delete(`/gpt/chat/sessions/${sessionId}/attachments`, { params: { name } });
+            setAttachments(prev => prev.filter(a => a.name !== name));
+            showSuccess(`Removed ${name}`);
+        } catch (err) {
+            showError("Couldn't remove file");
         }
     };
 
@@ -96,22 +120,63 @@ const GptChat = () => {
     };
 
     const handleFileUpload = async (e) => {
-        const file = e.target.files[0];
-        if (!file || !sessionId) return;
-        
-        const formData = new FormData();
-        formData.append('file', file);
-        
-        try {
-            setUploading(true);
-            await api.post(`/gpt/chat/sessions/${sessionId}/upload`, formData);
-            const sysMsg = { role: 'assistant', content: `📎 Knowledge indexed: **${file.filename || file.name}** is now available in this session.`, timestamp: new Date(), system: true };
-            setMessages(prev => [...prev, sysMsg]);
-            showSuccess("File indexed successfully");
-        } catch (err) {
-            showError("Upload failed");
-        } finally {
-            setUploading(false);
+        const files = Array.from(e.target.files || []);
+        if (!files.length) return;
+
+        // Mirror handleSend: create a session on the fly, so attaching a file
+        // FIRST in a fresh chat works instead of silently doing nothing.
+        let currentSessionId = sessionId;
+        if (!currentSessionId) {
+            try {
+                const res = await api.post(`/gpt/chat/${id}/session`);
+                currentSessionId = res.data.id;
+            } catch (err) {
+                showError("Couldn't start a chat session for the upload");
+                return;
+            }
+        }
+
+        setUploading(true);
+        const succeeded = [];
+        const failed = [];
+
+        // Upload each file independently so one bad file doesn't block the rest.
+        for (const file of files) {
+            const formData = new FormData();
+            formData.append('file', file);
+            try {
+                await api.post(`/gpt/chat/sessions/${currentSessionId}/upload`, formData);
+                succeeded.push(file.name);
+                if (sessionId) {
+                    const sysMsg = { role: 'assistant', content: `📎 Knowledge indexed: **${file.name}** is now available in this session.`, timestamp: new Date(), system: true };
+                    setMessages(prev => [...prev, sysMsg]);
+                }
+            } catch (err) {
+                console.error(`Upload failed for ${file.name}`, err);
+                failed.push(file.name);
+            }
+        }
+
+        setUploading(false);
+        // Reset the input so re-selecting the same file(s) fires onChange again.
+        if (fileInputRef.current) fileInputRef.current.value = '';
+
+        if (succeeded.length) {
+            showSuccess(succeeded.length === 1
+                ? "File indexed successfully"
+                : `${succeeded.length} files indexed successfully`);
+        }
+        if (failed.length) {
+            showError(`Failed to index: ${failed.join(', ')}`);
+        }
+
+        // Refresh the attached-files preview for the active session.
+        if (succeeded.length) fetchAttachments(currentSessionId);
+
+        // Fresh chat: enter the session we just created so the uploads are used.
+        if (!sessionId && succeeded.length) {
+            navigate(`/gpt/chat/${id}/${currentSessionId}`);
+            fetchSessions();
         }
     };
 
@@ -228,12 +293,12 @@ const GptChat = () => {
 
     return (
         <div className="fixed inset-0 top-[72px] left-[72px] flex bg-[var(--bg-main)] overflow-hidden">
-            <input 
-                type="file" 
-                ref={fileInputRef} 
-                className="hidden" 
+            <input
+                type="file"
+                ref={fileInputRef}
+                className="hidden"
                 onChange={handleFileUpload}
-                accept=".pdf,.doc,.docx,.txt,.csv,.json,.xls,.xlsx,.png,.jpg,.jpeg,.webp,.gif"
+                multiple
             />
             
             {/* 1. Left Sidebar: Support Engine Chats */}
@@ -453,8 +518,33 @@ const GptChat = () => {
 
                         {/* Chat Input Container */}
                         <div className="px-6 py-4 shrink-0 max-w-4xl w-full mx-auto">
-                            <form 
-                                onSubmit={(e) => { e.preventDefault(); handleSend(); }} 
+                            {/* Attached files preview */}
+                            {attachments.length > 0 && (
+                                <div className="flex flex-wrap gap-2 mb-3">
+                                    {attachments.map((att) => (
+                                        <div
+                                            key={att.name}
+                                            className="group/att flex items-center gap-2 pl-2 pr-1.5 py-1.5 bg-[var(--input-bg)] border border-[var(--border)] rounded-xl max-w-[220px]"
+                                            title={att.name}
+                                        >
+                                            <span className="w-6 h-6 rounded-lg bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] flex items-center justify-center shrink-0">
+                                                {att.has_image ? <ImageIcon size={13} /> : <FileText size={13} />}
+                                            </span>
+                                            <span className="text-[11px] font-bold text-[var(--text-main)] truncate">{att.name}</span>
+                                            <button
+                                                type="button"
+                                                onClick={() => handleRemoveAttachment(att.name)}
+                                                className="w-5 h-5 rounded-md flex items-center justify-center text-[var(--text-muted)] hover:text-[var(--accent-red)] hover:bg-[var(--accent-red-bg)] transition-colors shrink-0"
+                                                title="Remove file"
+                                            >
+                                                <X size={13} />
+                                            </button>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                            <form
+                                onSubmit={(e) => { e.preventDefault(); handleSend(); }}
                                 className="relative group flex items-center gap-2"
                             >
                                 <div className="relative flex-1">

@@ -1,7 +1,10 @@
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, UploadFile, File, Form
 from typing import List, Optional
 from app.db.mongodb import get_collection
-from app.controllers.auth_controller import get_current_user
+from app.controllers.auth_controller import (
+    get_current_user, is_internal_user, TASK_ACCESS_DENIED_MESSAGE,
+    get_non_internal_user_ids, TASK_RECIPIENT_DENIED_MESSAGE,
+)
 from app.models.calendar_event import CalendarEventCreate, CalendarEventResponse
 from app.services.notification_service import (
     send_task_created_email, send_task_updated_email, send_task_deleted_email,
@@ -11,8 +14,10 @@ from app.services.notification_service import (
 )
 from app.services.activity_log_service import log_activity
 from app.services.gpt_service import grade_descriptive_answer
-from app.services.s3_service import upload_file_to_s3
+from app.services.s3_service import upload_file_to_s3, get_signed_url
 from app.services.event_sync_service import sync_event_to_collection
+from app.routes.task_meta import sync_task_meta
+from app.services import task_events
 from bson import ObjectId
 from datetime import datetime, timedelta, timezone
 
@@ -131,21 +136,24 @@ async def notify_users_instant(event_dict: dict, action: str, creator_name: str)
             if not user_data: continue
 
             scope = event_dict.get("notification_scope", "staff")
+            # WhatsApp goes out ONLY when a staff member is the creator (scope == "staff").
+            # Learner-created tasks/sessions stay email + in-app only.
+            delivery = "both" if scope == "staff" else "email"
             if is_task:
-                if action == "created": await send_task_created_email(user_data, event_dict, creator_name)
-                elif action == "updated": await send_task_updated_email(user_data, event_dict, creator_name)
-                elif action == "deleted": await send_task_deleted_email(user_data, event_dict.get("title"), creator_name, scope)
+                if action == "created": await send_task_created_email(user_data, event_dict, creator_name, delivery)
+                elif action == "updated": await send_task_updated_email(user_data, event_dict, creator_name, delivery)
+                elif action == "deleted": await send_task_deleted_email(user_data, event_dict.get("title"), creator_name, delivery, scope)
             else:
-                if action == "created": await send_event_created_email(user_data, event_dict, creator_name, batch_name, quarter_name)
+                if action == "created": await send_event_created_email(user_data, event_dict, creator_name, batch_name, quarter_name, delivery)
                 elif action == "updated":
                     status = event_dict.get("status")
                     if status == "completed":
-                        await send_session_complete_email(user_data, event_dict)
+                        await send_session_complete_email(user_data, event_dict, delivery)
                     elif status == "canceled":
-                        await send_event_deleted_email(user_data, event_dict, creator_name, scope, batch_name, quarter_name)
+                        await send_event_deleted_email(user_data, event_dict, creator_name, scope, batch_name, quarter_name, delivery)
                     else:
-                        await send_event_updated_email(user_data, event_dict, creator_name, batch_name, quarter_name)
-                elif action == "deleted": await send_event_deleted_email(user_data, event_dict, creator_name, scope, batch_name, quarter_name)
+                        await send_event_updated_email(user_data, event_dict, creator_name, batch_name, quarter_name, delivery)
+                elif action == "deleted": await send_event_deleted_email(user_data, event_dict, creator_name, scope, batch_name, quarter_name, delivery)
         except Exception as e:
             print(f"Notification Error for {uid}: {e}")
             
@@ -162,6 +170,33 @@ async def notify_users_instant(event_dict: dict, action: str, creator_name: str)
                         await send_conflict_notification_email(conflict_user_data, event_dict, existing)
         except Exception as e:
             print(f"Conflict Notification Error: {e}")
+
+def _next_occurrence(curr_dt, repeat_type, interval, repeat_data=None):
+    """Advance curr_dt by one recurrence step, or return None if repeat_type is unrecognized."""
+    if repeat_type == "Daily":
+        return curr_dt + timedelta(days=1)
+    if "Weekly" in repeat_type:
+        return curr_dt + timedelta(weeks=1)
+    if repeat_type == "Monthly":
+        month = curr_dt.month + 1; year = curr_dt.year + (month - 1) // 12; month = (month - 1) % 12 + 1; day = min(curr_dt.day, 28)
+        return curr_dt.replace(year=year, month=month, day=day)
+    if repeat_type == "Annually":
+        return curr_dt.replace(year=curr_dt.year + 1)
+    if repeat_type == "periodic":
+        return curr_dt + timedelta(days=interval)
+    if repeat_type == "Custom":
+        unit = (repeat_data or {}).get("customUnit", "Months")
+        if unit == "Weeks":
+            return curr_dt + timedelta(weeks=interval)
+        # "Months" picks specific date(s) of the month (repeat_data.monthlyDates/lastDay,
+        # same field Monthly uses) so it steps by month like Monthly does, just with a
+        # custom N-month interval instead of a fixed 1.
+        total_months = curr_dt.month - 1 + interval
+        year = curr_dt.year + total_months // 12
+        month = total_months % 12 + 1
+        day = min(curr_dt.day, 28)
+        return curr_dt.replace(year=year, month=month, day=day)
+    return None
 
 @router.post("/validate-conflict")
 async def validate_conflict(event_data: dict, current_user: dict = Depends(get_current_user)):
@@ -187,22 +222,42 @@ async def validate_conflict(event_data: dict, current_user: dict = Depends(get_c
 
 @router.post("", response_model=dict)
 async def create_event(event: CalendarEventCreate, background_tasks: BackgroundTasks, current_user: dict = Depends(get_current_user)):
+    event_dict = event.model_dump()
+
     # ─── Permission Check ───
     user_role = current_user.get("role", "").lower()
     has_create_perm = current_user.get("permissions", {}).get("calendar", {}).get("create")
-    
-    if user_role != "superadmin":
-        # Allow Client Users (Learners) and Client Admins to create events
-        # Staff roles (admin, coach, staff) still require the explicit permission bit
+
+    if event_dict.get("type") == "task":
+        # Task & Delegation is internal-Sparsh-only, but ANY internal Sparsh user may create
+        # and assign tasks — the generic `calendar.create` permission bit is NOT required here.
+        # (A staff/coach/SMO/member without that bit was previously getting "Not authorized to
+        # create events" when hitting Assign Task.) Client-side users stay blocked.
+        if not is_internal_user(current_user):
+            raise HTTPException(status_code=403, detail=TASK_ACCESS_DENIED_MESSAGE)
+        # Assignees and In-Loop/watchers must all be internal Sparsh users.
+        bad = await get_non_internal_user_ids((event_dict.get("target_staff_id") or []) + (event_dict.get("watchers") or []))
+        if bad:
+            raise HTTPException(status_code=403, detail=TASK_RECIPIENT_DENIED_MESSAGE)
+    elif user_role != "superadmin":
+        # Non-task calendar / session events keep the original permission model.
+        # Allow Client Users (Learners) and Client Admins to create events;
+        # staff roles (admin, coach, staff) still require the explicit permission bit.
         if not has_create_perm and user_role not in ["clientuser", "clientadmin"]:
             raise HTTPException(status_code=403, detail="Not authorized to create events")
 
-    event_dict = event.model_dump()
     # Backdate validation logic... (omitted summary for brevity, keeping existing code)
     # [STRICT BACKDATE VALIDATION CODE REMAINS UNCHANGED]
     try:
+        now = datetime.utcnow()
         event_start = datetime.fromisoformat(event_dict["start"].replace("Z", "+00:00")).replace(tzinfo=None)
-        if event_start < datetime.utcnow():
+        # A task's `start` is a creation / recurrence-anchor reference stamped at "now", not a
+        # scheduled calendar slot. Comparing it to the exact submit-time `utcnow()` falsely
+        # flags every task as backdated (the stamp is always a few seconds old by the time it
+        # reaches here). So for tasks, only block genuinely past DATES (yesterday or earlier);
+        # calendar / session events keep the strict timestamp check.
+        is_backdated = (event_start.date() < now.date()) if event_dict.get("type") == "task" else (event_start < now)
+        if is_backdated:
             settings_col = get_collection("system_settings")
             settings = await settings_col.find_one({"setting_name": "backdate_control"})
             allow = False
@@ -242,6 +297,11 @@ async def create_event(event: CalendarEventCreate, background_tasks: BackgroundT
     if repeat_type != "Does not repeat" and end_date_str:
         # Generate a unique series ID to group these occurrences
         event_dict["recurring_group_id"] = str(ObjectId())
+
+    # Recurring TASKS create only the FIRST occurrence here; a nightly job rolls the series
+    # forward one occurrence at a time (see recurring_task_service.generate_due_recurring_tasks),
+    # so we never bulk-create duplicate tasks. Events keep the original bulk-generation below.
+    if repeat_type != "Does not repeat" and end_date_str and event_dict.get("type") != "task":
         try:
             # Standardize Start Date
             raw_start = event_dict["start"].replace("Z", "+00:00")
@@ -279,29 +339,52 @@ async def create_event(event: CalendarEventCreate, background_tasks: BackgroundT
                     if "_id" in new_ev: del new_ev["_id"]
                     generated_events.append(new_ev)
                     
-                    if repeat_type == "Daily": curr_dt += timedelta(days=1)
-                    elif "Weekly" in repeat_type: curr_dt += timedelta(weeks=1)
-                    elif repeat_type == "Monthly":
-                        month = curr_dt.month + 1; year = curr_dt.year + (month - 1) // 12; month = (month - 1) % 12 + 1; day = min(curr_dt.day, 28)
-                        curr_dt = curr_dt.replace(year=year, month=month, day=day)
-                    elif repeat_type == "Annually": curr_dt = curr_dt.replace(year=curr_dt.year + 1)
-                    elif repeat_type == "periodic": curr_dt += timedelta(days=interval)
-                    else: break
+                    next_dt = _next_occurrence(curr_dt, repeat_type, interval, event_dict.get("repeat_data"))
+                    if next_dt is None: break
+                    curr_dt = next_dt
                     if len(generated_events) > 365: break
                 
                 if generated_events:
                     await col.insert_many(generated_events)
-                    # Log activity for batch creation
-                    await log_activity(current_user, "Create Recurring", col_name, f"Generated {len(generated_events)} events for {event_dict['title']}")
+                    # Log activity for batch creation. Task-typed docs use a task-specific
+                    # action so the Task Management → Activity feed can pick them up.
+                    is_task = event_dict.get("type") == "task"
+                    await log_activity(current_user, "Create Recurring Tasks" if is_task else "Create Recurring", col_name, f"Generated {len(generated_events)} {'tasks' if is_task else 'events'} for {event_dict['title']}",
+                                       meta={"group_id": event_dict.get("group_id")} if is_task else None)
+                    if is_task:
+                        background_tasks.add_task(sync_task_meta, event_dict.get("category"), event_dict.get("tags"), str(current_user["_id"]))
+                        await task_events.publish(task_events.recipients_for(event_dict), {
+                            "type": "task_created",
+                            "task_id": None,  # batch create -- client refetches the list
+                            "title": event_dict.get("title"),
+                            "assigned_to": event_dict.get("target_staff_id") or [],
+                            "assigned_by": event_dict.get("user_id"),
+                            "watchers": event_dict.get("watchers") or [],
+                            "actor_id": str(current_user["_id"]),
+                        })
                     return {"message": f"Successfully generated {len(generated_events)} recurring duties."}
         except Exception as e:
             print(f"RECURSIVE ENGINE FAILURE: {e}")
             # Fall back to single event creation below if recursion fails
-    
+
     result = await col.insert_one(event_dict)
     event_dict["id"] = str(result.inserted_id)
     background_tasks.add_task(notify_users_instant, event_dict, "created", creator_name)
-    await log_activity(current_user, "Create Event", col_name, f"Created in {col_name}: {event_dict['title']}")
+    is_task = event_dict.get("type") == "task"
+    if is_task:
+        background_tasks.add_task(sync_task_meta, event_dict.get("category"), event_dict.get("tags"), str(current_user["_id"]))
+    await log_activity(current_user, "Create Task" if is_task else "Create Event", col_name, f"{'Task' if is_task else 'Event'} created: {event_dict['title']}",
+                       meta={"task_id": str(result.inserted_id), "group_id": event_dict.get("group_id")} if is_task else None)
+    if is_task:
+        await task_events.publish(task_events.recipients_for(event_dict), {
+            "type": "task_created",
+            "task_id": str(result.inserted_id),
+            "title": event_dict.get("title"),
+            "assigned_to": event_dict.get("target_staff_id") or [],
+            "assigned_by": event_dict.get("user_id"),
+            "watchers": event_dict.get("watchers") or [],
+            "actor_id": str(current_user["_id"]),
+        })
     return {"id": str(result.inserted_id), "message": f"Event created in {col_name}"}
 
 @router.patch("/{event_id}")
@@ -309,7 +392,24 @@ async def update_event(event_id: str, updates: dict, background_tasks: Backgroun
     existing, col_name = await find_event_across_collections(event_id)
     if not existing:
         raise HTTPException(status_code=404, detail="Event not found")
-        
+
+    # Task Management is internal-Sparsh-only: block client-side users from editing a task
+    # (or turning an event into a task) via this shared endpoint.
+    is_task_update = existing.get("type") == "task" or updates.get("type") == "task"
+    if is_task_update:
+        if not is_internal_user(current_user):
+            raise HTTPException(status_code=403, detail=TASK_ACCESS_DENIED_MESSAGE)
+        # If assignees / watchers are being changed, the new set must all be internal.
+        recipients = []
+        if "target_staff_id" in updates:
+            recipients += updates.get("target_staff_id") or []
+        if "watchers" in updates:
+            recipients += updates.get("watchers") or []
+        if recipients:
+            bad = await get_non_internal_user_ids(recipients)
+            if bad:
+                raise HTTPException(status_code=403, detail=TASK_RECIPIENT_DENIED_MESSAGE)
+
     is_admin = current_user.get("role") == "superadmin"
     has_update_perm = current_user.get("permissions", {}).get("calendar", {}).get("update")
     is_creator = existing.get("user_id") == str(current_user["_id"])
@@ -341,7 +441,26 @@ async def update_event(event_id: str, updates: dict, background_tasks: Backgroun
         await get_collection(col_name).update_one({"_id": ObjectId(event_id)}, {"$set": updates})
         final_doc = projected
 
-    await log_activity(current_user, "Update Event", new_col_name, f"Updated event ID: {event_id}")
+    is_task = (projected.get("type") or existing.get("type")) == "task"
+    _title = projected.get("title") or existing.get("title") or event_id
+    await log_activity(current_user, "Update Task" if is_task else "Update Event", new_col_name, f"{'Task' if is_task else 'Event'} updated: {_title}",
+                       meta={"task_id": event_id, "group_id": projected.get("group_id")} if is_task else None)
+    if is_task and ("category" in updates or "tags" in updates):
+        background_tasks.add_task(sync_task_meta, projected.get("category"), projected.get("tags"), str(current_user["_id"]))
+    if is_task:
+        # Union old + new recipients so a user removed from assignees/watchers also refetches
+        # (and the task correctly drops off their list).
+        recipients = task_events.recipients_for(existing) | task_events.recipients_for(projected)
+        await task_events.publish(recipients, {
+            "type": "task_updated",
+            "task_id": event_id,
+            "status": projected.get("workflow_status"),
+            "title": _title,
+            "assigned_to": projected.get("target_staff_id") or [],
+            "assigned_by": projected.get("user_id"),
+            "watchers": projected.get("watchers") or [],
+            "actor_id": str(current_user["_id"]),
+        })
     creator_name = current_user.get("full_name") or current_user.get("first_name", "System Admin")
     final_doc["id"] = str(event_id)
     background_tasks.add_task(notify_users_instant, final_doc, "updated", creator_name)
@@ -381,13 +500,9 @@ async def update_event(event_id: str, updates: dict, background_tasks: Backgroun
                         generated = []
                         curr_dt = current_end_dt
                         # Avoid duplicate on the current_end_dt itself
-                        if repeat_type == "Daily": curr_dt += timedelta(days=1)
-                        elif "Weekly" in repeat_type: curr_dt += timedelta(weeks=1)
-                        elif repeat_type == "Monthly":
-                            month = curr_dt.month + 1; year = curr_dt.year + (month - 1) // 12; month = (month - 1) % 12 + 1; day = min(curr_dt.day, 28)
-                            curr_dt = curr_dt.replace(year=year, month=month, day=day)
-                        elif repeat_type == "periodic": curr_dt += timedelta(days=interval)
-                        
+                        next_dt = _next_occurrence(curr_dt, repeat_type, interval, existing.get("repeat_data"))
+                        if next_dt is not None: curr_dt = next_dt
+
                         while curr_dt <= new_end_dt:
                             new_ev = {**existing, **updates}
                             new_ev["start"] = curr_dt.isoformat()
@@ -399,13 +514,9 @@ async def update_event(event_id: str, updates: dict, background_tasks: Backgroun
                             if "_id" in new_ev: del new_ev["_id"]
                             generated.append(new_ev)
                             
-                            if repeat_type == "Daily": curr_dt += timedelta(days=1)
-                            elif "Weekly" in repeat_type: curr_dt += timedelta(weeks=1)
-                            elif repeat_type == "Monthly":
-                                month = curr_dt.month + 1; year = curr_dt.year + (month - 1) // 12; month = (month - 1) % 12 + 1; day = min(curr_dt.day, 28)
-                                curr_dt = curr_dt.replace(year=year, month=month, day=day)
-                            elif repeat_type == "periodic": curr_dt += timedelta(days=interval)
-                            else: break
+                            next_dt = _next_occurrence(curr_dt, repeat_type, interval, existing.get("repeat_data"))
+                            if next_dt is None: break
+                            curr_dt = next_dt
                             if len(generated) > 365: break
                         
                         if generated:
@@ -499,7 +610,7 @@ async def upload_content(event_id: str, file: UploadFile = File(...), current_us
 import os
 import aiofiles
 import tempfile
-from app.services.transcription_service import process_background_upload_and_transcribe
+from app.services.transcription_service import process_background_upload_and_transcribe, process_media_library_resource
 
 @router.post("/{event_id}/upload-resource")
 async def upload_resource(event_id: str, background_tasks: BackgroundTasks, file: UploadFile = File(...), resource_type: str = Form(...), current_user: dict = Depends(get_current_user)):
@@ -529,6 +640,94 @@ async def upload_resource(event_id: str, background_tasks: BackgroundTasks, file
         background_tasks.add_task(process_background_upload_and_transcribe, event_id, resource_id, local_path, file.filename, file.content_type, resource_type, col_name)
         return {"message": "Resource accepted.", "resource": resource_obj}
     except Exception as e: raise HTTPException(status_code=500, detail=str(e))
+
+
+async def _get_media_asset(media_id: str) -> dict:
+    """Fetch a Media Library record or raise 404."""
+    try:
+        media = await get_collection("media_library").find_one({"_id": ObjectId(media_id)})
+    except Exception:
+        media = None
+    if not media:
+        raise HTTPException(status_code=404, detail="Media Library file not found")
+    return media
+
+
+@router.post("/{event_id}/add-content-from-media")
+async def add_content_from_media(event_id: str, payload: dict, current_user: dict = Depends(get_current_user)):
+    """Attach an existing Media Library file as Shared Content (by reference)."""
+    existing, col_name = await find_event_across_collections(event_id)
+    if not existing: raise HTTPException(status_code=404, detail="Event not found")
+
+    is_admin = current_user.get("role") == "superadmin"
+    has_update_perm = current_user.get("permissions", {}).get("calendar", {}).get("update")
+    is_creator = existing.get("user_id") == str(current_user["_id"])
+    if not (is_admin or has_update_perm or is_creator):
+        raise HTTPException(status_code=403, detail="Only the creator or an authorized administrator can add content")
+
+    media = await _get_media_asset(payload.get("media_id"))
+    # Regenerate a fresh signed URL from the stored key (signed URLs expire).
+    url = get_signed_url(media["s3_key"]) if media.get("s3_key") else media.get("url")
+
+    content_obj = {
+        "id": str(ObjectId()),
+        "name": media.get("name") or media.get("file_name"),
+        "url": url,
+        "file_type": media.get("content_type"),
+        "media_id": str(media["_id"]),   # reference back to the library
+        "s3_key": media.get("s3_key"),
+        "uploaded_by": str(current_user["_id"]),
+        "uploaded_at": datetime.utcnow(),
+        "views": 0,
+    }
+    await get_collection(col_name).update_one({"_id": ObjectId(event_id)}, {"$push": {"contents": content_obj}})
+    await sync_event_to_collection(event_id)
+    return {"message": "Content added from Media Library", "content": content_obj}
+
+
+@router.post("/{event_id}/add-resource-from-media")
+async def add_resource_from_media(event_id: str, background_tasks: BackgroundTasks, payload: dict, current_user: dict = Depends(get_current_user)):
+    """Attach an existing Media Library file as an Executive Resource (by
+    reference). Audio/video still get auto-transcribed, same as a direct upload."""
+    existing, col_name = await find_event_across_collections(event_id)
+    if not existing: raise HTTPException(status_code=404, detail="Event not found")
+
+    is_admin = current_user.get("role") == "superadmin"
+    has_update_perm = current_user.get("permissions", {}).get("calendar", {}).get("update")
+    is_creator = existing.get("user_id") == str(current_user["_id"])
+    if not (is_admin or has_update_perm or is_creator):
+        raise HTTPException(status_code=403, detail="Only the creator or an authorized administrator can add resources")
+
+    media = await _get_media_asset(payload.get("media_id"))
+    # Resource format: caller may override, else fall back to the library type.
+    resource_type = (payload.get("resource_type") or media.get("media_type") or "other").lower()
+    url = get_signed_url(media["s3_key"]) if media.get("s3_key") else media.get("url")
+
+    resource_id = str(ObjectId())
+    resource_obj = {
+        "id": resource_id,
+        "name": media.get("name") or media.get("file_name"),
+        "url": url,
+        "system_type": resource_type,
+        "file_type": media.get("content_type"),
+        "media_id": str(media["_id"]),
+        "s3_key": media.get("s3_key"),
+        "uploaded_by": str(current_user["_id"]),
+        "uploaded_at": datetime.utcnow(),
+        "status": "processing",
+        "progress": 0,
+        "transcription": None,
+        "views": 0,
+    }
+    await get_collection(col_name).update_one({"_id": ObjectId(event_id)}, {"$push": {"resources": resource_obj}})
+
+    background_tasks.add_task(
+        process_media_library_resource,
+        event_id, resource_id, media.get("s3_key"),
+        resource_obj["name"], media.get("content_type") or "",
+        resource_type, url, col_name,
+    )
+    return {"message": "Resource added from Media Library", "resource": resource_obj}
 
 
 @router.delete("/{event_id}")

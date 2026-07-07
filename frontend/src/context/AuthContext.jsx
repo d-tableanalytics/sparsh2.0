@@ -73,8 +73,25 @@ export const AuthProvider = ({ children }) => {
     delete axios.defaults.headers.common['Authorization'];
   };
 
+  // Re-pull the full profile from /users/me and merge it into the current user, so edits
+  // made in Settings ▸ General (name, etc.) reflect immediately in the header/avatar.
+  const refreshUser = async () => {
+    try {
+      const API_URL = import.meta.env.VITE_API_BASE_URL || '/api';
+      const response = await axios.get(`${API_URL}/users/me`);
+      setUser(prev => {
+        const merged = { ...(prev || {}), ...response.data };
+        if (!merged._id && merged.id) merged._id = merged.id;
+        return merged;
+      });
+      return response.data;
+    } catch (err) {
+      console.error("Profile refresh error:", err);
+    }
+  };
+
   return (
-    <AuthContext.Provider value={{ user, login, logout, loading }}>
+    <AuthContext.Provider value={{ user, login, logout, loading, refreshUser }}>
       {!loading && children}
     </AuthContext.Provider>
   );
