@@ -29,12 +29,17 @@ const SettingsPage = () => {
     const [showCreateModal, setShowCreateModal] = useState(false);
     const [newTemplateForm, setNewTemplateForm] = useState({ name: '', slug: 'task_created', channel: 'both' });
     const [searchQuery, setSearchQuery] = useState('');
+    const [togglingId, setTogglingId] = useState(null); // template _id currently updating status
 
     // Permission Checks
     const canUpdateSettings = user?.role === 'superadmin' || user?.permissions?.settings?.update;
     const canReadTemplates = user?.role === 'superadmin' || user?.role === 'clientadmin' || user?.permissions?.templates?.read;
     const canUpdateTemplates = user?.role === 'superadmin' || user?.role === 'clientadmin' || user?.permissions?.templates?.update;
     const canDeleteTemplates = user?.role === 'superadmin' || user?.role === 'clientadmin' || user?.permissions?.templates?.delete;
+    // Active/Inactive status is Admin & Super Admin ONLY — stricter than the template CRUD
+    // permission above (a staff member with templates.update must NOT be able to toggle).
+    // Mirrors backend TEMPLATE_STATUS_ADMIN_ROLES.
+    const canToggleStatus = ['superadmin', 'admin', 'clientadmin'].includes(user?.role);
     const canReadCompanies = user?.role === 'superadmin' || user?.permissions?.companies?.read;
     // Task settings (categories/tags) are internal-Sparsh-only, matching the module gate.
     const canAccessTasks = canAccessTaskManagement(user);
@@ -140,6 +145,30 @@ const SettingsPage = () => {
             setEditingTemplate(null);
             fetchTemplates();
         } catch (err) { showError("Sync failed."); }
+    };
+
+    // Activate / deactivate a single template (Admin & Super Admin only).
+    // Uses the dedicated PATCH status endpoint, updates only the affected row in place
+    // (no full refetch / page reload), and guards against duplicate calls while in flight.
+    const handleToggleStatus = async (template, nextActive) => {
+        if (!canToggleStatus || togglingId) return;
+        const id = template._id;
+        setTogglingId(id);
+        try {
+            const res = await api.patch(`/settings/templates/${id}/status`, { is_active: nextActive });
+            const value = res.data?.is_active ?? nextActive;
+            setTemplates(prev => prev.map(t => (t._id === id ? { ...t, is_active: value } : t)));
+            setEditingTemplate(prev => (prev && prev._id === id ? { ...prev, is_active: value } : prev));
+            showSuccess(value ? "Template activated successfully." : "Template deactivated successfully.");
+        } catch (err) {
+            if (err?.response?.status === 403) {
+                showError("You are not allowed to change template status.");
+            } else {
+                showError("Unable to update template status.");
+            }
+        } finally {
+            setTogglingId(null);
+        }
     };
 
     const deleteTemplate = async (id) => {
@@ -352,12 +381,18 @@ const SettingsPage = () => {
                                             <button key={t._id} onClick={() => setEditingTemplate(t)}
                                                 className={`w-full p-3 rounded-xl flex flex-col gap-0.5 text-left transition-all group border-2 ${editingTemplate?._id === t._id ? 'bg-white border-[var(--accent-indigo)] shadow-md' : 'bg-transparent border-transparent hover:bg-[var(--input-bg)]'}`}>
                                                 <div className="flex items-center justify-between">
-                                                    <span className={`text-[11px] font-black transition-colors ${editingTemplate?._id === t._id ? 'text-[var(--accent-indigo)]' : 'text-[var(--text-main)]'}`}>{t.name} {"{"}{t.channel?.toUpperCase() || 'EMAIL'}{"}"}</span>
+                                                    <span className={`flex items-center gap-1.5 text-[11px] font-black transition-colors ${editingTemplate?._id === t._id ? 'text-[var(--accent-indigo)]' : 'text-[var(--text-main)]'}`}>
+                                                        <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${t.is_active === false ? 'bg-[var(--accent-red)]' : 'bg-[var(--status-active-text)]'}`} title={t.is_active === false ? 'Inactive' : 'Active'}></span>
+                                                        {t.name} {"{"}{t.channel?.toUpperCase() || 'EMAIL'}{"}"}
+                                                    </span>
                                                     {canDeleteTemplates && (
                                                         <Trash2 size={12} className="text-gray-200 hover:text-red-500 transition-all cursor-pointer" onClick={(e) => { e.stopPropagation(); deleteTemplate(t._id); }} />
                                                     )}
                                                 </div>
-                                                <span className="text-[9px] font-medium text-[var(--text-muted)] uppercase italic">/{t.slug}</span>
+                                                <div className="flex items-center justify-between">
+                                                    <span className="text-[9px] font-medium text-[var(--text-muted)] uppercase italic">/{t.slug}</span>
+                                                    <span className={`text-[7px] font-black px-1.5 py-0.5 rounded uppercase tracking-tighter ${t.is_active === false ? 'bg-[var(--accent-red-bg)] text-[var(--accent-red)]' : 'bg-[var(--status-active-bg)] text-[var(--status-active-text)]'}`}>{t.is_active === false ? 'Inactive' : 'Active'}</span>
+                                                </div>
                                             </button>
                                         ))
                                     ) : (
@@ -394,8 +429,27 @@ const SettingsPage = () => {
                                                     </div>
                                                 </div>
                                             </div>
-                                            <div className="flex items-center gap-2">
-                                                <button onClick={() => setEditingTemplate(null)} className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest hover:text-red-500 mr-2 transition-all">Discard</button>
+                                            <div className="flex items-center gap-3">
+                                                <button onClick={() => setEditingTemplate(null)} className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest hover:text-red-500 mr-1 transition-all">Discard</button>
+
+                                                {/* Status: badge + Active/Inactive toggle (Admin & Super Admin only). */}
+                                                <div className="flex items-center gap-2 pl-3 pr-1 border-l border-[var(--border)]">
+                                                    <span className="text-[9px] font-black text-[var(--text-muted)] uppercase tracking-widest">Status</span>
+                                                    <span className={`text-[9px] font-black px-2 py-0.5 rounded-md uppercase tracking-tighter inline-flex items-center gap-1.5 border ${editingTemplate.is_active === false ? 'bg-[var(--accent-red-bg)] text-[var(--accent-red)] border-[var(--accent-red-bg)]' : 'bg-[var(--status-active-bg)] text-[var(--status-active-text)] border-[var(--status-active-border)]'}`}>
+                                                        <span className={`w-1.5 h-1.5 rounded-full ${editingTemplate.is_active === false ? 'bg-[var(--accent-red)]' : 'bg-[var(--status-active-text)]'}`}></span>
+                                                        {editingTemplate.is_active === false ? 'Inactive' : 'Active'}
+                                                    </span>
+                                                    {canToggleStatus && (
+                                                        <button type="button" role="switch" aria-checked={editingTemplate.is_active !== false}
+                                                            disabled={togglingId === editingTemplate._id}
+                                                            onClick={() => handleToggleStatus(editingTemplate, editingTemplate.is_active === false)}
+                                                            title={editingTemplate.is_active === false ? 'Activate template' : 'Deactivate template'}
+                                                            className={`relative w-11 h-6 rounded-full transition-colors duration-300 shrink-0 outline-none ${togglingId === editingTemplate._id ? 'opacity-50 cursor-wait' : 'cursor-pointer'} ${editingTemplate.is_active !== false ? 'bg-[var(--accent-indigo)]' : 'bg-[var(--border)]'}`}>
+                                                            <span className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform duration-300 ${editingTemplate.is_active !== false ? 'translate-x-5' : 'translate-x-0'}`} />
+                                                        </button>
+                                                    )}
+                                                </div>
+
                                                 {canUpdateTemplates && (
                                                     <button onClick={handleTemplateSave} className="bg-[var(--accent-indigo)] text-white px-5 py-2 rounded-xl font-black text-[11px] shadow-lg shadow-indigo-500/20 flex items-center gap-2 hover:brightness-110 transition-all uppercase tracking-widest">
                                                         <Save size={14}/> Sync Template

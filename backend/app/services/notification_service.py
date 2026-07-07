@@ -205,22 +205,37 @@ DEFAULT_TEMPLATES = {
 }
 
 async def fetch_template(slug: str, company_id: str = None):
+    """Resolve the notification template that should be used for `slug`.
+
+    Precedence: company-scoped doc → staff-scoped doc → hardcoded DEFAULT.
+    IMPORTANT (Active/Inactive feature): the resolution deliberately does NOT
+    filter on `is_active` in the query. Instead we resolve the doc that *would*
+    be used and, if an admin has deactivated it (is_active == False), we return
+    None so the caller skips sending entirely — an inactive template must never
+    fall through to a lower-precedence template or the hardcoded default.
+    Missing `is_active` is treated as active so legacy docs keep working."""
     col = get_collection("notification_templates")
+
+    doc = None
     if company_id:
-        t = await col.find_one({
-            "slug": slug, 
-            "company_id": str(company_id), 
-            "scope": "company", 
-            "is_active": True
+        doc = await col.find_one({
+            "slug": slug,
+            "company_id": str(company_id),
+            "scope": "company",
         })
-        if t: return t
-    
-    res = await col.find_one({
-        "slug": slug, 
-        "scope": "staff", 
-        "is_active": True
-    })
-    if res: return res
+
+    if doc is None:
+        doc = await col.find_one({
+            "slug": slug,
+            "scope": "staff",
+        })
+
+    if doc is not None:
+        # Respect the per-template Active/Inactive switch. Inactive => skip sending.
+        if not doc.get("is_active", True):
+            return None
+        return doc
+
     return DEFAULT_TEMPLATES.get(slug)
 
 def render_template(template_body: str, context: Dict[str, Any]):
