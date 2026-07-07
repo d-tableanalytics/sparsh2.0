@@ -31,6 +31,9 @@ import LearnerSessions from './pages/LearnerSessions';
 import CompanyPortal from './pages/CompanyPortal';
 import AssessmentPlayer from './pages/AssessmentPlayer';
 import MyReports from './pages/MyReports';
+import ORMPage from './pages/ORM/ORMPage';
+import ORMSetup from './pages/ORM/ORMSetup';
+import ORMSheet from './pages/ORM/ORMSheet';
 import MediaLibrary from './pages/MediaLibrary';
 import TaskDashboard from './pages/TaskDashboard';
 import MyTasks from './pages/MyTasks';
@@ -58,6 +61,16 @@ const EmployeeReport = lazy(() => import('./pages/EmployeeReport'));
 const RouteFallback = () => (
   <div className="py-20 text-center text-[13px] font-bold text-[var(--text-muted)]">Loading…</div>
 );
+
+// Blocks client-side users from ORM pages when their company's ORM module is off.
+const OrmGuard = ({ children }) => {
+  const { user } = useAuth();
+  const isStaff = ['superadmin', 'admin'].includes(user?.role);
+  if (user && !isStaff && user.orm_enabled === false) {
+    return <Navigate to="/" />;
+  }
+  return children;
+};
 
 const AppRoutes = () => {
   const { user } = useAuth();
@@ -97,6 +110,10 @@ const AppRoutes = () => {
       <Route path="/sessions" element={<PrivateRoute><LearnerSessions /></PrivateRoute>} />
       <Route path="/company-portal" element={<PrivateRoute><CompanyPortal /></PrivateRoute>} />
       <Route path="/my-reports" element={<PrivateRoute><MyReports /></PrivateRoute>} />
+      <Route path="/orm" element={<PrivateRoute><OrmGuard><ORMPage /></OrmGuard></PrivateRoute>} />
+      <Route path="/orm/setup" element={<PrivateRoute><OrmGuard><ORMSetup /></OrmGuard></PrivateRoute>} />
+      <Route path="/orm/sheet" element={<PrivateRoute><OrmGuard><ORMSheet /></OrmGuard></PrivateRoute>} />
+      
       <Route path="/media" element={<PrivateRoute><MediaLibrary /></PrivateRoute>} />
 
       {/* Admin Side: Staff Management */}

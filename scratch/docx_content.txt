@@ -1,0 +1,368 @@
+BUSINESS REQUIREMENT DOCUMENT
+ORM System
+Organisational Result Matrix — ERP Module
+
+1. Objective
+Design and implement an automated ORM (Organisational Result Matrix) system within ERP to track organizational KPIs, measure performance monthly, and enable data-driven decision-making.
+
+This module is fully independent. It operates without any dependency on other ERP modules. All features — KPI setup, target setting, achievement tracking, score calculation, dashboards,workflows, notifications, and reports — are self-contained.
+
+2. Scope
+The ORM module covers the following functional areas:
+
+KPI setup and configuration with weightage assignment
+Target vs achievement tracking on monthly, quarterly, and yearly basis
+Automated score calculation using standard and reverse formulas
+Dashboards — organisation-level ORM score and KPI-wise breakdown
+Performance analysis — trend tracking and report generation
+Action planning — logging and tracking improvement actions
+Notifications — input alerts, reminders, last-day alerts, post-feedback
+Automation — monthly reminders, auto score calc, dashboard updates
+
+Permissions:- Includes KPI setup, target vs achievement tracking, score calculation, dashboards, workflows, and performance analysis
+
+3. User Roles
+Five roles operate within the ORM module. Role-based access is enforced at the API and database level.
+Admin (HR / Strategy)
+Create, edit, and archive KPIs
+Set and edit targets for all periods
+Configure scoring rules and weightages
+Access all dashboards and reports
+Configure automation schedule and notification settings
+Unlock periods for re-entry if required
+
+Core Team
+Input monthly achievement data for assigned KPIs
+View their KPI scores and status
+View organisation-level dashboard in read-only mode
+Update status of actions assigned to them
+
+HOD (Head of Department)?
+View all KPI scores and dashboards
+Access all reports
+
+
+Management (MD)
+View organisation-level ORM score and all dashboards
+View all KPI-wise performance and monthly trends
+View action status across all KPIs
+
+
+System (Automation Engine)
+Trigger scheduled reminders on configured dates
+Auto-calculate scores on the monthly deadline
+Auto-update dashboards after score calculation
+Send email and in-app notifications
+Trigger monthly workflow
+
+
+ 
+
+4. Functional Requirements
+4.1 KPI Management
+Admin defines and manages KPIs that form the basis of all ORM scoring.
+
+KPI fields: Name, Category, Formula type (standard/reverse), Weightage %, Frequency, Status (active/inactive)
+
+Define KPIs across five categories: Sales, Cost, Process, Customer Satisfaction, Retention
+Assign weightage to each KPI (all active KPIs must sum to exactly 100%)
+System blocks save if total weightage does not equal 100% — displays validation error
+Cost KPIs are flagged as reverse formula type — lower actual cost = higher score
+KPIs can be deactivated without deletion — historical data is preserved
+Admin can reorder KPIs for display purposes
+
+4.2 Target Setting
+Admin sets numeric targets per KPI per period. Targets are required before achievement data can be entered.
+
+Monthly, Quarterly, and Yearly target setting supported for each KPI
+Target fields: KPI, period, target value, unit (%, INR, count etc.), optional notes
+Historical targets are retained permanently — full audit trail
+Target for a period is locked once achievement data is submitted — Admin must unlock to edit
+If no target is set for a KPI in the current period, achievement input is blocked with a clear message
+System sends a monthly target-setup reminder to Admin on the configured date (default: 1st of month)
+
+4.3 Performance Tracking
+Core Team enters monthly achievement data per KPI. The system auto-calculates scores immediately on save.
+
+Achievement entry fields: KPI, period, actual value achieved, optional notes
+One achievement record per KPI per period — duplicate entry blocked
+Achievement entry is open from the 1st of the month and closes on the configured deadline (default: 15th)
+After the deadline, editing is blocked — Admin can reopen if needed
+Score is auto-calculated immediately when achievement is saved — no manual trigger required
+System shows live score preview as Core Team types the achievement value
+All entries are time-stamped and attributed to the submitting user
+
+4.4 Dashboard & Analytics
+Dashboards give role-appropriate real-time visibility into ORM performance.
+
+Organisation-level dashboard: Overall ORM score (weighted total), score gauge with threshold indicator, month-on-month trend chart
+
+KPI-wise dashboard: Individual KPI score, target vs achievement bar, status flag (On Track / Caution / Below Target), weightage contribution
+Dashboard refreshes automatically after each score calculation
+Threshold for On Track: >= 70% (configurable by Admin)
+KPIs below threshold are flagged in red and trigger a notification to Admin
+Trend chart shows minimum last 6 months of ORM scores
+MD sees org-level view; HOD sees full KPI breakdown; Core Team sees own KPIs
+
+4.5 Review System
+The review system manages monthly and weekly tracking cycles.
+
+Monthly Tracking: Triggered on the configured date (default: 20th of month). HOD runs the review using the current ORM score.
+System logs each monthly review with: period, date held , overall score, KPI flags, actions raised
+visible to MD and Admin
+history retained for all past months
+
+Weekly tracking records: week number, reviewed by, date, status (reviewed / pending), notes
+Weekly tracking is lightweight — no score recalculation, status check only
+
+4.6 Action Planning
+When KPIs perform below threshold, HOD logs improvement actions to drive recovery.
+
+Action fields: description, KPI linked, owner (Core Team member), deadline, status (Open / In Progress / Completed)
+Actions can be created from the dashboard KPI flag, or independently
+Owner receives a notification when an action is assigned to them
+Status can be updated by the owner or HOD
+Overdue actions (past deadline and not Completed) are flagged in red and a reminder sent to owner and HOD
+Open actions from the previous month automatically carry forward into the new month's review
+All action history retained — no deletion
+
+5. Notification System
+The notification system covers all automated alerts, reminders, and post-event communications.
+
+5.1 Notification types
+Input alert: Sent to Core Team when the monthly achievement input window opens (1st of month). Includes deadline date.
+Reminder alert: Sent to Core Team members who have not yet submitted data. Frequency configured by Admin (e.g., every 3 days).
+Last day alert: Sent to all pending Core Team members the day before the input deadline. Marked as urgent.
+Post feedback: HOD can post a feedback note after the monthly review. Notification sent to MD and Admin with the feedback text.
+Score published: Sent to HOD, MD, and Admin when the monthly ORM score is calculated. Includes the overall score and any KPI red flags.
+KPI red flag: Sent to Admin and HOD when any KPI scores below the threshold after calculation.
+Action assigned: Sent to the action owner immediately when a new action is assigned to them.
+Action overdue: Sent to action owner and HOD on the deadline day if action is not marked Completed. Resent every 2 days until closed.
+
+5.2 Notification channels
+In-app notification (bell icon — visible on login)
+Email notification (configurable per user — on by default)
+All notifications logged with: recipient, type, timestamp, read status
+
+
+
+6. Automation Logic
+The System role handles all scheduled automation. No manual trigger is required for any of the following.
+
+1st of month: Monthly target-setup reminder sent to Admin. Achievement input window opens for Core Team.
+15th of month: Achievement input deadline. Input window closes automatically. Auto score calculation runs.
+15th of month: Dashboard auto-updates with the newly calculated scores. Score published notification sent.
+20th of month: Monthly review trigger. notification sent to HOD and Core Team.
+Every Monday: Weekly tracking reminder sent to HOD.
+Action deadline day: Overdue action reminder sent to owner and HOD if action not marked Completed.
+
+All automation dates are configurable by Admin. The defaults above are the system defaults on first setup.
+
+
+
+
+
+Core tables Triggers
+
+Notification Triggers
+
+
+
+
+7. Reports
+Four standard reports are available to Admin, HOD, and MD. All reports are filterable by period and exportable to PDF and Excel.
+
+7.1 KPI-wise performance report
+Shows each KPI with: target, achievement, score %, weightage, status (On Track / Caution / Below Target)
+Filterable by period (month / quarter / year) and KPI category
+Includes trend column showing change vs previous period
+
+7.2 Target vs achievement report
+Side-by-side comparison of target and achievement values for each KPI
+Shows variance (absolute and percentage)
+Bar chart visual included in the report
+Filterable by period
+
+7.3 Scorecard
+One-page summary of the current period ORM performance
+Includes: overall ORM score, each KPI score with weightage, traffic-light status, open actions count
+Designed to be shared with MD and leadership — printable format
+
+7.4 Monthly trend report
+Line chart showing overall ORM score for the last 12 months
+Overlays individual KPI trends as secondary lines (toggle on/off)
+Highlights months where score fell below threshold
+Table below chart shows numeric values for all periods
+
+8. Business Logic — Score Calculation (Critical)
+Score calculation is the core engine of the ORM module. The following formulas must be implemented exactly as specified. Unit tests are required for all formula types.
+
+8.1 Standard KPI score formula
+Applies to: Sales, Process, Customer Satisfaction, Retention
+
+KPI Score = (Achievement ÷ Target) × 100
+Weighted contribution = KPI Score × (Weightage ÷ 100)
+Score is capped at 100% maximum (over-performance does not exceed 100)
+Example: Achievement = 88, Target = 100, Weightage = 25%
+KPI Score = (88 ÷ 100) × 100 = 88.0%
+Weighted contribution = 88.0 × 0.25 = 22.0
+
+8.2 Reverse KPI score formula
+Applies to: Cost KPIs only. Lower actual cost vs target = higher score (efficiency rewarded).
+
+KPI Score = (Target ÷ Achievement) × 100
+Weighted contribution = KPI Score × (Weightage ÷ 100)
+Score is capped at 100% maximum
+Example: Target cost = 80, Actual cost = 72, Weightage = 20%
+KPI Score = (80 ÷ 72) × 100 = 111.1% → capped at 100%
+Weighted contribution = 100.0 × 0.20 = 20.0
+
+8.3 Total ORM score formula
+Total ORM Score = Sum of all Weighted Contributions
+Formula: Σ (KPI Score × Weightage%) for all active KPIs
+All active KPI weightages must sum to 100% — system validates this
+Example with 5 KPIs (weights: 25% + 20% + 20% + 20% + 15% = 100%):
+Sales (standard):                (88 ÷ 100) × 100 × 0.25 = 22.0
+Cost (reverse):                  (80 ÷ 72) × 100 capped × 0.20 = 20.0
+Process (standard):              (91 ÷ 95) × 100 × 0.20 = 19.2
+Customer Satisfaction (standard):(85 ÷ 90) × 100 × 0.20 = 18.9
+Retention (standard):            (80 ÷ 85) × 100 × 0.15 = 14.1
+Total ORM Score = 22.0 + 20.0 + 19.2 + 18.9 + 14.1 = 94.2%
+
+8.4 Score calculation rules
+Calculation runs automatically when any achievement value is saved
+Official monthly score is locked on the deadline date (default: 15th)
+Division by zero: if Target = 0, the KPI score is 0 and a warning is displayed to Admin
+Scores are stored with 2 decimal places of precision
+All calculations must be unit-tested before deployment
+
+9. Non-Functional Requirements
+
+9.1 Accuracy in calculations
+All score calculations must produce results accurate to 2 decimal places
+Floating-point arithmetic must be handled correctly — use decimal types, not floating point
+Formula results must be validated against manual calculations in unit tests
+Division-by-zero cases must be handled gracefully with a 0 score and an admin warning
+
+9.2 Role-based access
+All five roles have distinct permission sets — enforced at API middleware level
+Permissions also enforced at database query level (row-level scoping where applicable)
+No role can access data or actions outside their defined permission set
+Admin can configure which notification types each role receives
+
+9.3 High availability
+System uptime target: 99.5% minimum
+Dashboard data must be available even during scheduled maintenance windows via read replica
+Automation jobs must be retried automatically if they fail — with admin alert after 3 failed retries
+All automation jobs must be idempotent — running twice must not produce duplicate records
+
+9.4 Scalability
+System must support up to 500 concurrent users without degradation
+Dashboard API response time must be under 1 second for pre-cached period data
+Score calculation must complete within 3 seconds of achievement save
+Reports must generate within 5 seconds for up to 24 months of data
+Database tables must have appropriate indexes on: KPI ID, period, user ID, status
+
+Non-Functional Requirements
+10. Success Criteria
+The ORM module is considered successfully delivered when all of the following are met:
+
+10.1 Process success
+Monthly ORM review completed on schedule every month
+All Core Team members able to submit achievement data before the deadline
+Automated reminders dispatched without manual intervention
+
+10.2 Performance success
+Improved KPI scores — measurable upward trend in ORM score quarter on quarter
+Reduction in open actions month on month as improvements take effect
+Scorecard generated and distributed to MD within 24 hours of score calculation
+
+10.3 Decision-making success
+Data-driven decisions enabled — MD and HOD able to identify low-performing KPIs immediately from the dashboard
+Action plans created for every KPI flagged below threshold
+Monthly trend visible and used in leadership
+
+11. Glossary
+ORM: Organisational Result Matrix — the module name
+KPI: Key Performance Indicator — a measurable metric tracked within ORM
+Weightage: The percentage contribution of a KPI to the total ORM score. All KPI weightages must sum to 100%.
+Standard formula: (Achievement ÷ Target) × 100 — used for KPIs where higher achievement is better
+Reverse formula: (Target ÷ Achievement) × 100 — used for Cost KPIs where lower actual cost = better performance
+ORM Score: The total weighted score across all active KPIs for a given period. Maximum 100%.
+Period: The time interval for a target or achievement record. Format: YYYY-MM for monthly, YYYY-Q1 for quarterly, YYYY for yearly.
+
+Threshold: The minimum acceptable ORM score or KPI score. Default 70%. Configurable by Admin.
+HOD: Head of Department — senior role responsible for running reviews and assigning actions
+MD: Managing Director — top-level management with full view access, no data entry
+Core Team: Operational team members responsible for entering monthly KPI achievement data
+System: The automation engine role — no human login. Runs all scheduled jobs and notifications.
+
+
+
+
+
+
+
+
+
+
+
+We help share google Forms with Clients to do Survey and help them to audit and score  the Orm Parameters.
+
+End of ORM Developer Requirement Specification
+Role | Permissions
+Client Admin / HR / Strategy | Create KPIs, set targets, configure weight-ages, view all scores and reports
+Core Team | Input monthly achievement data for assigned KPI areas
+HOD | View reports
+MD / Management | View org-level ORM score and trend dashboard
+System (Automation) | Auto-trigger monthly reminders, calculate scores, update dashboards
+Rule | Validation
+Weightages must sum to exactly 100% | Block save if total ≠ 100%. Show validation error.
+Cost KPIs use reverse score formula | KPI flagged as formula_type = 'reverse'. Lower actual = higher score.
+Score cannot be entered before target is set | Achievement input blocked if no target exists for that period.
+Monthly input deadline enforced | Core team cannot edit after Admin-configured deadline. Admin can override.
+Score auto-recalculates on every achievement save | No manual score entry. System recalculates immediately on save.
+CSI score -feeds ORM Customer KPI | CSI % to ORM Customer category each cycle. Manual entry.
+Score auto-feeds ORM Team KPI | Module pushes org score to ORM Team outcome each cycle.
+Red flag threshold configurable by Admin | Default 70%. Any KPI below threshold flagged on dashboard and action prompted.
+Trigger | Recipient | Channel | Timing
+Monthly input reminder | Core team members | Email + in-app | Configurable date (e.g., 10th of month)
+Deadline approaching | Core team members | Email + in-app | 1 day before input deadline
+Score published | HOD, MD, Admin | Email + in-app | Immediately after auto-calculation
+KPI red flag | Admin, HOD, MD | In-app | Immediately on score calculation if below threshold
+Action assigned | Action owner | Email + in-app | Immediately on action creation
+Action overdue | Action owner + Admin | Email + in-app | Day of deadline + every 2 days after
+Requirement | Specification
+Score calculation | Must complete within 3 seconds of achievement save
+Dashboard load | < 1 second for pre-cached period data
+Data accuracy | Score calculation formula must match exactly — include unit tests
+Access control | HOD can only see own dept data. MD sees all. Enforced at API layer.
+Audit trail | All target/achievement changes logged with user ID and timestamp
+Historical data | Minimum 06-24 months of score history retained and accessible
+ORGANIZATION RESULT MATRIX (ORM) format | ORGANIZATION RESULT MATRIX (ORM) format | ORGANIZATION RESULT MATRIX (ORM) format | ORGANIZATION RESULT MATRIX (ORM) format | ORGANIZATION RESULT MATRIX (ORM) format | ORGANIZATION RESULT MATRIX (ORM) format
+Five-Perameters | Subs | Weightage | Target | Achievement | Score
+Revenue Target vs Achi | Location A | 6.0 | 50000 | 50000 | 6
+Revenue Target vs Achi | Location B | 6.0 | 60000 | 60000 | 6
+Revenue Target vs Achi | Location c | 6.0 | 70000 | 60000 | 5
+Revenue Target vs Achi | Location D | 6.0 | 70000 | 70000 | 6
+Revenue Target vs Achi | Location E | 6.0 | 80000 | 70000 | 5
+Revenue Target vs Achi Total |   | 30 |   |   | 28
+Process score | Service | 4 | 25% | 24% | 4
+Process score | Production | 4 | 25% | 20% | 3
+Process score | Sales | 4 | 25% | 19% | 3
+Process score | Delivery | 4 | 25% | 21% | 3
+Process score Total |   | 16 |   |   | 13
+NPS OR CSI | Service Survey | 5 | 25% | 24% | 5
+NPS OR CSI | Prod. Survey | 5 | 25% | 20% | 4
+NPS OR CSI | Sales Survey | 5 | 25% | 19% | 4
+NPS OR CSI | Del. Survey | 5 | 25% | 21% | 4
+NPS OR CSI Total |   | 20 |   |   | 17
+Team Engagement index | Internal Survey | 5 | 85% | 85% | 5
+Team Engagement index | Gupt Survey | 5 | 85% | 85% | 5
+Team Engagement index | anonymous | 5 | 85% | 85% | 5
+Team Engagement index Total |   | 15 |   |   | 15
+Budget Cost Adherence | departmental Cost | 6 | 66,00,000 | 66,00,000 | 6.00
+Budget Cost Adherence | Salaries | 6 | 3,00,000 | 2,90,000 | 5.80
+Budget Cost Adherence | anonymous | 7 | 11,000 | 7,000 | 4.45
+Budget Cost Adherence Total |   | 19 |   |   | 16
+Grand Total |   | 100 |   |   | 90

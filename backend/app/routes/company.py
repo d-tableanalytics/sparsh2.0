@@ -21,6 +21,9 @@ class CompanyOnboardingRequest(BaseModel):
 class CompanyStatusUpdate(BaseModel):
     status: str  # active, hold, inactive
 
+class CompanyORMAccessUpdate(BaseModel):
+    enabled: bool
+
 class CompanyEditRequest(BaseModel):
     name: Optional[str] = None
     domain: Optional[str] = None
@@ -177,6 +180,28 @@ async def update_company_status(company_id: str, body: CompanyStatusUpdate, curr
         raise HTTPException(status_code=404, detail="Company not found")
     
     return {"message": f"Company status changed to {body.status}"}
+
+# ─── Toggle ORM Module Access ───
+@router.patch("/{company_id}/orm-access")
+async def update_company_orm_access(company_id: str, body: CompanyORMAccessUpdate, current_user: dict = Depends(get_current_user)):
+    permissions = current_user.get("permissions", {})
+    can_update = permissions.get("companies", {}).get("update", False)
+
+    # Staff-only control (superadmin, or staff with companies.update permission)
+    if current_user.get("role") != "superadmin" and not can_update:
+        raise HTTPException(status_code=403, detail="Not authorized to manage ORM access")
+
+    companies_collection = get_collection("companies")
+    result = await companies_collection.update_one(
+        {"_id": ObjectId(company_id)},
+        {"$set": {"orm_enabled": body.enabled, "updated_at": datetime.now(timezone.utc)}}
+    )
+
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Company not found")
+
+    await log_activity(current_user, "Toggle ORM Access", "Company", f"{'Enabled' if body.enabled else 'Disabled'} ORM for company {company_id}")
+    return {"message": f"ORM access {'enabled' if body.enabled else 'disabled'}", "orm_enabled": body.enabled}
 
 # ─── Delete Company ───
 @router.delete("/{company_id}")

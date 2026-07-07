@@ -6,5 +6,11 @@ from . import quarter
 from . import session_template
 from . import calendar_events
 from . import settings
+from . import gpt
+from . import dashboard
+from . import notification
+from . import orm
+from . import orm_sheet
+from . import orm_requests
 from . import media_ai
 from . import media_chunk

@@ -502,13 +502,14 @@ const CalendarPage = () => {
                 <div className="flex items-start justify-between mb-2">
                     <div className="space-y-1.5">
                         <div className="flex items-center gap-2">
-                            <div className="flex items-center gap-1.5 text-[8px] font-black uppercase tracking-widest text-[var(--text-muted)]">
-                                {type === 'task' ? <CheckCircle size={10} style={{ color: isCreator ? '#f97316' : '#e11d48' }} /> : <Activity size={10} style={{ color: isCreator ? '#6366f1' : '#0d9488' }} />}
-                                {type}
+                                {type === 'task' ? <CheckCircle size={10} style={{ color: isCreator ? '#f97316' : '#e11d48' }} /> : 
+                                 type === 'orm_reminder' ? <Layers size={10} className="text-amber-600" /> :
+                                 <Activity size={10} style={{ color: isCreator ? '#6366f1' : '#0d9488' }} />}
+                                {type === 'orm_reminder' ? 'ORM REMINDER' : type}
                             </div>
                             {statusBadges[s] || statusBadges.schedule}
+                            {type === 'orm_reminder' && <span className="px-2 py-0.5 bg-amber-500 text-white rounded-md text-[8px] font-black uppercase tracking-widest border border-amber-600">Strategic</span>}
                             {!isCreator && <span className="px-2 py-0.5 bg-slate-100 text-slate-600 rounded-md text-[8px] font-black uppercase tracking-widest border border-slate-200 flex items-center gap-1"><UserCircle2 size={8}/> Assigned</span>}
-                        </div>
                         <h4 className="text-[14px] font-black text-[var(--text-main)] group-hover:text-[var(--accent-indigo)] transition-colors pr-10 leading-tight">{ev.title}</h4>
                     </div>
                 </div>
@@ -687,18 +688,22 @@ const CalendarPage = () => {
                         const isCreator = info.event.extendedProps.isCreator;
                         const dotColor = info.event.extendedProps.dotColor;
                         const isTask = type === 'task';
+                        const isORM = type === 'orm_reminder';
                         
                         return (
                             <div className={`flex items-center gap-1.5 px-2 py-0.5 max-w-full overflow-hidden group/ev transition-all border border-transparent hover:border-indigo-200/50 ${s === 'completed' ? 'opacity-40 grayscale' : ''} ${info.isStart ? 'rounded-l-lg' : ''} ${info.isEnd ? 'rounded-r-lg' : ''} ${!info.isStart && !info.isEnd ? '' : 'rounded-lg'}`}
                                  style={{ 
-                                     background: isCreator 
-                                        ? (isTask ? 'rgba(249, 115, 22, 0.08)' : 'rgba(99, 102, 241, 0.08)')
-                                        : (isTask ? 'rgba(225, 29, 72, 0.08)' : 'rgba(13, 148, 136, 0.08)'),
+                                     background: isORM 
+                                        ? 'rgba(245, 158, 11, 0.1)' 
+                                        : (isCreator 
+                                           ? (isTask ? 'rgba(249, 115, 22, 0.08)' : 'rgba(99, 102, 241, 0.08)')
+                                           : (isTask ? 'rgba(225, 29, 72, 0.08)' : 'rgba(13, 148, 136, 0.08)')),
                                      marginLeft: info.isStart ? '0' : '-8px',
                                      marginRight: info.isEnd ? '0' : '-8px',
                                  }}>
-                                <div className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ background: dotColor }}></div>
-                                <span className={`text-[10px] font-black truncate ${isTask ? 'text-orange-700' : 'text-indigo-700'}`} style={{ textDecoration: s === 'completed' ? 'line-through' : 'none' }}>
+                                <div className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ background: isORM ? '#f59e0b' : dotColor }}></div>
+                                {isORM && <span className="px-1.5 py-0.5 bg-amber-500 text-white rounded text-[7px] font-black uppercase tracking-tighter shrink-0">ORM</span>}
+                                <span className={`text-[10px] font-black truncate ${isORM ? 'text-amber-700' : (isTask ? 'text-orange-700' : 'text-indigo-700')}`} style={{ textDecoration: s === 'completed' ? 'line-through' : 'none' }}>
                                     {info.event.title}
                                 </span>
                             </div>

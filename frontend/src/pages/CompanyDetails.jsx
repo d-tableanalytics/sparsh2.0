@@ -10,9 +10,11 @@ import {
   ArrowLeft, Pencil, Trash2, Download, Upload, Plus, User, Lock,
   CheckCircle2, XCircle, PauseCircle, ChevronDown, Save, X,
   FileSpreadsheet, AlertTriangle, ExternalLink, Layers, Calendar,
-  Target, BookOpen, ChevronRight, CheckCircle, Circle, UploadCloud, FileText, Bot
+  Target, BookOpen, ChevronRight, CheckCircle, Circle, UploadCloud, FileText, Bot, Inbox
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import ORMReportTab from '../components/company/ORMReportTab';
+import ORMTargetRequestsTab from '../components/company/ORMTargetRequestsTab';
 import {
   BarChart, Bar, LineChart, Line, PieChart, Pie, Cell,
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
@@ -137,6 +139,7 @@ const CompanyDetails = () => {
   const canDelete = user?.role === 'superadmin' || user?.permissions?.companies?.delete;
   const canReadUsers = user?.role === 'superadmin' || user?.permissions?.users?.read;
   const canReadAnalytics = user?.role === 'superadmin' || user?.permissions?.companies?.read;
+  const isStaff = ['superadmin', 'admin'].includes(user?.role);
 
   const fetchData = async () => {
     try {
@@ -229,6 +232,15 @@ const CompanyDetails = () => {
       showSuccess('Company deleted successfully');
       navigate('/companies');
     } catch (err) { showError('Delete failed'); }
+  };
+
+  const handleToggleOrm = async () => {
+    const next = !(company.orm_enabled ?? true);
+    try {
+      await api.patch(`/companies/${companyId}/orm-access`, { enabled: next });
+      setCompany(prev => ({ ...prev, orm_enabled: next }));
+      showSuccess(`ORM ${next ? 'enabled' : 'disabled'} for ${company.name}`);
+    } catch (err) { showError('Failed to update ORM access'); }
   };
 
   const handleAddUser = async (e) => {
@@ -336,6 +348,19 @@ const CompanyDetails = () => {
           <StatusBadge status={company.status || 'active'} />
         </div>
         <div className="flex items-center gap-2">
+          {isStaff && canUpdate && (
+            <button
+              onClick={handleToggleOrm}
+              className={`h-9 px-4 rounded-lg text-[12px] font-bold flex items-center gap-2 border transition-all ${
+                (company.orm_enabled ?? true)
+                  ? 'bg-[var(--accent-green-bg)] border-[var(--accent-green-border)] text-[var(--accent-green)]'
+                  : 'bg-[var(--bg-card)] border-[var(--border)] text-[var(--text-muted)] hover:border-[var(--accent-green)]'
+              }`}
+              title="Toggle whether this company can access the ORM module"
+            >
+              <Layers size={14} /> ORM {(company.orm_enabled ?? true) ? 'On' : 'Off'}
+            </button>
+          )}
           {canUpdate && (
             <>
               <button onClick={() => setEditMode(!editMode)} className="h-9 px-4 bg-[var(--bg-card)] border border-[var(--border)] text-[var(--text-muted)] rounded-lg text-[12px] font-bold flex items-center gap-2 hover:border-[var(--accent-indigo)] hover:text-[var(--accent-indigo)] transition-all">
@@ -396,6 +421,8 @@ const CompanyDetails = () => {
           { id: 'dashboard', label: 'Company Dashboard', icon: BarChart3, show: canReadAnalytics },
           { id: 'members', label: 'Team Members', icon: Users, show: canReadUsers },
           { id: 'batches', label: 'Batches', icon: Layers, show: canReadAnalytics },
+          { id: 'orm', label: 'ORM Report', icon: Target, show: canReadAnalytics },
+          { id: 'orm-requests', label: 'Target Requests', icon: Inbox, show: isStaff },
         ].filter(t => t.show).map(tab => (
           <button key={tab.id} onClick={() => setActiveTab(tab.id)}
             className={`flex items-center gap-2 px-5 py-2.5 rounded-lg text-[12px] font-bold transition-all ${
@@ -927,6 +954,16 @@ const CompanyDetails = () => {
               )}
             </div>
           </motion.div>
+        )}
+
+        {/* ════════════ ORM REPORT TAB ════════════ */}
+        {activeTab === 'orm' && (
+          <ORMReportTab key="orm" companyId={companyId} companyName={company.name} />
+        )}
+
+        {/* ════════════ ORM TARGET REQUESTS TAB ════════════ */}
+        {activeTab === 'orm-requests' && isStaff && (
+          <ORMTargetRequestsTab key="orm-requests" companyId={companyId} />
         )}
       </AnimatePresence>
 
