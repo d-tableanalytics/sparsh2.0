@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from app.controllers.auth_controller import get_current_user
 from app.db.mongodb import get_collection
+from app.utils.orm_utils import ensure_orm_enabled
 from pydantic import BaseModel
 from typing import List, Optional
 from datetime import datetime
@@ -49,6 +50,8 @@ async def create_request(payload: TargetRequestCreate, current_user: dict = Depe
     company_id = current_user.get("company_id")
     if not company_id:
         raise HTTPException(status_code=400, detail="No company is associated with this account")
+
+    await ensure_orm_enabled(current_user, company_id)
 
     if not payload.changes:
         raise HTTPException(status_code=400, detail="At least one target change is required")

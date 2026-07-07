@@ -29,8 +29,8 @@ const Sidebar = () => {
     { name: 'Training Roadmap', path: '/company-portal', icon: Target, roles: ['clientadmin', 'clientuser'] },
     { name: 'Live Sessions', path: '/sessions', icon: PlayCircle, roles: ['clientadmin', 'clientuser'] },
     { name: 'My Progress', path: '/my-reports', icon: BarChart3, roles: ['clientadmin', 'clientuser'] },
-    { name: 'Organization Result Matrix (ORM)', path: '/orm', icon: Database, roles: ['clientadmin'] },
-    { name: 'ORM Sheet', path: '/orm/sheet', icon: CheckSquare, roles: ['clientadmin', 'clientuser'] },
+    { name: 'Organization Result Matrix (ORM)', path: '/orm', icon: Database, roles: ['clientadmin'], requiresOrm: true },
+    { name: 'ORM Sheet', path: '/orm/sheet', icon: CheckSquare, roles: ['clientadmin', 'clientuser'], requiresOrm: true },
     { name: 'Team', path: '/team', icon: Users, roles: ['clientadmin'] },
     { name: 'Calendar', path: '/calendar', icon: Calendar, roles: ['superadmin', 'admin', 'clientadmin', 'clientuser', 'coach', 'staff'], permissionKey: 'calendar' },
     { name: 'Company Settings', path: '/settings', icon: Settings, roles: ['clientadmin'] },
@@ -43,6 +43,9 @@ const Sidebar = () => {
 
     // If it's a client role, strictly hide admin links regardless of permissions
     if (isClientRole && isAdminLink) return false;
+
+    // Hide ORM links when the company's ORM module is disabled (staff-controlled)
+    if (link.requiresOrm && user?.orm_enabled === false) return false;
 
     // Default filtering logic
     const hasRole = link.roles.includes(user?.role);

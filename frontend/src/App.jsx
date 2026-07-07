@@ -39,6 +39,16 @@ import PrivateRoute from './components/common/PrivateRoute';
 import './index.css';
 import { useAuth } from './context/AuthContext';
 
+// Blocks client-side users from ORM pages when their company's ORM module is off.
+const OrmGuard = ({ children }) => {
+  const { user } = useAuth();
+  const isStaff = ['superadmin', 'admin'].includes(user?.role);
+  if (user && !isStaff && user.orm_enabled === false) {
+    return <Navigate to="/" />;
+  }
+  return children;
+};
+
 const AppRoutes = () => {
   const { user } = useAuth();
 
@@ -65,9 +75,9 @@ const AppRoutes = () => {
       <Route path="/sessions" element={<PrivateRoute><LearnerSessions /></PrivateRoute>} />
       <Route path="/company-portal" element={<PrivateRoute><CompanyPortal /></PrivateRoute>} />
       <Route path="/my-reports" element={<PrivateRoute><MyReports /></PrivateRoute>} />
-      <Route path="/orm" element={<PrivateRoute><ORMPage /></PrivateRoute>} />
-      <Route path="/orm/setup" element={<PrivateRoute><ORMSetup /></PrivateRoute>} />
-      <Route path="/orm/sheet" element={<PrivateRoute><ORMSheet /></PrivateRoute>} />
+      <Route path="/orm" element={<PrivateRoute><OrmGuard><ORMPage /></OrmGuard></PrivateRoute>} />
+      <Route path="/orm/setup" element={<PrivateRoute><OrmGuard><ORMSetup /></OrmGuard></PrivateRoute>} />
+      <Route path="/orm/sheet" element={<PrivateRoute><OrmGuard><ORMSheet /></OrmGuard></PrivateRoute>} />
       
       {/* Admin Side: Staff Management */}
       <Route path="/admin/users" element={<PrivateRoute><UserManagement /></PrivateRoute>} />

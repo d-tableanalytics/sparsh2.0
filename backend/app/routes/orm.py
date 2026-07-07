@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from app.models.orm import ORMCreateRequest
 from app.controllers.auth_controller import get_current_user
 from app.db.mongodb import get_collection
-from app.utils.orm_utils import sync_orm_to_calendar
+from app.utils.orm_utils import sync_orm_to_calendar, ensure_orm_enabled
 from bson import ObjectId
 from datetime import datetime
 from typing import List
@@ -115,6 +115,9 @@ async def save_orm(request: ORMCreateRequest, current_user: dict = Depends(get_c
     if current_user.get("role") not in ["superadmin", "admin", "clientadmin"]:
         raise HTTPException(status_code=403, detail="Not authorized to design ORM")
 
+    # Block client-side saves when ORM is disabled for the company.
+    await ensure_orm_enabled(current_user, request.company_id)
+
     # Only the current month is editable; past months are read-only history.
     period = request.period or _current_period()
     if period != _current_period():
@@ -159,6 +162,9 @@ async def save_orm(request: ORMCreateRequest, current_user: dict = Depends(get_c
 
 @router.get("/{company_id}")
 async def get_orm(company_id: str, period: str = None, current_user: dict = Depends(get_current_user)):
+    # Client-side users can't read ORM for a company that has it disabled (staff bypass).
+    await ensure_orm_enabled(current_user, company_id)
+
     col = get_collection("ORM_Configs")
     orm = await col.find_one({"company_id": company_id})
 

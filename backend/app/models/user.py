@@ -42,6 +42,7 @@ class UserCreate(UserBase):
 class UserResponse(UserBase):
     id: str = Field(alias="_id")
     created_at: datetime = Field(default_factory=datetime.utcnow)
+    orm_enabled: Optional[bool] = True  # Company-level ORM module access
 
     class Config:
         populate_by_name = True

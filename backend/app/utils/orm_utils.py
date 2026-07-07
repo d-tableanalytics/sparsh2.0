@@ -1,7 +1,34 @@
 from app.db.mongodb import get_collection
 from app.models.calendar_event import Reminder
 from datetime import datetime, timedelta
+from bson import ObjectId
 import calendar
+
+STAFF_ROLES = {"superadmin", "admin"}
+
+
+async def is_orm_enabled(company_id: str) -> bool:
+    """Whether ORM is enabled for a company. Missing flag defaults to enabled so
+    existing companies keep working until a superadmin explicitly disables ORM."""
+    if not company_id:
+        return False
+    try:
+        company = await get_collection("companies").find_one({"_id": ObjectId(company_id)})
+    except Exception:
+        return True
+    if not company:
+        return True
+    return bool(company.get("orm_enabled", True))
+
+
+async def ensure_orm_enabled(current_user: dict, company_id: str):
+    """Raise 403 for client-side users when their company's ORM access is off.
+    Staff (superadmin/admin) always pass so they can manage/report on ORM."""
+    from fastapi import HTTPException
+    if current_user.get("role") in STAFF_ROLES:
+        return
+    if not await is_orm_enabled(company_id):
+        raise HTTPException(status_code=403, detail="ORM is not enabled for this company. Contact your administrator.")
 
 async def sync_orm_to_calendar(company_id: str, parameters: list, saving_user_id: str = None):
     col = get_collection("calendar_events")

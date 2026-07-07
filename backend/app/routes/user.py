@@ -57,6 +57,14 @@ class UserStatusUpdate(BaseModel):
 @router.get("/me", response_model=UserResponse)
 async def read_users_me(current_user: dict = Depends(get_current_active_user)):
     current_user["_id"] = str(current_user["_id"])
+    # Surface the company's ORM access flag so the client can gate ORM navigation.
+    company_id = current_user.get("company_id")
+    if company_id:
+        try:
+            company = await get_collection("companies").find_one({"_id": ObjectId(company_id)})
+            current_user["orm_enabled"] = bool(company.get("orm_enabled", True)) if company else True
+        except Exception:
+            current_user["orm_enabled"] = True
     return current_user
 
 # ─── Helper to find user in any collection ───

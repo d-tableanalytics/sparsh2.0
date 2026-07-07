@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from app.controllers.auth_controller import get_current_user
 from app.db.mongodb import get_collection
+from app.utils.orm_utils import ensure_orm_enabled
 from pydantic import BaseModel, Field
 from typing import List, Optional
 from datetime import datetime
@@ -51,7 +52,9 @@ async def get_assigned_subsections(current_user: dict = Depends(get_current_user
     company_id = current_user.get("company_id")
     if not company_id:
         return {"parameters": []}
-    
+
+    await ensure_orm_enabled(current_user, company_id)
+
     configs_col = get_collection("ORM_Configs")
     orm = await configs_col.find_one({"company_id": company_id})
     if not orm:
@@ -132,10 +135,12 @@ async def submit_orm_sheet(
     current_user: dict = Depends(get_current_user)
 ):
     company_id = current_user.get("company_id")
+    await ensure_orm_enabled(current_user, company_id)
+
     user_id = str(current_user.get("_id"))
     user_name = current_user.get("name", "Learner")
     email = current_user.get("email", "")
-    
+
     submissions_col = get_collection("ORM_Submissions")
     
     # 1. Double check duplicate submissions

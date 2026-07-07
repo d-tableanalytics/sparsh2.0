@@ -234,6 +234,15 @@ const CompanyDetails = () => {
     } catch (err) { showError('Delete failed'); }
   };
 
+  const handleToggleOrm = async () => {
+    const next = !(company.orm_enabled ?? true);
+    try {
+      await api.patch(`/companies/${companyId}/orm-access`, { enabled: next });
+      setCompany(prev => ({ ...prev, orm_enabled: next }));
+      showSuccess(`ORM ${next ? 'enabled' : 'disabled'} for ${company.name}`);
+    } catch (err) { showError('Failed to update ORM access'); }
+  };
+
   const handleAddUser = async (e) => {
     e.preventDefault();
     try {
@@ -339,6 +348,19 @@ const CompanyDetails = () => {
           <StatusBadge status={company.status || 'active'} />
         </div>
         <div className="flex items-center gap-2">
+          {isStaff && canUpdate && (
+            <button
+              onClick={handleToggleOrm}
+              className={`h-9 px-4 rounded-lg text-[12px] font-bold flex items-center gap-2 border transition-all ${
+                (company.orm_enabled ?? true)
+                  ? 'bg-[var(--accent-green-bg)] border-[var(--accent-green-border)] text-[var(--accent-green)]'
+                  : 'bg-[var(--bg-card)] border-[var(--border)] text-[var(--text-muted)] hover:border-[var(--accent-green)]'
+              }`}
+              title="Toggle whether this company can access the ORM module"
+            >
+              <Layers size={14} /> ORM {(company.orm_enabled ?? true) ? 'On' : 'Off'}
+            </button>
+          )}
           {canUpdate && (
             <>
               <button onClick={() => setEditMode(!editMode)} className="h-9 px-4 bg-[var(--bg-card)] border border-[var(--border)] text-[var(--text-muted)] rounded-lg text-[12px] font-bold flex items-center gap-2 hover:border-[var(--accent-indigo)] hover:text-[var(--accent-indigo)] transition-all">
