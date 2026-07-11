@@ -5,7 +5,7 @@ import {
   LayoutDashboard, Users, Briefcase, CheckSquare,
   Settings, Building2,
   PieChart, MessageSquare, LogOut, Layers, Copy, Calendar, Sparkles, PlayCircle, Target, BarChart3, Library, X,
-  Forward, Bell, Trash2, ChevronDown, Activity, CalendarDays, UsersRound
+  Forward, Bell, Trash2, ChevronDown, Activity, CalendarDays, Database
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { canAccessTaskManagement } from '../../utils/taskAccess';
@@ -58,7 +58,6 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen }) => {
         { name: 'Delegated Tasks', path: '/tasks/delegated', icon: Forward },
         { name: 'Subscribed Tasks', path: '/tasks/subscribed', icon: Bell },
         { name: 'All Tasks', path: '/tasks/all', icon: Layers },
-        { name: 'Groups', path: '/tasks/groups', icon: UsersRound },
         { name: 'Holiday', path: '/tasks/holiday', icon: CalendarDays, roles: ['superadmin', 'admin'] },
         { name: 'Activity', path: '/tasks/activity', icon: Activity },
         { name: 'Deleted Tasks', path: '/tasks/deleted', icon: Trash2 },

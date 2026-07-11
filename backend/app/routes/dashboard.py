@@ -47,23 +47,29 @@ async def get_dashboard_stats(current_user: dict = Depends(get_current_user)):
         day_str = day.strftime("%d %b")
         count = 0
         
-        # Count sessions
+        # Count sessions only — exclude type=="task" so completed Task Management to-dos
+        # (which also carry status=="completed") never inflate the session pulse. Keeps
+        # Calendar/session stats independent of Task/Delegation data. (Session Mix below
+        # already applies this same exclusion.)
         for col_name in session_cols:
             query = {
                 "start": {"$regex": f"^{day.isoformat()}"},
-                "status": "completed"
+                "status": "completed",
+                "type": {"$ne": "task"},
             }
             if not is_staff:
                 query["company_id"] = company_id
-                
+
             count += await get_collection(col_name).count_documents(query)
         pulse_data.append({"name": day_str, "sessions": count})
 
-    # Total Velocity for the KPI (30 days)
+    # Total Velocity for the KPI (30 days) — sessions only (exclude type=="task" so completed
+    # tasks don't leak into the session count; keeps Calendar and Task/Delegation independent).
     for col_name in session_cols:
         query = {
             "status": "completed",
-            "start": {"$gte": thirty_days_ago}
+            "start": {"$gte": thirty_days_ago},
+            "type": {"$ne": "task"},
         }
         if not is_staff:
             query["company_id"] = company_id

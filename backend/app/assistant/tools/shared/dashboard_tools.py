@@ -57,7 +57,9 @@ async def get_dashboard_stats(ctx: UserContext) -> ToolResult:
     thirty_days_ago = (datetime.utcnow() - timedelta(days=30)).isoformat()
     session_velocity = 0
     for col_name in session_cols:
-        query: dict = {"status": "completed", "start": {"$gte": thirty_days_ago}}
+        # Sessions only — exclude type=="task" so completed to-dos don't inflate the count
+        # (mirrors the Session Mix exclusion below; keeps Calendar and Task stats independent).
+        query: dict = {"status": "completed", "start": {"$gte": thirty_days_ago}, "type": {"$ne": "task"}}
         if not is_staff:
             query["company_id"] = company_id
         session_velocity += await get_collection(col_name).count_documents(query)
@@ -69,7 +71,7 @@ async def get_dashboard_stats(ctx: UserContext) -> ToolResult:
         day = today - timedelta(days=i)
         count = 0
         for col_name in session_cols:
-            q: dict = {"start": {"$regex": f"^{day.isoformat()}"}, "status": "completed"}
+            q: dict = {"start": {"$regex": f"^{day.isoformat()}"}, "status": "completed", "type": {"$ne": "task"}}
             if not is_staff:
                 q["company_id"] = company_id
             count += await get_collection(col_name).count_documents(q)

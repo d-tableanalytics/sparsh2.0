@@ -3,9 +3,9 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { X, Save } from 'lucide-react';
 import { STATUS_CONFIG } from './statusConfig';
 
-// Collects the Doer Name + Reason that "Dependent on Other" and "Blocked" require before a
-// status change can be saved (backend enforces the same). The doer is picked from the
-// assignable users; for "Dependent on Other" the backend reassigns the task to that doer.
+// Collects the Reason a status change requires before it can be saved (backend enforces the
+// same). "Dependent on Other" additionally needs a Doer Name — the task is reassigned to that
+// doer — so the doer picker is shown only for that status. "Blocked" needs a reason only.
 // Shares the header/footer shape of the module's other small modals (PickerModal / TaskTagsModal).
 const StatusReasonModal = ({ isOpen, status, users = [], onClose, onSubmit, saving = false }) => {
   const [doerId, setDoerId] = useState('');
@@ -19,13 +19,15 @@ const StatusReasonModal = ({ isOpen, status, users = [], onClose, onSubmit, savi
 
   if (!isOpen) return null;
 
+  // Only "Dependent on Other" needs a doer (it reassigns the task); "Blocked" needs a reason only.
+  const needsDoer = status === 'dependent_on_others';
   const label = STATUS_CONFIG[status]?.label || status;
   const doerName = users.find(u => u._id === doerId)?.full_name || users.find(u => u._id === doerId)?.email || '';
-  const canSave = doerId && reason.trim() && !saving;
+  const canSave = reason.trim() && (!needsDoer || doerId) && !saving;
 
   const handleSave = () => {
     if (!canSave) return;
-    onSubmit({ doerId, doerName, reason: reason.trim() });
+    onSubmit({ doerId: needsDoer ? doerId : '', doerName: needsDoer ? doerName : '', reason: reason.trim() });
   };
 
   return (
@@ -40,16 +42,18 @@ const StatusReasonModal = ({ isOpen, status, users = [], onClose, onSubmit, savi
           </div>
 
           <div className="px-5 py-4 space-y-3">
+            {needsDoer && (
+              <div>
+                <label className="text-[9px] font-black text-[var(--text-muted)] uppercase tracking-widest">Doer Name *</label>
+                <select value={doerId} onChange={e => setDoerId(e.target.value)}
+                  className="mt-1 w-full px-3 py-2 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-lg text-[12px] font-bold outline-none focus:border-[var(--accent-indigo)]">
+                  <option value="">Select a doer...</option>
+                  {users.map(u => <option key={u._id} value={u._id}>{u.full_name || u.email}</option>)}
+                </select>
+              </div>
+            )}
             <div>
-              <label className="text-[9px] font-black text-[var(--text-muted)] uppercase tracking-widest">Doer Name *</label>
-              <select value={doerId} onChange={e => setDoerId(e.target.value)}
-                className="mt-1 w-full px-3 py-2 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-lg text-[12px] font-bold outline-none focus:border-[var(--accent-indigo)]">
-                <option value="">Select a doer...</option>
-                {users.map(u => <option key={u._id} value={u._id}>{u.full_name || u.email}</option>)}
-              </select>
-            </div>
-            <div>
-              <label className="text-[9px] font-black text-[var(--text-muted)] uppercase tracking-widest">Reason *</label>
+              <label className="text-[9px] font-black text-[var(--text-muted)] uppercase tracking-widest">Remark *</label>
               <textarea rows={3} value={reason} onChange={e => setReason(e.target.value)}
                 placeholder="Why is the task in this status?"
                 className="mt-1 w-full px-3 py-2 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-lg text-[12px] font-bold outline-none focus:border-[var(--accent-indigo)] resize-none" />

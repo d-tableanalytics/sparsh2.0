@@ -27,6 +27,10 @@ export const deleteChecklistItem = (taskId, itemId) => api.delete(`/tasks/${task
 
 export const addTaskComment = (taskId, text) => api.post(`/tasks/${taskId}/comments`, { text });
 
+// Follow-Up raised by an In-Loop member (watcher) / participant — a nudge with a remark.
+// The follow-up count is len(followUps) on the task detail payload.
+export const addTaskFollowUp = (taskId, remark) => api.post(`/tasks/${taskId}/follow-up`, { remark });
+
 export const uploadTaskAttachment = (taskId, file) => {
   const form = new FormData();
   form.append('file', file);
