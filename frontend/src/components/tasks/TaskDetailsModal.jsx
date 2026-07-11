@@ -12,6 +12,7 @@ import {
   uploadCompletionAttachment, deleteCompletionAttachment, reviseTaskDeadline,
   addTaskFollowUp,
 } from '../../services/taskApi';
+import { getHolidays } from '../../services/holidayApi';
 import { useAuth } from '../../context/AuthContext';
 import { useNotification } from '../../context/NotificationContext';
 import { STATUS_CONFIG, REASON_REQUIRED_STATUSES } from './statusConfig';
@@ -48,6 +49,10 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, onChanged, onEdit }) => {
   const [postingFollowUp, setPostingFollowUp] = useState(false);
   // In-Loop top controls: which quick-input (Follow Up / Remark) is expanded.
   const [inLoopBox, setInLoopBox] = useState(null); // 'followup' | 'remark' | null
+  // Holidays + Sunday weekly-off block selection in the Revision / Reopen / Date-Revision pickers,
+  // matching the create form. There is no persisted per-user weekly-off, so Sunday (0) is used.
+  const [holidayDates, setHolidayDates] = useState([]);
+  const WEEKLY_OFFS = [0];
   // Target status awaiting a Doer Name + Reason (Dependent on Other / Blocked).
   const [reasonStatus, setReasonStatus] = useState(null);
   const [savingReason, setSavingReason] = useState(false);
@@ -85,6 +90,8 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, onChanged, onEdit }) => {
     // Categories/tags for the "Add Subtask" form.
     api.get('/task-categories').then(r => setMetaCats((r.data || []).map(c => c.name).filter(Boolean))).catch(() => {});
     api.get('/task-tags').then(r => setMetaTags((r.data || []).map(t => t.name).filter(Boolean))).catch(() => {});
+    // Holidays block dates in the Revision / Reopen / Date-Revision pickers.
+    getHolidays().then(res => setHolidayDates((res.data || []).map(h => h.holiday_date).filter(Boolean))).catch(() => setHolidayDates([]));
   }, [isOpen, fetchDetail]);
 
   // Reset the working copy whenever the SERVER checklist changes (open, or after a Save) —
@@ -333,6 +340,12 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, onChanged, onEdit }) => {
   const isSelfTask = !!task && task.isCreator && !(task.assignedTo || []).length;
   // Who drives the working-status dropdown: the assignee, or the creator of a self-task.
   const canWork = isAssignee || isSelfTask;
+  // Pure In-Loop member (watcher, not the doer or the assigner) — e.g. a Subscribed task.
+  const isPureWatcher = !!task && isInLoop && !isAssignee && !task.isCreator;
+  // Editing/deleting the task definition belongs to the assigner (creator) / admins — NOT the
+  // assignee (their "My Tasks" view) and NOT a pure watcher (their Subscribed view). So hide
+  // Edit + Delete for a doer who isn't also the creator, and for in-loop-only members.
+  const canEditOrDelete = canManage && !(isAssignee && !task?.isCreator) && !isPureWatcher;
 
   // ─── Role-based working dropdown (assignee / dependent-on-other doer) ───
   // "Pending" is surfaced as "In Progress"; "Revision" opens the deadline calendar (no status
@@ -346,8 +359,8 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, onChanged, onEdit }) => {
   // Dependent-on-Other doer → Completed, Revision, Dependent on Other, Blocked.
   // Normal assignee → Accept, Dependent on Other, Blocked, Completed, Revision.
   const workingActions = task?.status === 'dependent_on_others'
-    ? [['completed', completedLabel], [REVISION_OPT, 'Revision'], ['dependent_on_others', 'Dependent on Other'], ['blocked', 'Blocked']]
-    : [['accepted', 'Accept'], ['dependent_on_others', 'Dependent on Other'], ['blocked', 'Blocked'], ['completed', completedLabel], [REVISION_OPT, 'Revision']];
+    ? [['completed', completedLabel], [REVISION_OPT, 'Revision'], ['dependent_on_others', 'Dependent on Other'], ['blocked', 'In Process-Pending']]
+    : [['accepted', 'Acknowledged Delegation'], ['dependent_on_others', 'Dependent on Other'], ['blocked', 'In Process-Pending'], ['completed', completedLabel], [REVISION_OPT, 'Revision']];
   // Only show the current status as a separate (disabled) line when it isn't already one of the
   // action options — otherwise it would duplicate it (e.g. two "Accept" entries).
   const showCurrentOpt = !workingActions.some(([v]) => v === curDisplayStatus);
@@ -392,10 +405,6 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, onChanged, onEdit }) => {
                       className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider border hover:opacity-90 ${inLoopBox === 'followup' ? 'bg-[var(--accent-indigo)] text-white border-[var(--accent-indigo)]' : 'bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] border-[var(--accent-indigo-border)]'}`}>
                       <Bell size={13} /> Follow Up
                     </button>
-                    <button type="button" onClick={() => setInLoopBox(b => (b === 'remark' ? null : 'remark'))}
-                      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider border hover:opacity-90 ${inLoopBox === 'remark' ? 'bg-[var(--accent-indigo)] text-white border-[var(--accent-indigo)]' : 'bg-[var(--input-bg)] text-[var(--text-muted)] border-[var(--border)]'}`}>
-                      <MessageSquare size={13} /> Remark
-                    </button>
                     {inLoopBox === 'followup' && (
                       <div className="flex items-center gap-2 w-full">
                         <input autoFocus value={followUpText} onChange={e => setFollowUpText(e.target.value)}
@@ -406,16 +415,6 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, onChanged, onEdit }) => {
                           className="flex items-center gap-1.5 px-3 py-2 bg-[var(--accent-indigo)] text-white rounded-lg text-[10px] font-black uppercase tracking-widest disabled:opacity-50 shrink-0">
                           <Bell size={13} /> {postingFollowUp ? '...' : 'Follow Up'}
                         </button>
-                      </div>
-                    )}
-                    {inLoopBox === 'remark' && (
-                      <div className="flex items-center gap-2 w-full">
-                        <input autoFocus value={newComment} onChange={e => setNewComment(e.target.value)}
-                          onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); handleAddComment(); } }}
-                          placeholder="Write a remark..."
-                          className="flex-1 px-3 py-2 bg-[var(--bg-card)] border border-[var(--border)] rounded-lg text-[12px] font-bold outline-none focus:border-[var(--accent-indigo)]" />
-                        <button type="button" onClick={handleAddComment} disabled={posting || !newComment.trim()}
-                          className="p-2 bg-[var(--accent-indigo)] text-white rounded-lg disabled:opacity-60 shrink-0"><Send size={15} /></button>
                       </div>
                     )}
                   </div>
@@ -466,7 +465,7 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, onChanged, onEdit }) => {
                 <span className="px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider border bg-[var(--input-bg)] text-[var(--text-muted)] border-[var(--border)]">
                   {formatFrequencyLabel(task.frequency)}
                 </span>
-                {canManage && (
+                {canEditOrDelete && (
                   <>
                     <button onClick={() => onEdit?.(task)}
                       className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider border bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] border-[var(--accent-indigo-border)] hover:opacity-90">
@@ -850,6 +849,7 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, onChanged, onEdit }) => {
       value={task?.end}
       title="Revise Deadline"
       onApply={(iso) => handleReviseDeadline(iso)}
+      holidayDates={holidayDates} weeklyOffs={WEEKLY_OFFS} onBlocked={showError}
     />
 
     {/* Reopen picker — the assigner must set a NEW deadline; only then is the task reopened
@@ -860,6 +860,7 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, onChanged, onEdit }) => {
       value={task?.end}
       title="New Deadline for Reopen"
       onApply={(iso) => handleReopenWithDeadline(iso)}
+      holidayDates={holidayDates} weeklyOffs={WEEKLY_OFFS} onBlocked={showError}
     />
 
     {/* Doer Name + Reason capture for Dependent on Other / Blocked. */}
