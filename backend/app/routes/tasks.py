@@ -684,10 +684,23 @@ async def update_task_status(task_id: str, body: dict, current_user: dict = Depe
     # Real-time: notify creator + assignees + watchers so their lists update without a refresh.
     # On reassignment, union old + new recipients so the task both drops off the previous
     # assignee's list and appears on the new doer's.
+    #
+    # The verification hand-off gets its own event types (rather than a generic task_updated)
+    # so the two sides can be told what actually happened: the assigner learns a task is
+    # awaiting their verification, and the assignee learns theirs was sent back for rework.
+    if new_status == "completed":
+        event_type = "task_completed"
+    elif new_status == "verification":
+        event_type = "task_verification_requested"
+    elif old_status == "verification" and new_status == "in_progress_reopened":
+        event_type = "task_verification_rejected"
+    else:
+        event_type = "task_updated"
+
     projected = {**existing, **updates}
     recipients = task_events.recipients_for(existing) | task_events.recipients_for(projected)
     await task_events.publish(recipients, {
-        "type": "task_completed" if new_status == "completed" else "task_updated",
+        "type": event_type,
         "task_id": task_id,
         "status": new_status,
         "title": existing.get("title"),

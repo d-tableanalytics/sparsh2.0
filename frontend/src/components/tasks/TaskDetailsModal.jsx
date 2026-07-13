@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import {
   ArrowLeft, Trash2, Pencil, FileText, History, Info, Users, Layers, Plus,
   Paperclip, MessageSquare, Send, CheckSquare, Square, X, Tags as TagsIcon,
-  ShieldCheck, CheckCircle2, RotateCcw, CalendarClock, FileCheck2, Save, Bell,
+  ShieldCheck, CalendarClock, FileCheck2, Save, Bell,
 } from 'lucide-react';
 import api from '../../services/api';
 import {
@@ -25,7 +25,7 @@ import AttachmentItem from './AttachmentItem';
 // Full single-task view: description, revision (status) history, core info,
 // involved parties, sub-tasks/checklist, attachments, and a comment thread.
 // Opened from the row menu in TaskListView ("Details").
-const TaskDetailsModal = ({ isOpen, onClose, taskId, onChanged, onEdit }) => {
+const TaskDetailsModal = ({ isOpen, onClose, taskId, scope, onChanged, onEdit }) => {
   const { user } = useAuth();
   const { showSuccess, showError } = useNotification();
   const [task, setTask] = useState(null);
@@ -137,7 +137,7 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, onChanged, onEdit }) => {
       // Verification-required tasks completed by the assignee are routed to "verification"
       // by the backend — the silent refetch below reflects whatever the server decided.
       if (status === 'completed' && task?.verificationRequired && !canManage) {
-        showSuccess('Submitted for verification');
+        showSuccess('Verification requested — sent to the assigner');
       }
       fetchDetail({ silent: true });
       onChanged?.();
@@ -150,10 +150,12 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, onChanged, onEdit }) => {
   };
 
   // Verification actions — assigner/delegator only (backend also enforces).
+  // Approve: the assigner's own "completed" is NOT rerouted to verification by the backend
+  // (that reroute only applies to the assignee), so this finalizes the task.
   const handleFinalComplete = async () => {
     try {
       await updateTaskStatus(taskId, 'completed');
-      showSuccess('Task verified & completed');
+      showSuccess('Verification approved — task completed');
       fetchDetail({ silent: true });
       onChanged?.();
     } catch (err) {
@@ -161,23 +163,24 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, onChanged, onEdit }) => {
     }
   };
 
-  // Reopen must carry a NEW deadline (spec): open the date picker first; the actual reopen
-  // happens in handleReopenWithDeadline once the assigner picks a date.
+  // Reopen must carry a NEW deadline and a mandatory remark (spec): open the picker first; the
+  // actual hand-back happens in handleReopenWithDeadline once the assigner submits both.
   const handleReopen = () => setReopenPickerOpen(true);
 
-  const handleReopenWithDeadline = async (iso) => {
+  const handleReopenWithDeadline = async (iso, remark) => {
     setReopenPickerOpen(false);
     setReopening(true);
     try {
-      // Set the new deadline first (assigner-only endpoint), then flip status to Reopened and
-      // hand the task back to the assignee. Reuses the existing deadline + status APIs.
-      await reviseTaskDeadline(taskId, iso, 'Reopened by assigner');
-      await updateTaskStatus(taskId, 'in_progress_reopened');
-      showSuccess('Task reopened with a new deadline');
+      // Set the new deadline first (assigner-only endpoint), then flip status to Reopened,
+      // which hands the task back to the assignee for rework. Reuses the existing APIs — the
+      // remark lands in both the deadline-revision history and the status history.
+      await reviseTaskDeadline(taskId, iso, remark);
+      await updateTaskStatus(taskId, 'in_progress_reopened', remark);
+      showSuccess('Task reopened — sent back to the assignee for rework');
       fetchDetail({ silent: true });
       onChanged?.();
     } catch (err) {
-      showError(err.response?.data?.detail || 'Failed to reopen task');
+      showError(err.response?.data?.detail || 'Failed to send the task back');
     } finally {
       setReopening(false);
     }
@@ -346,6 +349,9 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, onChanged, onEdit }) => {
   // assignee (their "My Tasks" view) and NOT a pure watcher (their Subscribed view). So hide
   // Edit + Delete for a doer who isn't also the creator, and for in-loop-only members.
   const canEditOrDelete = canManage && !(isAssignee && !task?.isCreator) && !isPureWatcher;
+  // Follow-Up is removed from the My Tasks module only — Delegated/Subscribed/All/Deleted
+  // Tasks keep it (this component is shared across all of them via the `scope` prop).
+  const hideFollowUp = scope === 'my';
 
   // ─── Role-based working dropdown (assignee / dependent-on-other doer) ───
   // "Pending" is surfaced as "In Progress"; "Revision" opens the deadline calendar (no status
@@ -354,19 +360,36 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, onChanged, onEdit }) => {
   const curDisplayStatus = task?.status === 'pending' ? 'in_progress' : task?.status;
   const curCfg = (task && (STATUS_CONFIG[curDisplayStatus] || cfg)) || {};
   const curLabel = STATUS_CONFIG[curDisplayStatus]?.label || curDisplayStatus || '';
-  // Completed submits for verification when Verification Required is on (assignee, not assigner).
-  const completedLabel = (task?.verificationRequired && canWork && !canManage) ? 'Submit for Verification' : 'Completed';
-  // Dependent-on-Other doer → Completed, Revision, Dependent on Other, Blocked.
-  // Normal assignee → Accept, Dependent on Other, Blocked, Completed, Revision.
-  const workingActions = task?.status === 'dependent_on_others'
-    ? [['completed', completedLabel], [REVISION_OPT, 'Revision'], ['dependent_on_others', 'Dependent on Other'], ['blocked', 'In Process-Pending']]
-    : [['accepted', 'Acknowledged Delegation'], ['dependent_on_others', 'Dependent on Other'], ['blocked', 'In Process-Pending'], ['completed', completedLabel], [REVISION_OPT, 'Revision']];
+  // Requirement: Verification Required = Yes → the doer's completion option reads "Request for
+  // Verification" (routes to the verification stage via the same 'completed' status transition,
+  // which the backend reroutes when verification_required is set and the caller isn't the
+  // assigner). Verification Required = No → the plain "Complete" flow, unchanged.
+  const canComplete = canWork && !['completed', 'verification'].includes(task?.status);
+  const requestingVerification = task?.verificationRequired && !canManage;
+  // Dependent-on-Other doer → Revise, Dependent on Other, Blocked.
+  // Normal assignee → Accept, Dependent on Other, Blocked, Revise.
+  // Both then get the completion option (Complete / Request for Verification) as the last entry.
+  const workingActions = [
+    ...(task?.status === 'dependent_on_others'
+      ? [[REVISION_OPT, 'Revise'], ['dependent_on_others', 'Dependent on Other'], ['blocked', 'Blocked']]
+      : [['accepted', 'Acknowledged Delegation'], ['dependent_on_others', 'Dependent on Other'], ['blocked', 'Blocked'], [REVISION_OPT, 'Revise']]),
+    ...(canComplete ? [['completed', requestingVerification ? 'Request for Verification' : 'Complete']] : []),
+  ];
   // Only show the current status as a separate (disabled) line when it isn't already one of the
   // action options — otherwise it would duplicate it (e.g. two "Accept" entries).
   const showCurrentOpt = !workingActions.some(([v]) => v === curDisplayStatus);
   const handleWorkingSelect = (val) => {
     if (val === REVISION_OPT) { setDeadlinePickerOpen(true); return; }
     handleStatusChange(val);
+  };
+  // Pending Verification is the assigner's call: Approve (→ Completed, final) or Reopen (→ back
+  // to the assignee for rework, with a new deadline + mandatory remark). Both live in the status
+  // dropdown rather than as separate buttons.
+  const APPROVE_OPT = '__approve__';
+  const REOPEN_OPT = '__reopen__';
+  const handleVerificationSelect = (val) => {
+    if (val === APPROVE_OPT) { handleFinalComplete(); return; }
+    if (val === REOPEN_OPT) { handleReopen(); }
   };
 
   return (
@@ -419,23 +442,18 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, onChanged, onEdit }) => {
                     )}
                   </div>
                 ) : isAwaitingVerification ? (
-                  // Verification hand-off: the delegator/assigner gets the Final Complete /
-                  // Reopen actions; the assignee only sees a read-only "Pending Verification"
-                  // badge (no assignee-side completion controls here).
+                  // Verification hand-off: the delegator/assigner gets a status dropdown with
+                  // exactly two actions — Approve (final) and Reopen (back for rework); the
+                  // assignee only sees a read-only "Pending Verification" badge.
                   canManage ? (
-                    <>
-                      <span className="px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider border" style={{ background: cfg.bg, color: cfg.color, borderColor: cfg.border }}>
-                        {cfg.label}
-                      </span>
-                      <button onClick={handleFinalComplete}
-                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider border bg-[var(--accent-green-bg)] text-[var(--accent-green)] border-[var(--accent-green-border)] hover:opacity-90">
-                        <CheckCircle2 size={13} /> Final Complete
-                      </button>
-                      <button onClick={handleReopen} disabled={reopening}
-                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider border bg-[var(--accent-orange-bg)] text-[var(--accent-orange)] border-[var(--accent-orange-border)] hover:opacity-90 disabled:opacity-50">
-                        <RotateCcw size={13} /> {reopening ? 'Reopening…' : 'Reopen (New Deadline)'}
-                      </button>
-                    </>
+                    <select value={curDisplayStatus} disabled={reopening}
+                      onChange={e => handleVerificationSelect(e.target.value)}
+                      className="px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider border outline-none cursor-pointer disabled:opacity-50"
+                      style={{ background: cfg.bg, color: cfg.color, borderColor: cfg.border }}>
+                      <option value={curDisplayStatus} disabled>{reopening ? 'Reopening…' : cfg.label}</option>
+                      <option value={APPROVE_OPT}>Approve</option>
+                      <option value={REOPEN_OPT}>Reopen</option>
+                    </select>
                   ) : (
                     <span className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider border" style={{ background: cfg.bg, color: cfg.color, borderColor: cfg.border }}>
                       <ShieldCheck size={13} /> {cfg.label}
@@ -443,7 +461,8 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, onChanged, onEdit }) => {
                   )
                 ) : canWork ? (
                   // Assignee / dependent-on-other doer: role-based working options. The closed
-                  // control shows the current status; the list is exactly the role's action set.
+                  // control shows the current status; the list is exactly the role's action set,
+                  // ending with Complete / Request for Verification.
                   <select value={curDisplayStatus} onChange={e => handleWorkingSelect(e.target.value)}
                     className="px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider border outline-none cursor-pointer"
                     style={{ background: curCfg.bg, color: curCfg.color, borderColor: curCfg.border }}>
@@ -760,47 +779,50 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, onChanged, onEdit }) => {
               </div>
 
               {/* Follow-Ups — raised by In-Loop members (watchers). Count = follow-up list length.
-                  Everyone involved sees the count + history; only in-loop members can add one. */}
-              <div className="bg-[var(--input-bg)] border border-[var(--border)] rounded-2xl p-4">
-                <p className="flex items-center gap-1.5 text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest mb-3">
-                  <Bell size={13} /> Follow-Ups ({task.followUpCount ?? (task.followUps || []).length})
-                </p>
-                {(task.followUps || []).length === 0 ? (
-                  <div className="py-6 flex flex-col items-center justify-center gap-2">
-                    <Bell size={24} className="text-[var(--text-muted)] opacity-30" />
-                    <p className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest opacity-70">No follow-ups yet</p>
-                  </div>
-                ) : (
-                  <div className="space-y-3 mb-3 max-h-56 overflow-y-auto no-scrollbar">
-                    {[...task.followUps].reverse().map(f => (
-                      <div key={f.id} className="flex items-start gap-2">
-                        <div className="w-7 h-7 rounded-full flex items-center justify-center text-white font-black text-[9px] shrink-0" style={{ background: 'var(--avatar-bg)' }}>
-                          {getInitials(f.by_name)}
+                  Everyone involved sees the count + history; only in-loop members can add one.
+                  Removed from the My Tasks module only (see hideFollowUp). */}
+              {!hideFollowUp && (
+                <div className="bg-[var(--input-bg)] border border-[var(--border)] rounded-2xl p-4">
+                  <p className="flex items-center gap-1.5 text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest mb-3">
+                    <Bell size={13} /> Follow-Ups ({task.followUpCount ?? (task.followUps || []).length})
+                  </p>
+                  {(task.followUps || []).length === 0 ? (
+                    <div className="py-6 flex flex-col items-center justify-center gap-2">
+                      <Bell size={24} className="text-[var(--text-muted)] opacity-30" />
+                      <p className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest opacity-70">No follow-ups yet</p>
+                    </div>
+                  ) : (
+                    <div className="space-y-3 mb-3 max-h-56 overflow-y-auto no-scrollbar">
+                      {[...task.followUps].reverse().map(f => (
+                        <div key={f.id} className="flex items-start gap-2">
+                          <div className="w-7 h-7 rounded-full flex items-center justify-center text-white font-black text-[9px] shrink-0" style={{ background: 'var(--avatar-bg)' }}>
+                            {getInitials(f.by_name)}
+                          </div>
+                          <div className="min-w-0">
+                            <p className="text-[11px] font-black text-[var(--text-main)]">{f.by_name}</p>
+                            <p className="text-[12px] font-medium text-[var(--text-main)]">{f.remark}</p>
+                            <p className="text-[9px] font-bold text-[var(--text-muted)] opacity-70">{f.created_at ? formatDateTime(f.created_at) : ''}</p>
+                          </div>
                         </div>
-                        <div className="min-w-0">
-                          <p className="text-[11px] font-black text-[var(--text-main)]">{f.by_name}</p>
-                          <p className="text-[12px] font-medium text-[var(--text-main)]">{f.remark}</p>
-                          <p className="text-[9px] font-bold text-[var(--text-muted)] opacity-70">{f.created_at ? formatDateTime(f.created_at) : ''}</p>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-                {isInLoop ? (
-                  <div className="flex items-center gap-2">
-                    <input value={followUpText} onChange={e => setFollowUpText(e.target.value)}
-                      onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); handleAddFollowUp(); } }}
-                      placeholder="Add a follow-up remark..."
-                      className="flex-1 px-3 py-2 bg-[var(--bg-card)] border border-[var(--border)] rounded-lg text-[12px] font-bold outline-none focus:border-[var(--accent-indigo)]" />
-                    <button type="button" onClick={handleAddFollowUp} disabled={postingFollowUp || !followUpText.trim()}
-                      className="flex items-center gap-1.5 px-3 py-2 bg-[var(--accent-indigo)] text-white rounded-lg text-[10px] font-black uppercase tracking-widest disabled:opacity-50 shrink-0">
-                      <Bell size={13} /> {postingFollowUp ? '...' : 'Follow Up'}
-                    </button>
-                  </div>
-                ) : (
-                  <p className="text-[10px] font-bold text-[var(--text-muted)] opacity-70">Only In-Loop members can raise a follow-up.</p>
-                )}
-              </div>
+                      ))}
+                    </div>
+                  )}
+                  {isInLoop ? (
+                    <div className="flex items-center gap-2">
+                      <input value={followUpText} onChange={e => setFollowUpText(e.target.value)}
+                        onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); handleAddFollowUp(); } }}
+                        placeholder="Add a follow-up remark..."
+                        className="flex-1 px-3 py-2 bg-[var(--bg-card)] border border-[var(--border)] rounded-lg text-[12px] font-bold outline-none focus:border-[var(--accent-indigo)]" />
+                      <button type="button" onClick={handleAddFollowUp} disabled={postingFollowUp || !followUpText.trim()}
+                        className="flex items-center gap-1.5 px-3 py-2 bg-[var(--accent-indigo)] text-white rounded-lg text-[10px] font-black uppercase tracking-widest disabled:opacity-50 shrink-0">
+                        <Bell size={13} /> {postingFollowUp ? '...' : 'Follow Up'}
+                      </button>
+                    </div>
+                  ) : (
+                    <p className="text-[10px] font-bold text-[var(--text-muted)] opacity-70">Only In-Loop members can raise a follow-up.</p>
+                  )}
+                </div>
+              )}
 
               {/* Remark History (Chat) */}
               <div className="bg-[var(--input-bg)] border border-[var(--border)] rounded-2xl p-4">
@@ -850,17 +872,20 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, onChanged, onEdit }) => {
       title="Revise Deadline"
       onApply={(iso) => handleReviseDeadline(iso)}
       holidayDates={holidayDates} weeklyOffs={WEEKLY_OFFS} onBlocked={showError}
+      disablePast
     />
 
-    {/* Reopen picker — the assigner must set a NEW deadline; only then is the task reopened
-        and handed back to the assignee. */}
+    {/* Reopen picker — the assigner must set a NEW deadline and give a mandatory reason; only
+        then is the task handed back to the assignee for rework. */}
     <MiniDatePicker
       isOpen={reopenPickerOpen}
       onClose={() => setReopenPickerOpen(false)}
       value={task?.end}
-      title="New Deadline for Reopen"
-      onApply={(iso) => handleReopenWithDeadline(iso)}
+      title="Reopen Task"
+      onApply={(iso, remark) => handleReopenWithDeadline(iso, remark)}
       holidayDates={holidayDates} weeklyOffs={WEEKLY_OFFS} onBlocked={showError}
+      disablePast
+      remarkLabel="Reason for Reopening" remarkRequired
     />
 
     {/* Doer Name + Reason capture for Dependent on Other / Blocked. */}
@@ -888,6 +913,7 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, onChanged, onEdit }) => {
       <TaskDetailsModal
         isOpen
         taskId={subtaskDetailId}
+        scope={scope}
         onClose={() => setSubtaskDetailId(null)}
         onChanged={() => { fetchDetail({ silent: true }); onChanged?.(); }}
         onEdit={onEdit}

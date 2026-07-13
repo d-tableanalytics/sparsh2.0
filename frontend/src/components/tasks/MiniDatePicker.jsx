@@ -13,12 +13,17 @@ const isSameDay = (a, b) => a && b && a.getFullYear() === b.getFullYear() && a.g
 // `blockHolidays`: when true (default) holidays are un-selectable (due/start pickers); when
 // false, holidays are still visibly marked but remain selectable — used for the Repeat End
 // Date, which is only a series boundary (the recurring engine skips holiday occurrences).
-const MiniDatePicker = ({ isOpen, onClose, value, onApply, title = 'Select Due Date', holidayDates = [], weeklyOffs = [], onBlocked, blockHolidays = true }) => {
+// `disablePast`: when true, any date before today is un-selectable — used for due-date fields.
+// `remarkLabel`: when set, a remark box is shown under the picker and its text is passed as the
+// 2nd argument to `onApply(iso, remark)` — used by the assigner's Reopen action, which must
+// carry both a new deadline and a mandatory reason. `remarkRequired` gates Done on it.
+const MiniDatePicker = ({ isOpen, onClose, value, onApply, title = 'Select Due Date', holidayDates = [], weeklyOffs = [], onBlocked, blockHolidays = true, disablePast = false, remarkLabel = '', remarkRequired = false }) => {
   const [viewMonth, setViewMonth] = useState(0);
   const [viewYear, setViewYear] = useState(2000);
   const [selectedDate, setSelectedDate] = useState(new Date());
   const [time, setTime] = useState('12:00');
   const [tab, setTab] = useState('date');
+  const [remark, setRemark] = useState('');
 
   useEffect(() => {
     if (!isOpen) return;
@@ -28,13 +33,17 @@ const MiniDatePicker = ({ isOpen, onClose, value, onApply, title = 'Select Due D
     setSelectedDate(d);
     setTime(`${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`);
     setTab('date');
+    setRemark('');
   }, [isOpen, value]);
 
   if (!isOpen) return null;
 
   const holidaySet = new Set(holidayDates);
   const keyOf = (dt) => `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
+  const today = new Date();
+  const todayKey = keyOf(today);
   const blockedInfo = (dt) => {
+    if (disablePast && keyOf(dt) < todayKey) return { blocked: true, msg: 'Past dates cannot be selected.', label: 'Past date' };
     const isHoliday = holidaySet.has(keyOf(dt));
     if (isHoliday && blockHolidays) return { blocked: true, holiday: true, msg: 'Holiday detected! Please select another date.', label: 'Holiday' };
     if (weeklyOffs.includes(dt.getDay())) return { blocked: true, msg: 'Weekly off! Please select another date.', label: 'Weekly off' };
@@ -45,7 +54,6 @@ const MiniDatePicker = ({ isOpen, onClose, value, onApply, title = 'Select Due D
 
   const daysInMonth = new Date(viewYear, viewMonth + 1, 0).getDate();
   const firstDayOfWeek = new Date(viewYear, viewMonth, 1).getDay();
-  const today = new Date();
 
   const cells = [];
   for (let i = 0; i < firstDayOfWeek; i++) cells.push(null);
@@ -62,9 +70,10 @@ const MiniDatePicker = ({ isOpen, onClose, value, onApply, title = 'Select Due D
     const sd = new Date(viewYear, viewMonth, selectedDate.getDate());
     const info = blockedInfo(sd);
     if (info.blocked) { onBlocked?.(info.msg); return; }
+    if (remarkRequired && !remark.trim()) { onBlocked?.(`${remarkLabel || 'Remark'} is required.`); return; }
     const [h, min] = time.split(':').map(Number);
     const final = new Date(viewYear, viewMonth, selectedDate.getDate(), h, min);
-    onApply(final.toISOString());
+    onApply(final.toISOString(), remark.trim());
     onClose();
   };
 
@@ -137,6 +146,17 @@ const MiniDatePicker = ({ isOpen, onClose, value, onApply, title = 'Select Due D
             ) : (
               <input type="time" value={time} onChange={e => setTime(e.target.value)}
                 className="w-full px-4 py-3 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-xl text-[14px] font-bold outline-none text-center" />
+            )}
+
+            {remarkLabel && (
+              <div className="mt-4">
+                <label className="block mb-1.5 text-[10px] font-black uppercase tracking-widest text-[var(--text-muted)]">
+                  {remarkLabel}{remarkRequired && <span className="text-[var(--accent-red)]"> *</span>}
+                </label>
+                <textarea value={remark} onChange={e => setRemark(e.target.value)} rows={3}
+                  placeholder="Explain why the task is being sent back..."
+                  className="w-full px-3 py-2 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-xl text-[12px] font-bold outline-none resize-none focus:border-[var(--accent-indigo)]" />
+              </div>
             )}
           </div>
 

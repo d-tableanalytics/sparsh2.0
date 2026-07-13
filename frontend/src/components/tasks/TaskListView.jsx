@@ -6,18 +6,20 @@ import {
   Calendar as CalendarIcon, Eye, X, ChevronDown, Repeat,
 } from 'lucide-react';
 import api from '../../services/api';
-import { getTasks, softDeleteTask, restoreTask, updateTaskStatus } from '../../services/taskApi';
+import { getTasks, softDeleteTask, restoreTask, updateTaskStatus, reviseTaskDeadline } from '../../services/taskApi';
 import { getTaskCategories, getTaskTags } from '../../services/taskMetaApi';
 import { openTaskEventStream } from '../../services/taskEventsApi';
+import { getHolidays } from '../../services/holidayApi';
 import { useAuth } from '../../context/AuthContext';
 import { useNotification } from '../../context/NotificationContext';
-import { STATUS_CONFIG, LIST_CARD_ORDER, CARD_KEY_TO_STATUS, PRIORITY_CONFIG, WORKFLOW_STATUSES, statusOptions, statusOptionLabel, REASON_REQUIRED_STATUSES } from './statusConfig';
+import { STATUS_CONFIG, LIST_CARD_ORDER, CARD_KEY_TO_STATUS, PRIORITY_CONFIG, WORKFLOW_STATUSES, statusOptions, statusOptionLabel, REASON_REQUIRED_STATUSES, VERIFICATION_ACTIONS } from './statusConfig';
 import { getInitials, formatRelativeTime, formatFrequencyLabel, formatDate, exportTasksToCsv, groupTasksByRecurrence } from './taskDisplayUtils';
 import StatusSummaryCards from './StatusSummaryCards';
 import DateRangeFilter from './DateRangeFilter';
 import TaskFormModal from './TaskFormModal';
 import TaskDetailsModal from './TaskDetailsModal';
 import StatusReasonModal from './StatusReasonModal';
+import MiniDatePicker from './MiniDatePicker';
 
 // One row in the card/list view. Extracted so both a standalone task and a recurring
 // series' primary occurrence render identically; `groupBadge` adds the "×N / expand" control
@@ -32,6 +34,14 @@ const TaskRow = ({
   const counterpartLabel = scope === 'delegated'
     ? `To: ${(task.assignedTo || []).map(id => userMap[id] || id).join(', ') || '—'}`
     : `From: ${userMap[task.assignedBy] || 'Someone'}`;
+  // Completion lives in the status dropdown itself — on the doer's side it reads "Request for
+  // Verification" when the task needs verifying (see TaskDetailsModal for the same rule).
+  const isDoerSide = scope === 'my' && !isAssigner;
+  // Once submitted, the task is the assigner's to approve or send back — the assignee gets a
+  // read-only badge rather than a status control they aren't allowed to act on.
+  const awaitingVerification = isDoerSide && task.status === 'verification';
+  // The assigner's side of the same moment: the only two moves are Approve and Reopen.
+  const isVerifying = !isDoerSide && task.status === 'verification';
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }}
       className={`flex items-center gap-3 bg-[var(--bg-card)] border border-[var(--border)] rounded-2xl px-4 py-3.5 hover:shadow-md transition-all ${indent ? 'ml-8' : ''}`}>
@@ -59,13 +69,21 @@ const TaskRow = ({
 
       <div className="flex items-center gap-2 shrink-0 flex-wrap justify-end">
         {groupBadge}
-        {scope === 'deleted' ? (
+        {scope === 'deleted' || awaitingVerification ? (
           <span className="px-3 py-1 rounded-full text-[9px] font-black uppercase tracking-wider border" style={{ background: cfg.bg, color: cfg.color, borderColor: cfg.border }}>{cfg.label}</span>
+        ) : isVerifying ? (
+          <select value={task.status} onChange={e => onStatusChange(e.target.value)} onClick={e => e.stopPropagation()} disabled={statusPending}
+            className="px-3 py-1 rounded-full text-[9px] font-black uppercase tracking-wider border outline-none cursor-pointer disabled:opacity-60 disabled:cursor-wait"
+            style={{ background: cfg.bg, color: cfg.color, borderColor: cfg.border }}>
+            <option value={task.status} disabled>{cfg.label}</option>
+            {VERIFICATION_ACTIONS.map(([val, label]) => <option key={val} value={val}>{label}</option>)}
+          </select>
         ) : (
           <select value={task.status} onChange={e => onStatusChange(e.target.value)} onClick={e => e.stopPropagation()} disabled={statusPending}
             className="px-3 py-1 rounded-full text-[9px] font-black uppercase tracking-wider border outline-none cursor-pointer disabled:opacity-60 disabled:cursor-wait"
             style={{ background: cfg.bg, color: cfg.color, borderColor: cfg.border }}>
-            {statusOptions(task.status).map(s => <option key={s} value={s}>{statusOptionLabel(s, { verificationRequired: task.verificationRequired, isAssigner })}</option>)}
+            {statusOptions(task.status)
+              .map(s => <option key={s} value={s}>{statusOptionLabel(s, { verificationRequired: task.verificationRequired, isAssigner })}</option>)}
           </select>
         )}
         <span className="px-2.5 py-1 rounded-full text-[9px] font-black uppercase tracking-wider bg-[var(--input-bg)] text-[var(--text-muted)] border border-[var(--border)]">
@@ -146,6 +164,11 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
   const [completing, setCompleting] = useState(new Set()); // task ids with an in-flight status change
   const [reasonTarget, setReasonTarget] = useState(null); // { task, status } awaiting Doer Name + Reason
   const [savingReason, setSavingReason] = useState(false);
+  // Reopen (assigner, from Pending Verification): the task awaiting a new deadline + reason.
+  const [reopenTarget, setReopenTarget] = useState(null);
+  // Holidays + Sunday weekly-off block selection in the Reopen picker, matching the create form.
+  const [holidayDates, setHolidayDates] = useState([]);
+  const WEEKLY_OFFS = [0];
 
   const userMap = useMemo(() => {
     const m = {};
@@ -195,6 +218,8 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
 
   useEffect(() => {
     api.get('/tasks/assignable-users').then(res => setUsers(res.data || [])).catch(() => {});
+    // Holidays block dates in the Reopen picker.
+    getHolidays().then(res => setHolidayDates((res.data || []).map(h => h.holiday_date).filter(Boolean))).catch(() => setHolidayDates([]));
   }, []);
 
   useEffect(() => { fetchTasks(); }, [fetchTasks]);
@@ -216,12 +241,24 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
       task_completed: 'A task was completed',
       task_deleted: 'A task was removed',
     };
+    // The verification hand-off is directional: only the assigner is asked to verify, and only
+    // the assignee is told their task came back for rework. Toasting either event to everyone
+    // on the task (watchers, the other side) would be noise, so these are addressed explicitly.
+    const directedToast = (type, data) => {
+      const isAssigner = data?.assigned_by && String(data.assigned_by) === String(currentUserId);
+      const isAssignee = (data?.assigned_to || []).some(id => String(id) === String(currentUserId));
+      if (type === 'task_verification_requested' && isAssigner) return 'A task is awaiting your verification';
+      if (type === 'task_verification_rejected' && isAssignee) return 'A task was sent back to you for rework';
+      return null;
+    };
     const cleanup = openTaskEventStream((type, data) => {
       if (debounce) clearTimeout(debounce);
       debounce = setTimeout(() => fetchTasksRef.current?.(), 300);
       // Don't toast the user for their own action (they already see the optimistic update).
       const isSelf = data?.actor_id && currentUserId && String(data.actor_id) === String(currentUserId);
-      if (!isSelf && TOASTS[type]) showSuccess(TOASTS[type]);
+      if (isSelf) return;
+      const message = TOASTS[type] || directedToast(type, data);
+      if (message) showSuccess(message);
     });
     return () => { if (debounce) clearTimeout(debounce); cleanup(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -306,14 +343,42 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
     }
   };
 
-  // Dependent on Other / Blocked need a Doer Name + Reason first — open the modal; every
-  // other status applies immediately.
+  // Dependent on Other / Blocked need a Doer Name + Reason first, and Reopen needs a NEW
+  // deadline + a mandatory reason — both open a modal; every other status applies immediately.
   const handleStatusChange = (task, status) => {
     if (REASON_REQUIRED_STATUSES.includes(status)) {
       setReasonTarget({ task, status });
       return;
     }
+    if (status === 'in_progress_reopened') {
+      setReopenTarget(task);
+      return;
+    }
     doStatusUpdate(task, status);
+  };
+
+  // Reopen (assigner, from Pending Verification): set the new deadline first, then flip the
+  // status back to the assignee. The reason lands in both the deadline-revision history and
+  // the status history — same flow as TaskDetailsModal.
+  const handleReopenWithDeadline = async (iso, remark) => {
+    const task = reopenTarget;
+    setReopenTarget(null);
+    if (!task) return;
+    setCompleting(prev => new Set(prev).add(task.id));
+    try {
+      await reviseTaskDeadline(task.id, iso, remark);
+      await updateTaskStatus(task.id, 'in_progress_reopened', remark);
+      showSuccess('Task reopened — sent back to the assignee for rework');
+      fetchTasks();
+    } catch (err) {
+      showError(err.response?.data?.detail || 'Failed to reopen the task');
+    } finally {
+      setCompleting(prev => {
+        const next = new Set(prev);
+        next.delete(task.id);
+        return next;
+      });
+    }
   };
 
   const doStatusUpdate = async (task, status, { reason, doerName, doerId } = {}) => {
@@ -546,13 +611,35 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
                     <td className="px-4 py-3">
                       {scope === 'deleted' ? (
                         <span className="px-3 py-1.5 rounded-lg text-[10px] font-black border" style={{ background: cfg.bg, color: cfg.color, borderColor: cfg.border }}>{cfg.label}</span>
-                      ) : (
-                        <select value={task.status} onChange={e => handleStatusChange(task, e.target.value)} disabled={completing.has(task.id)}
-                          className="px-3 py-1.5 rounded-lg text-[10px] font-black border outline-none cursor-pointer disabled:opacity-60 disabled:cursor-wait"
-                          style={{ background: cfg.bg, color: cfg.color, borderColor: cfg.border }}>
-                          {statusOptions(task.status).map(s => <option key={s} value={s}>{statusOptionLabel(s, { verificationRequired: task.verificationRequired, isAssigner: task.isCreator || isAdmin })}</option>)}
-                        </select>
-                      )}
+                      ) : (() => {
+                        const rowIsAssigner = task.isCreator || isAdmin;
+                        const rowIsDoerSide = scope === 'my' && !rowIsAssigner;
+                        // Submitted for verification → the assigner's call, so read-only here.
+                        if (rowIsDoerSide && task.status === 'verification') {
+                          return (
+                            <span className="px-3 py-1.5 rounded-lg text-[10px] font-black border" style={{ background: cfg.bg, color: cfg.color, borderColor: cfg.border }}>{cfg.label}</span>
+                          );
+                        }
+                        // The assigner's side of verification: Approve or Reopen, nothing else.
+                        if (task.status === 'verification') {
+                          return (
+                            <select value={task.status} onChange={e => handleStatusChange(task, e.target.value)} disabled={completing.has(task.id)}
+                              className="px-3 py-1.5 rounded-lg text-[10px] font-black border outline-none cursor-pointer disabled:opacity-60 disabled:cursor-wait"
+                              style={{ background: cfg.bg, color: cfg.color, borderColor: cfg.border }}>
+                              <option value={task.status} disabled>{cfg.label}</option>
+                              {VERIFICATION_ACTIONS.map(([val, label]) => <option key={val} value={val}>{label}</option>)}
+                            </select>
+                          );
+                        }
+                        return (
+                          <select value={task.status} onChange={e => handleStatusChange(task, e.target.value)} disabled={completing.has(task.id)}
+                            className="px-3 py-1.5 rounded-lg text-[10px] font-black border outline-none cursor-pointer disabled:opacity-60 disabled:cursor-wait"
+                            style={{ background: cfg.bg, color: cfg.color, borderColor: cfg.border }}>
+                            {statusOptions(task.status)
+                              .map(s => <option key={s} value={s}>{statusOptionLabel(s, { verificationRequired: task.verificationRequired, isAssigner: rowIsAssigner })}</option>)}
+                          </select>
+                        );
+                      })()}
                     </td>
                     <td className="px-4 py-3 text-right">
                       {scope === 'deleted' ? (
@@ -610,8 +697,20 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
 
       <TaskFormModal isOpen={modalOpen} onClose={() => setModalOpen(false)} task={editingTask} onSaved={fetchTasks}
         categories={categories} tags={tagOptions} onTaxonomyChanged={fetchTaxonomy} groupId={groupId} />
-      <TaskDetailsModal isOpen={!!detailsTaskId} taskId={detailsTaskId} onClose={() => setDetailsTaskId(null)} onChanged={fetchTasks}
+      <TaskDetailsModal isOpen={!!detailsTaskId} taskId={detailsTaskId} scope={scope} onClose={() => setDetailsTaskId(null)} onChanged={fetchTasks}
         onEdit={(t) => { setDetailsTaskId(null); setEditingTask(t); setModalOpen(true); }} />
+      {/* Reopen (from Pending Verification): a NEW deadline + a mandatory reason, then the task
+          goes back to the assignee for rework. */}
+      <MiniDatePicker
+        isOpen={!!reopenTarget}
+        onClose={() => setReopenTarget(null)}
+        value={reopenTarget?.end}
+        title="Reopen Task"
+        onApply={(iso, remark) => handleReopenWithDeadline(iso, remark)}
+        holidayDates={holidayDates} weeklyOffs={WEEKLY_OFFS} onBlocked={showError}
+        disablePast
+        remarkLabel="Reason for Reopening" remarkRequired
+      />
       {/* Doer Name + Reason capture for Dependent on Other / Blocked (from either list dropdown). */}
       <StatusReasonModal
         isOpen={!!reasonTarget}
