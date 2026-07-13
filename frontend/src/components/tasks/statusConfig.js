@@ -102,19 +102,34 @@ export const VERIFICATION_ACTIONS = [
   ['in_progress_reopened', 'Reopen'],
 ];
 
+// A dependency doer — someone the task was handed to via "Dependent on Other" — owns only that
+// dependency, not the task. Their "Complete" resolves the dependency and hands the task back to
+// the assignee who raised it (backend pops the dependency stack); they can also chain the
+// dependency on to someone else, or ask for a deadline revision. Acknowledged Delegation, In
+// Progress, Blocked and everything on the verification path belong to the real assignee and are
+// never offered to them. (Revise isn't a status — the list rows have no picker, so it's added
+// separately in TaskDetailsModal.)
+export const DEPENDENCY_DOER_STATUSES = ['completed', 'dependent_on_others'];
+
 // Options to show in a status <select>: the 4 selectable statuses, plus the task's current
 // status prepended when it isn't one of them (so the control still displays e.g. "Pending"
 // or "In Progress (Reopened)" correctly instead of falling back to a blank/mismatched value).
 // A task in verification is excluded — callers must render VERIFICATION_ACTIONS instead.
-export const statusOptions = (current) => {
+export const statusOptions = (current, { isDependencyDoer = false } = {}) => {
   if (current === 'verification') return ['verification'];
-  return SELECTABLE_STATUSES.includes(current) ? SELECTABLE_STATUSES : [current, ...SELECTABLE_STATUSES];
+  const allowed = isDependencyDoer ? DEPENDENCY_DOER_STATUSES : SELECTABLE_STATUSES;
+  return allowed.includes(current) ? allowed : [current, ...allowed];
 };
 
 // Label for a status option, verification-aware: an ASSIGNEE (not the assigner) on a
 // verification-required task requests verification rather than completing directly, so
-// the "completed" option reads "Request for Verification" for them.
-export const statusOptionLabel = (statusKey, { verificationRequired = false, isAssigner = false } = {}) => {
-  if (statusKey === 'completed' && verificationRequired && !isAssigner) return 'Request for Verification';
+// the "completed" option reads "Request for Verification" for them. A dependency doer is
+// exempt — they complete a dependency, and verification is the real assignee's step later.
+//
+// This relabel describes the ACTION of completing, so it must not apply once the task is already
+// completed (`currentStatus`) — an approved task reads "Completed", not "Request for Verification".
+export const statusOptionLabel = (statusKey, { verificationRequired = false, isAssigner = false, isDependencyDoer = false, currentStatus = null } = {}) => {
+  if (statusKey === 'completed' && currentStatus !== 'completed'
+    && verificationRequired && !isAssigner && !isDependencyDoer) return 'Request for Verification';
   return STATUS_CONFIG[statusKey]?.label || statusKey;
 };

@@ -27,7 +27,7 @@ import MiniDatePicker from './MiniDatePicker';
 // once that series is expanded.
 const TaskRow = ({
   task, scope, userMap, checked, onToggleSelect, onOpenDetails, onStatusChange,
-  onRestore, indent, groupBadge, statusPending, isAssigner,
+  onRestore, indent, groupBadge, statusPending, isAssigner, frozenReason, isDependencyDoer,
 }) => {
   const cfg = STATUS_CONFIG[task.status] || STATUS_CONFIG.pending;
   const priorityCfg = PRIORITY_CONFIG[task.priority] || PRIORITY_CONFIG.Normal;
@@ -71,6 +71,13 @@ const TaskRow = ({
         {groupBadge}
         {scope === 'deleted' || awaitingVerification ? (
           <span className="px-3 py-1 rounded-full text-[9px] font-black uppercase tracking-wider border" style={{ background: cfg.bg, color: cfg.color, borderColor: cfg.border }}>{cfg.label}</span>
+        ) : frozenReason ? (
+          // In-Loop observer, or an assignee waiting on a dependency doer: visible but frozen.
+          <select value={task.status} disabled onClick={e => e.stopPropagation()} title={frozenReason}
+            className="px-3 py-1 rounded-full text-[9px] font-black uppercase tracking-wider border outline-none opacity-60 cursor-not-allowed"
+            style={{ background: cfg.bg, color: cfg.color, borderColor: cfg.border }}>
+            <option value={task.status}>{cfg.label}</option>
+          </select>
         ) : isVerifying ? (
           <select value={task.status} onChange={e => onStatusChange(e.target.value)} onClick={e => e.stopPropagation()} disabled={statusPending}
             className="px-3 py-1 rounded-full text-[9px] font-black uppercase tracking-wider border outline-none cursor-pointer disabled:opacity-60 disabled:cursor-wait"
@@ -82,8 +89,8 @@ const TaskRow = ({
           <select value={task.status} onChange={e => onStatusChange(e.target.value)} onClick={e => e.stopPropagation()} disabled={statusPending}
             className="px-3 py-1 rounded-full text-[9px] font-black uppercase tracking-wider border outline-none cursor-pointer disabled:opacity-60 disabled:cursor-wait"
             style={{ background: cfg.bg, color: cfg.color, borderColor: cfg.border }}>
-            {statusOptions(task.status)
-              .map(s => <option key={s} value={s}>{statusOptionLabel(s, { verificationRequired: task.verificationRequired, isAssigner })}</option>)}
+            {statusOptions(task.status, { isDependencyDoer })
+              .map(s => <option key={s} value={s}>{statusOptionLabel(s, { verificationRequired: task.verificationRequired, isAssigner, isDependencyDoer, currentStatus: task.status })}</option>)}
           </select>
         )}
         <span className="px-2.5 py-1 rounded-full text-[9px] font-black uppercase tracking-wider bg-[var(--input-bg)] text-[var(--text-muted)] border border-[var(--border)]">
@@ -343,9 +350,32 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
     }
   };
 
+  // In-Loop member (a watcher who is neither the assigner nor a doer): read-only observer, so
+  // every status control is frozen for them. Mirrors isPureWatcher in TaskDetailsModal; the
+  // backend rejects their status writes too (only admin/creator/assignee may update).
+  const isWatcherOnly = (t) => !t.isCreator
+    && !(t.assignedTo || []).includes(currentUserId)
+    && (t.watchers || []).includes(currentUserId);
+
+  // Dependency doer: the task was handed to them via "Dependent on Other". They hold ONLY the
+  // dependency, so their options are limited to Complete / Dependent on Other (see statusConfig).
+  const isDependencyDoer = (t) => !!t.dependencyDoerId && t.dependencyDoerId === currentUserId;
+  // The assignee who raised the dependency still owns the task, but can't move it until the doer
+  // resolves it — their control stays visible at "Dependent on Other" but frozen.
+  const isAwaitingDependency = (t) => !!t.dependencyDoerId
+    && t.dependencyDoerId !== currentUserId
+    && (t.assignedTo || []).includes(currentUserId);
+  // Why a row's status control is frozen, or null when it's live.
+  const frozenReason = (t) => {
+    if (isWatcherOnly(t)) return "Read-only — In-Loop members can't change the task status";
+    if (isAwaitingDependency(t)) return 'Waiting on the dependency doer to complete their part';
+    return null;
+  };
+
   // Dependent on Other / Blocked need a Doer Name + Reason first, and Reopen needs a NEW
   // deadline + a mandatory reason — both open a modal; every other status applies immediately.
   const handleStatusChange = (task, status) => {
+    if (frozenReason(task)) return;
     if (REASON_REQUIRED_STATUSES.includes(status)) {
       setReasonTarget({ task, status });
       return;
@@ -614,6 +644,17 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
                       ) : (() => {
                         const rowIsAssigner = task.isCreator || isAdmin;
                         const rowIsDoerSide = scope === 'my' && !rowIsAssigner;
+                        // In-Loop observer, or an assignee waiting on a dependency doer: frozen.
+                        const rowFrozenReason = frozenReason(task);
+                        if (rowFrozenReason) {
+                          return (
+                            <select value={task.status} disabled title={rowFrozenReason}
+                              className="px-3 py-1.5 rounded-lg text-[10px] font-black border outline-none opacity-60 cursor-not-allowed"
+                              style={{ background: cfg.bg, color: cfg.color, borderColor: cfg.border }}>
+                              <option value={task.status}>{cfg.label}</option>
+                            </select>
+                          );
+                        }
                         // Submitted for verification → the assigner's call, so read-only here.
                         if (rowIsDoerSide && task.status === 'verification') {
                           return (
@@ -631,12 +672,13 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
                             </select>
                           );
                         }
+                        const rowIsDependencyDoer = isDependencyDoer(task);
                         return (
                           <select value={task.status} onChange={e => handleStatusChange(task, e.target.value)} disabled={completing.has(task.id)}
                             className="px-3 py-1.5 rounded-lg text-[10px] font-black border outline-none cursor-pointer disabled:opacity-60 disabled:cursor-wait"
                             style={{ background: cfg.bg, color: cfg.color, borderColor: cfg.border }}>
-                            {statusOptions(task.status)
-                              .map(s => <option key={s} value={s}>{statusOptionLabel(s, { verificationRequired: task.verificationRequired, isAssigner: rowIsAssigner })}</option>)}
+                            {statusOptions(task.status, { isDependencyDoer: rowIsDependencyDoer })
+                              .map(s => <option key={s} value={s}>{statusOptionLabel(s, { verificationRequired: task.verificationRequired, isAssigner: rowIsAssigner, isDependencyDoer: rowIsDependencyDoer, currentStatus: task.status })}</option>)}
                           </select>
                         );
                       })()}
@@ -666,6 +708,8 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
               task, scope, userMap, indent,
               statusPending: completing.has(task.id),
               isAssigner: task.isCreator || isAdmin,
+              frozenReason: frozenReason(task),
+              isDependencyDoer: isDependencyDoer(task),
               checked: selected.has(task.id),
               onToggleSelect: () => toggleSelect(task.id),
               onOpenDetails: () => setDetailsTaskId(task.id),
