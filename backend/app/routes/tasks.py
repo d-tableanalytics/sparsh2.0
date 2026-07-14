@@ -268,6 +268,24 @@ def _serialize_task(doc: dict, current_user_id: str) -> dict:
         "evidenceRequired": doc.get("evidence_required", False),
         # Follow-up count on the list payload too, so rows can show a badge without a detail fetch.
         "followUpCount": len(doc.get("follow_ups") or []),
+        # "Dependent on Other" hand-off: who currently holds the dependency (None when nobody
+        # does), and how deep the chain runs. The holder owns ONLY the dependency, so their status
+        # options are limited to Complete / Dependent on Other / Revise (see statusConfig.js);
+        # everyone else on the task keeps seeing it parked at "Dependent on Other".
+        "dependencyDoerId": doc.get("dependency_doer_id"),
+        "dependencyDepth": len(doc.get("dependency_stack") or []),
+    }
+
+
+async def _user_names(user_ids: list) -> dict:
+    """user_id -> display name, from the staff collection. Used for the dependency history notes."""
+    oids = [ObjectId(uid) for uid in user_ids if ObjectId.is_valid(uid)]
+    if not oids:
+        return {}
+    docs = await get_collection("staff").find({"_id": {"$in": oids}}).to_list(1000)
+    return {
+        str(d["_id"]): d.get("full_name") or d.get("first_name") or d.get("email") or "Unknown"
+        for d in docs
     }
 
 
@@ -599,10 +617,10 @@ async def update_task_status(task_id: str, body: dict, current_user: dict = Depe
 
     existing, col_name = await _get_task_or_404(task_id)
 
-    # Dependent on Other may reassign the task to the picked doer (must be an internal Sparsh
-    # user, same rule as create/update). Blocked captures the doer name only — no reassignment.
+    # Dependent on Other hands the task to the picked doer (must be an internal Sparsh user, same
+    # rule as create/update). Blocked captures the doer name only — no hand-off.
     reassign_doer = None
-    if new_status == "dependent_on_others" and doer_id and doer_id not in (existing.get("target_staff_id") or []):
+    if new_status == "dependent_on_others" and doer_id and doer_id != existing.get("dependency_doer_id"):
         bad = await get_non_internal_user_ids([doer_id])
         if bad:
             raise HTTPException(status_code=403, detail=TASK_RECIPIENT_DENIED_MESSAGE)
@@ -623,6 +641,28 @@ async def update_task_status(task_id: str, body: dict, current_user: dict = Depe
         raise HTTPException(status_code=403, detail="Only the assigner can verify, finalize, or reopen this task.")
     if new_status == "in_progress_reopened" and not is_assigner_or_admin:
         raise HTTPException(status_code=403, detail="Only the assigner can reopen this task.")
+
+    # ─── Dependency stack ───
+    # "Dependent on Other" hands the task to a dependency doer, who owns ONLY that dependency —
+    # ownership of the task itself stays with the assignee who raised it. Each hand-off pushes the
+    # assignees it displaced onto `dependency_stack` and records the current holder in
+    # `dependency_doer_id`, so a chain (A → B → C) unwinds one level at a time. The doer is ADDED
+    # to target_staff_id rather than replacing it: the task shows up in the doer's My Tasks while
+    # the original assignee keeps seeing it sitting at "Dependent on Other".
+    #
+    # The doer's "completed" therefore resolves their dependency and pops the task back to whoever
+    # delegated it (who resumes at In Progress). It is NOT a completion of the task, so the
+    # checklist / evidence / verification rules below — which gate the real assignee's completion —
+    # must not apply to it.
+    dependency_stack = existing.get("dependency_stack") or []
+    prev_level = dependency_stack[-1] if dependency_stack else None
+    resolving_dependency = (
+        new_status == "completed"
+        and prev_level is not None
+        and existing.get("dependency_doer_id") == user_id
+    )
+    if resolving_dependency:
+        new_status = "in_progress"
 
     if new_status == "completed":
         # Completion rule: every check point (checklist item) must be done first.
@@ -645,10 +685,39 @@ async def update_task_status(task_id: str, body: dict, current_user: dict = Depe
             new_status = "verification"
 
     updates = {"workflow_status": new_status, "updated_at": datetime.now(timezone.utc)}
+    # Human-readable line for the Revision History, so the dependency hand-off / hand-back reads as
+    # an event rather than just a status arrow.
+    history_note = None
+    prior_assignees = existing.get("target_staff_id") or []
     if reassign_doer:
-        # Reassign to the picked doer (existing delegation shape: assigned_to="other").
-        updates["target_staff_id"] = [reassign_doer]
+        # ADD the doer alongside the current assignees (delegation shape: assigned_to="other") so
+        # the task lands in their My Tasks without evicting the assignee who still owns it.
+        updates["target_staff_id"] = prior_assignees + [reassign_doer] if reassign_doer not in prior_assignees else prior_assignees
         updates["assigned_to"] = "other"
+        updates["dependency_doer_id"] = reassign_doer
+        updates["dependency_stack"] = dependency_stack + [{
+            "assignee_ids": prior_assignees,
+            "assigned_to": existing.get("assigned_to"),
+            "delegated_by": user_id,
+            "doer_id": reassign_doer,
+            "doer_name": doer_name,
+            "reason": reason,
+            "at": datetime.now(timezone.utc),
+        }]
+        history_note = f"Task assigned to {doer_name} as Dependent on Other."
+    elif resolving_dependency:
+        # Dependency done → drop the doer, hand the task back to the assignee who raised it. If the
+        # chain runs deeper (A → B → C), the level below becomes the current dependency again.
+        returned_to = prev_level.get("assignee_ids") or []
+        remaining_stack = dependency_stack[:-1]
+        updates["target_staff_id"] = returned_to
+        updates["assigned_to"] = prev_level.get("assigned_to") or "other"
+        updates["dependency_stack"] = remaining_stack
+        updates["dependency_doer_id"] = remaining_stack[-1].get("doer_id") if remaining_stack else None
+        names = await _user_names(returned_to)
+        returned_names = ", ".join(names.get(uid, "the assignee") for uid in returned_to) or "the assignee"
+        actor = current_user.get("full_name") or current_user.get("email")
+        history_note = f"Dependency completed by {actor}. Task returned to {returned_names}."
     was_completed = old_status == "completed"
     if new_status == "completed" and not was_completed:
         updates["completed_at"] = datetime.now(timezone.utc)
@@ -667,10 +736,13 @@ async def update_task_status(task_id: str, body: dict, current_user: dict = Depe
         "reason": reason,
         "doer_name": doer_name,
         "doer_id": doer_id,
+        "note": history_note,
         "changed_at": datetime.now(timezone.utc),
     }
 
-    if old_status != new_status:
+    # A note is always worth recording, even when the status doesn't move — chaining a dependency
+    # on from one doer to the next stays at "Dependent on Other" but is still a real event.
+    if old_status != new_status or history_note:
         await get_collection(col_name).update_one(
             {"_id": ObjectId(task_id)},
             {"$set": updates, "$push": {"status_history": history_entry}},
@@ -684,10 +756,23 @@ async def update_task_status(task_id: str, body: dict, current_user: dict = Depe
     # Real-time: notify creator + assignees + watchers so their lists update without a refresh.
     # On reassignment, union old + new recipients so the task both drops off the previous
     # assignee's list and appears on the new doer's.
+    #
+    # The verification hand-off gets its own event types (rather than a generic task_updated)
+    # so the two sides can be told what actually happened: the assigner learns a task is
+    # awaiting their verification, and the assignee learns theirs was sent back for rework.
+    if new_status == "completed":
+        event_type = "task_completed"
+    elif new_status == "verification":
+        event_type = "task_verification_requested"
+    elif old_status == "verification" and new_status == "in_progress_reopened":
+        event_type = "task_verification_rejected"
+    else:
+        event_type = "task_updated"
+
     projected = {**existing, **updates}
     recipients = task_events.recipients_for(existing) | task_events.recipients_for(projected)
     await task_events.publish(recipients, {
-        "type": "task_completed" if new_status == "completed" else "task_updated",
+        "type": event_type,
         "task_id": task_id,
         "status": new_status,
         "title": existing.get("title"),

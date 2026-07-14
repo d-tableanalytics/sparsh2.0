@@ -293,6 +293,12 @@ const TaskFormModal = ({ isOpen, onClose, onSaved, task = null, categories = [],
     if (!form.category.trim()) return 'Category is required';
     // A deadline is mandatory when delegating (assigning to others) so every assignee has a due date.
     if (form.target_staff_id.length && !form.end) return 'Deadline is required when delegating a task';
+    // Due date can't be in the past. Only enforced on create — editing an already-overdue
+    // task (a normal, common state) must still be possible without forcing a date change.
+    if (!task && form.end) {
+      const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
+      if (new Date(form.end) < todayStart) return 'Due date cannot be in the past';
+    }
     if (form.repeat !== 'Does not repeat') {
       if (!form.start) return 'Start Date is required when Repeat is enabled';
       if (!form.repeat) return 'Frequency is required when Repeat is enabled';
@@ -835,7 +841,7 @@ const TaskFormModal = ({ isOpen, onClose, onSaved, task = null, categories = [],
       />
       <MiniDatePicker isOpen={deadlinePickerOpen} onClose={() => setDeadlinePickerOpen(false)}
         value={form.end} title="Select Due Date" onApply={(iso) => setForm(f => ({ ...f, end: iso }))}
-        holidayDates={holidayDates} weeklyOffs={WEEKLY_OFFS} onBlocked={showError} />
+        holidayDates={holidayDates} weeklyOffs={WEEKLY_OFFS} onBlocked={showError} disablePast />
       <MiniDatePicker isOpen={startDatePickerOpen} onClose={() => setStartDatePickerOpen(false)}
         value={form.start} title="Repeat Start Date" onApply={(iso) => setForm(f => ({ ...f, start: iso }))}
         holidayDates={holidayDates} weeklyOffs={WEEKLY_OFFS} onBlocked={showError} />

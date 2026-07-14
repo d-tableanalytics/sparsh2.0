@@ -2,13 +2,13 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   ArrowLeft, Trash2, Pencil, FileText, History, Info, Users, Layers, Plus,
-  Paperclip, MessageSquare, Send, CheckSquare, Square, X, Tags as TagsIcon,
-  ShieldCheck, CheckCircle2, RotateCcw, CalendarClock, FileCheck2, Save, Bell,
+  Paperclip, CheckSquare, Square, X, Tags as TagsIcon,
+  ShieldCheck, CalendarClock, FileCheck2, Save, Bell,
 } from 'lucide-react';
 import api from '../../services/api';
 import {
   getTaskDetail, updateTaskStatus, updateChecklistItem,
-  deleteChecklistItem, addTaskComment, uploadTaskAttachment, softDeleteTask,
+  deleteChecklistItem, uploadTaskAttachment, softDeleteTask,
   uploadCompletionAttachment, deleteCompletionAttachment, reviseTaskDeadline,
   addTaskFollowUp,
 } from '../../services/taskApi';
@@ -22,17 +22,38 @@ import MiniDatePicker from './MiniDatePicker';
 import StatusReasonModal from './StatusReasonModal';
 import AttachmentItem from './AttachmentItem';
 
+// Follow-Ups is the task's single communication timeline: everything people say plus the
+// system's own record of what happened to the task. These are the system lines, keyed by the
+// status a transition landed on. A transition that already carries a `note` (the dependency
+// hand-off / hand-back, written by the backend) uses that instead.
+const SYSTEM_STATUS_MESSAGE = {
+  pending: 'Task assigned',
+  accepted: 'Delegation acknowledged',
+  in_progress: 'Status changed to In Progress',
+  blocked: 'Marked as Blocked',
+  dependent_on_others: 'Marked as Dependent on Other',
+  verification: 'Verification requested',
+  in_progress_reopened: 'Task reopened',
+  completed: 'Task completed',
+};
+
+const systemStatusMessage = (h) => {
+  if (h.note) return h.note;
+  // Completing straight out of verification is the assigner approving it — say so.
+  if (h.old_status === 'verification' && h.new_status === 'completed') return 'Verification approved — task completed';
+  return SYSTEM_STATUS_MESSAGE[h.new_status]
+    || `Status changed to ${STATUS_CONFIG[h.new_status]?.label || h.new_status}`;
+};
+
 // Full single-task view: description, revision (status) history, core info,
-// involved parties, sub-tasks/checklist, attachments, and a comment thread.
+// involved parties, sub-tasks/checklist, attachments, and the Follow-Ups timeline.
 // Opened from the row menu in TaskListView ("Details").
-const TaskDetailsModal = ({ isOpen, onClose, taskId, onChanged, onEdit }) => {
+const TaskDetailsModal = ({ isOpen, onClose, taskId, scope, onChanged, onEdit }) => {
   const { user } = useAuth();
   const { showSuccess, showError } = useNotification();
   const [task, setTask] = useState(null);
   const [users, setUsers] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [newComment, setNewComment] = useState('');
-  const [posting, setPosting] = useState(false);
   // Real subtasks (child tasks): add-form + nested detail view + taxonomy for the form.
   const [subtaskFormOpen, setSubtaskFormOpen] = useState(false);
   const [subtaskDetailId, setSubtaskDetailId] = useState(null);
@@ -116,7 +137,11 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, onChanged, onEdit }) => {
   };
 
   const doStatusUpdate = async (status, { reason, doerName, doerId } = {}) => {
-    if (status === 'completed') {
+    // A dependency doer's "completed" resolves their dependency and hands the task back to the
+    // assignee who raised it — it isn't a completion of the task, so the check-point / evidence
+    // rules (which gate the real assignee's completion) don't apply. The backend agrees.
+    const resolvingDependency = status === 'completed' && isDependencyDoer;
+    if (status === 'completed' && !resolvingDependency) {
       // Completion rule: a task can't be marked Completed until all check points are done.
       const items = task?.checklist || [];
       const pending = items.filter(c => !c.completed);
@@ -134,10 +159,12 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, onChanged, onEdit }) => {
     if (reasonStatus) setSavingReason(true);
     try {
       await updateTaskStatus(taskId, status, reason, doerName, doerId);
-      // Verification-required tasks completed by the assignee are routed to "verification"
-      // by the backend — the silent refetch below reflects whatever the server decided.
-      if (status === 'completed' && task?.verificationRequired && !canManage) {
-        showSuccess('Submitted for verification');
+      if (resolvingDependency) {
+        showSuccess('Dependency completed — the task is back with the assignee');
+      } else if (status === 'completed' && task?.verificationRequired && !canManage) {
+        // Verification-required tasks completed by the assignee are routed to "verification"
+        // by the backend — the silent refetch below reflects whatever the server decided.
+        showSuccess('Verification requested — sent to the assigner');
       }
       fetchDetail({ silent: true });
       onChanged?.();
@@ -150,10 +177,12 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, onChanged, onEdit }) => {
   };
 
   // Verification actions — assigner/delegator only (backend also enforces).
+  // Approve: the assigner's own "completed" is NOT rerouted to verification by the backend
+  // (that reroute only applies to the assignee), so this finalizes the task.
   const handleFinalComplete = async () => {
     try {
       await updateTaskStatus(taskId, 'completed');
-      showSuccess('Task verified & completed');
+      showSuccess('Verification approved — task completed');
       fetchDetail({ silent: true });
       onChanged?.();
     } catch (err) {
@@ -161,23 +190,24 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, onChanged, onEdit }) => {
     }
   };
 
-  // Reopen must carry a NEW deadline (spec): open the date picker first; the actual reopen
-  // happens in handleReopenWithDeadline once the assigner picks a date.
+  // Reopen must carry a NEW deadline and a mandatory remark (spec): open the picker first; the
+  // actual hand-back happens in handleReopenWithDeadline once the assigner submits both.
   const handleReopen = () => setReopenPickerOpen(true);
 
-  const handleReopenWithDeadline = async (iso) => {
+  const handleReopenWithDeadline = async (iso, remark) => {
     setReopenPickerOpen(false);
     setReopening(true);
     try {
-      // Set the new deadline first (assigner-only endpoint), then flip status to Reopened and
-      // hand the task back to the assignee. Reuses the existing deadline + status APIs.
-      await reviseTaskDeadline(taskId, iso, 'Reopened by assigner');
-      await updateTaskStatus(taskId, 'in_progress_reopened');
-      showSuccess('Task reopened with a new deadline');
+      // Set the new deadline first (assigner-only endpoint), then flip status to Reopened,
+      // which hands the task back to the assignee for rework. Reuses the existing APIs — the
+      // remark lands in both the deadline-revision history and the status history.
+      await reviseTaskDeadline(taskId, iso, remark);
+      await updateTaskStatus(taskId, 'in_progress_reopened', remark);
+      showSuccess('Task reopened — sent back to the assignee for rework');
       fetchDetail({ silent: true });
       onChanged?.();
     } catch (err) {
-      showError(err.response?.data?.detail || 'Failed to reopen task');
+      showError(err.response?.data?.detail || 'Failed to send the task back');
     } finally {
       setReopening(false);
     }
@@ -298,21 +328,6 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, onChanged, onEdit }) => {
     }
   };
 
-  const handleAddComment = async () => {
-    const text = newComment.trim();
-    if (!text) return;
-    setPosting(true);
-    try {
-      await addTaskComment(taskId, text);
-      setNewComment('');
-      fetchDetail({ silent: true });
-    } catch (err) {
-      showError(err.response?.data?.detail || 'Failed to post comment');
-    } finally {
-      setPosting(false);
-    }
-  };
-
   const cfg = task ? (STATUS_CONFIG[task.status] || STATUS_CONFIG.pending) : null;
   // Edit/Delete are available to the creator and to admins (backend enforces the same on
   // update/delete). Assignees / in-loop users can view + change status but not edit/delete.
@@ -338,14 +353,46 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, onChanged, onEdit }) => {
   const isAssignee = !!task && (task.assignedTo || []).includes(user?._id);
   // Self-assigned task (creator is the doer, no other assignees) — the creator works it like an assignee.
   const isSelfTask = !!task && task.isCreator && !(task.assignedTo || []).length;
-  // Who drives the working-status dropdown: the assignee, or the creator of a self-task.
-  const canWork = isAssignee || isSelfTask;
-  // Pure In-Loop member (watcher, not the doer or the assigner) — e.g. a Subscribed task.
+  // Pure In-Loop member (watcher, not the doer or the assigner) — e.g. a Subscribed task. They
+  // are observers: View + Follow Up + Add Subtask only. Every workflow action (status change,
+  // request verification / complete, approve / reopen, revise deadline, edit, delete) is frozen
+  // for them, regardless of their role — an admin who is merely in-loop gets no more than this.
   const isPureWatcher = !!task && isInLoop && !isAssignee && !task.isCreator;
+  // Who drives the working-status dropdown: the assignee, or the creator of a self-task.
+  const canWork = (isAssignee || isSelfTask) && !isPureWatcher;
+  // Assigner-side actions (approve/reopen a verification, revise the deadline).
+  const canAdminister = canManage && !isPureWatcher;
   // Editing/deleting the task definition belongs to the assigner (creator) / admins — NOT the
   // assignee (their "My Tasks" view) and NOT a pure watcher (their Subscribed view). So hide
   // Edit + Delete for a doer who isn't also the creator, and for in-loop-only members.
-  const canEditOrDelete = canManage && !(isAssignee && !task?.isCreator) && !isPureWatcher;
+  const canEditOrDelete = canAdminister && !(isAssignee && !task?.isCreator);
+  // ─── Follow-Ups: the task's ONE communication timeline ───
+  // Everything people said (follow-ups, plus the remarks left by the old chat section, folded in
+  // so that history isn't orphaned) merged with the system's record of what happened (status
+  // transitions, deadline revisions), oldest first. Everyone on the task can read it and post to
+  // it — assigner, assignee and in-loop members alike.
+  const activityTimeline = (() => {
+    if (!task) return [];
+    const items = [];
+    if (task.createdAt) {
+      const names = (task.assignedTo || []).map(id => userMap[id]).filter(Boolean).join(', ');
+      items.push({ id: 'created', kind: 'system', text: `Task assigned to ${names || 'themselves'}`, at: task.createdAt });
+    }
+    (task.remarks || []).forEach(r => items.push({
+      id: `remark-${r.id}`, kind: 'user', name: r.author_name, text: r.text, at: r.created_at,
+    }));
+    (task.followUps || []).forEach(f => items.push({
+      id: `followup-${f.id}`, kind: 'user', name: f.by_name, text: f.remark, at: f.created_at,
+    }));
+    (task.statusHistory || []).forEach((h, i) => items.push({
+      id: `status-${i}`, kind: 'system', by: h.changed_by_name, text: systemStatusMessage(h), reason: h.reason, at: h.changed_at,
+    }));
+    (task.deadlineHistory || []).forEach((d, i) => items.push({
+      id: `deadline-${i}`, kind: 'system', by: d.revised_by_name, reason: d.reason, at: d.revised_at,
+      text: `Deadline revised${d.new_end ? ` to ${formatDateTime(d.new_end)}` : ''}`,
+    }));
+    return items.sort((a, b) => new Date(a.at || 0) - new Date(b.at || 0));
+  })();
 
   // ─── Role-based working dropdown (assignee / dependent-on-other doer) ───
   // "Pending" is surfaced as "In Progress"; "Revision" opens the deadline calendar (no status
@@ -354,19 +401,51 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, onChanged, onEdit }) => {
   const curDisplayStatus = task?.status === 'pending' ? 'in_progress' : task?.status;
   const curCfg = (task && (STATUS_CONFIG[curDisplayStatus] || cfg)) || {};
   const curLabel = STATUS_CONFIG[curDisplayStatus]?.label || curDisplayStatus || '';
-  // Completed submits for verification when Verification Required is on (assignee, not assigner).
-  const completedLabel = (task?.verificationRequired && canWork && !canManage) ? 'Submit for Verification' : 'Completed';
-  // Dependent-on-Other doer → Completed, Revision, Dependent on Other, Blocked.
-  // Normal assignee → Accept, Dependent on Other, Blocked, Completed, Revision.
-  const workingActions = task?.status === 'dependent_on_others'
-    ? [['completed', completedLabel], [REVISION_OPT, 'Revision'], ['dependent_on_others', 'Dependent on Other'], ['blocked', 'In Process-Pending']]
-    : [['accepted', 'Acknowledged Delegation'], ['dependent_on_others', 'Dependent on Other'], ['blocked', 'In Process-Pending'], ['completed', completedLabel], [REVISION_OPT, 'Revision']];
+  // Requirement: Verification Required = Yes → the doer's completion option reads "Request for
+  // Verification" (routes to the verification stage via the same 'completed' status transition,
+  // which the backend reroutes when verification_required is set and the caller isn't the
+  // assigner). Verification Required = No → the plain "Complete" flow, unchanged.
+  const canComplete = canWork && !['completed', 'verification'].includes(task?.status);
+  // Dependency doer: the task was handed to them via "Dependent on Other", so they own the
+  // dependency only — never the task. Their "Complete" resolves the dependency and hands the
+  // task back to the assignee who raised it (the backend pops the dependency stack), so it must
+  // NOT read "Request for Verification": verification is that assignee's step, later.
+  const isDependencyDoer = !!task?.dependencyDoerId && task.dependencyDoerId === user?._id;
+  // The assignee who raised the dependency keeps the task (and sees it parked at "Dependent on
+  // Other"), but it isn't theirs to move until the doer resolves it — so their control is frozen.
+  const isAwaitingDependency = isAssignee && !!task?.dependencyDoerId && !isDependencyDoer;
+  const dependencyDoerName = userMap[task?.dependencyDoerId] || 'the dependency doer';
+  const requestingVerification = task?.verificationRequired && !canManage && !isDependencyDoer;
+  // Dependency doer → Complete, Dependent on Other (chain it on), Revise. Nothing else.
+  // Normal assignee → Accept, Dependent on Other, Blocked, Revise + the completion option.
+  const workingActions = isDependencyDoer
+    ? [
+      ...(canComplete ? [['completed', 'Complete']] : []),
+      ['dependent_on_others', 'Dependent on Other'],
+      [REVISION_OPT, 'Revise'],
+    ]
+    : [
+      ['accepted', 'Acknowledged Delegation'],
+      ['dependent_on_others', 'Dependent on Other'],
+      ['blocked', 'Blocked'],
+      [REVISION_OPT, 'Revise'],
+      ...(canComplete ? [['completed', requestingVerification ? 'Request for Verification' : 'Complete']] : []),
+    ];
   // Only show the current status as a separate (disabled) line when it isn't already one of the
   // action options — otherwise it would duplicate it (e.g. two "Accept" entries).
   const showCurrentOpt = !workingActions.some(([v]) => v === curDisplayStatus);
   const handleWorkingSelect = (val) => {
     if (val === REVISION_OPT) { setDeadlinePickerOpen(true); return; }
     handleStatusChange(val);
+  };
+  // Pending Verification is the assigner's call: Approve (→ Completed, final) or Reopen (→ back
+  // to the assignee for rework, with a new deadline + mandatory remark). Both live in the status
+  // dropdown rather than as separate buttons.
+  const APPROVE_OPT = '__approve__';
+  const REOPEN_OPT = '__reopen__';
+  const handleVerificationSelect = (val) => {
+    if (val === APPROVE_OPT) { handleFinalComplete(); return; }
+    if (val === REOPEN_OPT) { handleReopen(); }
   };
 
   return (
@@ -394,10 +473,16 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, onChanged, onEdit }) => {
             </div>
             {task && (
               <div className="flex items-center gap-2 flex-wrap mt-3">
-                {isInLoop && !isAssignee && !task.isCreator ? (
+                {isPureWatcher ? (
                   // Pure In-Loop member (watcher, not the doer or the assigner) — including admins:
-                  // no status changes, only Follow Up, Follow-Up Count, Remark.
+                  // observers only. The status control is shown but frozen, so it's clear the task's
+                  // workflow isn't theirs to drive; their actions are Follow Up + Add Subtask.
                   <div className="flex items-center gap-2 flex-wrap w-full">
+                    <select value={curDisplayStatus} disabled title="Read-only — In-Loop members can't change the task status"
+                      className="px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider border outline-none opacity-60 cursor-not-allowed"
+                      style={{ background: curCfg.bg, color: curCfg.color, borderColor: curCfg.border }}>
+                      <option value={curDisplayStatus}>{curLabel}</option>
+                    </select>
                     <span className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider border bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] border-[var(--accent-indigo-border)]">
                       <Bell size={12} /> Follow-Ups: {task.followUpCount ?? (task.followUps || []).length}
                     </span>
@@ -419,31 +504,36 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, onChanged, onEdit }) => {
                     )}
                   </div>
                 ) : isAwaitingVerification ? (
-                  // Verification hand-off: the delegator/assigner gets the Final Complete /
-                  // Reopen actions; the assignee only sees a read-only "Pending Verification"
-                  // badge (no assignee-side completion controls here).
-                  canManage ? (
-                    <>
-                      <span className="px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider border" style={{ background: cfg.bg, color: cfg.color, borderColor: cfg.border }}>
-                        {cfg.label}
-                      </span>
-                      <button onClick={handleFinalComplete}
-                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider border bg-[var(--accent-green-bg)] text-[var(--accent-green)] border-[var(--accent-green-border)] hover:opacity-90">
-                        <CheckCircle2 size={13} /> Final Complete
-                      </button>
-                      <button onClick={handleReopen} disabled={reopening}
-                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider border bg-[var(--accent-orange-bg)] text-[var(--accent-orange)] border-[var(--accent-orange-border)] hover:opacity-90 disabled:opacity-50">
-                        <RotateCcw size={13} /> {reopening ? 'Reopening…' : 'Reopen (New Deadline)'}
-                      </button>
-                    </>
+                  // Verification hand-off: the delegator/assigner gets a status dropdown with
+                  // exactly two actions — Approve (final) and Reopen (back for rework); the
+                  // assignee only sees a read-only "Pending Verification" badge.
+                  canAdminister ? (
+                    <select value={curDisplayStatus} disabled={reopening}
+                      onChange={e => handleVerificationSelect(e.target.value)}
+                      className="px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider border outline-none cursor-pointer disabled:opacity-50"
+                      style={{ background: cfg.bg, color: cfg.color, borderColor: cfg.border }}>
+                      <option value={curDisplayStatus} disabled>{reopening ? 'Reopening…' : cfg.label}</option>
+                      <option value={APPROVE_OPT}>Approve</option>
+                      <option value={REOPEN_OPT}>Reopen</option>
+                    </select>
                   ) : (
                     <span className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider border" style={{ background: cfg.bg, color: cfg.color, borderColor: cfg.border }}>
                       <ShieldCheck size={13} /> {cfg.label}
                     </span>
                   )
+                ) : isAwaitingDependency ? (
+                  // The dependency is out with someone else: the task stays the assignee's, but
+                  // it's parked at "Dependent on Other" until the doer resolves it.
+                  <select value={curDisplayStatus} disabled
+                    title={`Waiting on ${dependencyDoerName} to complete the dependency`}
+                    className="px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider border outline-none opacity-60 cursor-not-allowed"
+                    style={{ background: curCfg.bg, color: curCfg.color, borderColor: curCfg.border }}>
+                    <option value={curDisplayStatus}>{curLabel}</option>
+                  </select>
                 ) : canWork ? (
                   // Assignee / dependent-on-other doer: role-based working options. The closed
-                  // control shows the current status; the list is exactly the role's action set.
+                  // control shows the current status; the list is exactly the role's action set,
+                  // ending with Complete / Request for Verification.
                   <select value={curDisplayStatus} onChange={e => handleWorkingSelect(e.target.value)}
                     className="px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider border outline-none cursor-pointer"
                     style={{ background: curCfg.bg, color: curCfg.color, borderColor: curCfg.border }}>
@@ -510,6 +600,7 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, onChanged, onEdit }) => {
                             {STATUS_CONFIG[h.old_status]?.label || h.old_status} <span className="mx-1">→</span>
                             <span className="text-[var(--accent-indigo)]">{STATUS_CONFIG[h.new_status]?.label || h.new_status}</span>
                           </p>
+                          {h.note && <p className="mt-1 text-[11px] font-bold text-[var(--text-main)]">{h.note}</p>}
                           {h.doer_name && <p className="mt-1 text-[10px] font-bold text-[var(--text-muted)]">Doer: <span className="text-[var(--text-main)]">{h.doer_name}</span></p>}
                           {h.reason && <p className="mt-1 px-2 py-1 bg-[var(--accent-yellow-bg)] text-[var(--text-muted)] text-[11px] rounded-lg italic">"{h.reason}"</p>}
                           <p className="text-[10px] font-bold text-[var(--text-muted)] opacity-70 mt-1">By {h.changed_by_name || 'Unknown'}</p>
@@ -534,8 +625,8 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, onChanged, onEdit }) => {
                       <p className="text-[9px] font-black text-[var(--text-muted)] uppercase">Deadline</p>
                       <div className="flex items-center gap-2 flex-wrap">
                         <p className="font-bold text-[var(--text-main)]">{task.end ? formatDateTime(task.end) : '—'}</p>
-                        {/* Date Revision — assigner/delegator (backend-enforced). */}
-                        {canManage && (
+                        {/* Date Revision — assigner/delegator (backend-enforced), never in-loop. */}
+                        {canAdminister && (
                           <button type="button" onClick={() => setDeadlinePickerOpen(true)} disabled={savingDeadline}
                             className="flex items-center gap-1 px-2 py-0.5 rounded-lg text-[9px] font-black uppercase tracking-wider border bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] border-[var(--accent-indigo-border)] hover:opacity-90 disabled:opacity-50">
                             <CalendarClock size={11} /> {savingDeadline ? 'Saving...' : 'Revise'}
@@ -647,17 +738,21 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, onChanged, onEdit }) => {
                   <div className="space-y-1.5 mb-3">
                     {localChecklist.map(item => (
                       <div key={item.id} className="flex items-center gap-2 bg-[var(--bg-card)] rounded-lg px-3 py-2">
-                        <button type="button" onClick={() => handleToggleSubtask(item)} className="text-[var(--accent-indigo)] shrink-0">
+                        {/* In-Loop members observe the check points; they can't tick or remove them. */}
+                        <button type="button" onClick={() => handleToggleSubtask(item)} disabled={isPureWatcher}
+                          className="text-[var(--accent-indigo)] shrink-0 disabled:opacity-40 disabled:cursor-not-allowed">
                           {item.completed ? <CheckSquare size={16} /> : <Square size={16} />}
                         </button>
                         <span className={`flex-1 text-[12px] font-bold text-[var(--text-main)] ${item.completed ? 'line-through opacity-50' : ''}`}>{item.title}</span>
-                        <button type="button" onClick={() => handleRemoveSubtask(item)} className="text-[var(--text-muted)] hover:text-[var(--accent-red)]"><X size={13} /></button>
+                        {!isPureWatcher && (
+                          <button type="button" onClick={() => handleRemoveSubtask(item)} className="text-[var(--text-muted)] hover:text-[var(--accent-red)]"><X size={13} /></button>
+                        )}
                       </div>
                     ))}
                   </div>
                 )}
                 {/* Save appears only when there are unsaved tick/remove changes. */}
-                {checklistDirty && (
+                {checklistDirty && !isPureWatcher && (
                   <div className="flex justify-end">
                     <button type="button" onClick={handleSaveChecklist} disabled={savingChecklist}
                       className="flex items-center gap-1.5 px-4 py-2 rounded-lg text-[10px] font-black uppercase tracking-widest bg-[var(--accent-indigo)] text-white shadow-sm hover:opacity-90 disabled:opacity-60">
@@ -712,10 +807,12 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, onChanged, onEdit }) => {
                   <p className="flex items-center gap-1.5 text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest">
                     <Paperclip size={13} /> Assignment Attachments ({task.attachments?.length || 0})
                   </p>
-                  <label className="flex items-center gap-1.5 px-3 py-1.5 bg-[var(--accent-indigo)] text-white rounded-lg text-[10px] font-black uppercase tracking-widest cursor-pointer">
-                    Attach File
-                    <input type="file" className="hidden" onChange={handleAttach} />
-                  </label>
+                  {!isPureWatcher && (
+                    <label className="flex items-center gap-1.5 px-3 py-1.5 bg-[var(--accent-indigo)] text-white rounded-lg text-[10px] font-black uppercase tracking-widest cursor-pointer">
+                      Attach File
+                      <input type="file" className="hidden" onChange={handleAttach} />
+                    </label>
+                  )}
                 </div>
                 {(task.attachments || []).length > 0 ? (
                   <div className="space-y-2">
@@ -739,10 +836,12 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, onChanged, onEdit }) => {
                       <span className="px-1.5 py-0.5 rounded text-[8px] font-black uppercase tracking-wider bg-[var(--accent-red-bg)] text-[var(--accent-red)] border border-[var(--accent-red-border)]">Required</span>
                     )}
                   </p>
-                  <label className="flex items-center gap-1.5 px-3 py-1.5 bg-[var(--accent-green)] text-white rounded-lg text-[10px] font-black uppercase tracking-widest cursor-pointer">
-                    {uploadingEvidence ? 'Uploading...' : 'Upload Evidence'}
-                    <input type="file" className="hidden" onChange={handleEvidenceAttach} disabled={uploadingEvidence} />
-                  </label>
+                  {!isPureWatcher && (
+                    <label className="flex items-center gap-1.5 px-3 py-1.5 bg-[var(--accent-green)] text-white rounded-lg text-[10px] font-black uppercase tracking-widest cursor-pointer">
+                      {uploadingEvidence ? 'Uploading...' : 'Upload Evidence'}
+                      <input type="file" className="hidden" onChange={handleEvidenceAttach} disabled={uploadingEvidence} />
+                    </label>
+                  )}
                 </div>
                 {task.evidenceRequired && !(task.completionAttachments || []).length && (
                   <p className="mb-2 text-[10px] font-bold text-[var(--accent-red)]">Evidence upload is required before completing this task.</p>
@@ -750,7 +849,7 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, onChanged, onEdit }) => {
                 {(task.completionAttachments || []).length > 0 ? (
                   <div className="space-y-2">
                     {task.completionAttachments.map(a => (
-                      <AttachmentItem key={a.id} attachment={a} onRemove={() => handleRemoveEvidence(a.id)}
+                      <AttachmentItem key={a.id} attachment={a} onRemove={isPureWatcher ? undefined : () => handleRemoveEvidence(a.id)}
                         icon={FileCheck2} iconClass="text-[var(--accent-green)]" linkHover="hover:text-[var(--accent-green)]" />
                     ))}
                   </div>
@@ -759,81 +858,57 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, onChanged, onEdit }) => {
                 )}
               </div>
 
-              {/* Follow-Ups — raised by In-Loop members (watchers). Count = follow-up list length.
-                  Everyone involved sees the count + history; only in-loop members can add one. */}
+              {/* Follow-Ups — the task's single communication timeline. People's messages and the
+                  system's record of what happened, interleaved oldest-first. Anyone on the task
+                  (assigner, assignee, in-loop member) can read it and post to it. */}
               <div className="bg-[var(--input-bg)] border border-[var(--border)] rounded-2xl p-4">
                 <p className="flex items-center gap-1.5 text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest mb-3">
-                  <Bell size={13} /> Follow-Ups ({task.followUpCount ?? (task.followUps || []).length})
+                  <Bell size={13} /> Follow-Ups (Activity Timeline) · {task.followUpCount ?? (task.followUps || []).length}
                 </p>
-                {(task.followUps || []).length === 0 ? (
-                  <div className="py-6 flex flex-col items-center justify-center gap-2">
-                    <Bell size={24} className="text-[var(--text-muted)] opacity-30" />
-                    <p className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest opacity-70">No follow-ups yet</p>
-                  </div>
-                ) : (
-                  <div className="space-y-3 mb-3 max-h-56 overflow-y-auto no-scrollbar">
-                    {[...task.followUps].reverse().map(f => (
-                      <div key={f.id} className="flex items-start gap-2">
-                        <div className="w-7 h-7 rounded-full flex items-center justify-center text-white font-black text-[9px] shrink-0" style={{ background: 'var(--avatar-bg)' }}>
-                          {getInitials(f.by_name)}
-                        </div>
-                        <div className="min-w-0">
-                          <p className="text-[11px] font-black text-[var(--text-main)]">{f.by_name}</p>
-                          <p className="text-[12px] font-medium text-[var(--text-main)]">{f.remark}</p>
-                          <p className="text-[9px] font-bold text-[var(--text-muted)] opacity-70">{f.created_at ? formatDateTime(f.created_at) : ''}</p>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-                {isInLoop ? (
-                  <div className="flex items-center gap-2">
-                    <input value={followUpText} onChange={e => setFollowUpText(e.target.value)}
-                      onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); handleAddFollowUp(); } }}
-                      placeholder="Add a follow-up remark..."
-                      className="flex-1 px-3 py-2 bg-[var(--bg-card)] border border-[var(--border)] rounded-lg text-[12px] font-bold outline-none focus:border-[var(--accent-indigo)]" />
-                    <button type="button" onClick={handleAddFollowUp} disabled={postingFollowUp || !followUpText.trim()}
-                      className="flex items-center gap-1.5 px-3 py-2 bg-[var(--accent-indigo)] text-white rounded-lg text-[10px] font-black uppercase tracking-widest disabled:opacity-50 shrink-0">
-                      <Bell size={13} /> {postingFollowUp ? '...' : 'Follow Up'}
-                    </button>
-                  </div>
-                ) : (
-                  <p className="text-[10px] font-bold text-[var(--text-muted)] opacity-70">Only In-Loop members can raise a follow-up.</p>
-                )}
-              </div>
-
-              {/* Remark History (Chat) */}
-              <div className="bg-[var(--input-bg)] border border-[var(--border)] rounded-2xl p-4">
-                <p className="flex items-center gap-1.5 text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest mb-3">
-                  <MessageSquare size={13} /> Remark History (Chat)
-                </p>
-                {(task.remarks || []).length === 0 ? (
+                {activityTimeline.length === 0 ? (
                   <div className="py-8 flex flex-col items-center justify-center gap-2">
-                    <MessageSquare size={28} className="text-[var(--text-muted)] opacity-30" />
-                    <p className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest opacity-70">No conversation yet</p>
+                    <Bell size={28} className="text-[var(--text-muted)] opacity-30" />
+                    <p className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest opacity-70">Nothing here yet</p>
                   </div>
                 ) : (
-                  <div className="space-y-3 mb-3 max-h-56 overflow-y-auto no-scrollbar">
-                    {task.remarks.map(r => (
-                      <div key={r.id} className="flex items-start gap-2">
-                        <div className="w-7 h-7 rounded-full flex items-center justify-center text-white font-black text-[9px] shrink-0" style={{ background: 'var(--avatar-bg)' }}>
-                          {getInitials(r.author_name)}
-                        </div>
+                  <div className="space-y-3 mb-3 max-h-72 overflow-y-auto no-scrollbar">
+                    {activityTimeline.map(item => (
+                      <div key={item.id} className="flex items-start gap-2">
+                        {item.kind === 'system' ? (
+                          <div className="w-7 h-7 rounded-full flex items-center justify-center shrink-0 bg-[var(--bg-card)] border border-[var(--border)] text-[var(--text-muted)]">
+                            <Info size={13} />
+                          </div>
+                        ) : (
+                          <div className="w-7 h-7 rounded-full flex items-center justify-center text-white font-black text-[9px] shrink-0" style={{ background: 'var(--avatar-bg)' }}>
+                            {getInitials(item.name)}
+                          </div>
+                        )}
                         <div className="min-w-0">
-                          <p className="text-[11px] font-black text-[var(--text-main)]">{r.author_name}</p>
-                          <p className="text-[12px] font-medium text-[var(--text-main)]">{r.text}</p>
-                          <p className="text-[9px] font-bold text-[var(--text-muted)] opacity-70">{r.created_at ? formatDateTime(r.created_at) : ''}</p>
+                          <p className={`text-[11px] font-black ${item.kind === 'system' ? 'text-[var(--text-muted)] uppercase tracking-wider' : 'text-[var(--text-main)]'}`}>
+                            {item.kind === 'system' ? 'System' : item.name}
+                          </p>
+                          <p className={`text-[12px] ${item.kind === 'system' ? 'font-bold text-[var(--text-muted)]' : 'font-medium text-[var(--text-main)]'}`}>
+                            {item.text}
+                            {item.kind === 'system' && item.by && <span className="opacity-70"> · by {item.by}</span>}
+                          </p>
+                          {item.reason && (
+                            <p className="mt-1 px-2 py-1 bg-[var(--accent-yellow-bg)] text-[var(--text-muted)] text-[11px] rounded-lg italic">"{item.reason}"</p>
+                          )}
+                          <p className="text-[9px] font-bold text-[var(--text-muted)] opacity-70">{item.at ? formatDateTime(item.at) : ''}</p>
                         </div>
                       </div>
                     ))}
                   </div>
                 )}
                 <div className="flex items-center gap-2">
-                  <input value={newComment} onChange={e => setNewComment(e.target.value)}
-                    onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); handleAddComment(); } }}
-                    placeholder="Write a remark..."
+                  <input value={followUpText} onChange={e => setFollowUpText(e.target.value)}
+                    onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); handleAddFollowUp(); } }}
+                    placeholder="Add a follow-up..."
                     className="flex-1 px-3 py-2 bg-[var(--bg-card)] border border-[var(--border)] rounded-lg text-[12px] font-bold outline-none focus:border-[var(--accent-indigo)]" />
-                  <button type="button" onClick={handleAddComment} disabled={posting} className="p-2 bg-[var(--accent-indigo)] text-white rounded-lg disabled:opacity-60"><Send size={15} /></button>
+                  <button type="button" onClick={handleAddFollowUp} disabled={postingFollowUp || !followUpText.trim()}
+                    className="flex items-center gap-1.5 px-3 py-2 bg-[var(--accent-indigo)] text-white rounded-lg text-[10px] font-black uppercase tracking-widest disabled:opacity-50 shrink-0">
+                    <Bell size={13} /> {postingFollowUp ? '...' : 'Follow Up'}
+                  </button>
                 </div>
               </div>
             </div>
@@ -850,17 +925,20 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, onChanged, onEdit }) => {
       title="Revise Deadline"
       onApply={(iso) => handleReviseDeadline(iso)}
       holidayDates={holidayDates} weeklyOffs={WEEKLY_OFFS} onBlocked={showError}
+      disablePast
     />
 
-    {/* Reopen picker — the assigner must set a NEW deadline; only then is the task reopened
-        and handed back to the assignee. */}
+    {/* Reopen picker — the assigner must set a NEW deadline and give a mandatory reason; only
+        then is the task handed back to the assignee for rework. */}
     <MiniDatePicker
       isOpen={reopenPickerOpen}
       onClose={() => setReopenPickerOpen(false)}
       value={task?.end}
-      title="New Deadline for Reopen"
-      onApply={(iso) => handleReopenWithDeadline(iso)}
+      title="Reopen Task"
+      onApply={(iso, remark) => handleReopenWithDeadline(iso, remark)}
       holidayDates={holidayDates} weeklyOffs={WEEKLY_OFFS} onBlocked={showError}
+      disablePast
+      remarkLabel="Reason for Reopening" remarkRequired
     />
 
     {/* Doer Name + Reason capture for Dependent on Other / Blocked. */}
@@ -888,6 +966,7 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, onChanged, onEdit }) => {
       <TaskDetailsModal
         isOpen
         taskId={subtaskDetailId}
+        scope={scope}
         onClose={() => setSubtaskDetailId(null)}
         onChanged={() => { fetchDetail({ silent: true }); onChanged?.(); }}
         onEdit={onEdit}
