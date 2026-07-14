@@ -178,6 +178,62 @@ DEFAULT_TEMPLATES = {
         "subject": "New Task Assigned: {{task_name}}",
         "body": "Hello {{assigned_user}},\n\nA new task '{{task_name}}' has been assigned to you by {{assigned_by}}.\n\nDeadline: {{deadline}}\nPriority: {{critical_level}}\nDescription: {{description}}\n\nRegards,\nSparsh Notifications"
     },
+    # ─── Task Management (Delegation) module ───
+    # Separate triggers from the Calendar's. task_created/updated/deleted are the
+    # pre-existing slugs (they only ever fired for delegation tasks); the rest are new.
+    # See app/services/task_notifications.py for the recipients and context of each.
+    "task_updated_email": {
+        "subject": "Task Updated: {{task_name}}",
+        "body": "Hello {{name}},\n\nThe task '{{task_name}}' was updated by {{actor_name}}.\n\nDeadline: {{deadline}}\nPriority: {{critical_level}}\nStatus: {{task_status}}\n\nRegards,\nSparsh Notifications"
+    },
+    "task_deleted_email": {
+        "subject": "Task Deleted: {{task_name}}",
+        "body": "Hello {{name}},\n\nThe task '{{task_name}}' has been deleted by {{actor_name}}.\n\nRegards,\nSparsh Notifications"
+    },
+    "task_assigned_email": {
+        "subject": "Task Assigned: {{task_name}}",
+        "body": "Hello {{name}},\n\n{{actor_name}} has assigned you the task '{{task_name}}'.\n\nDeadline: {{deadline}}\nPriority: {{critical_level}}\nDescription: {{description}}\n\nRegards,\nSparsh Notifications"
+    },
+    "task_accepted_email": {
+        "subject": "Task Accepted: {{task_name}}",
+        "body": "Hello {{name}},\n\n{{actor_name}} has accepted the task '{{task_name}}'.\n\nDeadline: {{deadline}}\n\nRegards,\nSparsh Notifications"
+    },
+    "task_completed_email": {
+        "subject": "Task Completed: {{task_name}}",
+        "body": "Hello {{name}},\n\n{{actor_name}} has marked the task '{{task_name}}' as completed.\n\nRegards,\nSparsh Notifications"
+    },
+    "task_reopened_email": {
+        "subject": "Task Reopened: {{task_name}}",
+        "body": "Hello {{name}},\n\n{{actor_name}} has reopened the task '{{task_name}}'. It needs further work.\n\nReason: {{reason}}\nDeadline: {{deadline}}\n\nRegards,\nSparsh Notifications"
+    },
+    "task_verification_requested_email": {
+        "subject": "Verification Requested: {{task_name}}",
+        "body": "Hello {{name}},\n\n{{actor_name}} has submitted the task '{{task_name}}' for your verification.\n\nPlease review it and either approve the completion or reopen the task.\n\nRegards,\nSparsh Notifications"
+    },
+    "task_verification_approved_email": {
+        "subject": "Verification Approved: {{task_name}}",
+        "body": "Hello {{name}},\n\n{{actor_name}} has verified and approved your completion of the task '{{task_name}}'.\n\nRegards,\nSparsh Notifications"
+    },
+    "task_deadline_revised_email": {
+        "subject": "Deadline Revised: {{task_name}}",
+        "body": "Hello {{name}},\n\n{{actor_name}} has revised the deadline for the task '{{task_name}}'.\n\nPrevious deadline: {{old_deadline}}\nNew deadline: {{new_deadline}}\nReason: {{reason}}\n\nRegards,\nSparsh Notifications"
+    },
+    "task_blocked_email": {
+        "subject": "Task Blocked: {{task_name}}",
+        "body": "Hello {{name}},\n\n{{actor_name}} has marked the task '{{task_name}}' as Blocked.\n\nReason: {{reason}}\n\nRegards,\nSparsh Notifications"
+    },
+    "task_dependent_on_other_email": {
+        "subject": "Task Dependent on Other: {{task_name}}",
+        "body": "Hello {{name}},\n\n{{actor_name}} has marked the task '{{task_name}}' as Dependent on Other, waiting on {{doer_name}}.\n\nReason: {{reason}}\nDeadline: {{deadline}}\n\nRegards,\nSparsh Notifications"
+    },
+    "task_follow_up_added_email": {
+        "subject": "Follow-up on: {{task_name}}",
+        "body": "Hello {{name}},\n\n{{actor_name}} has raised a follow-up on the task '{{task_name}}'.\n\nRemark: {{remark}}\nDeadline: {{deadline}}\n\nRegards,\nSparsh Notifications"
+    },
+    "task_subtask_created_email": {
+        "subject": "Subtask Created: {{task_name}}",
+        "body": "Hello {{name}},\n\n{{actor_name}} has created the subtask '{{task_name}}' under '{{parent_task}}'.\n\nDeadline: {{deadline}}\nPriority: {{critical_level}}\n\nRegards,\nSparsh Notifications"
+    },
     "event_created_email": {
         "subject": "Session Scheduled: {{event_title}}",
         "body": SESSION_HTML_TEMPLATE
@@ -213,19 +269,32 @@ async def fetch_template(slug: str, company_id: str = None):
     be used and, if an admin has deactivated it (is_active == False), we return
     None so the caller skips sending entirely — an inactive template must never
     fall through to a lower-precedence template or the hardcoded default.
-    Missing `is_active` is treated as active so legacy docs keep working."""
+    Missing `is_active` is treated as active so legacy docs keep working.
+
+    Duplicates: the collection can hold several docs for the same (slug, scope, company)
+    — POST /settings/templates used to insert blindly, so hitting "New Override" twice for
+    one trigger left two copies. find_one() returned them in natural (insertion) order, which
+    meant a stale *deactivated* copy could shadow a newer active one and silently kill the
+    send. Resolution is therefore explicitly newest-first: the most recently touched doc is
+    the admin's latest intent. create_template now upserts, so new duplicates can't appear."""
     col = get_collection("notification_templates")
+
+    async def _newest(query: dict):
+        docs = await col.find(query).to_list(50)
+        if not docs:
+            return None
+        return max(docs, key=lambda d: d.get("updated_at") or d.get("created_at") or datetime.min)
 
     doc = None
     if company_id:
-        doc = await col.find_one({
+        doc = await _newest({
             "slug": slug,
             "company_id": str(company_id),
             "scope": "company",
         })
 
     if doc is None:
-        doc = await col.find_one({
+        doc = await _newest({
             "slug": slug,
             "scope": "staff",
         })

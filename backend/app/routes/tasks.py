@@ -18,6 +18,7 @@ from app.services.activity_log_service import log_activity
 from app.services.s3_service import upload_file_to_s3_with_key
 from app.routes.group import _is_member_or_manager
 from app.services import task_events
+from app.services.task_notifications import notify_task_event
 
 router = APIRouter(prefix="/tasks", tags=["Tasks"])
 
@@ -781,6 +782,42 @@ async def update_task_status(task_id: str, body: dict, current_user: dict = Depe
         "watchers": existing.get("watchers") or [],
         "actor_id": user_id,
     })
+
+    # ─── Email / WhatsApp / in-app (Task Management triggers only — never the Calendar's) ───
+    # Only a real transition is worth an email; a no-op re-save of the same status isn't.
+    # `notify_event` is the *most specific* thing that happened, so each transition sends
+    # exactly one notification: an assigner approving a verification gets "verification
+    # approved" (to the assignee), not that plus a generic "completed".
+    if old_status != new_status or history_note:
+        if reassign_doer or new_status == "dependent_on_others":
+            notify_event = "dependent_on_other"
+        elif new_status == "verification":
+            notify_event = "verification_requested"
+        elif old_status == "verification" and new_status == "completed":
+            notify_event = "verification_approved"
+        elif new_status == "in_progress_reopened":
+            notify_event = "reopened"
+        elif new_status == "completed":
+            notify_event = "completed"
+        elif new_status == "accepted":
+            notify_event = "accepted"
+        elif new_status == "blocked":
+            notify_event = "blocked"
+        else:
+            # Includes the dependency hand-back (doer completes → task returns to In Progress).
+            notify_event = "updated"
+
+        await notify_task_event(
+            notify_event,
+            projected,
+            current_user,
+            extra={
+                "reason": reason,
+                "doer_name": doer_name,
+                "doer_id": reassign_doer or existing.get("dependency_doer_id"),
+            },
+        )
+
     return {"id": task_id, "workflow_status": new_status}
 
 
@@ -893,6 +930,7 @@ async def add_task_follow_up(task_id: str, body: dict, current_user: dict = Depe
         "watchers": existing.get("watchers") or [],
         "actor_id": str(current_user["_id"]),
     })
+    await notify_task_event("follow_up_added", existing, current_user, extra={"remark": remark})
     return {"id": task_id, "follow_up": {**entry, "created_at": entry["created_at"].isoformat()}}
 
 
@@ -1026,6 +1064,12 @@ async def revise_task_deadline(task_id: str, body: dict, current_user: dict = De
         "watchers": existing.get("watchers") or [],
         "actor_id": str(current_user["_id"]),
     })
+    await notify_task_event(
+        "deadline_revised",
+        {**existing, "end": new_end},
+        current_user,
+        extra={"old_end": old_end, "new_end": new_end, "reason": reason},
+    )
     return {"id": task_id, "end": new_end}
 
 
@@ -1056,6 +1100,9 @@ async def soft_delete_task(task_id: str, current_user: dict = Depends(require_ta
         "watchers": existing.get("watchers") or [],
         "actor_id": str(current_user["_id"]),
     })
+    # The delegation module soft-deletes (the Calendar's hard DELETE has its own trigger),
+    # so without this the assignees were never told their task went away.
+    await notify_task_event("deleted", existing, current_user)
     return {"message": "Task moved to Deleted Tasks"}
 
 

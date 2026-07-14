@@ -158,21 +158,7 @@ const CalendarPage = () => {
                 api.get(usersEndpoint), api.get('/settings/backdate-control'),
                 api.get('/gpt/projects')
             ]);
-            setEvents(evRes.data.map(e => {
-                const evType = e.extendedProps?.type || e.type;
-                // Tasks have no user-facing "start" of their own (that field is only the
-                // recurrence-series start, defaulted to creation time — see TaskFormModal);
-                // the date the user actually picked is the due date (`end`, "Set Deadline").
-                // Anchor the calendar's day-cell placement to that instead, so a task shows
-                // up under the day it's due, not the day it happened to be created.
-                const displayStart = (evType === 'task' && e.end) ? e.end : e.start;
-                return {
-                    id: e.id, title: e.title, start: displayStart, end: e.end,
-                    backgroundColor: 'transparent', borderColor: 'transparent',
-                    textColor: 'var(--text-main)', allDay: e.allDay,
-                    extendedProps: { ...e.extendedProps, id: e.id, dotColor: getRescheduleColor(e.extendedProps?.status || e.status, e.extendedProps?.type || e.type, e.color, e.extendedProps?.isCreator) }
-                };
-            }));
+            setEvents(mapApiEvents(evRes.data));
             setBatches(bRes.data); setQuarters(qRes.data); setTemplates(tRes.data); setAllUsers(uRes.data);
             setBackdateSettings(sRes.data); setGptProjects(gRes.data);
         } catch (err) { console.error(err); }
@@ -249,14 +235,66 @@ const CalendarPage = () => {
         }
     };
 
+    // ─── Day-cell key: the ONE place that decides which day an entry belongs to ───
+    //
+    // Everything on this page (the grid, the Day Summary, the stats, the post-action refresh)
+    // must agree, and must agree with FullCalendar — which runs at timeZone:'local' and places
+    // each entry in its LOCAL day cell.
+    //
+    // The bug this replaces: the Day Summary compared the RAW STORED STRING's date part
+    // (`e.start.split('T')[0]`), which is the UTC date. For anything stored as a Z timestamp
+    // whose UTC date differs from its local date, that is a different day than the grid drew it
+    // on — e.g. a task due 2026-05-13T19:30:00Z is 14 May in IST: drawn on the 14th, but listed
+    // under the 13th. Hence "click a date, see another date's tasks".
+    //
+    // Three stored shapes exist in the DB and each needs its own rule:
+    //   'YYYY-MM-DD'            (date-only, all-day)  -> already a day key; DO NOT feed to Date(),
+    //                                                    JS reads it as UTC midnight and can slide
+    //                                                    it a day in negative-offset zones.
+    //   '...Z' / '...+00:00'    (instant)             -> convert to the local day.
+    const dayKey = (value) => {
+        if (!value) return "";
+        if (typeof value === 'string' && !value.includes('T')) return value.slice(0, 10);
+        const d = new Date(value);
+        if (isNaN(d.getTime())) return "";
+        return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    };
+
+    // A task's `start` is only its creation / recurrence anchor — the date the user actually
+    // picked is the due date (`end`, "Set Deadline"). Anchor tasks to that, so a task lands on
+    // the day it is DUE. Sessions keep their own start.
+    const anchorOf = (e) => {
+        const evType = e.extendedProps?.type || e.type;
+        return (evType === 'task' && e.end) ? e.end : e.start;
+    };
+
+    // Shape the API payload for FullCalendar. Shared by the initial load AND the post-action
+    // refresh, so both agree on the anchor — previously the refresh re-keyed tasks on their
+    // creation date and they jumped days after a complete/delete.
+    const mapApiEvents = (rows) => (rows || []).map(e => ({
+        id: e.id, title: e.title, start: anchorOf(e), end: e.end, allDay: e.allDay,
+        backgroundColor: 'transparent', borderColor: 'transparent', textColor: 'var(--text-main)',
+        extendedProps: {
+            ...e.extendedProps, id: e.id,
+            dotColor: getRescheduleColor(e.extendedProps?.status || e.status, e.extendedProps?.type || e.type, e.color, e.extendedProps?.isCreator)
+        }
+    }));
+
+    // Entries drawn on `key`'s cell. Batches/quarters are backdrop markers, not day entries.
+    const eventsOnDay = (key, list) => (list || []).filter(e =>
+        dayKey(e.start) === key && !['batch', 'quarter'].includes(e.extendedProps?.type || e.type)
+    );
+
     // ─── Stats Calculation ───
     const currentMonthStats = useMemo(() => {
         const currentYear = currentViewDate.getFullYear();
         const currentMonth = currentViewDate.getMonth();
 
         const data = events.filter(e => {
-            const d = new Date(e.start);
-            return d.getFullYear() === currentYear && d.getMonth() === currentMonth;
+            const key = dayKey(e.start);
+            if (!key) return false;
+            const [y, m] = key.split('-');
+            return Number(y) === currentYear && Number(m) - 1 === currentMonth;
         });
 
         const getCount = (type, status) => {
@@ -295,21 +333,15 @@ const CalendarPage = () => {
     }, [events, activeFilter]);
 
     // ─── Summary Logic ───
-    const handleDateSelect = (info) => {
-        const selectedDate = info.startStr.split('T')[0];
-        const eventsForDay = events.filter(e => {
-            const d = new Date(e.start);
-            if (isNaN(d.getTime())) return false;
-            const eStart = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-            return eStart === selectedDate && !['batch', 'quarter'].includes(e.extendedProps?.type || e.type);
-        });
-
-
-
-        setSummaryDate(selectedDate);
-        setDayEvents(eventsForDay);
+    // Reads `filteredEvents` — what the grid is actually drawing — so with a stat card active
+    // the summary can't list entries that aren't on screen.
+    const openDaySummary = (key) => {
+        setSummaryDate(key);
+        setDayEvents(eventsOnDay(key, filteredEvents));
         setShowSummary(true);
     };
+
+    const handleDateSelect = (info) => openDaySummary(info.startStr.split('T')[0]);
 
     const openCreateModal = (type) => {
         setIsEdit(false); setCurrentEventId(null);
@@ -366,17 +398,12 @@ const CalendarPage = () => {
             fetchData();
             // If in summary modal, refresh current day list
             if (showSummary) {
-                const res = await api.get('/calendar/events'); // Fast refresh for summary
-                const eventsForDay = res.data
-                    .filter(e => {
-                        const d = new Date(e.start);
-                        const eStart = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-                        return eStart === summaryDate && !['batch', 'quarter'].includes(e.type);
-                    })
-                    .map(e => ({
-                        id: e.id, title: e.title, start: e.start, end: e.end, extendedProps: { ...e.extendedProps, id: e.id }
-                    }));
-                setDayEvents(eventsForDay);
+                // Fast refresh for the open summary. Goes through the SAME mapper + day-key as
+                // the grid — it used to re-key on the raw `start` (a task's creation date), so a
+                // task due on the 15th but created on the 13th jumped to the 13th after a
+                // complete/delete.
+                const res = await api.get(`/calendar/events?view_mode=${viewMode}`);
+                setDayEvents(eventsOnDay(summaryDate, mapApiEvents(res.data)));
             }
         } catch (err) { console.error(err); showError("Communication Failure: The session architect could not be reached."); }
     };
@@ -677,11 +704,8 @@ const CalendarPage = () => {
                     initialView="dayGridMonth" headerToolbar={false} events={filteredEvents} height="auto" selectable={true}
                     datesSet={(arg) => setCurrentViewDate(arg.view.currentStart)}
 
-                    select={handleDateSelect} eventClick={(info) => {
-                        const eStart = info.event.startStr.split('T')[0];
-                        const eventsForDay = events.filter(e => e.start.split('T')[0] === eStart && !['batch', 'quarter'].includes(e.extendedProps.type));
-                        setSummaryDate(eStart); setDayEvents(eventsForDay); setShowSummary(true);
-                    }}
+                    select={handleDateSelect}
+                    eventClick={(info) => openDaySummary(dayKey(info.event.startStr))}
                     dayMaxEvents={3} eventContent={(info) => {
                         const s = info.event.extendedProps.status;
                         const type = info.event.extendedProps.type;
@@ -726,7 +750,10 @@ const CalendarPage = () => {
                                     <div>
                                         <h2 className="text-lg font-black text-[var(--text-main)] tracking-tight">Day Summary</h2>
                                         <p className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-wider">
-                                            {new Date(summaryDate).toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}
+                                            {/* "T00:00:00" forces a LOCAL parse. new Date("2026-07-14") is UTC
+                                                midnight and would print the 13th in a negative-offset zone —
+                                                i.e. a header contradicting the cell the user just clicked. */}
+                                            {summaryDate && new Date(summaryDate + "T00:00:00").toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}
                                             {(summaryDate && new Date(summaryDate + "T23:59:59") < new Date()) && <span className="ml-2 text-red-500">[PAST]</span>}
                                         </p>
                                     </div>

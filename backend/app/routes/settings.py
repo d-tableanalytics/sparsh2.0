@@ -86,11 +86,28 @@ async def create_template(template: dict = Body(...), current_user: dict = Depen
         "created_at": datetime.utcnow(),
         "is_active": True
     }
-    
+
     if role == "clientadmin":
         new_template["scope"] = "company"
         new_template["company_id"] = current_user.get("company_id")
-    
+
+    # One template per (slug, scope, company). This used to insert blindly, so creating an
+    # override twice for the same trigger left duplicate docs and fetch_template could then
+    # resolve the wrong one — a deactivated copy shadowing an active one silently stopped the
+    # notification from sending. Overwrite the existing doc instead of stacking another.
+    # `is_active` is deliberately preserved: status may only change via PATCH /templates/{id}/status.
+    existing = await col.find_one({
+        "slug": new_template.get("slug"),
+        "scope": new_template.get("scope"),
+        "company_id": new_template.get("company_id"),
+    })
+    if existing:
+        new_template.pop("is_active", None)
+        new_template["created_at"] = existing.get("created_at", new_template["created_at"])
+        new_template["updated_at"] = datetime.utcnow()
+        await col.update_one({"_id": existing["_id"]}, {"$set": new_template})
+        return {"id": str(existing["_id"]), "message": "Template updated"}
+
     result = await col.insert_one(new_template)
     return {"id": str(result.inserted_id), "message": "Template created"}
 
@@ -188,108 +205,171 @@ async def delete_template(template_id: str, current_user: dict = Depends(get_cur
     await col.delete_one({"_id": ObjectId(template_id)})
     return {"message": "Template deleted"}
 
+# ─── Seed content: one Email + one WhatsApp template per trigger ───
+# Each entry is (slug_base, friendly name, email subject, email body, whatsapp body). The
+# seeder below expands every entry into a "<slug>_email" and a "<slug>_whatsapp" doc, so
+# every action in every module has a template on both channels.
+#
+# WhatsApp bodies are kept to a single short paragraph: Meta only delivers free-form text
+# inside the 24h service window, so for business-initiated sends an admin still has to point
+# the template at a Meta-approved one (meta_template_name) in the editor. The body here is
+# what goes out in the free-form case and is the copy to mirror into the Meta template.
+TEMPLATE_SEEDS = [
+    # ─── Calendar: Sessions ───
+    ("event_created", "Session Scheduled",
+     "New Session Scheduled: {{event_title}}",
+     "Hello {{name}},\n\nA new training session '{{event_title}}' has been scheduled.\nDate: {{date}}\nTime: {{time}}\nLink: {{meeting_link}}",
+     "Hello {{name}}, the session '{{event_title}}' is scheduled for {{date}} at {{time}}. Join here: {{meeting_link}}"),
+    ("event_updated", "Session Rescheduled",
+     "Session Rescheduled: {{event_title}}",
+     "Hello {{name}},\n\nThe session '{{event_title}}' has been moved to a new time.\nNew Date: {{date}}\nNew Time: {{time}}",
+     "Hello {{name}}, the session '{{event_title}}' has been rescheduled to {{date}} at {{time}}."),
+    ("event_deleted", "Session Cancelled",
+     "Session Cancelled: {{event_title}}",
+     "Hello {{name}},\n\nThe session '{{event_title}}' scheduled for {{date}} has been cancelled.",
+     "Hello {{name}}, the session '{{event_title}}' on {{date}} has been cancelled."),
+    ("session_complete", "Session Completed",
+     "Session Completed: {{topic}}",
+     "Hello {{user_name}},\n\nThe session '{{topic}}' has been completed. Thank you for attending.",
+     "Hello {{user_name}}, the session '{{topic}}' is complete. Thank you for attending."),
+    ("reminder", "Session Reminder",
+     "Upcoming: {{title}} in {{reminder_time}}",
+     "Hello {{name}},\n\nThis is a friendly reminder for '{{title}}' starting at {{event_time}}.\nLink: {{meeting_url}}",
+     "Reminder: '{{title}}' starts at {{event_time}}. Link: {{meeting_url}}"),
+
+    # ─── Task Management (Delegation) ───
+    ("task_created", "Task Created",
+     "New Task Assigned: {{task_name}}",
+     "Hello {{assigned_user}},\n\nA new task '{{task_name}}' has been assigned to you by {{assigned_by}}.\n\nDeadline: {{deadline}}\nPriority: {{critical_level}}\nDescription: {{description}}\n\nRegards,\nSparsh Notifications",
+     "Hello {{assigned_user}}, {{assigned_by}} has assigned you the task '{{task_name}}'. Deadline: {{deadline}} (Priority: {{critical_level}})."),
+    ("task_assigned", "Task Assigned",
+     "Task Assigned: {{task_name}}",
+     "Hello {{name}},\n\n{{actor_name}} has assigned you the task '{{task_name}}'.\n\nDeadline: {{deadline}}\nPriority: {{critical_level}}\nDescription: {{description}}\n\nRegards,\nSparsh Notifications",
+     "Hello {{name}}, {{actor_name}} has assigned you the task '{{task_name}}'. Deadline: {{deadline}}."),
+    ("task_updated", "Task Updated",
+     "Task Updated: {{task_name}}",
+     "Hello {{name}},\n\nThe task '{{task_name}}' was updated by {{actor_name}}.\n\nDeadline: {{deadline}}\nPriority: {{critical_level}}\nStatus: {{task_status}}\n\nRegards,\nSparsh Notifications",
+     "Hello {{name}}, {{actor_name}} updated the task '{{task_name}}'. Current status: {{task_status}}."),
+    ("task_deleted", "Task Deleted",
+     "Task Deleted: {{task_name}}",
+     "Hello {{name}},\n\nThe task '{{task_name}}' has been deleted by {{actor_name}}.\n\nRegards,\nSparsh Notifications",
+     "Hello {{name}}, the task '{{task_name}}' has been deleted by {{actor_name}}."),
+    ("task_accepted", "Task Accepted",
+     "Task Accepted: {{task_name}}",
+     "Hello {{name}},\n\n{{actor_name}} has accepted the task '{{task_name}}'.\n\nDeadline: {{deadline}}\n\nRegards,\nSparsh Notifications",
+     "Hello {{name}}, {{actor_name}} has accepted the task '{{task_name}}'. Deadline: {{deadline}}."),
+    ("task_completed", "Task Completed",
+     "Task Completed: {{task_name}}",
+     "Hello {{name}},\n\n{{actor_name}} has marked the task '{{task_name}}' as completed.\n\nRegards,\nSparsh Notifications",
+     "Hello {{name}}, {{actor_name}} has completed the task '{{task_name}}'."),
+    ("task_reopened", "Task Reopened",
+     "Task Reopened: {{task_name}}",
+     "Hello {{name}},\n\n{{actor_name}} has reopened the task '{{task_name}}'. It needs further work.\n\nReason: {{reason}}\nDeadline: {{deadline}}\n\nRegards,\nSparsh Notifications",
+     "Hello {{name}}, {{actor_name}} has reopened the task '{{task_name}}'. Reason: {{reason}}"),
+    ("task_verification_requested", "Verification Requested",
+     "Verification Requested: {{task_name}}",
+     "Hello {{name}},\n\n{{actor_name}} has submitted the task '{{task_name}}' for your verification.\n\nPlease review it and either approve the completion or reopen the task.\n\nRegards,\nSparsh Notifications",
+     "Hello {{name}}, {{actor_name}} has submitted '{{task_name}}' for your verification. Please review and approve or reopen it."),
+    ("task_verification_approved", "Verification Approved",
+     "Verification Approved: {{task_name}}",
+     "Hello {{name}},\n\n{{actor_name}} has verified and approved your completion of the task '{{task_name}}'.\n\nRegards,\nSparsh Notifications",
+     "Hello {{name}}, {{actor_name}} has verified and approved your completion of '{{task_name}}'."),
+    ("task_deadline_revised", "Deadline Revised",
+     "Deadline Revised: {{task_name}}",
+     "Hello {{name}},\n\n{{actor_name}} has revised the deadline for the task '{{task_name}}'.\n\nPrevious deadline: {{old_deadline}}\nNew deadline: {{new_deadline}}\nReason: {{reason}}\n\nRegards,\nSparsh Notifications",
+     "Hello {{name}}, the deadline for '{{task_name}}' moved from {{old_deadline}} to {{new_deadline}}. Reason: {{reason}}"),
+    ("task_blocked", "Task Blocked",
+     "Task Blocked: {{task_name}}",
+     "Hello {{name}},\n\n{{actor_name}} has marked the task '{{task_name}}' as Blocked.\n\nReason: {{reason}}\n\nRegards,\nSparsh Notifications",
+     "Hello {{name}}, {{actor_name}} has marked '{{task_name}}' as Blocked. Reason: {{reason}}"),
+    ("task_dependent_on_other", "Dependent on Other",
+     "Task Dependent on Other: {{task_name}}",
+     "Hello {{name}},\n\n{{actor_name}} has marked the task '{{task_name}}' as Dependent on Other, waiting on {{doer_name}}.\n\nReason: {{reason}}\nDeadline: {{deadline}}\n\nRegards,\nSparsh Notifications",
+     "Hello {{name}}, '{{task_name}}' is now Dependent on Other, waiting on {{doer_name}}. Reason: {{reason}}"),
+    ("task_follow_up_added", "Follow-up Added",
+     "Follow-up on: {{task_name}}",
+     "Hello {{name}},\n\n{{actor_name}} has raised a follow-up on the task '{{task_name}}'.\n\nRemark: {{remark}}\nDeadline: {{deadline}}\n\nRegards,\nSparsh Notifications",
+     "Hello {{name}}, {{actor_name}} raised a follow-up on '{{task_name}}': {{remark}}"),
+    ("task_subtask_created", "Subtask Created",
+     "Subtask Created: {{task_name}}",
+     "Hello {{name}},\n\n{{actor_name}} has created the subtask '{{task_name}}' under '{{parent_task}}'.\n\nDeadline: {{deadline}}\nPriority: {{critical_level}}\n\nRegards,\nSparsh Notifications",
+     "Hello {{name}}, {{actor_name}} created the subtask '{{task_name}}' under '{{parent_task}}'. Deadline: {{deadline}}."),
+
+    # ─── User Management ───
+    ("user_creation", "User Created",
+     "Welcome to Sparsh 2.0",
+     "Hello {{name}},\n\nYour account has been created.\nRole: {{new_role}}\nLogin here: {{login_url}}\nTemporary Password: {{password}}",
+     "Hello {{name}}, your Sparsh account is ready. Log in at {{login_url}}."),
+    ("user_edit", "Profile Updated",
+     "Your Account Information Updated",
+     "Hello {{name}},\n\nYour profile details were updated by {{updated_by}}.\nIf you did not authorize this, please contact support.",
+     "Hello {{name}}, your Sparsh profile was updated by {{updated_by}}. Contact support if this wasn't you."),
+    ("user_access_control_change", "Access Changed",
+     "Your Access Level Has Changed",
+     "Hello {{name}},\n\nYour role has been updated to '{{new_role}}' by {{updated_by}}.\nLogin here: {{login_url}}",
+     "Hello {{name}}, your Sparsh role is now '{{new_role}}' (updated by {{updated_by}})."),
+    ("company_registration", "New Company",
+     "Welcome, {{company_name}}!",
+     "Hello {{name}},\n\n{{company_name}} is now live on our platform.\nYou can manage your team and learners at: {{login_url}}",
+     "Hello {{name}}, {{company_name}} is now live on Sparsh. Manage your team at {{login_url}}."),
+    ("user_deleted", "User Access Removed",
+     "Account Deactivation Notice",
+     "Hello {{name}},\n\nYour access to the platform has been revoked.",
+     "Hello {{name}}, your Sparsh access has been revoked."),
+
+    # ─── Attendance ───
+    ("attendance_thanks", "Attendance Thanks",
+     "Participation Authenticated: {{event_title}}",
+     "Hello {{user_name}},\n\nThank you for attending '{{event_title}}' at {{event_time}}.",
+     "Hello {{user_name}}, thank you for attending '{{event_title}}' at {{event_time}}."),
+    ("attendance_absent", "Attendance Absent",
+     "Absence Noted: {{event_title}}",
+     "Hello {{user_name}},\n\nWe missed you in '{{event_title}}' at {{event_time}}. Please review the resources.",
+     "Hello {{user_name}}, we missed you at '{{event_title}}' ({{event_time}}). Please review the shared resources."),
+]
+
+
 @router.post("/initialize-templates")
 async def initialize_default_templates(current_user: dict = Depends(get_current_user)):
+    """Seed a staff-scope Email + WhatsApp template for every trigger in every module.
+
+    Strictly additive and idempotent: a trigger that already has a template doc is left
+    exactly as it is — existing copy, edits and Active/Inactive status are never touched or
+    removed. Only genuinely missing (slug, scope, company) combinations are inserted, so this
+    is safe to run repeatedly.
+    """
     if current_user.get("role") != "superadmin":
          raise HTTPException(status_code=403, detail="Unauthorized")
-    
+
     col = get_collection("notification_templates")
-    
-    defaults = [
-        {
-            "name": "Task Created", "slug": "task_created_email", "channel": "email",
-            "subject": "New Task Assigned: {{task_name}}",
-            "body": "Hello {{assigned_user}},\n\nA new task '{{task_name}}' has been assigned to you by {{assigned_by}}.\nTopic: {{topic}}\nDeadline: {{deadline}}",
-            "scope": "staff", "is_active": True
-        },
-        {
-            "name": "Task Updated", "slug": "task_updated_email", "channel": "email",
-            "subject": "Update on Task: {{task_name}}",
-            "body": "Hello {{assigned_user}},\n\nThe task '{{task_name}}' has been updated.\nNew Status: {{task_status}}\nPlease check your dashboard for details.",
-            "scope": "staff", "is_active": True
-        },
-        {
-            "name": "Task Deleted", "slug": "task_deleted_email", "channel": "email",
-            "subject": "Task Cancelled: {{task_name}}",
-            "body": "Hello {{assigned_user}},\n\nThe task '{{task_name}}' has been removed from your list.",
-            "scope": "staff", "is_active": True
-        },
-        {
-            "name": "Session Scheduled", "slug": "event_created_email", "channel": "email",
-            "subject": "New Session Scheduled: {{event_title}}",
-            "body": "Hello {{name}},\n\nA new training session '{{event_title}}' has been scheduled.\nDate: {{date}}\nTime: {{time}}\nLink: {{meeting_link}}",
-            "scope": "staff", "is_active": True
-        },
-        {
-            "name": "Session Rescheduled", "slug": "event_updated_email", "channel": "email",
-            "subject": "Session Rescheduled: {{event_title}}",
-            "body": "Hello {{name}},\n\nThe session '{{event_title}}' has been moved to a new time.\nNew Date: {{date}}\nNew Time: {{time}}",
-            "scope": "staff", "is_active": True
-        },
-        {
-            "name": "Session Cancelled", "slug": "event_deleted_email", "channel": "email",
-            "subject": "Session Cancelled: {{event_title}}",
-            "body": "Hello {{name}},\n\nThe session '{{event_title}}' scheduled for {{date}} has been cancelled.",
-            "scope": "staff", "is_active": True
-        },
-        {
-            "name": "User Created", "slug": "user_creation_email", "channel": "email",
-            "subject": "Welcome to Sparsh 2.0",
-            "body": "Hello {{name}},\n\nYour account has been created.\nRole: {{new_role}}\nLogin here: {{login_url}}\nTemporary Password: {{password}}",
-            "scope": "staff", "is_active": True
-        },
-        {
-            "name": "Profile Updated", "slug": "user_edit_email", "channel": "email",
-            "subject": "Your Account Information Updated",
-            "body": "Hello {{name}},\n\nYour profile details were updated by {{updated_by}}.\nIf you did not authorize this, please contact support.",
-            "scope": "staff", "is_active": True
-        },
-        {
-            "name": "User Access Removed", "slug": "user_deleted_email", "channel": "email",
-            "subject": "Account Deactivation Notice",
-            "body": "Hello {{name}},\n\nYour access to the platform has been revoked.",
-            "scope": "staff", "is_active": True
-        },
-        {
-            "name": "Event Reminder", "slug": "reminder_email", "channel": "email",
-            "subject": "Upcoming: {{title}} in {{reminder_time}}",
-            "body": "Hello {{name}},\n\nThis is a friendly reminder for '{{title}}' starting at {{event_time}}.\nLink: {{meeting_url}}",
-            "scope": "staff", "is_active": True
-        },
-        {
-            "name": "New Company Registered", "slug": "company_registration_email", "channel": "email",
-            "subject": "Welcome, {{company_name}}!",
-            "body": "Hello {{name}},\n\n{{company_name}} is now live on our platform.\nYou can manage your team and learners at: {{login_url}}",
-            "scope": "staff", "is_active": True
-        },
-        {
-            "name": "Session Completed", "slug": "session_complete_email", "channel": "email",
-            "subject": "Session Completed: {{topic}}",
-            "body": "Hello {{user_name}},\n\nThe session '{{topic}}' has been completed. Thank you for attending.",
-            "scope": "staff", "is_active": True
-        },
-        {
-            "name": "Attendance Thanks", "slug": "attendance_thanks_email", "channel": "email",
-            "subject": "Participation Authenticated: {{event_title}}",
-            "body": "Hello {{user_name}},\n\nThank you for attending '{{event_title}}' at {{event_time}}.",
-            "scope": "staff", "is_active": True
-        },
-        {
-            "name": "Attendance Absent", "slug": "attendance_absent_email", "channel": "email",
-            "subject": "Absence Noted: {{event_title}}",
-            "body": "Hello {{user_name}},\n\nWe missed you in '{{event_title}}' at {{event_time}}. Please review the resources.",
-            "scope": "staff", "is_active": True
-        }
-    ]
 
-    for d in defaults:
-        d["created_by"] = str(current_user["_id"])
-        d["created_at"] = datetime.utcnow()
-        # Check if already exists to avoid duplicates
-        exists = await col.find_one({"slug": d["slug"], "scope": d["scope"], "company_id": None})
-        if not exists:
-            await col.insert_one(d)
+    created, skipped = [], []
+    for slug_base, name, subject, email_body, whatsapp_body in TEMPLATE_SEEDS:
+        for channel, body in (("email", email_body), ("whatsapp", whatsapp_body)):
+            slug = f"{slug_base}_{channel}"
+            # company_id: None also matches docs where the field was never set.
+            exists = await col.find_one({"slug": slug, "scope": "staff", "company_id": None})
+            if exists:
+                skipped.append(slug)
+                continue
+            await col.insert_one({
+                "name": f"{name} ({channel.upper()})",
+                "slug": slug,
+                "channel": channel,
+                "subject": subject if channel == "email" else None,
+                "body": body,
+                "scope": "staff",
+                "company_id": None,
+                "is_active": True,
+                "created_by": str(current_user["_id"]),
+                "created_at": datetime.utcnow(),
+            })
+            created.append(slug)
 
-    return {"message": "Default infrastructure initialized successfully"}
+    return {
+        "message": f"Initialized {len(created)} template(s); {len(skipped)} already existed and were left untouched.",
+        "created": created,
+        "skipped": skipped,
+    }
 
 
