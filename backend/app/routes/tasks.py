@@ -652,9 +652,19 @@ async def update_task_status(task_id: str, body: dict, current_user: dict = Depe
     # the original assignee keeps seeing it sitting at "Dependent on Other".
     #
     # The doer's "completed" therefore resolves their dependency and pops the task back to whoever
-    # delegated it (who resumes at In Progress). It is NOT a completion of the task, so the
-    # checklist / evidence / verification rules below — which gate the real assignee's completion —
-    # must not apply to it.
+    # delegated it. It is NOT the doer completing the task itself, so the checklist / evidence /
+    # verification rules below — which gate the real assignee's completion — must not be charged
+    # to the doer.
+    #
+    # Where the hand-back lands depends on what is left to do:
+    #   • Verification Required = YES → the assignee resumes at In Progress and later submits for
+    #     verification, so the existing verification flow runs untouched (assigner approves/reopens).
+    #   • Verification Required = NO  → once the chain has fully unwound back to the real assignee
+    #     there is nothing left for anyone to do, so the assignee's task is auto-completed. It must
+    #     NOT travel on to the assigner.
+    # Auto-completion still respects the checklist / evidence gates: if either is outstanding the
+    # task simply resumes In Progress so the assignee can satisfy it, rather than 400-ing the doer
+    # out of resolving a dependency that is genuinely done.
     dependency_stack = existing.get("dependency_stack") or []
     prev_level = dependency_stack[-1] if dependency_stack else None
     resolving_dependency = (
@@ -662,8 +672,21 @@ async def update_task_status(task_id: str, body: dict, current_user: dict = Depe
         and prev_level is not None
         and existing.get("dependency_doer_id") == user_id
     )
+    auto_complete_on_return = False
     if resolving_dependency:
-        new_status = "in_progress"
+        fully_unwound = len(dependency_stack) == 1  # popping this level returns it to the assignee
+        checklist_clear = not [
+            c for c in (existing.get("checklist") or [])
+            if not (isinstance(c, dict) and c.get("completed"))
+        ]
+        evidence_clear = not existing.get("evidence_required") or bool(existing.get("completion_attachments") or [])
+        auto_complete_on_return = (
+            fully_unwound
+            and not existing.get("verification_required")
+            and checklist_clear
+            and evidence_clear
+        )
+        new_status = "completed" if auto_complete_on_return else "in_progress"
 
     if new_status == "completed":
         # Completion rule: every check point (checklist item) must be done first.
@@ -719,6 +742,8 @@ async def update_task_status(task_id: str, body: dict, current_user: dict = Depe
         returned_names = ", ".join(names.get(uid, "the assignee") for uid in returned_to) or "the assignee"
         actor = current_user.get("full_name") or current_user.get("email")
         history_note = f"Dependency completed by {actor}. Task returned to {returned_names}."
+        if auto_complete_on_return:
+            history_note += " No verification required — task auto-completed."
     was_completed = old_status == "completed"
     if new_status == "completed" and not was_completed:
         updates["completed_at"] = datetime.now(timezone.utc)
