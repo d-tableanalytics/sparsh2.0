@@ -11,6 +11,7 @@ import TaskFormModal from '../components/tasks/TaskFormModal';
 import StatusSummaryCards from '../components/tasks/StatusSummaryCards';
 import StackedReportPanel from '../components/tasks/StackedReportPanel';
 import TaskDonutPanel from '../components/tasks/TaskDonutPanel';
+import ScoreRing from '../components/common/ScoreRing';
 import { SUMMARY_CARD_ORDER, STATUS_CONFIG, CARD_KEY_TO_STATUS } from '../components/tasks/statusConfig';
 import { formatDate } from '../components/tasks/taskDisplayUtils';
 
@@ -24,6 +25,14 @@ const bucketOf = (t) => {
   if (t.status === 'in_progress') return 'inProgress';
   return 'pending';
 };
+
+// Share-of-total as an integer percent, for the "count (X%)" cells in the report tables.
+const pct = (count, total) => (total > 0 ? Math.round((count / total) * 100) : 0);
+
+// Muted parenthetical percentage shown next to a count (e.g. "2 (100%)").
+const Pct = ({ count, total }) => (
+  <span className="text-[10px] font-medium text-[var(--text-muted)]"> ({pct(count, total)}%)</span>
+);
 
 const TABS = [
   { key: 'employees', label: 'Employees', groupBy: 'assignee' },
@@ -456,14 +465,19 @@ const TaskDashboard = () => {
                   <tbody>
                     {dashboard.monthly.map(row => (
                       <tr key={row.month} className="border-b border-[var(--border)] last:border-0 hover:bg-[var(--input-bg)] transition-colors">
-                        <td className="px-5 py-3.5 text-[13px] font-bold text-[var(--text-main)]">{row.month}</td>
+                        <td className="px-5 py-3.5 text-[13px] font-bold text-[var(--text-main)]">
+                          <span className="inline-flex items-center gap-2.5">
+                            <ScoreRing value={row.total > 0 ? (row.inTime / row.total) * 100 : 0} />
+                            <span className="truncate">{row.month}</span>
+                          </span>
+                        </td>
                         <td className="px-5 py-3.5 text-[12px] font-bold text-[var(--text-muted)]">{row.total}</td>
-                        <td className="px-5 py-3.5 text-[12px] font-bold text-[var(--text-muted)]">{row.score}</td>
-                        <td className="px-5 py-3.5 text-[12px] font-bold text-[var(--accent-red)]">{row.overdue}</td>
-                        <td className="px-5 py-3.5 text-[12px] font-bold text-[var(--accent-yellow)]">{row.pending}</td>
-                        <td className="px-5 py-3.5 text-[12px] font-bold text-[var(--accent-indigo)]">{row.inProgress}</td>
-                        <td className="px-5 py-3.5 text-[12px] font-bold text-[var(--accent-green)]">{row.inTime}</td>
-                        <td className="px-5 py-3.5 text-[12px] font-bold text-[var(--accent-red)]">{row.delayed}</td>
+                        <td className="px-5 py-3.5 text-[12px] font-bold text-[var(--accent-green)]">{(row.total > 0 ? (row.inTime / row.total) * 100 : 0).toFixed(1)}%</td>
+                        <td className="px-5 py-3.5 text-[12px] font-bold text-[var(--accent-red)]">{row.overdue}<Pct count={row.overdue} total={row.total} /></td>
+                        <td className="px-5 py-3.5 text-[12px] font-bold text-[var(--accent-yellow)]">{row.pending}<Pct count={row.pending} total={row.total} /></td>
+                        <td className="px-5 py-3.5 text-[12px] font-bold text-[var(--accent-indigo)]">{row.inProgress}<Pct count={row.inProgress} total={row.total} /></td>
+                        <td className="px-5 py-3.5 text-[12px] font-bold text-[var(--accent-green)]">{row.inTime}<Pct count={row.inTime} total={row.total} /></td>
+                        <td className="px-5 py-3.5 text-[12px] font-bold text-[var(--accent-red)]">{row.delayed}<Pct count={row.delayed} total={row.total} /></td>
                       </tr>
                     ))}
                   </tbody>
@@ -486,12 +500,19 @@ const TaskDashboard = () => {
                 <tbody>
                   {groupedRows.map(row => (
                     <tr key={row.label} className="border-b border-[var(--border)] last:border-0 hover:bg-[var(--input-bg)] transition-colors">
-                      <td className="px-5 py-3.5 text-[13px] font-bold text-[var(--text-main)]">{row.label}</td>
+                      <td className="px-5 py-3.5 text-[13px] font-bold text-[var(--text-main)]">
+                        {tab?.groupBy === 'assignee' ? (
+                          <span className="inline-flex items-center gap-2.5">
+                            <ScoreRing value={row.total > 0 ? Math.round((row.completed / row.total) * 100) : 0} />
+                            <span className="truncate">{row.label}</span>
+                          </span>
+                        ) : row.label}
+                      </td>
                       <td className="px-5 py-3.5 text-[12px] font-bold text-[var(--text-muted)]">{row.total}</td>
-                      <td className="px-5 py-3.5 text-[12px] font-bold text-[var(--accent-yellow)]">{row.pending}</td>
-                      <td className="px-5 py-3.5 text-[12px] font-bold text-[var(--accent-indigo)]">{row.inProgress}</td>
-                      <td className="px-5 py-3.5 text-[12px] font-bold text-[var(--accent-green)]">{row.completed}</td>
-                      <td className="px-5 py-3.5 text-[12px] font-bold text-[var(--accent-red)]">{row.overdue}</td>
+                      <td className="px-5 py-3.5 text-[12px] font-bold text-[var(--accent-yellow)]">{row.pending}<Pct count={row.pending} total={row.total} /></td>
+                      <td className="px-5 py-3.5 text-[12px] font-bold text-[var(--accent-indigo)]">{row.inProgress}<Pct count={row.inProgress} total={row.total} /></td>
+                      <td className="px-5 py-3.5 text-[12px] font-bold text-[var(--accent-green)]">{row.completed}<Pct count={row.completed} total={row.total} /></td>
+                      <td className="px-5 py-3.5 text-[12px] font-bold text-[var(--accent-red)]">{row.overdue}<Pct count={row.overdue} total={row.total} /></td>
                     </tr>
                   ))}
                 </tbody>

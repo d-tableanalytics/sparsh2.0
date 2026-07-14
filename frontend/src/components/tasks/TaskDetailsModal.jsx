@@ -3,17 +3,19 @@ import { motion, AnimatePresence } from 'framer-motion';
 import {
   ArrowLeft, Trash2, Pencil, FileText, History, Info, Users, Layers, Plus,
   Paperclip, MessageSquare, Send, CheckSquare, Square, X, Tags as TagsIcon,
-  ShieldCheck, CheckCircle2, RotateCcw, CalendarClock, FileCheck2, Save,
+  ShieldCheck, CheckCircle2, RotateCcw, CalendarClock, FileCheck2, Save, Bell,
 } from 'lucide-react';
 import api from '../../services/api';
 import {
   getTaskDetail, updateTaskStatus, updateChecklistItem,
   deleteChecklistItem, addTaskComment, uploadTaskAttachment, softDeleteTask,
   uploadCompletionAttachment, deleteCompletionAttachment, reviseTaskDeadline,
+  addTaskFollowUp,
 } from '../../services/taskApi';
+import { getHolidays } from '../../services/holidayApi';
 import { useAuth } from '../../context/AuthContext';
 import { useNotification } from '../../context/NotificationContext';
-import { STATUS_CONFIG, statusOptions, statusOptionLabel, REASON_REQUIRED_STATUSES } from './statusConfig';
+import { STATUS_CONFIG, REASON_REQUIRED_STATUSES } from './statusConfig';
 import { getInitials, formatFrequencyLabel, formatDate, formatDateTime } from './taskDisplayUtils';
 import TaskFormModal from './TaskFormModal';
 import MiniDatePicker from './MiniDatePicker';
@@ -39,6 +41,18 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, onChanged, onEdit }) => {
   const [uploadingEvidence, setUploadingEvidence] = useState(false);
   const [deadlinePickerOpen, setDeadlinePickerOpen] = useState(false);
   const [savingDeadline, setSavingDeadline] = useState(false);
+  // Reopen requires the assigner to set a NEW deadline before the task goes back to the assignee.
+  const [reopenPickerOpen, setReopenPickerOpen] = useState(false);
+  const [reopening, setReopening] = useState(false);
+  // Follow-Up (In-Loop members): a nudge + remark.
+  const [followUpText, setFollowUpText] = useState('');
+  const [postingFollowUp, setPostingFollowUp] = useState(false);
+  // In-Loop top controls: which quick-input (Follow Up / Remark) is expanded.
+  const [inLoopBox, setInLoopBox] = useState(null); // 'followup' | 'remark' | null
+  // Holidays + Sunday weekly-off block selection in the Revision / Reopen / Date-Revision pickers,
+  // matching the create form. There is no persisted per-user weekly-off, so Sunday (0) is used.
+  const [holidayDates, setHolidayDates] = useState([]);
+  const WEEKLY_OFFS = [0];
   // Target status awaiting a Doer Name + Reason (Dependent on Other / Blocked).
   const [reasonStatus, setReasonStatus] = useState(null);
   const [savingReason, setSavingReason] = useState(false);
@@ -76,6 +90,8 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, onChanged, onEdit }) => {
     // Categories/tags for the "Add Subtask" form.
     api.get('/task-categories').then(r => setMetaCats((r.data || []).map(c => c.name).filter(Boolean))).catch(() => {});
     api.get('/task-tags').then(r => setMetaTags((r.data || []).map(t => t.name).filter(Boolean))).catch(() => {});
+    // Holidays block dates in the Revision / Reopen / Date-Revision pickers.
+    getHolidays().then(res => setHolidayDates((res.data || []).map(h => h.holiday_date).filter(Boolean))).catch(() => setHolidayDates([]));
   }, [isOpen, fetchDetail]);
 
   // Reset the working copy whenever the SERVER checklist changes (open, or after a Save) —
@@ -145,14 +161,43 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, onChanged, onEdit }) => {
     }
   };
 
-  const handleReopen = async () => {
+  // Reopen must carry a NEW deadline (spec): open the date picker first; the actual reopen
+  // happens in handleReopenWithDeadline once the assigner picks a date.
+  const handleReopen = () => setReopenPickerOpen(true);
+
+  const handleReopenWithDeadline = async (iso) => {
+    setReopenPickerOpen(false);
+    setReopening(true);
     try {
+      // Set the new deadline first (assigner-only endpoint), then flip status to Reopened and
+      // hand the task back to the assignee. Reuses the existing deadline + status APIs.
+      await reviseTaskDeadline(taskId, iso, 'Reopened by assigner');
       await updateTaskStatus(taskId, 'in_progress_reopened');
-      showSuccess('Task reopened');
+      showSuccess('Task reopened with a new deadline');
       fetchDetail({ silent: true });
       onChanged?.();
     } catch (err) {
       showError(err.response?.data?.detail || 'Failed to reopen task');
+    } finally {
+      setReopening(false);
+    }
+  };
+
+  // Follow-Up — In-Loop members (watchers) / participants nudge with a remark.
+  const handleAddFollowUp = async () => {
+    const remark = followUpText.trim();
+    if (!remark) return;
+    setPostingFollowUp(true);
+    try {
+      await addTaskFollowUp(taskId, remark);
+      setFollowUpText('');
+      showSuccess('Follow-up added');
+      fetchDetail({ silent: true });
+      onChanged?.();
+    } catch (err) {
+      showError(err.response?.data?.detail || 'Failed to add follow-up');
+    } finally {
+      setPostingFollowUp(false);
     }
   };
 
@@ -283,6 +328,46 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, onChanged, onEdit }) => {
   // A verification-required task the assignee has submitted is now the assigner's to
   // finalize or reopen — the assignee-side status control is hidden while it's here.
   const isAwaitingVerification = !!task && task.verificationRequired && task.status === 'verification';
+  // In-Loop member (watcher) of this task — gets the Follow-Up action. Everyone involved can
+  // still see the follow-up count + history; only in-loop members can raise a new follow-up.
+  const isInLoop = !!task && (task.watchers || []).includes(user?._id);
+  // Assignee-side "Revision": the assignee can set a new deadline (calendar) when they can't
+  // finish by the current one. Available while the task is still theirs to work on (not
+  // completed, and not handed to the assigner for verification). The assigner keeps the
+  // separate "Revise" action (canManage) already shown next to the deadline.
+  const isAssignee = !!task && (task.assignedTo || []).includes(user?._id);
+  // Self-assigned task (creator is the doer, no other assignees) — the creator works it like an assignee.
+  const isSelfTask = !!task && task.isCreator && !(task.assignedTo || []).length;
+  // Who drives the working-status dropdown: the assignee, or the creator of a self-task.
+  const canWork = isAssignee || isSelfTask;
+  // Pure In-Loop member (watcher, not the doer or the assigner) — e.g. a Subscribed task.
+  const isPureWatcher = !!task && isInLoop && !isAssignee && !task.isCreator;
+  // Editing/deleting the task definition belongs to the assigner (creator) / admins — NOT the
+  // assignee (their "My Tasks" view) and NOT a pure watcher (their Subscribed view). So hide
+  // Edit + Delete for a doer who isn't also the creator, and for in-loop-only members.
+  const canEditOrDelete = canManage && !(isAssignee && !task?.isCreator) && !isPureWatcher;
+
+  // ─── Role-based working dropdown (assignee / dependent-on-other doer) ───
+  // "Pending" is surfaced as "In Progress"; "Revision" opens the deadline calendar (no status
+  // change). The closed control shows the current status; the options are exactly the role set.
+  const REVISION_OPT = '__revision__';
+  const curDisplayStatus = task?.status === 'pending' ? 'in_progress' : task?.status;
+  const curCfg = (task && (STATUS_CONFIG[curDisplayStatus] || cfg)) || {};
+  const curLabel = STATUS_CONFIG[curDisplayStatus]?.label || curDisplayStatus || '';
+  // Completed submits for verification when Verification Required is on (assignee, not assigner).
+  const completedLabel = (task?.verificationRequired && canWork && !canManage) ? 'Submit for Verification' : 'Completed';
+  // Dependent-on-Other doer → Completed, Revision, Dependent on Other, Blocked.
+  // Normal assignee → Accept, Dependent on Other, Blocked, Completed, Revision.
+  const workingActions = task?.status === 'dependent_on_others'
+    ? [['completed', completedLabel], [REVISION_OPT, 'Revision'], ['dependent_on_others', 'Dependent on Other'], ['blocked', 'In Process-Pending']]
+    : [['accepted', 'Acknowledged Delegation'], ['dependent_on_others', 'Dependent on Other'], ['blocked', 'In Process-Pending'], ['completed', completedLabel], [REVISION_OPT, 'Revision']];
+  // Only show the current status as a separate (disabled) line when it isn't already one of the
+  // action options — otherwise it would duplicate it (e.g. two "Accept" entries).
+  const showCurrentOpt = !workingActions.some(([v]) => v === curDisplayStatus);
+  const handleWorkingSelect = (val) => {
+    if (val === REVISION_OPT) { setDeadlinePickerOpen(true); return; }
+    handleStatusChange(val);
+  };
 
   return (
     <>
@@ -309,7 +394,31 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, onChanged, onEdit }) => {
             </div>
             {task && (
               <div className="flex items-center gap-2 flex-wrap mt-3">
-                {isAwaitingVerification ? (
+                {isInLoop && !isAssignee && !task.isCreator ? (
+                  // Pure In-Loop member (watcher, not the doer or the assigner) — including admins:
+                  // no status changes, only Follow Up, Follow-Up Count, Remark.
+                  <div className="flex items-center gap-2 flex-wrap w-full">
+                    <span className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider border bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] border-[var(--accent-indigo-border)]">
+                      <Bell size={12} /> Follow-Ups: {task.followUpCount ?? (task.followUps || []).length}
+                    </span>
+                    <button type="button" onClick={() => setInLoopBox(b => (b === 'followup' ? null : 'followup'))}
+                      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider border hover:opacity-90 ${inLoopBox === 'followup' ? 'bg-[var(--accent-indigo)] text-white border-[var(--accent-indigo)]' : 'bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] border-[var(--accent-indigo-border)]'}`}>
+                      <Bell size={13} /> Follow Up
+                    </button>
+                    {inLoopBox === 'followup' && (
+                      <div className="flex items-center gap-2 w-full">
+                        <input autoFocus value={followUpText} onChange={e => setFollowUpText(e.target.value)}
+                          onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); handleAddFollowUp(); } }}
+                          placeholder="Add a follow-up remark..."
+                          className="flex-1 px-3 py-2 bg-[var(--bg-card)] border border-[var(--border)] rounded-lg text-[12px] font-bold outline-none focus:border-[var(--accent-indigo)]" />
+                        <button type="button" onClick={handleAddFollowUp} disabled={postingFollowUp || !followUpText.trim()}
+                          className="flex items-center gap-1.5 px-3 py-2 bg-[var(--accent-indigo)] text-white rounded-lg text-[10px] font-black uppercase tracking-widest disabled:opacity-50 shrink-0">
+                          <Bell size={13} /> {postingFollowUp ? '...' : 'Follow Up'}
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                ) : isAwaitingVerification ? (
                   // Verification hand-off: the delegator/assigner gets the Final Complete /
                   // Reopen actions; the assignee only sees a read-only "Pending Verification"
                   // badge (no assignee-side completion controls here).
@@ -322,9 +431,9 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, onChanged, onEdit }) => {
                         className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider border bg-[var(--accent-green-bg)] text-[var(--accent-green)] border-[var(--accent-green-border)] hover:opacity-90">
                         <CheckCircle2 size={13} /> Final Complete
                       </button>
-                      <button onClick={handleReopen}
-                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider border bg-[var(--accent-orange-bg)] text-[var(--accent-orange)] border-[var(--accent-orange-border)] hover:opacity-90">
-                        <RotateCcw size={13} /> Reopen
+                      <button onClick={handleReopen} disabled={reopening}
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider border bg-[var(--accent-orange-bg)] text-[var(--accent-orange)] border-[var(--accent-orange-border)] hover:opacity-90 disabled:opacity-50">
+                        <RotateCcw size={13} /> {reopening ? 'Reopening…' : 'Reopen (New Deadline)'}
                       </button>
                     </>
                   ) : (
@@ -332,12 +441,21 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, onChanged, onEdit }) => {
                       <ShieldCheck size={13} /> {cfg.label}
                     </span>
                   )
-                ) : (
-                  <select value={task.status} onChange={e => handleStatusChange(e.target.value)}
+                ) : canWork ? (
+                  // Assignee / dependent-on-other doer: role-based working options. The closed
+                  // control shows the current status; the list is exactly the role's action set.
+                  <select value={curDisplayStatus} onChange={e => handleWorkingSelect(e.target.value)}
                     className="px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider border outline-none cursor-pointer"
-                    style={{ background: cfg.bg, color: cfg.color, borderColor: cfg.border }}>
-                    {statusOptions(task.status).map(s => <option key={s} value={s}>{statusOptionLabel(s, { verificationRequired: task.verificationRequired, isAssigner: canManage })}</option>)}
+                    style={{ background: curCfg.bg, color: curCfg.color, borderColor: curCfg.border }}>
+                    {showCurrentOpt && <option value={curDisplayStatus} disabled>{curLabel}</option>}
+                    {workingActions.map(([val, label]) => <option key={val} value={val}>{label}</option>)}
                   </select>
+                ) : (
+                  // Assigner/admin (not the doer): status is read-only here. Their actions are
+                  // Final Complete / Reopen (during verification) + Date Revision + Edit/Delete.
+                  <span className="px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider border" style={{ background: curCfg.bg, color: curCfg.color, borderColor: curCfg.border }}>
+                    {curLabel}
+                  </span>
                 )}
                 {task.verificationRequired && (
                   <span className="px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider border bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] border-[var(--accent-indigo-border)]">
@@ -347,7 +465,7 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, onChanged, onEdit }) => {
                 <span className="px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider border bg-[var(--input-bg)] text-[var(--text-muted)] border-[var(--border)]">
                   {formatFrequencyLabel(task.frequency)}
                 </span>
-                {canManage && (
+                {canEditOrDelete && (
                   <>
                     <button onClick={() => onEdit?.(task)}
                       className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider border bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] border-[var(--accent-indigo-border)] hover:opacity-90">
@@ -416,7 +534,7 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, onChanged, onEdit }) => {
                       <p className="text-[9px] font-black text-[var(--text-muted)] uppercase">Deadline</p>
                       <div className="flex items-center gap-2 flex-wrap">
                         <p className="font-bold text-[var(--text-main)]">{task.end ? formatDateTime(task.end) : '—'}</p>
-                        {/* Date Revision — assigner/delegator only (backend-enforced). */}
+                        {/* Date Revision — assigner/delegator (backend-enforced). */}
                         {canManage && (
                           <button type="button" onClick={() => setDeadlinePickerOpen(true)} disabled={savingDeadline}
                             className="flex items-center gap-1 px-2 py-0.5 rounded-lg text-[9px] font-black uppercase tracking-wider border bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] border-[var(--accent-indigo-border)] hover:opacity-90 disabled:opacity-50">
@@ -641,6 +759,49 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, onChanged, onEdit }) => {
                 )}
               </div>
 
+              {/* Follow-Ups — raised by In-Loop members (watchers). Count = follow-up list length.
+                  Everyone involved sees the count + history; only in-loop members can add one. */}
+              <div className="bg-[var(--input-bg)] border border-[var(--border)] rounded-2xl p-4">
+                <p className="flex items-center gap-1.5 text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest mb-3">
+                  <Bell size={13} /> Follow-Ups ({task.followUpCount ?? (task.followUps || []).length})
+                </p>
+                {(task.followUps || []).length === 0 ? (
+                  <div className="py-6 flex flex-col items-center justify-center gap-2">
+                    <Bell size={24} className="text-[var(--text-muted)] opacity-30" />
+                    <p className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest opacity-70">No follow-ups yet</p>
+                  </div>
+                ) : (
+                  <div className="space-y-3 mb-3 max-h-56 overflow-y-auto no-scrollbar">
+                    {[...task.followUps].reverse().map(f => (
+                      <div key={f.id} className="flex items-start gap-2">
+                        <div className="w-7 h-7 rounded-full flex items-center justify-center text-white font-black text-[9px] shrink-0" style={{ background: 'var(--avatar-bg)' }}>
+                          {getInitials(f.by_name)}
+                        </div>
+                        <div className="min-w-0">
+                          <p className="text-[11px] font-black text-[var(--text-main)]">{f.by_name}</p>
+                          <p className="text-[12px] font-medium text-[var(--text-main)]">{f.remark}</p>
+                          <p className="text-[9px] font-bold text-[var(--text-muted)] opacity-70">{f.created_at ? formatDateTime(f.created_at) : ''}</p>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {isInLoop ? (
+                  <div className="flex items-center gap-2">
+                    <input value={followUpText} onChange={e => setFollowUpText(e.target.value)}
+                      onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); handleAddFollowUp(); } }}
+                      placeholder="Add a follow-up remark..."
+                      className="flex-1 px-3 py-2 bg-[var(--bg-card)] border border-[var(--border)] rounded-lg text-[12px] font-bold outline-none focus:border-[var(--accent-indigo)]" />
+                    <button type="button" onClick={handleAddFollowUp} disabled={postingFollowUp || !followUpText.trim()}
+                      className="flex items-center gap-1.5 px-3 py-2 bg-[var(--accent-indigo)] text-white rounded-lg text-[10px] font-black uppercase tracking-widest disabled:opacity-50 shrink-0">
+                      <Bell size={13} /> {postingFollowUp ? '...' : 'Follow Up'}
+                    </button>
+                  </div>
+                ) : (
+                  <p className="text-[10px] font-bold text-[var(--text-muted)] opacity-70">Only In-Loop members can raise a follow-up.</p>
+                )}
+              </div>
+
               {/* Remark History (Chat) */}
               <div className="bg-[var(--input-bg)] border border-[var(--border)] rounded-2xl p-4">
                 <p className="flex items-center gap-1.5 text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest mb-3">
@@ -688,6 +849,18 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, onChanged, onEdit }) => {
       value={task?.end}
       title="Revise Deadline"
       onApply={(iso) => handleReviseDeadline(iso)}
+      holidayDates={holidayDates} weeklyOffs={WEEKLY_OFFS} onBlocked={showError}
+    />
+
+    {/* Reopen picker — the assigner must set a NEW deadline; only then is the task reopened
+        and handed back to the assignee. */}
+    <MiniDatePicker
+      isOpen={reopenPickerOpen}
+      onClose={() => setReopenPickerOpen(false)}
+      value={task?.end}
+      title="New Deadline for Reopen"
+      onApply={(iso) => handleReopenWithDeadline(iso)}
+      holidayDates={holidayDates} weeklyOffs={WEEKLY_OFFS} onBlocked={showError}
     />
 
     {/* Doer Name + Reason capture for Dependent on Other / Blocked. */}

@@ -274,8 +274,14 @@ async def create_event(event: CalendarEventCreate, background_tasks: BackgroundT
     event_dict["user_id"] = str(current_user["_id"])
     if current_user.get("company_id"):
         event_dict["company_id"] = str(current_user["company_id"])
-    
+
     event_dict["created_at"] = datetime.utcnow()
+
+    # New tasks start In Progress (not Pending) per the delegation workflow. Applies to every
+    # insert path below (single, separate-per-assignee, and the first recurring occurrence),
+    # since they all clone this event_dict.
+    if event_dict.get("type") == "task":
+        event_dict["workflow_status"] = "in_progress"
     
     # ─── Set Notification Scope ───
     # If a staff member creates it, it uses "staff" scope (standard design).
@@ -366,6 +372,43 @@ async def create_event(event: CalendarEventCreate, background_tasks: BackgroundT
         except Exception as e:
             print(f"RECURSIVE ENGINE FAILURE: {e}")
             # Fall back to single event creation below if recursion fails
+
+    # ─── Separate Assignment: one independent task per assignee ───
+    # "combined" (default) keeps the single shared doc below. "separate" clones the fully-built
+    # task into an independent doc per assignee (own status/evidence/verification/comments/
+    # deadline/completion), so one assignee's progress never affects another's. Only applies to
+    # tasks with more than one assignee; everything else falls through to the single insert.
+    assignees = event_dict.get("target_staff_id") or []
+    if event_dict.get("type") == "task" and event_dict.get("assignment_mode") == "separate" and len(assignees) > 1:
+        docs = []
+        for uid in assignees:
+            d = {k: v for k, v in event_dict.items() if k not in ("_id", "id")}
+            d["target_staff_id"] = [uid]
+            # Give each assignee an independent recurrence series so the nightly roll-forward
+            # (recurring_task_service) advances every user's copy separately.
+            if d.get("recurring_group_id"):
+                d["recurring_group_id"] = str(ObjectId())
+            d["created_at"] = datetime.utcnow()
+            docs.append(d)
+        insert_res = await col.insert_many(docs)
+        ids = [str(_id) for _id in insert_res.inserted_ids]
+        # Mirror the single-create side effects (notifications, meta sync, activity, realtime)
+        # for every created doc so nothing downstream behaves differently per assignee.
+        for d, _id in zip(docs, ids):
+            background_tasks.add_task(notify_users_instant, {**d, "id": _id}, "created", creator_name)
+            await task_events.publish(task_events.recipients_for(d), {
+                "type": "task_created",
+                "task_id": _id,
+                "title": d.get("title"),
+                "assigned_to": d.get("target_staff_id") or [],
+                "assigned_by": d.get("user_id"),
+                "watchers": d.get("watchers") or [],
+                "actor_id": str(current_user["_id"]),
+            })
+        background_tasks.add_task(sync_task_meta, event_dict.get("category"), event_dict.get("tags"), str(current_user["_id"]))
+        await log_activity(current_user, "Create Task", col_name, f"Created {len(ids)} separate tasks: {event_dict['title']}",
+                           meta={"task_id": ids[0], "group_id": event_dict.get("group_id")})
+        return {"ids": ids, "id": ids[0], "count": len(ids), "message": f"Created {len(ids)} separate tasks"}
 
     result = await col.insert_one(event_dict)
     event_dict["id"] = str(result.inserted_id)

@@ -49,6 +49,7 @@ const emptyForm = {
   priority: 'Normal',
   target_staff_id: [],
   watchers: [],
+  assignment_mode: 'combined', // combined (shared task) | separate (one task per assignee)
   evidence_required: false,
   verification_required: false,
   reminders: [],
@@ -142,6 +143,8 @@ const TaskFormModal = ({ isOpen, onClose, onSaved, task = null, categories = [],
         priority: task.priority || 'Normal',
         target_staff_id: task.assignedTo || task.target_staff_id || [],
         watchers: task.watchers || [],
+        assignment_mode: 'combined', // edit acts on the existing single doc; mode applies to create only
+
         evidence_required: task.evidenceRequired || false,
         verification_required: task.verificationRequired || false,
         reminders: task.reminders || [],
@@ -288,6 +291,8 @@ const TaskFormModal = ({ isOpen, onClose, onSaved, task = null, categories = [],
   const validate = () => {
     if (!form.title.trim()) return 'Task title is required';
     if (!form.category.trim()) return 'Category is required';
+    // A deadline is mandatory when delegating (assigning to others) so every assignee has a due date.
+    if (form.target_staff_id.length && !form.end) return 'Deadline is required when delegating a task';
     if (form.repeat !== 'Does not repeat') {
       if (!form.start) return 'Start Date is required when Repeat is enabled';
       if (!form.repeat) return 'Frequency is required when Repeat is enabled';
@@ -362,14 +367,20 @@ const TaskFormModal = ({ isOpen, onClose, onSaved, task = null, categories = [],
         // otherwise it's just the task's start/creation reference point. Defaults to today
         // (set when the modal opened) but honors whatever the user picked in the Start Date chip.
         payload.start = new Date(form.start || Date.now()).toISOString();
+        // Assignment mode only matters for a multi-assignee create; the backend ignores it
+        // otherwise. "separate" returns `ids` (one task per assignee); "combined" returns `id`.
+        payload.assignment_mode = form.target_staff_id.length > 1 ? (form.assignment_mode || 'combined') : 'combined';
         const res = await createTask(payload);
-        const newId = res.data?.id;
-        if (newId && pendingFiles.length) {
-          for (const file of pendingFiles) {
-            await uploadTaskAttachment(newId, file).catch(() => {});
+        const newIds = res.data?.ids || (res.data?.id ? [res.data.id] : []);
+        if (newIds.length && pendingFiles.length) {
+          // Each separate task is independent, so attachment(s) go onto every created task.
+          for (const id of newIds) {
+            for (const file of pendingFiles) {
+              await uploadTaskAttachment(id, file).catch(() => {});
+            }
           }
         }
-        showSuccess('Task created');
+        showSuccess(newIds.length > 1 ? `Created ${newIds.length} tasks` : 'Task created');
       }
       onSaved?.();
       onClose();
@@ -527,7 +538,7 @@ const TaskFormModal = ({ isOpen, onClose, onSaved, task = null, categories = [],
 
               <button type="button" onClick={() => setDeadlinePickerOpen(true)}
                 className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[10px] font-black uppercase tracking-wider border transition-all ${form.end ? 'border-[var(--accent-indigo)] text-[var(--accent-indigo)]' : 'border-[var(--border)] text-[var(--text-muted)]'}`}>
-                <CalendarClock size={12} /> {form.end ? formatDateTime(form.end) : 'Set Deadline'}
+                <CalendarClock size={12} /> {form.end ? formatDateTime(form.end) : (form.target_staff_id.length ? 'Set Deadline *' : 'Set Deadline')}
               </button>
 
               <button type="button" onClick={() => setForm(f => ({ ...f, priority: PRIORITY_CYCLE[(PRIORITY_CYCLE.indexOf(f.priority) + 1) % 3] }))}
@@ -561,6 +572,40 @@ const TaskFormModal = ({ isOpen, onClose, onSaved, task = null, categories = [],
                 <TagsIcon size={12} /> {form.tags.length ? `Tag (${form.tags.length})` : 'Tag'}
               </button>
             </div>
+
+            {/* Task Completion Type — only when creating a task for more than one assignee.
+                Team Task (combined) = one shared task, done for all when any one completes.
+                Individual Task (separate) = one independent task per member, completed on their
+                own. Hidden on edit (an existing task is already a single doc). */}
+            {!task && form.target_staff_id.length > 1 && (
+              <div className="px-6 pt-4">
+                <div className="p-3 bg-[var(--input-bg)] rounded-xl">
+                  <div className="flex items-center gap-1.5 mb-2">
+                    <Users size={13} className="text-[var(--accent-indigo)]" />
+                    <span className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest">Task Completion Type</span>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    {[
+                      { value: 'combined', label: 'Combined', desc: 'Complete for everyone when any one member completes (verified, if enabled). Everyone shares the same status.' },
+                      { value: 'separate', label: 'Separate', desc: 'Each member must complete separately — their own status, evidence, verification & due date. One member’s completion doesn’t affect others.' },
+                    ].map(opt => {
+                      const active = (form.assignment_mode || 'combined') === opt.value;
+                      return (
+                        <button type="button" key={opt.value}
+                          onClick={() => setForm(f => ({ ...f, assignment_mode: opt.value }))}
+                          className={`text-left p-3 rounded-xl border transition-all ${active ? 'border-[var(--accent-indigo)] bg-[var(--accent-indigo-bg)]' : 'border-[var(--border)] bg-[var(--bg-card)] hover:border-[var(--accent-indigo)]'}`}>
+                          <div className="flex items-center gap-1.5">
+                            {active ? <CheckCircle2 size={13} className="text-[var(--accent-indigo)]" /> : <Circle size={13} className="text-[var(--text-muted)]" />}
+                            <span className={`text-[12px] font-black ${active ? 'text-[var(--accent-indigo)]' : 'text-[var(--text-main)]'}`}>{opt.label}</span>
+                          </div>
+                          <p className="mt-1 text-[10px] font-medium text-[var(--text-muted)] leading-snug">{opt.desc}</p>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+            )}
 
             {/* Checkpoint / Repeat */}
             <div className="px-6 pt-4">

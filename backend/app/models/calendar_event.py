@@ -49,6 +49,12 @@ class CalendarEventBase(BaseModel):
     # Delegation
     assigned_to: str = "myself" # myself, other
     target_staff_id: Optional[List[str]] = []
+    # How a task with multiple assignees is materialised (task-typed docs only; events ignore it):
+    #   "combined" (default) — one shared task doc for the whole group (existing behavior); any
+    #       assignee completing it (verified, if verification is enabled) completes it for all.
+    #   "separate" — one independent task doc per assignee, each with its own status/progress/
+    #       evidence/verification/comments/deadline/completion, so users are tracked individually.
+    assignment_mode: Optional[str] = "combined"  # combined | separate
 
     # Reminders
     reminders: List[Reminder] = []
@@ -82,6 +88,9 @@ class CalendarEventBase(BaseModel):
     completion_attachments: List[Dict] = [] # [{id, name, key, url, uploaded_by, uploaded_at}]
     # Deadline (`end`) revision trail — only the assigner/delegator can revise.
     deadline_history: List[Dict] = [] # [{old_end, new_end, reason, revised_by, revised_by_name, revised_at}]
+    # Follow-Ups raised by In-Loop members (watchers) / participants — a nudge + remark.
+    # The count is simply len(follow_ups). Additive/optional; existing tasks default to [].
+    follow_ups: List[Dict] = [] # [{id, by, by_name, remark, created_at}]
 
 class CalendarEventCreate(CalendarEventBase):
     pass

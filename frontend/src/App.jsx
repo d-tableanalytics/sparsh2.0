@@ -40,7 +40,6 @@ import MyTasks from './pages/MyTasks';
 import DelegatedTasks from './pages/DelegatedTasks';
 import SubscribedTasks from './pages/SubscribedTasks';
 import AllTasks from './pages/AllTasks';
-import TaskGroups from './pages/TaskGroups';
 import TaskActivity from './pages/TaskActivity';
 import Holiday from './pages/Holiday';
 import DeletedTasks from './pages/DeletedTasks';
@@ -103,7 +102,6 @@ const AppRoutes = () => {
       <Route path="/tasks/delegated" element={<PrivateRoute><RequireTaskAccess><DelegatedTasks /></RequireTaskAccess></PrivateRoute>} />
       <Route path="/tasks/subscribed" element={<PrivateRoute><RequireTaskAccess><SubscribedTasks /></RequireTaskAccess></PrivateRoute>} />
       <Route path="/tasks/all" element={<PrivateRoute><RequireTaskAccess><AllTasks /></RequireTaskAccess></PrivateRoute>} />
-      <Route path="/tasks/groups" element={<PrivateRoute><RequireTaskAccess><TaskGroups /></RequireTaskAccess></PrivateRoute>} />
       <Route path="/tasks/activity" element={<PrivateRoute><RequireTaskAccess><TaskActivity /></RequireTaskAccess></PrivateRoute>} />
       <Route path="/tasks/holiday" element={<PrivateRoute><RequireTaskAccess><Holiday /></RequireTaskAccess></PrivateRoute>} />
       <Route path="/tasks/deleted" element={<PrivateRoute><RequireTaskAccess><DeletedTasks /></RequireTaskAccess></PrivateRoute>} />

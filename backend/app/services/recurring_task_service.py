@@ -171,7 +171,7 @@ async def generate_due_recurring_tasks():
                         new_task["end"] = (target + (oe - os)).isoformat()
                     new_task["created_at"] = datetime.utcnow()
                     new_task["updated_at"] = None
-                    new_task["workflow_status"] = "pending"
+                    new_task["workflow_status"] = "in_progress"  # new occurrences start In Progress
                     new_task["status"] = "schedule"
                     new_task["completed_at"] = None
                     new_task["completed_by"] = None

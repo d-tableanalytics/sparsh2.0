@@ -266,6 +266,8 @@ def _serialize_task(doc: dict, current_user_id: str) -> dict:
         # verification-aware labels / role-based options without a second fetch.
         "verificationRequired": doc.get("verification_required", False),
         "evidenceRequired": doc.get("evidence_required", False),
+        # Follow-up count on the list payload too, so rows can show a badge without a detail fetch.
+        "followUpCount": len(doc.get("follow_ups") or []),
     }
 
 
@@ -294,6 +296,8 @@ def _serialize_task_detail(doc: dict, current_user_id: str) -> dict:
         "remarks": doc.get("remarks") or [],
         "statusHistory": doc.get("status_history") or [],
         "deadlineHistory": doc.get("deadline_history") or [],
+        "followUps": doc.get("follow_ups") or [],
+        "followUpCount": len(doc.get("follow_ups") or []),
     })
     return base
 
@@ -586,10 +590,12 @@ async def update_task_status(task_id: str, body: dict, current_user: dict = Depe
     if new_status not in WORKFLOW_STATUSES:
         raise HTTPException(status_code=400, detail=f"workflow_status must be one of {WORKFLOW_STATUSES}")
 
-    # "Dependent on Other" and "Blocked" must carry who it's waiting on (Doer Name) + why (Reason).
-    if new_status in ("dependent_on_others", "blocked") and (not doer_name or not reason):
-        label = "Dependent on Other" if new_status == "dependent_on_others" else "Blocked"
-        raise HTTPException(status_code=400, detail=f"Doer Name and Reason are required to set status to {label}.")
+    # "Dependent on Other" must carry who it's waiting on (Doer Name) + why (Reason) — the task
+    # is reassigned to that doer. "Blocked" needs a Reason only (no doer).
+    if new_status == "dependent_on_others" and (not doer_name or not reason):
+        raise HTTPException(status_code=400, detail="Doer Name and Reason are required to set status to Dependent on Other.")
+    if new_status == "blocked" and not reason:
+        raise HTTPException(status_code=400, detail="Reason is required to set status to Blocked.")
 
     existing, col_name = await _get_task_or_404(task_id)
 
@@ -767,6 +773,44 @@ async def add_task_comment(task_id: str, body: dict, current_user: dict = Depend
     return comment
 
 
+@router.post("/{task_id}/follow-up")
+async def add_task_follow_up(task_id: str, body: dict, current_user: dict = Depends(require_task_access)):
+    """Follow-Up raised by an In-Loop member (watcher) — or any participant — as a nudge with a
+    remark. Each call appends one entry; the follow-up count is simply len(follow_ups)."""
+    remark = (body.get("remark") or "").strip()
+    if not remark:
+        raise HTTPException(status_code=400, detail="A follow-up remark is required")
+
+    existing, col_name = await _get_task_or_404(task_id)
+    if not _is_participant(existing, current_user):
+        raise HTTPException(status_code=403, detail="Only involved users can follow up on this task")
+
+    entry = {
+        "id": str(ObjectId()),
+        "by": str(current_user["_id"]),
+        "by_name": current_user.get("full_name") or current_user.get("email"),
+        "remark": remark,
+        "created_at": datetime.now(timezone.utc),
+    }
+    await get_collection(col_name).update_one(
+        {"_id": ObjectId(task_id)},
+        {"$push": {"follow_ups": entry}, "$set": {"updated_at": datetime.now(timezone.utc)}},
+    )
+    await log_activity(current_user, "Task Follow-Up", col_name, f"Follow-up on task {task_id}",
+                       meta={"task_id": task_id, "group_id": existing.get("group_id")})
+    # Notify the assigner + assignees + watchers so the nudge surfaces on their lists in real time.
+    await task_events.publish(task_events.recipients_for(existing), {
+        "type": "task_updated",
+        "task_id": task_id,
+        "title": existing.get("title"),
+        "assigned_to": existing.get("target_staff_id") or [],
+        "assigned_by": existing.get("user_id"),
+        "watchers": existing.get("watchers") or [],
+        "actor_id": str(current_user["_id"]),
+    })
+    return {"id": task_id, "follow_up": {**entry, "created_at": entry["created_at"].isoformat()}}
+
+
 @router.post("/{task_id}/attachments")
 async def upload_task_attachment(task_id: str, file: UploadFile = File(...), current_user: dict = Depends(require_task_access)):
     existing, col_name = await _get_task_or_404(task_id)
@@ -850,9 +894,10 @@ async def delete_completion_attachment(task_id: str, attachment_id: str, current
 
 
 # ─── Deadline / Date Revision ───
-# Only the assigner/delegator (creator) or an admin may revise a task's deadline (`end`).
-# The assignee can see the revised date (it's part of the normal detail payload) but the
-# UI never surfaces this action to them.
+# The assigner/delegator (creator) or an admin may revise a task's deadline (`end`) at any
+# time ("Date Revision"). The ASSIGNEE may also revise it ("Revision") — e.g. when they can't
+# finish by the current deadline they pick a new one. Every change is stamped into
+# `deadline_history` (with who revised it), so the trail stays auditable for the assigner.
 @router.patch("/{task_id}/deadline")
 async def revise_task_deadline(task_id: str, body: dict, current_user: dict = Depends(require_task_access)):
     new_end = body.get("end")
@@ -864,8 +909,9 @@ async def revise_task_deadline(task_id: str, body: dict, current_user: dict = De
 
     is_admin = current_user.get("role") == "superadmin"
     is_creator = existing.get("user_id") == str(current_user["_id"])
-    if not (is_admin or is_creator):
-        raise HTTPException(status_code=403, detail="Only the assigner can revise this task's deadline")
+    is_assignee = str(current_user["_id"]) in (existing.get("target_staff_id") or [])
+    if not (is_admin or is_creator or is_assignee):
+        raise HTTPException(status_code=403, detail="Only the assigner or assignee can revise this task's deadline")
 
     old_end = existing.get("end")
     if old_end == new_end:

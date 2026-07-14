@@ -9,10 +9,10 @@ import {
 // sidebar branding.
 export const STATUS_CONFIG = {
   pending: { label: 'Pending', shortLabel: 'Pending', icon: Clock, color: 'var(--text-muted)', bg: 'var(--input-bg)', border: 'var(--border)' },
-  accepted: { label: 'Accept', shortLabel: 'Accept', icon: CheckCircle2, color: 'var(--accent-indigo)', bg: 'var(--accent-indigo-bg)', border: 'var(--accent-indigo-border)' },
+  accepted: { label: 'Acknowledged Delegation', shortLabel: 'Acknowledged', icon: CheckCircle2, color: 'var(--accent-indigo)', bg: 'var(--accent-indigo-bg)', border: 'var(--accent-indigo-border)' },
   in_progress: { label: 'In Progress', shortLabel: 'In Progress', icon: PlayCircle, color: 'var(--accent-orange)', bg: 'var(--accent-orange-bg)', border: 'var(--accent-orange-border)' },
   dependent_on_others: { label: 'Dependent on Other', shortLabel: 'Dependent', icon: Link2, color: 'var(--accent-yellow)', bg: 'var(--accent-yellow-bg)', border: 'var(--accent-yellow-border)' },
-  blocked: { label: 'Blocked', shortLabel: 'Blocked', icon: Ban, color: 'var(--accent-red)', bg: 'var(--accent-red-bg)', border: 'var(--accent-red-border)' },
+  blocked: { label: 'In Process-Pending', shortLabel: 'In Process', icon: Ban, color: 'var(--accent-red)', bg: 'var(--accent-red-bg)', border: 'var(--accent-red-border)' },
   verification: { label: 'Pending Verification', shortLabel: 'Verification', icon: Eye, color: 'var(--accent-indigo)', bg: 'var(--accent-indigo-bg)', border: 'var(--accent-indigo-border)' },
   completed: { label: 'Completed', shortLabel: 'Completed', icon: CheckCircle, color: 'var(--accent-green)', bg: 'var(--accent-green-bg)', border: 'var(--accent-green-border)' },
   in_progress_reopened: { label: 'In Progress (Reopened)', shortLabel: 'Reopened', icon: RotateCcw, color: 'var(--accent-orange)', bg: 'var(--accent-orange-bg)', border: 'var(--accent-orange-border)' },

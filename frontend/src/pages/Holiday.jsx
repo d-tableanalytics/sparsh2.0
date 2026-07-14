@@ -1,10 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Navigate } from 'react-router-dom';
-import { CalendarDays, Plus, Search, Pencil, Trash2, X } from 'lucide-react';
+import { CalendarDays, Plus, Search, Pencil, Trash2, X, FileSpreadsheet } from 'lucide-react';
 import { getHolidays, deleteHoliday } from '../services/holidayApi';
 import { useAuth } from '../context/AuthContext';
 import { useNotification } from '../context/NotificationContext';
 import HolidayFormModal from '../components/holiday/HolidayFormModal';
+import HolidayImportModal from '../components/holiday/HolidayImportModal';
 
 // Holiday module is restricted to Super Admin / Admin only (view + manage).
 const MANAGE_ROLES = ['superadmin', 'admin'];
@@ -42,6 +43,7 @@ const Holiday = () => {
   const [typeFilter, setTypeFilter] = useState('');
 
   const [modalOpen, setModalOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
   const [editing, setEditing] = useState(null);
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [deleting, setDeleting] = useState(false);
@@ -106,10 +108,16 @@ const Holiday = () => {
           </div>
         </div>
         {canManage && (
-          <button onClick={openAdd}
-            className="flex items-center gap-2 px-5 py-2.5 bg-[var(--accent-indigo)] text-white rounded-xl text-[11px] font-black uppercase tracking-widest shadow-sm hover:opacity-90 transition-all shrink-0">
-            <Plus size={16} /> Holiday
-          </button>
+          <div className="flex items-center gap-2 shrink-0">
+            <button onClick={() => setImportOpen(true)}
+              className="flex items-center gap-2 px-4 py-2.5 bg-[var(--input-bg)] border border-[var(--border)] text-[var(--text-main)] rounded-xl text-[11px] font-black uppercase tracking-widest hover:border-[var(--accent-indigo)] transition-all">
+              <FileSpreadsheet size={16} /> Import
+            </button>
+            <button onClick={openAdd}
+              className="flex items-center gap-2 px-5 py-2.5 bg-[var(--accent-indigo)] text-white rounded-xl text-[11px] font-black uppercase tracking-widest shadow-sm hover:opacity-90 transition-all">
+              <Plus size={16} /> Holiday
+            </button>
+          </div>
         )}
       </div>
 
@@ -205,6 +213,9 @@ const Holiday = () => {
 
       {/* ─── Add / Edit Modal ─── */}
       <HolidayFormModal isOpen={modalOpen} onClose={() => setModalOpen(false)} holiday={editing} onSaved={fetchHolidays} />
+
+      {/* ─── Bulk Import Modal ─── */}
+      <HolidayImportModal isOpen={importOpen} onClose={() => setImportOpen(false)} existingHolidays={holidays} onImported={fetchHolidays} />
 
       {/* ─── Delete Confirm ─── */}
       {deleteTarget && (
