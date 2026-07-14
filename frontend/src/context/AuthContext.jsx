@@ -50,6 +50,9 @@ export const AuthProvider = ({ children }) => {
     const { access_token } = response.data;
 
     localStorage.setItem('token', access_token);
+    // TPMS (Google Apps Script) authenticates via ?userEmail=&password= query params, so the
+    // plaintext password has to be kept for the life of the session. Cleared on logout.
+    localStorage.setItem('tpms_password', password);
     const decoded = jwtDecode(access_token);
     setUser(decoded);
     axios.defaults.headers.common['Authorization'] = `Bearer ${access_token}`;
@@ -69,6 +72,7 @@ export const AuthProvider = ({ children }) => {
 
   const logout = () => {
     localStorage.removeItem('token');
+    localStorage.removeItem('tpms_password');
     setUser(null);
     delete axios.defaults.headers.common['Authorization'];
   };

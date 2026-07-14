@@ -51,9 +51,12 @@ const UserDetails = () => {
             setIsEditing(false);
             showSuccess("Profile updated");
             fetchData();
-        } catch (err) { 
+        } catch (err) {
             if (err.response?.status !== 403) {
-                showError(err.response?.data?.detail || "Update failed");
+                // A 422 from field validation (e.g. malformed email) returns detail as an
+                // array of error objects, not a string.
+                const detail = err.response?.data?.detail;
+                showError(typeof detail === 'string' ? detail : "Update failed");
             }
         }
     };
