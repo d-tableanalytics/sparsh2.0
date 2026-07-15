@@ -114,9 +114,8 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen }) => {
       transition={{ type: 'spring', stiffness: 400, damping: 40 }}
       onMouseEnter={() => !isMobile && setIsCollapsed(false)}
       onMouseLeave={() => !isMobile && setIsCollapsed(true)}
-      className={`h-screen fixed left-0 top-0 bg-[var(--sidebar-bg)] border-r border-[var(--sidebar-border)] flex flex-col z-50 overflow-hidden transform transition-transform duration-300 md:transition-none md:translate-x-0 ${
-        isMobileOpen ? 'translate-x-0' : '-translate-x-full'
-      }`}
+      className={`h-screen fixed left-0 top-0 bg-[var(--sidebar-bg)] border-r border-[var(--sidebar-border)] flex flex-col z-50 overflow-hidden transform transition-transform duration-300 md:transition-none md:translate-x-0 ${isMobileOpen ? 'translate-x-0' : '-translate-x-full'
+        }`}
     >
       {/* Logo Header */}
       <div className={`p-5 py-6 flex items-center ${isCollapsed && !isMobile ? 'justify-center' : 'justify-between'}`}>
@@ -267,12 +266,12 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen }) => {
                 animate={{ opacity: 1 }}
                 className="text-[13px] tracking-tight font-medium"
               >
-                Automation
+                TPMS
               </motion.span>
             )}
             {(isCollapsed && !isMobile) && (
               <div className="absolute left-full ml-4 px-2.5 py-1.5 bg-[var(--bg-card)] border border-[var(--border)] text-[var(--text-main)] text-[10px] font-bold uppercase tracking-widest rounded-lg opacity-0 group-hover:opacity-100 pointer-events-none transition-all duration-300 z-50 shadow-lg">
-                Automation
+                TPMS
               </div>
             )}
           </button>
