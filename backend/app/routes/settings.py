@@ -294,6 +294,10 @@ TEMPLATE_SEEDS = [
      "Subtask Created: {{task_name}}",
      "Hello {{name}},\n\n{{actor_name}} has created the subtask '{{task_name}}' under '{{parent_task}}'.\n\nDeadline: {{deadline}}\nPriority: {{critical_level}}\n\nRegards,\nSparsh Notifications",
      "Hello {{name}}, {{actor_name}} created the subtask '{{task_name}}' under '{{parent_task}}'. Deadline: {{deadline}}."),
+    ("task_in_loop_added", "In Loop Person",
+     "You're now in the loop on: {{task_name}}",
+     "Hello {{name}},\n\n{{actor_name}} has added you to keep track of the task '{{task_name}}'.\n\nDeadline: {{deadline}}\nPriority: {{critical_level}}\n\nRegards,\nSparsh Notifications",
+     "Hello {{name}}, {{actor_name}} has added you to keep track of the task '{{task_name}}'. Deadline: {{deadline}}."),
 
     # ─── User Management ───
     ("user_creation", "User Created",

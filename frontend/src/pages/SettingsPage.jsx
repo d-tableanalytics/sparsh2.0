@@ -64,7 +64,7 @@ const SettingsPage = () => {
         // second is event-specific and renders empty on triggers that don't carry it
         // (e.g. {{remark}} is only populated by Follow-up Added).
         task: ['task_name', 'topic', 'task_category', 'critical_level', 'assigned_user', 'assigned_by', 'actor_name', 'deadline', 'date', 'day', 'time', 'description', 'task_status', 'name',
-               'reason', 'doer_name', 'remark', 'old_deadline', 'new_deadline', 'parent_task'],
+               'reason', 'doer_name', 'remark', 'old_deadline', 'new_deadline', 'parent_task', 'loop_person'],
         event_staff: ['session_type', 'topic', 'date', 'day', 'time', 'meeting_link', 'description', 'batch_name', 'quarter', 'event_title', 'event_datetime'],
         event_learner: ['event_title', 'date', 'day', 'time', 'meeting_link', 'description', 'event_datetime'],
         user: ['name', 'email', 'new_role', 'updated_by', 'login_url', 'password'],
@@ -715,6 +715,7 @@ const SettingsPage = () => {
                                                 <option value="task_dependent_on_other">Dependent on Other</option>
                                                 <option value="task_follow_up_added">Follow-up Added</option>
                                                 <option value="task_subtask_created">Subtask Created</option>
+                                                <option value="task_in_loop_added">In Loop Person</option>
                                             </optgroup>
                                             {user?.role === 'superadmin' && (
                                                 <>

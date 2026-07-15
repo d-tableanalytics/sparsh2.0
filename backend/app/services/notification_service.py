@@ -234,6 +234,10 @@ DEFAULT_TEMPLATES = {
         "subject": "Subtask Created: {{task_name}}",
         "body": "Hello {{name}},\n\n{{actor_name}} has created the subtask '{{task_name}}' under '{{parent_task}}'.\n\nDeadline: {{deadline}}\nPriority: {{critical_level}}\n\nRegards,\nSparsh Notifications"
     },
+    "task_in_loop_added_email": {
+        "subject": "You're now in the loop on: {{task_name}}",
+        "body": "Hello {{name}},\n\n{{actor_name}} has added you to keep track of the task '{{task_name}}'.\n\nDeadline: {{deadline}}\nPriority: {{critical_level}}\n\nRegards,\nSparsh Notifications"
+    },
     "event_created_email": {
         "subject": "Session Scheduled: {{event_title}}",
         "body": SESSION_HTML_TEMPLATE

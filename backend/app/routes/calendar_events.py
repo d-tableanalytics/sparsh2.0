@@ -520,7 +520,16 @@ async def update_event(event_id: str, updates: dict, background_tasks: Backgroun
         if added:
             background_tasks.add_task(notify_task_event, "assigned", final_doc, current_user,
                                       {"new_assignee_ids": list(added)})
-        already_in_loop = recipients_for_event("updated", final_doc) - added
+        # Someone newly put in the loop (as a watcher) is being *added to the loop*, not merely
+        # told the task changed — they get the In Loop Person trigger and are held back from the
+        # generic update, so a single edit never sends one person two emails.
+        old_watchers = {str(u) for u in (existing.get("watchers") or []) if u}
+        new_watchers = {str(u) for u in (projected.get("watchers") or []) if u}
+        added_watchers = new_watchers - old_watchers
+        if added_watchers:
+            background_tasks.add_task(notify_task_event, "in_loop_added", final_doc, current_user,
+                                      {"new_watcher_ids": list(added_watchers)})
+        already_in_loop = recipients_for_event("updated", final_doc) - added - added_watchers
         if already_in_loop:
             background_tasks.add_task(notify_task_event, "updated", final_doc, current_user,
                                       None, list(already_in_loop))

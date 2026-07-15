@@ -42,6 +42,7 @@ TASK_EVENT_SLUGS = {
     "dependent_on_other": "task_dependent_on_other",
     "follow_up_added": "task_follow_up_added",
     "subtask_created": "task_subtask_created",
+    "in_loop_added": "task_in_loop_added",
 }
 
 # In-app title + tone per event (the bell feed mirrors every email/WhatsApp trigger).
@@ -60,6 +61,7 @@ _IN_APP = {
     "dependent_on_other": ("Task Dependent on Other", "warning"),
     "follow_up_added": ("Follow-up Added", "info"),
     "subtask_created": ("Subtask Created", "info"),
+    "in_loop_added": ("Added to Task Loop", "info"),
 }
 
 
@@ -83,6 +85,9 @@ def recipients_for_event(event: str, task: dict, extra: Optional[dict] = None) -
     if event == "assigned":
         # Only the people newly put on the task, not the ones who were already on it.
         return _ids(extra.get("new_assignee_ids"))
+    if event == "in_loop_added":
+        # Only the people newly put in the loop (as watchers), not the existing ones.
+        return _ids(extra.get("new_watcher_ids"))
     if event == "dependent_on_other":
         # The doer the task was handed to, plus the assigner tracking it.
         return _ids(extra.get("doer_id")) | assigner | watchers
@@ -149,6 +154,10 @@ def _build_context(event: str, task: dict, actor_name: str, extra: Optional[dict
         "new_deadline": format_datetime_standard(extra.get("new_end")) if extra.get("new_end") else "Not set",
         "parent_task": extra.get("parent_title") or "",
         "subtask_name": extra.get("subtask_title") or "",
+        # The in-loop (watcher) member being notified. On task_in_loop_added the recipient IS
+        # the person just put in the loop, so this mirrors their name; on other triggers it
+        # simply names whoever is receiving the notification.
+        "loop_person": recipient_name,
     }
     return context
 
