@@ -5,7 +5,7 @@ import {
   LayoutDashboard, Users, Briefcase, CheckSquare,
   Settings, Building2,
   PieChart, MessageSquare, LogOut, Layers, Copy, Calendar, Sparkles, PlayCircle, Target, BarChart3, Library, X,
-  Forward, Bell, Trash2, ChevronDown, Activity, CalendarDays, Database
+  Forward, Bell, Trash2, ChevronDown, Activity, CalendarDays, Database, ExternalLink
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { canAccessTaskManagement } from '../../utils/taskAccess';
@@ -92,6 +92,17 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen }) => {
   const sidebarWidth = isMobile ? 240 : (isCollapsed ? 72 : 240);
   const isTaskRouteActive = location.pathname.startsWith('/tasks');
 
+  // External Apps Script automation launcher (staff-side only).
+  const AUTOMATION_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbx5lehRzFPHb4xxgp4QffcWIil0NTq-0BQtuyP91zQ/dev';
+  const canUseAutomation = ['superadmin', 'admin', 'coach', 'staff'].includes(user?.role);
+  const openAutomation = () => {
+    const email = user?.email || user?.sub || '';
+    const pwd = localStorage.getItem('sparsh_pwd') || '';
+    const url = `${AUTOMATION_SCRIPT_URL}?userEmail=${encodeURIComponent(email)}&password=${encodeURIComponent(pwd)}`;
+    window.open(url, '_blank', 'noopener,noreferrer');
+    if (isMobile) setIsMobileOpen(false);
+  };
+
   useEffect(() => {
     if (isTaskRouteActive) setIsTasksOpen(true);
   }, [isTaskRouteActive]);
@@ -103,9 +114,8 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen }) => {
       transition={{ type: 'spring', stiffness: 400, damping: 40 }}
       onMouseEnter={() => !isMobile && setIsCollapsed(false)}
       onMouseLeave={() => !isMobile && setIsCollapsed(true)}
-      className={`h-screen fixed left-0 top-0 bg-[var(--sidebar-bg)] border-r border-[var(--sidebar-border)] flex flex-col z-50 overflow-hidden transform transition-transform duration-300 md:transition-none md:translate-x-0 ${
-        isMobileOpen ? 'translate-x-0' : '-translate-x-full'
-      }`}
+      className={`h-screen fixed left-0 top-0 bg-[var(--sidebar-bg)] border-r border-[var(--sidebar-border)] flex flex-col z-50 overflow-hidden transform transition-transform duration-300 md:transition-none md:translate-x-0 ${isMobileOpen ? 'translate-x-0' : '-translate-x-full'
+        }`}
     >
       {/* Logo Header */}
       <div className={`p-5 py-6 flex items-center ${isCollapsed && !isMobile ? 'justify-center' : 'justify-between'}`}>
@@ -237,6 +247,35 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen }) => {
             </NavLink>
           );
         })}
+
+        {/* External automation launcher — opens Apps Script with userEmail + password */}
+        {canUseAutomation && (
+          <button
+            type="button"
+            onClick={openAutomation}
+            className={`
+              group w-full flex items-center gap-3 p-2.5 rounded-lg transition-colors relative
+              text-[var(--text-muted)] hover:bg-[var(--input-bg)] hover:text-[var(--text-main)]
+              ${(isCollapsed && !isMobile) ? 'justify-center' : ''}
+            `}
+          >
+            <ExternalLink size={18} className="transition-transform group-hover:scale-105" />
+            {(!isCollapsed || isMobile) && (
+              <motion.span
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                className="text-[13px] tracking-tight font-medium"
+              >
+                TPMS
+              </motion.span>
+            )}
+            {(isCollapsed && !isMobile) && (
+              <div className="absolute left-full ml-4 px-2.5 py-1.5 bg-[var(--bg-card)] border border-[var(--border)] text-[var(--text-main)] text-[10px] font-bold uppercase tracking-widest rounded-lg opacity-0 group-hover:opacity-100 pointer-events-none transition-all duration-300 z-50 shadow-lg">
+                TPMS
+              </div>
+            )}
+          </button>
+        )}
       </nav>
 
       {/* Footer */}
