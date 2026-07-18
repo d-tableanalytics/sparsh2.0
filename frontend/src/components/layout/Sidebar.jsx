@@ -5,10 +5,11 @@ import {
   LayoutDashboard, Users, Briefcase, CheckSquare,
   Settings, Building2,
   PieChart, MessageSquare, LogOut, Layers, Copy, Calendar, Sparkles, PlayCircle, Target, BarChart3, Library, X,
-  Forward, Bell, Trash2, ChevronDown, Activity, CalendarDays, Database, ExternalLink
+  Forward, Bell, Trash2, ChevronDown, Activity, CalendarDays, Database, ExternalLink, LayoutGrid
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { canAccessTaskManagement } from '../../utils/taskAccess';
+import { canAccessTpms } from '../../features/tpms/access';
 
 import logo1 from '../../assets/Sparsh Magic  Logo PNG1.png';
 import logo2 from '../../assets/Sparsh Magic  Logo PNG2.png';
@@ -62,6 +63,12 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen }) => {
         { name: 'Activity', path: '/tasks/activity', icon: Activity },
         { name: 'Deleted Tasks', path: '/tasks/deleted', icon: Trash2 },
       ],
+    },
+    {
+      // TPMS — internal-Sparsh-only. Points at the /tpms gate which auto-routes by role
+      // (superadmin/admin → Admin panel, every other internal user → SMOPS panel).
+      name: 'TPMS', path: '/tpms', icon: LayoutGrid,
+      roles: [], visibleFn: canAccessTpms,
     },
     { name: 'Reports', path: '/admin/reports', icon: BarChart3, roles: ['superadmin', 'admin'] },
     { name: 'Company Settings', path: '/settings', icon: Settings, roles: ['clientadmin'] },
@@ -266,12 +273,12 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen }) => {
                 animate={{ opacity: 1 }}
                 className="text-[13px] tracking-tight font-medium"
               >
-                TPMS
+                Automation
               </motion.span>
             )}
             {(isCollapsed && !isMobile) && (
               <div className="absolute left-full ml-4 px-2.5 py-1.5 bg-[var(--bg-card)] border border-[var(--border)] text-[var(--text-main)] text-[10px] font-bold uppercase tracking-widest rounded-lg opacity-0 group-hover:opacity-100 pointer-events-none transition-all duration-300 z-50 shadow-lg">
-                TPMS
+                Automation
               </div>
             )}
           </button>

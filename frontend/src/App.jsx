@@ -46,6 +46,23 @@ import DeletedTasks from './pages/DeletedTasks';
 import ForgotPassword from './pages/ForgotPassword';
 import PrivateRoute from './components/common/PrivateRoute';
 import RequireTaskAccess from './components/common/RequireTaskAccess';
+import TpmsAdminLayout from './features/tpms/admin/TpmsAdminLayout';
+import ModulePlaceholder from './features/tpms/common/ModulePlaceholder';
+import AdminView from './features/tpms/admin/pages/AdminView';
+import OmSmopsView from './features/tpms/admin/pages/OmSmopsView';
+import ImplementationTracker from './features/tpms/admin/pages/ImplementationTracker';
+import ClientView from './features/tpms/admin/pages/ClientView';
+import Escalations from './features/tpms/admin/pages/Escalations';
+import LogsReport from './features/tpms/admin/pages/LogsReport';
+import HodView from './features/tpms/admin/pages/HodView';
+import EmployeeTasks from './features/tpms/admin/pages/EmployeeTasks';
+import ReviewReport from './features/tpms/common/ReviewReport';
+import MyProfile from './features/tpms/common/MyProfile';
+import TpmsSmopsLayout from './features/tpms/smops/TpmsSmopsLayout';
+import SmopsDashboard from './features/tpms/smops/pages/SmopsDashboard';
+import HodActivity from './features/tpms/smops/pages/HodActivity';
+import SmopsEmployeeTask from './features/tpms/smops/pages/SmopsEmployeeTask';
+import TpmsGate, { RequireTpms } from './features/tpms/TpmsGate';
 import AssistantWidget from './features/assistant';
 import './index.css';
 import { useAuth } from './context/AuthContext';
@@ -122,6 +139,34 @@ const AppRoutes = () => {
       <Route path="/admin/reports" element={<PrivateRoute><ReportsDashboard /></PrivateRoute>} />
       <Route path="/admin/reports/employee/:userId" element={<PrivateRoute><EmployeeReport /></PrivateRoute>} />
       <Route path="/admin/reports/:doerId" element={<PrivateRoute><DoerReportDetails /></PrivateRoute>} />
+      {/* ===================  TPMS  ===================
+          Dynamic entry: /tpms auto-routes by role (admin → admin panel,
+          everyone else → SMOPS). Panels are role-guarded via RequireTpms. */}
+      <Route path="/tpms" element={<PrivateRoute><TpmsGate /></PrivateRoute>} />
+
+      {/* TPMS ▸ ADMIN PANEL (superadmin / admin only) */}
+      <Route path="/tpms/admin" element={<PrivateRoute hideLayout><RequireTpms admin><TpmsAdminLayout /></RequireTpms></PrivateRoute>}>
+        <Route index                 element={<AdminView />} />
+        <Route path="om"             element={<OmSmopsView />} />
+        <Route path="implementation" element={<ImplementationTracker />} />
+        <Route path="clients"        element={<ClientView />} />
+        <Route path="escalations"    element={<Escalations />} />
+        <Route path="logs"           element={<LogsReport />} />
+        <Route path="hod"            element={<HodView />} />
+        <Route path="employee-tasks" element={<EmployeeTasks />} />
+        <Route path="reviews"        element={<ReviewReport />} />
+        <Route path="profile"        element={<MyProfile panelLabel="TPMS Admin" />} />
+      </Route>
+
+      {/* TPMS ▸ SMOPS PANEL (any internal user) */}
+      <Route path="/tpms/smops" element={<PrivateRoute hideLayout><RequireTpms><TpmsSmopsLayout /></RequireTpms></PrivateRoute>}>
+        <Route index                element={<SmopsDashboard />} />
+        <Route path="hod-activity"  element={<HodActivity />} />
+        <Route path="tasks"         element={<SmopsEmployeeTask />} />
+        <Route path="reviews"       element={<ReviewReport title="Review Report" subtitle="Detailed evaluation and feedback for your companies." />} />
+        <Route path="profile"       element={<MyProfile panelLabel="TPMS SMOPS" />} />
+      </Route>
+
       <Route path="/admin/settings" element={<Navigate to="/settings" />} />
       <Route path="/settings" element={<PrivateRoute><SettingsPage /></PrivateRoute>} />
       <Route path="/profile" element={<PrivateRoute><ProfilePage /></PrivateRoute>} />
