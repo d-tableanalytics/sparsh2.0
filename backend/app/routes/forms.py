@@ -25,14 +25,20 @@ from app.models.forms import (
     FORM_DEFINITIONS,
     get_definition,
     criteria_codes,
-    FormSubmissionCreate,
+    form_kind,
+    question_map,
+    RatingSubmissionCreate,
+    FeedbackSubmissionCreate,
     SCALE_MIN,
     SCALE_MAX,
+    KIND_RATING_MATRIX,
+    KIND_YESNO_CHECKLIST,
 )
 
 router = APIRouter(prefix="/forms", tags=["TPMS Forms"])
 
-COLLECTION = "TPMS_Form_Submissions"
+COLLECTION = "TPMS_Form_Submissions"          # rating_matrix submissions
+FEEDBACK_COLLECTION = "TPMS_Feedback_Responses"  # yesno_checklist answers (one doc per company+period+md)
 
 # TPMS Forms are an internal-staff admin tool (mirrors the /tpms/admin panel guard).
 STAFF_ROLES = {"superadmin", "admin"}
@@ -122,13 +128,48 @@ async def list_members(
 # ─────────────────────────────────────────────────────────────
 # Submissions
 # ─────────────────────────────────────────────────────────────
-@router.post("/{form_type}/submissions")
-async def create_submission(
+def _matrix_key(form_type: str, company_id: str, period: str, hod_id: str) -> dict:
+    return {"form_type": form_type, "company_id": company_id, "period": period, "hod_id": hod_id}
+
+
+@router.get("/{form_type}/ratings")
+async def get_ratings(
     form_type: str,
-    payload: FormSubmissionCreate,
+    company_id: str = Query(...),
+    period: str = Query(...),
+    hod_id: str = Query(...),
     current_user: dict = Depends(get_current_user),
 ):
+    """Existing ratings for (company, period, HOD) so the UI can lock saved cells."""
     definition = _require_form_type(form_type)
+    if definition.get("kind") != KIND_RATING_MATRIX:
+        raise HTTPException(status_code=400, detail=f"Form '{form_type}' is not a rating form")
+    if not _can_read(current_user):
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    doc = await get_collection(COLLECTION).find_one(
+        _matrix_key(form_type, company_id.strip(), period.strip(), hod_id.strip())
+    )
+    ratings = (doc or {}).get("ratings", {})           # { code: { member_id: {rating, ...} } }
+    count = sum(len(v) for v in ratings.values())
+    return {
+        "submitted": count > 0,
+        "submitted_on": (doc or {}).get("created_at"),
+        "ratings": ratings,
+        "count": count,
+    }
+
+
+@router.post("/{form_type}/ratings")
+async def submit_ratings(
+    form_type: str,
+    payload: RatingSubmissionCreate,
+    current_user: dict = Depends(get_current_user),
+):
+    """Cell-level partial submit: append only (criterion × member) cells not already saved."""
+    definition = _require_form_type(form_type)
+    if definition.get("kind") != KIND_RATING_MATRIX:
+        raise HTTPException(status_code=400, detail=f"Form '{form_type}' is not a rating form; use the feedback endpoint")
     if not _can_write(current_user):
         raise HTTPException(status_code=403, detail="Not authorized to submit forms")
     if not definition.get("available"):
@@ -138,59 +179,182 @@ async def create_submission(
     if not valid_codes:
         raise HTTPException(status_code=400, detail=f"Form '{form_type}' has no criteria configured")
 
-    members_out: List[dict] = []
-    for member in payload.members:
-        # Every required criterion must be present, and no stray codes allowed.
-        missing = valid_codes - set(member.scores.keys())
-        if missing:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Missing scores for {sorted(missing)} for member '{member.member_name}'",
-            )
-        unknown = set(member.scores.keys()) - valid_codes
-        if unknown:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Unknown criteria {sorted(unknown)} for member '{member.member_name}'",
-            )
-
-        ordered_scores = {code: int(member.scores[code]) for code in criteria_codes(form_type)}
-        total = sum(ordered_scores.values())
-        max_total = len(valid_codes) * SCALE_MAX
-        members_out.append({
-            "member_id": member.member_id,
-            "employee_id": member.employee_id,
-            "member_name": member.member_name,
-            "designation": member.designation,
-            "department": member.department,
-            "scores": ordered_scores,
-            # Convenience aggregates (plain arithmetic of the stored answers — NOT a
-            # Success Measure). Raw `scores` remain the authoritative source.
-            "total": total,
-            "max_total": max_total,
-            "average": round(total / len(valid_codes), 2) if valid_codes else 0,
-        })
+    key = _matrix_key(form_type, payload.company_id, payload.period, payload.hod_id)
+    existing = await get_collection(COLLECTION).find_one(key)
+    saved = (existing or {}).get("ratings", {})
 
     now = datetime.utcnow()
-    doc = {
-        "form_type": form_type,
-        "company_id": payload.company_id,
-        "period": payload.period,
-        "hod_id": payload.hod_id,
-        "hod_name": payload.hod_name,
-        "members": members_out,
-        "scale": {"min": SCALE_MIN, "max": SCALE_MAX},
-        "criteria_codes": criteria_codes(form_type),
-        "submitted_by": str(current_user.get("_id")),
-        "submitted_by_name": _user_display_name(current_user),
-        "source": "web",
-        "created_at": now,
-        "updated_at": now,
-    }
-    result = await get_collection(COLLECTION).insert_one(doc)
+    who = str(current_user.get("_id"))
+    who_name = _user_display_name(current_user)
+
+    set_fields: Dict[str, dict] = {}
+    added = 0
+    for cell in payload.ratings:
+        if cell.criterion_code not in valid_codes:
+            raise HTTPException(status_code=400, detail=f"Unknown criterion '{cell.criterion_code}'")
+        # Skip a cell that's already on file (append-only, no duplicates).
+        if saved.get(cell.criterion_code, {}).get(cell.member_id) is not None:
+            continue
+        set_fields[f"ratings.{cell.criterion_code}.{cell.member_id}"] = {
+            "rating": cell.rating,
+            "member_name": cell.member_name,
+            "designation": cell.designation,
+            "employee_id": cell.employee_id,
+            "criterion": cell.criterion_code,
+            "rated_at": now,
+            "rated_by": who,
+            "rated_by_name": who_name,
+        }
+        added += 1
+
+    if not added:
+        raise HTTPException(
+            status_code=400,
+            detail="Nothing new to save — the selected cells were already submitted.",
+        )
+
+    set_fields["updated_at"] = now
+    set_fields["hod_name"] = payload.hod_name
+    await get_collection(COLLECTION).update_one(
+        key,
+        {
+            "$set": set_fields,
+            "$setOnInsert": {
+                **key,
+                "kind": KIND_RATING_MATRIX,
+                "criteria_codes": criteria_codes(form_type),
+                "scale": {"min": SCALE_MIN, "max": SCALE_MAX},
+                "created_at": now,
+                "created_by": who,
+                "created_by_name": who_name,
+            },
+        },
+        upsert=True,
+    )
+
+    total_saved = sum(len(v) for v in saved.values()) + added
     return {
-        "message": f"{definition['title']} submitted successfully",
-        "submission": _serialize({**doc, "_id": result.inserted_id}),
+        "message": f"{definition['title']}: {added} rating(s) saved",
+        "count": added,
+        "total_saved": total_saved,
+    }
+
+
+# ─────────────────────────────────────────────────────────────
+# yesno_checklist (Implementation Feedback) — partial submission
+# ─────────────────────────────────────────────────────────────
+def _feedback_key(form_type: str, company_id: str, period: str, md_id: str) -> dict:
+    return {"form_type": form_type, "company_id": company_id, "period": period, "md_id": md_id}
+
+
+@router.get("/{form_type}/feedback")
+async def get_feedback(
+    form_type: str,
+    company_id: str = Query(...),
+    period: str = Query(...),
+    md_id: str = Query(...),
+    current_user: dict = Depends(get_current_user),
+):
+    """Existing answers for (company, period, MD) so the UI can lock what's already saved."""
+    definition = _require_form_type(form_type)
+    if definition.get("kind") != KIND_YESNO_CHECKLIST:
+        raise HTTPException(status_code=400, detail=f"Form '{form_type}' is not a feedback form")
+    if not _can_read(current_user):
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    doc = await get_collection(FEEDBACK_COLLECTION).find_one(
+        _feedback_key(form_type, company_id.strip(), period.strip(), md_id.strip())
+    )
+    answers = (doc or {}).get("answers", {})
+    return {
+        "submitted": bool(answers),
+        "submitted_on": (doc or {}).get("created_at"),
+        "answers": answers,          # { question_id: {question, checked, remark, ...} }
+        "count": len(answers),
+    }
+
+
+@router.post("/{form_type}/feedback")
+async def submit_feedback(
+    form_type: str,
+    payload: FeedbackSubmissionCreate,
+    current_user: dict = Depends(get_current_user),
+):
+    """Slot-by-slot submit: append only questions not already saved for this (company, period, MD)."""
+    definition = _require_form_type(form_type)
+    if definition.get("kind") != KIND_YESNO_CHECKLIST:
+        raise HTTPException(status_code=400, detail=f"Form '{form_type}' is not a feedback form")
+    if not _can_write(current_user):
+        raise HTTPException(status_code=403, detail="Not authorized to submit forms")
+    if not definition.get("available"):
+        raise HTTPException(status_code=400, detail=f"Form '{form_type}' is not yet available for submission")
+
+    qmap = question_map(form_type)
+    if not qmap:
+        raise HTTPException(status_code=400, detail=f"Form '{form_type}' has no questions configured")
+
+    key = _feedback_key(form_type, payload.company_id, payload.period, payload.md_id)
+    existing = await get_collection(FEEDBACK_COLLECTION).find_one(key)
+    already = set((existing or {}).get("answers", {}).keys())
+
+    now = datetime.utcnow()
+    who = str(current_user.get("_id"))
+    who_name = _user_display_name(current_user)
+
+    new_answers: Dict[str, dict] = {}
+    skipped_unknown, skipped_existing = [], []
+    for a in payload.answers:
+        qid = a.question_id
+        if qid not in qmap:
+            skipped_unknown.append(qid)
+            continue
+        if qid in already:
+            skipped_existing.append(qid)
+            continue
+        # Only persist a slot that was actually answered (ticked) or has a remark.
+        if not a.checked and not (a.remark or "").strip():
+            continue
+        new_answers[qid] = {
+            "question": a.question or qmap[qid].get("title", ""),
+            "checked": bool(a.checked),
+            "answer": "Yes" if a.checked else "No",
+            "remark": (a.remark or "").strip(),
+            "answered_at": now,
+            "answered_by": who,
+            "answered_by_name": who_name,
+        }
+
+    if not new_answers:
+        raise HTTPException(
+            status_code=400,
+            detail="Nothing new to save — tick a box or add a remark on an unanswered question.",
+        )
+
+    set_fields = {f"answers.{qid}": val for qid, val in new_answers.items()}
+    set_fields["updated_at"] = now
+    set_fields["md_name"] = payload.md_name
+
+    await get_collection(FEEDBACK_COLLECTION).update_one(
+        key,
+        {
+            "$set": set_fields,
+            "$setOnInsert": {
+                **key,
+                "kind": KIND_YESNO_CHECKLIST,
+                "created_at": now,
+                "created_by": who,
+                "created_by_name": who_name,
+            },
+        },
+        upsert=True,
+    )
+
+    return {
+        "message": f"{definition['title']}: {len(new_answers)} answer(s) saved",
+        "count": len(new_answers),
+        "skipped_already_saved": skipped_existing,
+        "total_saved": len(already) + len(new_answers),
+        "total_questions": len(qmap),
     }
 
 

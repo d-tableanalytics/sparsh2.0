@@ -1,13 +1,18 @@
 """
 TPMS ▸ Forms sub-module — models + form-type registry.
 
-These are monthly HOD "checklist" forms (Accountability, Ownership, Culture,
-Implementation Feedback). Each is a rating matrix: an HOD scores every team
-member on a fixed set of criteria using a 0–5 scale.
+Two form KINDS are supported:
 
-Storage granularity is deliberately atomic — one score per
-(company_id, period, hod_id, member_id, criterion_code) — so downstream
-Success Measure calculations can aggregate freely without re-parsing.
+  • "rating_matrix"   — an HOD scores every team member on fixed criteria using a
+                        0–5 scale (Ownership, Accountability, [Culture]).
+  • "yesno_checklist" — the MD answers a flat list of questions with Yes/No + an
+                        optional remark, with partial (slot-by-slot) submission
+                        (Implementation Feedback).
+
+Storage granularity is deliberately atomic so downstream Success Measure
+calculations can aggregate freely without re-parsing:
+  • rating_matrix   → one score per (company_id, period, hod_id, member_id, criterion_code)
+  • yesno_checklist → one answer per (company_id, period, md_id, question_id)
 Success Measure computation itself is intentionally NOT implemented here.
 """
 from pydantic import BaseModel, Field, field_validator
@@ -15,18 +20,22 @@ from typing import Optional, List, Dict
 from datetime import datetime
 
 
-# ─────────────────────────────────────────────────────────────
-# Form-type registry (source of truth for the questions/criteria).
-# The frontend fetches these so the UI never hardcodes the criteria.
-# Add Culture / Implementation Feedback criteria here once provided —
-# no route or model change is required.
-# ─────────────────────────────────────────────────────────────
 SCALE_MIN = 0
 SCALE_MAX = 5
 
+KIND_RATING_MATRIX = "rating_matrix"
+KIND_YESNO_CHECKLIST = "yesno_checklist"
+
+
+# ─────────────────────────────────────────────────────────────
+# Form-type registry (source of truth for questions/criteria).
+# The frontend fetches these so the UI never hardcodes anything.
+# Activate a form by filling its criteria/questions and available:True.
+# ─────────────────────────────────────────────────────────────
 FORM_DEFINITIONS: Dict[str, dict] = {
     "accountability": {
         "form_type": "accountability",
+        "kind": KIND_RATING_MATRIX,
         "title": "Accountability Checklist",
         "description": "Monthly HOD accountability rating for each team member.",
         "available": True,
@@ -44,6 +53,7 @@ FORM_DEFINITIONS: Dict[str, dict] = {
     },
     "ownership": {
         "form_type": "ownership",
+        "kind": KIND_RATING_MATRIX,
         "title": "Ownership Checklist",
         "description": "Monthly HOD ownership rating for each team member.",
         "available": True,
@@ -59,23 +69,26 @@ FORM_DEFINITIONS: Dict[str, dict] = {
              "prompt": "Is he/she aligned with the organisational result Matrix?"},
         ],
     },
-    # Placeholders — criteria to be supplied. `available: False` tells the UI to
-    # show a "coming soon" state instead of a form. Fill `criteria` to activate.
+    # Placeholder — criteria to be supplied.
     "culture": {
         "form_type": "culture",
+        "kind": KIND_RATING_MATRIX,
         "title": "Culture Checklist",
         "description": "Monthly HOD culture rating for each team member.",
         "available": False,
         "scale": {"min": SCALE_MIN, "max": SCALE_MAX},
         "criteria": [],
     },
+    # Yes/No checklist answered by the MD. Fill `questions` to activate; each is
+    # {"id": "...", "title": "...", "desc": "..."}. `available` flips True once populated.
     "implementation_feedback": {
         "form_type": "implementation_feedback",
-        "title": "Implementation Feedback",
-        "description": "Monthly implementation feedback for each team member.",
+        "kind": KIND_YESNO_CHECKLIST,
+        "title": "Implementation Update Feedback",
+        "description": "Monthly implementation update feedback submitted by the MD (Yes/No + remark).",
         "available": False,
-        "scale": {"min": SCALE_MIN, "max": SCALE_MAX},
-        "criteria": [],
+        "respondent": "MD",
+        "questions": [],
     },
 }
 
@@ -84,74 +97,104 @@ def get_definition(form_type: str) -> Optional[dict]:
     return FORM_DEFINITIONS.get(form_type)
 
 
+def form_kind(form_type: str) -> Optional[str]:
+    d = FORM_DEFINITIONS.get(form_type) or {}
+    return d.get("kind")
+
+
 def criteria_codes(form_type: str) -> List[str]:
     d = FORM_DEFINITIONS.get(form_type) or {}
     return [c["code"] for c in d.get("criteria", [])]
 
 
+def question_map(form_type: str) -> Dict[str, dict]:
+    d = FORM_DEFINITIONS.get(form_type) or {}
+    return {str(q["id"]): q for q in d.get("questions", [])}
+
+
 # ─────────────────────────────────────────────────────────────
-# Submission models
+# rating_matrix submission models (cell-level, partial submission)
+# One "cell" = one team member rated on one criterion.
 # ─────────────────────────────────────────────────────────────
-class MemberScore(BaseModel):
-    """One rated team member within a submission."""
-    member_id: Optional[str] = None        # staff/learner _id or employee code
-    employee_id: Optional[str] = None      # e.g. "EMP_223" if available
+class RatingCell(BaseModel):
+    criterion_code: str
+    member_id: str
     member_name: str
     designation: Optional[str] = None
-    department: Optional[str] = None
-    # criterion_code -> score (0..5). Authoritative atomic data.
-    scores: Dict[str, int] = Field(default_factory=dict)
+    employee_id: Optional[str] = None
+    rating: int
 
-    @field_validator("member_name")
+    @field_validator("criterion_code", "member_id", "member_name")
     @classmethod
-    def _name_required(cls, v: str) -> str:
-        if not v or not str(v).strip():
-            raise ValueError("member_name is required")
+    def _required(cls, v: str) -> str:
+        if v is None or not str(v).strip():
+            raise ValueError("criterion_code, member_id and member_name are required")
         return str(v).strip()
 
-    @field_validator("scores")
+    @field_validator("rating")
     @classmethod
-    def _scores_in_range(cls, v: Dict[str, int]) -> Dict[str, int]:
-        for code, score in v.items():
-            if not isinstance(score, int) or score < SCALE_MIN or score > SCALE_MAX:
-                raise ValueError(f"Score for '{code}' must be an integer between {SCALE_MIN} and {SCALE_MAX}")
+    def _rating_in_range(cls, v: int) -> int:
+        if not isinstance(v, int) or v < SCALE_MIN or v > SCALE_MAX:
+            raise ValueError(f"rating must be an integer between {SCALE_MIN} and {SCALE_MAX}")
         return v
 
 
-class FormSubmissionCreate(BaseModel):
+class RatingSubmissionCreate(BaseModel):
     company_id: str
-    period: str                            # raw MID as launched, e.g. "july26"
-    hod_id: Optional[str] = None           # EID, e.g. "EMP_223"
+    period: str
+    hod_id: str
     hod_name: Optional[str] = None
-    members: List[MemberScore]
+    ratings: List[RatingCell]
 
-    @field_validator("company_id", "period")
+    @field_validator("company_id", "period", "hod_id")
     @classmethod
     def _required(cls, v: str) -> str:
         if not v or not str(v).strip():
-            raise ValueError("company_id and period are required")
+            raise ValueError("company_id, period and hod_id are required")
         return str(v).strip()
 
-    @field_validator("members")
+    @field_validator("ratings")
     @classmethod
-    def _members_non_empty(cls, v: List[MemberScore]) -> List[MemberScore]:
+    def _ratings_non_empty(cls, v: List[RatingCell]) -> List[RatingCell]:
         if not v:
-            raise ValueError("At least one member must be rated")
+            raise ValueError("At least one rating is required")
         return v
 
 
-class FormSubmissionResponse(BaseModel):
-    id: str = Field(alias="_id")
-    form_type: str
+# ─────────────────────────────────────────────────────────────
+# yesno_checklist submission models
+# ─────────────────────────────────────────────────────────────
+class FeedbackAnswer(BaseModel):
+    question_id: str
+    question: Optional[str] = ""       # snapshot of the question text at answer time
+    checked: bool = False              # True = Yes, False = No
+    remark: Optional[str] = ""
+
+    @field_validator("question_id")
+    @classmethod
+    def _qid_required(cls, v: str) -> str:
+        if not v or not str(v).strip():
+            raise ValueError("question_id is required")
+        return str(v).strip()
+
+
+class FeedbackSubmissionCreate(BaseModel):
     company_id: str
     period: str
-    hod_id: Optional[str] = None
-    hod_name: Optional[str] = None
-    members: List[dict]
-    submitted_by: Optional[str] = None
-    submitted_by_name: Optional[str] = None
-    created_at: Optional[datetime] = None
-    updated_at: Optional[datetime] = None
+    md_id: str
+    md_name: Optional[str] = None
+    answers: List[FeedbackAnswer]
 
-    class Config:
-        populate_by_name = True
+    @field_validator("company_id", "period", "md_id")
+    @classmethod
+    def _required(cls, v: str) -> str:
+        if not v or not str(v).strip():
+            raise ValueError("company_id, period and md_id are required")
+        return str(v).strip()
+
+    @field_validator("answers")
+    @classmethod
+    def _answers_non_empty(cls, v: List[FeedbackAnswer]) -> List[FeedbackAnswer]:
+        if not v:
+            raise ValueError("At least one answer is required")
+        return v
