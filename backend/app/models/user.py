@@ -38,7 +38,8 @@ class UserBase(BaseModel):
         "users": {"create": False, "read": True, "update": False, "delete": False},
         "companies": {"create": False, "read": True, "update": False, "delete": False},
         "logs": {"create": False, "read": True, "update": False, "delete": False},
-        "templates": {"create": False, "read": True, "update": False, "delete": False}
+        "templates": {"create": False, "read": True, "update": False, "delete": False},
+        "forms": {"create": False, "read": True, "update": False, "delete": False}
     }
 
 class UserCreate(UserBase):

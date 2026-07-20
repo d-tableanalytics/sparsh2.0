@@ -1,5 +1,5 @@
 import React, { lazy, Suspense } from 'react';
-import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
+import { BrowserRouter as Router, Routes, Route, Navigate, Outlet } from 'react-router-dom';
 import { AuthProvider } from './context/AuthContext';
 import { ThemeProvider } from './context/ThemeContext';
 import { NotificationProvider } from './context/NotificationContext';
@@ -46,7 +46,6 @@ import DeletedTasks from './pages/DeletedTasks';
 import ForgotPassword from './pages/ForgotPassword';
 import PrivateRoute from './components/common/PrivateRoute';
 import RequireTaskAccess from './components/common/RequireTaskAccess';
-import TpmsAdminLayout from './features/tpms/admin/TpmsAdminLayout';
 import ModulePlaceholder from './features/tpms/common/ModulePlaceholder';
 import AdminView from './features/tpms/admin/pages/AdminView';
 import OmSmopsView from './features/tpms/admin/pages/OmSmopsView';
@@ -58,7 +57,11 @@ import HodView from './features/tpms/admin/pages/HodView';
 import EmployeeTasks from './features/tpms/admin/pages/EmployeeTasks';
 import ReviewReport from './features/tpms/common/ReviewReport';
 import MyProfile from './features/tpms/common/MyProfile';
-import TpmsSmopsLayout from './features/tpms/smops/TpmsSmopsLayout';
+import ImplementationFeedback from './features/tpms/admin/pages/forms/ImplementationFeedback';
+import Ownership from './features/tpms/admin/pages/forms/Ownership';
+import Culture from './features/tpms/admin/pages/forms/Culture';
+import Accountability from './features/tpms/admin/pages/forms/Accountability';
+import { CompanyProvider } from './features/tpms/smops/CompanyContext';
 import SmopsDashboard from './features/tpms/smops/pages/SmopsDashboard';
 import HodActivity from './features/tpms/smops/pages/HodActivity';
 import SmopsEmployeeTask from './features/tpms/smops/pages/SmopsEmployeeTask';
@@ -144,8 +147,9 @@ const AppRoutes = () => {
           everyone else → SMOPS). Panels are role-guarded via RequireTpms. */}
       <Route path="/tpms" element={<PrivateRoute><TpmsGate /></PrivateRoute>} />
 
-      {/* TPMS ▸ ADMIN PANEL (superadmin / admin only) */}
-      <Route path="/tpms/admin" element={<PrivateRoute hideLayout><RequireTpms admin><TpmsAdminLayout /></RequireTpms></PrivateRoute>}>
+      {/* TPMS ▸ ADMIN PANEL (superadmin / admin only) — rendered inside the main app
+          layout; navigation is driven by the main Sidebar's TPMS dropdown. */}
+      <Route path="/tpms/admin" element={<PrivateRoute><RequireTpms admin><Outlet /></RequireTpms></PrivateRoute>}>
         <Route index                 element={<AdminView />} />
         <Route path="om"             element={<OmSmopsView />} />
         <Route path="implementation" element={<ImplementationTracker />} />
@@ -154,12 +158,21 @@ const AppRoutes = () => {
         <Route path="logs"           element={<LogsReport />} />
         <Route path="hod"            element={<HodView />} />
         <Route path="employee-tasks" element={<EmployeeTasks />} />
+        {/* Forms sub-module: Implementation Feedback / Ownership / Culture / Accountability */}
+        <Route path="forms" element={<Outlet />}>
+          <Route index element={<Navigate to="implementation-feedback" replace />} />
+          <Route path="implementation-feedback" element={<ImplementationFeedback />} />
+          <Route path="ownership"                element={<Ownership />} />
+          <Route path="culture"                  element={<Culture />} />
+          <Route path="accountability"           element={<Accountability />} />
+        </Route>
         <Route path="reviews"        element={<ReviewReport />} />
         <Route path="profile"        element={<MyProfile panelLabel="TPMS Admin" />} />
       </Route>
 
-      {/* TPMS ▸ SMOPS PANEL (any internal user) */}
-      <Route path="/tpms/smops" element={<PrivateRoute hideLayout><RequireTpms><TpmsSmopsLayout /></RequireTpms></PrivateRoute>}>
+      {/* TPMS ▸ SMOPS PANEL (any internal user) — rendered inside the main app layout.
+          CompanyProvider supplies the shared company selection the SMOPS pages consume. */}
+      <Route path="/tpms/smops" element={<PrivateRoute><RequireTpms><CompanyProvider><Outlet /></CompanyProvider></RequireTpms></PrivateRoute>}>
         <Route index                element={<SmopsDashboard />} />
         <Route path="hod-activity"  element={<HodActivity />} />
         <Route path="tasks"         element={<SmopsEmployeeTask />} />

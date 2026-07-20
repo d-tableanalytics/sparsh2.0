@@ -5,7 +5,8 @@ import {
   LayoutDashboard, Users, Briefcase, CheckSquare,
   Settings, Building2,
   PieChart, MessageSquare, LogOut, Layers, Copy, Calendar, Sparkles, PlayCircle, Target, BarChart3, Library, X,
-  Forward, Bell, Trash2, ChevronDown, Activity, CalendarDays, Database, ExternalLink, LayoutGrid
+  Forward, Bell, Trash2, ChevronDown, Activity, CalendarDays, Database, ExternalLink, LayoutGrid,
+  Gauge, GitBranch, AlertTriangle, UserCog, ListChecks, ScrollText, UserCircle, ClipboardList, ClipboardCheck
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { canAccessTaskManagement } from '../../utils/taskAccess';
@@ -24,7 +25,9 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen }) => {
   const location = useLocation();
   const [isCollapsed, setIsCollapsed] = useState(true);
   const [isMobile, setIsMobile] = useState(false);
-  const [isTasksOpen, setIsTasksOpen] = useState(false);
+  // Tracks which dropdown groups (Task Management, TPMS, …) are expanded, keyed by link name.
+  const [openMenus, setOpenMenus] = useState({});
+  const toggleMenu = (name) => setOpenMenus((m) => ({ ...m, [name]: !m[name] }));
 
   useEffect(() => {
     const checkMobile = () => {
@@ -34,6 +37,39 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen }) => {
     window.addEventListener('resize', checkMobile);
     return () => window.removeEventListener('resize', checkMobile);
   }, []);
+
+  // TPMS submodules mirror the panel navs (features/tpms/*Layout.jsx). Role decides which
+  // panel a user lands on: superadmin/admin → Admin panel, every other internal → SMOPS.
+  const isTpmsAdminUser = ['superadmin', 'admin'].includes(user?.role);
+  const tpmsSubmodules = isTpmsAdminUser
+    ? [
+        { name: 'Admin View', path: '/tpms/admin', icon: LayoutDashboard, end: true },
+        { name: 'OM (SMOps) View', path: '/tpms/admin/om', icon: Gauge },
+        { name: 'Client View', path: '/tpms/admin/clients', icon: Building2 },
+        { name: 'Implementation Tracker', path: '/tpms/admin/implementation', icon: GitBranch },
+        { name: 'Escalations', path: '/tpms/admin/escalations', icon: AlertTriangle },
+        { name: 'HOD View', path: '/tpms/admin/hod', icon: UserCog },
+        { name: 'Employee Tasks', path: '/tpms/admin/employee-tasks', icon: ListChecks },
+        {
+          name: 'Forms', path: '/tpms/admin/forms', icon: ClipboardList,
+          children: [
+            { name: 'Implementation Feedback', path: '/tpms/admin/forms/implementation-feedback', icon: ClipboardList },
+            { name: 'Ownership', path: '/tpms/admin/forms/ownership', icon: UserCog },
+            { name: 'Culture', path: '/tpms/admin/forms/culture', icon: Sparkles },
+            { name: 'Accountability', path: '/tpms/admin/forms/accountability', icon: ClipboardCheck },
+          ],
+        },
+        { name: 'Logs Report', path: '/tpms/admin/logs', icon: ScrollText },
+        { name: 'Review Report', path: '/tpms/admin/reviews', icon: BarChart3 },
+        { name: 'My Profile', path: '/tpms/admin/profile', icon: UserCircle },
+      ]
+    : [
+        { name: 'Dashboard', path: '/tpms/smops', icon: LayoutDashboard, end: true },
+        { name: 'HOD Activity', path: '/tpms/smops/hod-activity', icon: Activity },
+        { name: 'Employee Task', path: '/tpms/smops/tasks', icon: ClipboardList },
+        { name: 'Review Report', path: '/tpms/smops/reviews', icon: BarChart3 },
+        { name: 'My Profile', path: '/tpms/smops/profile', icon: UserCircle },
+      ];
 
   const links = [
     { name: 'Dashboard', path: '/', icon: LayoutDashboard, roles: ['superadmin', 'admin', 'clientadmin', 'clientuser', 'coach', 'staff'] },
@@ -54,7 +90,7 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen }) => {
       name: 'Task Management', path: '/tasks', icon: CheckSquare,
       roles: [], visibleFn: canAccessTaskManagement,
       submodules: [
-        { name: 'Dashboard', path: '/tasks', icon: LayoutDashboard },
+        { name: 'Dashboard', path: '/tasks', icon: LayoutDashboard, end: true },
         { name: 'My Tasks', path: '/tasks/my', icon: CheckSquare },
         { name: 'Delegated Tasks', path: '/tasks/delegated', icon: Forward },
         { name: 'Subscribed Tasks', path: '/tasks/subscribed', icon: Bell },
@@ -65,10 +101,11 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen }) => {
       ],
     },
     {
-      // TPMS — internal-Sparsh-only. Points at the /tpms gate which auto-routes by role
-      // (superadmin/admin → Admin panel, every other internal user → SMOPS panel).
+      // TPMS — internal-Sparsh-only. Renders as a dropdown (like Task Management); the
+      // submodules deep-link into the role-appropriate panel (admin vs SMOPS).
       name: 'TPMS', path: '/tpms', icon: LayoutGrid,
       roles: [], visibleFn: canAccessTpms,
+      submodules: tpmsSubmodules,
     },
     { name: 'Reports', path: '/admin/reports', icon: BarChart3, roles: ['superadmin', 'admin'] },
     { name: 'Company Settings', path: '/settings', icon: Settings, roles: ['clientadmin'] },
@@ -97,7 +134,6 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen }) => {
   });
 
   const sidebarWidth = isMobile ? 240 : (isCollapsed ? 72 : 240);
-  const isTaskRouteActive = location.pathname.startsWith('/tasks');
 
   // External Apps Script automation launcher (staff-side only).
   const AUTOMATION_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbx5lehRzFPHb4xxgp4QffcWIil0NTq-0BQtuyP91zQ/dev';
@@ -110,9 +146,21 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen }) => {
     if (isMobile) setIsMobileOpen(false);
   };
 
+  // Auto-expand whichever dropdown group owns the current route.
   useEffect(() => {
-    if (isTaskRouteActive) setIsTasksOpen(true);
-  }, [isTaskRouteActive]);
+    setOpenMenus((m) => {
+      const next = { ...m };
+      links.forEach((link) => {
+        if (link.submodules && location.pathname.startsWith(link.path)) next[link.name] = true;
+        // Auto-open any nested submodule group (e.g. TPMS ▸ Forms) that owns the route.
+        (link.submodules || []).forEach((sub) => {
+          if (sub.children && location.pathname.startsWith(sub.path)) next[`${link.name}::${sub.name}`] = true;
+        });
+      });
+      return next;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [location.pathname]);
 
   return (
     <motion.aside
@@ -157,12 +205,13 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen }) => {
       <nav className="flex-1 px-3 space-y-1 overflow-y-auto no-scrollbar">
         {filteredLinks.map((link) => {
           if (link.submodules) {
-            const groupActive = isTaskRouteActive;
+            const groupActive = location.pathname.startsWith(link.path);
+            const isOpen = !!openMenus[link.name];
             return (
               <div key={link.path}>
                 <button
                   type="button"
-                  onClick={() => setIsTasksOpen(o => !o)}
+                  onClick={() => toggleMenu(link.name)}
                   className={`
                     group w-full flex items-center gap-3 p-2.5 rounded-lg transition-colors relative
                     ${groupActive
@@ -177,7 +226,7 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen }) => {
                       <motion.span initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="text-[13px] tracking-tight font-medium flex-1 text-left">
                         {link.name}
                       </motion.span>
-                      <ChevronDown size={14} className={`transition-transform ${isTasksOpen ? 'rotate-180' : ''}`} />
+                      <ChevronDown size={14} className={`transition-transform ${isOpen ? 'rotate-180' : ''}`} />
                     </>
                   )}
                   {(isCollapsed && !isMobile) && (
@@ -188,30 +237,82 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen }) => {
                 </button>
 
                 <AnimatePresence initial={false}>
-                  {isTasksOpen && (!isCollapsed || isMobile) && (
+                  {isOpen && (!isCollapsed || isMobile) && (
                     <motion.div
                       initial={{ height: 0, opacity: 0 }}
                       animate={{ height: 'auto', opacity: 1 }}
                       exit={{ height: 0, opacity: 0 }}
                       className="overflow-hidden pl-4 space-y-1 mt-1"
                     >
-                      {link.submodules.filter((sub) => !sub.roles || sub.roles.includes(user?.role)).map((sub) => (
-                        <NavLink
-                          key={sub.path}
-                          to={sub.path}
-                          end={sub.path === '/tasks'}
-                          onClick={() => { if (isMobile) setIsMobileOpen(false); }}
-                          className={({ isActive }) => `
-                            group flex items-center gap-3 pl-3 pr-2.5 py-2 rounded-lg transition-colors text-[12.5px]
-                            ${isActive
-                              ? 'bg-[var(--sidebar-active-bg)] text-[var(--sidebar-active-text)] font-bold shadow-sm'
-                              : 'text-[var(--text-muted)] hover:bg-[var(--input-bg)] hover:text-[var(--text-main)]'}
-                          `}
-                        >
-                          <sub.icon size={15} />
-                          <span className="tracking-tight font-medium">{sub.name}</span>
-                        </NavLink>
-                      ))}
+                      {link.submodules.filter((sub) => !sub.roles || sub.roles.includes(user?.role)).map((sub) => {
+                        const subLinkClass = ({ isActive }) => `
+                          group flex items-center gap-3 pl-3 pr-2.5 py-2 rounded-lg transition-colors text-[12.5px]
+                          ${isActive
+                            ? 'bg-[var(--sidebar-active-bg)] text-[var(--sidebar-active-text)] font-bold shadow-sm'
+                            : 'text-[var(--text-muted)] hover:bg-[var(--input-bg)] hover:text-[var(--text-main)]'}
+                        `;
+
+                        // Nested group (e.g. TPMS ▸ Forms ▸ Ownership/Culture/…)
+                        if (sub.children) {
+                          const nestedKey = `${link.name}::${sub.name}`;
+                          const nestedOpen = !!openMenus[nestedKey];
+                          const nestedActive = location.pathname.startsWith(sub.path);
+                          return (
+                            <div key={sub.path}>
+                              <button
+                                type="button"
+                                onClick={() => toggleMenu(nestedKey)}
+                                className={`
+                                  group w-full flex items-center gap-3 pl-3 pr-2.5 py-2 rounded-lg transition-colors text-[12.5px]
+                                  ${nestedActive
+                                    ? 'bg-[var(--sidebar-active-bg)] text-[var(--sidebar-active-text)] font-bold shadow-sm'
+                                    : 'text-[var(--text-muted)] hover:bg-[var(--input-bg)] hover:text-[var(--text-main)]'}
+                                `}
+                              >
+                                <sub.icon size={15} />
+                                <span className="tracking-tight font-medium flex-1 text-left">{sub.name}</span>
+                                <ChevronDown size={13} className={`transition-transform ${nestedOpen ? 'rotate-180' : ''}`} />
+                              </button>
+                              <AnimatePresence initial={false}>
+                                {nestedOpen && (
+                                  <motion.div
+                                    initial={{ height: 0, opacity: 0 }}
+                                    animate={{ height: 'auto', opacity: 1 }}
+                                    exit={{ height: 0, opacity: 0 }}
+                                    className="overflow-hidden pl-4 space-y-1 mt-1"
+                                  >
+                                    {sub.children.filter((c) => !c.roles || c.roles.includes(user?.role)).map((child) => (
+                                      <NavLink
+                                        key={child.path}
+                                        to={child.path}
+                                        end={child.end}
+                                        onClick={() => { if (isMobile) setIsMobileOpen(false); }}
+                                        className={subLinkClass}
+                                      >
+                                        <child.icon size={14} />
+                                        <span className="tracking-tight font-medium">{child.name}</span>
+                                      </NavLink>
+                                    ))}
+                                  </motion.div>
+                                )}
+                              </AnimatePresence>
+                            </div>
+                          );
+                        }
+
+                        return (
+                          <NavLink
+                            key={sub.path}
+                            to={sub.path}
+                            end={sub.end}
+                            onClick={() => { if (isMobile) setIsMobileOpen(false); }}
+                            className={subLinkClass}
+                          >
+                            <sub.icon size={15} />
+                            <span className="tracking-tight font-medium">{sub.name}</span>
+                          </NavLink>
+                        );
+                      })}
                     </motion.div>
                   )}
                 </AnimatePresence>
