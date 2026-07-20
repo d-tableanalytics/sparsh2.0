@@ -36,9 +36,17 @@ async def detect_conflicts(event_dict: dict, event_id: str = None):
         if event_dict.get("end"):
             new_end = datetime.fromisoformat(event_dict["end"].replace("Z", "+00:00")).replace(tzinfo=None)
         else:
-            new_end = new_start + timedelta(hours=1)
+            # No end time → a zero-length instant, NOT an invented 1-hour block. Inventing an hour
+            # made almost any two entries within 60 minutes "overlap" — the main source of the
+            # phantom conflict emails. A real conflict needs real overlapping times.
+            new_end = new_start
     except Exception as e:
         print(f"Conflict Parser Error: {e}")
+        return []
+
+    # A cancelled/completed session no longer occupies its slot, so creating or editing one must
+    # never raise a conflict (this also stops the email firing when a session is cancelled).
+    if (event_dict.get("status") or "").lower() in {"canceled", "cancelled", "completed"}:
         return []
 
     uids = set()
@@ -72,13 +80,19 @@ async def detect_conflicts(event_dict: dict, event_id: str = None):
         query["$and"].append({"_id": {"$ne": ObjectId(event_id)}})
 
     conflicts = []
+    # Only a genuinely-active SESSION can occupy a slot. Skip tasks (a separate module) and any
+    # cancelled/completed session, so neither can raise a phantom conflict.
+    INACTIVE_STATUSES = {"canceled", "cancelled", "completed"}
     # Search all collections for overlaps
     for col_name in (CALENDAR_COLLECTIONS + ["calendar_events"]):
         candidates = await get_collection(col_name).find(query).to_list(100)
         for ex in candidates:
             try:
+                if ex.get("type") == "task": continue
+                if (ex.get("status") or "").lower() in INACTIVE_STATUSES: continue
                 ex_start = datetime.fromisoformat(ex["start"].replace("Z", "+00:00")).replace(tzinfo=None)
-                ex_end = datetime.fromisoformat(ex["end"].replace("Z", "+00:00")).replace(tzinfo=None) if ex.get("end") else ex_start + timedelta(hours=1)
+                # Same rule as the new entry: a missing end is a zero-length instant, not a fake hour.
+                ex_end = datetime.fromisoformat(ex["end"].replace("Z", "+00:00")).replace(tzinfo=None) if ex.get("end") else ex_start
                 if ex_start < new_end and ex_end > new_start:
                     ex_uids = set([str(ex.get("user_id"))])
                     for mid in ex.get("assigned_member_ids", []): ex_uids.add(str(mid))
