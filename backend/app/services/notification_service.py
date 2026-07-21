@@ -705,7 +705,7 @@ async def send_reminder_email(user_obj: dict, event: dict):
     }
     return await send_notification_from_template(user_obj, "reminder", context, "email", event.get("notification_scope"))
 
-async def send_conflict_notification_email(user_obj: dict, event_data: dict, existing_event: dict):
+async def send_conflict_notification_email(user_obj: dict, event_data: dict, existing_event: dict, send_company_copy: bool = True):
     # Subject: Reschedule time mail due to conflict
     subject = "⚠️ Action Required: Reschedule time mail due to conflict"
     
@@ -736,9 +736,11 @@ async def send_conflict_notification_email(user_obj: dict, event_data: dict, exi
     # Send to User
     results = {"user": await send_email_notification(user_obj.get("email"), subject, rendered_body, user_id, "schedule_conflict")}
     
-    # 2. Fetch Company Email and Send Copy
+    # 2. Fetch Company Email and Send Copy.
+    # The caller passes send_company_copy=False once this save has already copied the company,
+    # so a multi-user conflict produces one company copy instead of one per affected user.
     company_id = user_obj.get("company_id")
-    if company_id:
+    if company_id and send_company_copy:
         try:
             company = await get_collection("companies").find_one({"_id": ObjectId(company_id)})
             if company and company.get("email"):
