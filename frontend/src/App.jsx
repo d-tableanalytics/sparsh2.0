@@ -35,6 +35,7 @@ import ORMPage from './pages/ORM/ORMPage';
 import ORMSetup from './pages/ORM/ORMSetup';
 import ORMSheet from './pages/ORM/ORMSheet';
 import MediaLibrary from './pages/MediaLibrary';
+import WhatsAppDashboard from './pages/WhatsAppDashboard';
 import TaskDashboard from './pages/TaskDashboard';
 import MyTasks from './pages/MyTasks';
 import DelegatedTasks from './pages/DelegatedTasks';
@@ -122,6 +123,7 @@ const AppRoutes = () => {
       <Route path="/admin/reports" element={<PrivateRoute><ReportsDashboard /></PrivateRoute>} />
       <Route path="/admin/reports/employee/:userId" element={<PrivateRoute><EmployeeReport /></PrivateRoute>} />
       <Route path="/admin/reports/:doerId" element={<PrivateRoute><DoerReportDetails /></PrivateRoute>} />
+      <Route path="/admin/whatsapp" element={<PrivateRoute><WhatsAppDashboard /></PrivateRoute>} />
       <Route path="/admin/settings" element={<Navigate to="/settings" />} />
       <Route path="/settings" element={<PrivateRoute><SettingsPage /></PrivateRoute>} />
       <Route path="/profile" element={<PrivateRoute><ProfilePage /></PrivateRoute>} />
