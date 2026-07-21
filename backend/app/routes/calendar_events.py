@@ -6,8 +6,8 @@ from app.controllers.auth_controller import (
     get_non_internal_user_ids, TASK_RECIPIENT_DENIED_MESSAGE,
 )
 from app.models.calendar_event import CalendarEventCreate, CalendarEventResponse
+from app.services.task_notifications import notify_task_event, recipients_for_event
 from app.services.notification_service import (
-    send_task_created_email, send_task_updated_email, send_task_deleted_email,
     send_event_created_email, send_event_updated_email, send_event_deleted_email,
     send_conflict_notification_email, send_attendance_thanks_email, send_attendance_absent_email,
     send_session_complete_email
@@ -29,7 +29,7 @@ from app.utils.calendar_utils import (
     get_target_collection_name, find_event_across_collections
 )
 
-async def detect_conflicts(event_dict: dict, event_id: str = None):
+async def detect_conflicts(event_dict: dict, event_id: str = None, sessions_only: bool = False):
     # Standardize Time Range
     try:
         new_start = datetime.fromisoformat(event_dict["start"].replace("Z", "+00:00")).replace(tzinfo=None)
@@ -72,11 +72,28 @@ async def detect_conflicts(event_dict: dict, event_id: str = None):
         query["$and"].append({"_id": {"$ne": ObjectId(event_id)}})
 
     conflicts = []
+    # A doc is identified by what it *is*, not by _id: the same event mirrored into another
+    # collection (or re-inserted by a collection move) gets a fresh _id, so the _id filter
+    # above misses it and it would otherwise conflict with itself / be counted repeatedly.
+    def _identity(doc):
+        return (doc.get("title"), doc.get("start"), str(doc.get("user_id")))
+
+    self_key = _identity(event_dict)
+    seen = set()
     # Search all collections for overlaps
     for col_name in (CALENDAR_COLLECTIONS + ["calendar_events"]):
         candidates = await get_collection(col_name).find(query).to_list(100)
         for ex in candidates:
             try:
+                # Conflict alerts are a session-vs-session concern; tasks never occupy a slot.
+                if sessions_only and ex.get("type") == "task":
+                    continue
+                # A cancelled slot no longer occupies the calendar.
+                if str(ex.get("status", "")).lower() in ("canceled", "cancelled"):
+                    continue
+                key = _identity(ex)
+                if key == self_key or key in seen:
+                    continue
                 ex_start = datetime.fromisoformat(ex["start"].replace("Z", "+00:00")).replace(tzinfo=None)
                 ex_end = datetime.fromisoformat(ex["end"].replace("Z", "+00:00")).replace(tzinfo=None) if ex.get("end") else ex_start + timedelta(hours=1)
                 if ex_start < new_end and ex_end > new_start:
@@ -88,46 +105,44 @@ async def detect_conflicts(event_dict: dict, event_id: str = None):
                         for t in target: ex_uids.add(str(t))
                     elif target: ex_uids.add(str(target))
                     overlap = list(set(uids) & ex_uids)
-                    if overlap: conflicts.append({"existing": ex, "users": overlap})
+                    if overlap:
+                        seen.add(key)
+                        conflicts.append({"existing": ex, "users": overlap})
             except: continue
     return conflicts
 
 
 async def notify_users_instant(event_dict: dict, action: str, creator_name: str):
-    user_ids = set()
-    is_task = event_dict.get("type") == "task"
+    """Calendar (session/event) notifications only.
 
-    # Identify recipients
-    if is_task:
-        # Assigned user
-        target = event_dict.get("target_staff_id", [])
-        if isinstance(target, list):
-            for t in target: 
-                if t: user_ids.add(t)
-        elif target: user_ids.add(target)
-        # Also notify creator if not already included
-        user_ids.add(event_dict.get("user_id"))
-    else:
-        # Attendees & Coaching team
-        for mid in event_dict.get("assigned_member_ids", []):
-            if mid: user_ids.add(mid)
-        for cid in event_dict.get("coach_ids", []):
-            if cid: user_ids.add(cid)
-        # Notify creator
-        user_ids.add(event_dict.get("user_id"))
-            
+    Task Management docs (type=="task") live in these same collections but are a different
+    business module with its own triggers, templates and recipients — see
+    services/task_notifications.py, which the task call sites below invoke directly. Bailing
+    out here is what guarantees a task can never fire a Calendar template.
+    """
+    if event_dict.get("type") == "task":
+        return
+
+    user_ids = set()
+    # Attendees & Coaching team
+    for mid in event_dict.get("assigned_member_ids", []):
+        if mid: user_ids.add(mid)
+    for cid in event_dict.get("coach_ids", []):
+        if cid: user_ids.add(cid)
+    # Notify creator
+    user_ids.add(event_dict.get("user_id"))
+
     if not user_ids: return
 
     # Fetch extra metadata for sessions
     batch_name = "N/A"
     quarter_name = "N/A"
-    if not is_task:
-        if event_dict.get("batch_id"):
-            b = await get_collection("batches").find_one({"_id": ObjectId(event_dict["batch_id"])})
-            if b: batch_name = b.get("name", "N/A")
-        if event_dict.get("quarter_id"):
-            q = await get_collection("quarters").find_one({"_id": ObjectId(event_dict["quarter_id"])})
-            if q: quarter_name = q.get("name", "N/A")
+    if event_dict.get("batch_id"):
+        b = await get_collection("batches").find_one({"_id": ObjectId(event_dict["batch_id"])})
+        if b: batch_name = b.get("name", "N/A")
+    if event_dict.get("quarter_id"):
+        q = await get_collection("quarters").find_one({"_id": ObjectId(event_dict["quarter_id"])})
+        if q: quarter_name = q.get("name", "N/A")
 
     for uid in user_ids:
         if not uid: continue
@@ -137,37 +152,51 @@ async def notify_users_instant(event_dict: dict, action: str, creator_name: str)
 
             scope = event_dict.get("notification_scope", "staff")
             # WhatsApp goes out ONLY when a staff member is the creator (scope == "staff").
-            # Learner-created tasks/sessions stay email + in-app only.
+            # Learner-created sessions stay email + in-app only.
             delivery = "both" if scope == "staff" else "email"
-            if is_task:
-                if action == "created": await send_task_created_email(user_data, event_dict, creator_name, delivery)
-                elif action == "updated": await send_task_updated_email(user_data, event_dict, creator_name, delivery)
-                elif action == "deleted": await send_task_deleted_email(user_data, event_dict.get("title"), creator_name, delivery, scope)
-            else:
-                if action == "created": await send_event_created_email(user_data, event_dict, creator_name, batch_name, quarter_name, delivery)
-                elif action == "updated":
-                    status = event_dict.get("status")
-                    if status == "completed":
-                        await send_session_complete_email(user_data, event_dict, delivery)
-                    elif status == "canceled":
-                        await send_event_deleted_email(user_data, event_dict, creator_name, scope, batch_name, quarter_name, delivery)
-                    else:
-                        await send_event_updated_email(user_data, event_dict, creator_name, batch_name, quarter_name, delivery)
-                elif action == "deleted": await send_event_deleted_email(user_data, event_dict, creator_name, scope, batch_name, quarter_name, delivery)
+            if action == "created":
+                await send_event_created_email(user_data, event_dict, creator_name, batch_name, quarter_name, delivery)
+            elif action == "updated":
+                status = event_dict.get("status")
+                if status == "completed":
+                    await send_session_complete_email(user_data, event_dict, delivery)
+                elif status == "canceled":
+                    await send_event_deleted_email(user_data, event_dict, creator_name, scope, batch_name, quarter_name, delivery)
+                else:
+                    await send_event_updated_email(user_data, event_dict, creator_name, batch_name, quarter_name, delivery)
+            elif action == "deleted":
+                await send_event_deleted_email(user_data, event_dict, creator_name, scope, batch_name, quarter_name, delivery)
         except Exception as e:
             print(f"Notification Error for {uid}: {e}")
             
-    # ─── New Conflict Logic ───
+    # ─── Conflict Logic ───
+    # Sessions only (tasks already returned at the top of this function), and at most ONE mail
+    # per affected user per save. The previous nested loop mailed once per (conflict × user),
+    # and send_conflict_notification_email itself also copies the company — so a single save
+    # could fan out into 15-20 messages.
     if action in ["created", "updated"]:
         try:
-            conflicts = await detect_conflicts(event_dict, event_dict.get("id"))
+            conflicts = await detect_conflicts(event_dict, event_dict.get("id"), sessions_only=True)
+            notified_uids = set()
+            copied_companies = set()
             for conf in conflicts:
                 existing = conf["existing"]
                 for conflict_uid in conf["users"]:
-                    # Notify affected user about this specific conflict
+                    if not conflict_uid or conflict_uid in notified_uids:
+                        continue
+                    notified_uids.add(conflict_uid)
                     conflict_user_data = await find_user_by_id(conflict_uid)
-                    if conflict_user_data:
-                        await send_conflict_notification_email(conflict_user_data, event_dict, existing)
+                    if not conflict_user_data:
+                        continue
+                    # One [COPY] per distinct company per save, not one per affected user.
+                    company_id = str(conflict_user_data.get("company_id") or "")
+                    send_copy = bool(company_id) and company_id not in copied_companies
+                    if send_copy:
+                        copied_companies.add(company_id)
+                    await send_conflict_notification_email(
+                        conflict_user_data, event_dict, existing, send_company_copy=send_copy)
+            if notified_uids:
+                print(f"[DEBUG-CONFLICT] {len(conflicts)} overlap(s); mailed {len(notified_uids)} user(s), {len(copied_companies)} company copy(ies)")
         except Exception as e:
             print(f"Conflict Notification Error: {e}")
 
@@ -395,7 +424,7 @@ async def create_event(event: CalendarEventCreate, background_tasks: BackgroundT
         # Mirror the single-create side effects (notifications, meta sync, activity, realtime)
         # for every created doc so nothing downstream behaves differently per assignee.
         for d, _id in zip(docs, ids):
-            background_tasks.add_task(notify_users_instant, {**d, "id": _id}, "created", creator_name)
+            background_tasks.add_task(notify_task_event, "created", {**d, "id": _id}, current_user)
             await task_events.publish(task_events.recipients_for(d), {
                 "type": "task_created",
                 "task_id": _id,
@@ -412,10 +441,21 @@ async def create_event(event: CalendarEventCreate, background_tasks: BackgroundT
 
     result = await col.insert_one(event_dict)
     event_dict["id"] = str(result.inserted_id)
-    background_tasks.add_task(notify_users_instant, event_dict, "created", creator_name)
     is_task = event_dict.get("type") == "task"
     if is_task:
+        # A subtask announces itself as a subtask, not as a brand-new top-level task.
+        parent_id = event_dict.get("parent_task_id")
+        if parent_id:
+            parent, _ = await find_event_across_collections(parent_id)
+            background_tasks.add_task(
+                notify_task_event, "subtask_created", event_dict, current_user,
+                {"parent_title": (parent or {}).get("title") or "its parent task"},
+            )
+        else:
+            background_tasks.add_task(notify_task_event, "created", event_dict, current_user)
         background_tasks.add_task(sync_task_meta, event_dict.get("category"), event_dict.get("tags"), str(current_user["_id"]))
+    else:
+        background_tasks.add_task(notify_users_instant, event_dict, "created", creator_name)
     await log_activity(current_user, "Create Task" if is_task else "Create Event", col_name, f"{'Task' if is_task else 'Event'} created: {event_dict['title']}",
                        meta={"task_id": str(result.inserted_id), "group_id": event_dict.get("group_id")} if is_task else None)
     if is_task:
@@ -506,7 +546,31 @@ async def update_event(event_id: str, updates: dict, background_tasks: Backgroun
         })
     creator_name = current_user.get("full_name") or current_user.get("first_name", "System Admin")
     final_doc["id"] = str(event_id)
-    background_tasks.add_task(notify_users_instant, final_doc, "updated", creator_name)
+    if is_task:
+        # Someone newly put on the task is being *assigned* it, not merely told it changed.
+        # They get the assignment trigger and are held back from the update trigger, so a
+        # single edit never sends one person two emails.
+        old_assignees = {str(u) for u in (existing.get("target_staff_id") or []) if u}
+        new_assignees = {str(u) for u in (projected.get("target_staff_id") or []) if u}
+        added = new_assignees - old_assignees
+        if added:
+            background_tasks.add_task(notify_task_event, "assigned", final_doc, current_user,
+                                      {"new_assignee_ids": list(added)})
+        # Someone newly put in the loop (as a watcher) is being *added to the loop*, not merely
+        # told the task changed — they get the In Loop Person trigger and are held back from the
+        # generic update, so a single edit never sends one person two emails.
+        old_watchers = {str(u) for u in (existing.get("watchers") or []) if u}
+        new_watchers = {str(u) for u in (projected.get("watchers") or []) if u}
+        added_watchers = new_watchers - old_watchers
+        if added_watchers:
+            background_tasks.add_task(notify_task_event, "in_loop_added", final_doc, current_user,
+                                      {"new_watcher_ids": list(added_watchers)})
+        already_in_loop = recipients_for_event("updated", final_doc) - added - added_watchers
+        if already_in_loop:
+            background_tasks.add_task(notify_task_event, "updated", final_doc, current_user,
+                                      None, list(already_in_loop))
+    else:
+        background_tasks.add_task(notify_users_instant, final_doc, "updated", creator_name)
 
     # ─── Recurring Series Timeline Sync ───
     if updates.get("repeat_end_date") and existing.get("recurring_group_id"):
@@ -786,7 +850,10 @@ async def delete_event(event_id: str, background_tasks: BackgroundTasks, current
     
     await get_collection(col_name).delete_one({"_id": ObjectId(event_id)})
     creator_name = current_user.get("full_name") or current_user.get("first_name", "System Admin")
-    background_tasks.add_task(notify_users_instant, existing, "deleted", creator_name)
+    if existing.get("type") == "task":
+        background_tasks.add_task(notify_task_event, "deleted", existing, current_user)
+    else:
+        background_tasks.add_task(notify_users_instant, existing, "deleted", creator_name)
     return {"message": "Deleted successfully"}
 
 
