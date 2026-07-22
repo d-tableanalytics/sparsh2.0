@@ -14,12 +14,13 @@ import { useMemo } from 'react';
 import {
     ChevronLeft, ChevronRight, Clock, X, UserCircle2,
     Zap, ListChecks, Users2, Activity, CalendarDays, Building2,
-    Layers, Trash2, AlertCircle, Link, Check, UserPlus2, ShieldCheck,
+    Layers, Trash2, AlertCircle, Link, Check, UserPlus2,
     Edit2, CheckCircle, ArrowRightLeft, Ban, PlayCircle, MoreHorizontal,
     PlusCircle, LayoutGrid, Calendar as CalendarIcon, Briefcase, Video, Bell,
     Eye, Lock, ClipboardList, FileText
 } from 'lucide-react';
 import ReminderModal from '../components/calendar/ReminderModal';
+import { canAccessTaskManagement } from '../utils/taskAccess';
 
 const CustomTimePicker = ({ value, onChange, label }) => {
     const [isOpen, setIsOpen] = useState(false);
@@ -279,6 +280,12 @@ const CalendarPage = () => {
         }
     };
 
+    // Whether the Task & Delegation module is available to this user. Internal Sparsh users
+    // always have it; a company user only while their company's Delegation toggle is ON
+    // (Company Details ▸ Delegation On/Off). Same gate the module itself and the sidebar use,
+    // so a client whose Delegation is disabled never sees Task KPIs here either.
+    const showTaskStats = canAccessTaskManagement(user);
+
     // ─── Stats Calculation ───
     const currentMonthStats = useMemo(() => {
         const currentYear = currentViewDate.getFullYear();
@@ -300,21 +307,48 @@ const CalendarPage = () => {
             }).length;
         };
 
-        return [
-            { id: 'ev_total', label: 'Total Sessions', count: getCount('event', null), color: 'indigo', icon: <Activity size={14} />, filter: { type: 'event', status: null } },
-            { id: 'ev_com', label: 'Completed', count: getCount('event', 'completed'), color: 'emerald', icon: <CheckCircle size={14} />, filter: { type: 'event', status: 'completed' } },
-            { id: 'ev_pen', label: 'Pending', count: getCount('event', 'pending'), color: 'amber', icon: <Clock size={14} />, filter: { type: 'event', status: 'pending' } },
-            { id: 'ev_res', label: 'Rescheduled', count: getCount('event', 'reschedule'), color: 'orange', icon: <ArrowRightLeft size={14} />, filter: { type: 'event', status: 'reschedule' } },
-            { id: 'tk_total', label: 'Total Tasks', count: getCount('task', null), color: 'slate', icon: <ListChecks size={14} />, filter: { type: 'task', status: null } },
-            { id: 'tk_com', label: 'Task Complete', count: getCount('task', 'completed'), color: 'emerald', icon: <CheckCircle size={14} />, filter: { type: 'task', status: 'completed' } },
-            { id: 'tk_pen', label: 'Task Pending', count: getCount('task', 'pending'), color: 'rose', icon: <AlertCircle size={14} />, filter: { type: 'task', status: 'pending' } },
-            // Todo counts are computed the same way but on type "todo", so they can never
-            // overlap the Task counts above (a document is one type or the other).
-            { id: 'td_total', label: 'Total Todos', count: getCount('todo', null), color: 'violet', icon: <ClipboardList size={14} />, filter: { type: 'todo', status: null } },
-            { id: 'td_com', label: 'Completed Todos', count: getCount('todo', 'completed'), color: 'emerald', icon: <CheckCircle size={14} />, filter: { type: 'todo', status: 'completed' } },
-            { id: 'td_pen', label: 'Pending Todos', count: getCount('todo', 'pending'), color: 'violet', icon: <Clock size={14} />, filter: { type: 'todo', status: 'pending' } },
+        // Grouped by the module each metric belongs to, so Session / Task / Todo figures read
+        // as three separate stories instead of one undifferentiated row. Card definitions
+        // (labels, counts, colors, icons, filters) are unchanged — only their grouping is new.
+        const groups = [
+            {
+                key: 'sessions',
+                label: 'Sessions',
+                cards: [
+                    { id: 'ev_total', label: 'Total Sessions', count: getCount('event', null), color: 'indigo', icon: <Activity size={14} />, filter: { type: 'event', status: null } },
+                    { id: 'ev_com', label: 'Completed', count: getCount('event', 'completed'), color: 'emerald', icon: <CheckCircle size={14} />, filter: { type: 'event', status: 'completed' } },
+                    { id: 'ev_pen', label: 'Pending', count: getCount('event', 'pending'), color: 'amber', icon: <Clock size={14} />, filter: { type: 'event', status: 'pending' } },
+                    { id: 'ev_res', label: 'Rescheduled', count: getCount('event', 'reschedule'), color: 'orange', icon: <ArrowRightLeft size={14} />, filter: { type: 'event', status: 'reschedule' } },
+                ],
+            },
+            // Hidden entirely when the company's Delegation module is off — no heading, no cards.
+            ...(showTaskStats ? [{
+                key: 'tasks',
+                label: 'Task & Delegation',
+                cards: [
+                    { id: 'tk_total', label: 'Total Tasks', count: getCount('task', null), color: 'slate', icon: <ListChecks size={14} />, filter: { type: 'task', status: null } },
+                    { id: 'tk_com', label: 'Task Complete', count: getCount('task', 'completed'), color: 'emerald', icon: <CheckCircle size={14} />, filter: { type: 'task', status: 'completed' } },
+                    { id: 'tk_pen', label: 'Task Pending', count: getCount('task', 'pending'), color: 'rose', icon: <AlertCircle size={14} />, filter: { type: 'task', status: 'pending' } },
+                ],
+            }] : []),
+            {
+                // Always shown: todos are personal and independent of the Delegation module.
+                // Counts are computed the same way but on type "todo", so they can never
+                // overlap the Task counts above (a document is one type or the other).
+                key: 'todos',
+                label: 'Personal Todo',
+                cards: [
+                    { id: 'td_total', label: 'Total Todos', count: getCount('todo', null), color: 'violet', icon: <ClipboardList size={14} />, filter: { type: 'todo', status: null } },
+                    { id: 'td_com', label: 'Completed Todos', count: getCount('todo', 'completed'), color: 'emerald', icon: <CheckCircle size={14} />, filter: { type: 'todo', status: 'completed' } },
+                    // Amber, not violet: violet is the Todo module's own colour and is already
+                    // carried by the Total card, so a violet Pending card read as a duplicate.
+                    // Amber also matches "Pending" in the Sessions group.
+                    { id: 'td_pen', label: 'Pending Todos', count: getCount('todo', 'pending'), color: 'amber', icon: <Clock size={14} />, filter: { type: 'todo', status: 'pending' } },
+                ],
+            },
         ];
-    }, [events, currentViewDate]);
+        return groups;
+    }, [events, currentViewDate, showTaskStats]);
 
     // The logged-in user's own todos for the day shown in the Day Summary. `isCreator` is a
     // belt-and-braces guard: the API already scopes todos to their owner.
@@ -686,10 +720,24 @@ const CalendarPage = () => {
 
             <div className="flex-1 bg-[var(--bg-card)] border border-[var(--border)] rounded-[24px] md:rounded-[40px] overflow-hidden shadow-2xl p-3 md:p-6 fc-theme-orlando relative">
                 {loading && (<div className="absolute inset-0 flex items-center justify-center bg-[var(--bg-card)]/80 backdrop-blur-sm z-[100]"> <div className="w-12 h-12 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin"></div> </div>)}
-                {/* ─── Stats Dashboard Row ─── */}
-                <div className="flex flex-nowrap items-center gap-3 mb-6 p-1 overflow-x-auto no-scrollbar scroll-smooth">
-
-                    {currentMonthStats.map(s => {
+                {/* ─── Stats Dashboard — one container per module, side by side ─── */}
+                {/* flex-wrap + flex-1 (rather than a fixed grid) is what keeps the row gap-free:
+                    3 containers share the row on desktop, 2 per row on tablet with the third
+                    growing to full width, 1 per row on mobile — and when the Task & Delegation
+                    container is hidden the remaining two expand to fill the space on their own.
+                    Equal height comes free from the flex row's default `align-items: stretch`. */}
+                <div className="flex flex-wrap items-stretch gap-3 mb-6">
+                    {currentMonthStats.map(group => (
+                        <div key={group.key} className="flex-1 min-w-[260px] flex flex-col gap-2.5 p-3 md:p-4 bg-[var(--input-bg)] border border-[var(--border)] rounded-[24px]">
+                            <div className="flex items-center gap-2">
+                                <span className="text-[9px] font-black text-[var(--text-muted)] uppercase tracking-[0.2em] whitespace-nowrap">{group.label}</span>
+                                <span className="flex-1 h-px bg-[var(--border)]" />
+                            </div>
+                            {/* Two columns inside every container so the cards line up across all
+                                three. A container with an odd number of cards lets its last card
+                                span both columns, so there is never a hole in the grid. */}
+                            <div className="grid grid-cols-2 gap-2.5 [&>*:last-child:nth-child(odd)]:col-span-2">
+                                {group.cards.map(s => {
                         const isActive = statFilter?.type === s.filter.type && statFilter?.status === s.filter.status;
                         const colorMap = {
                             indigo: 'bg-indigo-50 border-indigo-100 text-indigo-700 active:bg-indigo-500 active:text-white',
@@ -712,15 +760,18 @@ const CalendarPage = () => {
 
                         return (
                             <button key={s.id} onClick={() => setStatFilter(isActive ? null : s.filter)}
-                                className={`flex flex-col min-w-[110px] p-3 rounded-[20px] border-2 transition-all duration-300 transform active:scale-95 text-left shrink-0 ${isActive ? activeColorMap[s.color] : colorMap[s.color]}`}>
+                                className={`flex flex-col justify-between w-full min-w-0 p-3 rounded-[20px] border-2 transition-all duration-300 transform active:scale-95 text-left ${isActive ? activeColorMap[s.color] : colorMap[s.color]}`}>
                                 <div className="flex items-center justify-between mb-2">
                                     <div className={`p-1.5 rounded-lg ${isActive ? 'bg-white/20' : 'bg-white shadow-sm'}`}>{s.icon}</div>
                                     <span className="text-[18px] font-black leading-none">{s.count}</span>
                                 </div>
-                                <span className={`text-[10px] font-black uppercase tracking-widest opacity-80 ${isActive ? 'text-white' : ''}`}>{s.label}</span>
+                                <span className={`text-[10px] font-black uppercase tracking-widest opacity-80 truncate ${isActive ? 'text-white' : ''}`}>{s.label}</span>
                             </button>
                         );
-                    })}
+                                })}
+                            </div>
+                        </div>
+                    ))}
                 </div>
 
                 {/* ─── Month Jump Bar ─── */}
@@ -1335,15 +1386,8 @@ const CalendarPage = () => {
                             />
 
                             {!(isEdit && !isStaff && !eventForm.isCreator) && eventForm.status !== 'completed' && (
-                                <div className="p-5 border-t border-[var(--border)] flex justify-between items-center bg-[var(--table-header-bg)]">
-                                    <div className="flex items-center gap-3">
-                                        <ShieldCheck size={20} className="text-[var(--accent-indigo)] opacity-30" />
-                                        <div className="space-y-0">
-                                            <p className="text-[9px] font-black text-[var(--text-muted)] uppercase tracking-widest leading-tight">Digital Authorization</p>
-                                            <p className="text-[10px] font-bold text-gray-400 italic leading-tight">Changes sync to calendars instantly.</p>
-                                        </div>
-                                    </div>
-                                    <button onClick={handleSave} 
+                                <div className="p-5 border-t border-[var(--border)] flex justify-end items-center bg-[var(--table-header-bg)]">
+                                    <button onClick={handleSave}
                                         disabled={isEdit && !(user.role === 'superadmin' || user.role === 'admin' || eventForm.isCreator)}
                                         className={`bg-[var(--btn-primary)] text-white px-10 py-3 rounded-xl text-[12px] font-black shadow-xl shadow-indigo-500/30 hover:scale-[1.02] active:scale-[0.98] transition-all tracking-[0.1em] uppercase ${isEdit && !(user.role === 'superadmin' || user.role === 'admin' || eventForm.isCreator) ? 'opacity-20 cursor-not-allowed grayscale' : ''}`}>
                                         {isEdit ? (eventForm.type === 'todo' ? 'Save Todo' : 'Authorize Updates') : (eventForm.type === 'todo' ? 'Create Todo' : (eventForm.type === 'task' ? 'Schedule Task' : 'Schedule Session'))}

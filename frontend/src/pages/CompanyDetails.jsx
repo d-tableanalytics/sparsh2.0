@@ -10,8 +10,7 @@ import {
   ArrowLeft, Pencil, Trash2, Download, Upload, Plus, User, Lock,
   CheckCircle2, XCircle, PauseCircle, ChevronDown, Save, X,
   FileSpreadsheet, AlertTriangle, ExternalLink, Layers, Calendar,
-  Target, BookOpen, ChevronRight, CheckCircle, Circle, UploadCloud, FileText, Bot, Inbox,
-  CheckSquare
+  Target, BookOpen, ChevronRight, CheckCircle, Circle, UploadCloud, FileText, Bot, Inbox
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import ORMReportTab from '../components/company/ORMReportTab';
@@ -59,6 +58,39 @@ const StatCard = ({ icon: Icon, label, value, sub, color }) => (
       {sub && <p className="text-[10px] text-[var(--accent-green)] font-bold mt-0.5">{sub}</p>}
     </div>
   </div>
+);
+
+// ─── Module Access Toggle ───
+// The ON/OFF switch used for the company's module flags (ORM, Delegation). One component so
+// every module toggle is identical by construction: same pill, same track, same animation —
+// only the label and the flag it drives differ.
+const ModuleToggle = ({ label, enabled, onToggle, title, disabled = false }) => (
+  <button
+    type="button"
+    role="switch"
+    aria-checked={enabled}
+    aria-label={`${label} module`}
+    onClick={onToggle}
+    disabled={disabled}
+    title={title}
+    className={`h-9 pl-3 pr-2 rounded-lg border flex items-center gap-2.5 transition-all ${
+      enabled
+        ? 'bg-[var(--accent-green-bg)] border-[var(--accent-green-border)]'
+        : 'bg-[var(--bg-card)] border-[var(--border)] hover:border-[var(--accent-green)]'
+    } ${disabled ? 'opacity-50 cursor-not-allowed' : ''}`}
+  >
+    <span className={`text-[11px] font-black uppercase tracking-wider transition-colors ${enabled ? 'text-[var(--accent-green)]' : 'text-[var(--text-muted)]'}`}>
+      {label}
+    </span>
+    {/* Track + sliding knob. The state word sits on the side the knob is NOT on, so it stays
+        readable at both ends. */}
+    <span className={`relative w-[44px] h-[20px] rounded-full shrink-0 transition-colors duration-300 ${enabled ? 'bg-[var(--accent-green)]' : 'bg-gray-300'}`}>
+      <span className={`absolute top-1/2 -translate-y-1/2 text-[8px] font-black uppercase tracking-wider text-white transition-all duration-300 ${enabled ? 'left-[7px]' : 'right-[6px]'}`}>
+        {enabled ? 'On' : 'Off'}
+      </span>
+      <span className={`absolute top-[2px] w-4 h-4 rounded-full bg-white shadow-sm transition-all duration-300 ${enabled ? 'left-[26px]' : 'left-[2px]'}`} />
+    </span>
+  </button>
 );
 
 // ─── Chart Colors ───
@@ -363,30 +395,20 @@ const CompanyDetails = () => {
         </div>
         <div className="flex items-center gap-2">
           {isStaff && canUpdate && (
-            <button
-              onClick={handleToggleOrm}
-              className={`h-9 px-4 rounded-lg text-[12px] font-bold flex items-center gap-2 border transition-all ${
-                (company.orm_enabled ?? true)
-                  ? 'bg-[var(--accent-green-bg)] border-[var(--accent-green-border)] text-[var(--accent-green)]'
-                  : 'bg-[var(--bg-card)] border-[var(--border)] text-[var(--text-muted)] hover:border-[var(--accent-green)]'
-              }`}
+            <ModuleToggle
+              label="ORM"
+              enabled={company.orm_enabled ?? true}
+              onToggle={handleToggleOrm}
               title="Toggle whether this company can access the ORM module"
-            >
-              <Layers size={14} /> ORM {(company.orm_enabled ?? true) ? 'On' : 'Off'}
-            </button>
+            />
           )}
           {isStaff && canUpdate && (
-            <button
-              onClick={handleToggleDelegation}
-              className={`h-9 px-4 rounded-lg text-[12px] font-bold flex items-center gap-2 border transition-all ${
-                (company.delegation_enabled ?? false)
-                  ? 'bg-[var(--accent-green-bg)] border-[var(--accent-green-border)] text-[var(--accent-green)]'
-                  : 'bg-[var(--bg-card)] border-[var(--border)] text-[var(--text-muted)] hover:border-[var(--accent-green)]'
-              }`}
+            <ModuleToggle
+              label="Delegation"
+              enabled={company.delegation_enabled ?? false}
+              onToggle={handleToggleDelegation}
               title="Toggle whether this company can access the Task & Delegation module"
-            >
-              <CheckSquare size={14} /> Delegation {(company.delegation_enabled ?? false) ? 'On' : 'Off'}
-            </button>
+            />
           )}
           {canUpdate && (
             <>
