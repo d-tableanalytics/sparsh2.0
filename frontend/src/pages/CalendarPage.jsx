@@ -14,12 +14,13 @@ import { useMemo } from 'react';
 import {
     ChevronLeft, ChevronRight, Clock, X, UserCircle2,
     Zap, ListChecks, Users2, Activity, CalendarDays, Building2,
-    Layers, Trash2, AlertCircle, Link, Check, UserPlus2, ShieldCheck,
+    Layers, Trash2, AlertCircle, Link, Check, UserPlus2,
     Edit2, CheckCircle, ArrowRightLeft, Ban, PlayCircle, MoreHorizontal,
     PlusCircle, LayoutGrid, Calendar as CalendarIcon, Briefcase, Video, Bell,
-    Eye, Lock
+    Eye, Lock, ClipboardList, FileText
 } from 'lucide-react';
 import ReminderModal from '../components/calendar/ReminderModal';
+import { canAccessTaskManagement } from '../utils/taskAccess';
 
 const CustomTimePicker = ({ value, onChange, label }) => {
     const [isOpen, setIsOpen] = useState(false);
@@ -205,6 +206,33 @@ const CalendarPage = () => {
         });
     };
 
+    // ─── Todo date display ───
+    // A todo's due date is picked in the user's OWN timezone, so it has to be displayed in
+    // that same timezone. formatIST/formatShortIST above render in Asia/Kolkata, which shows a
+    // different DAY for anyone not on IST: a todo set for 11 July (stored at local midday)
+    // reads back as "12 July, 12:30 AM". These render from the same local clock the date
+    // picker writes with, so the date shown always equals the date chosen.
+    // A full-day todo shows no time at all — the time carries no meaning for it.
+    const formatTodoDateTime = (dateStr, allDay) => {
+        if (!dateStr) return "";
+        const d = new Date(dateStr);
+        if (isNaN(d.getTime())) return "";
+        return d.toLocaleString(undefined, {
+            weekday: 'long', day: 'numeric', month: 'long', year: 'numeric',
+            ...(allDay ? {} : { hour: '2-digit', minute: '2-digit', hour12: true }),
+        });
+    };
+
+    const formatTodoShort = (dateStr, allDay) => {
+        if (!dateStr) return "";
+        const d = new Date(dateStr);
+        if (isNaN(d.getTime())) return "";
+        return d.toLocaleString(undefined, {
+            day: 'numeric', month: 'short',
+            ...(allDay ? {} : { hour: '2-digit', minute: '2-digit', hour12: true }),
+        });
+    };
+
 
     const getLocalDatePart = (dateStr) => {
         if (!dateStr) return "";
@@ -242,12 +270,21 @@ const CalendarPage = () => {
         if (status === 'completed') return '#10b981'; // Emerald
         if (status === 'canceled') return '#ef4444'; // Red
         
+        // Todos are always the creator's own (private), so they get one fixed colour.
+        if (type === 'todo') return '#8b5cf6'; // Violet
+
         if (isCreator) {
             return color || (type === 'task' ? '#f97316' : '#6366f1'); // Orange / Indigo
         } else {
             return color || (type === 'task' ? '#e11d48' : '#0d9488'); // Rose / Teal
         }
     };
+
+    // Whether the Task & Delegation module is available to this user. Internal Sparsh users
+    // always have it; a company user only while their company's Delegation toggle is ON
+    // (Company Details ▸ Delegation On/Off). Same gate the module itself and the sidebar use,
+    // so a client whose Delegation is disabled never sees Task KPIs here either.
+    const showTaskStats = canAccessTaskManagement(user);
 
     // ─── Stats Calculation ───
     const currentMonthStats = useMemo(() => {
@@ -270,16 +307,55 @@ const CalendarPage = () => {
             }).length;
         };
 
-        return [
-            { id: 'ev_total', label: 'Total Sessions', count: getCount('event', null), color: 'indigo', icon: <Activity size={14} />, filter: { type: 'event', status: null } },
-            { id: 'ev_com', label: 'Completed', count: getCount('event', 'completed'), color: 'emerald', icon: <CheckCircle size={14} />, filter: { type: 'event', status: 'completed' } },
-            { id: 'ev_pen', label: 'Pending', count: getCount('event', 'pending'), color: 'amber', icon: <Clock size={14} />, filter: { type: 'event', status: 'pending' } },
-            { id: 'ev_res', label: 'Rescheduled', count: getCount('event', 'reschedule'), color: 'orange', icon: <ArrowRightLeft size={14} />, filter: { type: 'event', status: 'reschedule' } },
-            { id: 'tk_total', label: 'Total Tasks', count: getCount('task', null), color: 'slate', icon: <ListChecks size={14} />, filter: { type: 'task', status: null } },
-            { id: 'tk_com', label: 'Task Complete', count: getCount('task', 'completed'), color: 'emerald', icon: <CheckCircle size={14} />, filter: { type: 'task', status: 'completed' } },
-            { id: 'tk_pen', label: 'Task Pending', count: getCount('task', 'pending'), color: 'rose', icon: <AlertCircle size={14} />, filter: { type: 'task', status: 'pending' } },
+        // Grouped by the module each metric belongs to, so Session / Task / Todo figures read
+        // as three separate stories instead of one undifferentiated row. Card definitions
+        // (labels, counts, colors, icons, filters) are unchanged — only their grouping is new.
+        const groups = [
+            {
+                key: 'sessions',
+                label: 'Sessions',
+                cards: [
+                    { id: 'ev_total', label: 'Total Sessions', count: getCount('event', null), color: 'indigo', icon: <Activity size={14} />, filter: { type: 'event', status: null } },
+                    { id: 'ev_com', label: 'Completed', count: getCount('event', 'completed'), color: 'emerald', icon: <CheckCircle size={14} />, filter: { type: 'event', status: 'completed' } },
+                    { id: 'ev_pen', label: 'Pending', count: getCount('event', 'pending'), color: 'amber', icon: <Clock size={14} />, filter: { type: 'event', status: 'pending' } },
+                    { id: 'ev_res', label: 'Rescheduled', count: getCount('event', 'reschedule'), color: 'orange', icon: <ArrowRightLeft size={14} />, filter: { type: 'event', status: 'reschedule' } },
+                ],
+            },
+            // Hidden entirely when the company's Delegation module is off — no heading, no cards.
+            ...(showTaskStats ? [{
+                key: 'tasks',
+                label: 'Task & Delegation',
+                cards: [
+                    { id: 'tk_total', label: 'Total Tasks', count: getCount('task', null), color: 'slate', icon: <ListChecks size={14} />, filter: { type: 'task', status: null } },
+                    { id: 'tk_com', label: 'Task Complete', count: getCount('task', 'completed'), color: 'emerald', icon: <CheckCircle size={14} />, filter: { type: 'task', status: 'completed' } },
+                    { id: 'tk_pen', label: 'Task Pending', count: getCount('task', 'pending'), color: 'rose', icon: <AlertCircle size={14} />, filter: { type: 'task', status: 'pending' } },
+                ],
+            }] : []),
+            {
+                // Always shown: todos are personal and independent of the Delegation module.
+                // Counts are computed the same way but on type "todo", so they can never
+                // overlap the Task counts above (a document is one type or the other).
+                key: 'todos',
+                label: 'Personal Todo',
+                cards: [
+                    { id: 'td_total', label: 'Total Todos', count: getCount('todo', null), color: 'violet', icon: <ClipboardList size={14} />, filter: { type: 'todo', status: null } },
+                    { id: 'td_com', label: 'Completed Todos', count: getCount('todo', 'completed'), color: 'emerald', icon: <CheckCircle size={14} />, filter: { type: 'todo', status: 'completed' } },
+                    // Amber, not violet: violet is the Todo module's own colour and is already
+                    // carried by the Total card, so a violet Pending card read as a duplicate.
+                    // Amber also matches "Pending" in the Sessions group.
+                    { id: 'td_pen', label: 'Pending Todos', count: getCount('todo', 'pending'), color: 'amber', icon: <Clock size={14} />, filter: { type: 'todo', status: 'pending' } },
+                ],
+            },
         ];
-    }, [events, currentViewDate]);
+        return groups;
+    }, [events, currentViewDate, showTaskStats]);
+
+    // The logged-in user's own todos for the day shown in the Day Summary. `isCreator` is a
+    // belt-and-braces guard: the API already scopes todos to their owner.
+    const dayTodos = useMemo(
+        () => dayEvents.filter(e => e.extendedProps?.type === 'todo' && e.extendedProps?.isCreator !== false),
+        [dayEvents]
+    );
 
     const activeFilter = statFilter;
     const filteredEvents = useMemo(() => {
@@ -311,9 +387,28 @@ const CalendarPage = () => {
         setShowSummary(true);
     };
 
+    // "YYYY-MM-DD" -> a real local timestamp anchored at noon that day.
+    //
+    // A bare date string is parsed by JS as UTC midnight, so every later
+    // `new Date(start).setHours(...).toISOString()` round-trip works off UTC midnight instead
+    // of the local day — which is what made a todo picked for 11 July save/display as 10 July.
+    // Seeding an actual local timestamp removes the ambiguity, and noon is the safe anchor:
+    // no real timezone offset can push midday across a date boundary, so the day the user
+    // picks is the day that gets stored, shown and reminded on.
+    const localNoonFromDateKey = (dateKey) => {
+        const [y, m, d] = (dateKey || '').split('-').map(Number);
+        const dt = (y && m && d) ? new Date(y, m - 1, d, 12, 0, 0, 0) : new Date(new Date().setHours(12, 0, 0, 0));
+        return dt.toISOString();
+    };
+
     const openCreateModal = (type) => {
         setIsEdit(false); setCurrentEventId(null);
-        setEventForm({ ...initialForm, type, start: summaryDate, end: summaryDate });
+        if (type === 'todo') {
+            const anchored = localNoonFromDateKey(summaryDate);
+            setEventForm({ ...initialForm, type, start: anchored, end: anchored });
+        } else {
+            setEventForm({ ...initialForm, type, start: summaryDate, end: summaryDate });
+        }
         setShowModal(true);
     };
 
@@ -382,7 +477,11 @@ const CalendarPage = () => {
     };
 
     const handleSave = async () => {
-        if (!eventForm.title) return showError("Add a title");
+        if (!eventForm.title) return showError(eventForm.type === 'todo' ? "Add a todo title" : "Add a title");
+        // A todo must say what actually has to be done — the details are the todo.
+        if (eventForm.type === 'todo' && !(eventForm.additional_details || '').trim()) {
+            return showError("Add the task details for this todo");
+        }
 
         const eventStart = new Date(eventForm.start);
         const now = new Date();
@@ -395,20 +494,25 @@ const CalendarPage = () => {
         }
 
 
+        const isTodo = eventForm.type === 'todo';
+
         // ─── CONFLICT DETECTION WARNING (Logged) ───
-        try {
-            const conflictCheck = await api.post('/calendar/events/validate-conflict', { 
-                ...eventForm, id: currentEventId 
-            });
-            if (conflictCheck.data.has_conflict) {
-                console.warn("Conflict detected:", conflictCheck.data.conflicts.map(c => c.title).join(", "));
-            }
-        } catch (e) { console.error("Conflict check failed", e); }
+        // Skipped for todos: they have no attendees, so there is nobody to clash with.
+        if (!isTodo) {
+            try {
+                const conflictCheck = await api.post('/calendar/events/validate-conflict', {
+                    ...eventForm, id: currentEventId
+                });
+                if (conflictCheck.data.has_conflict) {
+                    console.warn("Conflict detected:", conflictCheck.data.conflicts.map(c => c.title).join(", "));
+                }
+            } catch (e) { console.error("Conflict check failed", e); }
+        }
 
         try {
             if (isEdit) await api.patch(`/calendar/events/${currentEventId}`, eventForm);
             else await api.post('/calendar/events', eventForm);
-            showSuccess(isEdit ? 'Event updated' : 'Event scheduled successfully');
+            showSuccess(isTodo ? (isEdit ? 'Todo updated' : 'Todo created') : (isEdit ? 'Event updated' : 'Event scheduled successfully'));
             fetchData(); setShowModal(false); setShowSummary(false); 
         } catch (err) { showError('Failed to save event'); console.error(err); }
     };
@@ -502,7 +606,8 @@ const CalendarPage = () => {
                 <div className="flex items-start justify-between mb-2">
                     <div className="space-y-1.5">
                         <div className="flex items-center gap-2">
-                                {type === 'task' ? <CheckCircle size={10} style={{ color: isCreator ? '#f97316' : '#e11d48' }} /> : 
+                                {type === 'todo' ? <ClipboardList size={10} style={{ color: '#8b5cf6' }} /> :
+                                 type === 'task' ? <CheckCircle size={10} style={{ color: isCreator ? '#f97316' : '#e11d48' }} /> :
                                  type === 'orm_reminder' ? <Layers size={10} className="text-amber-600" /> :
                                  <Activity size={10} style={{ color: isCreator ? '#6366f1' : '#0d9488' }} />}
                                 {type === 'orm_reminder' ? 'ORM REMINDER' : type}
@@ -515,8 +620,10 @@ const CalendarPage = () => {
                 </div>
                 <div className="flex flex-col gap-1.5 text-[10px] font-bold text-[var(--text-muted)] mt-2 border-t border-[var(--border)] pt-2 border-dashed">
                     <div className="flex items-center justify-between">
-                        <span className="flex items-center gap-1 opacity-60"> <Clock size={11} /> Deadline: </span>
-                        <span className="text-[var(--text-main)]">{formatShortIST(ev.start)}</span>
+                        <span className="flex items-center gap-1 opacity-60"> <Clock size={11} /> {type === 'todo' ? 'Due:' : 'Deadline:'} </span>
+                        {/* Todos render in the user's own timezone so the card matches the date
+                            they picked; sessions/tasks keep the existing IST rendering. */}
+                        <span className="text-[var(--text-main)]">{type === 'todo' ? formatTodoShort(ev.start, ev.allDay ?? ev.extendedProps?.all_day) : formatShortIST(ev.start)}</span>
                     </div>
                     {ev.extendedProps.completed_at && (
                         <div className="flex items-center justify-between text-emerald-600 bg-emerald-500/5 px-2 py-0.5 rounded-md">
@@ -613,10 +720,24 @@ const CalendarPage = () => {
 
             <div className="flex-1 bg-[var(--bg-card)] border border-[var(--border)] rounded-[24px] md:rounded-[40px] overflow-hidden shadow-2xl p-3 md:p-6 fc-theme-orlando relative">
                 {loading && (<div className="absolute inset-0 flex items-center justify-center bg-[var(--bg-card)]/80 backdrop-blur-sm z-[100]"> <div className="w-12 h-12 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin"></div> </div>)}
-                {/* ─── Stats Dashboard Row ─── */}
-                <div className="flex flex-nowrap items-center gap-3 mb-6 p-1 overflow-x-auto no-scrollbar scroll-smooth">
-
-                    {currentMonthStats.map(s => {
+                {/* ─── Stats Dashboard — one container per module, side by side ─── */}
+                {/* flex-wrap + flex-1 (rather than a fixed grid) is what keeps the row gap-free:
+                    3 containers share the row on desktop, 2 per row on tablet with the third
+                    growing to full width, 1 per row on mobile — and when the Task & Delegation
+                    container is hidden the remaining two expand to fill the space on their own.
+                    Equal height comes free from the flex row's default `align-items: stretch`. */}
+                <div className="flex flex-wrap items-stretch gap-3 mb-6">
+                    {currentMonthStats.map(group => (
+                        <div key={group.key} className="flex-1 min-w-[260px] flex flex-col gap-2.5 p-3 md:p-4 bg-[var(--input-bg)] border border-[var(--border)] rounded-[24px]">
+                            <div className="flex items-center gap-2">
+                                <span className="text-[9px] font-black text-[var(--text-muted)] uppercase tracking-[0.2em] whitespace-nowrap">{group.label}</span>
+                                <span className="flex-1 h-px bg-[var(--border)]" />
+                            </div>
+                            {/* Two columns inside every container so the cards line up across all
+                                three. A container with an odd number of cards lets its last card
+                                span both columns, so there is never a hole in the grid. */}
+                            <div className="grid grid-cols-2 gap-2.5 [&>*:last-child:nth-child(odd)]:col-span-2">
+                                {group.cards.map(s => {
                         const isActive = statFilter?.type === s.filter.type && statFilter?.status === s.filter.status;
                         const colorMap = {
                             indigo: 'bg-indigo-50 border-indigo-100 text-indigo-700 active:bg-indigo-500 active:text-white',
@@ -625,6 +746,7 @@ const CalendarPage = () => {
                             orange: 'bg-orange-50 border-orange-100 text-orange-700 active:bg-orange-500 active:text-white',
                             slate: 'bg-slate-50 border-slate-100 text-slate-700 active:bg-slate-500 active:text-white',
                             rose: 'bg-rose-50 border-rose-100 text-rose-700 active:bg-rose-500 active:text-white',
+                            violet: 'bg-violet-50 border-violet-100 text-violet-700 active:bg-violet-500 active:text-white',
                         };
                         const activeColorMap = {
                             indigo: 'bg-indigo-600 border-indigo-600 text-white ring-4 ring-indigo-100',
@@ -633,19 +755,23 @@ const CalendarPage = () => {
                             orange: 'bg-orange-600 border-orange-600 text-white ring-4 ring-orange-100',
                             slate: 'bg-slate-700 border-slate-700 text-white ring-4 ring-slate-100',
                             rose: 'bg-rose-600 border-rose-600 text-white ring-4 ring-rose-100',
+                            violet: 'bg-violet-600 border-violet-600 text-white ring-4 ring-violet-100',
                         };
 
                         return (
                             <button key={s.id} onClick={() => setStatFilter(isActive ? null : s.filter)}
-                                className={`flex flex-col min-w-[110px] p-3 rounded-[20px] border-2 transition-all duration-300 transform active:scale-95 text-left shrink-0 ${isActive ? activeColorMap[s.color] : colorMap[s.color]}`}>
+                                className={`flex flex-col justify-between w-full min-w-0 p-3 rounded-[20px] border-2 transition-all duration-300 transform active:scale-95 text-left ${isActive ? activeColorMap[s.color] : colorMap[s.color]}`}>
                                 <div className="flex items-center justify-between mb-2">
                                     <div className={`p-1.5 rounded-lg ${isActive ? 'bg-white/20' : 'bg-white shadow-sm'}`}>{s.icon}</div>
                                     <span className="text-[18px] font-black leading-none">{s.count}</span>
                                 </div>
-                                <span className={`text-[10px] font-black uppercase tracking-widest opacity-80 ${isActive ? 'text-white' : ''}`}>{s.label}</span>
+                                <span className={`text-[10px] font-black uppercase tracking-widest opacity-80 truncate ${isActive ? 'text-white' : ''}`}>{s.label}</span>
                             </button>
                         );
-                    })}
+                                })}
+                            </div>
+                        </div>
+                    ))}
                 </div>
 
                 {/* ─── Month Jump Bar ─── */}
@@ -689,21 +815,24 @@ const CalendarPage = () => {
                         const dotColor = info.event.extendedProps.dotColor;
                         const isTask = type === 'task';
                         const isORM = type === 'orm_reminder';
-                        
+                        const isTodo = type === 'todo';
+
                         return (
                             <div className={`flex items-center gap-1.5 px-2 py-0.5 max-w-full overflow-hidden group/ev transition-all border border-transparent hover:border-indigo-200/50 ${s === 'completed' ? 'opacity-40 grayscale' : ''} ${info.isStart ? 'rounded-l-lg' : ''} ${info.isEnd ? 'rounded-r-lg' : ''} ${!info.isStart && !info.isEnd ? '' : 'rounded-lg'}`}
                                  style={{ 
-                                     background: isORM 
-                                        ? 'rgba(245, 158, 11, 0.1)' 
-                                        : (isCreator 
-                                           ? (isTask ? 'rgba(249, 115, 22, 0.08)' : 'rgba(99, 102, 241, 0.08)')
-                                           : (isTask ? 'rgba(225, 29, 72, 0.08)' : 'rgba(13, 148, 136, 0.08)')),
+                                     background: isORM
+                                        ? 'rgba(245, 158, 11, 0.1)'
+                                        : isTodo
+                                           ? 'rgba(139, 92, 246, 0.08)'
+                                           : (isCreator
+                                              ? (isTask ? 'rgba(249, 115, 22, 0.08)' : 'rgba(99, 102, 241, 0.08)')
+                                              : (isTask ? 'rgba(225, 29, 72, 0.08)' : 'rgba(13, 148, 136, 0.08)')),
                                      marginLeft: info.isStart ? '0' : '-8px',
                                      marginRight: info.isEnd ? '0' : '-8px',
                                  }}>
                                 <div className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ background: isORM ? '#f59e0b' : dotColor }}></div>
                                 {isORM && <span className="px-1.5 py-0.5 bg-amber-500 text-white rounded text-[7px] font-black uppercase tracking-tighter shrink-0">ORM</span>}
-                                <span className={`text-[10px] font-black truncate ${isORM ? 'text-amber-700' : (isTask ? 'text-orange-700' : 'text-indigo-700')}`} style={{ textDecoration: s === 'completed' ? 'line-through' : 'none' }}>
+                                <span className={`text-[10px] font-black truncate ${isORM ? 'text-amber-700' : isTodo ? 'text-violet-700' : (isTask ? 'text-orange-700' : 'text-indigo-700')}`} style={{ textDecoration: s === 'completed' ? 'line-through' : 'none' }}>
                                     {info.event.title}
                                 </span>
                             </div>
@@ -753,19 +882,22 @@ const CalendarPage = () => {
                                     </div>
                                 </div>
 
-                                {/* ─── Section 2: Strategic Tasks ─── */}
+                                {/* ─── Section 2: Personal Todos ─── */}
+                                {/* Todos only — the user's own private planning list. The backend
+                                    never returns anyone else's todo, and the isCreator guard keeps
+                                    that true here too. Delegation tasks live in Task & Delegation. */}
                                 <div className="space-y-4">
                                     <div className="flex items-center justify-between border-b border-[var(--border)] pb-2">
-                                        <h3 className="text-[11px] font-black text-orange-500 uppercase tracking-[0.2em] flex items-center gap-1.5"> <CheckCircle size={14} /> Tasks ({dayEvents.filter(e => e.extendedProps.type === 'task').length}) </h3>
+                                        <h3 className="text-[11px] font-black text-violet-500 uppercase tracking-[0.2em] flex items-center gap-1.5"> <ClipboardList size={14} /> Todos ({dayTodos.length}) </h3>
                                         {(canCreate && (!summaryDate || new Date(summaryDate + "T23:59:59") >= new Date() || backdateSettings.allow_backdate || backdateSettings.exception_users.includes(user?.email))) && (
-                                            <button onClick={() => openCreateModal('task')} className="flex items-center gap-1.5 px-4 py-1.5 bg-[var(--input-bg)] border border-[var(--border)] text-[var(--text-main)] rounded-lg text-[10px] font-black hover:bg-gray-100 transition-all uppercase tracking-widest"> <PlusCircle size={12} /> Add Task </button>
+                                            <button onClick={() => openCreateModal('todo')} className="flex items-center gap-1.5 px-4 py-1.5 bg-[var(--input-bg)] border border-[var(--border)] text-[var(--text-main)] rounded-lg text-[10px] font-black hover:bg-gray-100 transition-all uppercase tracking-widest"> <PlusCircle size={12} /> Add Todo </button>
                                         )}
                                     </div>
                                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                        {dayEvents.filter(e => e.extendedProps.type === 'task').map(ev => renderEventTile(ev))}
-                                        {dayEvents.filter(e => e.extendedProps.type === 'task').length === 0 && (
+                                        {dayTodos.map(ev => renderEventTile(ev))}
+                                        {dayTodos.length === 0 && (
                                             <div className="col-span-full py-8 flex flex-col items-center justify-center bg-gray-50/50 rounded-[24px] border border-dashed border-gray-200 opacity-50">
-                                                <p className="text-[9px] font-black text-gray-400 uppercase tracking-widest">No tasks listed.</p>
+                                                <p className="text-[9px] font-black text-gray-400 uppercase tracking-widest">No todos listed.</p>
                                             </div>
                                         )}
                                     </div>
@@ -793,7 +925,7 @@ const CalendarPage = () => {
                                 <div className="flex items-center gap-3">
                                     <div className={`w-2.5 h-2.5 rounded-full animate-pulse ${eventForm.status === 'completed' ? 'bg-green-500' : 'bg-indigo-500'}`} />
                                     <span className="text-[10px] font-black uppercase tracking-widest text-[var(--accent-indigo)]"> 
-                                        {isEdit ? `Edit Operation [${eventForm.status}]` : (eventForm.type === 'task' ? 'Architect Tasks' : 'Architect Session')} 
+                                        {isEdit ? `Edit Operation [${eventForm.status}]` : (eventForm.type === 'todo' ? 'Personal Todo' : (eventForm.type === 'task' ? 'Architect Tasks' : 'Architect Session'))}
                                     </span>
                                 </div>
                                 <div className="flex items-center gap-2">
@@ -878,11 +1010,16 @@ const CalendarPage = () => {
                                 ) : (
                                     <>
                                         <div className="space-y-3">
-                                    <input autoFocus placeholder={eventForm.type === 'task' ? "Task Name" : "Session Title"} className="w-full text-2xl font-black bg-transparent border-b border-dashed border-gray-200 focus:border-[var(--accent-indigo)] outline-none pb-2 text-[var(--text-main)] transition-colors"
+                                    <input autoFocus placeholder={eventForm.type === 'todo' ? "Example: Prepare weekly report" : (eventForm.type === 'task' ? "Task Name" : "Session Title")} className="w-full text-2xl font-black bg-transparent border-b border-dashed border-gray-200 focus:border-[var(--accent-indigo)] outline-none pb-2 text-[var(--text-main)] transition-colors"
                                         value={eventForm.title} onChange={e => setEventForm({ ...eventForm, title: e.target.value })} />
 
                                     <div className="flex flex-wrap items-center gap-3">
-                                        <div className="flex items-center gap-1.5 px-2 py-1 bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] text-[9px] font-black uppercase tracking-widest rounded-lg"> <Clock size={12} /> IST • {formatIST(eventForm.start)} </div>
+                                        <div className="flex items-center gap-1.5 px-2 py-1 bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] text-[9px] font-black uppercase tracking-widest rounded-lg">
+                                            <Clock size={12} />
+                                            {eventForm.type === 'todo'
+                                                ? formatTodoDateTime(eventForm.start, eventForm.all_day)
+                                                : `IST • ${formatIST(eventForm.start)}`}
+                                        </div>
                                         {isEdit && (
                                             <div className="flex items-center gap-1.5">
                                                 <label className="text-[9px] font-black text-gray-400 uppercase">Status:</label>
@@ -951,6 +1088,11 @@ const CalendarPage = () => {
                                     )}
                                 </div>
 
+                                {/* A todo has no configuration grid at all — it is just a title, details, a due
+                    date and an optional reminder (all rendered below, shared with the other
+                    types). No category, priority, repeat or delegation, matching a standard
+                    personal todo app. */}
+                {eventForm.type !== 'todo' && (
                                 <div className={`grid grid-cols-1 md:grid-cols-2 gap-6 ${(isEdit && !eventForm.isCreator && !canUpdate && eventForm.isAssigned) ? 'opacity-40 pointer-events-none' : ''}`}>
                                     {isStaff ? (
                                         eventForm.type === 'event' ? (
@@ -1113,8 +1255,10 @@ const CalendarPage = () => {
                                         )
                                     )}
                                 </div>
+                                )}
 
-                                {!(isStaff && eventForm.type === 'task') && (
+                                {/* Participant management never applies to a todo — it is personal. */}
+                                {eventForm.type !== 'todo' && !(isStaff && eventForm.type === 'task') && (
                                     <div className="space-y-3 p-4 bg-[var(--input-bg)] rounded-2xl border border-[var(--border)] shadow-sm">
                                         <div className="space-y-2">
                                             <label className="text-[9px] font-black text-[var(--text-muted)] uppercase tracking-wider flex items-center gap-1.5">
@@ -1150,6 +1294,11 @@ const CalendarPage = () => {
                                 )}
 
                                 <div className="space-y-4">
+                                    {eventForm.type === 'todo' && (
+                                        <label className="text-[9px] font-black text-[var(--text-muted)] uppercase tracking-wider flex items-center gap-1.5">
+                                            <CalendarDays size={12} /> Due Date
+                                        </label>
+                                    )}
                                     <div className="flex items-center gap-4 flex-wrap">
                                         <div className="flex items-center gap-2 bg-[var(--input-bg)] px-4 py-2.5 rounded-xl border border-[var(--border)] relative cursor-pointer hover:border-[var(--accent-indigo)] transition-all">
                                             <CalendarDays size={18} className="text-[var(--accent-indigo)]" />
@@ -1213,8 +1362,18 @@ const CalendarPage = () => {
                                     )}
                                 </div>
 
-                                <textarea placeholder={eventForm.type === 'task' ? "Task Details..." : "Instruction..." } rows={3} className="w-full bg-[var(--input-bg)] p-4 rounded-2xl text-[12px] font-medium border border-[var(--border)] outline-none focus:bg-white transition-all shadow-inner"
-                                    value={eventForm.additional_details} onChange={e => setEventForm({ ...eventForm, additional_details: e.target.value })} />
+                                {eventForm.type === 'todo' ? (
+                                    <div className="space-y-2">
+                                        <label className="text-[9px] font-black text-[var(--text-muted)] uppercase tracking-wider flex items-center gap-1.5">
+                                            <FileText size={12} /> Task Details <span className="text-[var(--accent-indigo)]">*</span>
+                                        </label>
+                                        <textarea placeholder="Example: Review all pending reports before 5 PM." rows={6} className="w-full bg-[var(--input-bg)] p-4 rounded-2xl text-[12px] font-medium border border-[var(--border)] outline-none focus:bg-white transition-all shadow-inner resize-y"
+                                            value={eventForm.additional_details} onChange={e => setEventForm({ ...eventForm, additional_details: e.target.value })} />
+                                    </div>
+                                ) : (
+                                    <textarea placeholder={eventForm.type === 'task' ? "Task Details..." : "Instruction..."} rows={3} className="w-full bg-[var(--input-bg)] p-4 rounded-2xl text-[12px] font-medium border border-[var(--border)] outline-none focus:bg-white transition-all shadow-inner"
+                                        value={eventForm.additional_details} onChange={e => setEventForm({ ...eventForm, additional_details: e.target.value })} />
+                                )}
                                     </>
                                 )}
                             </div>
@@ -1227,18 +1386,11 @@ const CalendarPage = () => {
                             />
 
                             {!(isEdit && !isStaff && !eventForm.isCreator) && eventForm.status !== 'completed' && (
-                                <div className="p-5 border-t border-[var(--border)] flex justify-between items-center bg-[var(--table-header-bg)]">
-                                    <div className="flex items-center gap-3">
-                                        <ShieldCheck size={20} className="text-[var(--accent-indigo)] opacity-30" />
-                                        <div className="space-y-0">
-                                            <p className="text-[9px] font-black text-[var(--text-muted)] uppercase tracking-widest leading-tight">Digital Authorization</p>
-                                            <p className="text-[10px] font-bold text-gray-400 italic leading-tight">Changes sync to calendars instantly.</p>
-                                        </div>
-                                    </div>
-                                    <button onClick={handleSave} 
+                                <div className="p-5 border-t border-[var(--border)] flex justify-end items-center bg-[var(--table-header-bg)]">
+                                    <button onClick={handleSave}
                                         disabled={isEdit && !(user.role === 'superadmin' || user.role === 'admin' || eventForm.isCreator)}
                                         className={`bg-[var(--btn-primary)] text-white px-10 py-3 rounded-xl text-[12px] font-black shadow-xl shadow-indigo-500/30 hover:scale-[1.02] active:scale-[0.98] transition-all tracking-[0.1em] uppercase ${isEdit && !(user.role === 'superadmin' || user.role === 'admin' || eventForm.isCreator) ? 'opacity-20 cursor-not-allowed grayscale' : ''}`}>
-                                        {isEdit ? 'Authorize Updates' : (eventForm.type === 'task' ? 'Schedule Task' : 'Schedule Session')}
+                                        {isEdit ? (eventForm.type === 'todo' ? 'Save Todo' : 'Authorize Updates') : (eventForm.type === 'todo' ? 'Create Todo' : (eventForm.type === 'task' ? 'Schedule Task' : 'Schedule Session'))}
                                     </button>
                                 </div>
                             )}

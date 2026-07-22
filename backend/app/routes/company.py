@@ -24,6 +24,9 @@ class CompanyStatusUpdate(BaseModel):
 class CompanyORMAccessUpdate(BaseModel):
     enabled: bool
 
+class CompanyDelegationAccessUpdate(BaseModel):
+    enabled: bool
+
 class CompanyEditRequest(BaseModel):
     name: Optional[str] = None
     domain: Optional[str] = None
@@ -202,6 +205,27 @@ async def update_company_orm_access(company_id: str, body: CompanyORMAccessUpdat
 
     await log_activity(current_user, "Toggle ORM Access", "Company", f"{'Enabled' if body.enabled else 'Disabled'} ORM for company {company_id}")
     return {"message": f"ORM access {'enabled' if body.enabled else 'disabled'}", "orm_enabled": body.enabled}
+
+# ─── Toggle Task & Delegation Module Access ───
+# Same shape as the ORM toggle above, but deliberately Sparsh-admin-only: a Company Admin
+# must never be able to grant their own company a module. `companies.update` alone is not
+# enough here (it is for ORM) — the role itself has to be superadmin/admin.
+@router.patch("/{company_id}/delegation-access")
+async def update_company_delegation_access(company_id: str, body: CompanyDelegationAccessUpdate, current_user: dict = Depends(get_current_user)):
+    if current_user.get("role") not in ["superadmin", "admin"]:
+        raise HTTPException(status_code=403, detail="Only Sparsh Super Admin / Admin can manage Delegation access")
+
+    companies_collection = get_collection("companies")
+    result = await companies_collection.update_one(
+        {"_id": ObjectId(company_id)},
+        {"$set": {"delegation_enabled": body.enabled, "updated_at": datetime.now(timezone.utc)}}
+    )
+
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Company not found")
+
+    await log_activity(current_user, "Toggle Delegation Access", "Company", f"{'Enabled' if body.enabled else 'Disabled'} Delegation for company {company_id}")
+    return {"message": f"Delegation access {'enabled' if body.enabled else 'disabled'}", "delegation_enabled": body.enabled}
 
 # ─── Delete Company ───
 @router.delete("/{company_id}")

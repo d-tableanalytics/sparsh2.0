@@ -24,6 +24,9 @@ class CompanyBase(BaseModel):
     status: str = "active"  # active, hold, inactive
     is_active: bool = True
     orm_enabled: bool = True  # Whether the ORM module is available to this company
+    # Whether the Task & Delegation module is available to this company. Defaults to OFF:
+    # Delegation was internal-only before this toggle, so access is opt-in per company.
+    delegation_enabled: bool = False
 
 class CompanyCreate(CompanyBase):
     pass
