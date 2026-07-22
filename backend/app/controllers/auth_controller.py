@@ -65,13 +65,21 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
     return user
 
 
-# ─── Task Management access gate (internal-Sparsh-only) ───
+# ─── Task Management access gate ───
 # Internal = users in the `staff` collection (tag="staff"): superadmin/admin and any future
-# staff-side role. Client-side users (learners collection: clientadmin/clientuser) are blocked
-# from the entire Task Management / Delegation module unless explicitly granted the
-# `permissions.tasks.access_task_management` override. Super Admin is always allowed.
+# staff-side role. Internal users always have the module.
+#
+# Client-side users (learners collection: clientadmin/clientuser) get the module only when
+# their company's Delegation toggle is ON (Company Details ▸ Delegation On/Off, stored as
+# `delegation_enabled` on the company). The legacy per-user
+# `permissions.tasks.access_task_management` override still works for one-off grants.
 INTERNAL_ROLES = {"superadmin", "admin", "coach", "staff"}
+CLIENT_ROLES = {"clientadmin", "clientuser"}
 TASK_ACCESS_DENIED_MESSAGE = "Task Management is only available for Sparsh internal teams."
+DELEGATION_DISABLED_MESSAGE = (
+    "The Delegation module is not enabled for your company. "
+    "Please contact your administrator."
+)
 
 
 def is_internal_user(user: dict) -> bool:
@@ -95,18 +103,106 @@ def is_internal_user(user: dict) -> bool:
     return user.get("role") in INTERNAL_ROLES
 
 
+def is_client_side_user(user: dict) -> bool:
+    """A company (client) user rather than a Sparsh internal user."""
+    if not user:
+        return False
+    src = user.get("_source_collection")
+    if src == "learners":
+        return True
+    if src == "staff":
+        return False
+    if user.get("tag") == "learner":
+        return True
+    return (user.get("role") or "").lower() in CLIENT_ROLES
+
+
+async def is_company_delegation_enabled(company_id) -> bool:
+    """Whether the Task & Delegation module is switched on for a client company.
+
+    Mirrors utils/orm_utils.is_orm_enabled, with one deliberate difference: a MISSING flag
+    means OFF. Delegation was internal-only before this toggle existed, so an existing
+    company must be explicitly enabled by a Sparsh admin rather than silently gaining
+    access to a module it never had."""
+    if not company_id:
+        return False
+    from bson import ObjectId
+    try:
+        company = await get_collection("companies").find_one({"_id": ObjectId(company_id)})
+    except Exception:
+        return False
+    if not company:
+        return False
+    return bool(company.get("delegation_enabled", False))
+
+
+async def has_task_access(user: dict) -> bool:
+    """Async access check used everywhere the Task & Delegation module is gated:
+    internal Sparsh users always, client-side users only while their company's
+    Delegation toggle is ON."""
+    if is_internal_user(user):
+        return True
+    return await is_company_delegation_enabled(user.get("company_id"))
+
+
 async def require_task_access(current_user: dict = Depends(get_current_user)):
-    """Dependency that 403s any non-internal user. Returns the user so endpoints that
-    swap `Depends(get_current_user)` -> `Depends(require_task_access)` still receive it."""
-    if not is_internal_user(current_user):
-        raise HTTPException(status_code=403, detail=TASK_ACCESS_DENIED_MESSAGE)
-    return current_user
+    """Dependency that 403s anyone without Task & Delegation access. Returns the user so
+    endpoints that swap `Depends(get_current_user)` -> `Depends(require_task_access)`
+    still receive it."""
+    if await has_task_access(current_user):
+        return current_user
+    raise HTTPException(
+        status_code=403,
+        detail=DELEGATION_DISABLED_MESSAGE if is_client_side_user(current_user) else TASK_ACCESS_DENIED_MESSAGE,
+    )
 
 
 TASK_RECIPIENT_DENIED_MESSAGE = (
     "Task and Delegation module is only for Sparsh internal users. "
     "Client-side users cannot be assigned or added in loop."
 )
+
+COMPANY_RECIPIENT_DENIED_MESSAGE = (
+    "Tasks can only be assigned to — or shared in loop with — users of your own company."
+)
+
+
+def recipient_denied_message(actor: dict) -> str:
+    """The right rejection message for whoever is creating/editing the task."""
+    return COMPANY_RECIPIENT_DENIED_MESSAGE if is_client_side_user(actor) else TASK_RECIPIENT_DENIED_MESSAGE
+
+
+async def get_ineligible_recipient_ids(actor: dict, user_ids) -> list:
+    """Recipients (assignees + in-loop members) this actor is not allowed to put on a task.
+
+    - Internal Sparsh actor → recipients must be internal staff (unchanged rule).
+    - Client-side actor (company with Delegation ON) → recipients must be users of the SAME
+      company, so a company can only delegate within itself and never reaches — or sees —
+      the internal Sparsh directory.
+    """
+    from bson import ObjectId
+    ids = [str(i) for i in (user_ids or []) if i]
+    if not ids:
+        return []
+    if not is_client_side_user(actor):
+        return await get_non_internal_user_ids(ids)
+
+    company_id = actor.get("company_id")
+    if not company_id:
+        return ids
+    oids = []
+    for i in ids:
+        try:
+            oids.append(ObjectId(i))
+        except Exception:
+            pass
+    eligible = set()
+    cursor = get_collection("learners").find(
+        {"_id": {"$in": oids}, "company_id": str(company_id)}, {"_id": 1}
+    )
+    async for u in cursor:
+        eligible.add(str(u["_id"]))
+    return [i for i in ids if i not in eligible]
 
 
 async def get_non_internal_user_ids(user_ids) -> list:

@@ -9,9 +9,10 @@ import re
 
 from app.db.mongodb import get_collection
 from app.controllers.auth_controller import (
-    get_current_user, get_user_from_token, require_task_access,
-    is_internal_user, TASK_ACCESS_DENIED_MESSAGE,
-    get_non_internal_user_ids, TASK_RECIPIENT_DENIED_MESSAGE,
+    get_user_from_token, require_task_access,
+    has_task_access, is_client_side_user,
+    TASK_ACCESS_DENIED_MESSAGE, DELEGATION_DISABLED_MESSAGE,
+    get_ineligible_recipient_ids, recipient_denied_message,
 )
 from app.utils.calendar_utils import CALENDAR_COLLECTIONS, find_event_across_collections
 from app.services.activity_log_service import log_activity
@@ -278,15 +279,20 @@ def _serialize_task(doc: dict, current_user_id: str) -> dict:
 
 
 async def _user_names(user_ids: list) -> dict:
-    """user_id -> display name, from the staff collection. Used for the dependency history notes."""
+    """user_id -> display name. Looks in both staff and learners, so a company user's name
+    resolves too once their company has the Delegation module. Used for dependency history notes."""
     oids = [ObjectId(uid) for uid in user_ids if ObjectId.is_valid(uid)]
     if not oids:
         return {}
-    docs = await get_collection("staff").find({"_id": {"$in": oids}}).to_list(1000)
-    return {
-        str(d["_id"]): d.get("full_name") or d.get("first_name") or d.get("email") or "Unknown"
-        for d in docs
-    }
+    names = {}
+    for col_name in ("staff", "learners"):
+        docs = await get_collection(col_name).find({"_id": {"$in": oids}}).to_list(1000)
+        for d in docs:
+            names.setdefault(
+                str(d["_id"]),
+                d.get("full_name") or d.get("first_name") or d.get("email") or "Unknown",
+            )
+    return names
 
 
 async def _fetch_subtasks(parent_id: str, current_user_id: str):
@@ -548,8 +554,11 @@ async def task_event_stream(token: str = Query(...)):
     user = await get_user_from_token(token)
     if not user:
         raise HTTPException(status_code=401, detail="Invalid or missing token")
-    if not is_internal_user(user):
-        raise HTTPException(status_code=403, detail=TASK_ACCESS_DENIED_MESSAGE)
+    if not await has_task_access(user):
+        raise HTTPException(
+            status_code=403,
+            detail=DELEGATION_DISABLED_MESSAGE if is_client_side_user(user) else TASK_ACCESS_DENIED_MESSAGE,
+        )
     user_id = str(user["_id"])
 
     async def event_gen():
@@ -572,16 +581,28 @@ async def task_event_stream(token: str = Query(...)):
     )
 
 
-# Internal users who can be picked in a task's Assigned To / In Loop dropdowns. Defined
-# before /{task_id} (literal path) and gated by require_task_access, so any internal task
-# creator can load it (unlike GET /users, which needs the users.read permission). Returns
-# ONLY staff-collection (internal Sparsh) users — client-side users never appear here.
+# Users who can be picked in a task's Assigned To / In Loop dropdowns. Defined before
+# /{task_id} (literal path) and gated by require_task_access, so any task creator can load it
+# (unlike GET /users, which needs the users.read permission).
+#
+# An internal Sparsh user gets the staff directory. A company user (their company's Delegation
+# module is ON) gets ONLY their own company's active users — the internal Sparsh directory is
+# never exposed to a client company. Mirrors get_ineligible_recipient_ids, which enforces the
+# same split on save.
 @router.get("/assignable-users")
 async def list_assignable_users(current_user: dict = Depends(require_task_access)):
-    docs = await get_collection("staff").find({"is_active": {"$ne": False}}).to_list(1000)
+    if is_client_side_user(current_user):
+        company_id = current_user.get("company_id")
+        if not company_id:
+            return []
+        docs = await get_collection("learners").find({
+            "company_id": str(company_id), "is_active": {"$ne": False},
+        }).to_list(1000)
+    else:
+        docs = await get_collection("staff").find({"is_active": {"$ne": False}}).to_list(1000)
     return [{
         "_id": str(u["_id"]),
-        "full_name": u.get("full_name") or u.get("first_name") or u.get("email"),
+        "full_name": u.get("full_name") or (f"{u.get('first_name', '')} {u.get('last_name', '')}".strip() or None) or u.get("email"),
         "email": u.get("email"),
         "role": u.get("role"),
         "designation": u.get("designation"),
@@ -617,13 +638,14 @@ async def update_task_status(task_id: str, body: dict, current_user: dict = Depe
 
     existing, col_name = await _get_task_or_404(task_id)
 
-    # Dependent on Other hands the task to the picked doer (must be an internal Sparsh user, same
-    # rule as create/update). Blocked captures the doer name only — no hand-off.
+    # Dependent on Other hands the task to the picked doer, who must be an eligible recipient
+    # for whoever is handing it over (internal staff, or their own company's users) — same rule
+    # as create/update. Blocked captures the doer name only — no hand-off.
     reassign_doer = None
     if new_status == "dependent_on_others" and doer_id and doer_id != existing.get("dependency_doer_id"):
-        bad = await get_non_internal_user_ids([doer_id])
+        bad = await get_ineligible_recipient_ids(current_user, [doer_id])
         if bad:
-            raise HTTPException(status_code=403, detail=TASK_RECIPIENT_DENIED_MESSAGE)
+            raise HTTPException(status_code=403, detail=recipient_denied_message(current_user))
         reassign_doer = doer_id
 
     user_id = str(current_user["_id"])

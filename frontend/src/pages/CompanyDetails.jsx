@@ -10,7 +10,8 @@ import {
   ArrowLeft, Pencil, Trash2, Download, Upload, Plus, User, Lock,
   CheckCircle2, XCircle, PauseCircle, ChevronDown, Save, X,
   FileSpreadsheet, AlertTriangle, ExternalLink, Layers, Calendar,
-  Target, BookOpen, ChevronRight, CheckCircle, Circle, UploadCloud, FileText, Bot, Inbox
+  Target, BookOpen, ChevronRight, CheckCircle, Circle, UploadCloud, FileText, Bot, Inbox,
+  CheckSquare
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import ORMReportTab from '../components/company/ORMReportTab';
@@ -243,6 +244,19 @@ const CompanyDetails = () => {
     } catch (err) { showError('Failed to update ORM access'); }
   };
 
+  // Task & Delegation module access — same shape as the ORM toggle above. Defaults to OFF
+  // (Delegation is opt-in per company), and the endpoint is Sparsh-admin-only.
+  const handleToggleDelegation = async () => {
+    const next = !(company.delegation_enabled ?? false);
+    try {
+      await api.patch(`/companies/${companyId}/delegation-access`, { enabled: next });
+      setCompany(prev => ({ ...prev, delegation_enabled: next }));
+      showSuccess(`Delegation ${next ? 'enabled' : 'disabled'} for ${company.name}`);
+    } catch (err) {
+      showError(err.response?.data?.detail || 'Failed to update Delegation access');
+    }
+  };
+
   const handleAddUser = async (e) => {
     e.preventDefault();
     try {
@@ -359,6 +373,19 @@ const CompanyDetails = () => {
               title="Toggle whether this company can access the ORM module"
             >
               <Layers size={14} /> ORM {(company.orm_enabled ?? true) ? 'On' : 'Off'}
+            </button>
+          )}
+          {isStaff && canUpdate && (
+            <button
+              onClick={handleToggleDelegation}
+              className={`h-9 px-4 rounded-lg text-[12px] font-bold flex items-center gap-2 border transition-all ${
+                (company.delegation_enabled ?? false)
+                  ? 'bg-[var(--accent-green-bg)] border-[var(--accent-green-border)] text-[var(--accent-green)]'
+                  : 'bg-[var(--bg-card)] border-[var(--border)] text-[var(--text-muted)] hover:border-[var(--accent-green)]'
+              }`}
+              title="Toggle whether this company can access the Task & Delegation module"
+            >
+              <CheckSquare size={14} /> Delegation {(company.delegation_enabled ?? false) ? 'On' : 'Off'}
             </button>
           )}
           {canUpdate && (
