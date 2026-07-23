@@ -935,7 +935,9 @@ const CalendarPage = () => {
                                             {(!isStaff) && (
                                                 <button onClick={() => setEventForm({ ...eventForm, status: 'completed' })} className={`p-2 rounded-lg transition-all ${eventForm.status === 'completed' ? 'bg-green-500 text-white shadow-lg' : 'text-gray-400 hover:text-green-500'}`}> <CheckCircle size={16} /> </button>
                                             )}
-                                            <button onClick={() => setEventForm({ ...eventForm, status: 'canceled' })} className={`p-2 rounded-lg transition-all ${eventForm.status === 'canceled' ? 'bg-red-500 text-white shadow-lg' : 'text-gray-400 hover:text-red-500'}`}> <Ban size={16} /> </button>
+                                            {eventForm.type !== 'todo' && (
+                                                <button onClick={() => setEventForm({ ...eventForm, status: 'canceled' })} className={`p-2 rounded-lg transition-all ${eventForm.status === 'canceled' ? 'bg-red-500 text-white shadow-lg' : 'text-gray-400 hover:text-red-500'}`}> <Ban size={16} /> </button>
+                                            )}
                                             
                                             {canDelete && <button onClick={() => handleQuickAction(currentEventId, 'delete')} className="p-2 text-gray-400 hover:text-red-500 hover:bg-red-500/10 rounded-lg"> <Trash2 size={16} /> </button>}
                                         </div>
@@ -1024,6 +1026,13 @@ const CalendarPage = () => {
                                             <div className="flex items-center gap-1.5">
                                                 <label className="text-[9px] font-black text-gray-400 uppercase">Status:</label>
                                                 {(eventForm.isCreator || canUpdate) ? (
+                                                    eventForm.type === 'todo' ? (
+                                                        <button type="button"
+                                                            onClick={() => setEventForm({ ...eventForm, status: eventForm.status === 'completed' ? 'schedule' : 'completed' })}
+                                                            className={`flex items-center gap-1 px-3 py-1 rounded-md text-[10px] font-black uppercase transition-all ${eventForm.status === 'completed' ? 'bg-green-500 text-white shadow-lg' : 'bg-[var(--input-bg)] border border-[var(--border)] text-[var(--accent-indigo)] hover:border-green-500 hover:text-green-500'}`}>
+                                                            <CheckCircle size={12} /> {eventForm.status === 'completed' ? 'Completed' : 'Mark Complete'}
+                                                        </button>
+                                                    ) : (
                                                     <select value={eventForm.status} onChange={e => setEventForm({ ...eventForm, status: e.target.value })}
                                                         className="bg-[var(--input-bg)] border border-[var(--border)] rounded-md px-2 py-0.5 text-[10px] font-black text-[var(--accent-indigo)] uppercase outline-none focus:border-[var(--accent-indigo)]">
                                                         <option value="schedule">Scheduled</option>
@@ -1031,6 +1040,7 @@ const CalendarPage = () => {
                                                         <option value="canceled">Canceled</option>
                                                         {!isStaff && <option value="completed">Completed</option>}
                                                     </select>
+                                                    )
                                                 ) : (
                                                     <span className="px-2 py-0.5 bg-gray-100 rounded text-[9px] font-black uppercase text-gray-500">{eventForm.status}</span>
                                                 )}
