@@ -233,14 +233,10 @@ async def create_event(event: CalendarEventCreate, background_tasks: BackgroundT
         if bad:
             raise HTTPException(status_code=403, detail=TASK_RECIPIENT_DENIED_MESSAGE)
     elif user_role != "superadmin":
-        is_scheduled_activity = bool(event_dict.get("activity"))
-        if is_scheduled_activity:
-            # Schedule Calendar events may only be created by Super Admin / Admin.
-            if user_role != "admin":
-                raise HTTPException(status_code=403, detail="Only Admin / Super Admin can create schedule calendar events")
-        # Non-task calendar / session events keep the original permission model:
-        # Client Users/Admins may create; staff roles still require the explicit bit.
-        elif not has_create_perm and user_role not in ["clientuser", "clientadmin"]:
+        # Non-task calendar / session events keep the original permission model.
+        # Allow Client Users (Learners) and Client Admins to create events;
+        # staff roles (admin, coach, staff) still require the explicit permission bit.
+        if not has_create_perm and user_role not in ["clientuser", "clientadmin"]:
             raise HTTPException(status_code=403, detail="Not authorized to create events")
 
     # Backdate validation logic... (omitted summary for brevity, keeping existing code)
@@ -269,13 +265,7 @@ async def create_event(event: CalendarEventCreate, background_tasks: BackgroundT
         raise HTTPException(status_code=500, detail="Security validation failed. Request blocked.")
 
     event_dict["user_id"] = str(current_user["_id"])
-    # Client-side users may only schedule for their OWN company — force it regardless of
-    # payload. Staff may target a specific client company via the payload's company_id;
-    # otherwise fall back to the creator's company.
-    if user_role in ("clientadmin", "clientuser"):
-        if current_user.get("company_id"):
-            event_dict["company_id"] = str(current_user["company_id"])
-    elif not event_dict.get("company_id") and current_user.get("company_id"):
+    if current_user.get("company_id"):
         event_dict["company_id"] = str(current_user["company_id"])
 
     event_dict["created_at"] = datetime.utcnow()
@@ -467,18 +457,12 @@ async def update_event(event_id: str, updates: dict, background_tasks: Backgroun
             if bad:
                 raise HTTPException(status_code=403, detail=TASK_RECIPIENT_DENIED_MESSAGE)
 
-    # Schedule Calendar events (carry an `activity`) are Admin/Super Admin controlled;
-    # assigned users get view-only. This overrides the generic creator/permission rules.
-    if existing.get("activity"):
-        if current_user.get("role") not in ("superadmin", "admin"):
-            raise HTTPException(status_code=403, detail="Only Admin / Super Admin can modify a schedule calendar event.")
-    else:
-        is_admin = current_user.get("role") == "superadmin"
-        has_update_perm = current_user.get("permissions", {}).get("calendar", {}).get("update")
-        is_creator = existing.get("user_id") == str(current_user["_id"])
+    is_admin = current_user.get("role") == "superadmin"
+    has_update_perm = current_user.get("permissions", {}).get("calendar", {}).get("update")
+    is_creator = existing.get("user_id") == str(current_user["_id"])
 
-        if not (is_admin or has_update_perm or is_creator):
-            raise HTTPException(status_code=403, detail="Not authorized to edit this event.")
+    if not (is_admin or has_update_perm or is_creator):
+        raise HTTPException(status_code=403, detail="Not authorized to edit this event.")
          
     # ─── Record Completion Timestamp ───
     if updates.get("status") == "completed" and existing.get("status") != "completed":
@@ -822,17 +806,12 @@ async def delete_event(event_id: str, background_tasks: BackgroundTasks, current
     existing, col_name = await find_event_across_collections(event_id)
     if not existing: raise HTTPException(status_code=404, detail="Event not found")
 
-    # Schedule Calendar events (carry an `activity`) may only be deleted by Admin/Super Admin.
-    if existing.get("activity"):
-        if current_user.get("role") not in ("superadmin", "admin"):
-            raise HTTPException(status_code=403, detail="Only Admin / Super Admin can delete a schedule calendar event.")
-    else:
-        is_admin = current_user.get("role") == "superadmin"
-        has_delete_perm = current_user.get("permissions", {}).get("calendar", {}).get("delete")
-        is_creator = existing.get("user_id") == str(current_user["_id"])
+    is_admin = current_user.get("role") == "superadmin"
+    has_delete_perm = current_user.get("permissions", {}).get("calendar", {}).get("delete")
+    is_creator = existing.get("user_id") == str(current_user["_id"])
 
-        if not (is_admin or has_delete_perm or is_creator):
-            raise HTTPException(status_code=403, detail="Not authorized to delete this event")
+    if not (is_admin or has_delete_perm or is_creator):
+         raise HTTPException(status_code=403, detail="Not authorized to delete this event")
     
     await get_collection(col_name).delete_one({"_id": ObjectId(event_id)})
     creator_name = current_user.get("full_name") or current_user.get("first_name", "System Admin")
@@ -1144,17 +1123,12 @@ async def complete_event(event_id: str, background_tasks: BackgroundTasks, curre
     event, col_name = await find_event_across_collections(event_id)
     if not event: raise HTTPException(status_code=404, detail="Event not found")
 
-    # Schedule Calendar events (carry an `activity`) are Admin/Super Admin controlled.
-    if event.get("activity"):
-        if current_user.get("role") not in ("superadmin", "admin"):
-            raise HTTPException(status_code=403, detail="Only Admin / Super Admin can update a schedule calendar event.")
-    else:
-        is_admin = current_user.get("role") == "superadmin"
-        has_update_perm = current_user.get("permissions", {}).get("calendar", {}).get("update")
-        is_creator = event.get("user_id") == str(current_user["_id"])
+    is_admin = current_user.get("role") == "superadmin"
+    has_update_perm = current_user.get("permissions", {}).get("calendar", {}).get("update")
+    is_creator = event.get("user_id") == str(current_user["_id"])
 
-        if not (is_admin or has_update_perm or is_creator):
-            raise HTTPException(status_code=403, detail="Not authorized")
+    if not (is_admin or has_update_perm or is_creator):
+         raise HTTPException(status_code=403, detail="Not authorized")
 
     await get_collection(col_name).update_one({"_id": ObjectId(event_id)}, {"$set": {"status": "completed", "updated_at": datetime.utcnow()}})
     await sync_event_to_collection(event_id)

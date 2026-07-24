@@ -25,15 +25,6 @@ class CalendarEventBase(BaseModel):
     batch_id: Optional[str] = None
     quarter_id: Optional[str] = None
     status: str = "schedule"
-    # Optional company scope. When set (e.g. staff scheduling for a specific client
-    # company via the Schedule Calendar modal) it overrides the creator's company.
-    company_id: Optional[str] = None
-    # Free-text activity label for scheduled activities (WRM, MMR, DRM, Cal Disc, …).
-    activity: Optional[str] = None
-    # Snapshot for the Schedule Activity detail view so any assignee can see names/company
-    # without extra lookups: {company_name, departments:[...], smops:[{id,name}], doers:[{id,name,department}]}.
-    company_name: Optional[str] = None
-    activity_meta: Optional[dict] = None
     assigned_departments: Optional[List[str]] = []
     assigned_member_ids: Optional[List[str]] = []
     coach_ids: Optional[List[str]] = []
