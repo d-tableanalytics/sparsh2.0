@@ -1,0 +1,436 @@
+<div class="topbar">
+  <h1>📊 Admin Dashboard</h1>
+  <div class="adm-controls" id="admDashControls">
+    <select id="admMonth" onchange="admLoad()"><option value="">This Month</option></select>
+    <select id="admSmops" onchange="admLoad()"><option value="">All OMs</option></select>
+    <select id="admCompany" onchange="admLoad()"><option value="">All Clients</option></select>
+    <button class="btn secondary sm" onclick="admLoad(true)">↻ Refresh</button>
+  </div>
+</div>
+
+<div class="wrap">
+  <div class="adm-tabs">
+    <button class="adm-tab active" id="admTabBtn0" onclick="admSwitchTab(0)">📊 Dashboard</button>
+    <button class="adm-tab" id="admTabBtn1" onclick="admSwitchTab(1)">📅 Client-wise Calendar</button>
+  </div>
+
+  <!-- TAB 0: DASHBOARD -->
+  <div id="admTab0">
+    <div class="adm-kpis" id="admKpis"></div>
+
+    <div class="card adm-section">
+      <div class="adm-sec-head">CLIENT HEALTH MATRIX</div>
+      <div class="adm-table-wrap">
+        <table class="adm-table" id="admClientTable">
+          <thead><tr>
+            <th>#</th><th>Client</th><th>OM</th><th>Done</th><th>Pending</th><th>Overdue</th>
+            <th>Completion&nbsp;%</th><th>Progress</th>
+            <th>Action&nbsp;Cls&nbsp;%</th><th>Avg Delay</th><th>Esc</th><th>Trend</th><th>Status</th>
+          </tr></thead>
+          <tbody id="admClientBody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card adm-section">
+      <div class="adm-sec-head">OM PERFORMANCE COMPARISON (RANKED)</div>
+      <div class="adm-table-wrap">
+        <table class="adm-table" id="admOmTable">
+          <thead><tr>
+            <th>Rank</th><th>OM</th><th>Clients</th><th>Planned</th><th>Completed</th><th>Completion&nbsp;%</th>
+            <th>Progress</th><th>Avg Delay</th>
+            <th>Action&nbsp;Cls&nbsp;%</th><th>Esc</th><th>Trend</th>
+          </tr></thead>
+          <tbody id="admOmBody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card adm-section">
+      <div class="adm-sec-head red">TOP DELAYED CLIENTS</div>
+      <div class="adm-table-wrap">
+        <table class="adm-table">
+          <thead><tr><th>#</th><th>Client</th><th>OM</th><th>Avg Delay (days)</th><th>Overdue</th><th>Completion&nbsp;%</th><th>Status</th></tr></thead>
+          <tbody id="admDelayedBody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card adm-section">
+      <div class="adm-sec-head">OM CLIENTS — ACTIVITY STATUS</div>
+      <div class="oca-filters">
+        <select id="ocaSide" onchange="ocaLoad()">
+          <option value="">Scheduled by: Any</option>
+          <option value="OM">Scheduled by OM</option>
+          <option value="Client">Scheduled by Client</option>
+        </select>
+      </div>
+      <div class="adm-kpis" id="ocaKpis"></div>
+      <div class="adm-table-wrap">
+        <table class="adm-table" id="ocaGridTable">
+          <thead><tr id="ocaGridHeadRow"></tr></thead>
+          <tbody id="ocaGridBody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card adm-section">
+      <div class="adm-sec-head">OPEN ACTION ITEMS — MY CLIENTS</div>
+      <div class="oca-filters">
+        <select id="ocaActionSide" onchange="ocaLoad()">
+          <option value="">Pending from: Any</option>
+          <option value="Client">Pending from Client side</option>
+          <option value="OM">Pending from OM side</option>
+        </select>
+      </div>
+      <div class="adm-table-wrap">
+        <table class="adm-table">
+          <thead><tr><th>Client</th><th>Activity</th><th>Action</th><th>Owner</th><th>Emp ID</th><th>Target Date</th><th>Actual Date</th><th>Status</th><th>Client Delay</th><th>OM Delay</th><th>Follow-up</th></tr></thead>
+          <tbody id="ocaActionBody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- TAB 1: CLIENT-WISE CALENDAR -->
+  <div id="admTab1" class="hidden">
+    <div class="card adm-section">
+      <div class="adm-sec-head">CLIENT-WISE ACTIVITY CALENDAR</div>
+      <div class="cwc-filters">
+        <select id="cwcMonth" onchange="cwcLoad()"><option value="">This Month</option></select>
+        <select id="cwcCompany" onchange="cwcOnCompanyChange()"><option value="">All Clients</option></select>
+        <select id="cwcHod" onchange="cwcLoad()"><option value="">All HODs</option></select>
+        <select id="cwcSmops" onchange="cwcLoad()" class="hidden"><option value="">All OMs</option></select>
+        <select id="cwcSide" onchange="cwcLoad()">
+          <option value="">Scheduled by: Any</option>
+          <option value="OM">Scheduled by OM</option>
+          <option value="Client">Scheduled by Client</option>
+        </select>
+        <button class="btn secondary sm" onclick="cwcLoad()">↻ Refresh</button>
+      </div>
+      <div class="cwc-kpis" id="cwcPlanned"></div>
+      <div class="cwc-cal-head">
+        <div class="nav">
+          <button class="btn secondary sm" onclick="cwcChangeMonth(-1)">‹ Prev</button>
+          <h3 id="cwcMonthLabel">…</h3>
+          <button class="btn secondary sm" onclick="cwcChangeMonth(1)">Next ›</button>
+        </div>
+      </div>
+      <div class="grid7" id="cwcDow"></div>
+      <div class="grid7" id="cwcGrid" style="margin-top:6px"></div>
+    </div>
+  </div>
+</div>
+
+<!-- DAY DETAIL MODAL (client-wise calendar) -->
+<div class="overlay" id="cwcDayOverlay">
+  <div class="modal narrow">
+    <header>
+      <h2 id="cwcDayTitle">Events</h2>
+      <button class="x" onclick="cwcCloseDay()">&times;</button>
+    </header>
+    <div class="mbody" id="cwcDayBody"></div>
+    <div class="footer"><button class="btn secondary" onclick="cwcCloseDay()">Close</button></div>
+  </div>
+</div>
+
+<script>
+  var ADM_TOKEN = localStorage.getItem('sessionToken') || '';
+  var ADM_ROLE  = localStorage.getItem('userRole') || '';
+  var ADM_CACHE = null;   // last payload, for instant re-render
+
+  (function admInit(){
+    admLoad();
+    document.getElementById('cwcDow').innerHTML =
+      ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'].map(d => '<div class="dow">'+d+'</div>').join('');
+    if (ADM_ROLE === 'Admin') document.getElementById('cwcSmops').classList.remove('hidden');
+  })();
+
+  function admSwitchTab(i){
+    document.getElementById('admTab0').classList.toggle('hidden', i!==0);
+    document.getElementById('admTab1').classList.toggle('hidden', i!==1);
+    document.getElementById('admTabBtn0').classList.toggle('active', i===0);
+    document.getElementById('admTabBtn1').classList.toggle('active', i===1);
+    document.getElementById('admDashControls').style.display = (i===0) ? '' : 'none';
+    if (i===1 && !cwcData) cwcLoad();
+  }
+
+  function admLoad(){
+    showLoading(true);
+    var scope={ month:document.getElementById('admMonth').value,
+                smopsId:document.getElementById('admSmops').value,
+                companyId:document.getElementById('admCompany').value };
+    google.script.run
+      .withSuccessHandler(function(d){ ADM_CACHE=d; admRender(d); showLoading(false); })
+      .withFailureHandler(function(e){ showLoading(false); toast(e.message,true); })
+      .getAnalytics(ADM_TOKEN, scope);
+    ocaLoad();
+  }
+
+  function admRender(d){
+    var mo=document.getElementById('admMonth');
+    var cur=mo.value || (d.selectedMonth||'');
+    mo.innerHTML='<option value="">This Month</option>'+((d.filters&&d.filters.months)||[]).map(function(m){
+      return '<option value="'+esc(m.id)+'"'+(m.id===cur?' selected':'')+'>'+esc(m.name)+'</option>'; }).join('');
+    admFillFilters(d.filters); admRenderKpis(d.cards); admRenderClients(d.clients); admRenderOms(d.oms); admRenderDelayed(d.topDelayed);
+  }
+
+  function admFillFilters(f){
+    var sm=document.getElementById('admSmops'), a=sm.value;
+    sm.innerHTML='<option value="">All OMs</option>'+f.smops.map(function(s){return '<option value="'+esc(s.id)+'">'+esc(s.name)+'</option>';}).join(''); sm.value=a;
+    var co=document.getElementById('admCompany'), b=co.value;
+    co.innerHTML='<option value="">All Clients</option>'+f.companies.map(function(c){return '<option value="'+esc(c.id)+'">'+esc(c.name)+'</option>';}).join(''); co.value=b;
+  }
+ function admRenderKpis(c){
+    var cards=[
+      { n:c.totalClients,        l:'Total Clients',      s:'Active',             cls:'k-blue' },
+      { n:c.plannedClients||0,   l:'Planned Clients',    s:'Have activity this period', cls:'k-green' },
+      { n:c.unplannedClients||0, l:'Unplanned Clients',  s:'No activity scheduled',      cls:'k-red' },
+      { n:c.totalOMs,            l:'Total OMs',          s:'Across teams',       cls:'k-blue' },
+      { n:c.planned,             l:'Planned Activities', s:'This period',        cls:'k-brown' },
+      { n:c.completed,           l:'Completed',          s:'Activities done',    cls:'k-green' },
+      { n:c.completion+'%',      l:'Overall Completion', s:'vs 90% target',      cls:'k-green' },
+      { n:c.avgDelay,            l:'Avg Delay Days',     s:'Days past deadline', cls:'k-brown' },
+      { n:c.actionClosure+'%',   l:'Action Closure',     s:'vs 95% target',      cls:'k-brown' },
+      { n:c.escalations,         l:'Active Escalations', s:'Need OM action',     cls:'k-red' },
+      { n:c.oaRating+'%',        l:'O&A Rating',         s:'HODs accountability',cls:'k-green' },
+      { n:c.cultureScore+'%',    l:'Culture Score',      s:'Overall score',      cls:'k-green' },
+      { n:c.drmCompletion+'%',   l:'DRM Completion',     s:'HODs signed-off',    cls:'k-green' },
+      { n:c.successScore+'%',    l:'Success Score',      s:'Overall avg',        cls:'k-green' }
+    ];
+    document.getElementById('admKpis').innerHTML=cards.map(function(k){
+      return '<div class="kpi '+k.cls+'"><div class="kn">'+esc(k.n)+'</div><div class="kl">'+esc(k.l)+'</div><div class="ks">'+esc(k.s)+'</div></div>';
+    }).join('');
+  }
+  function admBar(p){ p=Math.max(0,Math.min(100,Number(p)||0)); var col=p>=90?'var(--com-fg)':(p>=80?'#16a34a':'#92400e');
+    return '<div class="bar"><div class="bar-fill" style="width:'+p+'%;background:'+col+'"></div><span class="bar-pct">'+p+'%</span></div>'; }
+  function admPctCell(p){ p=Number(p)||0; var cls=p>=90?'pc-green':(p>=80?'pc-amber':'pc-red'); return '<td class="'+cls+'"><b>'+p+'%</b></td>'; }
+  function admClsCell(v){ if (v===''||v==null) return '<td class="num">—</td>'; var p=Number(v); var cls=p>=90?'pc-green':(p>=80?'pc-amber':'pc-red'); return '<td class="num '+cls+'">'+p+'%</td>'; }
+  function admEsc(v){ v=Number(v)||0; return v>0 ? '<td class="num overdue">'+v+'</td>' : '<td class="num">0</td>'; }
+  function admTrend(t){ if(t==='Up')return '<span class="tr up">▲ Up</span>'; if(t==='Down')return '<span class="tr down">▼ Down</span>'; return '<span class="tr flat">→ Flat</span>'; }
+  function admStatusBadge(s){ var m={'STRONG':'sb-strong','GOOD':'sb-good','WATCH':'sb-watch','AT-RISK':'sb-risk'}; return '<span class="sb '+(m[s]||'sb-good')+'">'+esc(s)+'</span>'; }
+
+  function admRenderClients(rows){
+    if(!rows.length){ document.getElementById('admClientBody').innerHTML='<tr><td colspan="13" class="adm-empty">No data for this period.</td></tr>'; return; }
+    document.getElementById('admClientBody').innerHTML=rows.map(function(r,i){
+      return '<tr><td>'+(i+1)+'</td><td class="adm-strong">'+esc(r.company)+'</td><td>'+esc(r.smops||'—')+'</td>'
+        +'<td class="num done">'+r.done+'</td><td class="num pending">'+r.pending+'</td><td class="num overdue">'+r.overdue+'</td>'
+        +admPctCell(r.completion)+'<td>'+admBar(r.completion)+'</td>'
+        +admClsCell(r.actionClosure)+'<td class="num">'+r.avgDelay+'</td>'+admEsc(r.escalations)
+        +'<td>'+admTrend(r.trend)+'</td><td>'+admStatusBadge(r.status)+'</td></tr>';
+    }).join('');
+  }
+  function admRenderOms(rows){
+    if(!rows.length){ document.getElementById('admOmBody').innerHTML='<tr><td colspan="11" class="adm-empty">No data for this period.</td></tr>'; return; }
+    document.getElementById('admOmBody').innerHTML=rows.map(function(r,i){
+      var medal = i===0?'🥇':i===1?'🥈':i===2?'🥉':(i+1);
+      return '<tr><td class="num">'+medal+'</td><td class="adm-strong">'+esc(r.om)+'</td><td class="num">'+r.clients+'</td>'
+        +'<td class="num">'+r.planned+'</td><td class="num done">'+r.done+'</td>'+admPctCell(r.completion)+'<td>'+admBar(r.completion)+'</td>'
+        +'<td class="num">'+r.avgDelay+' days</td>'
+        +admClsCell(r.actionClosure)+admEsc(r.escalations)+'<td>'+admTrend(r.trend)+'</td></tr>';
+    }).join('');
+  }
+  function admRenderDelayed(rows){
+    if(!rows||!rows.length){ document.getElementById('admDelayedBody').innerHTML='<tr><td colspan="7" class="adm-empty">No delayed clients 🎉</td></tr>'; return; }
+    document.getElementById('admDelayedBody').innerHTML=rows.map(function(r,i){
+      return '<tr><td class="num">'+(i+1)+'</td><td class="adm-strong">'+esc(r.company)+'</td><td>'+esc(r.smops||'—')+'</td>'
+        +'<td class="num overdue">'+r.avgDelay+'</td><td class="num overdue">'+r.overdue+'</td>'+admPctCell(r.completion)
+        +'<td>'+admStatusBadge(r.status)+'</td></tr>';
+    }).join('');
+  }
+
+  /* ==================== CLIENT-WISE CALENDAR TAB ==================== */
+  var cwcData = null;
+  var cwcViewYear, cwcViewMonth, cwcByDate = {};
+  var CWC_MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+
+  (function cwcInit(){ var t=new Date(); cwcViewYear=t.getFullYear(); cwcViewMonth=t.getMonth(); })();
+
+  function cwcMonthId(){
+    var mo3=['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'][cwcViewMonth];
+    return mo3+String(cwcViewYear).slice(-2);
+  }
+  function cwcChangeMonth(delta){
+    cwcViewMonth+=delta;
+    if (cwcViewMonth<0){ cwcViewMonth=11; cwcViewYear--; }
+    if (cwcViewMonth>11){ cwcViewMonth=0; cwcViewYear++; }
+    document.getElementById('cwcMonth').value = cwcMonthId();
+    cwcLoad();
+  }
+  function cwcOnCompanyChange(){ cwcLoad(); }
+
+  function cwcLoad(){
+    document.getElementById('cwcMonthLabel').textContent = CWC_MONTHS[cwcViewMonth]+' '+cwcViewYear;
+    showLoading(true);
+    var scope = {
+      month: document.getElementById('cwcMonth').value || cwcMonthId(),
+      companyId: document.getElementById('cwcCompany').value,
+      hodId: document.getElementById('cwcHod').value,
+      smopsId: document.getElementById('cwcSmops').value,
+      side: document.getElementById('cwcSide').value
+    };
+    google.script.run
+      .withSuccessHandler(function(d){ cwcData=d; cwcRender(d); showLoading(false); })
+      .withFailureHandler(function(e){ showLoading(false); toast(e.message,true); })
+      .getClientCalendarData(ADM_TOKEN, scope);
+  }
+
+  function cwcRender(d){
+    var mo=document.getElementById('cwcMonth'), curM=mo.value||d.selectedMonth;
+    mo.innerHTML='<option value="">This Month</option>'+(d.filters.months||[]).map(function(m){
+      return '<option value="'+esc(m.id)+'"'+(m.id===curM?' selected':'')+'>'+esc(m.name)+'</option>'; }).join('');
+
+    var co=document.getElementById('cwcCompany'), curC=co.value;
+    co.innerHTML='<option value="">All Clients</option>'+d.filters.companies.map(function(c){
+      return '<option value="'+esc(c.id)+'">'+esc(c.name)+'</option>'; }).join(''); co.value=curC;
+
+    var ho=document.getElementById('cwcHod'), curH=ho.value;
+    ho.innerHTML='<option value="">All HODs</option>'+d.filters.hods.map(function(h){
+      return '<option value="'+esc(h.id)+'">'+esc(h.name)+'</option>'; }).join(''); ho.value=curH;
+
+    if (d.isAdmin){
+      var sm=document.getElementById('cwcSmops'), curS=sm.value;
+      sm.innerHTML='<option value="">All OMs</option>'+d.filters.smops.map(function(s){
+        return '<option value="'+esc(s.id)+'">'+esc(s.name)+'</option>'; }).join(''); sm.value=curS;
+    }
+
+    var cwcCards=[
+      { n:d.planned,   l:'Planned',   s:'Total scheduled', cls:'k-brown' },
+      { n:d.completed, l:'Completed', s:'Activities done', cls:'k-green' },
+      { n:d.pending,   l:'Pending',   s:'Upcoming',         cls:'k-blue'  },
+      { n:d.delayed,   l:'Delayed',   s:'Past due',         cls:'k-red'   },
+      { n:d.lapsed,    l:'Lapsed',    s:'Auto-lapsed',      cls:'k-red'   }
+    ];
+    document.getElementById('cwcPlanned').innerHTML = cwcCards.map(function(k){
+      return '<div class="kpi '+k.cls+'"><div class="kn">'+esc(k.n)+'</div><div class="kl">'+esc(k.l)+'</div><div class="ks">'+esc(k.s)+'</div></div>';
+    }).join('');
+
+    cwcByDate = {};
+    (d.events||[]).forEach(function(e){ (cwcByDate[e.date]=cwcByDate[e.date]||[]).push(e); });
+    cwcRenderGrid();
+  }
+
+  function cwcYmd(y,m,day){ return y+'-'+('0'+m).slice(-2)+'-'+('0'+day).slice(-2); }
+  function cwcStClass(s){ return 'st-'+String(s||'Scheduled').toLowerCase(); }
+
+  function cwcRenderGrid(){
+    var first=new Date(cwcViewYear,cwcViewMonth,1).getDay();
+    var dim=new Date(cwcViewYear,cwcViewMonth+1,0).getDate();
+    var today=new Date(); var todayStr=cwcYmd(today.getFullYear(),today.getMonth()+1,today.getDate());
+    var html='';
+    for (var i=0;i<first;i++) html+='<div class="day empty"></div>';
+    for (var d=1; d<=dim; d++){
+      var ds=cwcYmd(cwcViewYear,cwcViewMonth+1,d);
+      var evs=cwcByDate[ds]||[];
+      var isToday = ds===todayStr ? ' today' : '';
+      var countBadge = evs.length ? '<span class="cwc-count">'+evs.length+'</span>' : '';
+      var pills = evs.slice(0,2).map(function(e){
+        return '<span class="pill '+cwcStClass(e.status)+'" title="'+esc(e.company)+' — '+esc(e.title)+'">'+esc(e.company)+': '+esc(e.title)+'</span>';
+      }).join('');
+      if (evs.length>2) pills += '<span class="more">+'+(evs.length-2)+' more</span>';
+      html += '<div class="day'+isToday+'" onclick="cwcOpenDay(\''+ds+'\')"><div class="num">'+d+' '+countBadge+'</div>'+pills+'</div>';
+    }
+    document.getElementById('cwcGrid').innerHTML=html;
+  }
+
+  function cwcOpenDay(ds){
+    var evs=cwcByDate[ds]||[];
+    document.getElementById('cwcDayTitle').textContent='Activities on '+ds;
+    document.getElementById('cwcDayBody').innerHTML = evs.length ? evs.map(function(e){
+      return '<div class="ev s-'+String(e.status||'Scheduled').toLowerCase()+'">'
+        + '<div class="ev-top"><span class="type-tag">🏢 '+esc(e.company)+'</span>'
+        + '<span class="badge" style="background:'+(e.side==='OM'?'#dbeafe':'#fce7f3')+';color:'+(e.side==='OM'?'#1e40af':'#9d174d')+'">'+esc(e.side||'—')+'</span>'
+        + '<span class="badge '+cwcStClass(e.status)+'">'+esc(e.status)+'</span></div>'
+        + '<h4>'+esc(e.title)+'</h4>'
+        + '<div class="meta">'
+          + (e.time?'🕒 '+esc(e.time)+'<br>':'')
+          + (e.activity?'🏷️ '+esc(e.activity)+'<br>':'')
+          + (e.doers?'👥 '+esc(e.doers):'')
+        + '</div></div>';
+    }).join('') : '<p style="color:#94a3b8;margin:0">No activities on this day.</p>';
+    document.getElementById('cwcDayOverlay').classList.add('open');
+  }
+  function cwcCloseDay(){ document.getElementById('cwcDayOverlay').classList.remove('open'); }
+
+  /* ==================== OM CLIENTS — ACTIVITY STATUS (driven by top filters) ==================== */
+  function ocaLoad(){
+    var scope = { month: document.getElementById('admMonth').value,
+                  smopsId: document.getElementById('admSmops').value,
+                  companyId: document.getElementById('admCompany').value,
+                  side: document.getElementById('ocaSide') ? document.getElementById('ocaSide').value : '',
+                  actionSide: document.getElementById('ocaActionSide') ? document.getElementById('ocaActionSide').value : '' };
+    showLoading(true);
+    google.script.run
+      .withSuccessHandler(function(d){ ocaRender(d); showLoading(false); })
+      .withFailureHandler(function(e){ showLoading(false); toast(e.message,true); })
+      .getStaffDashboard(ADM_TOKEN, scope);
+  }
+
+  function ocaRender(d){
+    var c = d.cards;
+    var cards=[
+      { n:c.planned,          l:'Planned',       s:'This period',    cls:'k-brown' },
+      { n:c.completed,        l:'Completed',     s:'Activities done',cls:'k-green' },
+      { n:c.lapsed||0,        l:'Lapsed',        s:'Auto-lapsed',    cls:'k-red'   },
+      { n:c.rescheduled||0,   l:'Rescheduled',   s:'Moved',          cls:'k-blue'  }
+    ];
+    document.getElementById('ocaKpis').innerHTML = cards.map(function(k){
+      return '<div class="kpi '+k.cls+'"><div class="kn">'+esc(k.n)+'</div><div class="kl">'+esc(k.l)+'</div><div class="ks">'+esc(k.s)+'</div></div>';
+    }).join('');
+
+    ocaRenderGrid(d.activities, d.clientsGrid);
+    ocaRenderActions(d.openActions);
+  }
+
+  function ocaCell(cell){
+    if (!cell || !cell.total) return '<td class="cellc"></td>';
+    var cls = cell.status==='done' ? 'done' : cell.status==='overdue' ? 'over' : cell.status==='cancelled' ? 'canc' : 'pend';
+    return '<td class="cellc ratio '+cls+'">'+cell.done+'/'+cell.total+'</td>';
+  }
+  function ocaRenderGrid(activities, clients){
+    var head = '<th>Client</th>' + activities.map(function(a){ return '<th title="'+esc(a.full)+'">'+esc(a.short)+'</th>'; }).join('') + '<th>Done</th><th>Pct</th>';
+    document.getElementById('ocaGridHeadRow').innerHTML = head;
+    if (!clients.length){ document.getElementById('ocaGridBody').innerHTML = '<tr><td colspan="'+(activities.length+3)+'" class="adm-empty">No clients / activities this period.</td></tr>'; return; }
+    document.getElementById('ocaGridBody').innerHTML = clients.map(function(c){
+      var cells = activities.map(function(a){ return ocaCell(c.cells[a.full]); }).join('');
+      var pcCls = c.pct>=90?'pc-green':(c.pct>=80?'pc-amber':'pc-red');
+      return '<tr><td class="adm-strong">'+esc(c.company)+'</td>'+cells
+        + '<td class="num done">'+c.done+'</td><td class="num '+pcCls+'"><b>'+c.pct+'%</b></td></tr>';
+    }).join('');
+  }
+  function ocaRenderActions(rows){
+    if (!rows.length){ document.getElementById('ocaActionBody').innerHTML = '<tr><td colspan="11" class="adm-empty">No open action items.</td></tr>'; return; }
+    document.getElementById('ocaActionBody').innerHTML = rows.map(function(r){
+      var fuCls = /overdue/i.test(r.followUp) ? 'overdue' : 'pending';
+      var ldCls = /^\d+d$/.test(r.learnerDelay||'') ? 'overdue' : 'pending';
+      var sdCls = /^\d+d$/.test(r.staffDelay||'') ? 'overdue' : 'pending';
+      return '<tr><td class="adm-strong">'+esc(r.company)+'</td><td>'+esc(r.activity)+'</td><td>'+esc(r.action)+'</td>'
+        + '<td>'+esc(r.owner||'—')+'</td><td>'+esc(r.employeeId||'—')+'</td><td>'+esc(r.target||'—')+'</td><td>'+esc(r.actual||'—')+'</td>'
+        + '<td class="pending">'+esc(r.status)+'</td>'
+        + '<td class="'+ldCls+'">'+esc(r.learnerDelay||'—')+'</td>'
+        + '<td class="'+sdCls+'">'+esc(r.staffDelay||'—')+'</td>'
+        + '<td class="'+fuCls+'">'+esc(r.followUp)+'</td></tr>';
+    }).join('');
+  }
+</script>
+
+<style>
+  .adm-tabs{ display:flex; gap:8px; margin-bottom:16px; }
+  .adm-tab{ padding:9px 18px; border-radius:10px; border:1px solid var(--line); background:#fff; cursor:pointer; font-weight:600; font-size:13.5px; color:#64748b; }
+  .adm-tab.active{ background:#7c3aed; color:#fff; border-color:#7c3aed; }
+  .cwc-filters{ display:flex; gap:10px; flex-wrap:nowrap; padding:14px 16px; border-bottom:1px solid var(--line); align-items:center; }
+  .cwc-filters select{ flex:1 1 0; min-width:0; padding:9px 12px; border-radius:8px; border:1px solid var(--line); font-size:13.5px; }
+  .cwc-filters .btn{ flex:0 0 auto; white-space:nowrap; }
+  .cwc-kpis{ display:grid; grid-template-columns:repeat(5,1fr); gap:12px; padding:14px 16px; }
+  @media (max-width:900px){ .cwc-filters{ flex-wrap:wrap; } .cwc-filters select{ flex:1 1 45%; } .cwc-kpis{ grid-template-columns:repeat(2,1fr); } }
+  .cwc-cal-head{ padding:0 16px; }
+  .cwc-cal-head .nav{ display:flex; align-items:center; justify-content:center; gap:16px; margin-bottom:10px; }
+  .cwc-count{ background:#7c3aed; color:#fff; font-size:10px; font-weight:700; padding:1px 6px; border-radius:10px; margin-left:4px; }
+  .oca-filters{ display:flex; gap:10px; flex-wrap:wrap; padding:10px 16px 0; }
+  .oca-filters select{ min-width:200px; padding:8px 10px; border-radius:8px; border:1px solid var(--line); font-size:13.5px; }
+  .cellc.ratio{ font-weight:700; font-size:12.5px; padding:6px 4px; }
+  .cellc.ratio.done{ color:#15803d; background:#f0fdf4; }
+  .cellc.ratio.pend{ color:#92400e; background:#fffbeb; }
+  .cellc.ratio.over{ color:#b91c1c; background:#fef2f2; }
+  .cellc.ratio.canc{ color:#64748b; background:#f1f5f9; }
+</style>

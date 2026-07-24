@@ -1,0 +1,288 @@
+<div class="topbar">
+  <h1>🎯 Implementation tracker Dashboard</h1>
+  <div class="adm-controls">
+    <select id="sdMonth" onchange="sdLoad()"><option value="">All Months</option></select>
+    <select id="sdSmops" onchange="sdLoad()"><option value="">All OMs</option></select>
+    <select id="sdCompany" onchange="sdLoad()"><option value="">All Clients</option></select>
+    <button class="btn secondary sm" onclick="sdLoad()">↻ Refresh</button>
+  </div>
+</div>
+
+<div class="wrap">
+  <div class="sd-source">Impl. Target = 100% (default) · Actual Impl. % = month me koi occurrence completed? 100 : 0 · Actual Score % = auto (completed÷total) — ya Activity sheet me "Manual" wali activities me haath se bhari · Calendar Discipline = auto (Action Closure Review chhod ke) · Achievement % = Actual Score ÷ Score Target × 100 · Met ≥100% | Partial 50–99% | Not Met &lt;50%</div>
+
+  <!-- KPI band -->
+  <div class="sd-band" id="sdBand"></div>
+
+  <div class="card adm-section">
+    <div class="adm-sec-head" id="sdScoreHead">ACTIVITY SCORECARD — ALL ACTIVITIES</div>
+    <div class="adm-table-wrap">
+      <table class="adm-table">
+        <thead><tr>
+          <th>#</th><th>Activity Name</th>
+          <th>Impl. Target&nbsp;%</th><th>Actual Impl.&nbsp;%</th>
+          <th>Score Target&nbsp;%</th><th>Actual Score&nbsp;%</th>
+          <th>Achievement&nbsp;%</th><th>Progress</th><th>Status</th>
+        </tr></thead>
+        <tbody id="sdScoreBody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card adm-section" id="sdManualCard" style="display:none">
+    <div class="adm-sec-head">✏️ MANUAL SCORES <span id="sdManualMonth" style="font-weight:400;color:#64748b"></span></div>
+    <div class="sd-mtabs">
+      <button id="sdmTabCo" class="sd-mtab active" onclick="sdmSetScope('company')">Company-wise</button>
+      <button id="sdmTabHod" class="sd-mtab" onclick="sdmSetScope('hod')">HOD-wise</button>
+    </div>
+    <div id="sdmHodPickWrap" class="sd-mhodpick" style="display:none">
+      <label>HOD</label>
+      <select id="sdmHod" onchange="sdmRender()"><option value="">— Select HOD —</option></select>
+    </div>
+    <div class="adm-table-wrap">
+      <table class="adm-table">
+        <thead><tr><th>Activity</th><th>Score Target %</th><th>Actual Score %</th><th></th></tr></thead>
+        <tbody id="sdmBody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card adm-section" id="sdUploadCard" style="display:none">
+    <div class="adm-sec-head">📎 UPLOADED FILES</div>
+    <div id="sdUploadBody"></div>
+  </div>
+
+  <div class="card adm-section">
+    <div class="adm-sec-head">CLIENT × ACTIVITY SCORE MATRIX</div>
+    <div class="adm-table-wrap">
+      <table class="adm-table" id="sdMatrixTable">
+        <thead><tr id="sdMatrixHead"></tr></thead>
+        <tbody id="sdMatrixBody"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<script>
+  var SD_TOKEN = localStorage.getItem('sessionToken') || '';
+  (function sdInit(){ sdLoad(); })();
+
+  function sdLoad(){
+    showLoading(true);
+    var scope = { smopsId: document.getElementById('sdSmops').value, companyId: document.getElementById('sdCompany').value, month: document.getElementById('sdMonth').value };
+    google.script.run
+      .withSuccessHandler(function(d){ sdRender(d); showLoading(false); })
+      .withFailureHandler(function(e){ showLoading(false); toast(e.message, true); })
+      .getSuccessDashboard(SD_TOKEN, scope);
+  }
+
+  function sdRender(d){
+    window.__sdSelMonth = d.selectedMonth || '';
+    sdFillFilters(d.filters);
+    sdRenderBand(d.cards);
+    var hasCompany = !!d.selectedCompany;
+    document.getElementById('sdScoreHead').textContent = hasCompany
+      ? 'ACTIVITY SCORECARD — ' + d.cards.total + ' ACTIVITIES'
+      : 'ACTIVITY SCORECARD';
+    if (hasCompany){
+      sdRenderScorecard(d.scorecard);
+    } else {
+      document.getElementById('sdScoreBody').innerHTML =
+        '<tr><td colspan="9" class="adm-empty">Select a client above to view its detailed success measures &amp; uploads.</td></tr>';
+    }
+    sdRenderUploads(d.uploads, hasCompany);
+    sdRenderManual(hasCompany);
+    sdRenderMatrix(d.matrixActivities, d.clients);
+  }
+
+  var sdmScope = 'company', sdmData = null;
+
+  function sdRenderManual(show){
+    var card = document.getElementById('sdManualCard');
+    if (!show){ card.style.display='none'; return; }
+    card.style.display='';
+    var cid = document.getElementById('sdCompany').value;
+    var mon = document.getElementById('sdMonth').value;
+    google.script.run
+      .withSuccessHandler(function(d){ sdmData=d;
+        document.getElementById('sdManualMonth').textContent = '— '+(d.monthLabel||'');
+        var hs=document.getElementById('sdmHod');
+        hs.innerHTML='<option value="">— Select HOD —</option>'+d.hods.map(function(h){
+          return '<option value="'+esc(h.id)+'" data-name="'+esc(h.name)+'">'+esc(h.name)+'</option>'; }).join('');
+        sdmRender();
+      })
+      .withFailureHandler(function(e){ toast(e.message,true); })
+      .getManualScores(SD_TOKEN, cid, mon);
+  }
+
+  function sdmSetScope(s){
+    sdmScope=s;
+    document.getElementById('sdmTabCo').classList.toggle('active', s==='company');
+    document.getElementById('sdmTabHod').classList.toggle('active', s==='hod');
+    document.getElementById('sdmHodPickWrap').style.display = s==='hod' ? '' : 'none';
+    sdmRender();
+  }
+
+  function sdmRender(){
+    if (!sdmData){ document.getElementById('sdmBody').innerHTML=''; return; }
+    var acts = sdmData.activities.filter(function(a){ return a.scope===sdmScope; });
+    if (!acts.length){
+      document.getElementById('sdmBody').innerHTML='<tr><td colspan="4" class="adm-empty">No '+sdmScope+'-wise manual activities.</td></tr>';
+      return;
+    }
+    var hodId = document.getElementById('sdmHod').value;
+    var body = acts.map(function(a){
+      if (sdmScope==='company'){
+        return sdmRow(a.activity, 'company', '', a.target, a.actual, '');
+      }
+      // HOD-wise: agar HOD chuna → uska row (editable); warna avg (read-only)
+      if (hodId){
+        var hv = (a.hods||[]).filter(function(h){ return h.id===hodId; })[0] || { target:'', actual:'' };
+        var hn = document.getElementById('sdmHod').selectedOptions[0].getAttribute('data-name')||'';
+        return sdmRow(a.activity, 'hod', hodId, hv.target, hv.actual, hn);
+      }
+      return '<tr><td class="adm-strong">'+esc(a.activity)+'</td>'
+        + '<td class="num" colspan="2">Avg of HODs: <b>'+(a.avg===''?'—':a.avg+'%')+'</b> — pick a HOD to edit</td><td></td></tr>';
+    }).join('');
+    document.getElementById('sdmBody').innerHTML = body;
+  }
+
+  function sdmRow(activity, scope, hodId, target, actual, hodName){
+    var t = (target===''||target==null)?'':target;
+    var a = (actual===''||actual==null)?'':actual;
+    var safe = activity.replace(/[^a-z0-9]/gi,'_');
+    return '<tr><td class="adm-strong">'+esc(activity)+'</td>'
+      + '<td><input type="number" min="0" max="1000" class="sdm-in" id="sdmt-'+safe+'" value="'+t+'" placeholder="100"></td>'
+      + '<td><input type="number" min="0" max="1000" class="sdm-in" id="sdma-'+safe+'" value="'+a+'" placeholder="—"></td>'
+      + '<td><button class="btn secondary sm" onclick="sdmSave(\''+encodeURIComponent(activity)+'\',\''+scope+'\',\''+esc(hodId)+'\',\''+encodeURIComponent(hodName||'')+'\')">Save</button></td></tr>';
+  }
+
+  function sdmSave(actEnc, scope, hodId, hodNameEnc){
+    var activity = decodeURIComponent(actEnc);
+    var safe = activity.replace(/[^a-z0-9]/gi,'_');
+    var target = document.getElementById('sdmt-'+safe).value;
+    var actual = document.getElementById('sdma-'+safe).value;
+    showLoading(true);
+    google.script.run
+      .withSuccessHandler(function(){ showLoading(false); toast('Saved ✔'); sdRenderManual(true); sdLoad(); })
+      .withFailureHandler(function(e){ showLoading(false); toast(e.message,true); })
+      .saveManualScore(SD_TOKEN, {
+        companyId: document.getElementById('sdCompany').value,
+        month: document.getElementById('sdMonth').value,
+        activity: activity, scope: scope,
+        hodId: hodId, hodName: decodeURIComponent(hodNameEnc||''),
+        target: target, actual: actual
+      });
+  }
+
+  function sdRenderUploads(list, show){
+    var card = document.getElementById('sdUploadCard');
+    if (!show){ card.style.display='none'; return; }
+    card.style.display='';
+    list = list || [];
+    if (!list.length){
+      document.getElementById('sdUploadBody').innerHTML =
+        '<div class="adm-empty" style="padding:16px">No files uploaded for this client'+(document.getElementById('sdMonth').value?' this month':'')+'.</div>';
+      return;
+    }
+    var byAct = {};
+    list.forEach(function(f){ (byAct[f.activity]=byAct[f.activity]||[]).push(f); });
+    document.getElementById('sdUploadBody').innerHTML = Object.keys(byAct).map(function(act){
+      var files = byAct[act];
+      var isHod = /hod/i.test(files[0].responsive||'');
+      var scope = isHod ? '<span class="up-scope hod">HOD-wise</span>' : '<span class="up-scope comp">Company-wise</span>';
+      var rows = files.map(function(f){
+        var who = isHod ? (f.employee||f.by||'—') : (f.by||'—');
+        return '<tr><td><a href="'+esc(f.url)+'" target="_blank">📄 '+esc(f.name)+'</a></td>'
+          + '<td>'+esc(who)+'</td><td>'+esc(f.month||'')+'</td><td>'+esc(f.at||'')+'</td></tr>';
+      }).join('');
+      return '<div class="sd-up-grp"><div class="sd-up-act">'+esc(act)+' '+scope+'</div>'
+        + '<div class="adm-table-wrap"><table class="adm-table"><thead><tr>'
+        + '<th>File</th><th>'+(isHod?'HOD':'Uploaded By')+'</th><th>Month</th><th>Uploaded At</th>'
+        + '</tr></thead><tbody>'+rows+'</tbody></table></div></div>';
+    }).join('');
+  }
+
+  function sdFillFilters(f){
+    var mo=document.getElementById('sdMonth'), m=mo.value || (window.__sdSelMonth||'');
+    mo.innerHTML='<option value="">All Months</option>'+(f.months||[]).map(function(x){return '<option value="'+esc(x.id)+'">'+esc(x.name)+'</option>';}).join(''); mo.value=m;
+    var sm=document.getElementById('sdSmops'), a=sm.value;
+    sm.innerHTML='<option value="">All OMs</option>'+f.smops.map(function(s){return '<option value="'+esc(s.id)+'">'+esc(s.name)+'</option>';}).join(''); sm.value=a;
+    var co=document.getElementById('sdCompany'), b=co.value;
+    co.innerHTML='<option value="">All Clients</option>'+f.companies.map(function(c){return '<option value="'+esc(c.id)+'">'+esc(c.name)+'</option>';}).join(''); co.value=b;
+  }
+
+  function sdRenderBand(c){
+    var cells=[
+      { n:c.met+'/'+c.total,     l:'Activity Done',   cls:'sd-met' },
+      { n:c.partial+'/'+c.total, l:'Partially Done',  cls:'sd-par' },
+      { n:c.notMet+'/'+c.total,  l:'Not Done',        cls:'sd-not' },
+      { n:c.avgScore+'%',        l:'Avg Score',      cls:'sd-avg' },
+      { n:c.target+'%',          l:'Target',         cls:'sd-tgt' }
+    ];
+    document.getElementById('sdBand').innerHTML = cells.map(function(k){
+      return '<div class="sd-kpi '+k.cls+'"><div class="sd-n">'+esc(k.n)+'</div><div class="sd-l">'+esc(k.l)+'</div></div>';
+    }).join('');
+  }
+
+  function sdBar(p){ p=Math.max(0,Math.min(100,Number(p)||0)); var col=p>=100?'var(--com-fg)':(p>=50?'#92400e':'#b91c1c');
+    return '<div class="bar"><div class="bar-fill" style="width:'+p+'%;background:'+col+'"></div><span class="bar-pct">'+p+'%</span></div>'; }
+  function sdScoreCls(p){ return p>=100?'pc-green':(p>=50?'pc-amber':'pc-red'); }
+  function sdStatus(s){ var m={'Met':'sb-strong','Partial':'sb-good','Not Met':'sb-risk'}; return '<span class="sb '+(m[s]||'sb-good')+'">'+esc(s)+'</span>'; }
+
+ function sdRenderScorecard(rows){
+    if (!rows.length){ document.getElementById('sdScoreBody').innerHTML='<tr><td colspan="9" class="adm-empty">No success-measure data. Populate the Success_Measures sheet.</td></tr>'; return; }
+    document.getElementById('sdScoreBody').innerHTML=rows.map(function(r,i){
+      return '<tr><td class="num">'+(i+1)+'</td><td class="adm-strong">'+esc(r.activity)+'</td>'
+        +'<td class="num pc-blue">'+r.implTarget+'%</td>'
+        +'<td class="num '+sdScoreCls(r.implActual)+'"><b>'+r.implActual+'%</b></td>'
+        +'<td class="num pc-blue">'+r.scoreTarget+'%</td>'
+        +'<td class="num">'+r.scoreActual+'%</td>'
+        +'<td class="num '+sdScoreCls(r.achievement)+'"><b>'+r.achievement+'%</b></td>'
+        +'<td>'+sdBar(r.achievement)+'</td>'
+        +'<td>'+sdStatus(r.status)+'</td></tr>';
+    }).join('');
+  }
+
+  function sdRenderMatrix(acts, clients){
+    var head='<th>Client</th><th>OM</th>'+acts.map(function(a){return '<th title="'+esc(a.full)+'">'+esc(a.short)+'</th>';}).join('')+'<th>AVG</th>';
+    document.getElementById('sdMatrixHead').innerHTML=head;
+    if (!clients.length){ document.getElementById('sdMatrixBody').innerHTML='<tr><td colspan="'+(acts.length+3)+'" class="adm-empty">No client data.</td></tr>'; return; }
+    document.getElementById('sdMatrixBody').innerHTML=clients.map(function(c){
+      var cells=acts.map(function(a){ var v=c.cells[a.full];
+        if (v==null||isNaN(v)) return '<td class="num">—</td>';
+        return '<td class="num '+sdScoreCls(v)+'">'+v+'%</td>';
+      }).join('');
+      return '<tr><td class="adm-strong">'+esc(c.company)+'</td><td>'+esc(c.om||'—')+'</td>'+cells
+        +'<td class="num '+sdScoreCls(c.avg)+'"><b>'+c.avg+'%</b></td></tr>';
+    }).join('');
+  }
+</script>
+
+<style>
+  .sd-source{ background:#fffbeb; border:1px solid var(--res-bd); border-radius:10px; padding:9px 14px; font-size:12px; color:#92400e; margin-bottom:16px; }
+  .sd-band{ display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; margin-bottom:18px; }
+  .sd-kpi{ border-radius:14px; padding:16px 14px; text-align:center; border:1px solid var(--line); }
+  .sd-kpi .sd-n{ font-size:26px; font-weight:800; line-height:1; }
+  .sd-kpi .sd-l{ font-size:12px; font-weight:700; margin-top:7px; }
+  .sd-kpi.sd-met{ background:#f0fdf4; } .sd-kpi.sd-met .sd-n{ color:#15803d; }
+  .sd-kpi.sd-par{ background:#fffbeb; } .sd-kpi.sd-par .sd-n{ color:#b45309; }
+  .sd-kpi.sd-not{ background:#fef2f2; } .sd-kpi.sd-not .sd-n{ color:#b91c1c; }
+  .sd-kpi.sd-avg{ background:#eff6ff; } .sd-kpi.sd-avg .sd-n{ color:#1d4ed8; }
+  .sd-kpi.sd-tgt{ background:#ede9fe; } .sd-kpi.sd-tgt .sd-n{ color:#7c3aed; }
+  .pc-blue{ color:#1d4ed8; }
+
+  .sd-up-grp{ margin-bottom:16px; }
+  .sd-up-act{ font-weight:700; font-size:14px; color:#334155; margin-bottom:6px; display:flex; align-items:center; gap:8px; }
+  .up-scope{ font-size:11px; font-weight:700; padding:2px 9px; border-radius:20px; }
+  .up-scope.hod{ background:#ede9fe; color:#7c3aed; }
+  .up-scope.comp{ background:#eff6ff; color:#1d4ed8; }
+
+  .sd-mtabs{ display:inline-flex; gap:2px; background:#ede9fe; border-radius:10px; padding:3px; margin-bottom:12px; }
+  .sd-mtab{ border:0; background:transparent; padding:6px 14px; border-radius:8px; font-weight:700; font-size:12px; cursor:pointer; color:#6b21a8; }
+  .sd-mtab.active{ background:#fff; color:#7c3aed; box-shadow:0 1px 3px rgba(0,0,0,.12); }
+  .sd-mhodpick{ display:flex; align-items:center; gap:8px; margin-bottom:12px; }
+  .sd-mhodpick label{ font-size:12px; font-weight:700; color:#64748b; }
+  .sd-mhodpick select{ padding:6px 10px; border:1px solid var(--line); border-radius:8px; font-size:13px; }
+  .sdm-in{ width:90px; padding:5px 8px; border:1px solid var(--line); border-radius:7px; font-size:13px; text-align:center; }
+</style>

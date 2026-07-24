@@ -65,6 +65,7 @@ import SmopsDashboard from './features/tpms/smops/pages/SmopsDashboard';
 import HodActivity from './features/tpms/smops/pages/HodActivity';
 import SmopsEmployeeTask from './features/tpms/smops/pages/SmopsEmployeeTask';
 import TpmsGate, { RequireTpms } from './features/tpms/TpmsGate';
+import TpmsCalendar from './features/tpms/calendar/TpmsCalendar';
 import ClientFormsHome from './features/tpms/client/ClientFormsHome';
 import ClientRatingForm from './features/tpms/client/ClientRatingForm';
 import ClientFeedbackForm from './features/tpms/client/ClientFeedbackForm';
@@ -169,6 +170,7 @@ const AppRoutes = () => {
         <Route path="logs"           element={<LogsReport />} />
         <Route path="hod"            element={<HodView />} />
         <Route path="employee-tasks" element={<EmployeeTasks />} />
+        <Route path="calendar"       element={<TpmsCalendar />} />
         {/* Forms sub-module: Implementation Feedback / Ownership / Culture / Accountability */}
         <Route path="forms" element={<Outlet />}>
           <Route index element={<Navigate to="implementation-feedback" replace />} />
@@ -184,6 +186,9 @@ const AppRoutes = () => {
           CompanyProvider supplies the shared company selection the SMOPS pages consume. */}
       <Route path="/tpms/smops" element={<PrivateRoute><RequireTpms><CompanyProvider><Outlet /></CompanyProvider></RequireTpms></PrivateRoute>}>
         <Route index                element={<TpmsDashboardIndex />} />
+        {/* Calendar is shared by every TPMS audience — internal SMOPS users and
+            client-side doers alike; the page itself gates the lifecycle actions by role. */}
+        <Route path="calendar"      element={<TpmsCalendar />} />
         <Route path="hod-activity"  element={<HodActivity />} />
         <Route path="tasks"         element={<SmopsEmployeeTask />} />
         <Route path="reviews"       element={<ReviewReport title="Review Report" subtitle="Detailed evaluation and feedback for your companies." />} />

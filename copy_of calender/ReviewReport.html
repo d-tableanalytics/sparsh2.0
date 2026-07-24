@@ -1,0 +1,383 @@
+<div class="topbar">
+  <h1>📝 Review Reports</h1>
+  <div class="adm-controls">
+    <div class="rr-seg">
+      <button id="rrViewCards" class="rr-seg-btn active" onclick="rrSetView('cards')">Cards</button>
+      <button id="rrViewTrend" class="rr-seg-btn" onclick="rrSetView('trend')">Monthly Trend</button>
+    </div>
+    <button class="btn secondary sm" onclick="rrLoad()">↻ Refresh</button>
+    <button class="btn secondary sm" onclick="rrExport()">⬇ CSV</button>
+  </div>
+</div>
+
+<div class="wrap">
+  <div class="rr-cards" id="rrCards"></div>
+
+  <div class="card rr-filterbar">
+    <div class="rr-fgrp">
+      <label>Form</label>
+      <select id="rrSource" onchange="rrLoad()"></select>
+    </div>
+    <div class="rr-fgrp">
+      <label>Month</label>
+      <select id="rrMonth" onchange="rrLoad()"><option value="">All Months</option></select>
+    </div>
+    <div class="rr-fgrp" id="rrCompanyWrap">
+      <label>Company</label>
+      <select id="rrCompany" onchange="rrOnCompany()"><option value="">All Companies</option></select>
+    </div>
+    <div class="rr-fgrp" id="rrHodWrap">
+      <label>HOD</label>
+      <select id="rrHod" onchange="rrLoad()"><option value="">All HODs</option></select>
+    </div>
+    <div class="rr-fgrp rr-grow">
+      <label>Search</label>
+      <input id="rrSearch" placeholder="🔍 HOD, employee, company…" oninput="rrRender()">
+    </div>
+  </div>
+
+  <div id="rrBody"></div>
+</div>
+
+<script>
+  var RR_TOKEN = localStorage.getItem('sessionToken') || '';
+  var rrData = null, rrInit = false, rrView = 'cards';
+
+  function rrSetView(v){
+    rrView = v;
+    document.getElementById('rrViewCards').classList.toggle('active', v==='cards');
+    document.getElementById('rrViewTrend').classList.toggle('active', v==='trend');
+    rrRender();
+  }
+
+  (function(){ rrLoad(); })();
+
+  function rrLoad(){
+    showLoading(true);
+    var src = rrInit ? document.getElementById('rrSource').value : '';
+    var scope = {
+      month: rrInit ? document.getElementById('rrMonth').value : '',
+      companyId: rrInit ? (document.getElementById('rrCompany') ? document.getElementById('rrCompany').value : '') : '',
+      hodId: rrInit ? (document.getElementById('rrHod') ? document.getElementById('rrHod').value : '') : ''
+    };
+    google.script.run
+      .withSuccessHandler(function(d){ rrData=d; rrFillFilters(); rrRender(); showLoading(false); })
+      .withFailureHandler(function(e){ showLoading(false); toast(e.message, true); })
+      .getReviewReports(RR_TOKEN, src, scope);
+  }
+
+  function rrFillFilters(){
+    if (!rrData) return;
+    // source
+    var ss = document.getElementById('rrSource');
+    if (!rrInit){
+      ss.innerHTML = rrData.sources.map(function(s){
+        return '<option value="'+esc(s.id)+'"'+(s.id===rrData.source.id?' selected':'')+'>'+esc(s.label)+'</option>';
+      }).join('');
+    }
+    // month
+    var ms = document.getElementById('rrMonth');
+    ms.innerHTML = '<option value="">All Months</option>' + rrData.monthOptions.map(function(m){
+      return '<option value="'+esc(m.id)+'"'+(m.id===rrData.selectedMonth?' selected':'')+'>'+esc(m.name)+'</option>';
+    }).join('');
+    // company + hod (only Admin/OM)
+    var cw = document.getElementById('rrCompanyWrap');
+    var hw = document.getElementById('rrHodWrap');
+    if (rrData.canPickHod){
+      cw.style.display=''; hw.style.display='';
+      // company dropdown (preserve current selection)
+      var cs = document.getElementById('rrCompany');
+      var curCo = rrInit ? cs.value : '';
+      cs.innerHTML = '<option value="">All Companies</option>' + (rrData.companyOptions||[]).map(function(c){
+        return '<option value="'+esc(c.id)+'"'+(c.id===curCo?' selected':'')+'>'+esc(c.name)+'</option>';
+      }).join('');
+      rrFillHods();   // fills HOD list scoped to selected company
+    } else { cw.style.display='none'; hw.style.display='none'; }
+    rrInit = true;
+  }
+
+
+  // HOD dropdown ko selected company ke hisaab se bharo
+  function rrFillHods(){
+    if (!rrData) return;
+    var hs = document.getElementById('rrHod'); if (!hs) return;
+    var co = document.getElementById('rrCompany').value;
+    var list = (rrData.hodOptions||[]).filter(function(h){ return !co || h.companyId === co; });
+    var cur = hs.value || rrData.selectedHod || '';
+    // agar current HOD selected company me nahi hai to reset
+    var keep = list.some(function(h){ return h.id === cur; }) ? cur : '';
+    hs.innerHTML = '<option value="">All HODs</option>' + list.map(function(h){
+      return '<option value="'+esc(h.id)+'"'+(h.id===keep?' selected':'')+'>'+esc(h.name)+(!co&&h.company?' — '+esc(h.company):'')+'</option>';
+    }).join('');
+  }
+
+  // company change: HOD list refilter karo, agar HOD ab valid nahi to reload
+  function rrOnCompany(){
+    var before = document.getElementById('rrHod').value;
+    rrFillHods();
+    var after = document.getElementById('rrHod').value;
+    // HOD reset ho gaya ya company change hua → data reload
+    rrLoad();
+  }
+
+  function rrColor(v){
+    if(v===''||v==null||isNaN(v)) return '';
+    v=Number(v);
+    if(v>=4) return 'rr-hi'; if(v>=2.5) return 'rr-mid'; return 'rr-lo';
+  }
+
+// per-cell colour by rating/max (green high, amber mid, red low)
+  function rrScoreCol(v, max){
+    if(v===''||v==null||isNaN(v)) return '';
+    var p = (Number(v)/max)*100;
+    if(p>=80) return 'rr-hi'; if(p>=50) return 'rr-mid'; return 'rr-lo';
+  }
+  // Score % colour
+  function rrPctCol(p){ p=Number(p)||0; if(p>=85) return 'rr-hi'; if(p>=70) return 'rr-mid'; return 'rr-lo'; }
+ 
+  // Status by Score % using per-form labels from backend (≥85 / 70-84 / <70)
+  function rrStatus(p){
+    p=Number(p)||0;
+    var st = (rrData && rrData.source && rrData.source.status) || { high:'Strong', mid:'Moderate', low:'Needs Focus' };
+    if(p>=85) return '<span class="rr-badge b-hi">'+esc(st.high)+'</span>';
+    if(p>=70) return '<span class="rr-badge b-mid">'+esc(st.mid)+'</span>';
+    return '<span class="rr-badge b-lo">'+esc(st.low)+'</span>';
+  }
+  function rrMatch(hod, q){
+    if(!q) return true;
+    var hay = (hod.hodName+' '+hod.company+' '+(hod.employees||[]).map(function(e){return e.name;}).join(' ')).toLowerCase();
+    return q.split(/\s+/).every(function(t){ return hay.indexOf(t)!==-1; });
+  }
+
+  function rrRender(){
+    if (!rrData) return;
+    var t = rrData.totals||{};
+    var thirdCard;
+    if (rrData.isYesNo){
+      var yy=0, tt=0;
+      (rrData.hods||[]).forEach(function(h){ if(h.yesno){ yy+=h.yes; tt+=h.total; } });
+      var yp = tt>0 ? Math.round((yy/tt)*100) : 0;
+      thirdCard = rrCard('Yes Score', (tt?yp+'%':'—'), 'rr-c-amber');
+    } else {
+      thirdCard = rrCard('Avg Rating', (t.avgRating===''||t.avgRating==null)?'—':t.avgRating, 'rr-c-amber');
+    }
+    document.getElementById('rrCards').innerHTML =
+        rrCard('Responses', t.responses||0, 'rr-c-blue')
+      + rrCard(rrData.isYesNo?'MDs':'HODs', t.hodCount||0, 'rr-c-green')
+      + thirdCard;
+
+    if (rrView === 'trend'){ rrRenderTrend(); return; }
+
+    var q = (document.getElementById('rrSearch').value||'').trim().toLowerCase();
+    var hods = (rrData.hods||[]).filter(function(h){ return rrMatch(h,q); });
+
+    if (!hods.length){
+      document.getElementById('rrBody').innerHTML = '<div class="card rr-empty">No responses match these filters.</div>';
+      return;
+    }
+
+    document.getElementById('rrBody').innerHTML = hods.map(function(h){
+      var head = '<div class="rr-hod-head"><div>'
+        + '<h3>'+esc(h.hodName||'(HOD)')+'</h3>'
+        + '<span class="rr-sub">'+esc(h.company||'')+(h.monthLabel?' • '+esc(h.monthLabel):'')+'</span></div>'
+        + (h.avg!==''&&h.avg!=null ? '<div class="rr-avg '+rrColor(h.avg)+'">'+h.avg+'</div>' : '')
+        + '</div>';
+
+      if (h.matrix){
+        if (!h.employees.length) return '<div class="card rr-hod">'+head+'<p class="rr-none">No employee ratings.</p></div>';
+        var Q = h.questions, nQ = Q.length, MAX = 5;
+        var legend = Q.map(function(qq,i){ return '<span class="rr-leg"><b>C'+(i+1)+'</b> '+esc(qq.text)+'</span>'; }).join('');
+
+        var thead = '<th class="rr-emp">Emp Name</th>'
+          + Q.map(function(qq,i){ return '<th title="'+esc(qq.text)+'">C'+(i+1)+'</th>'; }).join('')
+          + '<th>Grand&nbsp;Total</th><th>Score&nbsp;%</th><th>Status</th>';
+
+        var colSum = Q.map(function(){ return 0; }), colHas = Q.map(function(){ return false; });
+        var gTotalAll = 0, gMaxAll = 0;
+
+        var body = h.employees.map(function(e){
+          var rowTotal = 0, answered = 0;
+          var cells = Q.map(function(qq,i){
+            var v = e.ratings[qq.id];
+            if (v!=null && !isNaN(v)){ rowTotal += Number(v); answered++; colSum[i]+=Number(v); colHas[i]=true; }
+            return '<td class="'+rrScoreCol(v,MAX)+'">'+(v==null||v===''?'—':v)+'</td>';
+          }).join('');
+          var rowMax = answered * MAX;
+          var pct = rowMax>0 ? Math.round((rowTotal/rowMax)*100) : 0;
+          gTotalAll += rowTotal; gMaxAll += rowMax;
+          return '<tr><td class="rr-emp">'+esc(e.name)+'</td>'+cells
+            + '<td class="rr-gt">'+rowTotal+'</td>'
+            + '<td class="rr-pct '+rrPctCol(pct)+'">'+pct+'%</td>'
+            + '<td>'+rrStatus(pct)+'</td></tr>';
+        }).join('');
+
+        // Grand Total footer row
+        var gpct = gMaxAll>0 ? Math.round((gTotalAll/gMaxAll)*100) : 0;
+        var foot = '<tr class="rr-foot"><td class="rr-emp">Grand Total</td>'
+          + colSum.map(function(s,i){ return '<td>'+(colHas[i]?s:'—')+'</td>'; }).join('')
+          + '<td class="rr-gt">'+gTotalAll+'</td>'
+          + '<td class="rr-pct '+rrPctCol(gpct)+'">'+gpct+'%</td>'
+          + '<td>'+rrStatus(gpct)+'</td></tr>';
+
+        return '<div class="card rr-hod">'+head
+          + '<div class="rr-legend">'+legend+'</div>'
+          + '<div class="rr-tablewrap"><table class="rr-table"><thead><tr>'+thead+'</tr></thead>'
+          + '<tbody>'+body+'</tbody><tfoot>'+foot+'</tfoot></table></div></div>';
+      }
+
+      if (h.yesno){
+        var body = h.items.map(function(it,i){
+          var badge = it.yes ? '<span class="rr-badge b-hi">Yes</span>' : '<span class="rr-badge b-lo">'+esc(it.answer||'No')+'</span>';
+          return '<tr><td class="rr-emp">'+(i+1)+'. '+esc(it.question)+'</td>'
+            + '<td>'+badge+'</td><td>'+esc(it.remark||'—')+'</td></tr>';
+        }).join('');
+        var pct = h.scorePct;
+        var foot = '<tr class="rr-foot"><td class="rr-emp">Score ('+h.yes+' of '+h.total+' Yes)</td>'
+          + '<td class="rr-pct '+rrPctCol(pct)+'">'+pct+'%</td><td>'+rrStatus(pct)+'</td></tr>';
+        return '<div class="card rr-hod">'+head
+          + '<div class="rr-tablewrap"><table class="rr-table"><thead><tr>'
+          + '<th class="rr-emp">Question</th><th>Answer</th><th>Remark</th></tr></thead>'
+          + '<tbody>'+body+'</tbody><tfoot>'+foot+'</tfoot></table></div></div>';
+      }
+
+      // raw (non-matrix) sheet
+      var rth = h.columns.map(function(c){ return '<th>'+esc(c)+'</th>'; }).join('');
+      var rtb = h.rows.map(function(r){ return '<tr>'+r.map(function(c){ return '<td>'+esc(c||'—')+'</td>'; }).join('')+'</tr>'; }).join('');
+      return '<div class="card rr-hod">'+head
+        + '<div class="rr-tablewrap"><table class="rr-table"><thead><tr>'+rth+'</tr></thead><tbody>'+rtb+'</tbody></table></div></div>';
+    }).join('');
+  }
+
+
+  function rrRenderTrend(){
+    var tr = rrData.trend || { months:[], employees:[] };
+    var q = (document.getElementById('rrSearch').value||'').trim().toLowerCase();
+    var emps = (tr.employees||[]).filter(function(e){
+      if(!q) return true;
+      var hay=(e.name+' '+e.company).toLowerCase();
+      return q.split(/\s+/).every(function(t){ return hay.indexOf(t)!==-1; });
+    });
+
+    if (!tr.months.length || !emps.length){
+      document.getElementById('rrBody').innerHTML = '<div class="card rr-empty">No trend data for this scope.</div>';
+      return;
+    }
+
+    // show Company column only when more than one company present
+    var coSet = {}; emps.forEach(function(e){ coSet[e.company]=1; });
+    var multiCo = Object.keys(coSet).length > 1;
+
+    var head = (multiCo?'<th class="rr-emp">Company</th>':'') + '<th class="rr-emp">Emp Name</th>'
+      + tr.months.map(function(m){ return '<th>'+esc(m.name)+'</th>'; }).join('') + '<th>Avg</th>';
+
+    // per-month totals for grand-total row
+    var colSum = tr.months.map(function(){ return 0; }), colCnt = tr.months.map(function(){ return 0; });
+
+    var body = emps.map(function(e){
+      var vals = [], row = tr.months.map(function(m,i){
+        var v = e.scores[m.id];
+        if (v!=null && !isNaN(v)){ vals.push(v); colSum[i]+=v; colCnt[i]++; }
+        return '<td class="'+(v==null?'':rrPctCol(v))+'">'+(v==null?'—':v+'%')+'</td>';
+      }).join('');
+      var avg = vals.length ? Math.round(vals.reduce(function(s,x){return s+x;},0)/vals.length) : null;
+      return '<tr>'+(multiCo?'<td class="rr-emp">'+esc(e.company)+'</td>':'')
+        + '<td class="rr-emp">'+esc(e.name)+'</td>'+row
+        + '<td class="rr-pct '+(avg==null?'':rrPctCol(avg))+'">'+(avg==null?'—':avg+'%')+'</td></tr>';
+    }).join('');
+
+    // Grand Total (avg per month)
+    var gAll=[], footCells = tr.months.map(function(m,i){
+      var a = colCnt[i]>0 ? Math.round(colSum[i]/colCnt[i]) : null;
+      if (a!=null) gAll.push(a);
+      return '<td class="rr-pct '+(a==null?'':rrPctCol(a))+'">'+(a==null?'—':a+'%')+'</td>';
+    }).join('');
+    var gAvg = gAll.length ? Math.round(gAll.reduce(function(s,x){return s+x;},0)/gAll.length) : null;
+    var foot = '<tr class="rr-foot">'+(multiCo?'<td class="rr-emp"></td>':'')
+      + '<td class="rr-emp">Grand Total</td>'+footCells
+      + '<td class="rr-pct">'+(gAvg==null?'—':gAvg+'%')+'</td></tr>';
+
+    var title = '<div class="rr-hod-head"><div><h3>Monthly Score Trend — '+esc(rrData.source.label)+'</h3>'
+      + '<span class="rr-sub">Score % per employee across months'+(multiCo?'':(emps[0]?' • '+esc(emps[0].company):''))+'</span></div></div>';
+
+    document.getElementById('rrBody').innerHTML = '<div class="card rr-hod">'+title
+      + '<div class="rr-tablewrap"><table class="rr-table"><thead><tr>'+head+'</tr></thead>'
+      + '<tbody>'+body+'</tbody><tfoot>'+foot+'</tfoot></table></div></div>';
+  }
+
+
+  function rrCard(label, val, cls){
+    return '<div class="rr-card '+cls+'"><div class="rr-card-n">'+val+'</div><div class="rr-card-l">'+label+'</div></div>';
+  }
+
+  function rrExport(){
+    if (!rrData) return;
+    var out = [['Form','HOD','Company','Month','Employee','Question','Rating']];
+    (rrData.hods||[]).forEach(function(h){
+      if (h.matrix){
+        h.employees.forEach(function(e){
+          h.questions.forEach(function(qq){
+            var v = e.ratings[qq.id]; if (v==null||v==='') return;
+            out.push([rrData.source.label, h.hodName, h.company, h.monthLabel, e.name, qq.text, v]);
+          });
+        });
+      }
+    });
+    var csv = out.map(function(r){ return r.map(function(c){
+      var v=String(c==null?'':c).replace(/"/g,'""'); return /[",\n]/.test(v)?'"'+v+'"':v; }).join(','); }).join('\n');
+    var a=document.createElement('a'); a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));
+    a.download=(rrData.source.id||'review')+'_'+new Date().toISOString().slice(0,10)+'.csv';
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  }
+</script>
+
+<style>
+  .rr-cards{ display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:14px; margin-bottom:16px; }
+  .rr-card{ border-radius:16px; padding:18px; border:1px solid var(--line); background:#fff; }
+  .rr-card-n{ font-size:32px; font-weight:800; line-height:1; }
+  .rr-card-l{ font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; margin-top:6px; color:#475569; }
+  .rr-c-blue{ background:linear-gradient(135deg,#eff6ff,#fff);} .rr-c-blue .rr-card-n{ color:#1d4ed8; }
+  .rr-c-green{ background:linear-gradient(135deg,#f0fdf4,#fff);} .rr-c-green .rr-card-n{ color:#15803d; }
+  .rr-c-amber{ background:linear-gradient(135deg,#fffbeb,#fff);} .rr-c-amber .rr-card-n{ color:#b45309; }
+
+  .rr-filterbar{ display:flex; flex-wrap:wrap; gap:14px; align-items:flex-end; padding:14px 16px; margin-bottom:16px; }
+  .rr-fgrp{ display:flex; flex-direction:column; gap:5px; }
+  .rr-fgrp label{ font-size:11px; font-weight:700; text-transform:uppercase; color:#64748b; letter-spacing:.03em; }
+  .rr-fgrp input, .rr-fgrp select{ padding:7px 10px; border:1px solid var(--line); border-radius:9px; font-size:13px; }
+  .rr-grow{ flex:1; min-width:200px; } .rr-grow input{ width:100%; }
+
+  .rr-hod{ margin-bottom:16px; }
+  .rr-hod-head{ display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:12px; }
+  .rr-hod-head h3{ margin:0; font-size:17px; }
+  .rr-sub{ font-size:13px; color:#64748b; }
+  .rr-avg{ font-size:20px; font-weight:800; padding:6px 14px; border-radius:12px; background:#f1f5f9; color:#334155; }
+
+  .rr-legend{ display:flex; flex-wrap:wrap; gap:8px 16px; margin-bottom:12px; }
+  .rr-leg{ font-size:12px; color:#475569; } .rr-leg b{ color:#1e293b; margin-right:3px; }
+
+  .rr-tablewrap{ overflow-x:auto; }
+  .rr-table{ width:100%; border-collapse:collapse; font-size:13px; }
+  .rr-table th, .rr-table td{ padding:9px 10px; text-align:center; border-bottom:1px solid var(--line); }
+  .rr-table thead th{ background:#1e293b; color:#fff; position:sticky; top:0; font-weight:600; }
+  .rr-emp{ text-align:left !important; min-width:150px; font-weight:600; }
+  .rr-avgc{ font-weight:700; }
+  .rr-hi{ background:#dcfce7; color:#15803d; font-weight:700; }
+  .rr-mid{ background:#fef3c7; color:#b45309; font-weight:700; }
+  .rr-lo{ background:#fee2e2; color:#b91c1c; font-weight:700; }
+  .rr-empty, .rr-none{ color:#94a3b8; text-align:center; padding:30px; margin:0; }
+
+  .rr-gt{ font-weight:800; background:#f1f5f9; }
+  .rr-pct{ font-weight:800; }
+  .rr-foot td{ font-weight:800; background:#0f172a; color:#fff; border-top:2px solid #334155; }
+  .rr-foot .rr-emp{ background:#0f172a; color:#fff; }
+  .rr-foot .rr-pct, .rr-foot .rr-gt{ background:#1e293b; color:#fff; }
+  .rr-badge{ display:inline-block; padding:3px 10px; border-radius:20px; font-size:11px; font-weight:700; }
+  .b-hi{ background:#dcfce7; color:#15803d; }
+  .b-mid{ background:#fef3c7; color:#b45309; }
+  .b-lo{ background:#fee2e2; color:#b91c1c; }
+
+
+  .rr-seg{ display:inline-flex; background:#ede9fe; border-radius:10px; padding:3px; gap:2px; }
+  .rr-seg-btn{ border:0; background:transparent; padding:6px 13px; border-radius:8px; font-weight:700;
+    font-size:12px; cursor:pointer; color:#6b21a8; }
+  .rr-seg-btn.active{ background:#fff; color:#7c3aed; box-shadow:0 1px 3px rgba(0,0,0,.12); }
+</style>

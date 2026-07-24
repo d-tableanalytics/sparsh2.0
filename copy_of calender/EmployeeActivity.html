@@ -1,0 +1,160 @@
+<div class="topbar">
+    <h1>👥 Company Employees — Task Activity <span id="eaCompanyName" style="font-size:13px;opacity:.85"></span></h1>
+    <div class="adm-controls">
+      <select id="eaCompany" class="hidden" onchange="eaLoad()"></select>
+      <select id="eaMonth" onchange="eaLoad()"><option value="">All Months</option></select>
+      <select id="eaEmployee" onchange="eaLoad()"><option value="">All Employees</option></select>
+      <select id="eaDesignation" onchange="eaLoad()"><option value="">All Designations</option></select>
+      <select id="eaSide" onchange="eaLoad()">
+        <option value="">Scheduled by: Any</option>
+        <option value="OM">Scheduled by OM</option>
+        <option value="Client">Scheduled by Client</option>
+      </select>
+      <button class="btn secondary sm" onclick="eaClear()">Clear</button>
+      <button class="btn secondary sm" onclick="eaLoad()">↻ Refresh</button>
+    </div>
+  </div>
+
+<div class="wrap">
+  <div class="adm-kpis" id="eaKpis"></div>
+
+  <div class="card adm-section">
+    <div class="adm-sec-head">EMPLOYEE ACTIVITY SUMMARY</div>
+    <div class="adm-table-wrap">
+      <table class="adm-table">
+        <thead><tr>
+          <th>Employee</th><th>Designation</th><th>Department</th>
+          <th>Total</th><th>Completed</th><th>Missed</th><th>Pending</th>
+          <th>Score</th><th>Progress</th><th></th>
+        </tr></thead>
+        <tbody id="eaBody"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- EMPLOYEE DETAIL MODAL -->
+<div class="overlay" id="eaDetailOverlay">
+  <div class="modal narrow">
+    <header>
+      <h2 id="eaDetailTitle">Employee Activities</h2>
+      <button class="x" onclick="eaCloseDetail()">&times;</button>
+    </header>
+    <div class="mbody" id="eaDetailBody"></div>
+    <div class="footer"><button class="btn secondary" onclick="eaCloseDetail()">Close</button></div>
+  </div>
+</div>
+
+<script>
+  var EA_TOKEN = localStorage.getItem('sessionToken') || '';
+  var EA_ROLE  = localStorage.getItem('userRole') || '';
+  var EA_DATA = null;
+  var eaPickerReady = false;
+
+  (function eaInit(){ eaLoad(); })();
+
+  function eaLoad(){
+    showLoading(true);
+    var scope = {
+      companyId: document.getElementById('eaCompany').value,
+      month: document.getElementById('eaMonth').value,
+      employeeId: document.getElementById('eaEmployee').value,
+      designation: document.getElementById('eaDesignation').value,
+      side: document.getElementById('eaSide').value
+    };
+    google.script.run
+      .withSuccessHandler(function(d){ EA_DATA=d; eaRender(d); showLoading(false); })
+      .withFailureHandler(function(e){ showLoading(false); toast(e.message,true); })
+      .getEmployeeActivityDashboard(EA_TOKEN, scope);
+  }
+
+  function eaClear(){
+    document.getElementById('eaMonth').value='';
+    document.getElementById('eaEmployee').value='';
+    document.getElementById('eaDesignation').value='';
+    document.getElementById('eaSide').value='';
+    if (!document.getElementById('eaCompany').classList.contains('hidden')) document.getElementById('eaCompany').value='';
+    eaLoad();
+  }
+
+  function eaRender(d){
+    document.getElementById('eaCompanyName').textContent = d.company ? '— '+d.company : '';
+
+    if (d.canPickCompany){
+      var co = document.getElementById('eaCompany');
+      co.classList.remove('hidden');
+      if (!eaPickerReady){
+        co.innerHTML = '<option value="">All Companies</option>' +
+          d.companyOptions.map(function(c){ return '<option value="'+esc(c.id)+'">'+esc(c.name)+'</option>'; }).join('');
+        eaPickerReady = true;
+      }
+    }
+
+    var mo = document.getElementById('eaMonth'), curM = mo.value || d.selectedMonth;
+    mo.innerHTML = '<option value="">All Months</option>' + (d.monthOptions||[]).map(function(m){
+      return '<option value="'+esc(m.id)+'"'+(m.id===curM?' selected':'')+'>'+esc(m.name)+'</option>'; }).join('');
+    mo.value = curM;
+
+    var emp = document.getElementById('eaEmployee'), curE = emp.value;
+    emp.innerHTML = '<option value="">All Employees</option>' + (d.employeeOptions||[]).map(function(e){
+      return '<option value="'+esc(e.id)+'">'+esc(e.name)+'</option>'; }).join('');
+    emp.value = curE;
+
+    var des = document.getElementById('eaDesignation'), curD = des.value;
+    des.innerHTML = '<option value="">All Designations</option>' + (d.designationOptions||[]).map(function(x){
+      return '<option>'+esc(x)+'</option>'; }).join('');
+    des.value = curD;
+
+    eaRenderKpis(d.cards);
+    eaRenderRows(d.rows);
+  }
+
+  function eaRenderKpis(c){
+    var cards=[
+      { n:c.totalEmployees, l:'Employees',  s:'In scope',        cls:'k-blue'  },
+      { n:c.totalActivities,l:'Total Tasks',s:'This period',     cls:'k-brown' },
+      { n:c.completed,      l:'Completed',  s:'Done',            cls:'k-green' },
+      { n:c.missed,         l:'Missed',     s:'Overdue/not done',cls:'k-red'   },
+      { n:c.pending,        l:'Pending',    s:'Upcoming',        cls:'k-brown' },
+      { n:c.avgScore+'%',   l:'Avg Score',  s:'Across employees',cls:'k-green' }
+    ];
+    document.getElementById('eaKpis').innerHTML = cards.map(function(k){
+      return '<div class="kpi '+k.cls+'"><div class="kn">'+esc(k.n)+'</div><div class="kl">'+esc(k.l)+'</div><div class="ks">'+esc(k.s)+'</div></div>';
+    }).join('');
+  }
+
+  function eaBar(p){ p=Math.max(0,Math.min(100,Number(p)||0)); var col=p>=90?'var(--com-fg)':(p>=60?'#92400e':'#b91c1c');
+    return '<div class="bar"><div class="bar-fill" style="width:'+p+'%;background:'+col+'"></div><span class="bar-pct">'+p+'%</span></div>'; }
+
+  function eaRenderRows(rows){
+    if (!rows.length){ document.getElementById('eaBody').innerHTML = '<tr><td colspan="10" class="adm-empty">No employees / activity data for this filter.</td></tr>'; return; }
+    document.getElementById('eaBody').innerHTML = rows.map(function(r,i){
+      var pcCls = r.score>=90?'pc-green':(r.score>=60?'pc-amber':'pc-red');
+      return '<tr><td class="adm-strong">'+esc(r.name)+'</td><td>'+esc(r.designation)+'</td><td>'+esc(r.department)+'</td>'
+        + '<td class="num">'+r.total+'</td><td class="num done">'+r.completed+'</td>'
+        + '<td class="num overdue">'+r.missed+'</td><td class="num pending">'+r.pending+'</td>'
+        + '<td class="num '+pcCls+'"><b>'+r.score+'%</b></td>'
+        + '<td>'+eaBar(r.score)+'</td>'
+        + '<td><button class="btn secondary sm" onclick="eaOpenDetail('+i+')">View</button></td></tr>';
+    }).join('');
+  }
+
+  function eaOpenDetail(idx){
+    var r = EA_DATA.rows[idx];
+    document.getElementById('eaDetailTitle').textContent = r.name + ' — Activity Breakdown';
+    if (!r.activities.length){
+      document.getElementById('eaDetailBody').innerHTML = '<p style="color:#94a3b8;margin:0">No activity records.</p>';
+    } else {
+      document.getElementById('eaDetailBody').innerHTML =
+        '<table class="adm-table"><thead><tr><th>Activity</th><th>Completed</th><th>Total</th><th>%</th></tr></thead><tbody>'
+        + r.activities.map(function(a){
+            var cls = a.pct>=90?'pc-green':(a.pct>=60?'pc-amber':'pc-red');
+            return '<tr><td class="adm-strong">'+esc(a.activity)+'</td><td class="num done">'+a.completed+'</td>'
+              + '<td class="num">'+a.total+'</td><td class="num '+cls+'"><b>'+a.pct+'%</b></td></tr>';
+          }).join('')
+        + '</tbody></table>';
+    }
+    document.getElementById('eaDetailOverlay').classList.add('open');
+  }
+  function eaCloseDetail(){ document.getElementById('eaDetailOverlay').classList.remove('open'); }
+</script>

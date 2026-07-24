@@ -1,0 +1,86 @@
+<div class="topbar">
+  <h1>👤 My Profile</h1>
+</div>
+
+<div class="wrap">
+  <div class="card" style="max-width:560px">
+    <h2 style="margin-top:0">Account Details</h2>
+    <div id="profileFields"><p style="color:#94a3b8">Loading…</p></div>
+  </div>
+
+  <div class="card" style="max-width:560px">
+    <h2 style="margin-top:0">Change Password</h2>
+    <div class="grid" style="display:block">
+      <div style="margin-bottom:14px">
+        <label class="fld">Current Password *</label>
+        <input type="password" id="pwOld" autocomplete="current-password" placeholder="Enter current password" style="width:100%">
+      </div>
+      <div style="margin-bottom:14px">
+        <label class="fld">New Password *</label>
+        <input type="password" id="pwNew" autocomplete="new-password" placeholder="At least 6 characters" style="width:100%">
+      </div>
+      <div style="margin-bottom:14px">
+        <label class="fld">Confirm New Password *</label>
+        <input type="password" id="pwNew2" autocomplete="new-password" placeholder="Re-enter new password" style="width:100%">
+      </div>
+      <button class="btn" id="pwBtn" onclick="pfChangePassword()">Update Password</button>
+      <span id="pwMsg" style="margin-left:12px;font-size:13px"></span>
+    </div>
+  </div>
+</div>
+
+<script>
+  var PF_TOKEN = localStorage.getItem('sessionToken') || '';
+
+  (function pfInit(){
+    showLoading(true);
+    google.script.run
+      .withSuccessHandler(function(p){ pfRender(p); showLoading(false); })
+      .withFailureHandler(function(e){ showLoading(false); document.getElementById('profileFields').innerHTML =
+        '<p style="color:#d93025">'+esc(e.message)+'</p>'; })
+      .getProfile(PF_TOKEN);
+  })();
+
+  function pfRender(p){
+    var rows = (p.fields || []).map(function(f){
+      return '<tr><td style="padding:8px 14px 8px 0;color:#64748b;width:140px">'+esc(f[0])+'</td>'
+           + '<td style="padding:8px 0;font-weight:600">'+esc(f[1] || '—')+'</td></tr>';
+    }).join('');
+    document.getElementById('profileFields').innerHTML =
+      '<table style="width:100%;border-collapse:collapse">'+rows+'</table>';
+  }
+
+  function pfChangePassword(){
+    var oldP = document.getElementById('pwOld').value;
+    var newP = document.getElementById('pwNew').value;
+    var new2 = document.getElementById('pwNew2').value;
+    var msg  = document.getElementById('pwMsg');
+    msg.textContent = '';
+
+    if (!oldP || !newP || !new2){ msg.style.color='#d93025'; msg.textContent='All fields are required.'; return; }
+    if (newP.length < 6){ msg.style.color='#d93025'; msg.textContent='New password must be at least 6 characters.'; return; }
+    if (newP !== new2){ msg.style.color='#d93025'; msg.textContent='New passwords do not match.'; return; }
+
+    var btn = document.getElementById('pwBtn');
+    btn.disabled = true; btn.textContent = 'Updating…';
+    google.script.run
+      .withSuccessHandler(function(r){
+        btn.disabled = false; btn.textContent = 'Update Password';
+        if (r && r.ok){
+          msg.style.color='#15803d'; msg.textContent='Password updated ✔';
+          document.getElementById('pwOld').value='';
+          document.getElementById('pwNew').value='';
+          document.getElementById('pwNew2').value='';
+        } else {
+          msg.style.color='#d93025'; msg.textContent=(r && r.error) || 'Update failed.';
+        }
+      })
+      .withFailureHandler(function(e){
+        btn.disabled = false; btn.textContent = 'Update Password';
+        msg.style.color='#d93025'; msg.textContent=e.message;
+      })
+      .changePassword(PF_TOKEN, oldP, newP);
+  }
+
+  function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g,function(m){return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]);}); }
+</script>

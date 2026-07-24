@@ -1,0 +1,203 @@
+<div class="topbar">
+  <h1>📋 Client Dashboard <span id="ldClient" style="font-size:13px;opacity:.85"></span></h1>
+  <div style="display:flex;gap:8px;align-items:center">
+    <select id="ldCompany" class="hidden" onchange="ldLoad()" style="width:auto;min-width:180px;padding:7px 10px;border-radius:8px;border:0"></select>
+    <select id="ldMonth" onchange="ldLoad()" style="width:auto;min-width:130px;padding:7px 10px;border-radius:8px;border:0"><option value="">This Month</option></select>
+  </div>
+</div>
+
+<div class="wrap">
+  <div class="ld-banner" id="ldBanner"></div>
+
+  <!-- Operational metrics -->
+  <div class="adm-kpis" id="ldOpKpis"></div>
+
+  <!-- Activity success scorecard -->
+  <div class="card adm-section">
+    <div class="adm-sec-head">ACTIVITY SCORECARD — SUCCESS MEASURES</div>
+    <div class="ld-succ-band" id="ldSuccBand"></div>
+    <div class="adm-table-wrap">
+      <table class="adm-table" id="ldTable">
+        <thead><tr>
+          <th>#</th><th>Activity Name</th>
+          <th>Impl. Target&nbsp;%</th><th>Actual Impl.&nbsp;%</th>
+          <th>Score Target&nbsp;%</th><th>Actual Score&nbsp;%</th>
+          <th>Achievement&nbsp;%</th><th>Progress</th><th>Status</th>
+        </tr></thead>
+        <tbody id="ldBody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Activity status grid -->
+  <div class="card adm-section">
+    <div class="adm-sec-head">CLIENTS — ACTIVITY STATUS</div>
+    <div class="adm-table-wrap">
+      <table class="adm-table" id="ldGridTable">
+        <thead><tr id="ldGridHeadRow"></tr></thead>
+        <tbody id="ldGridBody"></tbody>
+      </table>
+    </div>
+  </div>
+  <!-- Pending actions -->
+  <div class="card adm-section">
+    <div class="adm-sec-head red">PENDING ACTIONS</div>
+    <div class="adm-table-wrap">
+      <table class="adm-table">
+        <thead><tr><th>Activity</th><th>Action</th><th>Owner</th><th>Target Date</th><th>Status</th><th>Learner Delay</th><th>Staff Delay</th></tr></thead>
+        <tbody id="ldPendBody"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<script>
+  var LD_TOKEN = localStorage.getItem('sessionToken') || '';
+  var LD_ROLE  = localStorage.getItem('userRole') || '';
+  var ldMonthReady = false;
+
+  (function ldInit(){
+    if (LD_ROLE === 'Admin' || LD_ROLE === 'Staff'){
+      google.script.run.withSuccessHandler(function(d){
+        var sel = document.getElementById('ldCompany');
+        sel.classList.remove('hidden');
+        sel.innerHTML = '<option value="">— Select a client —</option>' +
+          d.companies.map(function(c){ return '<option value="'+esc(c.id)+'">'+esc(c.name)+'</option>'; }).join('');
+      }).withFailureHandler(function(e){ toast(e.message,true); }).getInitialData(LD_TOKEN);
+    } else {
+      ldLoad();
+    }
+  })();
+
+  function ldLoad(){
+    var companyId = '';
+    var sel = document.getElementById('ldCompany');
+    if (sel && !sel.classList.contains('hidden')){
+      companyId = sel.value;
+      if (!companyId){ ldClear('Select a client to view their dashboard.'); return; }
+    }
+    var month = document.getElementById('ldMonth').value;
+    showLoading(true);
+    google.script.run
+      .withSuccessHandler(function(d){ ldRender(d); showLoading(false); })
+      .withFailureHandler(function(e){ showLoading(false); toast(e.message, true); })
+      .getLearnerDashboard(LD_TOKEN, { companyId: companyId, month: month });
+  }
+
+  function ldClear(msg){
+    document.getElementById('ldBanner').innerHTML='';
+    document.getElementById('ldOpKpis').innerHTML='';
+    document.getElementById('ldSuccBand').innerHTML='';
+    document.getElementById('ldBody').innerHTML='<tr><td colspan="9" class="adm-empty">'+esc(msg)+'</td></tr>';
+    document.getElementById('ldPendBody').innerHTML='<tr><td colspan="7" class="adm-empty">—</td></tr>';
+    document.getElementById('ldGridHeadRow').innerHTML='';
+    document.getElementById('ldGridBody').innerHTML='';
+  }
+
+  function ldRender(d){
+    // month dropdown (preserve selection)
+    var mo = document.getElementById('ldMonth');
+    var cur = mo.value || (d.selectedMonth||'');
+    mo.innerHTML = '<option value="">This Month</option>' + (d.monthOptions||[]).map(function(m){
+      return '<option value="'+esc(m.id)+'"'+(m.id===cur?' selected':'')+'>'+esc(m.name)+'</option>'; }).join('');
+
+    document.getElementById('ldClient').textContent = d.company ? '— '+d.company+(d.om?' · OM: '+d.om:'') : '';
+    var sCls = { 'STRONG':'sb-strong','GOOD':'sb-good','WATCH':'sb-watch','AT-RISK':'sb-risk' }[d.status]||'sb-good';
+    document.getElementById('ldBanner').innerHTML =
+      '<b>'+esc(d.company)+'</b> · OM: '+esc(d.om||'—')+' · Completion: <b>'+d.completion+'%</b> · Status: <span class="sb '+sCls+'">'+esc(d.status)+'</span>';
+
+    // operational KPI band
+    var o = d.opCards;
+    var opCards = [
+      { n:o.planned,        l:'Planned',      s:'This period',     cls:'k-brown' },
+      { n:o.completed,      l:'Completed',    s:'Activities done', cls:'k-green' },
+      { n:o.completion+'%', l:'Completion',   s:'Done ÷ planned',  cls:'k-green' },
+      { n:o.avgDelay,       l:'Avg Delay',    s:'Days',            cls:'k-brown' }
+    ];
+    document.getElementById('ldOpKpis').innerHTML = opCards.map(function(k){
+      return '<div class="kpi '+k.cls+'"><div class="kn">'+esc(k.n)+'</div><div class="kl">'+esc(k.l)+'</div><div class="ks">'+esc(k.s)+'</div></div>';
+    }).join('');
+
+    // success summary band
+    var c = d.cards;
+    document.getElementById('ldSuccBand').innerHTML =
+        '<span class="ld-chip met">Met '+c.met+'/'+c.total+'</span>'
+      + '<span class="ld-chip par">Partial '+c.partial+'/'+c.total+'</span>'
+      + '<span class="ld-chip not">Not Met '+c.notMet+'/'+c.total+'</span>'
+      + '<span class="ld-chip avg">Avg Score '+c.avgScore+'%</span>'
+      + '<span class="ld-chip tgt">Target '+c.target+'%</span>';
+
+    ldRenderRows(d.rows);
+    ldRenderPending(d.pendingActions);
+    ldRenderGrid(d.activities, d.clientsGrid);
+  }
+
+  function ldCell(cell){
+    if (!cell || !cell.total) return '<td class="cellc"></td>';
+    var cls = cell.status==='done' ? 'done' : cell.status==='overdue' ? 'over' : cell.status==='cancelled' ? 'canc' : 'pend';
+    return '<td class="cellc ratio '+cls+'">'+cell.done+'/'+cell.total+'</td>';
+  }
+  function ldRenderGrid(activities, clients){
+    activities = activities || []; clients = clients || [];
+    var head = '<th>Client</th>' + activities.map(function(a){ return '<th title="'+esc(a.full)+'">'+esc(a.short)+'</th>'; }).join('') + '<th>Done</th><th>Pct</th>';
+    document.getElementById('ldGridHeadRow').innerHTML = head;
+    if (!clients.length){ document.getElementById('ldGridBody').innerHTML = '<tr><td colspan="'+(activities.length+3)+'" class="adm-empty">No activity data for this period.</td></tr>'; return; }
+    document.getElementById('ldGridBody').innerHTML = clients.map(function(c){
+      var cells = activities.map(function(a){ return ldCell(c.cells[a.full]); }).join('');
+      var pcCls = c.pct>=90?'pc-green':(c.pct>=80?'pc-amber':'pc-red');
+      return '<tr><td class="adm-strong">'+esc(c.company)+'</td>'+cells
+        + '<td class="num done">'+c.done+'</td><td class="num '+pcCls+'"><b>'+c.pct+'%</b></td></tr>';
+    }).join('');
+  }
+
+  function ldBar(p){ p=Math.max(0,Math.min(100,Number(p)||0)); var col=p>=100?'var(--com-fg)':(p>=50?'#92400e':'#b91c1c');
+    return '<div class="bar"><div class="bar-fill" style="width:'+p+'%;background:'+col+'"></div><span class="bar-pct">'+p+'%</span></div>'; }
+  function ldStatus(s){ var m={'Met':'sb-strong','Partial':'sb-good','Not Met':'sb-risk'}; return '<span class="sb '+(m[s]||'sb-good')+'">'+esc(s)+'</span>'; }
+
+  function ldRenderRows(rows){
+    if (!rows.length){ document.getElementById('ldBody').innerHTML = '<tr><td colspan="9" class="adm-empty">No success measures recorded for this client yet.</td></tr>'; return; }
+    document.getElementById('ldBody').innerHTML = rows.map(function(r, i){
+      var achCls = r.achievement>=100?'pc-green':(r.achievement>=50?'pc-amber':'pc-red');
+      var ia = r.implActual;
+      var implCell = (ia===''||ia==null) ? '—' : '<span class="ld-impl '+(Number(ia)>=100?'yes':'no')+'">'+ia+'%</span>';
+      return '<tr><td class="num">'+(i+1)+'</td><td class="adm-strong">'+esc(r.activity)+'</td>'
+        + '<td class="num pc-blue">'+r.implTarget+'%</td>'
+        + '<td class="num">'+implCell+'</td>'
+        + '<td class="num pc-blue">'+(r.target===''?'—':r.target+'%')+'</td>'
+        + '<td class="num">'+(r.actual===''?'—':r.actual+'%')+'</td>'
+        + '<td class="num '+achCls+'"><b>'+r.achievement+'%</b></td>'
+        + '<td>'+ldBar(r.achievement)+'</td>'
+        + '<td>'+ldStatus(r.status)+'</td></tr>';
+    }).join('');
+  }
+  function ldRenderPending(rows){
+    if (!rows || !rows.length){ document.getElementById('ldPendBody').innerHTML='<tr><td colspan="7" class="adm-empty">No pending actions 🎉</td></tr>'; return; }
+    document.getElementById('ldPendBody').innerHTML = rows.map(function(r){
+      var ldCls = /^\d+d$/.test(r.learnerDelay||'') ? 'overdue' : 'pending';
+      var sdCls = /^\d+d$/.test(r.staffDelay||'') ? 'overdue' : 'pending';
+      return '<tr><td class="adm-strong">'+esc(r.activity)+'</td><td>'+esc(r.action)+'</td><td>'+esc(r.owner||'—')+'</td>'
+        + '<td>'+esc(r.target||'—')+'</td><td class="pending">'+esc(r.status)+'</td>'
+        + '<td class="'+ldCls+'">'+esc(r.learnerDelay||'—')+'</td>'
+        + '<td class="'+sdCls+'">'+esc(r.staffDelay||'—')+'</td></tr>';
+    }).join('');
+  }
+</script>
+
+<style>
+  .ld-banner{ background:#f0fdf4; border:1px solid var(--com-bd); border-radius:12px; padding:12px 16px; margin-bottom:18px; font-size:13.5px; color:#15803d; }
+  .ld-succ-band{ display:flex; flex-wrap:wrap; gap:8px; padding:12px 16px; background:#faf8ff; border-bottom:1px solid var(--line); }
+  .ld-chip{ font-size:12px; font-weight:700; padding:4px 10px; border-radius:20px; }
+  .ld-chip.met{ background:#dcfce7; color:#15803d; } .ld-chip.par{ background:#fef3c7; color:#b45309; }
+  .ld-chip.not{ background:#fee2e2; color:#b91c1c; } .ld-chip.avg{ background:#dbeafe; color:#1d4ed8; }
+  .ld-chip.tgt{ background:#ede9fe; color:#7c3aed; }
+
+  .ld-impl{ display:inline-block; font-weight:700; padding:2px 9px; border-radius:20px; font-size:12px; }
+  .ld-impl.yes{ background:#dcfce7; color:#15803d; }
+  .ld-impl.no{ background:#fee2e2; color:#b91c1c; }
+  .pc-blue{ color:#1d4ed8; }
+  .cellc.ratio{ font-weight:700; font-size:12.5px; padding:6px 4px; }
+  .cellc.ratio.done{ color:#15803d; background:#f0fdf4; }
+  .cellc.ratio.pend{ color:#92400e; background:#fffbeb; }
+  .cellc.ratio.over{ color:#b91c1c; background:#fef2f2; }
+  .cellc.ratio.canc{ color:#64748b; background:#f1f5f9; }
+</style>

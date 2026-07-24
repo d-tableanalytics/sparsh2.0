@@ -1,0 +1,854 @@
+<div class="topbar">
+  <h1>📅 Calendar</h1>
+  <div style="display:flex;gap:8px">
+    <button class="btn ghost" id="calReqBtn" onclick="calOpenRequests()" style="display:none">📨 Reschedule Requests <span id="calReqCount" class="req-badge" style="display:none">0</span></button>
+    <button class="btn ghost" id="calNewBtn" onclick="calNewSchedule()">+ Schedule Calendar</button>
+  </div>
+</div>
+
+<div class="wrap">
+  <div class="card">
+    <div class="cal-head">
+      <div class="nav">
+        <button class="btn secondary sm" onclick="calChangeMonth(-1)">‹ Prev</button>
+        <h2 id="calMonthLabel">…</h2>
+        <button class="btn secondary sm" onclick="calChangeMonth(1)">Next ›</button>
+      </div>
+      <div class="legend">
+        <span class="lg sch">● Scheduled</span>
+        <span class="lg res">● Rescheduled</span>
+        <span class="lg can">● Cancelled</span>
+        <span class="lg com">● Completed</span>
+        <span class="lg lap">● Lapsed</span>
+      </div>
+    </div>
+
+    <div class="cal-stats" id="calStats"></div>
+
+    <div class="cal-filters" id="calFilters">
+        <select id="fActivity" onchange="calApplyFilters()"><option value="">All Activities</option></select>
+        <select id="fCompany" onchange="calApplyFilters()"><option value="">All Companies</option></select>
+
+
+        <select id="fRecurrence" onchange="calApplyFilters()">
+          <option value="">All Recurrence</option>
+          <option value="One-time">One-time</option>
+          <option value="Monthly">Monthly</option>
+          <option value="Weekly">Weekly</option>
+          <option value="Periodically">Periodically</option>
+        </select>
+
+        <select id="fStatus" onchange="calApplyFilters()">
+          <option value="">All Status</option>
+          <option value="Scheduled">Scheduled</option>
+          <option value="Rescheduled">Rescheduled</option>
+          <option value="Cancelled">Cancelled</option>
+          <option value="Completed">Completed</option>
+          <option value="Lapsed">Lapsed</option>
+        </select>
+
+        <button class="btn secondary sm" onclick="calClearFilters()">Clear</button>
+      </div>
+
+    <div class="grid7" id="calDow"></div>
+    <div class="grid7" id="calGrid" style="margin-top:6px"></div>
+  </div>
+</div>
+
+<!-- ADD / EDIT MODAL -->
+<div class="overlay" id="calOverlay">
+  <div class="modal">
+    <header>
+      <h2 id="calModalTitle">Schedule Calendar</h2>
+      <button class="x" onclick="calCloseModal()">&times;</button>
+    </header>
+    <div class="mbody">
+      <div id="calFormFields">
+        <div class="grid">
+
+          <div class="full hidden" id="calStatusWrap">
+            <label class="fld">Status *</label>
+            <select id="calStatus">
+              <option value="Scheduled">Scheduled</option>
+              <option value="Rescheduled">Rescheduled</option>
+              <option value="Cancelled">Cancelled</option>
+              <option value="Completed">Completed</option>
+            </select>
+            <div class="hint" id="calStatusHint">Changing the date or time will mark this as <b>Rescheduled</b>.</div>
+          </div>
+
+          <div class="full">
+            <label class="fld">Title *</label>
+            <input id="calTitle" placeholder="Enter title">
+          </div>
+
+          <div class="cal-time-field">
+            <label class="fld" id="calTimeLabel">Time</label>
+            <input type="time" id="calEventTime" onchange="calMaybeReschedule()">
+          </div>
+
+          <div>
+            <label class="fld">Activity *</label>
+            <select id="calActivity"><option value="">Loading…</option></select>
+          </div>
+
+          <div>
+            <label class="fld">Company Name *</label>
+            <select id="calCompany" onchange="calOnCompanyChange()"><option value="">Loading…</option></select>
+          </div>
+
+          <div>
+            <label class="fld">Recurrence *</label>
+            <select id="calRecurrence" onchange="calOnRecurrenceChange()">
+              <option value="One-time">One-time</option>
+              <option value="Monthly">Monthly</option>
+              <option value="Weekly">Weekly</option>
+              <option value="Periodically">Periodically (specific weekdays)</option>
+            </select>
+          </div>
+
+          <div>
+            <label class="fld" id="calStartLabel">Plan start Date *</label>
+            <input type="date" id="calPlanStart" onchange="calMaybeReschedule()">
+          </div>
+
+          <div id="calEndWrap">
+            <label class="fld">Plan end Date *</label>
+            <input type="date" id="calPlanEnd">
+          </div>
+
+          <div class="full hidden" id="calWeekdayWrap">
+            <label class="fld">Recurring Weekdays *</label>
+            <div class="weekdays" id="calWeekdays"></div>
+          </div>
+
+          <div>
+            <label class="fld">Staff Assigner * (multi-select)</label>
+            <div class="checkbox-box" id="calStaffAssigner">Select a company first</div>
+            <div class="hint">SMOps of the selected company is pre-checked.</div>
+          </div>
+
+          <div>
+            <label class="fld">Departments * (multi-select)</label>
+            <div class="checkbox-box" id="calDepartments">Loading…</div>
+          </div>
+
+          <div class="full">
+            <label class="fld">Company Assigners (doers) (multi-select)</label>
+            <div class="checkbox-box" id="calCompanyAssigners">Select company &amp; departments</div>
+          </div>
+
+          <div class="full">
+            <label class="fld">Comment</label>
+            <textarea id="calComment" rows="3" placeholder="Optional notes…" style="width:100%;resize:vertical"></textarea>
+          </div>
+
+          <!-- Reminders (create mode only) -->
+          <div class="full" id="calRemindersWrap">
+            <label class="fld">🔔 Reminders (optional)</label>
+            <div id="calReminderList"></div>
+            <button type="button" class="btn secondary sm" onclick="calAddReminderRow()">+ Add reminder</button>
+            <div class="hint">Before/After reminders apply to every occurrence. A schedule email is sent on save; reminders email at their time.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="footer">
+      <button class="btn secondary" onclick="calCloseModal()">Cancel</button>
+      <button class="btn" id="calSaveBtn" onclick="calSave()">Save Schedule</button>
+    </div>
+  </div>
+</div>
+
+<!-- DAY DETAIL MODAL -->
+<div class="overlay" id="calDayOverlay">
+  <div class="modal narrow">
+    <header>
+      <h2 id="calDayTitle">Events</h2>
+      <button class="x" onclick="calCloseDay()">&times;</button>
+    </header>
+    <div class="mbody" id="calDayBody"></div>
+    <div class="footer">
+      <button class="btn" id="calDayAddBtn">+ Add on this day</button>
+    </div>
+  </div>
+</div>
+
+<!-- RESCHEDULE REQUEST MODAL (learner) -->
+<div class="overlay" id="calRROverlay">
+  <div class="modal narrow">
+    <header><h2>🔄 Request Reschedule</h2><button class="x" onclick="calRRClose()">&times;</button></header>
+    <div class="mbody">
+      <div id="calRRInfo" style="margin-bottom:14px;font-size:14px"></div>
+      <div style="display:grid;gap:12px">
+        <div><label class="fld">New Date *</label><input type="date" id="calRRDate"></div>
+        <div><label class="fld">New Time</label><input type="time" id="calRRTime"></div>
+        <div><label class="fld">Reason</label><textarea id="calRRReason" rows="3" placeholder="Why reschedule?" style="width:100%;resize:vertical"></textarea></div>
+      </div>
+      <div class="hint">Requests must be raised at least 12 hours before the activity. Staff will approve or reject.</div>
+    </div>
+    <div class="footer"><button class="btn secondary" onclick="calRRClose()">Cancel</button><button class="btn" onclick="calRRSubmit()">Send Request</button></div>
+  </div>
+</div>
+
+<!-- RESCHEDULE REQUESTS PANEL (staff/admin) -->
+<div class="overlay" id="calReqOverlay">
+  <div class="modal narrow">
+    <header><h2>📨 Reschedule Requests</h2><button class="x" onclick="calReqClose()">&times;</button></header>
+    <div class="mbody" id="calReqBody">Loading…</div>
+    <div class="footer"><button class="btn secondary" onclick="calReqClose()">Close</button></div>
+  </div>
+</div>
+
+<!-- CONFLICT / DUPLICATE ALERT MODAL -->
+<div class="overlay" id="calConflictOverlay">
+  <div class="modal narrow">
+    <header style="background:#fffbeb">
+      <h2 style="color:#b45309">⚠ Already Scheduled</h2>
+      <button class="x" onclick="calCloseConflict()">&times;</button>
+    </header>
+    <div class="mbody" id="calConflictBody"></div>
+    <div class="footer">
+      <button class="btn secondary" onclick="calCloseConflict()">Cancel</button>
+      <button class="btn" id="calConflictProceed">Schedule Anyway</button>
+    </div>
+  </div>
+</div>
+
+<script>
+  /* ===== Calendar page (reuses global el/toast/showLoading/esc from Index) ===== */
+  var CAL_TOKEN = localStorage.getItem('sessionToken') || '';
+  var CAL_ROLE  = localStorage.getItem('userRole') || '';
+  var calData = null, calEditingId = null;
+  var calViewYear, calViewMonth, calMonthEvents = {};
+  var calPendingDoers = null, calPendingStaff = null;
+  var calOrigDate = '', calOrigTime = '', calOrigStatus = 'Scheduled';
+  var calCompanyMap = {};
+  var CAL_MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+
+  // permissions
+  var CAN_CREATE = (CAL_ROLE === 'Admin' || CAL_ROLE === 'Staff');   // edit existing
+  var CAN_SCHEDULE = (CAL_ROLE === 'Admin' || CAL_ROLE === 'Staff' || CAL_ROLE === 'Learner');  // create new
+  var CAN_DELETE = (CAL_ROLE === 'Admin');
+  var IS_LEARNER = (CAL_ROLE === 'Learner');
+  var IS_STAFF   = (CAL_ROLE === 'Admin' || CAL_ROLE === 'Staff');
+
+  (function calInit(){
+    document.getElementById('calDow').innerHTML =
+      ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'].map(d => '<div class="dow">'+d+'</div>').join('');
+    if (!CAN_SCHEDULE) document.getElementById('calNewBtn').classList.add('hidden');
+    if (IS_STAFF){ document.getElementById('calReqBtn').style.display=''; calLoadReqCount(); }
+    if (CAL_ROLE === 'Learner'){ var cf=document.getElementById('fCompany'); if(cf) cf.style.display='none'; }
+    var t = new Date(); calViewYear = t.getFullYear(); calViewMonth = t.getMonth();
+
+    if (window.__INITIAL_DATA){ calInitUI(window.__INITIAL_DATA); calLoadMonth(); return; }
+    showLoading(true);
+    google.script.run
+      .withSuccessHandler(function(d){ window.__INITIAL_DATA = d; calInitUI(d); calLoadMonth(); })
+      .withFailureHandler(function(e){ showLoading(false); toast(e.message, true); })
+      .getInitialData(CAL_TOKEN);
+  })();
+
+  function calInitUI(d){
+    calData = d;
+    document.getElementById('calActivity').innerHTML = '<option value="">— Select —</option>' +
+      d.activities.map(function(a){ return '<option>'+esc(a)+'</option>'; }).join('');
+    document.getElementById('calCompany').innerHTML = '<option value="">— Select —</option>' +
+      d.companies.map(function(c){ calCompanyMap[c.id]=c; return '<option value="'+esc(c.id)+'">'+esc(c.name)+'</option>'; }).join('');
+    document.getElementById('calDepartments').innerHTML = d.departments.length
+      ? d.departments.map(function(dep){ return '<label><input type="checkbox" class="cal-dep" value="'+esc(dep)+'" onchange="calRefreshDoers()"> '+esc(dep)+'</label>'; }).join('')
+      : '<span style="color:#94a3b8">No departments</span>';
+    document.getElementById('calWeekdays').innerHTML =
+      ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'].map(function(n,i){ return '<label><input type="checkbox" class="cal-wd" value="'+i+'"> '+n+'</label>'; }).join('');
+
+      document.getElementById('fActivity').innerHTML = '<option value="">All Activities</option>' +
+      d.activities.map(function(a){ return '<option>'+esc(a)+'</option>'; }).join('');
+    document.getElementById('fCompany').innerHTML = '<option value="">All Companies</option>' +
+      d.companies.map(function(c){ return '<option value="'+esc(c.name)+'">'+esc(c.name)+'</option>'; }).join('');
+  }
+
+  /* ----- calendar grid ----- */
+  function calChangeMonth(delta){
+    calViewMonth += delta;
+    if (calViewMonth < 0){ calViewMonth = 11; calViewYear--; }
+    if (calViewMonth > 11){ calViewMonth = 0; calViewYear++; }
+    calLoadMonth();
+  }
+   function calLoadMonth(){
+    document.getElementById('calMonthLabel').textContent = CAL_MONTHS[calViewMonth] + ' ' + calViewYear;
+    showLoading(true);
+    google.script.run
+      .withSuccessHandler(function(events){
+        calMonthEvents = {};
+        events.forEach(function(e){ (calMonthEvents[e.date]=calMonthEvents[e.date]||[]).push(e); });
+        calRenderGrid(); showLoading(false);
+      })
+      .withFailureHandler(function(e){ showLoading(false); toast(e.message, true); })
+      .getEvents(CAL_TOKEN, calViewYear, calViewMonth);
+  }
+
+
+  function calStClass(s){ return 'st-' + String(s || 'Scheduled').toLowerCase(); }
+  function calTypeIcon(){ return '📅'; }
+  function calYmd(y,m,d){ return y + '-' + ('0'+m).slice(-2) + '-' + ('0'+d).slice(-2); }
+  function calSplit(s){ return String(s||'').split(',').map(function(x){ return x.trim(); }).filter(Boolean); }
+
+  function calFilteredEventsFor(ds){
+    var evs = calMonthEvents[ds] || [];
+    var fActivity = document.getElementById('fActivity') ? document.getElementById('fActivity').value : '';
+    var fCompany = document.getElementById('fCompany') ? document.getElementById('fCompany').value : '';
+    var fRec = document.getElementById('fRecurrence') ? document.getElementById('fRecurrence').value : '';
+    var fStatus = document.getElementById('fStatus') ? document.getElementById('fStatus').value : '';
+    return evs.filter(function(e){
+      if (fStatus && e.status !== fStatus) return false;
+      if (fActivity && e.activity !== fActivity) return false;
+      if (fCompany && e.company !== fCompany) return false;
+      if (fRec && e.recurrence !== fRec) return false;
+      return true;
+    });
+  }
+  function calApplyFilters(){ calRenderGrid(); }
+  function calClearFilters(){
+   ['fActivity','fCompany','fRecurrence','fStatus'].forEach(function(id){
+      var el2 = document.getElementById(id); if (el2) el2.value = '';
+    });
+    calRenderGrid();
+  }
+
+
+function calRenderStats(){
+    var counts = { total:0, Scheduled:0, Rescheduled:0, Cancelled:0, Completed:0, Lapsed:0 };
+    var dim = new Date(calViewYear, calViewMonth + 1, 0).getDate();
+    for (var d = 1; d <= dim; d++){
+      var ds = calYmd(calViewYear, calViewMonth + 1, d);
+      calFilteredEventsFor(ds).forEach(function(e){
+        counts.total++;
+        if (counts[e.status] !== undefined) counts[e.status]++;
+      });
+    }
+    document.getElementById('calStats').innerHTML =
+        '<div class="stat total"><div class="n">'+counts.total+'</div><div class="l">Total</div></div>'
+      + '<div class="stat sch"><div class="n">'+counts.Scheduled+'</div><div class="l">Scheduled</div></div>'
+      + '<div class="stat res"><div class="n">'+counts.Rescheduled+'</div><div class="l">Rescheduled</div></div>'
+      + '<div class="stat com"><div class="n">'+counts.Completed+'</div><div class="l">Completed</div></div>'
+      + '<div class="stat can"><div class="n">'+counts.Cancelled+'</div><div class="l">Cancelled</div></div>'
+      + '<div class="stat lap"><div class="n">'+counts.Lapsed+'</div><div class="l">Lapsed</div></div>';
+  }
+
+
+
+  function calRenderGrid(){
+     calRenderStats();
+    var first = new Date(calViewYear, calViewMonth, 1).getDay();
+    var dim = new Date(calViewYear, calViewMonth + 1, 0).getDate();
+    var today = new Date(); var todayStr = calYmd(today.getFullYear(), today.getMonth()+1, today.getDate());
+    var html = '';
+    for (var i = 0; i < first; i++) html += '<div class="day empty"></div>';
+    for (var d = 1; d <= dim; d++){
+      var ds = calYmd(calViewYear, calViewMonth + 1, d);
+      var evs = calFilteredEventsFor(ds);
+      var isToday = ds === todayStr ? ' today' : '';
+      var pills = evs.slice(0,3).map(function(e){
+        var tm = e.time ? e.time + ' ' : '';
+        var mineCls = e.mine ? ' pill-mine' : '';
+        var mineIco = e.mine ? '📌 ' : '';
+        return '<span class="pill '+calStClass(e.status)+mineCls+'" title="'+esc(e.title)+' — '+esc(e.status)+(e.mine?' — scheduled by you':'')+'">'+mineIco+calTypeIcon()+' '+esc(tm)+esc(e.title)+'</span>';
+      }).join('');
+      if (evs.length > 3) pills += '<span class="more">+'+(evs.length-3)+' more</span>';
+      html += '<div class="day'+isToday+'" onclick="calOpenDay(\''+ds+'\')"><div class="num">'+d+'</div>'+pills+'</div>';
+    }
+    document.getElementById('calGrid').innerHTML = html;
+  }
+
+  /* ----- day detail ----- */
+  function calOpenDay(ds){
+    var evs = calFilteredEventsFor(ds);
+    document.getElementById('calDayTitle').textContent = 'Events on ' + ds;
+    document.getElementById('calDayBody').innerHTML = evs.length ? evs.map(function(e){
+      var editBtn = (CAN_CREATE || e.mine) ? '<button class="btn secondary sm" onclick=\'calEditEvent('+JSON.stringify(e).replace(/'/g,"&#39;")+')\'>✏️ Edit</button>' : '';
+      var delBtn  = CAN_DELETE ? '<button class="btn danger sm" onclick="calDelEvent(\''+e.id+'\')">🗑️ Delete</button>' : '';
+      return '<div class="ev s-'+String(e.status||'Scheduled').toLowerCase()+'">'
+        + '<div class="ev-top"><span class="type-tag">📅'+(e.mine?' <span class="mine-chip">📌 You scheduled</span>':'')+(e.uploadRequired?' <span class="up-chip">📎 Upload</span>':'')+'</span>'
+        + '<span class="badge '+calStClass(e.status)+'">'+esc(e.status)+(e.rescheduleCount?'<span class="rc">↻ '+e.rescheduleCount+'</span>':'')+'</span></div>'
+        + '<h4>'+esc(e.title)+'</h4>'
+        + '<div class="meta">'
+          + (e.time ? '🕒 '+esc(e.time)+'<br>' : '')
+          + (e.activity ? '🏷️ '+esc(e.activity)+'<br>' : '')
+          + (e.company ? '🏢 '+esc(e.company)+'<br>' : '')
+          + (e.departments ? '🗂️ '+esc(e.departments)+'<br>' : '')
+          + (e.companyAssigners ? '👥 '+esc(e.companyAssigners)+'<br>' : '')
+          + (e.staffAssigner ? '🧑‍💼 '+esc(e.staffAssigner)+'<br>' : '')
+          + (e.completedAt ? '✅ Completed: '+esc(e.completedAt)+'<br>' : '')
+          + (e.reminderCount ? '🔔 '+e.reminderCount+' reminder(s)' : '')
+        + '</div>'
+        + (e.uploadRequired ? calUploadBlock(e) : '')
+        + (e.learnerDone==='Yes' ? '<div class="ldone-badge">✅ Marked done by doer — awaiting staff confirmation</div>' : '')
+        + calLifecycleBtns(e)
+        + ((editBtn||delBtn) ? '<div class="actions">'+editBtn+delBtn+'</div>' : '')
+        + '</div>';
+    }).join('') : '<p style="color:#94a3b8;margin:0">No events on this day.</p>';
+
+    document.querySelectorAll('#calDayBody .cal-upload').forEach(function(el){
+      calLoadUploads(el.getAttribute('data-sid'));
+    });
+
+    var addBtn = document.getElementById('calDayAddBtn');
+    if (CAN_SCHEDULE){ addBtn.classList.remove('hidden'); addBtn.onclick = function(){ calCloseDay(); calNewSchedule(ds); }; }
+    else addBtn.classList.add('hidden');
+    document.getElementById('calDayOverlay').classList.add('open');
+  }
+  function calCloseDay(){ document.getElementById('calDayOverlay').classList.remove('open'); }
+
+  /* ----- task uploads (upload-required activities) ----- */
+  function calUploadBlock(e){
+    var sid = esc(e.id);
+    return '<div class="cal-upload" data-sid="'+sid+'">'
+      + '<div class="cal-up-head">📎 Upload for <b>'+esc(e.activity)+'</b>'
+      + '<span class="cal-up-badge up-wait" id="upb-'+sid+'">…</span></div>'
+      + '<div class="cal-up-list" id="upl-'+sid+'">Loading…</div>'
+      + '<div class="cal-up-controls">'
+      + '<input type="file" id="upf-'+sid+'">'
+      + '<button class="btn secondary sm" onclick="calUpload(\''+sid+'\')">⬆ Upload</button>'
+      + '</div></div>';
+  }
+
+  function calLoadUploads(sid){
+    google.script.run
+      .withSuccessHandler(function(list){
+        var badge = document.getElementById('upb-'+sid);
+        var listEl = document.getElementById('upl-'+sid);
+        if (!listEl) return;
+        if (badge){
+          badge.className = 'cal-up-badge ' + (list.length ? 'up-done' : 'up-need');
+          badge.textContent = list.length ? '✅ '+list.length+' file(s)' : 'Pending';
+        }
+        listEl.innerHTML = list.length ? list.map(function(f){
+          return '<div class="cal-up-file"><a href="'+esc(f.url)+'" target="_blank">📄 '+esc(f.name)+'</a>'
+            + '<span class="cal-up-meta">'+esc(f.empName||f.by||'')+(f.at?' • '+esc(f.at):'')+'</span></div>';
+        }).join('') : '<span style="color:#94a3b8">No files uploaded yet.</span>';
+      })
+      .withFailureHandler(function(e){
+        var listEl = document.getElementById('upl-'+sid);
+        if (listEl) listEl.innerHTML = '<span style="color:#ef4444">'+esc(e.message)+'</span>';
+      })
+      .getTaskUploads(CAL_TOKEN, sid);
+  }
+
+  function calUpload(sid){
+    var input = document.getElementById('upf-'+sid);
+    if (!input || !input.files || !input.files[0]) return toast('Choose a file first', true);
+    var file = input.files[0];
+    if (file.size > 25*1024*1024) return toast('Max file size 25 MB', true);
+    var reader = new FileReader();
+    reader.onload = function(){
+      var b64 = String(reader.result).split(',')[1];
+      showLoading(true);
+      google.script.run
+        .withSuccessHandler(function(){ showLoading(false); toast('Uploaded ✔'); input.value=''; calLoadUploads(sid); })
+        .withFailureHandler(function(e){ showLoading(false); toast(e.message, true); })
+        .uploadTaskFile(CAL_TOKEN, sid, { name:file.name, mimeType:file.type, data:b64 });
+    };
+    reader.readAsDataURL(file);
+  }
+
+  function calShowConflict(chk, payload){
+    var rows = (chk.existing||[]).map(function(m){
+      return '<div class="ev s-'+String(m.status||'Scheduled').toLowerCase()+'" style="margin-bottom:10px">'
+        + '<div class="ev-top"><span class="badge '+calStClass(m.status)+'">'+esc(m.status)+'</span></div>'
+        + '<h4>'+esc(m.title||'(no title)')+'</h4>'
+        + '<div class="meta">'
+          + '📅 '+esc(m.date)+(m.time?(' &nbsp;🕒 '+esc(m.time)):'')+'<br>'
+          + (m.doers ? '👥 '+esc(m.doers)+'<br>' : '')
+          + (m.staff ? '🧑‍💼 '+esc(m.staff) : '')
+        + '</div></div>';
+    }).join('');
+
+    var scopeTxt = chk.scope === 'HOD'
+      ? 'This activity is <b>HOD-wise once a month</b> and the selected doer already has it this month ('+esc(chk.month)+').'
+      : 'This activity is <b>company-wise once a month</b> and <b>'+esc((payload.companyName||''))+'</b> already has it this month ('+esc(chk.month)+').';
+
+    document.getElementById('calConflictBody').innerHTML =
+      '<p style="margin:0 0 12px;color:#92400e">'+scopeTxt+'</p>' + rows;
+
+    var btn = document.getElementById('calConflictProceed');
+    btn.onclick = function(){ calCloseConflict(); calDoSave(payload); };  // override = schedule anyway
+    document.getElementById('calConflictOverlay').classList.add('open');
+  }
+  function calCloseConflict(){ document.getElementById('calConflictOverlay').classList.remove('open'); }
+
+  function calDelEvent(id){
+    if (!CAN_DELETE) return toast('No permission to delete', true);
+    if (!confirm('Delete this entry and its reminders?')) return;
+    showLoading(true);
+    google.script.run
+      .withSuccessHandler(function(){ showLoading(false); toast('Deleted ✔'); calCloseDay(); calLoadMonth(); })
+      .withFailureHandler(function(e){ showLoading(false); toast(e.message, true); })
+      .deleteSchedule(CAL_TOKEN, id);
+  }
+
+  /* ----- reminders UI ----- */
+  function calAddReminderRow(){
+    var row = document.createElement('div');
+    row.className = 'rem-row';
+    row.innerHTML =
+      '<div class="rem-line" style="margin-bottom:8px">'
+      + '<button type="button" class="rem-ch active" data-ch="Email" onclick="calPickCh(this)">EMAIL</button>'
+      + '<button type="button" class="rem-ch" data-ch="WhatsApp" onclick="calPickCh(this)">WHATSAPP</button>'
+      + '<button type="button" class="rem-ch" data-ch="Both" onclick="calPickCh(this)">BOTH</button>'
+      + '<button type="button" class="rem-del" onclick="this.closest(\'.rem-row\').remove()">Remove</button>'
+      + '</div>'
+      + '<div class="rem-line">'
+      + '<select class="cal-rem-type" onchange="calOnRemType(this)">'
+      + '<option value="before">Before event</option><option value="after">After event</option><option value="exact">Exact date &amp; time</option></select>'
+      + '<span class="cal-rem-offset" style="display:flex;gap:8px;align-items:center">'
+      + '<input type="number" class="rem-num cal-rem-num" min="1" value="10">'
+      + '<select class="cal-rem-unit"><option value="MINS">Minutes</option><option value="HRS">Hours</option><option value="DAYS">Days</option></select></span>'
+      + '<span class="cal-rem-exact" style="display:none;gap:8px;align-items:center">'
+      + '<input type="date" class="cal-rem-date"><input type="time" class="cal-rem-time"></span>'
+      + '</div>';
+    document.getElementById('calReminderList').appendChild(row);
+  }
+  function calPickCh(btn){ btn.parentElement.querySelectorAll('.rem-ch').forEach(function(b){ b.classList.remove('active'); }); btn.classList.add('active'); }
+  function calOnRemType(sel){
+    var row = sel.closest('.rem-row'); var exact = sel.value === 'exact';
+    row.querySelector('.cal-rem-offset').style.display = exact ? 'none' : 'flex';
+    row.querySelector('.cal-rem-exact').style.display  = exact ? 'flex' : 'none';
+  }
+  function calBuildReminders(){
+    return [].slice.call(document.querySelectorAll('#calReminderList .rem-row')).map(function(row){
+      var chBtn = row.querySelector('.rem-ch.active');
+      var channel = chBtn ? chBtn.getAttribute('data-ch') : 'Email';
+      var type = row.querySelector('.cal-rem-type').value;
+      if (type === 'exact')
+        return { channel:channel, type:'exact', date: row.querySelector('.cal-rem-date').value, time: row.querySelector('.cal-rem-time').value };
+      return { channel:channel, type:'offset', dir:type, value:Number(row.querySelector('.cal-rem-num').value)||0, unit:row.querySelector('.cal-rem-unit').value };
+    });
+  }
+
+  /* ----- modal ----- */
+  function calResetForm(){
+    calEditingId = null; calPendingDoers = null; calPendingStaff = null;
+    calOrigDate = ''; calOrigTime = ''; calOrigStatus = 'Scheduled';
+    document.getElementById('calModalTitle').textContent = 'Schedule Calendar';
+    document.getElementById('calStatusWrap').classList.add('hidden');
+    document.getElementById('calStatus').value = 'Scheduled';
+    document.getElementById('calTitle').value = '';
+    document.getElementById('calActivity').value = '';
+    document.getElementById('calCompany').value = '';
+    document.getElementById('calPlanStart').value = '';
+    document.getElementById('calPlanEnd').value = '';
+    document.getElementById('calRecurrence').value = 'One-time';
+    document.getElementById('calRecurrence').disabled = false;
+    document.getElementById('calStaffAssigner').innerHTML = '<span style="color:#94a3b8">Select a company first</span>';
+    document.getElementById('calCompanyAssigners').innerHTML = '<span style="color:#94a3b8">Select company &amp; departments</span>';
+    document.getElementById('calEventTime').value = '';
+     document.getElementById('calComment').value = '';
+    document.getElementById('calReminderList').innerHTML = '';
+    document.getElementById('calRemindersWrap').classList.remove('hidden');
+    document.querySelectorAll('.cal-dep,.cal-wd').forEach(function(c){ c.checked = false; });
+    calOnRecurrenceChange();
+  }
+  function calNewSchedule(presetDate){
+    if (!CAN_SCHEDULE) return toast('No permission', true);
+    calResetForm();
+    if (presetDate) document.getElementById('calPlanStart').value = presetDate;
+    document.getElementById('calOverlay').classList.add('open');
+  }
+  function calEditEvent(e){
+    if (!CAN_CREATE && !e.mine) return toast('No permission', true);
+    calCloseDay(); calResetForm();
+    calEditingId = e.id;
+    document.getElementById('calModalTitle').textContent = 'Edit Schedule';
+    document.getElementById('calStatusWrap').classList.remove('hidden');
+    document.getElementById('calRemindersWrap').classList.add('hidden');
+    document.getElementById('calStatus').value = e.status || 'Scheduled';
+    document.getElementById('calEventTime').value = e.time || '';
+    document.getElementById('calTitle').value = e.title;
+    document.getElementById('calActivity').value = e.activity;
+    document.getElementById('calCompany').value = e.companyId;
+    document.getElementById('calRecurrence').value = 'One-time';
+    document.getElementById('calRecurrence').disabled = true; calOnRecurrenceChange();
+    document.getElementById('calPlanStart').value = e.date;
+    document.getElementById('calComment').value = e.comment || '';
+    calOrigDate = e.date || ''; calOrigTime = e.time || ''; calOrigStatus = e.status || 'Scheduled';
+    var deps = calSplit(e.departments);
+    document.querySelectorAll('.cal-dep').forEach(function(c){ c.checked = deps.indexOf(c.value) !== -1; });
+    calPendingStaff = calSplit(e.staffAssigner);
+    calPendingDoers = calSplit(e.companyAssigners);
+    calOnCompanyChange();
+    document.getElementById('calOverlay').classList.add('open');
+  }
+  function calMaybeReschedule(){
+    if (!calEditingId) return;
+    var changed = (document.getElementById('calPlanStart').value !== calOrigDate)
+               || (document.getElementById('calEventTime').value !== calOrigTime);
+    var hint = document.getElementById('calStatusHint');
+    if (changed){
+      document.getElementById('calStatus').value = 'Rescheduled';
+      hint.innerHTML = '↻ Date/time changed — status set to <b>Rescheduled</b>.'; hint.classList.add('resc-hint');
+    } else {
+      document.getElementById('calStatus').value = calOrigStatus;
+      hint.innerHTML = 'Changing the date or time will mark this as <b>Rescheduled</b>.'; hint.classList.remove('resc-hint');
+    }
+  }
+ 
+
+
+  function calOnRecurrenceChange(){
+    var r = document.getElementById('calRecurrence').value; var oneTime = (r === 'One-time');
+    document.getElementById('calStartLabel').textContent = oneTime ? 'Plan Date *' : 'Plan start Date *';
+    document.getElementById('calEndWrap').classList.toggle('hidden', oneTime);
+    document.getElementById('calWeekdayWrap').classList.toggle('hidden', r !== 'Periodically');
+  }
+  function calOnCompanyChange(){
+    var c = calCompanyMap[document.getElementById('calCompany').value];
+    var def = (c && c.smName) ? c.smName : '';
+    var html = '';
+    if (def) html += '<label><input type="checkbox" class="cal-staff" value="'+esc(def)+'" checked> '+esc(def)+' — SMOps (default)</label>';
+    html += calData.staff.filter(function(s){ return s.name !== def; })
+      .map(function(s){ return '<label><input type="checkbox" class="cal-staff" value="'+esc(s.name)+'"> '+esc(s.name)+(s.email?' ('+esc(s.email)+')':'')+'</label>'; }).join('');
+    document.getElementById('calStaffAssigner').innerHTML = html || '<span style="color:#94a3b8">No staff found</span>';
+    if (calPendingStaff && calPendingStaff.length){
+      document.querySelectorAll('.cal-staff').forEach(function(c){ if (calPendingStaff.indexOf(c.value)!==-1) c.checked = true; });
+      calPendingStaff = null;
+    }
+    calRefreshDoers();
+  }
+  function calDoerPicked(cb){
+    if (!cb.checked) return;
+    var dept = cb.getAttribute('data-dept');
+    if (!dept) return;
+    document.querySelectorAll('.cal-dep').forEach(function(d){
+      if (d.value === dept && !d.checked) d.checked = true;
+    });
+  }
+  function calSelectedStaff(){ return [].slice.call(document.querySelectorAll('.cal-staff:checked')).map(function(c){ return c.value; }); }
+  function calSelectedDepts(){ return [].slice.call(document.querySelectorAll('.cal-dep:checked')).map(function(c){ return c.value; }); }
+
+  function calRefreshDoers(){
+    var cid = document.getElementById('calCompany').value;
+    if (!cid){ document.getElementById('calCompanyAssigners').innerHTML = '<span style="color:#94a3b8">Select a company</span>'; return; }
+    document.getElementById('calCompanyAssigners').innerHTML = 'Loading…';
+    google.script.run
+      .withSuccessHandler(function(list){
+        document.getElementById('calCompanyAssigners').innerHTML = list.length
+          ? list.map(function(p){ return '<label><input type="checkbox" class="cal-doer" value="'+esc(p.name)+'" data-dept="'+esc(p.dept||'')+'" onchange="calDoerPicked(this)"> '+esc(p.name)+(p.dept?' — '+esc(p.dept):'')+'</label>'; }).join('')
+          : '<span style="color:#94a3b8">No doers for this company / departments</span>';
+        if (calPendingDoers && calPendingDoers.length){
+          document.querySelectorAll('.cal-doer').forEach(function(c){ if (calPendingDoers.indexOf(c.value)!==-1) c.checked = true; });
+          calPendingDoers = null;
+        }
+      })
+      .withFailureHandler(function(e){ toast(e.message, true); })
+      .getDoers(CAL_TOKEN, cid, calSelectedDepts());
+  }
+
+  function calSave(){
+    var cid = document.getElementById('calCompany').value;
+    var c = calCompanyMap[cid];
+    var payload = {
+  title: document.getElementById('calTitle').value.trim(),
+  eventTime: document.getElementById('calEventTime').value,
+  activity: document.getElementById('calActivity').value,
+  companyId: cid,
+  companyName: c ? c.name : '',
+  planStart: document.getElementById('calPlanStart').value,
+  planEnd: document.getElementById('calPlanEnd').value,
+  staffAssigners: calSelectedStaff(),
+  status: calEditingId ? document.getElementById('calStatus').value : 'Scheduled',
+  departments: calSelectedDepts(),
+  companyAssigners: [].slice.call(document.querySelectorAll('.cal-doer:checked')).map(function(x){ return x.value; }),
+  recurrence: document.getElementById('calRecurrence').value,
+  weekdays: [].slice.call(document.querySelectorAll('.cal-wd:checked')).map(function(x){ return x.value; }),
+  comment: document.getElementById('calComment').value.trim()
+};
+    if (!calEditingId) payload.reminders = calBuildReminders();
+
+    var need = [['title','Title'],['activity','Activity'],['companyId','Company'],['planStart','Plan Date']];
+    for (var i = 0; i < need.length; i++) if (!payload[need[i][0]]) return toast('Please fill: ' + need[i][1], true);
+    if (!payload.departments.length) return toast('Select at least one Department', true);
+    if (!payload.staffAssigners.length) return toast('Select at least one Staff Assigner', true);
+    if (!payload.companyAssigners.length) return toast('Select at least one Company Assigner (doer)', true);
+    if (!calEditingId){
+      for (var j = 0; j < payload.reminders.length; j++){
+        var r = payload.reminders[j];
+        if (r.type === 'exact'){ if (!r.date || !r.time) return toast('Set date & time for each exact reminder', true); }
+        else { if (!r.value || r.value <= 0) return toast('Reminder offset must be at least 1', true); }
+      }
+      if (payload.recurrence !== 'One-time'){
+        if (!payload.planEnd) return toast('Select Plan end Date', true);
+        if (payload.planEnd < payload.planStart) return toast('Plan end must be after start', true);
+        if (payload.recurrence === 'Periodically' && !payload.weekdays.length) return toast('Select at least one weekday', true);
+      }
+    }
+
+    // ---- duplicate / once-per-month check (only on NEW schedules) ----
+    if (!calEditingId){
+      showLoading(true);
+      google.script.run
+        .withSuccessHandler(function(chk){
+          showLoading(false);
+          if (chk && chk.conflict){ calShowConflict(chk, payload); }
+          else { calDoSave(payload); }
+        })
+        .withFailureHandler(function(e){ showLoading(false); calDoSave(payload); }) // check fail → allow save
+        .checkScheduleConflict(CAL_TOKEN, payload);
+      return;
+    }
+    calDoSave(payload);
+  }
+
+  // actual save (was the body of calSave)
+  function calDoSave(payload){
+    document.getElementById('calSaveBtn').disabled = true;
+    document.getElementById('calSaveBtn').textContent = 'Saving…';
+    showLoading(true);
+    var ok = function(res){
+      document.getElementById('calSaveBtn').disabled = false;
+      document.getElementById('calSaveBtn').textContent = 'Save Schedule';
+      showLoading(false);
+      var msg = calEditingId ? 'Updated ✔' : 'Saved ' + res.count + ' entr' + (res.count > 1 ? 'ies' : 'y');
+      if (!calEditingId && res.reminders) msg += ' + ' + res.reminders + ' reminder(s)';
+      if (!calEditingId && res.scheduleMails) msg += ', ' + res.scheduleMails + ' email(s)';
+      toast(msg + (calEditingId ? '' : ' ✔'));
+      calCloseModal(); calLoadMonth();
+    };
+    var fail = function(e){
+      document.getElementById('calSaveBtn').disabled = false;
+      document.getElementById('calSaveBtn').textContent = 'Save Schedule';
+      showLoading(false); toast(e.message, true);
+    };
+    if (calEditingId)
+      google.script.run.withSuccessHandler(ok).withFailureHandler(fail).updateSchedule(CAL_TOKEN, calEditingId, payload);
+    else
+      google.script.run.withSuccessHandler(ok).withFailureHandler(fail).saveSchedule(CAL_TOKEN, payload);
+  }
+
+  function calCloseModal(){ document.getElementById('calOverlay').classList.remove('open'); }
+
+  /* ===== Activity lifecycle: reschedule request / mark done / confirm ===== */
+  function calCanAct(e){
+    return ['Completed','Cancelled','Lapsed'].indexOf(e.status)===-1;
+  }
+  function calLifecycleBtns(e){
+    var b='';
+    if (IS_LEARNER && !e.mine && calCanAct(e) && e.learnerDone!=='Yes'){
+      b += '<button class="btn secondary sm" onclick=\'calReqReschedule('+JSON.stringify(e).replace(/\'/g,"&#39;")+')\'>🔄 Request Reschedule</button>'
+         + '<button class="btn sm" onclick="calMarkDone(\''+e.id+'\')">✅ Mark Done</button>';
+    }
+    if (IS_STAFF && e.learnerDone==='Yes' && calCanAct(e)){
+      b += '<button class="btn sm" onclick="calConfirmComplete(\''+e.id+'\')">✔ Confirm Complete</button>';
+    }
+    return b ? '<div class="actions">'+b+'</div>' : '';
+  }
+  function calMarkDone(id){
+    if (!confirm('Mark this activity as done? Staff will confirm the final completion.')) return;
+    showLoading(true);
+    google.script.run
+      .withSuccessHandler(function(){ showLoading(false); toast('Marked done ✔ — staff will confirm'); calCloseDay(); calLoadMonth(); })
+      .withFailureHandler(function(e){ showLoading(false); toast(e.message,true); })
+      .markLearnerDone(CAL_TOKEN, id);
+  }
+  function calConfirmComplete(id){
+    if (!confirm('Confirm final completion of this activity?')) return;
+    showLoading(true);
+    google.script.run
+      .withSuccessHandler(function(){ showLoading(false); toast('Completed ✔'); calCloseDay(); calLoadMonth(); })
+      .withFailureHandler(function(e){ showLoading(false); toast(e.message,true); })
+      .confirmCompletion(CAL_TOKEN, id);
+  }
+  var calRR = null;
+  function calReqReschedule(e){
+    calRR = e;
+    document.getElementById('calRRInfo').innerHTML = '<b>'+esc(e.title||e.activity||'')+'</b><br><span style="color:#64748b">'+esc(e.activity||'')+' · '+esc(e.company||'')+'</span><br>Current: '+esc(e.date)+(e.time?' '+esc(e.time):'');
+    document.getElementById('calRRDate').value = e.date || '';
+    document.getElementById('calRRTime').value = e.time || '';
+    document.getElementById('calRRReason').value = '';
+    calCloseDay();
+    document.getElementById('calRROverlay').classList.add('open');
+  }
+  function calRRClose(){ document.getElementById('calRROverlay').classList.remove('open'); }
+  function calRRSubmit(){
+    if (!calRR) return;
+    var nd = document.getElementById('calRRDate').value;
+    if (!nd) return toast('Choose a new date', true);
+    showLoading(true);
+    google.script.run
+      .withSuccessHandler(function(){ showLoading(false); toast('Request sent ✔'); calRRClose(); })
+      .withFailureHandler(function(e){ showLoading(false); toast(e.message,true); })
+      .requestReschedule(CAL_TOKEN, calRR.id, nd, document.getElementById('calRRTime').value, document.getElementById('calRRReason').value.trim());
+  }
+
+  /* ===== Staff: reschedule requests panel ===== */
+  function calLoadReqCount(){
+    google.script.run.withSuccessHandler(function(d){
+      var n=(d.requests||[]).length;
+      var b=document.getElementById('calReqCount');
+      if (n){ b.style.display=''; b.textContent=n; } else b.style.display='none';
+    }).withFailureHandler(function(){}).getRescheduleRequests(CAL_TOKEN, 'Pending');
+  }
+  function calOpenRequests(){
+    document.getElementById('calReqBody').innerHTML='Loading…';
+    document.getElementById('calReqOverlay').classList.add('open');
+    google.script.run
+      .withSuccessHandler(function(d){ calRenderRequests(d.requests||[]); })
+      .withFailureHandler(function(e){ document.getElementById('calReqBody').innerHTML='<span style="color:#ef4444">'+esc(e.message)+'</span>'; })
+      .getRescheduleRequests(CAL_TOKEN, 'Pending');
+  }
+  function calReqClose(){ document.getElementById('calReqOverlay').classList.remove('open'); }
+  function calRenderRequests(list){
+    if (!list.length){ document.getElementById('calReqBody').innerHTML='<p style="color:#94a3b8;margin:0">No pending requests.</p>'; return; }
+    document.getElementById('calReqBody').innerHTML = list.map(function(r){
+      return '<div class="rr-card">'
+        + '<h4>'+esc(r.title||r.activity||'')+'</h4>'
+        + '<div class="rr-meta">'+esc(r.activity)+' · '+esc(r.company)+'</div>'
+        + '<div class="rr-line">📅 <b>From</b> '+esc(r.oldDate)+' '+esc(r.oldTime||'')+' &nbsp;→&nbsp; <b>To</b> '+esc(r.newDate)+' '+esc(r.newTime||'')+'</div>'
+        + '<div class="rr-line">🙋 '+esc(r.by)+(r.reason?' — '+esc(r.reason):'')+'</div>'
+        + '<div class="rr-act">'
+        + '<button class="btn sm" onclick="calDecideReq(\''+r.id+'\',true)">✔ Approve</button>'
+        + '<button class="btn danger sm" onclick="calDecideReq(\''+r.id+'\',false)">✕ Reject</button>'
+        + '</div></div>';
+    }).join('');
+  }
+  function calDecideReq(id, approve){
+    var note = approve ? '' : (prompt('Reason for rejection (optional):')||'');
+    showLoading(true);
+    google.script.run
+      .withSuccessHandler(function(){ showLoading(false); toast(approve?'Approved ✔':'Rejected'); calOpenRequests(); calLoadReqCount(); calLoadMonth(); })
+      .withFailureHandler(function(e){ showLoading(false); toast(e.message,true); })
+      .decideRescheduleRequest(CAL_TOKEN, id, approve, note);
+  }
+</script>
+
+
+<style>
+  .pill-mine{ box-shadow: inset 3px 0 0 #7c3aed; font-weight:700; }
+  .mine-chip{ background:#ede9fe; color:#6d28d9; font-size:11px; font-weight:700; padding:2px 8px; border-radius:20px; margin-left:6px; }
+  .ldone-badge{ margin-top:8px; background:#dcfce7; color:#15803d; font-size:12px; font-weight:600; padding:6px 10px; border-radius:8px; }
+  /* Lapsed status colors */
+  .lg.lap{ color:#64748b; }
+  .stat.lap .n{ color:#475569; }
+  .stat.lap{ background:#f1f5f9; }
+  .pill.st-lapsed, .badge.st-lapsed{ background:#e2e8f0; color:#475569; }
+  .ev.s-lapsed{ border-left-color:#94a3b8; }
+  .badge.st-lapsed{ border:1px solid #cbd5e1; }
+  .req-badge{ background:#ef4444; color:#fff; border-radius:20px; padding:1px 8px; font-size:11px; font-weight:700; margin-left:4px; }
+  .rr-card{ border:1px solid var(--line); border-radius:12px; padding:12px 14px; margin-bottom:12px; }
+  .rr-card h4{ margin:0 0 4px; font-size:15px; }
+  .rr-meta{ color:#64748b; font-size:12px; margin-bottom:8px; }
+  .rr-line{ font-size:13px; margin:4px 0; }
+  .rr-act{ display:flex; gap:8px; margin-top:10px; }
+  .up-chip{ background:#fef3c7; color:#b45309; font-size:11px; font-weight:700; padding:2px 8px; border-radius:20px; margin-left:6px; }
+  .cal-upload{ margin-top:10px; padding:10px 12px; border:1px dashed #cbd5e1; border-radius:10px; background:#f8fafc; }
+  .cal-up-head{ font-size:13px; font-weight:600; color:#334155; display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:8px; }
+  .cal-up-badge{ font-size:11px; font-weight:700; padding:2px 9px; border-radius:20px; }
+  .up-wait{ background:#e2e8f0; color:#64748b; }
+  .up-need{ background:#fee2e2; color:#b91c1c; }
+  .up-done{ background:#dcfce7; color:#15803d; }
+  .cal-up-list{ font-size:12px; margin-bottom:8px; }
+  .cal-up-file{ display:flex; flex-wrap:wrap; gap:6px; align-items:center; padding:4px 0; }
+  .cal-up-file a{ color:#7c3aed; text-decoration:none; font-weight:600; }
+  .cal-up-meta{ color:#94a3b8; font-size:11px; }
+  .cal-up-controls{ display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .cal-up-controls input[type=file]{ font-size:12px; }
+</style>

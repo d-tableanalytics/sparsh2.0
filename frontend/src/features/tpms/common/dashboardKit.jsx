@@ -137,10 +137,20 @@ export const Td = ({ children, align, className = '' }) => (
 );
 
 /** White pill <select> for the gradient hero header. */
+/**
+ * Options accept either plain strings (`['All OMs', 'A. Nair']`) or `{id, name}`
+ * objects, so a select can submit an id while displaying a label. Mixing is fine —
+ * pages backed by the API pass objects, static ones keep passing strings.
+ */
+const normaliseOptions = (options = []) =>
+  options.map((o) => (typeof o === 'object' && o !== null
+    ? { value: String(o.id ?? o.value ?? ''), label: String(o.name ?? o.label ?? o.id ?? '') }
+    : { value: String(o), label: String(o) }));
+
 export const HeaderSelect = ({ value, onChange, options }) => (
   <select value={value} onChange={(e) => onChange(e.target.value)}
     className="px-3 py-2 rounded-lg bg-white/95 text-slate-800 text-[12.5px] font-bold outline-none border border-white/30 shadow-sm hover:bg-white transition-all cursor-pointer">
-    {options.map((o) => <option key={o} value={o}>{o}</option>)}
+    {normaliseOptions(options).map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
   </select>
 );
 
@@ -148,7 +158,7 @@ export const HeaderSelect = ({ value, onChange, options }) => (
 export const FilterSelect = ({ value, onChange, options }) => (
   <select value={value} onChange={(e) => onChange(e.target.value)}
     className="px-3 py-2 rounded-lg bg-[var(--input-bg)] border border-[var(--input-border)] text-[12.5px] font-bold outline-none focus:border-[var(--accent-indigo)] cursor-pointer">
-    {options.map((o) => <option key={o} value={o}>{o}</option>)}
+    {normaliseOptions(options).map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
   </select>
 );
 

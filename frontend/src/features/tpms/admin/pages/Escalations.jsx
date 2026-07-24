@@ -1,22 +1,21 @@
-import React, { useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   RefreshCw, Siren, Info, AlertTriangle, Flame, Timer, CheckCircle2, ListOrdered,
 } from 'lucide-react';
 import {
   DashboardHero, HeroButton, HeaderSelect, Section, Th, Td, TableShell, KpiTile,
 } from '../../common/dashboardKit';
+import { getEscalationDashboard } from '../../../../services/tpmsApi';
 
 /* ─────────────────────────────────────────────────────────────
    Admin Panel ▸ Escalations — active escalations requiring OM action,
    the reminder-timeline system logic, and resolved escalations.
-   Escalation chain: HOD (T+5) → HR (T+7) → MD (T+10). All data mock.
-   ───────────────────────────────────────────────────────────── */
 
-const ACTIVE = [
-  { client: 'Nimbus Ltd',  om: 'S. Kapoor', activity: 'WRM',      daysOverdue: 6, level: 'Escalation L1', escalatedTo: 'HOD + OM',     escDate: '2026-07-12', lastReminder: '2026-07-16', status: 'Awaiting HOD',   action: 'Call HOD, confirm WRM reschedule' },
-  { client: 'Orbit Media', om: 'P. Shah',   activity: 'Cal Disc', daysOverdue: 9, level: 'Escalation L2', escalatedTo: 'HR + OM',      escDate: '2026-07-09', lastReminder: '2026-07-17', status: 'Escalated to HR', action: 'HR to intervene with client MD' },
-  { client: 'Acme Corp',   om: 'R. Mehta',  activity: 'DRM',      daysOverdue: 3, level: 'Reminder 2',    escalatedTo: 'Client Coord', escDate: '2026-07-15', lastReminder: '2026-07-17', status: 'Follow-up sent', action: 'Send urgent follow-up mail' },
-];
+   Levels shown here come from the auto-feed sweep (HOD T+5 → HR T+7 → MD T+10).
+   NOTE: the mails recipients actually receive run on a different, faster cadence
+   (D+1 pending → D+2 critical → D+3 lapsed). Both engines are ported from the
+   Apps Script, which runs both — see backend tpms_escalation_service.py.
+   ───────────────────────────────────────────────────────────── */
 
 const TIMELINE = [
   { stage: 'Pre-Reminder',  tone: 'green',  timing: 'T − 2 days',   trigger: 'Scheduler auto-fires',    action: 'Send advance notice',   recipient: 'Client Coord (HOD/HR)', subject: '[Reminder] {Activity} due in 2 days | {Client}' },
@@ -28,12 +27,9 @@ const TIMELINE = [
   { stage: 'Escalation L3', tone: 'red',    timing: 'T + 10 days',  trigger: 'HR unresponsive',         action: 'Escalate to MD',        recipient: 'MD + OM',               subject: '[CRITICAL] {Activity} | {Client} | MD Attention Required' },
 ];
 
-const RESOLVED = [
-  { client: 'Vertex Health', om: 'A. Nair',   activity: 'MMR', escDate: '2026-07-02', resDate: '2026-07-05', daysTaken: 3, method: 'Client Coord response', resolvedBy: 'A. Nair' },
-  { client: 'Helix Pharma',  om: 'S. Kapoor', activity: 'DRM', escDate: '2026-06-28', resDate: '2026-07-04', daysTaken: 6, method: 'HOD intervention',     resolvedBy: 'HR' },
-];
-
-const levelTone = (lvl) => (lvl.includes('Escalation') ? 'red' : lvl.includes('Reminder') ? 'orange' : 'green');
+// level 1 → HOD, 2 → HR, 3 → MD (escLevel_ in the source)
+const LEVEL_LABEL = { 1: 'Escalation L1', 2: 'Escalation L2', 3: 'Escalation L3' };
+const levelTone = (lvl) => (Number(lvl) >= 2 ? 'red' : Number(lvl) === 1 ? 'orange' : 'green');
 const TONE = {
   green:  { c: 'var(--accent-green)',  bg: 'var(--accent-green-bg)',  bd: 'var(--accent-green-border)' },
   orange: { c: 'var(--accent-orange)', bg: 'var(--accent-orange-bg)', bd: 'var(--accent-orange-border)' },
@@ -48,26 +44,51 @@ const stickyHead = 'sticky left-0 z-10 bg-[var(--table-header-bg)]';
 const stickyCell = 'sticky left-0 z-10 bg-[var(--bg-card)] group-hover:bg-[var(--table-hover)]';
 
 const Escalations = () => {
-  const [om, setOm] = useState('All OMs');
-  const [client, setClient] = useState('All Clients');
+  // Filters are applied SERVER-side (the source passed {smopsId, companyId} to the
+  // backend and reloaded), so the KPI cards always reflect the current selection.
+  const [om, setOm] = useState('');
+  const [client, setClient] = useState('');
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
 
-  const active = useMemo(() => ACTIVE.filter((r) =>
-    (om === 'All OMs' || r.om === om) && (client === 'All Clients' || r.client === client)), [om, client]);
-  const resolved = useMemo(() => RESOLVED.filter((r) =>
-    (om === 'All OMs' || r.om === om) && (client === 'All Clients' || r.client === client)), [om, client]);
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError('');
+    try {
+      const res = await getEscalationDashboard({
+        om_id: om || undefined,
+        company_id: client || undefined,
+      });
+      setData(res.data);
+    } catch (e) {
+      setError(e.response?.data?.detail || 'Failed to load escalations');
+    } finally {
+      setLoading(false);
+    }
+  }, [om, client]);
 
-  const critical = active.filter((r) => /L2|L3/.test(r.level)).length;
-  const avgOverdue = active.length ? Math.round(active.reduce((a, r) => a + r.daysOverdue, 0) / active.length) : 0;
+  useEffect(() => { load(); }, [load]);
+
+  const active = data?.active || [];
+  const resolved = data?.resolved || [];
+  const cards = data?.cards || {};
 
   const kpis = [
-    { value: active.length, label: 'Active Escalations', sub: 'Need OM action',     tone: active.length ? 'red' : 'plain', icon: AlertTriangle },
-    { value: critical,      label: 'Critical (L2+)',     sub: 'HR / MD involved',   tone: critical ? 'red' : 'plain',       icon: Flame },
-    { value: avgOverdue,    label: 'Avg Days Overdue',   sub: 'Across active',      tone: 'yellow',                         icon: Timer },
-    { value: resolved.length, label: 'Resolved',         sub: 'This month',         tone: 'green',                          icon: CheckCircle2 },
+    { value: cards.active_count ?? 0,   label: 'Active Escalations', sub: 'Need OM action',   tone: cards.active_count ? 'red' : 'plain', icon: AlertTriangle },
+    { value: (cards.l2 ?? 0) + (cards.l3 ?? 0), label: 'Critical (L2+)', sub: 'HR / MD involved', tone: (cards.l2 || cards.l3) ? 'red' : 'plain', icon: Flame },
+    { value: cards.avg_overdue ?? 0,    label: 'Avg Days Overdue',   sub: 'Across active',    tone: 'yellow',                             icon: Timer },
+    { value: cards.resolved_month ?? 0, label: 'Resolved',           sub: 'This month',       tone: 'green',                              icon: CheckCircle2 },
   ];
 
-  const omOpts = ['All OMs', ...Array.from(new Set([...ACTIVE, ...RESOLVED].map((r) => r.om)))];
-  const clientOpts = ['All Clients', ...Array.from(new Set([...ACTIVE, ...RESOLVED].map((r) => r.client)))];
+  const omOpts = useMemo(
+    () => [{ id: '', name: 'All OMs' }, ...(data?.filters?.oms || [])], [data]);
+  const clientOpts = useMemo(
+    () => [{ id: '', name: 'All Clients' }, ...(data?.filters?.companies || [])], [data]);
+
+  if (loading && !data) {
+    return <div className="px-5 py-16 text-center text-[13px] font-bold text-[var(--text-muted)]">Loading escalations…</div>;
+  }
 
   return (
     <div className="space-y-5">
@@ -75,8 +96,14 @@ const Escalations = () => {
       <DashboardHero icon={Siren} title="Escalation Dashboard" subtitle="Active escalations, reminder logic & resolutions">
         <HeaderSelect value={om} onChange={setOm} options={omOpts} />
         <HeaderSelect value={client} onChange={setClient} options={clientOpts} />
-        <HeroButton icon={RefreshCw}>Refresh</HeroButton>
+        <HeroButton icon={RefreshCw} onClick={load}>Refresh</HeroButton>
       </DashboardHero>
+
+      {error && (
+        <div className="rounded-2xl border border-[var(--accent-red-border)] bg-[var(--accent-red-bg)] px-4 py-3 text-[12px] font-bold text-[var(--accent-red)]">
+          {error}
+        </div>
+      )}
 
       {/* Source / chain info */}
       <div className="rounded-2xl border border-[var(--accent-indigo-border)] bg-[var(--accent-indigo-bg)] px-4 py-3 flex items-start gap-2.5">
@@ -112,16 +139,16 @@ const Escalations = () => {
               {active.map((r, i) => (
                 <tr key={i} className="group border-b border-[var(--border)] last:border-0 hover:bg-[var(--table-hover)] transition-colors">
                   <Td className="text-[var(--text-muted)] font-bold">{i + 1}</Td>
-                  <Td className="font-bold">{r.client}</Td>
-                  <Td className="text-[var(--text-muted)]">{r.om}</Td>
+                  <Td className="font-bold">{r.company}</Td>
+                  <Td className="text-[var(--text-muted)]">{r.om || '—'}</Td>
                   <Td className="font-medium">{r.activity}</Td>
-                  <Td align="center" className="font-extrabold text-[var(--accent-red)] tabular-nums">{r.daysOverdue}</Td>
-                  <Td align="center"><Pill label={r.level} tone={levelTone(r.level)} /></Td>
-                  <Td className="font-medium">{r.escalatedTo}</Td>
-                  <Td className="tabular-nums text-[var(--text-muted)]">{r.escDate}</Td>
-                  <Td className="tabular-nums text-[var(--text-muted)]">{r.lastReminder}</Td>
-                  <Td align="center"><Pill label={r.status} tone={levelTone(r.level)} /></Td>
-                  <Td className="text-[var(--text-muted)] max-w-[220px]">{r.action}</Td>
+                  <Td align="center" className="font-extrabold text-[var(--accent-red)] tabular-nums">{r.days_overdue}</Td>
+                  <Td align="center"><Pill label={LEVEL_LABEL[r.level] || '—'} tone={levelTone(r.level)} /></Td>
+                  <Td className="font-medium">{r.escalated_to || '—'}</Td>
+                  <Td className="tabular-nums text-[var(--text-muted)]">{r.esc_date || '—'}</Td>
+                  <Td className="tabular-nums text-[var(--text-muted)]">{r.last_reminder || '—'}</Td>
+                  <Td align="center"><Pill label="Active" tone={levelTone(r.level)} /></Td>
+                  <Td className="text-[var(--text-muted)] max-w-[220px]">{r.recommended || '—'}</Td>
                 </tr>
               ))}
             </tbody>
@@ -169,14 +196,14 @@ const Escalations = () => {
             <tbody>
               {resolved.map((r, i) => (
                 <tr key={i} className="group border-b border-[var(--border)] last:border-0 hover:bg-[var(--table-hover)] transition-colors">
-                  <Td className={`font-bold ${stickyCell}`}>{r.client}</Td>
-                  <Td className="text-[var(--text-muted)]">{r.om}</Td>
+                  <Td className={`font-bold ${stickyCell}`}>{r.company}</Td>
+                  <Td className="text-[var(--text-muted)]">{r.om || '—'}</Td>
                   <Td className="font-medium">{r.activity}</Td>
-                  <Td className="tabular-nums text-[var(--text-muted)]">{r.escDate}</Td>
-                  <Td className="tabular-nums text-[var(--text-muted)]">{r.resDate}</Td>
-                  <Td align="center" className="font-extrabold text-[var(--accent-green)] tabular-nums">{r.daysTaken}</Td>
-                  <Td className="font-medium">{r.method}</Td>
-                  <Td className="text-[var(--text-muted)]">{r.resolvedBy}</Td>
+                  <Td className="tabular-nums text-[var(--text-muted)]">{r.esc_date || '—'}</Td>
+                  <Td className="tabular-nums text-[var(--text-muted)]">{r.res_date || '—'}</Td>
+                  <Td align="center" className="font-extrabold text-[var(--accent-green)] tabular-nums">{r.days_taken}</Td>
+                  <Td className="font-medium">{r.method || '—'}</Td>
+                  <Td className="text-[var(--text-muted)]">{r.resolved_by || '—'}</Td>
                 </tr>
               ))}
             </tbody>

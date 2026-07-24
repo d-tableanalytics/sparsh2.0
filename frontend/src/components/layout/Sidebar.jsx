@@ -46,6 +46,7 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen }) => {
   // for non-HOD users; everyone gets Culture + Implementation Feedback.
   const tpmsClientForms = [
     { name: 'Dashboard', path: '/tpms/smops', icon: LayoutDashboard, end: true },
+    { name: 'Calendar', path: '/tpms/smops/calendar', icon: CalendarDays },
     { name: 'HOD Activity', path: '/tpms/smops/hod-activity', icon: Activity },
     { name: 'Employee Task', path: '/tpms/smops/tasks', icon: ClipboardList },
     { name: 'Review Report', path: '/tpms/smops/reviews', icon: BarChart3 },
@@ -66,6 +67,7 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen }) => {
     : isTpmsAdminUser
     ? [
         { name: 'Admin View', path: '/tpms/admin', icon: LayoutDashboard, end: true },
+        { name: 'Calendar', path: '/tpms/admin/calendar', icon: CalendarDays },
         { name: 'OM (SMOps) View', path: '/tpms/admin/om', icon: Gauge },
         { name: 'Client View', path: '/tpms/admin/clients', icon: Building2 },
         { name: 'Implementation Tracker', path: '/tpms/admin/implementation', icon: GitBranch },
@@ -86,6 +88,7 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen }) => {
       ]
     : [
         { name: 'Dashboard', path: '/tpms/smops', icon: LayoutDashboard, end: true },
+        { name: 'Calendar', path: '/tpms/smops/calendar', icon: CalendarDays },
         { name: 'HOD Activity', path: '/tpms/smops/hod-activity', icon: Activity },
         { name: 'Employee Task', path: '/tpms/smops/tasks', icon: ClipboardList },
         { name: 'Review Report', path: '/tpms/smops/reviews', icon: BarChart3 },

@@ -1,0 +1,190 @@
+<div class="topbar">
+  <h1>🧑‍💼 OM Dashboard <span id="smName" style="font-size:13px;opacity:.85"></span></h1>
+  <div class="adm-controls">
+    <select id="smOmPicker" class="hidden" onchange="smLoad()"></select>
+    <select id="smMonth" onchange="smLoad()"><option value="">This Month</option></select>
+    <button class="btn secondary sm" onclick="smLoad()">↻ Refresh</button>
+  </div>
+</div>
+
+<div class="wrap">
+  <div class="adm-kpis" id="smKpis"></div>
+
+  <div class="card adm-section">
+    <div class="adm-sec-head" id="smGridHead">MY CLIENTS — ACTIVITY STATUS</div>
+    <div class="adm-table-wrap">
+      <table class="adm-table" id="smGridTable">
+        <thead><tr id="smGridHeadRow"></tr></thead>
+        <tbody id="smGridBody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card adm-section">
+    <div class="adm-sec-head red">ACTION REQUIRED FROM ME</div>
+    <div id="smAlerts" class="sm-alerts"></div>
+  </div>
+
+  <div class="card adm-section">
+    <div class="adm-sec-head">OPEN ACTION ITEMS — MY CLIENTS</div>
+    <div class="sm-act-filters">
+      <select id="smActActivity" onchange="smApplyActionFilters()"><option value="">All Activities</option></select>
+      <select id="smActClient" onchange="smApplyActionFilters()"><option value="">All Clients</option></select>
+      <select id="smActOwner" onchange="smApplyActionFilters()"><option value="">All Owners</option></select>
+      <button class="btn secondary sm" onclick="smClearActionFilters()">Clear</button>
+    </div>
+    <div class="adm-table-wrap">
+      <table class="adm-table">
+        <thead><tr><th>Client</th><th>Activity</th><th>Action</th><th>Owner</th><th>Emp ID</th><th>Target Date</th><th>Actual Date</th><th>Status</th><th>Client Delay</th><th>OM Delay</th><th>Follow-up</th></tr></thead>
+        <tbody id="smActionBody"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<script>
+  var SM_TOKEN = localStorage.getItem('sessionToken') || '';
+  var SM_ROLE  = localStorage.getItem('userRole') || '';
+  var smPickerReady = false;
+
+  (function smInit(){ smLoad(); })();
+
+  function smLoad(){
+    var scope = { month: document.getElementById('smMonth').value };
+    var pick = document.getElementById('smOmPicker');
+    if (SM_ROLE === 'Admin' && pick && pick.value) scope.smopsId = pick.value;
+    showLoading(true);
+    google.script.run
+      .withSuccessHandler(function(d){ smRender(d); showLoading(false); })
+      .withFailureHandler(function(e){ showLoading(false); toast(e.message,true); })
+      .getStaffDashboard(SM_TOKEN, scope);
+  }
+
+  function smRender(d){
+    document.getElementById('smName').textContent = d.smopsName ? '— '+d.smopsName : '';
+    // month dropdown (preserve selection)
+    var mo = document.getElementById('smMonth');
+    var cur = mo.value || (d.selectedMonth||'');
+    mo.innerHTML = '<option value="">This Month</option>' + (d.monthOptions||[]).map(function(m){
+      return '<option value="'+esc(m.id)+'"'+(m.id===cur?' selected':'')+'>'+esc(m.name)+'</option>'; }).join('');
+    // OM picker (Admin only, build once)
+    if (d.isAdmin){
+      var pick = document.getElementById('smOmPicker');
+      pick.classList.remove('hidden');
+      if (!smPickerReady){
+        pick.innerHTML = '<option value="">All OMs</option>' +
+          d.smopsOptions.map(function(s){ return '<option value="'+esc(s.id)+'">'+esc(s.name)+'</option>'; }).join('');
+        pick.value = d.selectedSmops || '';
+        smPickerReady = true;
+      }
+    }
+    smRenderKpis(d.cards);
+    smRenderGrid(d.activities, d.clientsGrid);
+    smRenderAlerts(d.alerts);
+    smAllActions = d.openActions || [];
+    smFillActionFilters(smAllActions);
+    smRenderActions(smAllActions);
+  }
+
+  function smRenderKpis(c){
+    var cards=[
+      { n:c.clients,          l:'My Clients',         s:'Assigned',         cls:'k-blue' },
+      { n:c.planned,          l:'Planned',            s:'This period',      cls:'k-brown' },
+      { n:c.completed,        l:'Completed',          s:'Activities done',  cls:'k-green' },
+      { n:c.pending,          l:'Pending',            s:'Upcoming',         cls:'k-brown' },
+      { n:c.overdue,          l:'Overdue',            s:'Past deadline',    cls:'k-red' },
+      { n:c.completion+'%',   l:'Completion',         s:'Done ÷ planned',   cls:'k-green' },
+      { n:c.avgDelay,         l:'Avg Delay Days',     s:'On completed',     cls:'k-brown' },
+      { n:c.actionClosure+'%',l:'Action Closure',     s:'vs 95% target',    cls:'k-green' },
+      { n:c.escalations,      l:'Active Escalations', s:'Need action',      cls:'k-red' }
+    ];
+    document.getElementById('smKpis').innerHTML = cards.map(function(k){
+      return '<div class="kpi '+k.cls+'"><div class="kn">'+esc(k.n)+'</div><div class="kl">'+esc(k.l)+'</div><div class="ks">'+esc(k.s)+'</div></div>';
+    }).join('');
+  }
+
+  function smCell(cell){
+    if (!cell || !cell.total) return '<td class="cellc"></td>';
+    var cls = cell.status==='done' ? 'done' : cell.status==='overdue' ? 'over' : cell.status==='cancelled' ? 'canc' : 'pend';
+    return '<td class="cellc ratio '+cls+'">'+cell.done+'/'+cell.total+'</td>';
+  }
+  function smRenderGrid(activities, clients){
+    var head = '<th>Client</th>' + activities.map(function(a){ return '<th title="'+esc(a.full)+'">'+esc(a.short)+'</th>'; }).join('') + '<th>Done</th><th>Pct</th>';
+    document.getElementById('smGridHeadRow').innerHTML = head;
+    if (!clients.length){ document.getElementById('smGridBody').innerHTML = '<tr><td colspan="'+(activities.length+3)+'" class="adm-empty">No clients / activities this period.</td></tr>'; return; }
+    document.getElementById('smGridBody').innerHTML = clients.map(function(c){
+      var cells = activities.map(function(a){ return smCell(c.cells[a.full]); }).join('');
+      var pcCls = c.pct>=90?'pc-green':(c.pct>=80?'pc-amber':'pc-red');
+      return '<tr><td class="adm-strong">'+esc(c.company)+'</td>'+cells
+        + '<td class="num done">'+c.done+'</td><td class="num '+pcCls+'"><b>'+c.pct+'%</b></td></tr>';
+    }).join('');
+  }
+  function smRenderAlerts(alerts){
+    if (!alerts.length){ document.getElementById('smAlerts').innerHTML = '<div class="sm-alert ok">✓ No urgent actions. You\'re on track.</div>'; return; }
+    document.getElementById('smAlerts').innerHTML = alerts.map(function(a){
+      return '<div class="sm-alert '+(a.level==='overdue'?'over':'soon')+'">⚠ '+esc(a.text)+'</div>';
+    }).join('');
+  }
+  function smRenderActions(rows){
+    if (!rows.length){ document.getElementById('smActionBody').innerHTML = '<tr><td colspan="11" class="adm-empty">No open action items.</td></tr>'; return; }
+    document.getElementById('smActionBody').innerHTML = rows.map(function(r){
+      var fuCls = /overdue/i.test(r.followUp) ? 'overdue' : 'pending';
+      var ldCls = /^\d+d$/.test(r.learnerDelay||'') ? 'overdue' : 'pending';
+      var sdCls = /^\d+d$/.test(r.staffDelay||'') ? 'overdue' : 'pending';
+      return '<tr><td class="adm-strong">'+esc(r.company)+'</td><td>'+esc(r.activity)+'</td><td>'+esc(r.action)+'</td>'
+        + '<td>'+esc(r.owner||'—')+'</td><td>'+esc(r.employeeId||'—')+'</td><td>'+esc(r.target||'—')+'</td><td>'+esc(r.actual||'—')+'</td>'
+        + '<td class="pending">'+esc(r.status)+'</td>'
+        + '<td class="'+ldCls+'">'+esc(r.learnerDelay||'—')+'</td>'
+        + '<td class="'+sdCls+'">'+esc(r.staffDelay||'—')+'</td>'
+        + '<td class="'+fuCls+'">'+esc(r.followUp)+'</td></tr>';
+    }).join('');
+  }
+
+  /* ==== Open Action Items filters (activity/client/owner) ==== */
+  var smAllActions = [];
+  function smFillActionFilters(rows){
+    var acts={}, clis={}, owns={};
+    rows.forEach(function(r){
+      if (r.activity) acts[r.activity]=1;
+      if (r.company) clis[r.company]=1;
+      if (r.owner) owns[r.owner]=1;
+    });
+    var actSel=document.getElementById('smActActivity'), curA=actSel.value;
+    actSel.innerHTML='<option value="">All Activities</option>'+Object.keys(acts).sort().map(function(a){return '<option>'+esc(a)+'</option>';}).join('');
+    actSel.value=curA;
+    var cliSel=document.getElementById('smActClient'), curC=cliSel.value;
+    cliSel.innerHTML='<option value="">All Clients</option>'+Object.keys(clis).sort().map(function(c){return '<option>'+esc(c)+'</option>';}).join('');
+    cliSel.value=curC;
+    var ownSel=document.getElementById('smActOwner'), curO=ownSel.value;
+    ownSel.innerHTML='<option value="">All Owners</option>'+Object.keys(owns).sort().map(function(o){return '<option>'+esc(o)+'</option>';}).join('');
+    ownSel.value=curO;
+  }
+  function smApplyActionFilters(){
+    var fa=document.getElementById('smActActivity').value;
+    var fc=document.getElementById('smActClient').value;
+    var fo=document.getElementById('smActOwner').value;
+    var filtered = smAllActions.filter(function(r){
+      if (fa && r.activity!==fa) return false;
+      if (fc && r.company!==fc) return false;
+      if (fo && r.owner!==fo) return false;
+      return true;
+    });
+    smRenderActions(filtered);
+  }
+  function smClearActionFilters(){
+    ['smActActivity','smActClient','smActOwner'].forEach(function(id){ document.getElementById(id).value=''; });
+    smRenderActions(smAllActions);
+  }
+</script>
+
+<style>
+  .sm-act-filters{ display:flex; gap:10px; flex-wrap:wrap; padding:14px 16px; align-items:center; }
+  .sm-act-filters select{ flex:1 1 0; min-width:140px; padding:8px 10px; border-radius:8px; border:1px solid var(--line); font-size:13.5px; }
+  .sm-act-filters .btn{ flex:0 0 auto; white-space:nowrap; }
+  @media (max-width:900px){ .sm-act-filters select{ flex:1 1 45%; } }
+  .cellc.ratio{ font-weight:700; font-size:12.5px; padding:6px 4px; }
+  .cellc.ratio.done{ color:#15803d; background:#f0fdf4; }
+  .cellc.ratio.pend{ color:#92400e; background:#fffbeb; }
+  .cellc.ratio.over{ color:#b91c1c; background:#fef2f2; }
+  .cellc.ratio.canc{ color:#64748b; background:#f1f5f9; }
+</style>

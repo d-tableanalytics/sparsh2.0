@@ -101,6 +101,30 @@ class CalendarEventBase(BaseModel):
     # The count is simply len(follow_ups). Additive/optional; existing tasks default to [].
     follow_ups: List[Dict] = [] # [{id, by, by_name, remark, created_at}]
 
+    # ─── TPMS module additions (additive/optional; non-TPMS events are unaffected) ───
+    # A TPMS "scheduled activity" IS a calendar event, tagged with this discriminator so
+    # it reuses the recurrence engine, reminder scheduler and calendar UI. All other
+    # events leave `kind` as None. See app/models/tpms.py:TPMS_EVENT_KIND.
+    kind: Optional[str] = None                      # "tpms_activity" | None
+    # TPMS's own status vocabulary (Scheduled/Rescheduled/Cancelled/Completed/Lapsed).
+    # The legacy lowercase `status` above stays in sync via tpms.erp_status_for() so the
+    # existing Calendar page and every other consumer keep working unchanged.
+    tpms_status: Optional[str] = None
+    # Groups one recurrence expansion (the Apps Script's Batch_ID). Deliberately NOT
+    # `batch_id` — that name is already taken above by the LMS Batch.
+    tpms_batch_id: Optional[str] = None
+    # Escalation ladder progress: 0=none, 1=pending mailed, 2=critical mailed, 3=lapsed.
+    # Reset to 0 when the doer marks done. (runEscalationLadder, code.js:3755)
+    esc_stage: int = 0
+    reschedule_count: int = 0
+    # Two-step completion: the doer claims it, then internal staff confirm. `status`
+    # only becomes "completed" on confirmation. (code.js:3888 / 3915)
+    learner_done: bool = False
+    learner_done_by: Optional[str] = None
+    learner_done_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    completed_by: Optional[str] = None
+
 class CalendarEventCreate(CalendarEventBase):
     pass
 

@@ -1,0 +1,146 @@
+<div class="topbar">
+  <h1>🚨 Escalation Dashboard</h1>
+  <div class="adm-controls">
+    <select id="esSmops" onchange="esLoad()"><option value="">All OMs</option></select>
+    <select id="esCompany" onchange="esLoad()"><option value="">All Clients</option></select>
+    <button class="btn secondary sm" onclick="esLoad()">↻ Refresh</button>
+  </div>
+</div>
+
+<div class="wrap">
+  <div class="es-source">Source: Escalation Tracker + Action Tracker · Chain: HOD (T+5) → HR (T+7) → MD (T+10) · "This month" = current calendar month</div>
+
+  <div class="adm-kpis" id="esKpis"></div>
+
+  <div class="card adm-section">
+    <div class="adm-sec-head red">ACTIVE ESCALATIONS — REQUIRES IMMEDIATE OM ACTION</div>
+    <div class="adm-table-wrap">
+      <table class="adm-table">
+        <thead><tr>
+          <th>#</th><th>Client</th><th>OM</th><th>Activity</th><th>Days Overdue</th><th>Level</th>
+          <th>Escalated To</th><th>Escalation Date</th><th>Last Reminder</th><th>Status</th><th>Recommended Action</th>
+        </tr></thead>
+        <tbody id="esActiveBody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card adm-section">
+    <div class="adm-sec-head">ESCALATION REMINDER TIMELINE (SYSTEM LOGIC)</div>
+    <div class="adm-table-wrap">
+      <table class="adm-table" id="esTimeline">
+        <thead><tr><th>Stage</th><th>Timing</th><th>Trigger</th><th>Action</th><th>Recipient</th><th>Subject Line Format</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card adm-section">
+    <div class="adm-sec-head green">RESOLVED ESCALATIONS — THIS MONTH</div>
+    <div class="adm-table-wrap">
+      <table class="adm-table">
+        <thead><tr><th>Client</th><th>OM</th><th>Activity</th><th>Escalation Date</th><th>Resolution Date</th><th>Days Taken</th><th>Resolution Method</th><th>Resolved By</th></tr></thead>
+        <tbody id="esResolvedBody"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<script>
+  var ES_TOKEN = localStorage.getItem('sessionToken') || '';
+
+  var ES_TIMELINE = [
+    ['Pre-Reminder','T − 2 days','Scheduler auto-fires','Send advance notice','Client Coord (HOD/HR)','[Reminder] {Activity} due in 2 days | {Client}'],
+    ['Activity Due','T (Due Date)','Date reached','Send primary alert','Client Coord + MD','[Action Required] {Activity} | {Client} | {Date}'],
+    ['Reminder 1','T + 2 days','No response detected','Auto follow-up mail','Client Coord','[Follow Up] {Activity} | {Client} | Reminder 1'],
+    ['Reminder 2','T + 4 days','Still no response','Auto follow-up URGENT','Client Coord','[URGENT] {Activity} | {Client} | Reminder 2'],
+    ['Escalation L1','T + 5 days','3rd reminder unanswered','Escalate to HOD','HOD + OM CC','[ESCALATION] {Activity} Overdue | {Client}'],
+    ['Escalation L2','T + 7 days','HOD unresponsive','Escalate to HR','HR + OM','[ESCALATION L2] {Activity} | {Client} | HOD Unresponsive'],
+    ['Escalation L3','T + 10 days','HR unresponsive','Escalate to MD','MD + OM','[CRITICAL] {Activity} | {Client} | MD Attention Required']
+  ];
+
+  (function esInit(){
+    document.querySelector('#esTimeline tbody').innerHTML = ES_TIMELINE.map(function(r,i){
+      var stageCls = i>=4 ? 'es-stage-esc' : (i>=2 ? 'es-stage-rem' : 'es-stage-pre');
+      return '<tr><td class="adm-strong '+stageCls+'">'+esc(r[0])+'</td><td>'+esc(r[1])+'</td><td>'+esc(r[2])+'</td><td>'+esc(r[3])+'</td><td>'+esc(r[4])+'</td><td><code>'+esc(r[5])+'</code></td></tr>';
+    }).join('');
+    esLoad();
+  })();
+
+  function esLoad(){
+    showLoading(true);
+    var scope = { smopsId: document.getElementById('esSmops').value, companyId: document.getElementById('esCompany').value };
+    google.script.run
+      .withSuccessHandler(function(d){ esRender(d); showLoading(false); })
+      .withFailureHandler(function(e){ showLoading(false); toast(e.message, true); })
+      .getEscalationDashboard(ES_TOKEN, scope);
+  }
+
+  function esRender(d){
+    esFillFilters(d.filters);
+    esRenderKpis(d.cards);
+    esRenderActive(d.active);
+    esRenderResolved(d.resolved);
+  }
+
+  function esFillFilters(f){
+    var sm=document.getElementById('esSmops'), a=sm.value;
+    sm.innerHTML='<option value="">All OMs</option>'+f.smops.map(function(s){return '<option value="'+esc(s.id)+'">'+esc(s.name)+'</option>';}).join(''); sm.value=a;
+    var co=document.getElementById('esCompany'), b=co.value;
+    co.innerHTML='<option value="">All Clients</option>'+f.companies.map(function(c){return '<option value="'+esc(c.id)+'">'+esc(c.name)+'</option>';}).join(''); co.value=b;
+  }
+
+  function esRenderKpis(c){
+    var cards=[
+      { n:c.activeCount,            l:'Active Escalations',  s:'Open now',        cls:'k-red' },
+      { n:c.avgOverdue,             l:'Avg Days Overdue',    s:'Across active',   cls:'k-brown' },
+      { n:c.resolvedMonth,          l:'Resolved This Month', s:'Closed',          cls:'k-green' },
+      { n:c.avgResolution+' days',  l:'Avg Resolution',      s:'Time to close',   cls:'k-blue' },
+      { n:c.l1,                     l:'Level 1 (HOD)',       s:'T+5',             cls:'k-brown' },
+      { n:c.l2,                     l:'Level 2 (HR)',        s:'T+7',             cls:'k-brown' },
+      { n:c.l3,                     l:'Level 3 (MD)',        s:'T+10',            cls:'k-red' }
+    ];
+    document.getElementById('esKpis').innerHTML=cards.map(function(k){
+      return '<div class="kpi '+k.cls+'"><div class="kn">'+esc(k.n)+'</div><div class="kl">'+esc(k.l)+'</div><div class="ks">'+esc(k.s)+'</div></div>';
+    }).join('');
+  }
+
+  function esLevelBadge(lvl){
+    if (lvl===3) return '<span class="es-lvl l3">Level 3</span>';
+    if (lvl===2) return '<span class="es-lvl l2">Level 2</span>';
+    if (lvl===1) return '<span class="es-lvl l1">Level 1</span>';
+    return '<span class="es-lvl l0">—</span>';
+  }
+
+  function esRenderActive(rows){
+    if (!rows.length){ document.getElementById('esActiveBody').innerHTML='<tr><td colspan="11" class="adm-empty">No active escalations 🎉</td></tr>'; return; }
+    document.getElementById('esActiveBody').innerHTML=rows.map(function(r,i){
+      return '<tr><td class="num">'+(i+1)+'</td><td class="adm-strong">'+esc(r.company)+'</td><td>'+esc(r.om||'—')+'</td>'
+        +'<td>'+esc(r.activity)+'</td><td class="num overdue">'+r.daysOverdue+'</td><td>'+esLevelBadge(r.level)+'</td>'
+        +'<td>'+esc(r.escalatedTo||'—')+'</td><td>'+esc(r.escDate||'—')+'</td><td>'+esc(r.lastReminder||'—')+'</td>'
+        +'<td><span class="sb sb-risk">Active</span></td><td>'+esc(r.recommended||'—')+'</td></tr>';
+    }).join('');
+  }
+
+  function esRenderResolved(rows){
+    if (!rows.length){ document.getElementById('esResolvedBody').innerHTML='<tr><td colspan="8" class="adm-empty">No escalations resolved this month.</td></tr>'; return; }
+    document.getElementById('esResolvedBody').innerHTML=rows.map(function(r){
+      return '<tr><td class="adm-strong">'+esc(r.company)+'</td><td>'+esc(r.om||'—')+'</td><td>'+esc(r.activity)+'</td>'
+        +'<td>'+esc(r.escDate||'—')+'</td><td>'+esc(r.resDate||'—')+'</td><td class="num done">'+esc(r.daysTaken)+'</td>'
+        +'<td>'+esc(r.method||'—')+'</td><td>'+esc(r.resolvedBy||'—')+'</td></tr>';
+    }).join('');
+  }
+</script>
+
+<style>
+  .es-source{ background:#fef2f2; border:1px solid var(--can-bd); border-radius:10px; padding:9px 14px; font-size:12px; color:#b91c1c; margin-bottom:16px; }
+  .adm-sec-head.green{ background:#15803d; }
+  .kpi.k-red .kn{ color:#b91c1c; } .kpi.k-red{ background:#fef2f2; }
+  .es-lvl{ font-size:11px; font-weight:800; padding:2px 8px; border-radius:20px; }
+  .es-lvl.l1{ background:#fef3c7; color:#b45309; }
+  .es-lvl.l2{ background:#ffedd5; color:#c2410c; }
+  .es-lvl.l3{ background:#fee2e2; color:#b91c1c; }
+  .es-lvl.l0{ color:#94a3b8; }
+  .es-stage-pre{ color:#15803d; } .es-stage-rem{ color:#b45309; } .es-stage-esc{ color:#b91c1c; }
+  #esTimeline code{ background:#f1f5f9; padding:1px 5px; border-radius:4px; font-size:11px; }
+</style>

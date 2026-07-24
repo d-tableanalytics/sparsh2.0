@@ -5,6 +5,10 @@ import {
   UserCog, ClipboardList, RefreshCw, Save, Check, Search, ChevronDown,
 } from 'lucide-react';
 import api from '../../services/api';
+import {
+  checkScheduleConflict as checkTpmsConflict,
+  createSchedule as createTpmsSchedule,
+} from '../../services/tpmsApi';
 import { useAuth } from '../../context/AuthContext';
 import { useNotification } from '../../context/NotificationContext';
 import ReminderModal from './ReminderModal';
@@ -46,6 +50,12 @@ const RECURRENCE = [
   { label: 'Yearly',   repeat: 'Annually' },
 ];
 
+// TPMS uses its own recurrence set — the backend generator implements exactly these four
+// (One-time / Monthly / Weekly / Periodically-by-weekday). "Daily" and "Yearly" have no
+// TPMS equivalent, and "Periodically" has no ERP-calendar equivalent.
+const TPMS_RECURRENCE = ['One-time', 'Weekly', 'Monthly', 'Periodically'];
+const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
 const emptyForm = () => ({
   title: '',
   time: '',
@@ -53,6 +63,8 @@ const emptyForm = () => ({
   companyId: '',
   recurrence: 'One-time',
   planDate: '',
+  planEndDate: '',
+  weekdays: [],
   staffIds: [],
   departments: [],
   doerIds: [],
@@ -173,7 +185,15 @@ const SearchableMultiSelect = ({ options, selectedIds, onToggle, placeholder, di
   );
 };
 
-const ScheduleCalendarModal = ({ isOpen, onClose, onSaved }) => {
+/**
+ * @param {'erp'|'tpms'} mode  'erp' (default) posts to /calendar/events and keeps the
+ *   existing behaviour untouched. 'tpms' posts to /tpms/schedules, uses the TPMS
+ *   recurrence set, keeps doers and staff in separate fields, and runs the
+ *   once-per-month conflict check before saving.
+ */
+const ScheduleCalendarModal = ({ isOpen, onClose, onSaved, mode = 'erp' }) => {
+  const isTpms = mode === 'tpms';
+  const [conflict, setConflict] = useState(null);   // {info, payload} — TPMS duplicate warning
   const { showSuccess, showError } = useNotification();
   const { user } = useAuth();
   // Client-side users schedule only for their OWN company and don't assign internal staff.
@@ -273,11 +293,72 @@ const ScheduleCalendarModal = ({ isOpen, onClose, onSaved }) => {
     return { start: startDt.toISOString(), end: endDt.toISOString(), all_day: false };
   };
 
+  /** TPMS payload — doers and internal staff stay in SEPARATE fields (the ERP path
+   *  merges both into assigned_member_ids; TPMS needs them apart so escalation can tell
+   *  the doer from the SMOps owner). */
+  const tpmsPayload = () => ({
+    title: form.title.trim(),
+    activity: form.activity,
+    company_id: form.companyId,
+    company_name: isClient
+      ? companyName
+      : (companies.find((c) => String(c._id || c.id) === form.companyId)?.name || ''),
+    plan_start: form.planDate,
+    plan_end: form.recurrence === 'One-time' ? '' : form.planEndDate,
+    event_time: form.time,
+    recurrence: form.recurrence,
+    weekdays: form.weekdays,
+    departments: form.departments,
+    member_ids: form.doerIds,
+    staff_ids: form.staffIds,
+    comment: form.comment,
+    reminders: (form.reminders || []).map((r) => ({
+      channel: r.reminder_type === 'whatsapp' ? 'WhatsApp' : r.reminder_type === 'both' ? 'Both' : 'Email',
+      type: 'offset',
+      dir: r.timing_type || 'before',
+      value: Math.max(1, Math.round((r.offset_minutes || 0) / 60)),
+      unit: 'HRS',
+    })),
+  });
+
+  const saveTpms = async (payload) => {
+    setSaving(true);
+    try {
+      await createTpmsSchedule(payload);
+      showSuccess('Activity scheduled — reminders and mails are on their way.');
+      onSaved?.();
+      onClose();
+    } catch (err) {
+      showError(err.response?.data?.detail || 'Failed to schedule activity');
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const handleSave = async () => {
     if (!form.title.trim()) return showError('Enter a title');
     if (!form.activity) return showError('Select an activity');
     if (!form.companyId) return showError('Select a company');
     if (!form.planDate) return showError('Pick a plan date');
+
+    if (isTpms) {
+      if (!form.departments.length) return showError('Select at least one Department');
+      if (!form.doerIds.length) return showError('Select at least one Company Assigner (doer)');
+      if (!isClient && !form.staffIds.length) return showError('Select at least one Staff Assigner');
+      if (form.recurrence !== 'One-time') {
+        if (!form.planEndDate) return showError('Select Plan end Date');
+        if (form.planEndDate < form.planDate) return showError('Plan end must be after start');
+        if (form.recurrence === 'Periodically' && !form.weekdays.length)
+          return showError('Select at least one weekday');
+      }
+      const payload = tpmsPayload();
+      // Advisory duplicate check for once-a-month activities — the user may proceed.
+      try {
+        const { data } = await checkTpmsConflict(payload);
+        if (data?.conflict) return setConflict({ info: data, payload });
+      } catch { /* check failed → fall through and save, matching the source */ }
+      return saveTpms(payload);
+    }
 
     const rec = RECURRENCE.find((r) => r.label === form.recurrence) || RECURRENCE[0];
     const { start, end, all_day } = buildTimes();
@@ -393,13 +474,41 @@ const ScheduleCalendarModal = ({ isOpen, onClose, onSaved }) => {
               <div>
                 <Label req><RefreshCw size={11} className="inline mr-1" />Recurrence</Label>
                 <select value={form.recurrence} onChange={(e) => set({ recurrence: e.target.value })} className={field}>
-                  {RECURRENCE.map((r) => <option key={r.label} value={r.label}>{r.label}</option>)}
+                  {isTpms
+                    ? TPMS_RECURRENCE.map((r) => <option key={r} value={r}>{r === 'Periodically' ? 'Periodically (specific weekdays)' : r}</option>)
+                    : RECURRENCE.map((r) => <option key={r.label} value={r.label}>{r.label}</option>)}
                 </select>
               </div>
               <div>
-                <Label req>Plan Date</Label>
+                <Label req>{isTpms && form.recurrence !== 'One-time' ? 'Plan start Date' : 'Plan Date'}</Label>
                 <input type="date" value={form.planDate} onChange={(e) => set({ planDate: e.target.value })} className={field} />
               </div>
+              {isTpms && form.recurrence !== 'One-time' && (
+                <div>
+                  <Label req>Plan end Date</Label>
+                  <input type="date" value={form.planEndDate} min={form.planDate}
+                    onChange={(e) => set({ planEndDate: e.target.value })} className={field} />
+                </div>
+              )}
+              {isTpms && form.recurrence === 'Periodically' && (
+                <div className="sm:col-span-2">
+                  <Label req>Weekdays</Label>
+                  <div className="flex flex-wrap gap-2">
+                    {WEEKDAYS.map((d, i) => {
+                      const on = form.weekdays.includes(i);
+                      return (
+                        <button key={d} type="button"
+                          onClick={() => set({ weekdays: on ? form.weekdays.filter((w) => w !== i) : [...form.weekdays, i] })}
+                          className={`px-3 py-1.5 rounded-lg text-[11.5px] font-black border transition-all ${
+                            on ? 'bg-[var(--accent-indigo)] text-white border-[var(--accent-indigo)]'
+                               : 'bg-[var(--input-bg)] text-[var(--text-muted)] border-[var(--input-border)] hover:border-[var(--accent-indigo)]'}`}>
+                          {d}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
               {!isClient && (
                 <div>
                   <Label req><UserCog size={11} className="inline mr-1" />Staff Assigner (multi-select)</Label>
@@ -486,6 +595,44 @@ const ScheduleCalendarModal = ({ isOpen, onClose, onSaved }) => {
           </div>
         </motion.div>
       </div>
+
+      {/* TPMS ▸ once-per-month duplicate warning. Advisory only — "Schedule Anyway"
+          overrides it, exactly as the source's conflict modal did. */}
+      {conflict && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/40">
+          <div className="w-full max-w-lg rounded-2xl bg-white shadow-2xl overflow-hidden">
+            <div className="px-6 py-4 bg-amber-50 border-b border-amber-200">
+              <h3 className="text-[15px] font-black text-amber-700">⚠ Already Scheduled</h3>
+            </div>
+            <div className="px-6 py-4 max-h-[50vh] overflow-y-auto">
+              <p className="text-[12.5px] text-amber-800 font-semibold mb-3">
+                {conflict.info.scope === 'HOD'
+                  ? <>This activity is <b>HOD-wise once a month</b> and the selected doer already has it this month ({conflict.info.period}).</>
+                  : <>This activity is <b>company-wise once a month</b> and this client already has it this month ({conflict.info.period}).</>}
+              </p>
+              {(conflict.info.existing || []).map((m) => (
+                <div key={m.event_id} className="rounded-xl border border-gray-200 px-3 py-2 mb-2">
+                  <div className="text-[12.5px] font-black text-gray-800">{m.title || '(no title)'}</div>
+                  <div className="text-[11.5px] text-gray-500 font-semibold">
+                    📅 {m.date}{m.time ? ` · 🕒 ${m.time}` : ''} · {m.status}
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div className="px-6 py-4 border-t border-gray-100 flex justify-end gap-3 bg-gray-50">
+              <button onClick={() => setConflict(null)}
+                className="px-5 py-2.5 rounded-xl border border-gray-200 text-gray-600 text-[12px] font-black hover:bg-gray-100 transition-all">
+                Cancel
+              </button>
+              <button
+                onClick={() => { const p = conflict.payload; setConflict(null); saveTpms(p); }}
+                className="px-6 py-2.5 rounded-xl bg-amber-500 text-white text-[12px] font-black shadow-lg hover:scale-[1.02] active:scale-95 transition-all">
+                Schedule Anyway
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <ReminderModal
         isOpen={showReminders}

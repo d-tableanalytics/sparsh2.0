@@ -22,6 +22,7 @@ from bson.errors import InvalidId
 from app.controllers.auth_controller import get_current_user
 from app.db.mongodb import get_collection
 from app.models.forms import (
+    AUDIENCE_DEPARTMENT,
     FORM_DEFINITIONS,
     FORM_COLLECTIONS,
     ACTIVITY_CATALOGUE,
@@ -39,6 +40,7 @@ from app.models.forms import (
     KIND_RATING_MATRIX,
     KIND_YESNO_CHECKLIST,
 )
+from app.models.tpms import period_parts, period_tokens
 
 router = APIRouter(prefix="/forms", tags=["TPMS Forms"])
 
@@ -81,16 +83,21 @@ def _can_read(user: dict) -> bool:
     return bool(user.get("permissions", {}).get("forms", {}).get("read", True))
 
 
+def _user_department(user: dict) -> str:
+    return (user.get("department") or "").strip().lower()
+
+
 def _is_hod(user: dict) -> bool:
-    return (user.get("department") or "").strip().lower() == "hod"
+    return _user_department(user) == "hod"
 
 
 def _enforce_client_scope(user: dict, company_id: str, respondent_id: str, form_type: str) -> None:
     """Defence-in-depth for client-side submissions. Staff bypass all of this.
     A client user may only write:
       • within their own company, and
-      • under their own identity (as the HOD/respondent),
-      • and 'hod'-audience forms only if their department is HOD.
+      • under their own identity (as the HOD/MD/respondent),
+      • and department-gated forms only from the matching department
+        ('hod' → Accountability/Ownership/Culture, 'md' → Implementation Feedback).
     """
     if _is_staff(user):
         return
@@ -100,8 +107,12 @@ def _enforce_client_scope(user: dict, company_id: str, respondent_id: str, form_
         raise HTTPException(status_code=403, detail="You can only submit forms for your own company.")
     if respondent_id != _self_id(user):
         raise HTTPException(status_code=403, detail="You can only submit your own form.")
-    if form_audience(form_type) == "hod" and not _is_hod(user):
-        raise HTTPException(status_code=403, detail="Only an HOD can submit this form.")
+    required_dept = AUDIENCE_DEPARTMENT.get(form_audience(form_type))
+    if required_dept and _user_department(user) != required_dept:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Only a{'n' if required_dept == 'hod' else ''} {required_dept.upper()} can submit this form.",
+        )
 
 
 def _require_form_type(form_type: str) -> dict:
@@ -519,17 +530,14 @@ _CAL_COLLECTIONS = ["STAFF_CALENDER", "LEARNER_CALENDER", "calendar_events"]
 
 
 def _month_parts(month: str):
-    """Accept 'YYYY-MM' and return (year, month_num, [period tokens forms may use])."""
+    """Accept 'YYYY-MM' and return (year, month_num, [period tokens forms may use]).
+    Delegates to the shared TPMS period helpers so there is exactly one definition of
+    how a period is spelled across the module."""
     try:
-        year, month_num = int(month[:4]), int(month[5:7])
+        year, month_num = period_parts(month)
+        return year, month_num, period_tokens(month)
     except (ValueError, IndexError):
         raise HTTPException(status_code=400, detail="month must be 'YYYY-MM'")
-    first = datetime(year, month_num, 1)
-    mon_short = first.strftime("%b").lower()   # jul
-    mon_full = first.strftime("%B").lower()    # july
-    yy = str(year)[-2:]
-    tokens = list({f"{mon_short}{yy}", f"{mon_full}{yy}", month, f"{mon_short}-{yy}"})
-    return year, month_num, tokens
 
 
 def _parse_dt(s):
@@ -541,47 +549,16 @@ def _parse_dt(s):
         return None
 
 
-def _rating_score_pct(docs):
-    total = count = 0
-    for d in docs:
-        for _code, members in (d.get("ratings") or {}).items():
-            for _mid, cell in (members or {}).items():
-                r = cell.get("rating")
-                if isinstance(r, (int, float)):
-                    total += r
-                    count += 1
-    if not count:
-        return None
-    return round(total / count / SCALE_MAX * 100)
+async def _activity_score_pct(activity: str, company_id: str, tokens: list):
+    """Delegates to the Success-Measure engine so the whole module reports ONE number.
 
-
-def _feedback_score_pct(docs):
-    yes = count = 0
-    for d in docs:
-        for _qid, a in (d.get("answers") or {}).items():
-            count += 1
-            if a.get("checked"):
-                yes += 1
-    if not count:
-        return None
-    return round(yes / count * 100)
-
-
-async def _activity_score_pct(activity: str, company_id: str, period_tokens: list):
-    form_types = ACTIVITY_FORM_MAP.get(activity)
-    if not form_types:
-        return None
-    pcts = []
-    for ft in form_types:
-        docs = await get_collection(submission_collection(ft)).find(
-            {"company_id": company_id, "period": {"$in": period_tokens}}
-        ).to_list(1000)
-        pct = _feedback_score_pct(docs) if form_kind(ft) == KIND_YESNO_CHECKLIST else _rating_score_pct(docs)
-        if pct is not None:
-            pcts.append(pct)
-    if not pcts:
-        return None
-    return round(sum(pcts) / len(pcts))
+    This previously averaged each source form's percentage separately. The Apps Script
+    pools sum/count across all of an activity's forms and divides once — which differs
+    whenever the forms carry different numbers of ratings (partial submission makes that
+    the norm). See tpms_score_service.activity_score_pct.
+    """
+    from app.services.tpms_score_service import activity_score_pct
+    return await activity_score_pct(activity, company_id, tokens=tokens)
 
 
 def _status_for(achievement, has_data):

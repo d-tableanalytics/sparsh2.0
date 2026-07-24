@@ -26,9 +26,45 @@ async def start_reminder_scheduler():
                     last_recurring_day = today
                 except Exception as e:
                     logger.error(f"Error generating recurring tasks: {e}")
+
+                # TPMS daily sweeps. Each is isolated so a TPMS failure can never stop
+                # the reminder loop the rest of the ERP depends on.
+                await run_tpms_daily_jobs()
         except Exception as e:
             logger.error(f"Error in reminder scheduler: {e}")
         await asyncio.sleep(60) # Check every minute
+
+async def run_tpms_daily_jobs():
+    """TPMS's once-a-day sweeps, ported from the Apps Script's time-driven triggers.
+
+    Order mirrors the source's trigger times: the auto-feed ran at ~06:00 and the
+    escalation ladder at ~07:00, so the feed sees the previous day's statuses before
+    the ladder can lapse anything.
+
+    Each job is wrapped individually — a TPMS failure must never break the reminder
+    loop that Tasks and the Calendar depend on.
+    """
+    try:
+        from app.services.tpms_escalation_service import sync_auto_feed
+        result = await sync_auto_feed()
+        logger.info(f"TPMS auto-feed: {result}")
+    except Exception as e:
+        logger.error(f"TPMS auto-feed failed: {e}")
+
+    try:
+        from app.services.tpms_escalation_service import run_escalation_ladder
+        result = await run_escalation_ladder()
+        logger.info(f"TPMS escalation ladder: {result}")
+    except Exception as e:
+        logger.error(f"TPMS escalation ladder failed: {e}")
+
+    try:
+        from app.services.tpms_score_service import run_daily as tpms_scores
+        result = await tpms_scores()
+        logger.info(f"TPMS success measures: {result}")
+    except Exception as e:
+        logger.error(f"TPMS success-measure sync failed: {e}")
+
 
 async def check_and_trigger_reminders():
     now = datetime.utcnow()

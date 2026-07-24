@@ -74,32 +74,65 @@ FORM_DEFINITIONS: Dict[str, dict] = {
              "prompt": "Is he/she aligned with the organisational result Matrix?"},
         ],
     },
-    # Culture — a SELF rating: every client-side user scores themselves on each
-    # criterion (0–5). Stored keyed by (company, period, respondent) where the single
-    # rated "member" is the respondent themselves. Placeholder — criteria to be supplied.
+    # Culture — an HOD rates each of their team members, exactly like Accountability and
+    # Ownership. (Source of truth: HOD_Culture/code.js, which is byte-identical to the
+    # Accountability form apart from sheet names + template columns. It builds the team
+    # from HOD_IDs and writes one row per question × employee. The 261 rows in
+    # HOD_Culture_Responses match that shape.)
+    # NOTE: the Activity sheet marks "Culture Rating" as Company-wise — that governs
+    # scheduling/upload scope only, NOT who fills the form.
     "culture": {
         "form_type": "culture",
         "kind": KIND_RATING_MATRIX,
         "title": "Culture Rating",
-        "description": "Monthly culture self-rating submitted by each client-side user.",
-        "available": False,
-        "audience": "all",
-        "self_rating": True,
+        "description": "Monthly HOD culture rating for each team member.",
+        "available": True,
+        "audience": "hod",
         "scale": {"min": SCALE_MIN, "max": SCALE_MAX},
-        "criteria": [],
+        "criteria": [
+            {"code": "C1", "title": "Works in the Team",
+             "prompt": "Supportive and works as a team"},
+            {"code": "C2", "title": "Problem Solving Approach",
+             "prompt": "Acts as a problem solver in day-to-day work situations and approches with multiple solutions."},
+            {"code": "C3", "title": "Carrying Pocket Diary",
+             "prompt": "Carries the Pocket Diary at all times as required"},
+            {"code": "C4", "title": "Understanding the Core Ideology",
+             "prompt": "Is aware of company core values and actively practices them"},
+            {"code": "C5", "title": "Customer First Attitude",
+             "prompt": "Exhibits a customer-first attitude for internal and external customers"},
+        ],
     },
-    # Yes/No checklist answered by every client-side user (their own response). Fill
-    # `questions` to activate; each is {"id": "...", "title": "...", "desc": "..."}.
-    # `available` flips True once populated.
+    # Yes/No checklist answered by the company's MD only — not every client-side user.
+    # (Source of truth: Implementation_Update_Feedback/code.js, which resolves the
+    # respondent as the MD and writes MD_ID / MD_Name columns.)
+    # NOTE: Q6 asks for a list of departments — it is a free-text question living in a
+    # Yes/No form. The AppScript stores it as Yes/No with the real answer in `remark`;
+    # that behaviour is reproduced here deliberately.
     "implementation_feedback": {
         "form_type": "implementation_feedback",
         "kind": KIND_YESNO_CHECKLIST,
         "title": "Implementation Update Feedback",
-        "description": "Monthly implementation update feedback submitted by each client-side user (Yes/No + remark).",
-        "available": False,
-        "audience": "all",
-        "respondent": "user",
-        "questions": [],
+        "description": "Monthly implementation update feedback submitted by the MD (Yes/No + remark).",
+        "available": True,
+        "audience": "md",
+        "respondent": "md",
+        "questions": [
+            {"id": "Q1",  "title": "Are you receiving ORM score?", "desc": ""},
+            {"id": "Q2",  "title": "Are you receiving process audit scores for all departments?", "desc": ""},
+            {"id": "Q3",  "title": "Are CSI (Customer Satisfaction Index) scores being reviewed to identify improvement areas?", "desc": ""},
+            {"id": "Q4",  "title": "Were actions taken on TEI (Team Engagement Index) areas to improve team engagement?", "desc": ""},
+            {"id": "Q5",  "title": "Is the OHL moving towards the desired pyramid structure month on month through hiring, promotions, and structure corrections?", "desc": ""},
+            {"id": "Q6",  "title": "Please mention for which departments you are receiving DRM scores?", "desc": ""},
+            {"id": "Q7",  "title": "Is your implementation team making schedules and getting RRO done for IRM (Individual Result Matrix)?", "desc": ""},
+            {"id": "Q8",  "title": "Are Weekly Review Meetings (WRM) happening?", "desc": ""},
+            {"id": "Q9",  "title": "Are Monthly Management Reviews (MMR) being conducted?", "desc": ""},
+            {"id": "Q10", "title": "Are A&O ratings happening?", "desc": ""},
+            {"id": "Q11", "title": "Are culture ratings happening?", "desc": ""},
+            {"id": "Q12", "title": "Are leadership scoring happening?", "desc": ""},
+            {"id": "Q13", "title": "Are you receiving calendars for leaders?", "desc": ""},
+            {"id": "Q14", "title": "Do you feel the implementation is moving forward with the expected speed?", "desc": ""},
+            {"id": "Q15", "title": "Do teams have sufficient leadership support and decision-making speed to implement the framework?", "desc": ""},
+        ],
     },
 }
 
@@ -162,10 +195,17 @@ def form_kind(form_type: str) -> Optional[str]:
 
 
 def form_audience(form_type: str) -> str:
-    """Who fills this form on the client side: 'hod' (HOD rates their team) or
-    'all' (every client-side user submits their own response). Defaults to 'hod'."""
+    """Who fills this form on the client side:
+      'hod' — each HOD rates their own team members (Accountability/Ownership/Culture)
+      'md'  — only the company's MD responds (Implementation Feedback)
+      'all' — every client-side user submits their own response
+    Defaults to 'hod'."""
     d = FORM_DEFINITIONS.get(form_type) or {}
     return d.get("audience", "hod")
+
+
+# audience → the client-side `department` value required to submit. 'all' imposes none.
+AUDIENCE_DEPARTMENT = {"hod": "hod", "md": "md"}
 
 
 def criteria_codes(form_type: str) -> List[str]:

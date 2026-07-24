@@ -1,0 +1,219 @@
+<div class="topbar">
+  <h1>🧑‍🏫 HOD Activity <span id="hodName" style="font-size:13px;opacity:.85"></span></h1>
+  <div class="adm-controls">
+    <select id="hodCompany" class="hidden" onchange="hodOnCompany()"></select>
+    <select id="hodPicker" class="hidden" onchange="hodLoad()"></select>
+    <select id="hodRange" onchange="hodOnRange()">
+      <option value="month">This Month</option>
+      <option value="last">Last Month</option>
+      <option value="quarter">This Quarter</option>
+      <option value="custom">Custom Range</option>
+    </select>
+    <input type="date" id="hodFrom" class="hidden" onchange="hodLoad()">
+    <input type="date" id="hodTo" class="hidden" onchange="hodLoad()">
+    <button class="btn secondary sm" onclick="hodLoad()">↻ Refresh</button>
+  </div>
+</div>
+
+<div class="wrap">
+  <div class="card adm-section" id="hodInfoCard" style="margin-bottom:14px">
+    <div id="hodInfo" style="color:#475569;font-size:14px">Loading…</div>
+  </div>
+
+  <div class="adm-kpis" id="hodKpis"></div>
+
+  <!-- ACTIVITY SCORING (Activity_Tracker) -->
+  <div class="card adm-section">
+    <div class="adm-sec-head">ACTIVITY SCORING — PER ACTIVITY × MONTH</div>
+    <div class="adm-table-wrap">
+      <table class="adm-table">
+        <thead><tr><th>Month</th><th>Activity</th><th>Completed</th><th>Total</th><th>Missed</th><th>Pending</th><th>Score</th><th>%</th></tr></thead>
+        <tbody id="hodScoreBody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- RAW OCCURRENCES (Activity_Tracker detail) -->
+  <div class="card adm-section">
+    <div class="adm-sec-head">ACTIVITY TRACKER — OCCURRENCES</div>
+    <div class="adm-table-wrap">
+      <table class="adm-table">
+        <thead><tr><th>Date</th><th>Month</th><th>Activity</th><th>Status</th></tr></thead>
+        <tbody id="hodTrackBody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card adm-section">
+    <div class="adm-sec-head red">NEEDS ATTENTION</div>
+    <div id="hodAlerts" class="sm-alerts"></div>
+  </div>
+
+  <!-- ACTION ITEMS -->
+  <div class="card adm-section">
+    <div class="adm-sec-head">OPEN ACTION ITEMS</div>
+    <div class="adm-table-wrap">
+      <table class="adm-table">
+        <thead><tr><th>Activity</th><th>Action</th><th>Owner</th><th>Emp ID</th><th>Target Date</th><th>Status</th><th>Client Delay</th><th>OM Delay</th><th>Follow-up</th></tr></thead>
+        <tbody id="hodActionBody"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<script>
+  var HOD_TOKEN = localStorage.getItem('sessionToken') || '';
+  var hodPickerReady = false;
+
+  (function hodInit(){ document.getElementById('hodRange').value='month'; hodLoad(); })();
+
+  function hodPeriod(){
+    var now=new Date(), y=now.getFullYear(), m=now.getMonth();
+    var pad=function(n){return ('0'+n).slice(-2);};
+    var ymd=function(d){return d.getFullYear()+'-'+pad(d.getMonth()+1)+'-'+pad(d.getDate());};
+    var r=document.getElementById('hodRange').value;
+    if (r==='custom') return { from:document.getElementById('hodFrom').value, to:document.getElementById('hodTo').value };
+    if (r==='last') return { from:ymd(new Date(y,m-1,1)), to:ymd(new Date(y,m,0)) };
+    if (r==='quarter'){ var q=Math.floor(m/3)*3; return { from:ymd(new Date(y,q,1)), to:ymd(new Date(y,q+3,0)) }; }
+    return { from:ymd(new Date(y,m,1)), to:ymd(new Date(y,m+1,0)) };
+  }
+  function hodOnRange(){
+    var c=document.getElementById('hodRange').value==='custom';
+    document.getElementById('hodFrom').classList.toggle('hidden',!c);
+    document.getElementById('hodTo').classList.toggle('hidden',!c);
+    if (!c) hodLoad();
+  }
+  function hodLoad(){
+    var p=hodPeriod();
+    if (document.getElementById('hodRange').value==='custom' && (!p.from||!p.to)) return;
+    var scope = { from:p.from, to:p.to };
+    var pick = document.getElementById('hodPicker');
+    if (pick && !pick.classList.contains('hidden') && pick.value) scope.employeeId = pick.value;
+    showLoading(true);
+    google.script.run
+      .withSuccessHandler(function(d){ hodRender(d); showLoading(false); })
+      .withFailureHandler(function(e){ showLoading(false); toast(e.message,true); })
+      .getHodDashboard(HOD_TOKEN, scope);
+  }
+
+  // HOD picker ko selected company ke hisaab se bharo
+  function hodFillPicker(preselect){
+    var comp = document.getElementById('hodCompany');
+    var pick = document.getElementById('hodPicker');
+    var co = comp.value;
+    var list = (window.__hodOptions||[]).filter(function(h){ return !co || h.companyId === co; });
+    var cur = preselect || pick.value || '';
+    var keep = list.some(function(h){ return h.id === cur; }) ? cur : (list[0] ? list[0].id : '');
+    pick.innerHTML = list.map(function(h){
+      return '<option value="'+esc(h.id)+'"'+(h.id===keep?' selected':'')+'>'+esc(h.name)+(!co&&h.company?' — '+esc(h.company):'')+'</option>';
+    }).join('');
+  }
+
+  // company change → picker refill + reload
+  function hodOnCompany(){
+    hodFillPicker('');
+    hodLoad();
+  }
+
+  function hodRender(d){
+    document.getElementById('hodName').textContent = d.hod && d.hod.name ? '— '+d.hod.name : '';
+
+    if (d.canPick){
+      var comp = document.getElementById('hodCompany');
+      var pick = document.getElementById('hodPicker');
+      comp.classList.remove('hidden');
+      pick.classList.remove('hidden');
+      if (!hodPickerReady){
+        window.__hodOptions = d.hodOptions || [];
+        // company dropdown (distinct from hodOptions)
+        var seen={}, cos=[];
+        window.__hodOptions.forEach(function(h){ if(h.companyId && !seen[h.companyId]){ seen[h.companyId]=true; cos.push({id:h.companyId,name:h.company||h.companyId}); } });
+        cos.sort(function(a,b){ return a.name.localeCompare(b.name); });
+        comp.innerHTML = '<option value="">All Companies</option>' + cos.map(function(c){
+          return '<option value="'+esc(c.id)+'">'+esc(c.name)+'</option>'; }).join('');
+        hodFillPicker(d.selectedHod || '');
+        hodPickerReady = true;
+      }
+    }
+
+    var h = d.hod || {};
+    document.getElementById('hodInfo').innerHTML =
+      '<b>'+esc(h.name||'—')+'</b>'
+      + (h.id ? ' &nbsp;·&nbsp; ID: '+esc(h.id) : '')
+      + (h.company ? ' &nbsp;·&nbsp; '+esc(h.company) : '')
+      + (h.department ? ' &nbsp;·&nbsp; '+esc(h.department) : '')
+      + (h.email ? ' &nbsp;·&nbsp; '+esc(h.email) : '');
+
+    hodKpis(d.cards);
+    hodScores(d.scoreRows);
+    hodTracker(d.tracker);
+    hodAlerts(d.alerts);
+    hodActions(d.openActions);
+  }
+
+  function hodKpis(c){
+    var cards=[
+      { n:c.activities,        l:'Activities',      s:'This period',     cls:'k-blue' },
+      { n:c.completed,         l:'Completed',       s:'Done',            cls:'k-green' },
+      { n:c.missed,            l:'Missed',          s:'Not done',        cls:'k-red' },
+      { n:c.pending,           l:'Pending',         s:'Upcoming',        cls:'k-brown' },
+      { n:c.completion+'%',    l:'Completion',      s:'Done ÷ total',    cls:'k-green' },
+      { n:c.openActions,       l:'Open Actions',    s:'To close',        cls:'k-brown' },
+      { n:c.actionClosure+'%', l:'Action Closure',  s:'vs 95% target',   cls:'k-green' }
+    ];
+    document.getElementById('hodKpis').innerHTML = cards.map(function(k){
+      return '<div class="kpi '+k.cls+'"><div class="kn">'+esc(k.n)+'</div><div class="kl">'+esc(k.l)+'</div><div class="ks">'+esc(k.s)+'</div></div>';
+    }).join('');
+  }
+
+  function hodScores(rows){
+    if (!rows || !rows.length){ document.getElementById('hodScoreBody').innerHTML='<tr><td colspan="8" class="adm-empty">No activities tracked this period.</td></tr>'; return; }
+    document.getElementById('hodScoreBody').innerHTML = rows.map(function(r){
+      var pcCls = r.score>=90?'pc-green':(r.score>=60?'pc-amber':'pc-red');
+      return '<tr><td>'+esc(r.month)+'</td><td class="adm-strong">'+esc(r.activity)+'</td>'
+        + '<td class="num done">'+r.completed+'</td><td class="num">'+r.total+'</td>'
+        + '<td class="num">'+r.missed+'</td><td class="num">'+r.pending+'</td>'
+        + '<td class="num"><b>'+esc(r.label)+'</b></td>'
+        + '<td class="num '+pcCls+'"><b>'+r.score+'%</b></td></tr>';
+    }).join('');
+  }
+
+  function hodTrackCell(s){
+    var v = String(s||'').toLowerCase();
+    if (v==='completed') return '<span class="badge st-completed">✓ Completed</span>';
+    if (v==='missed')    return '<span class="badge st-cancelled">⚠ Missed</span>';
+    if (v==='cancelled') return '<span class="badge st-cancelled">✕ Cancelled</span>';
+    if (v==='rescheduled') return '<span class="badge st-rescheduled">↻ Rescheduled</span>';
+    return '<span class="badge st-scheduled">⏳ '+esc(s||'Scheduled')+'</span>';
+  }
+  function hodTracker(rows){
+    if (!rows || !rows.length){ document.getElementById('hodTrackBody').innerHTML='<tr><td colspan="4" class="adm-empty">No tracked occurrences this period.</td></tr>'; return; }
+    document.getElementById('hodTrackBody').innerHTML = rows.map(function(r){
+      return '<tr><td>'+esc(r.date)+'</td><td>'+esc(r.month)+'</td>'
+        + '<td class="adm-strong">'+esc(r.activity)+'</td>'
+        + '<td>'+hodTrackCell(r.status)+'</td></tr>';
+    }).join('');
+  }
+
+  function hodAlerts(alerts){
+    if (!alerts || !alerts.length){ document.getElementById('hodAlerts').innerHTML='<div class="sm-alert ok">✓ Nothing urgent. On track.</div>'; return; }
+    document.getElementById('hodAlerts').innerHTML = alerts.map(function(a){
+      return '<div class="sm-alert '+(a.level==='overdue'?'over':'soon')+'">⚠ '+esc(a.text)+'</div>';
+    }).join('');
+  }
+
+  function hodActions(rows){
+    if (!rows || !rows.length){ document.getElementById('hodActionBody').innerHTML='<tr><td colspan="9" class="adm-empty">No open action items.</td></tr>'; return; }
+    document.getElementById('hodActionBody').innerHTML = rows.map(function(r){
+      var fuCls = /overdue/i.test(r.followUp) ? 'overdue' : 'pending';
+      var ldCls = /^\d+d$/.test(r.learnerDelay||'') ? 'overdue' : 'pending';
+      var sdCls = /^\d+d$/.test(r.staffDelay||'') ? 'overdue' : 'pending';
+      return '<tr><td>'+esc(r.activity)+'</td><td>'+esc(r.action)+'</td><td>'+esc(r.owner||'—')+'</td>'
+        + '<td>'+esc(r.employeeId||'—')+'</td>'
+        + '<td>'+esc(r.target||'—')+'</td><td class="pending">'+esc(r.status)+'</td>'
+        + '<td class="'+ldCls+'">'+esc(r.learnerDelay||'—')+'</td>'
+        + '<td class="'+sdCls+'">'+esc(r.staffDelay||'—')+'</td>'
+        + '<td class="'+fuCls+'">'+esc(r.followUp)+'</td></tr>';
+    }).join('');
+  }
+</script>

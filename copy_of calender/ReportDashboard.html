@@ -1,0 +1,253 @@
+<div class="topbar">
+  <h1>📋 Logs Report</h1>
+  <div class="adm-controls">
+    <div class="rp-seg">
+      <button id="rpTabWa" class="rp-seg-btn active" onclick="rpSetType('whatsapp')">📱 WhatsApp</button>
+      <button id="rpTabEm" class="rp-seg-btn" onclick="rpSetType('email')">✉️ Email</button>
+    </div>
+    <button class="btn secondary sm" onclick="rpLoad()">↻ Refresh</button>
+    <button class="btn secondary sm" onclick="rpExport()">⬇ CSV</button>
+  </div>
+</div>
+
+<div class="wrap">
+
+  <!-- KPI CARDS -->
+  <div class="rp-cards" id="rpCards"></div>
+
+  <!-- FILTER BAR -->
+  <div class="card rp-filterbar">
+    <div class="rp-fgrp">
+      <label>From</label>
+      <input type="date" id="rpFrom" onchange="rpLoad()">
+    </div>
+    <div class="rp-fgrp">
+      <label>To</label>
+      <input type="date" id="rpTo" onchange="rpLoad()">
+    </div>
+    <div class="rp-fgrp">
+      <label>Status</label>
+      <select id="rpStatus" onchange="rpLoad()">
+        <option value="">All</option>
+        <option value="sent">Sent</option>
+        <option value="failed">Failed</option>
+        <option value="skipped">Skipped</option>
+      </select>
+    </div>
+    <div class="rp-fgrp">
+      <label>Side</label>
+      <select id="rpSide" onchange="rpLoad()">
+        <option value="">All</option>
+        <option value="company">Company</option>
+        <option value="staff">Staff</option>
+      </select>
+    </div>
+    <div class="rp-fgrp rp-quick">
+      <label>Quick</label>
+      <div>
+        <button class="rp-chip" onclick="rpQuick(0)">Today</button>
+        <button class="rp-chip" onclick="rpQuick(7)">7d</button>
+        <button class="rp-chip" onclick="rpQuick(30)">30d</button>
+        <button class="rp-chip" onclick="rpQuick(-1)">All</button>
+      </div>
+    </div>
+    <div class="rp-fgrp rp-grow">
+      <label>Search</label>
+      <input id="rpSearch" placeholder="🔍 anything — name, phone, activity, company, schedule id…" oninput="rpRender()">
+    </div>
+  </div>
+
+  <div class="card adm-section">
+    <div class="adm-sec-head" id="rpHead">LOGS</div>
+    <div class="adm-table-wrap rp-tablewrap">
+      <table class="adm-table rp-table">
+        <thead><tr id="rpHeadRow"></tr></thead>
+        <tbody id="rpBody"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<script>
+  var RP_TOKEN = localStorage.getItem('sessionToken') || '';
+  var rpData = null, rpType = 'whatsapp';
+
+  (function rpInit(){ rpLoad(); })();
+
+  function rpSetType(t){
+    rpType = t;
+    document.getElementById('rpTabWa').classList.toggle('active', t==='whatsapp');
+    document.getElementById('rpTabEm').classList.toggle('active', t==='email');
+    rpLoad();
+  }
+
+  function rpQuick(days){
+    var to = new Date(), from = new Date();
+    if (days === -1){ document.getElementById('rpFrom').value=''; document.getElementById('rpTo').value=''; rpLoad(); return; }
+    from.setDate(to.getDate() - days);
+    var f = function(d){ return d.toISOString().slice(0,10); };
+    document.getElementById('rpFrom').value = f(from);
+    document.getElementById('rpTo').value = f(to);
+    rpLoad();
+  }
+
+  function rpLoad(){
+    showLoading(true);
+    var scope = {
+      status: document.getElementById('rpStatus').value,
+      side:   document.getElementById('rpSide').value,
+      from:   document.getElementById('rpFrom').value,
+      to:     document.getElementById('rpTo').value
+    };
+    google.script.run
+      .withSuccessHandler(function(d){ rpData = d; rpRender(); showLoading(false); })
+      .withFailureHandler(function(e){ showLoading(false); toast(e.message, true); })
+      .getLogsReport(RP_TOKEN, rpType, scope);
+  }
+
+  function rpFilteredRows(){
+    if (!rpData) return [];
+    var q = (document.getElementById('rpSearch').value || '').trim().toLowerCase();
+    if (!q) return rpData.rows;
+    var terms = q.split(/\s+/);
+    return rpData.rows.filter(function(r){
+      var hay = r.join(' ').toLowerCase();
+      return terms.every(function(t){ return hay.indexOf(t) !== -1; });
+    });
+  }
+
+  function rpSpark(spark){
+    if (!spark || !spark.length) return '';
+    var max = Math.max.apply(null, spark.map(function(s){return s.count;})) || 1;
+    return '<div class="rp-spark">' + spark.map(function(s){
+      var h = Math.max(8, Math.round((s.count/max)*100));
+      return '<span class="rp-bar" style="height:'+h+'%" title="'+esc(s.day)+': '+s.count+'"></span>';
+    }).join('') + '</div>';
+  }
+
+  function rpRender(){
+    if (!rpData) return;
+    var c = rpData.counts || {total:0,sent:0,failed:0,skipped:0};
+    var rate = c.total ? Math.round((c.sent/c.total)*100) : 0;
+    document.getElementById('rpCards').innerHTML =
+        rpCard('Total', c.total, 'rp-c-blue', rpSpark(rpData.spark))
+      + rpCard('Sent', c.sent, 'rp-c-green', '<div class="rp-sub">'+rate+'% success</div>')
+      + rpCard('Failed', c.failed, 'rp-c-red', c.failed?'<div class="rp-sub">needs review</div>':'<div class="rp-sub">all clear</div>')
+      + rpCard('Skipped', c.skipped, 'rp-c-amber', '<div class="rp-sub">no phone / no tpl</div>');
+
+    var rows = rpFilteredRows();
+    document.getElementById('rpHead').textContent =
+      (rpData.type === 'email' ? 'EMAIL LOGS' : 'WHATSAPP LOGS') + ' — ' + rows.length + ' row(s)'
+      + (rpData.truncated ? ' (latest 3000)' : '');
+
+    var cols = rpData.columns;
+    document.getElementById('rpHeadRow').innerHTML = cols.map(function(h){ return '<th>'+esc(h)+'</th>'; }).join('');
+
+    if (!rows.length){
+      document.getElementById('rpBody').innerHTML =
+        '<tr><td colspan="'+cols.length+'" class="adm-empty">No logs match these filters.</td></tr>';
+      return;
+    }
+
+    document.getElementById('rpBody').innerHTML = rows.map(function(r){
+      return '<tr>' + r.map(function(cell, i){
+        var h = cols[i], v = String(cell==null?'':cell);
+        if (h === 'Log Status')  return '<td>'+rpBadge(v)+'</td>';
+        if (h === 'Cal Status')  return '<td>'+(v?rpCalBadge(v):'—')+'</td>';
+        if (h === 'Side')        return '<td><span class="rp-side">'+esc(v||'—')+'</span></td>';
+        if (h === 'Action')      return '<td><span class="rp-action">'+esc(v||'—')+'</span></td>';
+        if ((h === 'Form Link' || h === 'Form URL'))
+          return '<td>'+(/^https?:\/\//i.test(v) ? '<a href="'+esc(v)+'" target="_blank">open ↗</a>' : '—')+'</td>';
+        if (h === 'Schedule_ID') return '<td><code class="rp-sid">'+esc(v||'—')+'</code></td>';
+        if (h === 'Error' && v.length > 36) return '<td class="rp-err" title="'+esc(v)+'">'+esc(v.slice(0,36))+'…</td>';
+        if (h === 'Timestamp')   return '<td class="rp-ts">'+esc(v)+'</td>';
+        return '<td>'+esc(v||'—')+'</td>';
+      }).join('') + '</tr>';
+    }).join('');
+  }
+
+  function rpCard(label, val, cls, extra){
+    return '<div class="rp-card '+cls+'"><div class="rp-card-n">'+val+'</div>'
+      + '<div class="rp-card-l">'+label+'</div>'+(extra||'')+'</div>';
+  }
+  function rpBadge(v){
+    var cls = /sent/i.test(v) ? 'b-sent' : (/fail/i.test(v) ? 'b-fail' : 'b-skip');
+    return '<span class="rp-badge '+cls+'">'+esc(v)+'</span>';
+  }
+  function rpCalBadge(v){
+    var l = v.toLowerCase(), cls='b-sch';
+    if (l.indexOf('complet')!==-1) cls='b-sent';
+    else if (l.indexOf('cancel')!==-1) cls='b-fail';
+    else if (l.indexOf('reschedul')!==-1) cls='b-skip';
+    return '<span class="rp-badge '+cls+'">'+esc(v)+'</span>';
+  }
+
+  function rpExport(){
+    if (!rpData) return;
+    var rows = rpFilteredRows();
+    var csv = [rpData.columns].concat(rows).map(function(r){
+      return r.map(function(c){
+        var v = String(c==null?'':c).replace(/"/g,'""');
+        return /[",\n]/.test(v) ? '"'+v+'"' : v;
+      }).join(',');
+    }).join('\n');
+    var blob = new Blob([csv], { type:'text/csv' });
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = (rpData.type||'logs') + '_logs_' + new Date().toISOString().slice(0,10) + '.csv';
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  }
+</script>
+
+<style>
+  /* segmented type toggle */
+  .rp-seg{ display:inline-flex; background:#ede9fe; border-radius:10px; padding:3px; gap:2px; }
+  .rp-seg-btn{ border:0; background:transparent; padding:7px 14px; border-radius:8px; font-weight:700;
+    font-size:13px; cursor:pointer; color:#6b21a8; }
+  .rp-seg-btn.active{ background:#fff; color:#7c3aed; box-shadow:0 1px 3px rgba(0,0,0,.12); }
+
+  /* KPI cards */
+  .rp-cards{ display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:14px; margin-bottom:16px; }
+  .rp-card{ position:relative; border-radius:16px; padding:18px 18px 16px; border:1px solid var(--line);
+    background:#fff; overflow:hidden; }
+  .rp-card-n{ font-size:34px; font-weight:800; line-height:1; }
+  .rp-card-l{ font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; margin-top:6px; color:#475569; }
+  .rp-sub{ font-size:11px; color:#94a3b8; margin-top:6px; font-weight:600; }
+  .rp-c-blue{ background:linear-gradient(135deg,#eff6ff,#fff); } .rp-c-blue .rp-card-n{ color:#1d4ed8; }
+  .rp-c-green{ background:linear-gradient(135deg,#f0fdf4,#fff);} .rp-c-green .rp-card-n{ color:#15803d; }
+  .rp-c-red{ background:linear-gradient(135deg,#fef2f2,#fff);}  .rp-c-red .rp-card-n{ color:#b91c1c; }
+  .rp-c-amber{ background:linear-gradient(135deg,#fffbeb,#fff);} .rp-c-amber .rp-card-n{ color:#b45309; }
+
+  /* mini sparkline */
+  .rp-spark{ display:flex; align-items:flex-end; gap:2px; height:30px; margin-top:8px; }
+  .rp-bar{ flex:1; background:#93c5fd; border-radius:2px 2px 0 0; min-height:8px; }
+
+  /* filter bar */
+  .rp-filterbar{ display:flex; flex-wrap:wrap; gap:14px; align-items:flex-end; padding:14px 16px; margin-bottom:16px; }
+  .rp-fgrp{ display:flex; flex-direction:column; gap:5px; }
+  .rp-fgrp label{ font-size:11px; font-weight:700; text-transform:uppercase; color:#64748b; letter-spacing:.03em; }
+  .rp-fgrp input, .rp-fgrp select{ padding:7px 10px; border:1px solid var(--line); border-radius:9px; font-size:13px; }
+  .rp-grow{ flex:1; min-width:200px; } .rp-grow input{ width:100%; }
+  .rp-quick > div{ display:flex; gap:6px; }
+  .rp-chip{ border:1px solid var(--line); background:#f8fafc; border-radius:20px; padding:6px 12px;
+    font-size:12px; font-weight:600; cursor:pointer; color:#475569; }
+  .rp-chip:hover{ background:#ede9fe; color:#7c3aed; border-color:#ddd6fe; }
+
+  /* table */
+  .rp-tablewrap{ max-height:62vh; overflow:auto; }
+  .rp-table thead th{ position:sticky; top:0; background:#1e293b; color:#fff; z-index:2; }
+  .rp-table tbody tr:hover{ background:#f8fafc; }
+  .rp-ts{ font-variant-numeric:tabular-nums; white-space:nowrap; color:#475569; font-size:12px; }
+  .rp-sid{ font-size:11px; background:#f1f5f9; padding:2px 6px; border-radius:5px; color:#475569; }
+  .rp-side, .rp-action{ font-size:11px; text-transform:capitalize; background:#eef2ff; color:#4338ca;
+    padding:2px 8px; border-radius:20px; font-weight:600; }
+  .rp-err{ color:#b91c1c; font-size:12px; max-width:240px; }
+  #rpBody a{ color:#1d4ed8; font-weight:600; text-decoration:none; } #rpBody a:hover{ text-decoration:underline; }
+
+  /* badges */
+  .rp-badge{ display:inline-block; padding:3px 10px; border-radius:20px; font-size:11px; font-weight:700; }
+  .b-sent{ background:#dcfce7; color:#15803d; }
+  .b-fail{ background:#fee2e2; color:#b91c1c; }
+  .b-skip{ background:#fef3c7; color:#b45309; }
+  .b-sch{ background:#e0e7ff; color:#4338ca; }
+</style>

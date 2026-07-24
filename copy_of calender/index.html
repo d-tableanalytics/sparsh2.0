@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <?!= include('Stylesheet'); ?>
+</head>
+<body>
+
+  <div id="loading"><div>Loading…</div></div>
+
+  <!-- LOGIN -->
+  <div id="loginSection" class="login-container">
+    <h2>Team Productivity Monitoring System</h2>
+    <form id="loginForm" onsubmit="return handleLogin(event)">
+      <div class="input-group">
+        <input type="text" id="username" autocomplete="username" required>
+        <label for="username">Email</label>
+      </div>
+      <div class="input-group">
+        <input type="password" id="password" autocomplete="current-password" required>
+        <label for="password">Password</label>
+      </div>
+      <button type="submit" class="login-btn">Login</button>
+    </form>
+    <div id="loginError"></div>
+  </div>
+
+  <!-- APP SHELL -->
+  <div id="mainContent" class="hidden">
+    <div class="sidebar">
+      <div class="brand">TPMS Testing</div>
+    <div class="who" id="whoBox"></div>
+
+      <!-- Non-admin: single dashboard button -->
+      <button onclick="loadPage(resolveDashboard())" id="DashboardTab" data-roles="Staff,Learner">Dashboard</button>
+
+      <!-- Admin-only: switch between the three dashboards -->
+     <div class="submenu" id="adminDashMenu" style="display:none">
+        <button onclick="loadPage('AdminDashboard')"   id="AdminDashboardTab"   data-roles="Admin">Admin View</button>
+        <button onclick="loadPage('StaffDashboard')"   id="StaffDashboardTab"   data-roles="Admin">OM (SMOps) View</button>
+        <button onclick="loadPage('LearnerDashboard')" id="LearnerDashboardTab" data-roles="Admin">Client View</button>
+        <button onclick="loadPage('SuccessDashboard')" id="SuccessDashboardTab" data-roles="Admin">Implementation tracker</button>
+        <button onclick="loadPage('EscalationDashboard')" id="EscalationDashboardTab" data-roles="Admin">Escalations</button>
+        <button onclick="loadPage('ReportDashboard')" id="ReportDashboardTab" data-roles="Admin">Logs Report</button>
+        <button onclick="loadPage('HodView')" id="HodViewTab2" data-roles="Admin">HOD View</button>
+      </div>
+
+      <button onclick="loadPage('Calendar')" id="CalendarTab" data-roles="Admin,Staff,Learner">Calendar</button>
+       <button onclick="loadPage('HodView')" id="HodViewTab" data-roles="Staff,Learner">HOD Activity</button>
+      <button onclick="loadPage('EmployeeActivity')" id="EmployeeActivityTab" data-roles="Admin,Staff,Learner">Employee Tasks</button>
+      <button onclick="loadPage('ReviewReports')" id="ReviewReportsTab" data-roles="Admin,Staff,Learner">Review Reports</button>
+
+ <button onclick="loadPage('Profile')" id="ProfileTab" data-roles="Admin,Staff,Learner">My Profile</button>
+      <button onclick="handleLogout()" class="logout-btn">Logout</button>
+    </div>
+    <div class="content" id="contentArea"></div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+<script>
+  const el = id => document.getElementById(id);
+
+  document.addEventListener('DOMContentLoaded', checkSession);
+
+  function resolveDashboard(){
+    var r = localStorage.getItem('userRole');
+    if (r === 'Admin') return 'AdminDashboard';
+    if (r === 'Staff') return 'StaffDashboard';
+    return 'LearnerDashboard';
+  }
+
+  /* ---------- session ---------- */
+  function checkSession(){
+    const token = localStorage.getItem('sessionToken');
+    showLoading(true);
+    if (!token){ showLogin(); showLoading(false); return; }
+    google.script.run
+      .withSuccessHandler(res => {
+        if (res && res.valid){ applyUser(res.userData); showMainContent(); }
+        else { clearSession(); showLogin(); }
+        showLoading(false);
+      })
+      .withFailureHandler(() => { clearSession(); showLogin(); showLoading(false); })
+      .validateSession(token);
+  }
+
+  function handleLogin(event){
+    event.preventDefault();
+    el('loginError').textContent = '';
+    const username = el('username').value.trim();
+    const password = el('password').value;
+    showLoading(true);
+    google.script.run
+      .withSuccessHandler(res => {
+        showLoading(false);
+        if (res && res.success){
+          localStorage.setItem('sessionToken', res.token);
+          applyUser(res.userData);
+          showMainContent();
+        } else {
+          el('loginError').textContent = (res && res.error) || 'Login failed';
+        }
+      })
+      .withFailureHandler(e => { showLoading(false); el('loginError').textContent = e.message; })
+      .authenticateUser(username, password);
+  }
+
+  function handleLogout(){
+    const token = localStorage.getItem('sessionToken');
+    if (token) google.script.run.invalidateSession(token);
+    clearSession();
+    showLogin();
+  }
+
+  function clearSession(){
+    ['sessionToken','activeTab','userRole','userName','userEmail','companyId'].forEach(k => localStorage.removeItem(k));
+  }
+
+  /* ---------- user / roles ---------- */
+  function applyUser(u){
+    localStorage.setItem('userRole', u.role || '');
+    localStorage.setItem('userName', u.username || '');
+    localStorage.setItem('userEmail', u.email || '');
+    localStorage.setItem('companyId', u.companyId || '');
+    el('whoBox').innerHTML = esc(u.username || u.email) + '<br><b>' + esc(u.role) + '</b>';
+    applyRoleVisibility(u.role);
+    const dashMenu = el('adminDashMenu');
+    if (dashMenu) dashMenu.style.display = (u.role === 'Admin') ? 'block' : 'none';
+  }
+
+  // Hide sidebar tabs the role can't access
+  function applyRoleVisibility(role){
+    document.querySelectorAll('.sidebar button[data-roles]').forEach(btn => {
+      const allowed = (btn.getAttribute('data-roles') || '').split(',').map(s => s.trim());
+      btn.classList.toggle('hidden', allowed.indexOf(role) === -1);
+    });
+  }
+
+ // First page the current role is allowed to see
+  function defaultPageForRole(role){
+    return resolveDashboard();   // AdminDashboard / StaffDashboard / LearnerDashboard
+  }
+
+  /* ---------- page loading ---------- */
+ var PAGE_CACHE = {};   // page -> html string
+
+  function loadPage(page){
+    const role = localStorage.getItem('userRole') || '';
+    const btn = el(page + 'Tab');
+    const isDashboard = /Dashboard$/.test(page);
+    // collect data-roles from ALL buttons that load this page (handles duplicate buttons like HodView)
+    if (!isDashboard){
+      var roleOk = false, sawBtn = false;
+      document.querySelectorAll('.sidebar button[onclick*="\'' + page + '\'"]').forEach(function(b){
+        var dr = b.getAttribute('data-roles'); if (!dr) return; sawBtn = true;
+        if (dr.split(',').map(function(s){return s.trim();}).indexOf(role) !== -1) roleOk = true;
+      });
+      if (sawBtn && !roleOk){ toast('No access to that page', true); return; }
+    }
+    if (isDashboard && role !== 'Admin' && page !== resolveDashboard()){ toast('No access to that page', true); return; }
+
+    localStorage.setItem('activeTab', page);
+    document.querySelectorAll('.sidebar button').forEach(b => b.classList.remove('active'));
+    let btnEl = btn; if (!btnEl && isDashboard) btnEl = el('DashboardTab');
+    if (btnEl) btnEl.classList.add('active');
+
+    // serve cached HTML instantly
+    if (PAGE_CACHE[page]){ renderPage(page, PAGE_CACHE[page]); return; }
+
+    showLoading(true);
+    google.script.run
+      .withSuccessHandler(html => { PAGE_CACHE[page] = html; renderPage(page, html); showLoading(false); })
+      .withFailureHandler(e => { showLoading(false); toast(e.message, true); })
+      .getPageContent(page);
+  }
+
+  function renderPage(page, html){
+    el('contentArea').innerHTML = html;
+    Array.from(el('contentArea').getElementsByTagName('script')).forEach(oldS => {
+      const s = document.createElement('script');
+      Array.from(oldS.attributes).forEach(a => s.setAttribute(a.name, a.value));
+      s.textContent = oldS.innerHTML;
+      oldS.parentNode.replaceChild(s, oldS);
+    });
+  }
+
+  /* ---------- view toggles ---------- */
+function showMainContent(){
+    el('loginSection').classList.add('hidden');
+    el('mainContent').classList.remove('hidden');
+    const role = localStorage.getItem('userRole') || '';
+    let tab = localStorage.getItem('activeTab') || defaultPageForRole(role);
+    // legacy alias: an old saved "Dashboard" maps to the role's real file
+    if (tab === 'Dashboard') tab = resolveDashboard();
+    // if the saved tab has a sidebar button but this role can't access it, fall back
+    const btn = el(tab + 'Tab');
+    if (btn){
+      const allowed = (btn.getAttribute('data-roles') || '').split(',').map(s => s.trim());
+      if (allowed.indexOf(role) === -1) tab = defaultPageForRole(role);
+    }
+    loadPage(tab);
+  }
+  function showLogin(){
+    el('mainContent').classList.add('hidden');
+    el('loginSection').classList.remove('hidden');
+    el('loginForm').reset();
+  }
+  function showLoading(on){ el('loading').classList.toggle('on', !!on); }
+
+  function toast(msg, isErr){
+    const t = el('toast'); t.textContent = msg; t.className = 'toast ' + (isErr ? 'err' : 'ok');
+    t.style.display = 'block'; setTimeout(() => t.style.display = 'none', 3000);
+  }
+  function esc(s){ return String(s == null ? '' : s).replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
+</script>
+</body>
+</html>

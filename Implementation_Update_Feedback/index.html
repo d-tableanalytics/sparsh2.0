@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html>
+<head>
+<base target="_top">
+<meta charset="utf-8">
+<style>
+  :root{--bg:#f0f2f5;--card:#fff;--ink:#202124;--muted:#5f6368;--line:#e0e0e0;
+    --accent:#0d9488;--accent-soft:#ccfbf1;--req:#d93025;--ok:#15803d;}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:'Google Sans',Roboto,Arial,sans-serif;background:var(--bg);color:var(--ink);}
+  .wrap{max-width:760px;margin:0 auto;padding:24px 14px 96px;}
+  .topbar{height:10px;background:var(--accent);border-radius:12px 12px 0 0;}
+  .head{background:var(--card);border:1px solid var(--line);border-top:none;border-radius:0 0 12px 12px;padding:22px 24px;margin-bottom:18px;}
+  .head h1{margin:0 0 6px;font-size:22px;}
+  .head .meta{color:var(--muted);font-size:14px;}
+  .head .meta b{color:var(--ink);}
+  .banner{margin-top:12px;padding:10px 14px;border-radius:8px;font-size:13px;display:none;}
+  .banner.show{display:block;}
+  .banner.locked{background:#fff4e5;color:#8a5300;border:1px solid #ffd699;}
+  .qcard{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px 18px;margin-bottom:14px;}
+  .qcard.locked{background:#fafafa;}
+  .qrow{display:flex;align-items:flex-start;gap:14px;}
+  .qrow .chk{flex:0 0 auto;margin-top:2px;}
+  .qrow .chk input{width:24px;height:24px;accent-color:var(--accent);cursor:pointer;}
+  .qrow .chk input:disabled{cursor:default;}
+  .qtext{flex:1;font-size:15px;line-height:1.5;font-weight:600;}
+  .qtext small{display:block;font-weight:400;color:var(--muted);font-size:13px;margin-top:2px;}
+  .ans-tag{font-size:12px;font-weight:700;padding:2px 8px;border-radius:20px;margin-left:8px;}
+  .ans-yes{background:#dcfce7;color:#15803d;}
+  .ans-no{background:#fee2e2;color:#b91c1c;}
+  .remark{margin-top:10px;width:100%;border:1px solid var(--line);border-radius:8px;padding:8px 10px;font-family:inherit;font-size:14px;resize:vertical;}
+  .remark:disabled{background:#f1f1f1;color:#666;}
+  .remark-label{font-size:12px;color:var(--muted);margin:8px 0 4px;}
+  .bar{position:fixed;left:0;right:0;bottom:0;background:#fff;border-top:1px solid var(--line);padding:12px 16px;display:flex;justify-content:flex-end;gap:12px;align-items:center;}
+  .bar .info{margin-right:auto;color:var(--muted);font-size:13px;}
+  button{font-family:inherit;font-size:15px;font-weight:600;border:none;border-radius:8px;padding:10px 26px;cursor:pointer;}
+  .submit{background:var(--accent);color:#fff;}
+  .submit:disabled{opacity:.5;cursor:not-allowed;}
+  .state{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:40px;text-align:center;color:var(--muted);}
+  .err{color:var(--req);}
+  .toast{position:fixed;top:18px;left:50%;transform:translateX(-50%);background:#323232;color:#fff;padding:12px 20px;border-radius:8px;font-size:14px;opacity:0;transition:.3s;z-index:9;pointer-events:none;}
+  .toast.show{opacity:1;}
+  .done{text-align:center;padding:60px 20px;}
+  .done .check{width:64px;height:64px;border-radius:50%;background:var(--accent-soft);color:var(--accent);display:flex;align-items:center;justify-content:center;font-size:34px;margin:0 auto 16px;}
+</style>
+</head>
+<body>
+  <div id="toast" class="toast"></div>
+  <div class="wrap">
+    <div class="topbar"></div>
+    <div class="head">
+      <h1>Implementation Update Feedback</h1>
+      <div class="meta" id="meta">Loading…</div>
+      <div class="banner locked" id="lockBanner"></div>
+    </div>
+    <div id="content"><div class="state">Loading form…</div></div>
+  </div>
+  <div class="bar" id="bar" style="display:none">
+    <span class="info" id="progress"></span>
+    <button class="submit" id="submitBtn" onclick="submitForm()">Submit</button>
+  </div>
+
+<script>
+  const CID='<?= CID ?>', EID='<?= EID ?>', MID='<?= MID ?>';
+  let DATA=null;
+
+  window.onload=function(){
+    google.script.run.withSuccessHandler(render)
+      .withFailureHandler(e=>showError(e.message)).getFormData(CID,EID,MID);
+  };
+
+  function showError(msg){
+    document.getElementById('meta').textContent='';
+    document.getElementById('content').innerHTML='<div class="state err">⚠ '+esc(msg)+'</div>';
+  }
+
+  function render(res){
+    if(!res||!res.ok){showError(res?res.error:'Unknown error');return;}
+    DATA=res;
+    document.getElementById('meta').innerHTML=
+      'Company: <b>'+esc(res.company)+'</b> &nbsp;•&nbsp; Month: <b>'+esc(res.month)+'</b> &nbsp;•&nbsp; MD: <b>'+esc(res.md.name)+'</b> ('+esc(res.md.id)+')';
+
+    if(res.submitted){
+      const b=document.getElementById('lockBanner');
+      b.classList.add('show');
+      b.innerHTML='✏️ Partly submitted for <b>'+esc(res.month)+'</b>'+(res.submittedOn?(' on '+esc(res.submittedOn)):'')+'. Saved answers are locked; you can still fill the remaining ones and submit.';
+    }
+
+    if(!res.questions.length){document.getElementById('content').innerHTML='<div class="state">No questions found.</div>';return;}
+
+    let html='';
+    res.questions.forEach((q,qi)=>{
+      let saved=null;
+      if(res.answers && res.answers[q.id]!=null) saved=res.answers[q.id];
+      else if(res.answersByText && res.answersByText[q.title]!=null) saved=res.answersByText[q.title];
+      const locked = (saved!=null);
+      const checked = (saved && saved.checked) ? ' checked' : '';
+      const remark = (saved && saved.remark) ? saved.remark : '';
+      const dis = locked ? ' disabled' : '';
+
+      let tag='';
+      if(locked) tag = saved.checked ? '<span class="ans-tag ans-yes">YES</span>' : '<span class="ans-tag ans-no">NO</span>';
+
+      html+='<div class="qcard'+(locked?' locked':'')+'" data-locked="'+(locked?1:0)+'" id="q_'+qi+'">';
+      html+='<div class="qrow">';
+      html+='<label class="chk"><input type="checkbox" id="c_'+qi+'"'+checked+dis+'></label>';
+      html+='<div class="qtext">'+(qi+1)+'. '+esc(q.title)+tag+(q.desc?'<small>'+esc(q.desc)+'</small>':'')+'</div>';
+      html+='</div>';
+      html+='<div class="remark-label">Remark (optional)</div>';
+      html+='<textarea class="remark" id="r_'+qi+'" rows="2" placeholder="Add a note…"'+dis+'>'+esc(remark)+'</textarea>';
+      html+='</div>';
+    });
+    document.getElementById('content').innerHTML=html;
+    document.getElementById('bar').style.display='flex';
+    updateProgress();
+
+    // live counter
+    res.questions.forEach((q,qi)=>{
+      const c=document.getElementById('c_'+qi);
+      if(c && !c.disabled) c.addEventListener('change', updateProgress);
+    });
+  }
+
+  function editableCount(){
+    let n=0;
+    DATA.questions.forEach((q,qi)=>{ if(document.getElementById('q_'+qi).getAttribute('data-locked')!=='1') n++; });
+    return n;
+  }
+  function answeredCount(){
+    // "answered" = checkbox ticked OR a remark typed, among editable rows
+    let n=0;
+    DATA.questions.forEach((q,qi)=>{
+      const card=document.getElementById('q_'+qi);
+      if(card.getAttribute('data-locked')==='1') return;
+      const c=document.getElementById('c_'+qi).checked;
+      const r=document.getElementById('r_'+qi).value.trim();
+      if(c||r) n++;
+    });
+    return n;
+  }
+  function updateProgress(){
+    const tot=editableCount();
+    document.getElementById('progress').textContent = tot? (answeredCount()+' / '+tot+' to answer this visit') : 'All questions submitted';
+  }
+
+  function submitForm(){
+    const answers=[];
+    DATA.questions.forEach((q,qi)=>{
+      const card=document.getElementById('q_'+qi);
+      if(card.getAttribute('data-locked')==='1') return;   // already saved → skip
+      const checked=document.getElementById('c_'+qi).checked;
+      const remark=document.getElementById('r_'+qi).value.trim();
+      // submit a row if MD ticked the box OR wrote a remark (an explicit "No" without remark is skipped → fill later)
+      if(checked || remark)
+        answers.push({questionId:q.id, question:q.title, checked:checked, remark:remark});
+    });
+    if(!answers.length){toast('Tick a box or add a remark before submitting.');return;}
+
+    const btn=document.getElementById('submitBtn');
+    btn.disabled=true;btn.textContent='Submitting…';
+    google.script.run
+      .withSuccessHandler(r=>{
+        if(r&&r.ok) done(r);
+        else{btn.disabled=false;btn.textContent='Submit';toast((r&&r.error)||'Submit failed.');}})
+      .withFailureHandler(e=>{btn.disabled=false;btn.textContent='Submit';toast(e.message);})
+      .submitResponses({company:DATA.company,month:DATA.month,mdId:DATA.md.id,mdName:DATA.md.name,answers:answers});
+  }
+
+  function done(r){
+    document.getElementById('bar').style.display='none';
+    let extra='';
+    if(r.mail && r.mail.mailed!=null) extra='<p style="color:var(--muted);font-size:13px">Notification sent to '+r.mail.mailed+' recipient(s).</p>';
+    document.getElementById('content').innerHTML=
+      '<div class="qcard done"><div class="check">✓</div><h2>Feedback recorded</h2>'+
+      '<p style="color:var(--muted)">'+r.count+' answer(s) saved for '+esc(DATA.month)+'. Reopen this link to fill the rest.</p>'+extra+'</div>';
+    window.scrollTo({top:0,behavior:'smooth'});
+  }
+
+  function toast(msg){const t=document.getElementById('toast');t.textContent=msg;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),3200);}
+  function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+</script>
+</body>
+</html>
