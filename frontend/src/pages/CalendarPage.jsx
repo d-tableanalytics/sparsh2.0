@@ -17,7 +17,7 @@ import {
     Layers, Trash2, AlertCircle, Link, Check, UserPlus2,
     Edit2, CheckCircle, ArrowRightLeft, Ban, PlayCircle, MoreHorizontal,
     PlusCircle, LayoutGrid, Calendar as CalendarIcon, Briefcase, Video, Bell,
-    Eye, Lock, ClipboardList, FileText
+    Eye, Lock, ClipboardList, FileText, ChevronDown, CheckCircle2, Circle
 } from 'lucide-react';
 import ReminderModal from '../components/calendar/ReminderModal';
 import { canAccessTaskManagement } from '../utils/taskAccess';
@@ -101,6 +101,249 @@ const CustomTimePicker = ({ value, onChange, label }) => {
     );
 };
 
+// ─── Todo recurrence ───
+// Frequency options, the repeat_data shape, the controls and the validation below are taken
+// from the Task & Delegation "Repeat" control (components/tasks/TaskFormModal.jsx) unchanged,
+// so a repeating todo and a repeating task are the same thing on the wire and are rolled
+// forward by the same backend engine (recurring_task_service.generate_due_recurring_tasks):
+// one occurrence per period, created on its own day, skipping holidays and weekly offs.
+// "periodic" is the stored value behind the "Periodically" label; "Yearly" is reference-only
+// (the engine matches "Annually"), exactly as it is for tasks today.
+const REPEAT_OPTIONS = [
+    { value: 'Daily', label: 'Daily' },
+    { value: 'Weekly', label: 'Weekly' },
+    { value: 'Monthly', label: 'Monthly' },
+    { value: 'Yearly', label: 'Yearly' },
+    { value: 'periodic', label: 'Periodically' },
+    { value: 'Custom', label: 'Custom' },
+];
+
+const EMPTY_REPEAT_DATA = { monthlyDates: [], weekdays: [], lastDay: false };
+
+// Reconciles whatever shape repeat_data comes back as (including the older single-value
+// day_of_month/weekday shape) into the { monthlyDates, weekdays, lastDay } shape the controls
+// use — same helper the task form applies, so editing an older doc doesn't crash.
+const normalizeRepeatData = (data) => {
+    if (!data) return { ...EMPTY_REPEAT_DATA };
+    if (Array.isArray(data.monthlyDates) || Array.isArray(data.weekdays)) {
+        return { ...EMPTY_REPEAT_DATA, ...data };
+    }
+    if (data.day_of_month === 'last') return { ...EMPTY_REPEAT_DATA, lastDay: true };
+    if (typeof data.day_of_month === 'number') return { ...EMPTY_REPEAT_DATA, monthlyDates: [data.day_of_month] };
+    if (typeof data.weekday === 'number') return { ...EMPTY_REPEAT_DATA, weekdays: [data.weekday] };
+    return { ...EMPTY_REPEAT_DATA };
+};
+
+const customUnitLabel = (unit, interval) => {
+    const singular = { Weeks: 'Week', Months: 'Month' }[unit || 'Months'];
+    return (interval || 1) === 1 ? singular : (unit || 'Months');
+};
+
+// The repeat rules from TaskFormModal.validate(), applied verbatim. A todo's due date is its
+// series start, so `start` is always present — the Start Date check is kept anyway so the two
+// forms stay line-for-line comparable. Returns an error string, or null when valid.
+const validateRepeat = (form) => {
+    if (form.repeat === 'Does not repeat') return null;
+    if (!form.start) return 'Start Date is required when Repeat is enabled';
+    if (!form.repeat) return 'Frequency is required when Repeat is enabled';
+    const data = form.repeat_data || EMPTY_REPEAT_DATA;
+    if (form.repeat === 'Monthly' && !data.lastDay && !(data.monthlyDates || []).length) {
+        return 'Select at least one date (or Last Day) for a Monthly repeat';
+    }
+    if (form.repeat === 'Custom' && (data.customUnit || 'Months') === 'Months' && !data.lastDay && !(data.monthlyDates || []).length) {
+        return 'Select at least one date (or Last Day) for a Custom repeat';
+    }
+    if (form.repeat_end_date && new Date(form.repeat_end_date) < new Date(form.start)) {
+        return 'End Date cannot be before Start Date';
+    }
+    return null;
+};
+
+// The Repeat control itself. Kept as its own component (rather than inlined in the already
+// long modal) purely for readability; the markup mirrors the task form's control.
+const TodoRepeatSection = ({ form, setForm, minEndDate }) => {
+    const [freqOpen, setFreqOpen] = useState(false);
+    const [customIntervalOpen, setCustomIntervalOpen] = useState(false);
+    const [customUnitOpen, setCustomUnitOpen] = useState(false);
+
+    const data = form.repeat_data || EMPTY_REPEAT_DATA;
+    const isRepeating = form.repeat !== 'Does not repeat';
+    const setRepeatData = (patch) => setForm({ ...form, repeat_data: { ...data, ...patch } });
+
+    const toggleMonthlyDate = (day) => {
+        const current = data.monthlyDates || [];
+        const monthlyDates = current.includes(day) ? current.filter(d => d !== day) : [...current, day].sort((a, b) => a - b);
+        setRepeatData({ monthlyDates, lastDay: false });
+    };
+    const toggleLastDay = () => setRepeatData({ lastDay: !data.lastDay, monthlyDates: [] });
+    const toggleWeekday = (idx) => {
+        const current = data.weekdays || [];
+        setRepeatData({ weekdays: current.includes(idx) ? current.filter(d => d !== idx) : [...current, idx].sort((a, b) => a - b) });
+    };
+
+    const dayGrid = (
+        <div className="grid grid-cols-10 gap-1.5">
+            {Array.from({ length: 31 }, (_, i) => i + 1).map(day => (
+                <button type="button" key={day} onClick={() => toggleMonthlyDate(day)}
+                    className={`aspect-square flex items-center justify-center rounded-lg text-[11px] font-bold border transition-all ${(data.monthlyDates || []).includes(day) ? 'bg-[var(--accent-indigo)] text-white border-[var(--accent-indigo)]' : 'bg-[var(--bg-card)] text-[var(--text-muted)] border-[var(--border)] hover:text-[var(--text-main)]'}`}>
+                    {day}
+                </button>
+            ))}
+            <button type="button" onClick={toggleLastDay}
+                className={`col-span-3 flex items-center justify-center rounded-lg text-[10px] font-black uppercase tracking-wider border transition-all ${data.lastDay ? 'bg-[var(--accent-indigo)] text-white border-[var(--accent-indigo)]' : 'bg-[var(--bg-card)] text-[var(--text-muted)] border-[var(--border)] hover:text-[var(--text-main)]'}`}>
+                Last Day
+            </button>
+        </div>
+    );
+
+    const weekdayGrid = (order) => (
+        <div className="grid grid-cols-7 gap-1.5">
+            {order.map(([idx, label]) => (
+                <button type="button" key={label} onClick={() => toggleWeekday(idx)}
+                    className={`py-2 rounded-lg text-[10px] font-black uppercase tracking-wider border transition-all ${(data.weekdays || []).includes(idx) ? 'bg-[var(--accent-indigo)] text-white border-[var(--accent-indigo)]' : 'bg-[var(--bg-card)] text-[var(--text-muted)] border-[var(--border)] hover:text-[var(--text-main)]'}`}>
+                    {label}
+                </button>
+            ))}
+        </div>
+    );
+
+    return (
+        <div className="space-y-2">
+            <div className="flex items-center gap-2 flex-wrap p-3 bg-[var(--input-bg)] rounded-xl border border-[var(--border)]">
+                <button type="button"
+                    onClick={() => setForm({
+                        ...form,
+                        repeat: isRepeating ? 'Does not repeat' : 'Daily',
+                        // Turning Repeat off drops the series settings, so a stale end date or
+                        // day selection can never resurrect a recurrence the user cancelled.
+                        ...(isRepeating ? { repeat_end_date: '', repeat_interval: 1, repeat_data: { ...EMPTY_REPEAT_DATA } } : {}),
+                    })}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[10px] font-black uppercase tracking-wider border transition-all ${isRepeating ? 'bg-[var(--accent-indigo)] text-white border-[var(--accent-indigo)]' : 'border-[var(--border)] text-[var(--text-muted)]'}`}>
+                    {isRepeating ? <CheckCircle2 size={12} /> : <Circle size={12} />} Repeat
+                </button>
+
+                {isRepeating && (
+                    <>
+                        <div className="relative" onClick={e => e.stopPropagation()}>
+                            <button type="button" onClick={() => setFreqOpen(o => !o)}
+                                className="flex items-center gap-1.5 px-3 py-1.5 bg-[var(--bg-card)] border border-[var(--border)] rounded-full text-[10px] font-black uppercase tracking-wider text-[var(--text-main)]">
+                                {REPEAT_OPTIONS.find(o => o.value === form.repeat)?.label || 'Daily'}
+                                <ChevronDown size={12} className={`transition-transform ${freqOpen ? 'rotate-180' : ''}`} />
+                            </button>
+                            {freqOpen && (
+                                <div className="absolute top-full left-0 mt-1.5 w-40 bg-[var(--bg-card)] border border-[var(--border)] rounded-2xl shadow-xl overflow-hidden z-20 p-1.5 space-y-0.5">
+                                    {REPEAT_OPTIONS.map(o => (
+                                        <button type="button" key={o.value}
+                                            onClick={() => { setForm({ ...form, repeat: o.value }); setFreqOpen(false); }}
+                                            className={`w-full text-left px-3 py-2 rounded-xl text-[11px] font-black uppercase tracking-wider transition-all ${form.repeat === o.value ? 'bg-[var(--accent-indigo)] text-white' : 'text-[var(--text-muted)] hover:bg-[var(--input-bg)]'}`}>
+                                            {o.label}
+                                        </button>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
+
+                        {/* The task form carries a separate Start Date chip because a task's
+                            `start` is a recurrence anchor distinct from its deadline. A todo's
+                            due date IS its start, so the series simply runs from the Due Date
+                            picked above — only the end of the series is collected here. */}
+                        <div className="relative flex items-center gap-1.5 px-3 py-1.5 bg-[var(--bg-card)] border border-[var(--border)] rounded-full text-[10px] font-black uppercase tracking-wider text-[var(--text-muted)] cursor-pointer hover:border-[var(--accent-indigo)]">
+                            <CalendarDays size={12} />
+                            {form.repeat_end_date ? new Date(form.repeat_end_date).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' }) : 'End Date'}
+                            <input type="date" min={minEndDate}
+                                className="absolute inset-0 opacity-0 cursor-pointer"
+                                value={form.repeat_end_date ? form.repeat_end_date.split('T')[0] : ''}
+                                onChange={e => setForm({ ...form, repeat_end_date: e.target.value })} />
+                        </div>
+                    </>
+                )}
+            </div>
+
+            {form.repeat === 'periodic' && (
+                <div className="p-3 bg-[var(--input-bg)] rounded-xl border border-[var(--border)] flex items-center justify-between">
+                    <span className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-wider">Repeat Every</span>
+                    <input type="number" min="1" value={form.repeat_interval}
+                        onChange={e => setForm({ ...form, repeat_interval: parseInt(e.target.value) || 1 })}
+                        className="w-16 text-center px-2 py-1.5 bg-[var(--bg-card)] border border-[var(--border)] rounded-lg text-[12px] font-bold text-[var(--text-main)] outline-none focus:border-[var(--accent-indigo)]" />
+                    <span className="text-[10px] font-black text-[var(--accent-indigo)] uppercase tracking-wider">Days</span>
+                </div>
+            )}
+
+            {form.repeat === 'Monthly' && (
+                <div className="p-3 bg-[var(--input-bg)] rounded-xl border border-[var(--border)]">{dayGrid}</div>
+            )}
+
+            {form.repeat === 'Weekly' && (
+                <div className="p-3 bg-[var(--input-bg)] rounded-xl border border-[var(--border)]">
+                    {weekdayGrid([[0, 'Sun'], [1, 'Mon'], [2, 'Tue'], [3, 'Wed'], [4, 'Thu'], [5, 'Fri'], [6, 'Sat']])}
+                </div>
+            )}
+
+            {form.repeat === 'Custom' && (
+                <div className="p-3 bg-[var(--input-bg)] rounded-xl border border-[var(--border)] space-y-3">
+                    <div className="flex items-center gap-2">
+                        <span className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-wider">Occur Every</span>
+
+                        <div className="relative" onClick={e => e.stopPropagation()}>
+                            <button type="button" onClick={() => { setCustomIntervalOpen(o => !o); setCustomUnitOpen(false); }}
+                                className="flex items-center gap-1 px-3 py-1.5 bg-[var(--bg-card)] border border-[var(--border)] rounded-lg text-[12px] font-bold text-[var(--text-main)]">
+                                {form.repeat_interval || 1}
+                                <ChevronDown size={12} className={`transition-transform ${customIntervalOpen ? 'rotate-180' : ''}`} />
+                            </button>
+                            {customIntervalOpen && (
+                                <div className="absolute top-full left-0 mt-1.5 w-16 max-h-48 overflow-y-auto no-scrollbar bg-[var(--bg-card)] border border-[var(--border)] rounded-xl shadow-xl z-20 p-1">
+                                    {Array.from({ length: 30 }, (_, i) => i + 1).map(n => (
+                                        <button type="button" key={n}
+                                            onClick={() => { setForm({ ...form, repeat_interval: n }); setCustomIntervalOpen(false); }}
+                                            className={`w-full text-center px-2 py-1.5 rounded-lg text-[11px] font-bold ${(form.repeat_interval || 1) === n ? 'bg-[var(--accent-indigo)] text-white' : 'text-[var(--text-muted)] hover:bg-[var(--input-bg)]'}`}>
+                                            {n}
+                                        </button>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
+
+                        <div className="relative" onClick={e => e.stopPropagation()}>
+                            <button type="button" onClick={() => { setCustomUnitOpen(o => !o); setCustomIntervalOpen(false); }}
+                                className="flex items-center gap-1 px-3 py-1.5 bg-[var(--bg-card)] border border-[var(--border)] rounded-lg text-[12px] font-bold text-[var(--text-main)]">
+                                {customUnitLabel(data.customUnit, form.repeat_interval)}
+                                <ChevronDown size={12} className={`transition-transform ${customUnitOpen ? 'rotate-180' : ''}`} />
+                            </button>
+                            {customUnitOpen && (
+                                <div className="absolute top-full left-0 mt-1.5 w-24 bg-[var(--bg-card)] border border-[var(--border)] rounded-xl shadow-xl z-20 p-1 space-y-0.5">
+                                    {['Weeks', 'Months'].map(unit => (
+                                        <button type="button" key={unit}
+                                            onClick={() => { setRepeatData({ customUnit: unit }); setCustomUnitOpen(false); }}
+                                            className={`w-full text-left px-2.5 py-1.5 rounded-lg text-[12px] font-bold ${(data.customUnit || 'Months') === unit ? 'bg-[var(--accent-indigo)] text-white' : 'text-[var(--text-muted)] hover:bg-[var(--input-bg)]'}`}>
+                                            {customUnitLabel(unit, form.repeat_interval)}
+                                        </button>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
+                    </div>
+
+                    {data.customUnit === 'Weeks' && (
+                        <div>
+                            <span className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-wider">Select Days :</span>
+                            <div className="mt-1.5">
+                                {weekdayGrid([[1, 'Mon'], [2, 'Tue'], [3, 'Wed'], [4, 'Thu'], [5, 'Fri'], [6, 'Sat'], [0, 'Sun']])}
+                            </div>
+                        </div>
+                    )}
+
+                    {(data.customUnit || 'Months') === 'Months' && (
+                        <div>
+                            <span className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-wider">Select Dates :</span>
+                            <div className="mt-1.5">{dayGrid}</div>
+                        </div>
+                    )}
+                </div>
+            )}
+        </div>
+    );
+};
+
 const CalendarPage = () => {
     const calendarRef = useRef(null);
     const { user } = useAuth();
@@ -139,7 +382,8 @@ const CalendarPage = () => {
         batch_id: '', quarter_id: '', status: 'schedule', meeting_link: '',
         assigned_departments: [], assigned_member_ids: [], coach_ids: [],
         additional_details: '', category: 'General', repeat: 'Does not repeat',
-        repeat_end_date: '', repeat_interval: 1, assigned_to: 'myself', target_staff_id: [],
+        repeat_end_date: '', repeat_interval: 1, repeat_data: { ...EMPTY_REPEAT_DATA },
+        assigned_to: 'myself', target_staff_id: [],
         reminders: [], status_remark: '', gpt_projects: []
     };
 
@@ -429,6 +673,7 @@ const CalendarPage = () => {
             repeat: props.repeat || 'Does not repeat',
             repeat_end_date: props.repeat_end_date || '',
             repeat_interval: props.repeat_interval || 1,
+            repeat_data: normalizeRepeatData(props.repeat_data),
             assigned_to: props.assigned_to || 'myself',
             target_staff_id: props.target_staff_id || [],
             reminders: props.reminders || [],
@@ -481,6 +726,11 @@ const CalendarPage = () => {
         // A todo must say what actually has to be done — the details are the todo.
         if (eventForm.type === 'todo' && !(eventForm.additional_details || '').trim()) {
             return showError("Add the task details for this todo");
+        }
+        // Recurrence is validated by the Task & Delegation rules, unchanged — see validateRepeat.
+        if (eventForm.type === 'todo') {
+            const repeatError = validateRepeat(eventForm);
+            if (repeatError) return showError(repeatError);
         }
 
         const eventStart = new Date(eventForm.start);
@@ -1349,6 +1599,21 @@ const CalendarPage = () => {
                                             </div>
                                         )}
                                     </div>
+
+                                    {/* ─── Frequency (todo only) ───
+                                        The Task & Delegation Repeat control, reused as-is: same
+                                        options, same repeat_data, same validation, and the same
+                                        nightly rollover engine on the backend. A todo's due date
+                                        doubles as the series start, so the control sits directly
+                                        under it. */}
+                                    {eventForm.type === 'todo' && (
+                                        <div className="space-y-3 pt-2">
+                                            <label className="text-[9px] font-black text-[var(--text-muted)] uppercase tracking-wider flex items-center gap-1.5">
+                                                <ArrowRightLeft size={12} /> Frequency
+                                            </label>
+                                            <TodoRepeatSection form={eventForm} setForm={setEventForm} minEndDate={getLocalDatePart(eventForm.start)} />
+                                        </div>
+                                    )}
                                 </div>
                                 <div className="space-y-4 p-5 bg-orange-50/20 rounded-[24px] border border-orange-100 border-dashed">
                                     <div className="flex items-center justify-between">

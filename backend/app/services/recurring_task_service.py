@@ -7,7 +7,9 @@ once per day at/after midnight by the reminder scheduler, creates the NEXT occur
 each active series whose date has arrived — catching up any missed days — so there is exactly
 one task per period, never a bulk dump of duplicates.
 
-Only type == "task" documents are handled; recurring events keep their own behaviour.
+Personal TODOS repeat through this same engine, by the same rules (Calendar ▸ Personal Todo ▸
+Frequency uses the delegation Repeat control), so the two never drift apart. Recurring
+sessions/events keep their own bulk-generation behaviour.
 """
 from datetime import datetime, timezone, timedelta
 import logging
@@ -18,6 +20,11 @@ from app.utils.calendar_utils import CALENDAR_COLLECTIONS
 logger = logging.getLogger(__name__)
 
 TASK_COLLECTIONS = CALENDAR_COLLECTIONS + ["calendar_events"]
+
+# Document types this engine rolls forward. Todos ride along with tasks so a repeating todo
+# gets exactly the delegation feature's behaviour — same cadences, same holiday / weekly-off
+# handling, same one-occurrence-per-period rule.
+RECURRING_TYPES = ["task", "todo"]
 
 # Weekly off day(s) — recurring occurrences never land here, matching the task due-date
 # picker which blocks the same day. Python date.weekday(): Mon=0 … Sun=6, so {6} == Sunday.
@@ -89,7 +96,7 @@ async def generate_due_recurring_tasks():
     for col_name in TASK_COLLECTIONS:
         col = get_collection(col_name)
         docs = await col.find({
-            "type": "task",
+            "type": {"$in": RECURRING_TYPES},
             "recurring_group_id": {"$ne": None},
             "repeat": {"$nin": [None, "", "Does not repeat"]},
             "deleted_at": None,
@@ -171,7 +178,9 @@ async def generate_due_recurring_tasks():
                         new_task["end"] = (target + (oe - os)).isoformat()
                     new_task["created_at"] = datetime.utcnow()
                     new_task["updated_at"] = None
-                    new_task["workflow_status"] = "in_progress"  # new occurrences start In Progress
+                    if head.get("type") == "task":
+                        # Delegation workflow state — a todo has no workflow, only status.
+                        new_task["workflow_status"] = "in_progress"  # new occurrences start In Progress
                     new_task["status"] = "schedule"
                     new_task["completed_at"] = None
                     new_task["completed_by"] = None
@@ -192,7 +201,7 @@ async def generate_due_recurring_tasks():
 
     if created or skipped_holidays or skipped_weekly_offs or shifted_occurrences:
         logger.info(
-            f"Recurring engine: created {created} task occurrence(s); "
+            f"Recurring engine: created {created} task/todo occurrence(s); "
             f"skipped {skipped_holidays} holiday and {skipped_weekly_offs} weekly-off date(s); "
             f"shifted {shifted_occurrences} occurrence(s) to the next working day."
         )
