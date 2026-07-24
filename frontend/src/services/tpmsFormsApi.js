@@ -41,3 +41,8 @@ export const getFeedback = (formType, params) =>
 // Slot-by-slot submit (only unanswered questions are sent).
 export const submitFeedback = (formType, payload) =>
   api.post(`/forms/${formType}/feedback`, payload);
+
+// ── Client dashboard ── Success-Measure scorecard for the caller's company + month.
+// month is 'YYYY-MM'. Client users are auto-scoped to their own company server-side.
+export const getClientDashboard = (month) =>
+  api.get('/forms/dashboard', { params: { month } });

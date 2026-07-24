@@ -15,8 +15,6 @@ import { canAccessTpms } from '../../features/tpms/access';
 import logo1 from '../../assets/Sparsh Magic  Logo PNG1.png';
 import logo2 from '../../assets/Sparsh Magic  Logo PNG2.png';
 import logo3 from '../../assets/Sparsh Magic white  Logo PNG3.png';
-import dtableLogo from '../../assets/D-Table_Logo.png';
-import dtableFull from '../../assets/D-Table Analytics-Picsart-BackgroundRemover.jpeg';
 import { useTheme } from '../../context/ThemeContext';
 
 const Sidebar = ({ isMobileOpen, setIsMobileOpen }) => {
@@ -41,7 +39,31 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen }) => {
   // TPMS submodules mirror the panel navs (features/tpms/*Layout.jsx). Role decides which
   // panel a user lands on: superadmin/admin → Admin panel, every other internal → SMOPS.
   const isTpmsAdminUser = ['superadmin', 'admin'].includes(user?.role);
-  const tpmsSubmodules = isTpmsAdminUser
+  const isTpmsClientUser = ['clientadmin', 'clientuser'].includes(user?.role);
+  const isHodUser = (user?.department || '').trim().toLowerCase() === 'hod';
+  // Client-side users share the SMOPS submodules (Dashboard, HOD Activity, Employee Task,
+  // Review Report, My Profile) plus a Forms group. HOD-only forms (team ratings) are hidden
+  // for non-HOD users; everyone gets Culture + Implementation Feedback.
+  const tpmsClientForms = [
+    { name: 'Dashboard', path: '/tpms/smops', icon: LayoutDashboard, end: true },
+    { name: 'HOD Activity', path: '/tpms/smops/hod-activity', icon: Activity },
+    { name: 'Employee Task', path: '/tpms/smops/tasks', icon: ClipboardList },
+    { name: 'Review Report', path: '/tpms/smops/reviews', icon: BarChart3 },
+    {
+      name: 'Forms', path: '/tpms/forms', icon: ClipboardCheck,
+      children: [
+        ...(isHodUser ? [
+          { name: 'Accountability', path: '/tpms/forms/accountability', icon: ClipboardCheck },
+          { name: 'Ownership', path: '/tpms/forms/ownership', icon: UserCog },
+        ] : []),
+        { name: 'Culture', path: '/tpms/forms/culture', icon: Sparkles },
+        { name: 'Implementation Feedback', path: '/tpms/forms/implementation-feedback', icon: ClipboardList },
+      ],
+    },
+  ];
+  const tpmsSubmodules = isTpmsClientUser
+    ? tpmsClientForms
+    : isTpmsAdminUser
     ? [
         { name: 'Admin View', path: '/tpms/admin', icon: LayoutDashboard, end: true },
         { name: 'OM (SMOps) View', path: '/tpms/admin/om', icon: Gauge },
@@ -61,14 +83,12 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen }) => {
         },
         { name: 'Logs Report', path: '/tpms/admin/logs', icon: ScrollText },
         { name: 'Review Report', path: '/tpms/admin/reviews', icon: BarChart3 },
-        { name: 'My Profile', path: '/tpms/admin/profile', icon: UserCircle },
       ]
     : [
         { name: 'Dashboard', path: '/tpms/smops', icon: LayoutDashboard, end: true },
         { name: 'HOD Activity', path: '/tpms/smops/hod-activity', icon: Activity },
         { name: 'Employee Task', path: '/tpms/smops/tasks', icon: ClipboardList },
         { name: 'Review Report', path: '/tpms/smops/reviews', icon: BarChart3 },
-        { name: 'My Profile', path: '/tpms/smops/profile', icon: UserCircle },
       ];
 
   const links = [
@@ -401,12 +421,15 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen }) => {
           {(!isCollapsed || isMobile) && <span className="text-[13px] font-bold tracking-tight">Logout</span>}
         </button>
 
-        <div className={`mt-4 p-2.5 rounded-xl bg-white shadow-sm flex items-center transition-all ${(isCollapsed && !isMobile) ? 'justify-center mx-1' : 'justify-start px-3 gap-2'}`}>
-          <img
-            src={(isCollapsed && !isMobile) ? dtableLogo : dtableFull}
-            alt="D-Table Analytics"
-            className={`${(isCollapsed && !isMobile) ? 'w-8 h-8' : 'w-full h-10'} object-contain`}
-          />
+        <div className={`mt-4 p-2.5 rounded-xl bg-white shadow-sm flex items-center justify-center transition-all ${(isCollapsed && !isMobile) ? 'mx-1' : 'px-3'}`}>
+          <a
+            href="https://www.dtableanalytics.com/"
+            target="_blank"
+            rel="noopener noreferrer"
+            className={`font-black text-blue-600 text-center leading-tight hover:underline ${(isCollapsed && !isMobile) ? 'text-[10px]' : 'text-[11px]'}`}
+          >
+            {(isCollapsed && !isMobile) ? 'DTA' : 'Powered by D Table Analytics'}
+          </a>
         </div>
       </div>
     </motion.aside>

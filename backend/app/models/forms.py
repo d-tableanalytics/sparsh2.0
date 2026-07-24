@@ -36,9 +36,13 @@ FORM_DEFINITIONS: Dict[str, dict] = {
     "accountability": {
         "form_type": "accountability",
         "kind": KIND_RATING_MATRIX,
-        "title": "Accountability Checklist",
+        "title": "Accountability Rating",
         "description": "Monthly HOD accountability rating for each team member.",
         "available": True,
+        # audience — who fills this on the client side:
+        #   "hod" → each HOD rates their own team members
+        #   "all" → every client-side user submits their own response
+        "audience": "hod",
         "scale": {"min": SCALE_MIN, "max": SCALE_MAX},
         "criteria": [
             {"code": "A1", "title": "Timely Task Completion",
@@ -54,9 +58,10 @@ FORM_DEFINITIONS: Dict[str, dict] = {
     "ownership": {
         "form_type": "ownership",
         "kind": KIND_RATING_MATRIX,
-        "title": "Ownership Checklist",
+        "title": "Ownership Rating",
         "description": "Monthly HOD ownership rating for each team member.",
         "available": True,
+        "audience": "hod",
         "scale": {"min": SCALE_MIN, "max": SCALE_MAX},
         "criteria": [
             {"code": "O1", "title": "Active Departmental Participation",
@@ -69,27 +74,81 @@ FORM_DEFINITIONS: Dict[str, dict] = {
              "prompt": "Is he/she aligned with the organisational result Matrix?"},
         ],
     },
-    # Placeholder — criteria to be supplied.
+    # Culture — a SELF rating: every client-side user scores themselves on each
+    # criterion (0–5). Stored keyed by (company, period, respondent) where the single
+    # rated "member" is the respondent themselves. Placeholder — criteria to be supplied.
     "culture": {
         "form_type": "culture",
         "kind": KIND_RATING_MATRIX,
-        "title": "Culture Checklist",
-        "description": "Monthly HOD culture rating for each team member.",
+        "title": "Culture Rating",
+        "description": "Monthly culture self-rating submitted by each client-side user.",
         "available": False,
+        "audience": "all",
+        "self_rating": True,
         "scale": {"min": SCALE_MIN, "max": SCALE_MAX},
         "criteria": [],
     },
-    # Yes/No checklist answered by the MD. Fill `questions` to activate; each is
-    # {"id": "...", "title": "...", "desc": "..."}. `available` flips True once populated.
+    # Yes/No checklist answered by every client-side user (their own response). Fill
+    # `questions` to activate; each is {"id": "...", "title": "...", "desc": "..."}.
+    # `available` flips True once populated.
     "implementation_feedback": {
         "form_type": "implementation_feedback",
         "kind": KIND_YESNO_CHECKLIST,
         "title": "Implementation Update Feedback",
-        "description": "Monthly implementation update feedback submitted by the MD (Yes/No + remark).",
+        "description": "Monthly implementation update feedback submitted by each client-side user (Yes/No + remark).",
         "available": False,
-        "respondent": "MD",
+        "audience": "all",
+        "respondent": "user",
         "questions": [],
     },
+}
+
+
+# ─────────────────────────────────────────────────────────────
+# Physical storage — one dedicated collection ("table") per form.
+# submission_collection(form_type) is the single source of truth used by the
+# routes and by the DB provisioning (startup hook + scripts/setup_form_collections.py).
+# ─────────────────────────────────────────────────────────────
+FORM_COLLECTIONS: Dict[str, str] = {
+    "accountability":         "tpms_accountability",
+    "ownership":              "tpms_ownership",
+    "culture":                "tpms_culture",
+    "implementation_feedback": "tpms_implementation_feedback",
+}
+
+
+def submission_collection(form_type: str) -> Optional[str]:
+    """The collection a form's submissions are stored in (one table per form)."""
+    return FORM_COLLECTIONS.get(form_type)
+
+
+# ─────────────────────────────────────────────────────────────
+# Activity catalogue — the Success-Measure activities scheduled on the calendar and
+# scored on the client dashboard. Keep in sync with the frontend Schedule Calendar list.
+# ─────────────────────────────────────────────────────────────
+ACTIVITY_CATALOGUE = [
+    "Org Structure Update",
+    "DRM & KPI data available",
+    "Calendar Discipline",
+    "WRM",
+    "Monthly Management Review (MMR)",
+    "One pager Memo",
+    "Action Closure Review",
+    "Accountability & Ownership Rating",
+    "Culture Rating",
+    "RRO",
+    "Implementation Update Feedback",
+    "Team Engagement Index",
+    "Customer Satisfaction Index",
+    "Organization Result Matrix",
+]
+
+# Activities whose "Actual Score %" is derived from a TPMS form submission.
+# The value is the list of form_types averaged for that activity's score.
+ACTIVITY_FORM_MAP = {
+    "Accountability & Ownership Rating": ["accountability", "ownership"],
+    "Culture Rating": ["culture"],
+    "Implementation Update Feedback": ["implementation_feedback"],
 }
 
 
@@ -100,6 +159,13 @@ def get_definition(form_type: str) -> Optional[dict]:
 def form_kind(form_type: str) -> Optional[str]:
     d = FORM_DEFINITIONS.get(form_type) or {}
     return d.get("kind")
+
+
+def form_audience(form_type: str) -> str:
+    """Who fills this form on the client side: 'hod' (HOD rates their team) or
+    'all' (every client-side user submits their own response). Defaults to 'hod'."""
+    d = FORM_DEFINITIONS.get(form_type) or {}
+    return d.get("audience", "hod")
 
 
 def criteria_codes(form_type: str) -> List[str]:

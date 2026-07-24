@@ -56,7 +56,6 @@ import LogsReport from './features/tpms/admin/pages/LogsReport';
 import HodView from './features/tpms/admin/pages/HodView';
 import EmployeeTasks from './features/tpms/admin/pages/EmployeeTasks';
 import ReviewReport from './features/tpms/common/ReviewReport';
-import MyProfile from './features/tpms/common/MyProfile';
 import ImplementationFeedback from './features/tpms/admin/pages/forms/ImplementationFeedback';
 import Ownership from './features/tpms/admin/pages/forms/Ownership';
 import Culture from './features/tpms/admin/pages/forms/Culture';
@@ -66,6 +65,10 @@ import SmopsDashboard from './features/tpms/smops/pages/SmopsDashboard';
 import HodActivity from './features/tpms/smops/pages/HodActivity';
 import SmopsEmployeeTask from './features/tpms/smops/pages/SmopsEmployeeTask';
 import TpmsGate, { RequireTpms } from './features/tpms/TpmsGate';
+import ClientFormsHome from './features/tpms/client/ClientFormsHome';
+import ClientRatingForm from './features/tpms/client/ClientRatingForm';
+import ClientFeedbackForm from './features/tpms/client/ClientFeedbackForm';
+import ClientDashboard from './features/tpms/client/ClientDashboard';
 import AssistantWidget from './features/assistant';
 import './index.css';
 import { useAuth } from './context/AuthContext';
@@ -89,6 +92,14 @@ const OrmGuard = ({ children }) => {
     return <Navigate to="/" />;
   }
   return children;
+};
+
+// The /tpms/smops Dashboard is shared: client-side users get the real ClientDashboard
+// (their own company's Success-Measure scorecard); internal users keep the SMOPS view.
+const TpmsDashboardIndex = () => {
+  const { user } = useAuth();
+  const isClient = ['clientadmin', 'clientuser'].includes(user?.role);
+  return isClient ? <ClientDashboard /> : <SmopsDashboard />;
 };
 
 const AppRoutes = () => {
@@ -167,17 +178,26 @@ const AppRoutes = () => {
           <Route path="accountability"           element={<Accountability />} />
         </Route>
         <Route path="reviews"        element={<ReviewReport />} />
-        <Route path="profile"        element={<MyProfile panelLabel="TPMS Admin" />} />
       </Route>
 
       {/* TPMS ▸ SMOPS PANEL (any internal user) — rendered inside the main app layout.
           CompanyProvider supplies the shared company selection the SMOPS pages consume. */}
       <Route path="/tpms/smops" element={<PrivateRoute><RequireTpms><CompanyProvider><Outlet /></CompanyProvider></RequireTpms></PrivateRoute>}>
-        <Route index                element={<SmopsDashboard />} />
+        <Route index                element={<TpmsDashboardIndex />} />
         <Route path="hod-activity"  element={<HodActivity />} />
         <Route path="tasks"         element={<SmopsEmployeeTask />} />
         <Route path="reviews"       element={<ReviewReport title="Review Report" subtitle="Detailed evaluation and feedback for your companies." />} />
-        <Route path="profile"       element={<MyProfile panelLabel="TPMS SMOPS" />} />
+      </Route>
+
+      {/* TPMS ▸ CLIENT FORMS PANEL (client-side users) — rendered inside the main app layout.
+          Each client fills their own forms; HODs additionally rate their team. Available to
+          every client company by default; guarded via RequireTpms client. */}
+      <Route path="/tpms/forms" element={<PrivateRoute><RequireTpms><Outlet /></RequireTpms></PrivateRoute>}>
+        <Route index                          element={<ClientFormsHome />} />
+        <Route path="accountability"          element={<ClientRatingForm formType="accountability" />} />
+        <Route path="ownership"               element={<ClientRatingForm formType="ownership" />} />
+        <Route path="culture"                 element={<ClientRatingForm formType="culture" />} />
+        <Route path="implementation-feedback" element={<ClientFeedbackForm formType="implementation_feedback" />} />
       </Route>
 
       <Route path="/admin/settings" element={<Navigate to="/settings" />} />

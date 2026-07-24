@@ -20,6 +20,8 @@ import {
     Eye, Lock
 } from 'lucide-react';
 import ReminderModal from '../components/calendar/ReminderModal';
+import ScheduleCalendarModal from '../components/calendar/ScheduleCalendarModal';
+import ActivityDetailView from '../components/calendar/ActivityDetailView';
 
 const CustomTimePicker = ({ value, onChange, label }) => {
     const [isOpen, setIsOpen] = useState(false);
@@ -131,6 +133,8 @@ const CalendarPage = () => {
     const [isEdit, setIsEdit] = useState(false);
     const [currentEventId, setCurrentEventId] = useState(null);
     const [showReminderModal, setShowReminderModal] = useState(false);
+    const [showScheduleModal, setShowScheduleModal] = useState(false);
+    const [activityEdit, setActivityEdit] = useState(false); // admin toggled a schedule activity into edit mode
 
     const initialForm = {
         title: '', type: 'event', start: '', end: '', all_day: true,
@@ -139,7 +143,8 @@ const CalendarPage = () => {
         assigned_departments: [], assigned_member_ids: [], coach_ids: [],
         additional_details: '', category: 'General', repeat: 'Does not repeat',
         repeat_end_date: '', repeat_interval: 1, assigned_to: 'myself', target_staff_id: [],
-        reminders: [], status_remark: '', gpt_projects: []
+        reminders: [], status_remark: '', gpt_projects: [],
+        activity: '', company_id: '', company_name: '', activity_meta: null, learner_contents: []
     };
 
     const [eventForm, setEventForm] = useState(initialForm);
@@ -351,7 +356,8 @@ const CalendarPage = () => {
 
     const openEditModal = (ev) => {
         const props = ev.extendedProps;
-        setIsEdit(true); 
+        setIsEdit(true);
+        setActivityEdit(false);
         setCurrentEventId(ev.id || ev._id);
         const startRaw = ev.start; const endRaw = ev.end || ev.start;
         setEventForm({
@@ -371,6 +377,12 @@ const CalendarPage = () => {
             reminders: props.reminders || [],
             status_remark: props.status_remark || '',
             gpt_projects: props.gpt_projects || [],
+            activity: props.activity || '',
+            company_id: props.company_id || '',
+            company_name: props.company_name || '',
+            activity_meta: props.activity_meta || null,
+            learner_contents: props.learner_contents || [],
+            completed_at: props.completed_at || null,
             isCreator: props.isCreator,
             isAssigned: props.isAssigned
         });
@@ -453,6 +465,11 @@ const CalendarPage = () => {
     const canUpdate = isStaff || user?.permissions?.calendar?.update;
     const canDelete = isStaff || user?.permissions?.calendar?.delete;
 
+    // Schedule Calendar events (carry an `activity`) are Admin / Super Admin controlled.
+    // Assigned users may only view them — no edit / delete / status / reschedule.
+    const isAdminUser = ['superadmin', 'admin'].includes(role);
+    const scheduleReadOnly = isEdit && !!eventForm.activity && !isAdminUser;
+
     // List of Staff users (Coaching side) for coaching team & task delegation
     const staffMembers = allUsers.filter(u => ['superadmin', 'admin', 'coach', 'staff'].includes(u.role?.toLowerCase()));
 
@@ -508,6 +525,8 @@ const CalendarPage = () => {
         const s = ev.extendedProps.status;
         const type = ev.extendedProps.type;
         const isCreator = ev.extendedProps.isCreator;
+        // Schedule Calendar events are Admin/Super Admin controlled; assigned users view-only.
+        const scheduleTileLocked = type === 'event' && !!ev.extendedProps.activity && !isAdminUser;
         const color = ev.extendedProps.dotColor;
 
         const statusBadges = {
@@ -563,16 +582,16 @@ const CalendarPage = () => {
 
                 <div className="mt-3 flex items-center justify-between border-t border-dashed border-gray-200 pt-3">
                     <div className="flex items-center gap-2">
-                        {(canUpdate || ev.extendedProps.isCreator) && (type !== 'event' || !isStaff) && (
+                        {(canUpdate || ev.extendedProps.isCreator) && (type !== 'event' || !isStaff) && !scheduleTileLocked && (
                             <button onClick={() => handleQuickAction(ev.id, 'complete')} className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[9px] font-black transition-all ${s === 'completed' ? 'bg-green-100/10 text-green-600 border border-green-200' : 'bg-[var(--bg-main)] text-[var(--text-muted)] hover:bg-green-500 hover:text-white border border-[var(--border)]'}`}>
                                 {s === 'completed' ? <Check size={12} /> : <CheckCircle size={12} />} {s === 'completed' ? 'Done' : 'Complete'}
                             </button>
                         )}
-                        <button onClick={() => openEditModal(ev)} className="p-1.5 bg-[var(--bg-main)] border border-[var(--border)] text-[var(--text-muted)] hover:text-[var(--accent-indigo)] hover:bg-indigo-500/10 rounded-lg transition-all"> 
-                            { ((canUpdate || ev.extendedProps.isCreator) && !(isStaff && type === 'event' && s === 'completed')) ? <Edit2 size={12} /> : <Eye size={12} /> } 
+                        <button onClick={() => openEditModal(ev)} className="p-1.5 bg-[var(--bg-main)] border border-[var(--border)] text-[var(--text-muted)] hover:text-[var(--accent-indigo)] hover:bg-indigo-500/10 rounded-lg transition-all">
+                            { ((canUpdate || ev.extendedProps.isCreator) && !scheduleTileLocked && !(isStaff && type === 'event' && s === 'completed')) ? <Edit2 size={12} /> : <Eye size={12} /> }
                         </button>
                     </div>
-                    {(canDelete || ev.extendedProps.isCreator) && (
+                    {(canDelete || ev.extendedProps.isCreator) && !scheduleTileLocked && (
                         <button onClick={() => handleQuickAction(ev.id, 'delete')} className="p-1.5 text-gray-300 hover:text-red-500 hover:bg-red-500/10 rounded-lg transition-all opacity-0 group-hover:opacity-100"> <Trash2 size={12} /> </button>
                     )}
                 </div>
@@ -635,6 +654,14 @@ const CalendarPage = () => {
                     <span className="text-[11px] font-black text-[var(--text-muted)] shrink-0 sm:hidden">
                         {currentViewDate.toLocaleDateString(undefined, { month: 'short', year: 'numeric' })}
                     </span>
+
+                    {/* Schedule Calendar — Admin / Super Admin only */}
+                    {['superadmin', 'admin'].includes(role) && (
+                        <button onClick={() => setShowScheduleModal(true)}
+                            className="shrink-0 ml-auto h-9 px-4 bg-[var(--btn-primary)] text-white rounded-xl text-[11px] font-black uppercase tracking-widest flex items-center gap-2 shadow-lg shadow-indigo-500/20 hover:scale-[1.02] active:scale-95 transition-all">
+                            <CalendarIcon size={14} /> Schedule Activity
+                        </button>
+                    )}
                 </div>
             </div>
 
@@ -762,19 +789,37 @@ const CalendarPage = () => {
                             </div>
 
                             <div className="p-6 overflow-y-auto no-scrollbar space-y-8">
-                                {/* ─── Section 1: Corporate Sessions ─── */}
+                                {/* ─── Section 1: Corporate Sessions (regular events, excluding scheduled activities) ─── */}
                                 <div className="space-y-4">
                                     <div className="flex items-center justify-between border-b border-[var(--border)] pb-2">
-                                        <h3 className="text-[11px] font-black text-[var(--accent-indigo)] uppercase tracking-[0.2em] flex items-center gap-1.5"> <Activity size={14} /> Sessions ({dayEvents.filter(e => e.extendedProps.type === 'event').length}) </h3>
+                                        <h3 className="text-[11px] font-black text-[var(--accent-indigo)] uppercase tracking-[0.2em] flex items-center gap-1.5"> <Activity size={14} /> Sessions ({dayEvents.filter(e => e.extendedProps.type === 'event' && !e.extendedProps.activity).length}) </h3>
                                         {(canCreate && (!summaryDate || new Date(summaryDate + "T23:59:59") >= new Date() || backdateSettings.allow_backdate || backdateSettings.exception_users.includes(user?.email))) && (
                                             <button onClick={() => openCreateModal('event')} className="flex items-center gap-1.5 px-4 py-1.5 bg-[var(--accent-indigo)] text-white rounded-lg text-[10px] font-black shadow-md shadow-indigo-200/40 hover:opacity-90 transition-all uppercase tracking-widest"> <PlusCircle size={12} /> Add Session </button>
                                         )}
                                     </div>
                                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                        {dayEvents.filter(e => e.extendedProps.type === 'event').map(ev => renderEventTile(ev))}
-                                        {dayEvents.filter(e => e.extendedProps.type === 'event').length === 0 && (
+                                        {dayEvents.filter(e => e.extendedProps.type === 'event' && !e.extendedProps.activity).map(ev => renderEventTile(ev))}
+                                        {dayEvents.filter(e => e.extendedProps.type === 'event' && !e.extendedProps.activity).length === 0 && (
                                             <div className="col-span-full py-8 flex flex-col items-center justify-center bg-gray-50/50 rounded-[24px] border border-dashed border-gray-200 opacity-50">
                                                 <p className="text-[9px] font-black text-gray-400 uppercase tracking-widest">No sessions scheduled.</p>
+                                            </div>
+                                        )}
+                                    </div>
+                                </div>
+
+                                {/* ─── Section: Scheduled Activities (events carrying an `activity`; Admin/Super Admin only) ─── */}
+                                <div className="space-y-4">
+                                    <div className="flex items-center justify-between border-b border-[var(--border)] pb-2">
+                                        <h3 className="text-[11px] font-black text-violet-500 uppercase tracking-[0.2em] flex items-center gap-1.5"> <CalendarIcon size={14} /> Activities ({dayEvents.filter(e => e.extendedProps.type === 'event' && e.extendedProps.activity).length}) </h3>
+                                        {['superadmin', 'admin'].includes(role) && (
+                                            <button onClick={() => setShowScheduleModal(true)} className="flex items-center gap-1.5 px-4 py-1.5 bg-[var(--btn-primary)] text-white rounded-lg text-[10px] font-black shadow-md hover:opacity-90 transition-all uppercase tracking-widest"> <PlusCircle size={12} /> Add Activity </button>
+                                        )}
+                                    </div>
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                        {dayEvents.filter(e => e.extendedProps.type === 'event' && e.extendedProps.activity).map(ev => renderEventTile(ev))}
+                                        {dayEvents.filter(e => e.extendedProps.type === 'event' && e.extendedProps.activity).length === 0 && (
+                                            <div className="col-span-full py-8 flex flex-col items-center justify-center bg-gray-50/50 rounded-[24px] border border-dashed border-gray-200 opacity-50">
+                                                <p className="text-[9px] font-black text-gray-400 uppercase tracking-widest">No activities scheduled.</p>
                                             </div>
                                         )}
                                     </div>
@@ -824,7 +869,7 @@ const CalendarPage = () => {
                                     </span>
                                 </div>
                                 <div className="flex items-center gap-2">
-                                    {(isEdit && (canUpdate || eventForm.isCreator)) && eventForm.status !== 'completed' && (
+                                    {(isEdit && (canUpdate || eventForm.isCreator)) && eventForm.status !== 'completed' && !scheduleReadOnly && !(eventForm.activity && !activityEdit) && (
                                         <div className="flex items-center bg-[var(--input-bg)] border border-[var(--border)] rounded-xl p-1 shrink-0">
                                             {/* Staff cannot mark as completed from here, but can cancel/reschedule */}
                                             {(!isStaff) && (
@@ -845,7 +890,22 @@ const CalendarPage = () => {
                             </div>
 
                             <div className="p-6 overflow-y-auto no-scrollbar space-y-6">
-                                {((!isStaff && isEdit && !eventForm.isCreator) || (eventForm.status === 'completed' && eventForm.type === 'event')) ? (
+                                {(isEdit && eventForm.activity && !activityEdit) ? (
+                                    /* ─── SCHEDULE ACTIVITY DETAIL VIEW ─── */
+                                    <ActivityDetailView
+                                        event={eventForm}
+                                        eventId={currentEventId}
+                                        isAdmin={isAdminUser}
+                                        isCreator={eventForm.isCreator}
+                                        onEdit={() => setActivityEdit(true)}
+                                        onDelete={() => handleQuickAction(currentEventId, 'delete')}
+                                        onUploaded={(content) => {
+                                            if (content) setEventForm(f => ({ ...f, learner_contents: [...(f.learner_contents || []), content] }));
+                                            fetchData();
+                                        }}
+                                        formatIST={formatIST}
+                                    />
+                                ) : (!eventForm.activity && (scheduleReadOnly || (!isStaff && isEdit && !eventForm.isCreator) || (eventForm.status === 'completed' && eventForm.type === 'event'))) ? (
                                     /* ─── SIMPLIFIED LEARNER TICKET VIEW ─── */
                                     <div className="space-y-8 py-4">
                                         <div className="flex flex-col items-center text-center space-y-2">
@@ -1253,7 +1313,7 @@ const CalendarPage = () => {
                                 onApply={(reminders) => setEventForm({ ...eventForm, reminders })}
                             />
 
-                            {!(isEdit && !isStaff && !eventForm.isCreator) && eventForm.status !== 'completed' && (
+                            {!scheduleReadOnly && !(eventForm.activity && !activityEdit) && !(isEdit && !isStaff && !eventForm.isCreator) && eventForm.status !== 'completed' && (
                                 <div className="p-5 border-t border-[var(--border)] flex justify-between items-center bg-[var(--table-header-bg)]">
                                     <div className="flex items-center gap-3">
                                         <ShieldCheck size={20} className="text-[var(--accent-indigo)] opacity-30" />
@@ -1262,17 +1322,48 @@ const CalendarPage = () => {
                                             <p className="text-[10px] font-bold text-gray-400 italic leading-tight">Changes sync to calendars instantly.</p>
                                         </div>
                                     </div>
-                                    <button onClick={handleSave} 
+                                    <button onClick={handleSave}
                                         disabled={isEdit && !(user.role === 'superadmin' || user.role === 'admin' || eventForm.isCreator)}
                                         className={`bg-[var(--btn-primary)] text-white px-10 py-3 rounded-xl text-[12px] font-black shadow-xl shadow-indigo-500/30 hover:scale-[1.02] active:scale-[0.98] transition-all tracking-[0.1em] uppercase ${isEdit && !(user.role === 'superadmin' || user.role === 'admin' || eventForm.isCreator) ? 'opacity-20 cursor-not-allowed grayscale' : ''}`}>
                                         {isEdit ? 'Authorize Updates' : (eventForm.type === 'task' ? 'Schedule Task' : 'Schedule Session')}
                                     </button>
                                 </div>
                             )}
+
+                            {/* Activity detail footer — Admin/Super Admin get Edit + Delete here */}
+                            {isEdit && eventForm.activity && !activityEdit && (
+                                <div className="p-5 border-t border-[var(--border)] flex justify-between items-center bg-[var(--table-header-bg)]">
+                                    <div className="flex items-center gap-3">
+                                        <ShieldCheck size={20} className="text-[var(--accent-indigo)] opacity-30" />
+                                        <div className="space-y-0">
+                                            <p className="text-[9px] font-black text-[var(--text-muted)] uppercase tracking-widest leading-tight">Activity Schedule</p>
+                                            <p className="text-[10px] font-bold text-gray-400 italic leading-tight">{isAdminUser ? 'Admin controlled — edit or delete.' : 'View only — managed by your Admin.'}</p>
+                                        </div>
+                                    </div>
+                                    {isAdminUser && (
+                                        <div className="flex items-center gap-3">
+                                            <button onClick={() => handleQuickAction(currentEventId, 'delete')}
+                                                className="flex items-center gap-2 px-5 py-3 rounded-xl bg-red-500 text-white text-[12px] font-black hover:bg-red-600 transition-all uppercase tracking-widest">
+                                                <Trash2 size={14} /> Delete
+                                            </button>
+                                            <button onClick={() => setActivityEdit(true)}
+                                                className="flex items-center gap-2 bg-[var(--btn-primary)] text-white px-8 py-3 rounded-xl text-[12px] font-black shadow-xl shadow-indigo-500/30 hover:scale-[1.02] active:scale-[0.98] transition-all tracking-[0.1em] uppercase">
+                                                <Edit2 size={14} /> Edit
+                                            </button>
+                                        </div>
+                                    )}
+                                </div>
+                            )}
                         </motion.div>
                     </div>
                 )}
             </AnimatePresence>
+
+            <ScheduleCalendarModal
+                isOpen={showScheduleModal}
+                onClose={() => setShowScheduleModal(false)}
+                onSaved={fetchData}
+            />
         </div>
     );
 };

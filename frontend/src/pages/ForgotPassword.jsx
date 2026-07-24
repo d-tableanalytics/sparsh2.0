@@ -208,7 +208,7 @@ const ForgotPassword = () => {
 
           <footer className="login-footer mt-12">
             <p className="footer-company">
-              Designed & Managed by <span style={{ color: '#2563eb' }}>D-TABLE ANALYTICS</span>
+<a href="https://www.dtableanalytics.com/" target="_blank" rel="noopener noreferrer" style={{ color: '#2563eb', fontWeight: 800, textDecoration: 'none' }}>Powered by D Table Analytics</a>
             </p>
           </footer>
         </div>
