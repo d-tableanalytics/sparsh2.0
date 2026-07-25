@@ -387,6 +387,8 @@ const CalendarPage = () => {
         reminders: [], status_remark: '', gpt_projects: []
     };
 
+    const navigate = useNavigate();
+
     const [eventForm, setEventForm] = useState(initialForm);
 
     const departments = ['HOD', 'EA', 'MD', 'Implementor', 'HR', 'Other'];
