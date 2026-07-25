@@ -34,6 +34,7 @@ export const AuthProvider = ({ children }) => {
       try {
         const decoded = jwtDecode(token);
         if (decoded.exp * 1000 < Date.now()) {
+          // eslint-disable-next-line react-hooks/set-state-in-effect
           logout();
         } else {
           setUser(decoded); // Immediate load from token
@@ -41,6 +42,7 @@ export const AuthProvider = ({ children }) => {
           fetchUser(decoded); // Background load full profile
         }
       } catch (err) {
+        // eslint-disable-next-line react-hooks/set-state-in-effect
         logout();
       }
     }

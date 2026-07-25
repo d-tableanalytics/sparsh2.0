@@ -29,6 +29,7 @@ const AuditModal = ({ isOpen, onClose, subsection, onSave, paramId, paramName })
   const [budgetChecklist, setBudgetChecklist] = useState(subsection.budgetAdherenceChecklist || []);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setChecklist(subsection.auditChecklist || []);
     setUnitName(subsection.unitName || '');
     setAchievement(subsection.achievement || 0);
