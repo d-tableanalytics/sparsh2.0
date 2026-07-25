@@ -1,29 +1,22 @@
-import React, { useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   RefreshCw, Users, ListChecks, CheckCircle2, XCircle, Clock, Gauge, Eye,
 } from 'lucide-react';
 import {
   DashboardHero, HeroButton, HeaderSelect, Section, Th, Td, TableShell, KpiTile,
 } from '../../common/dashboardKit';
+import { useAuth } from '../../../../context/AuthContext';
+import { getEmployeeActivityDashboard, currentPeriod } from '../../../../services/tpmsApi';
+import api from '../../../../services/api';
 
 /* ─────────────────────────────────────────────────────────────
    Admin Panel ▸ Employee Tasks — "Company Employees — Task Activity".
-   Per-employee task-activity summary with company / month / employee /
-   designation / scheduled-by filters. All data is placeholder mock.
+   Per-employee task-activity summary, wired to the employee-activity
+   dashboard endpoint (getEmployeeActivity in tpms_dashboard_service.py).
+   Filters (company / period / employee / designation) are applied
+   SERVER-side, so the KPI cards always reflect the current selection.
    ───────────────────────────────────────────────────────────── */
 
-const EMPLOYEES = [
-  { name: 'Bhavna R.',        company: 'Acme Corp',     designation: 'Implementor', department: 'Delivery',   total: 1, completed: 1, missed: 0, pending: 0, scheduledBy: 'System' },
-  { name: 'Harshit T.',       company: 'Acme Corp',     designation: 'HOD',         department: 'Operations', total: 2, completed: 1, missed: 1, pending: 0, scheduledBy: 'System' },
-  { name: 'Abhigyan J.',      company: 'Nimbus Ltd',    designation: 'Implementor', department: 'Delivery',   total: 3, completed: 2, missed: 0, pending: 1, scheduledBy: 'Manual' },
-  { name: 'Abhishek G.',      company: 'Nimbus Ltd',    designation: 'Implementor', department: 'Delivery',   total: 0, completed: 0, missed: 0, pending: 0, scheduledBy: 'System' },
-  { name: 'Aparajita B.',     company: 'Vertex Health', designation: 'Implementor', department: 'Delivery',   total: 4, completed: 4, missed: 0, pending: 0, scheduledBy: 'System' },
-  { name: 'Rahul V.',         company: 'Vertex Health', designation: 'HOD',         department: 'Support',    total: 3, completed: 1, missed: 2, pending: 0, scheduledBy: 'Manual' },
-  { name: 'Neha G.',          company: 'Orbit Media',   designation: 'HR',          department: 'People',     total: 2, completed: 1, missed: 0, pending: 1, scheduledBy: 'System' },
-  { name: 'Vikram S.',        company: 'Orbit Media',   designation: 'MD',          department: 'Leadership', total: 1, completed: 0, missed: 1, pending: 0, scheduledBy: 'Manual' },
-];
-
-const score = (e) => (e.total ? Math.round((e.completed / e.total) * 100) : 0);
 const scoreColor = (v) => (v >= 80 ? 'var(--accent-green)' : v >= 60 ? 'var(--accent-orange)' : v > 0 ? 'var(--accent-red)' : 'var(--text-muted)');
 
 const ScoreBar = ({ v }) => (
@@ -35,55 +28,121 @@ const ScoreBar = ({ v }) => (
   </div>
 );
 
-const uniq = (arr) => Array.from(new Set(arr));
+// Last 12 months as { id: 'YYYY-MM', name: 'Jul26' } so the current period is always pickable.
+const periodOptions = () => {
+  const out = [];
+  const base = new Date();
+  for (let i = 0; i < 12; i += 1) {
+    const d = new Date(base.getFullYear(), base.getMonth() - i, 1);
+    const id = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+    const name = `${d.toLocaleString('en-US', { month: 'short' })}${String(d.getFullYear()).slice(-2)}`;
+    out.push({ id, name });
+  }
+  return out;
+};
+
+const initials = (name = '') => name.split(' ').filter(Boolean).map((x) => x[0]).join('').slice(0, 3) || '?';
 const stickyHead = 'sticky left-0 z-10 bg-[var(--table-header-bg)]';
 const stickyCell = 'sticky left-0 z-10 bg-[var(--bg-card)] group-hover:bg-[var(--table-hover)]';
 
 const EmployeeTasks = () => {
-  const [company, setCompany] = useState('All Companies');
-  const [month, setMonth] = useState('All Months');
-  const [employee, setEmployee] = useState('All Employees');
-  const [designation, setDesignation] = useState('All Designations');
-  const [scheduledBy, setScheduledBy] = useState('Any');
+  const { user } = useAuth();
 
-  const rows = useMemo(() => EMPLOYEES.filter((e) =>
-    (company === 'All Companies' || e.company === company) &&
-    (employee === 'All Employees' || e.name === employee) &&
-    (designation === 'All Designations' || e.designation === designation) &&
-    (scheduledBy === 'Any' || e.scheduledBy === scheduledBy)), [company, employee, designation, scheduledBy]);
+  const [company, setCompany] = useState('');
+  const [period, setPeriod] = useState(currentPeriod());
+  const [member, setMember] = useState('');
+  const [designation, setDesignation] = useState('');
 
-  const k = useMemo(() => {
-    const total = rows.reduce((a, e) => a + e.total, 0);
-    const completed = rows.reduce((a, e) => a + e.completed, 0);
-    const missed = rows.reduce((a, e) => a + e.missed, 0);
-    const pending = rows.reduce((a, e) => a + e.pending, 0);
-    const avg = rows.length ? Math.round(rows.reduce((a, e) => a + score(e), 0) / rows.length) : 0;
-    return { employees: rows.length, total, completed, missed, pending, avg };
-  }, [rows]);
+  const [companies, setCompanies] = useState([]);
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
 
-  const clearFilters = () => { setCompany('All Companies'); setMonth('All Months'); setEmployee('All Employees'); setDesignation('All Designations'); setScheduledBy('Any'); };
+  const months = useMemo(() => periodOptions(), []);
+
+  // Company list for the picker (role-scoped server-side by the endpoint too).
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const res = await api.get('/companies');
+        if (alive) setCompanies(Array.isArray(res.data) ? res.data : (res.data?.companies || []));
+      } catch {
+        if (alive) setCompanies([]);
+      }
+    })();
+    return () => { alive = false; };
+  }, []);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError('');
+    try {
+      const res = await getEmployeeActivityDashboard({
+        period: period || undefined,
+        company_id: company || undefined,
+        member_id: member || undefined,
+        designation: designation || undefined,
+      });
+      setData(res.data);
+    } catch (e) {
+      setData(null);
+      setError(e.response?.data?.detail || 'Failed to load employee activity');
+    } finally {
+      setLoading(false);
+    }
+  }, [period, company, member, designation]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const rows = data?.rows || [];
+  const cards = data?.cards || {};
+  const canPick = data?.can_pick_company ?? ((user?.role || '').toLowerCase() !== 'client');
+
+  const companyOpts = useMemo(() => {
+    const src = data?.company_options?.length
+      ? data.company_options
+      : companies.map((c) => ({ id: String(c._id ?? c.id ?? ''), name: c.name ?? c.company_name ?? '' }));
+    return [{ id: '', name: 'All Companies' }, ...src];
+  }, [data, companies]);
+
+  const memberOpts = useMemo(
+    () => [{ id: '', name: 'All Employees' }, ...(data?.member_options || [])], [data]);
+  const designationOpts = useMemo(
+    () => ['', ...(data?.designation_options || [])].map((d) => ({ id: d, name: d || 'All Designations' })), [data]);
+
+  const clearFilters = () => { setCompany(''); setPeriod(currentPeriod()); setMember(''); setDesignation(''); };
 
   const kpis = [
-    { value: k.employees, label: 'Employees',  sub: 'In scope',        tone: 'blue',   icon: Users },
-    { value: k.total,     label: 'Total Tasks', sub: 'This period',    tone: 'yellow', icon: ListChecks },
-    { value: k.completed, label: 'Completed',  sub: 'Done',            tone: 'green',  icon: CheckCircle2 },
-    { value: k.missed,    label: 'Missed',     sub: 'Overdue/not done',tone: k.missed ? 'red' : 'plain', icon: XCircle },
-    { value: k.pending,   label: 'Pending',    sub: 'Upcoming',        tone: 'yellow', icon: Clock },
-    { value: `${k.avg}%`, label: 'Avg Score',  sub: 'Across employees',tone: k.avg >= 60 ? 'green' : 'yellow', icon: Gauge },
+    { value: cards.total_employees ?? 0,   label: 'Employees',   sub: 'In scope',          tone: 'blue',   icon: Users },
+    { value: cards.total_activities ?? 0,  label: 'Total Tasks', sub: 'This period',       tone: 'yellow', icon: ListChecks },
+    { value: cards.completed ?? 0,         label: 'Completed',   sub: 'Done',              tone: 'green',  icon: CheckCircle2 },
+    { value: cards.missed ?? 0,            label: 'Missed',      sub: 'Overdue/not done',  tone: cards.missed ? 'red' : 'plain', icon: XCircle },
+    { value: cards.pending ?? 0,           label: 'Pending',     sub: 'Upcoming',          tone: 'yellow', icon: Clock },
+    { value: `${cards.avg_score ?? 0}%`,   label: 'Avg Score',   sub: 'Across employees',  tone: (cards.avg_score ?? 0) >= 60 ? 'green' : 'yellow', icon: Gauge },
   ];
+
+  if (loading && !data) {
+    return <div className="px-5 py-16 text-center text-[13px] font-bold text-[var(--text-muted)]">Loading employee activity…</div>;
+  }
 
   return (
     <div className="space-y-5">
       {/* Hero */}
       <DashboardHero icon={Users} title="Company Employees — Task Activity" subtitle="Per-employee task completion & scoring">
-        <HeaderSelect value={company} onChange={setCompany} options={['All Companies', ...uniq(EMPLOYEES.map((e) => e.company))]} />
-        <HeaderSelect value={month} onChange={setMonth} options={['All Months', 'Jul 2026', 'Jun 2026', 'May 2026']} />
-        <HeaderSelect value={employee} onChange={setEmployee} options={['All Employees', ...uniq(EMPLOYEES.map((e) => e.name))]} />
-        <HeaderSelect value={designation} onChange={setDesignation} options={['All Designations', ...uniq(EMPLOYEES.map((e) => e.designation))]} />
-        <HeaderSelect value={scheduledBy} onChange={setScheduledBy} options={['Any', 'System', 'Manual']} />
+        {canPick && <HeaderSelect value={company} onChange={setCompany} options={companyOpts} />}
+        <HeaderSelect value={period} onChange={setPeriod} options={months} />
+        <HeaderSelect value={member} onChange={setMember} options={memberOpts} />
+        <HeaderSelect value={designation} onChange={setDesignation} options={designationOpts} />
         <button onClick={clearFilters} className="inline-flex items-center px-3.5 py-2 rounded-lg bg-white/15 text-white text-[12.5px] font-bold ring-1 ring-white/25 hover:bg-white/25 transition-all">Clear</button>
-        <HeroButton icon={RefreshCw}>Refresh</HeroButton>
+        <HeroButton icon={RefreshCw} onClick={load}>Refresh</HeroButton>
       </DashboardHero>
+
+      {error && (
+        <div className="rounded-2xl border border-[var(--accent-red-border)] bg-[var(--accent-red-bg)] px-4 py-3 text-[12px] font-bold text-[var(--accent-red)]">
+          {error}
+        </div>
+      )}
 
       {/* KPI tiles */}
       <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-6 gap-3">
@@ -102,23 +161,23 @@ const EmployeeTasks = () => {
           </thead>
           <tbody>
             {rows.map((e, i) => {
-              const sc = score(e);
+              const sc = e.score ?? 0;
               return (
-                <tr key={i} className="group border-b border-[var(--border)] last:border-0 hover:bg-[var(--table-hover)] transition-colors">
+                <tr key={e.id ?? i} className="group border-b border-[var(--border)] last:border-0 hover:bg-[var(--table-hover)] transition-colors">
                   <Td className={`font-bold ${stickyCell}`}>
                     <div className="flex items-center gap-2.5">
                       <span className="w-7 h-7 rounded-full text-white text-[9px] font-bold flex items-center justify-center shrink-0" style={{ background: 'var(--avatar-bg)' }}>
-                        {e.name.split(' ').map((x) => x[0]).join('')}
+                        {initials(e.name)}
                       </span>
                       {e.name}
                     </div>
                   </Td>
-                  <Td className="text-[var(--accent-indigo)] font-bold uppercase text-[11px] tracking-wide">{e.designation}</Td>
-                  <Td className="text-[var(--text-muted)] uppercase text-[11px] tracking-wide">{e.department}</Td>
-                  <Td align="center" className="tabular-nums font-bold">{e.total}</Td>
-                  <Td align="center" className="font-bold text-[var(--accent-green)]">{e.completed}</Td>
-                  <Td align="center" className="font-bold text-[var(--accent-red)]">{e.missed}</Td>
-                  <Td align="center" className="font-bold text-[var(--accent-orange)]">{e.pending}</Td>
+                  <Td className="text-[var(--accent-indigo)] font-bold uppercase text-[11px] tracking-wide">{e.designation || '—'}</Td>
+                  <Td className="text-[var(--text-muted)] uppercase text-[11px] tracking-wide">{e.department || '—'}</Td>
+                  <Td align="center" className="tabular-nums font-bold">{e.total ?? 0}</Td>
+                  <Td align="center" className="font-bold text-[var(--accent-green)]">{e.completed ?? 0}</Td>
+                  <Td align="center" className="font-bold text-[var(--accent-red)]">{e.missed ?? 0}</Td>
+                  <Td align="center" className="font-bold text-[var(--accent-orange)]">{e.pending ?? 0}</Td>
                   <Td align="center" className="font-extrabold" style={{ color: scoreColor(sc) }}>{sc}%</Td>
                   <Td><ScoreBar v={sc} /></Td>
                   <Td align="right">

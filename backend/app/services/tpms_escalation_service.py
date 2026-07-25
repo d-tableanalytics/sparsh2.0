@@ -33,7 +33,7 @@ from app.models.tpms import (
     COLL_ACTION_ITEMS, COLL_ESCALATIONS,
     LADDER_CRITICAL_DAYS, LADDER_LAPSE_DAYS, LADDER_PENDING_DAYS,
     STATUS_CANCELLED, STATUS_COMPLETED, STATUS_LAPSED, STATUS_SCHEDULED,
-    TPMS_EVENT_KIND, erp_status_for, escalation_level,
+    TPMS_EVENT_KIND, TPMS_NOTIFICATIONS_ENABLED, erp_status_for, escalation_level,
 )
 from app.services.tpms_schedule_service import CAL_COLLECTIONS, update_tracker_status
 
@@ -133,6 +133,10 @@ def _esc_body(event: dict, label: str, note: str) -> str:
 
 
 async def _send(recipients: List[str], subject: str, html: str, slug: str) -> int:
+    # TPMS notifications globally disabled → suppress escalation mails only. The ladder's
+    # STATE transitions (esc_stage bumps, Lapsed status) still run — this silences the mail.
+    if not TPMS_NOTIFICATIONS_ENABLED:
+        return 0
     from app.services.notification_service import send_email_notification
     sent = 0
     for email in recipients:

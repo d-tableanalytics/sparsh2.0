@@ -1,37 +1,46 @@
-import React, { useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  RefreshCw, Download, ClipboardCheck, Users, Star, Search, LayoutGrid, LineChart as LineIcon, MessageSquare,
+  RefreshCw, Download, ClipboardCheck, Users, Star, Search, LayoutGrid, LineChart as LineIcon, MessageSquare, AlertTriangle,
 } from 'lucide-react';
 import {
   ResponsiveContainer, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
 } from 'recharts';
 import { DashboardHero, HeroButton, Section, KpiTile, FilterSelect } from './dashboardKit';
+import { useAuth } from '../../../context/AuthContext';
+import { getReviewReports, currentPeriod, periodLabel } from '../../../services/tpmsApi';
+import api from '../../../services/api';
 
 /* ─────────────────────────────────────────────────────────────
    Review Report — review-form responses with a Cards view and a
    Monthly Trend chart. Shared by the Admin panel and SMOPS panel.
-   All data is placeholder mock.
+   Data comes from GET /tpms/reports/reviews (per-respondent
+   submissions + monthly score trend); see tpms_dashboard_service
+   .get_review_reports for the response shape.
    ───────────────────────────────────────────────────────────── */
 
-const FORMS = ['Accountability', 'Culture', 'O&A Rating', 'Success Review'];
-
-const RESPONSES = [
-  { form: 'Accountability', month: 'Jul', company: 'Acme Corp',     hod: 'Ananya Rao',   employee: 'Priya S.',  rating: 4.6, date: '2026-07-14', comment: 'Consistently owns delivery and unblocks the team quickly.' },
-  { form: 'Accountability', month: 'Jul', company: 'Nimbus Ltd',    hod: 'Rahul Verma',  employee: 'Megha M.',  rating: 3.4, date: '2026-07-13', comment: 'Follow-through on WRMs needs improvement this month.' },
-  { form: 'Culture',        month: 'Jul', company: 'Vertex Health', hod: 'Deepak Joshi', employee: 'Sneha I.',  rating: 4.4, date: '2026-07-12', comment: 'Great team culture; recognition rituals are working.' },
-  { form: 'O&A Rating',     month: 'Jun', company: 'Acme Corp',     hod: 'Ananya Rao',   employee: 'Rohit S.',  rating: 4.1, date: '2026-06-28', comment: 'Objectives clear; alignment cadence is solid.' },
-  { form: 'Success Review', month: 'Jun', company: 'Orbit Media',   hod: 'Neha Gupta',   employee: 'Aashi K.',  rating: 2.9, date: '2026-06-24', comment: 'Several success measures slipped; needs a recovery plan.' },
-  { form: 'Culture',        month: 'May', company: 'Nimbus Ltd',    hod: 'Rahul Verma',  employee: 'Karan M.',  rating: 3.8, date: '2026-05-19', comment: 'Improving; more consistency in 1:1s would help.' },
-  { form: 'Accountability', month: 'May', company: 'Vertex Health', hod: 'Deepak Joshi', employee: 'Anil P.',   rating: 4.7, date: '2026-05-15', comment: 'Reliable and accurate throughout the quarter.' },
+// Fallback form list so the source selector renders before the first fetch.
+const DEFAULT_SOURCES = [
+  { id: 'accountability', label: 'Accountability Rating' },
+  { id: 'ownership', label: 'Ownership Rating' },
+  { id: 'culture', label: 'Culture Rating' },
+  { id: 'implementation_feedback', label: 'Implementation Update Feedback' },
 ];
 
-const TREND = [
-  { m: 'Jan', rating: 3.6 }, { m: 'Feb', rating: 3.8 }, { m: 'Mar', rating: 3.7 },
-  { m: 'Apr', rating: 4.0 }, { m: 'May', rating: 3.9 }, { m: 'Jun', rating: 4.1 }, { m: 'Jul', rating: 4.2 },
-];
+// Last 12 months as { id: 'YYYY-MM', name: 'Jul26' } for the period picker.
+const monthOptions = () => {
+  const out = [{ id: '', name: 'All Periods' }];
+  const base = new Date();
+  for (let i = 0; i < 12; i += 1) {
+    const d = new Date(base.getFullYear(), base.getMonth() - i, 1);
+    const id = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+    out.push({ id, name: periodLabel(id) || id });
+  }
+  return out;
+};
 
-const formColor = { 'Accountability': 'var(--accent-indigo)', 'Culture': 'var(--accent-green)', 'O&A Rating': 'var(--accent-orange)', 'Success Review': 'var(--badge-type-text)' };
-const ratingColor = (r) => (r >= 4 ? 'var(--accent-green)' : r >= 3 ? 'var(--accent-orange)' : 'var(--accent-red)');
+// Status bands mirror the backend (≥85 strong / ≥70 moderate / below).
+const scoreColor = (p) => (p >= 85 ? 'var(--accent-green)' : p >= 70 ? 'var(--accent-orange)' : 'var(--accent-red)');
+const initials = (name) => (name || '?').split(' ').filter(Boolean).map((x) => x[0]).join('').slice(0, 2).toUpperCase();
 
 const Stars = ({ value }) => (
   <span className="inline-flex items-center gap-0.5">
@@ -46,41 +55,113 @@ const ChartTooltip = ({ active, payload, label }) => {
   return (
     <div className="rounded-lg border border-[var(--border)] bg-[var(--bg-card)] px-3 py-2 shadow-lg">
       <p className="text-[11px] font-bold text-[var(--text-muted)] mb-1">{label}</p>
-      <p className="text-[12px] font-bold text-[var(--accent-indigo)]">Avg rating: {payload[0].value}</p>
+      <p className="text-[12px] font-bold text-[var(--accent-indigo)]">Avg score: {payload[0].value}%</p>
     </div>
   );
 };
 
 const ReviewReport = ({ title = 'Review Reports', subtitle = 'Evaluation & feedback responses across teams' }) => {
+  useAuth(); // ensure an authenticated context; server scopes results by role.
+
+  const periods = useMemo(() => monthOptions(), []);
+
   const [view, setView] = useState('cards');
-  const [form, setForm] = useState('All Forms');
-  const [month, setMonth] = useState('All Months');
-  const [company, setCompany] = useState('All Companies');
-  const [hod, setHod] = useState('All HODs');
+  const [source, setSource] = useState('accountability');
+  const [period, setPeriod] = useState(currentPeriod());
+  const [companyId, setCompanyId] = useState('');
+  const [respondentId, setRespondentId] = useState('');
   const [q, setQ] = useState('');
 
-  const rows = useMemo(() => RESPONSES.filter((r) =>
-    (form === 'All Forms' || r.form === form) &&
-    (month === 'All Months' || r.month === month) &&
-    (company === 'All Companies' || r.company === company) &&
-    (hod === 'All HODs' || r.hod === hod) &&
-    (!q.trim() || `${r.hod} ${r.employee} ${r.company} ${r.comment}`.toLowerCase().includes(q.trim().toLowerCase()))
-  ), [form, month, company, hod, q]);
+  const [companies, setCompanies] = useState([]);
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
 
-  const stats = useMemo(() => {
-    const responses = rows.length;
-    const hods = new Set(rows.map((r) => r.hod)).size;
-    const avg = responses ? (rows.reduce((a, r) => a + r.rating, 0) / responses).toFixed(1) : '—';
-    return { responses, hods, avg };
-  }, [rows]);
+  // Companies list for the picker (loaded once; server still scopes by role).
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const res = await api.get('/companies');
+        if (alive) setCompanies(res.data || []);
+      } catch {
+        if (alive) setCompanies([]);
+      }
+    })();
+    return () => { alive = false; };
+  }, []);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError('');
+    try {
+      const params = { source: source || 'accountability' };
+      if (period) params.period = period;
+      if (companyId) params.company_id = companyId;
+      const res = await getReviewReports(params);
+      setData(res.data);
+    } catch (e) {
+      setData(null);
+      setError(e.response?.data?.detail || 'Failed to load review reports');
+    } finally {
+      setLoading(false);
+    }
+  }, [source, period, companyId]);
+
+  // Fetch on mount + whenever source / period / company change.
+  useEffect(() => { load(); }, [load]);
+
+  const sources = data?.sources?.length ? data.sources : DEFAULT_SOURCES;
+  const totals = data?.totals || {};
+  const isYesno = !!data?.is_yesno;
+  const sourceMeta = data?.source || {};
+  const statusBands = sourceMeta.status || {};
+
+  const statusLabel = (p) => (p >= 85 ? statusBands.high : p >= 70 ? statusBands.mid : statusBands.low) || '';
+
+  const companyOpts = useMemo(
+    () => [{ id: '', name: 'All Companies' }, ...companies.map((c) => ({ id: String(c._id || c.id), name: c.name }))],
+    [companies],
+  );
+  const respondentOpts = useMemo(
+    () => [{ id: '', name: 'All Respondents' },
+      ...(data?.respondent_options || []).map((r) => ({ id: String(r.id), name: r.name }))],
+    [data],
+  );
+
+  // Respondent + search are refined client-side over the fetched entries.
+  const rows = useMemo(() => {
+    const entries = data?.entries || [];
+    const needle = q.trim().toLowerCase();
+    return entries.filter((e) => {
+      if (respondentId && String(e.respondent_id) !== String(respondentId)) return false;
+      if (!needle) return true;
+      const names = e.matrix ? (e.employees || []).map((emp) => emp.name).join(' ') : '';
+      return `${e.name} ${e.company} ${names}`.toLowerCase().includes(needle);
+    });
+  }, [data, respondentId, q]);
 
   const kpis = [
-    { value: stats.responses, label: 'Responses', sub: 'Submitted',        tone: 'blue',  icon: ClipboardCheck },
-    { value: stats.hods,      label: 'HODs',      sub: 'Reviewed',         tone: 'green', icon: Users },
-    { value: stats.avg,       label: 'Avg Rating',sub: 'Out of 5',         tone: 'yellow',icon: Star },
+    { value: totals.responses ?? 0, label: 'Responses', sub: 'Submitted', tone: 'blue', icon: ClipboardCheck },
+    { value: totals.respondent_count ?? 0, label: 'Respondents', sub: 'Reviewers', tone: 'green', icon: Users },
+    isYesno
+      ? { value: totals.yes_pct === '' || totals.yes_pct == null ? '—' : `${totals.yes_pct}%`, label: 'Yes Rate', sub: 'Checklist', tone: 'yellow', icon: Star }
+      : { value: totals.avg_rating === '' || totals.avg_rating == null ? '—' : totals.avg_rating, label: 'Avg Rating', sub: 'Out of 5', tone: 'yellow', icon: Star },
   ];
 
-  const uniq = (key) => Array.from(new Set(RESPONSES.map((r) => r[key])));
+  // Monthly trend: average score % across rated people per period (ascending).
+  const trendData = useMemo(() => {
+    const trend = data?.trend || { periods: [], people: [] };
+    const ps = [...(trend.periods || [])].reverse();
+    const people = trend.people || [];
+    return ps.map((p) => {
+      const vals = people
+        .map((pp) => pp.scores?.[p.id])
+        .filter((v) => typeof v === 'number');
+      const avg = vals.length ? Math.round(vals.reduce((a, v) => a + v, 0) / vals.length) : null;
+      return { m: p.name, rating: avg };
+    });
+  }, [data]);
 
   return (
     <div className="space-y-5">
@@ -94,7 +175,7 @@ const ReviewReport = ({ title = 'Review Reports', subtitle = 'Evaluation & feedb
             </button>
           ))}
         </div>
-        <HeroButton icon={RefreshCw}>Refresh</HeroButton>
+        <HeroButton icon={RefreshCw} onClick={load}>Refresh</HeroButton>
         <HeroButton icon={Download}>CSV</HeroButton>
       </DashboardHero>
 
@@ -107,10 +188,10 @@ const ReviewReport = ({ title = 'Review Reports', subtitle = 'Evaluation & feedb
       <div className="rounded-2xl border border-[var(--border)] bg-[var(--bg-card)] shadow-sm p-4">
         <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-5 gap-3 items-end">
           {[
-            { label: 'Form', value: form, set: setForm, opts: ['All Forms', ...FORMS] },
-            { label: 'Month', value: month, set: setMonth, opts: ['All Months', ...uniq('month')] },
-            { label: 'Company', value: company, set: setCompany, opts: ['All Companies', ...uniq('company')] },
-            { label: 'HOD', value: hod, set: setHod, opts: ['All HODs', ...uniq('hod')] },
+            { label: 'Form', value: source, set: setSource, opts: sources.map((s) => ({ id: s.id, name: s.label })) },
+            { label: 'Period', value: period, set: setPeriod, opts: periods },
+            { label: 'Company', value: companyId, set: setCompanyId, opts: companyOpts },
+            { label: 'Respondent', value: respondentId, set: setRespondentId, opts: respondentOpts },
           ].map((f) => (
             <label key={f.label} className="flex flex-col gap-1">
               <span className="text-[10px] font-bold uppercase tracking-widest text-[var(--text-muted)]">{f.label}</span>
@@ -121,64 +202,103 @@ const ReviewReport = ({ title = 'Review Reports', subtitle = 'Evaluation & feedb
             <span className="text-[10px] font-bold uppercase tracking-widest text-[var(--text-muted)]">Search</span>
             <div className="relative">
               <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-[var(--text-muted)]" />
-              <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="HOD, employee, company…"
+              <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Respondent, company, employee…"
                 className="w-full pl-9 pr-3 py-2 rounded-lg bg-[var(--input-bg)] border border-[var(--input-border)] text-[13px] font-medium outline-none focus:border-[var(--accent-indigo)]" />
             </div>
           </label>
         </div>
       </div>
 
+      {error && (
+        <div className="rounded-2xl border border-[var(--accent-red-border)] bg-[var(--accent-red-bg)] px-4 py-3 text-[12px] font-bold text-[var(--accent-red)]">
+          {error}
+        </div>
+      )}
+
       {/* Content */}
-      {view === 'trend' ? (
-        <Section title="Monthly Rating Trend" subtitle="Average review rating over time" icon={LineIcon}>
+      {loading ? (
+        <div className="py-24 flex flex-col items-center justify-center text-[var(--text-muted)]">
+          <RefreshCw size={26} className="animate-spin mb-3 opacity-60" />
+          <p className="text-[13px] font-bold">Loading review reports…</p>
+        </div>
+      ) : view === 'trend' ? (
+        <Section title="Monthly Score Trend" subtitle="Average review score % over time" icon={LineIcon}>
           <div className="px-2 py-5 h-[320px]">
-            <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={TREND} margin={{ top: 10, right: 20, left: -10, bottom: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
-                <XAxis dataKey="m" tick={{ fontSize: 11, fontWeight: 700, fill: 'var(--text-muted)' }} axisLine={false} tickLine={false} />
-                <YAxis domain={[0, 5]} tick={{ fontSize: 11, fontWeight: 700, fill: 'var(--text-muted)' }} axisLine={false} tickLine={false} />
-                <Tooltip content={<ChartTooltip />} />
-                <Line type="monotone" dataKey="rating" stroke="var(--accent-indigo)" strokeWidth={2.5} dot={{ r: 4, fill: 'var(--accent-indigo)' }} activeDot={{ r: 6 }} />
-              </LineChart>
-            </ResponsiveContainer>
+            {trendData.length === 0 ? (
+              <div className="h-full flex flex-col items-center justify-center text-[var(--text-muted)]">
+                <AlertTriangle size={24} className="mb-2 opacity-40" />
+                <p className="text-[13px] font-bold">No trend data for this selection.</p>
+              </div>
+            ) : (
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={trendData} margin={{ top: 10, right: 20, left: -10, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
+                  <XAxis dataKey="m" tick={{ fontSize: 11, fontWeight: 700, fill: 'var(--text-muted)' }} axisLine={false} tickLine={false} />
+                  <YAxis domain={[0, 100]} tick={{ fontSize: 11, fontWeight: 700, fill: 'var(--text-muted)' }} axisLine={false} tickLine={false} />
+                  <Tooltip content={<ChartTooltip />} />
+                  <Line type="monotone" dataKey="rating" stroke="var(--accent-indigo)" strokeWidth={2.5} dot={{ r: 4, fill: 'var(--accent-indigo)' }} activeDot={{ r: 6 }} connectNulls />
+                </LineChart>
+              </ResponsiveContainer>
+            )}
           </div>
         </Section>
       ) : rows.length === 0 ? (
         <div className="rounded-2xl border border-[var(--border)] bg-[var(--bg-card)] shadow-sm py-16 text-center">
           <MessageSquare size={26} className="mx-auto text-[var(--text-muted)]" />
           <p className="text-[13px] font-bold mt-3">No responses match these filters.</p>
-          <p className="text-[12px] text-[var(--text-muted)] mt-1">Try widening the form, month, company or HOD.</p>
+          <p className="text-[12px] text-[var(--text-muted)] mt-1">Try a different form, period, company or respondent.</p>
         </div>
       ) : (
         <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
-          {rows.map((r, i) => (
-            <div key={i} className="rounded-2xl border border-[var(--border)] bg-[var(--bg-card)] shadow-sm p-4 flex flex-col hover:shadow-md transition-all">
-              <div className="flex items-start justify-between gap-2">
-                <div className="flex items-center gap-2.5 min-w-0">
-                  <span className="w-9 h-9 rounded-xl text-white text-[11px] font-bold flex items-center justify-center shrink-0" style={{ background: 'var(--avatar-bg)' }}>
-                    {r.hod.split(' ').map((x) => x[0]).join('')}
-                  </span>
-                  <div className="min-w-0">
-                    <p className="text-[13.5px] font-bold truncate">{r.hod}</p>
-                    <p className="text-[11px] text-[var(--text-muted)] truncate">{r.company}</p>
+          {rows.map((r, i) => {
+            const pctVal = Number(r.score_pct) || 0;
+            return (
+              <div key={`${r.respondent_id}-${r.period}-${i}`} className="rounded-2xl border border-[var(--border)] bg-[var(--bg-card)] shadow-sm p-4 flex flex-col hover:shadow-md transition-all">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <span className="w-9 h-9 rounded-xl text-white text-[11px] font-bold flex items-center justify-center shrink-0" style={{ background: 'var(--avatar-bg)' }}>
+                      {initials(r.name)}
+                    </span>
+                    <div className="min-w-0">
+                      <p className="text-[13.5px] font-bold truncate">{r.name || '—'}</p>
+                      <p className="text-[11px] text-[var(--text-muted)] truncate">{r.company || '—'}</p>
+                    </div>
                   </div>
+                  <span className="text-[10px] font-bold px-2 py-1 rounded-md shrink-0 tabular-nums" style={{ color: 'var(--accent-indigo)', background: 'var(--input-bg)' }}>{r.period_label || r.period}</span>
                 </div>
-                <span className="text-[10px] font-bold px-2 py-1 rounded-md shrink-0" style={{ color: formColor[r.form], background: 'var(--input-bg)' }}>{r.form}</span>
-              </div>
 
-              <div className="flex items-center gap-2 mt-3">
-                <Stars value={r.rating} />
-                <span className="text-[13px] font-extrabold tabular-nums" style={{ color: ratingColor(r.rating) }}>{r.rating}</span>
-              </div>
+                <div className="flex items-center gap-2 mt-3">
+                  {!isYesno && r.avg !== '' && r.avg != null && <Stars value={Number(r.avg)} />}
+                  <span className="text-[13px] font-extrabold tabular-nums" style={{ color: scoreColor(pctVal) }}>{pctVal}%</span>
+                  {statusLabel(pctVal) && (
+                    <span className="text-[10px] font-bold px-2 py-0.5 rounded-full" style={{ color: scoreColor(pctVal), background: `${scoreColor(pctVal)}1a` }}>{statusLabel(pctVal)}</span>
+                  )}
+                </div>
 
-              <p className="text-[12.5px] text-[var(--text-main)] mt-3 leading-relaxed flex-1">“{r.comment}”</p>
+                {/* Matrix: per-employee scores · Checklist: per-question answers */}
+                <div className="mt-3 flex-1 max-h-56 overflow-y-auto no-scrollbar space-y-1.5">
+                  {isYesno
+                    ? (r.items || []).map((it, k) => (
+                      <div key={k} className="flex items-center justify-between gap-2 text-[12px]">
+                        <span className="text-[var(--text-main)] truncate">{it.question}</span>
+                        <span className="text-[10px] font-bold px-2 py-0.5 rounded-full shrink-0" style={{ color: it.yes ? 'var(--accent-green)' : 'var(--accent-red)', background: it.yes ? 'var(--accent-green-bg)' : 'var(--accent-red-bg)' }}>{it.answer}</span>
+                      </div>
+                    ))
+                    : (r.employees || []).map((emp) => (
+                      <div key={emp.id} className="flex items-center justify-between gap-2 text-[12px]">
+                        <span className="text-[var(--text-main)] truncate">{emp.name}</span>
+                        <span className="text-[11px] font-extrabold tabular-nums shrink-0" style={{ color: scoreColor(Number(emp.score_pct) || 0) }}>{emp.score_pct}%</span>
+                      </div>
+                    ))}
+                </div>
 
-              <div className="flex items-center justify-between mt-3 pt-3 border-t border-[var(--border)] text-[11px] font-medium text-[var(--text-muted)]">
-                <span>By {r.employee}</span>
-                <span className="tabular-nums">{r.date}</span>
+                <div className="flex items-center justify-between mt-3 pt-3 border-t border-[var(--border)] text-[11px] font-medium text-[var(--text-muted)]">
+                  <span>{isYesno ? `${r.yes ?? 0}/${r.total ?? 0} yes` : `${(r.employees || []).length} rated`}</span>
+                  <span className="tabular-nums">{sourceMeta.label || ''}</span>
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </div>

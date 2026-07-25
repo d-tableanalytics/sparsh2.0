@@ -115,6 +115,16 @@ UPLOAD_MAX_BYTES     = 25 * 1024 * 1024
 DEFAULT_REMIND_TIME  = "09:00"     # CFG.DEFAULT_REMIND_TIME
 REVIEW_MAX_RATING    = 5           # REVIEW_MAX_RATING (code.js:2016)
 
+# ─── TPMS notification master switch ───────────────────────────────────────────
+# When False, the TPMS module sends NO email or WhatsApp notifications of any kind —
+# schedule / reschedule / cancel / completion mails, the "marked done → please confirm"
+# nudge, the escalation-ladder mails, AND the TPMS activity reminders fired by the shared
+# reminder scheduler are all suppressed. TPMS state changes (status, esc_stage, Lapsed,
+# tracker, scores) are UNAFFECTED — only the outbound messages are silenced.
+# This flag is TPMS-only: every other module's email/WhatsApp/reminder behaviour is
+# untouched because those paths never consult it. Flip to True to re-enable TPMS messaging.
+TPMS_NOTIFICATIONS_ENABLED = False
+
 # Calendar Discipline is a pseudo-activity: its score is the completion rate across all
 # OTHER activities that month, excluding itself and Action Closure Review (code.js:1924).
 CAL_DISCIPLINE_ACTIVITY = "Calendar Discipline"

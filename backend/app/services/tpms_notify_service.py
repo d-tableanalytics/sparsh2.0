@@ -24,7 +24,7 @@ from datetime import datetime
 from typing import Dict, List, Optional
 
 from app.db.mongodb import get_collection
-from app.models.tpms import COLL_MAIL_TEMPLATES
+from app.models.tpms import COLL_MAIL_TEMPLATES, TPMS_NOTIFICATIONS_ENABLED
 
 logger = logging.getLogger(__name__)
 
@@ -138,6 +138,9 @@ async def _dispatch(event: dict, event_kind: str, heading: str,
                     extra: Optional[dict] = None) -> dict:
     """Resolve a template per side, fill it and send. Never raises — a mail failure must
     not roll back the action that triggered it (the source wraps every send too)."""
+    # TPMS notifications globally disabled → send nothing (schedule/reschedule/cancel/complete).
+    if not TPMS_NOTIFICATIONS_ENABLED:
+        return {"sent": 0, "failed": 0}
     from app.services.notification_service import send_email_notification
 
     mapping = build_map(event, extra)
@@ -187,6 +190,9 @@ async def notify_status(event: dict, status_kind: str, extra: Optional[dict] = N
 
 async def notify_learner_done(event: dict, doer_name: str) -> dict:
     """Staff-only nudge asking them to confirm (markLearnerDone, code.js:3901)."""
+    # TPMS notifications globally disabled → no confirm-me nudge.
+    if not TPMS_NOTIFICATIONS_ENABLED:
+        return {"sent": 0}
     from app.services.notification_service import send_email_notification
 
     people = await _recipients(event)

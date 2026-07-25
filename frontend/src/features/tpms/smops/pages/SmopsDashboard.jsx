@@ -1,89 +1,101 @@
-import React, { useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   RefreshCw, Briefcase, Users, CalendarClock, CheckCircle2, Clock,
   AlertOctagon, Target, Timer, ClipboardCheck, AlertTriangle,
 } from 'lucide-react';
-import { useCompany } from '../CompanyContext';
 import { DashboardHero, HeaderSelect, HeroButton } from '../../common/dashboardKit';
 import OmDashboardBody from '../../common/OmDashboardBody';
+import { getStaffDashboard, currentPeriod, periodLabel } from '../../../../services/tpmsApi';
 
 /* ─────────────────────────────────────────────────────────────
    SMOPS panel Dashboard — the OM Dashboard scoped to the SMOPS user's
-   companies via the global company selector. Shares OmDashboardBody with
-   the Admin panel's OM (SMOps) View. All data is placeholder mock.
+   own companies (the backend enforces the scoping in getStaffDashboard).
+   Shares OmDashboardBody with the Admin panel's OM (SMOps) View; the SMOPS
+   user may narrow to a single assigned company + period.
    ───────────────────────────────────────────────────────────── */
 
-const MATRIX = [
-  { companyId: 'acme',   client: 'Acme Corp',     org: '1/1', drm: '1/1', cal: '1/1', wrm: '1/1', mmr: '1/1', pager: '1/1', action: '1/1', aoRtg: '1/1', cultRtg: '1/1', done: 14 },
-  { companyId: 'nimbus', client: 'Nimbus Ltd',    org: '1/1', drm: '0/1', cal: '1/1', wrm: '0/1', mmr: '1/1', pager: '0/1', action: '0/1', aoRtg: '0/1', cultRtg: '1/1', done: 9  },
-  { companyId: 'vertex', client: 'Vertex Health', org: '1/1', drm: '1/1', cal: '1/1', wrm: '1/1', mmr: '1/1', pager: '1/1', action: '1/1', aoRtg: '1/1', cultRtg: '1/1', done: 21 },
-  { companyId: 'orbit',  client: 'Orbit Media',   org: '1/1', drm: '0/1', cal: '0/1', wrm: '0/1', mmr: '1/1', pager: '0/1', action: '0/1', aoRtg: '0/1', cultRtg: '0/1', done: 6  },
-  { companyId: 'cobalt', client: 'Cobalt Bank',   org: '1/1', drm: '1/1', cal: '1/1', wrm: '1/1', mmr: '1/1', pager: '1/1', action: '1/1', aoRtg: '1/1', cultRtg: '1/1', done: 11 },
+const buildKpis = (cards = {}) => [
+  { value: cards.clients ?? 0,             label: 'My Clients',         sub: 'Assigned',        tone: 'blue',   icon: Users },
+  { value: cards.planned ?? 0,             label: 'Planned',            sub: 'This period',     tone: 'yellow', icon: CalendarClock },
+  { value: cards.completed ?? 0,           label: 'Completed',          sub: 'Activities done', tone: 'green',  icon: CheckCircle2 },
+  { value: cards.pending ?? 0,             label: 'Pending',            sub: 'Upcoming',        tone: 'yellow', icon: Clock },
+  { value: cards.overdue ?? 0,             label: 'Overdue',            sub: 'Past deadline',   tone: 'red',    icon: AlertOctagon },
+  { value: `${cards.completion ?? 0}%`,    label: 'Completion',         sub: 'Done ÷ planned',  tone: 'green',  icon: Target },
+  { value: cards.avg_delay ?? 0,           label: 'Avg Delay Days',     sub: 'On completed',    tone: 'yellow', icon: Timer },
+  { value: `${cards.action_closure ?? 0}%`, label: 'Action Closure',    sub: 'vs 95% target',   tone: 'green',  icon: ClipboardCheck },
+  { value: cards.escalations ?? 0,         label: 'Active Escalations', sub: 'Need action',     tone: 'red',    icon: AlertTriangle },
 ];
-
-const FIGURES = {
-  acme:   { clients: 1, planned: 5, completed: 3, pending: 2, overdue: 1, comp: 78, delay: 1, actCls: 62, esc: 0 },
-  nimbus: { clients: 1, planned: 6, completed: 4, pending: 3, overdue: 2, comp: 64, delay: 3, actCls: 48, esc: 1 },
-  vertex: { clients: 1, planned: 8, completed: 7, pending: 1, overdue: 0, comp: 88, delay: 0, actCls: 74, esc: 0 },
-  orbit:  { clients: 1, planned: 4, completed: 2, pending: 2, overdue: 3, comp: 52, delay: 5, actCls: 40, esc: 2 },
-  cobalt: { clients: 1, planned: 3, completed: 2, pending: 1, overdue: 0, comp: 67, delay: 0, actCls: 50, esc: 0 },
-};
-
-const ALERTS = [
-  { companyId: 'nimbus', text: 'Nimbus Ltd — WRM overdue by 1 day.' },
-  { companyId: 'nimbus', text: 'Nimbus Ltd — action "Follow up: WRM" overdue. Owner: Megha M.' },
-  { companyId: 'orbit',  text: 'Orbit Media — Cal Disc not scheduled this period.' },
-  { companyId: 'orbit',  text: 'Orbit Media — 3 activities overdue, needs OM action.' },
-];
-
-const ACTIONS = [
-  { companyId: 'nimbus', client: 'Nimbus Ltd',  activity: 'WRM', action: 'Follow up: WRM',   owner: 'Megha M.', emp: 'EMP-170', target: '2026-07-17', actual: '—', status: 'Pending', clientDelay: 'Pending',  omDelay: 'Overdue' },
-  { companyId: 'orbit',  client: 'Orbit Media', activity: 'MMR', action: 'Schedule MMR',     owner: 'Rahul V.', emp: 'EMP-204', target: '2026-07-19', actual: '—', status: 'Pending', clientDelay: 'On-track', omDelay: 'Pending' },
-  { companyId: 'acme',   client: 'Acme Corp',   activity: 'DRM', action: 'Sign-off DRM/KPI', owner: 'Priya S.', emp: 'EMP-088', target: '2026-07-22', actual: '—', status: 'Pending', clientDelay: 'On-track', omDelay: 'On-track' },
-];
-
-const sum = (rows, k) => rows.reduce((a, r) => a + r[k], 0);
-const avg = (rows, k) => (rows.length ? Math.round(rows.reduce((a, r) => a + r[k], 0) / rows.length) : 0);
 
 const SmopsDashboard = () => {
-  const { companies, companyId, setCompanyId, isAll, company } = useCompany();
-  const [period, setPeriod] = useState('Jul 2026');
-  const pickCompany = (name) => setCompanyId(companies.find((c) => c.name === name).id);
+  const [client, setClient] = useState('');
+  const [period, setPeriod] = useState(currentPeriod());
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
 
-  const scope = (rows) => (isAll ? rows : rows.filter((r) => r.companyId === companyId));
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError('');
+    try {
+      const res = await getStaffDashboard({
+        period: period || undefined,
+        company_id: client || undefined,
+      });
+      setData(res.data);
+    } catch (e) {
+      setData(null);
+      setError(e.response?.data?.detail || 'Failed to load dashboard');
+    } finally {
+      setLoading(false);
+    }
+  }, [period, client]);
 
-  const figures = useMemo(() => {
-    if (!isAll) return FIGURES[companyId];
-    const all = Object.values(FIGURES);
-    return {
-      clients: all.length,
-      planned: sum(all, 'planned'), completed: sum(all, 'completed'),
-      pending: sum(all, 'pending'), overdue: sum(all, 'overdue'),
-      comp: avg(all, 'comp'), delay: avg(all, 'delay'), actCls: avg(all, 'actCls'), esc: sum(all, 'esc'),
-    };
-  }, [companyId, isAll]);
+  useEffect(() => { load(); }, [load]);
 
-  const kpis = [
-    { value: figures.clients,      label: 'My Clients',         sub: 'Assigned',        tone: 'blue',   icon: Users },
-    { value: figures.planned,      label: 'Planned',            sub: 'This period',     tone: 'yellow', icon: CalendarClock },
-    { value: figures.completed,    label: 'Completed',          sub: 'Activities done', tone: 'green',  icon: CheckCircle2 },
-    { value: figures.pending,      label: 'Pending',            sub: 'Upcoming',        tone: 'yellow', icon: Clock },
-    { value: figures.overdue,      label: 'Overdue',            sub: 'Past deadline',   tone: 'red',    icon: AlertOctagon },
-    { value: `${figures.comp}%`,   label: 'Completion',         sub: 'Done ÷ planned',  tone: 'green',  icon: Target },
-    { value: figures.delay,        label: 'Avg Delay Days',     sub: 'On completed',    tone: 'yellow', icon: Timer },
-    { value: `${figures.actCls}%`, label: 'Action Closure',     sub: 'vs 95% target',   tone: 'green',  icon: ClipboardCheck },
-    { value: figures.esc,          label: 'Active Escalations', sub: 'Need action',     tone: 'red',    icon: AlertTriangle },
-  ];
+  const kpis = useMemo(() => buildKpis(data?.cards || {}), [data]);
+
+  const clientOpts = useMemo(
+    () => [{ id: '', name: 'All Companies' }, ...(data?.filters?.companies || [])], [data]);
+  const periodOpts = useMemo(() => {
+    const list = data?.filters?.periods || [];
+    if (period && !list.some((p) => p.id === period)) {
+      return [{ id: period, name: periodLabel(period) || period }, ...list];
+    }
+    return list.length ? list : [{ id: period, name: periodLabel(period) || period }];
+  }, [data, period]);
+
+  const highlight = client
+    ? data?.filters?.companies?.find((c) => c.id === client)?.name
+    : 'All Companies';
 
   return (
     <div className="space-y-5">
-      <DashboardHero icon={Briefcase} title="OM Dashboard" highlight={isAll ? 'All Companies' : company.name} subtitle="Your operational performance across assigned companies">
-        <HeaderSelect value={company.name} onChange={pickCompany} options={companies.map((c) => c.name)} />
-        <HeaderSelect value={period} onChange={setPeriod} options={['Jul 2026', 'Jun 2026', 'Q2 2026']} />
-        <HeroButton icon={RefreshCw}>Refresh</HeroButton>
+      <DashboardHero icon={Briefcase} title="OM Dashboard" highlight={highlight} subtitle="Your operational performance across assigned companies">
+        <HeaderSelect value={client} onChange={setClient} options={clientOpts} />
+        <HeaderSelect value={period} onChange={setPeriod} options={periodOpts} />
+        <HeroButton icon={RefreshCw} onClick={load}>Refresh</HeroButton>
       </DashboardHero>
 
-      <OmDashboardBody kpis={kpis} matrix={scope(MATRIX)} alerts={scope(ALERTS)} actions={scope(ACTIONS)} />
+      {error && (
+        <div className="rounded-2xl border border-[var(--accent-red-border)] bg-[var(--accent-red-bg)] px-4 py-3 text-[12px] font-bold text-[var(--accent-red)]">
+          {error}
+        </div>
+      )}
+
+      {loading && !data ? (
+        <div className="py-24 flex flex-col items-center justify-center text-[var(--text-muted)]">
+          <RefreshCw size={26} className="animate-spin mb-3 opacity-60" />
+          <p className="text-[13px] font-bold">Loading dashboard…</p>
+        </div>
+      ) : (
+        <OmDashboardBody
+          kpis={kpis}
+          activities={data?.activities || []}
+          matrix={data?.clients_grid || []}
+          alerts={data?.alerts || []}
+          actions={data?.open_actions || []}
+        />
+      )}
     </div>
   );
 };

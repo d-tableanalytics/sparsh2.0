@@ -8,6 +8,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 from app.utils.calendar_utils import CALENDAR_COLLECTIONS, find_user_by_id
+from app.models.tpms import TPMS_EVENT_KIND, TPMS_NOTIFICATIONS_ENABLED
 
 async def start_reminder_scheduler():
     logger.info("Starting reminder scheduler background worker...")
@@ -77,6 +78,12 @@ async def check_and_trigger_reminders():
         events = await col.find(query).to_list(1000)
         
         for event in events:
+            # TPMS activity reminders are suppressed while TPMS notifications are disabled.
+            # This gate is TPMS-only (keyed on the `tpms_activity` discriminator) — reminders
+            # for every other event/task fire exactly as before. Leaving them unsent (rather
+            # than marking them sent) means re-enabling the flag restores them intact.
+            if event.get("kind") == TPMS_EVENT_KIND and not TPMS_NOTIFICATIONS_ENABLED:
+                continue
             reminders = event.get("reminders", [])
             event_time_str = event.get("start")
             if not event_time_str: continue
