@@ -372,7 +372,12 @@ async def create_event(event: CalendarEventCreate, background_tasks: BackgroundT
     # ─── Recursive Generation Engine ───
     repeat_type = event_dict.get("repeat", "Does not repeat")
     end_date_str = event_dict.get("repeat_end_date")
-    if repeat_type != "Does not repeat" and end_date_str:
+    is_todo = event_dict.get("type") == TODO_TYPE
+    # A series needs a group id for the nightly rollover engine to pick it up. Tasks/events
+    # only get one when an end date bounds the series; a TODO does not require an end date —
+    # an open-ended personal todo (no stop date) still recurs, rolling forward one occurrence
+    # per period indefinitely (the engine treats a missing repeat_end_date as "no stop").
+    if repeat_type != "Does not repeat" and (end_date_str or is_todo):
         # Generate a unique series ID to group these occurrences
         event_dict["recurring_group_id"] = str(ObjectId())
 

@@ -225,7 +225,7 @@ const TodoRepeatSection = ({ form, setForm, minEndDate }) => {
                 {isRepeating && (
                     <>
                         <div className="relative" onClick={e => e.stopPropagation()}>
-                            <button type="button" onClick={() => setFreqOpen(o => !o)}
+                            <button type="button" onClick={() => { setFreqOpen(o => !o); setCustomIntervalOpen(false); setCustomUnitOpen(false); }}
                                 className="flex items-center gap-1.5 px-3 py-1.5 bg-[var(--bg-card)] border border-[var(--border)] rounded-full text-[10px] font-black uppercase tracking-wider text-[var(--text-main)]">
                                 {REPEAT_OPTIONS.find(o => o.value === form.repeat)?.label || 'Daily'}
                                 <ChevronDown size={12} className={`transition-transform ${freqOpen ? 'rotate-180' : ''}`} />
@@ -247,12 +247,21 @@ const TodoRepeatSection = ({ form, setForm, minEndDate }) => {
                             `start` is a recurrence anchor distinct from its deadline. A todo's
                             due date IS its start, so the series simply runs from the Due Date
                             picked above — only the end of the series is collected here. */}
+                        {/* Clicking the invisible date input only focuses it — the calendar
+                            popup opens on the (hidden) picker icon, so a click anywhere on the
+                            chip may not open it. showPicker() forces it open on the click gesture. */}
                         <div className="relative flex items-center gap-1.5 px-3 py-1.5 bg-[var(--bg-card)] border border-[var(--border)] rounded-full text-[10px] font-black uppercase tracking-wider text-[var(--text-muted)] cursor-pointer hover:border-[var(--accent-indigo)]">
                             <CalendarDays size={12} />
                             {form.repeat_end_date ? new Date(form.repeat_end_date).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' }) : 'End Date'}
                             <input type="date" min={minEndDate}
-                                className="absolute inset-0 opacity-0 cursor-pointer"
+                                className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
                                 value={form.repeat_end_date ? form.repeat_end_date.split('T')[0] : ''}
+                                onClick={e => {
+                                    // Close our own popovers first so the native calendar never
+                                    // overlaps the open frequency menu (they are separate layers).
+                                    setFreqOpen(false); setCustomIntervalOpen(false); setCustomUnitOpen(false);
+                                    try { e.currentTarget.showPicker(); } catch { /* older browsers: click still focuses */ }
+                                }}
                                 onChange={e => setForm({ ...form, repeat_end_date: e.target.value })} />
                         </div>
                     </>
@@ -763,8 +772,14 @@ const CalendarPage = () => {
             if (isEdit) await api.patch(`/calendar/events/${currentEventId}`, eventForm);
             else await api.post('/calendar/events', eventForm);
             showSuccess(isTodo ? (isEdit ? 'Todo updated' : 'Todo created') : (isEdit ? 'Event updated' : 'Event scheduled successfully'));
-            fetchData(); setShowModal(false); setShowSummary(false); 
-        } catch (err) { showError('Failed to save event'); console.error(err); }
+            fetchData(); setShowModal(false); setShowSummary(false);
+        } catch (err) {
+            // Surface the backend's real reason (e.g. a past-date block) instead of a generic
+            // message, so the user knows what to fix rather than seeing "Failed to save".
+            const detail = err.response?.data?.detail;
+            showError(typeof detail === 'string' && detail ? detail : (isTodo ? 'Failed to save todo' : 'Failed to save event'));
+            console.error(err);
+        }
     };
 
     const role = user?.role?.toLowerCase();

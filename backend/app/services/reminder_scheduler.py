@@ -18,7 +18,10 @@ async def start_reminder_scheduler():
 
             # Once per day (first tick after midnight, and at startup), roll recurring
             # task series forward — creating each day's/week's/month's next occurrence.
-            today = datetime.utcnow().date()
+            # The day boundary is IST (UTC+5:30), so the next occurrence is created at
+            # 12:00 AM IST, not 00:00 UTC (= 5:30 AM IST). The generator applies the same
+            # IST boundary internally, so trigger and generation agree.
+            today = (datetime.utcnow() + timedelta(hours=5, minutes=30)).date()
             if today != last_recurring_day:
                 try:
                     from app.services.recurring_task_service import generate_due_recurring_tasks
