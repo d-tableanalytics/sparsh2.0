@@ -17,6 +17,7 @@ const ReminderModal = ({ isOpen, onClose, reminders, onApply }) => {
 
     useEffect(() => {
         if (isOpen) {
+            // eslint-disable-next-line react-hooks/set-state-in-effect
             setLocalReminders((reminders || []).map(r => ({ ...r, offset_unit: r.offset_unit || inferUnit(r.offset_minutes) })));
         }
     }, [isOpen, reminders]);

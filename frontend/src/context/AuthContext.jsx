@@ -8,6 +8,13 @@ export const AuthProvider = ({ children }) => {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
 
+  const logout = () => {
+    localStorage.removeItem('token');
+    localStorage.removeItem('sparsh_pwd');
+    setUser(null);
+    delete axios.defaults.headers.common['Authorization'];
+  };
+
   useEffect(() => {
     const token = localStorage.getItem('token');
     const fetchUser = async (tokenData) => {
@@ -70,13 +77,6 @@ export const AuthProvider = ({ children }) => {
     return decoded;
   };
 
-  const logout = () => {
-    localStorage.removeItem('token');
-    localStorage.removeItem('sparsh_pwd');
-    setUser(null);
-    delete axios.defaults.headers.common['Authorization'];
-  };
-
   // Re-pull the full profile from /users/me and merge it into the current user, so edits
   // made in Settings ▸ General (name, etc.) reflect immediately in the header/avatar.
   const refreshUser = async () => {
@@ -101,4 +101,5 @@ export const AuthProvider = ({ children }) => {
   );
 };
 
+// eslint-disable-next-line react-refresh/only-export-components
 export const useAuth = () => useContext(AuthContext);
