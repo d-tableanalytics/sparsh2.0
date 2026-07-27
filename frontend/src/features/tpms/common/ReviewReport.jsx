@@ -115,9 +115,15 @@ const ReviewReport = ({ title = 'Review Reports', subtitle = 'Evaluation & feedb
   const totals = data?.totals || {};
   const isYesno = !!data?.is_yesno;
   const sourceMeta = data?.source || {};
-  const statusBands = sourceMeta.status || {};
 
-  const statusLabel = (p) => (p >= 85 ? statusBands.high : p >= 70 ? statusBands.mid : statusBands.low) || '';
+  // M7 — form-appropriate status vocabulary. Checklist (yes/no) forms read as
+  // compliance; rating (matrix) forms read as review health. Thresholds match
+  // the backend bands (≥85 / ≥70 / below).
+  const isChecklist = isYesno || (source || '') === 'implementation_feedback';
+  const statusVocab = isChecklist
+    ? { high: 'Compliant', mid: 'Partial', low: 'At Risk' }
+    : { high: 'Strong', mid: 'Healthy', low: 'Needs Focus' };
+  const statusLabel = (p) => (p >= 85 ? statusVocab.high : p >= 70 ? statusVocab.mid : statusVocab.low);
 
   const companyOpts = useMemo(
     () => [{ id: '', name: 'All Companies' }, ...companies.map((c) => ({ id: String(c._id || c.id), name: c.name }))],
@@ -163,6 +169,33 @@ const ReviewReport = ({ title = 'Review Reports', subtitle = 'Evaluation & feedb
     });
   }, [data]);
 
+  // M6 — export the currently filtered entries as a CSV file, built client-side.
+  const exportCsv = useCallback(() => {
+    const cell = (v) => {
+      const s = v == null ? '' : String(v);
+      return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+    const lastHeader = isYesno ? 'Yes %' : 'Avg Rating';
+    const header = ['Respondent', 'Company', 'Period', 'Score %', lastHeader];
+    const table = [header, ...rows.map((r) => {
+      const last = isYesno
+        ? (r.total ? Math.round(((r.yes || 0) / r.total) * 100) : (r.score_pct ?? ''))
+        : (r.avg ?? '');
+      return [r.name ?? '', r.company ?? '', r.period_label || r.period || '', r.score_pct ?? '', last];
+    })];
+    const csv = table.map((row) => row.map(cell).join(',')).join('\r\n');
+    const blob = new Blob(['﻿', csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const date = new Date().toISOString().slice(0, 10);
+    a.href = url;
+    a.download = `tpms-review-${source || 'form'}-${date}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }, [rows, isYesno, source]);
+
   return (
     <div className="space-y-5">
       {/* Hero */}
@@ -176,7 +209,7 @@ const ReviewReport = ({ title = 'Review Reports', subtitle = 'Evaluation & feedb
           ))}
         </div>
         <HeroButton icon={RefreshCw} onClick={load}>Refresh</HeroButton>
-        <HeroButton icon={Download}>CSV</HeroButton>
+        <HeroButton icon={Download} onClick={exportCsv}>Export CSV</HeroButton>
       </DashboardHero>
 
       {/* KPI tiles */}
@@ -300,6 +333,26 @@ const ReviewReport = ({ title = 'Review Reports', subtitle = 'Evaluation & feedb
             );
           })}
         </div>
+      )}
+
+      {/* M6 — Grand Total summary (from server totals across the fetched set). */}
+      {!loading && view === 'cards' && (
+        <Section title="Grand Total" subtitle="Overall totals for the current form & filters" icon={ClipboardCheck}>
+          <div className="grid grid-cols-1 sm:grid-cols-3 divide-y sm:divide-y-0 sm:divide-x divide-[var(--border)]">
+            {[
+              { label: 'Total Responses', value: totals.responses ?? 0 },
+              { label: 'Respondents', value: totals.respondent_count ?? 0 },
+              isYesno
+                ? { label: 'Overall Yes %', value: totals.yes_pct === '' || totals.yes_pct == null ? '—' : `${totals.yes_pct}%` }
+                : { label: 'Overall Avg Rating', value: totals.avg_rating === '' || totals.avg_rating == null ? '—' : totals.avg_rating },
+            ].map((c) => (
+              <div key={c.label} className="px-5 py-4 flex flex-col gap-1">
+                <span className="text-[10px] font-bold uppercase tracking-widest text-[var(--text-muted)]">{c.label}</span>
+                <span className="text-[20px] font-extrabold tabular-nums text-[var(--text-main)]">{c.value}</span>
+              </div>
+            ))}
+          </div>
+        </Section>
       )}
     </div>
   );

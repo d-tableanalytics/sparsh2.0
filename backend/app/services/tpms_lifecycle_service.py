@@ -236,6 +236,14 @@ async def request_reschedule(user: dict, event_id: str, new_date: str,
         "status": REQUEST_PENDING,
     }
     res = await get_collection(COLL_RESCHEDULE_REQUESTS).insert_one(request)
+
+    # H9 — notify internal staff that a reschedule was requested (gated by the TPMS switch).
+    try:
+        from app.services.tpms_notify_service import notify_reschedule_request
+        await notify_reschedule_request(doc, _display_name(user), str(new_date)[:10])
+    except Exception as e:
+        logger.error(f"TPMS reschedule-request mail failed: {e}")
+
     return {"ok": True, "request_id": str(res.inserted_id)}
 
 
@@ -281,6 +289,13 @@ async def decide_reschedule_request(user: dict, request_id: str,
     }})
 
     if not approve:
+        # H9 — notify the doer their request was rejected (gated by the TPMS switch).
+        try:
+            rej_doc, _ = await find_tpms_event(req["event_id"])
+            from app.services.tpms_notify_service import notify_reschedule_decision
+            await notify_reschedule_decision(rej_doc, False, note or "")
+        except Exception as e:
+            logger.error(f"TPMS reschedule-reject mail failed: {e}")
         return {"ok": True, "status": REQUEST_REJECTED}
 
     doc, coll = await find_tpms_event(req["event_id"])

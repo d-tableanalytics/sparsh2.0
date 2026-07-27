@@ -1,11 +1,12 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   LayoutDashboard, RefreshCw, CalendarDays, CheckCircle2, ClipboardList,
-  Percent, Timer, TrendingUp, AlertTriangle, ShieldCheck, Building2,
+  Percent, Timer, TrendingUp, AlertTriangle, ShieldCheck, Building2, Grid3x3,
 } from 'lucide-react';
 import { useAuth } from '../../../context/AuthContext';
 import { useNotification } from '../../../context/NotificationContext';
 import { getClientDashboard } from '../../../services/tpmsFormsApi';
+import { Section, Th, Td, TableShell } from '../common/dashboardKit';
 
 /**
  * Client TPMS Dashboard — Success-Measure scorecard for the logged-in company,
@@ -40,6 +41,32 @@ const ROW_STATUS_TONE = {
 };
 
 const barColor = (p) => (p >= 100 ? 'var(--accent-green)' : p > 0 ? 'var(--accent-orange)' : 'var(--accent-red)');
+
+// Colour vocabulary for the client × activity status grid. The backend cell.status
+// is emitted in two spellings across sources — the TPMS status labels (Completed /
+// Scheduled / Rescheduled / Lapsed / Cancelled) and the grid's lowercase tokens
+// (done / pending / overdue / cancelled) — so both are aliased to the same tone.
+const CELL_TONE = {
+  Completed:   { label: 'Completed',   text: 'var(--accent-green)',  bg: 'var(--accent-green-bg)' },
+  Scheduled:   { label: 'Scheduled',   text: 'var(--accent-indigo)', bg: 'var(--accent-indigo-bg)' },
+  Rescheduled: { label: 'Rescheduled', text: 'var(--accent-orange)', bg: 'var(--accent-orange-bg)' },
+  Lapsed:      { label: 'Lapsed',      text: 'var(--accent-red)',    bg: 'var(--accent-red-bg)' },
+  Cancelled:   { label: 'Cancelled',   text: 'var(--text-muted)',    bg: 'var(--input-bg)' },
+};
+const CELL_ALIAS = {
+  done: 'Completed', completed: 'Completed',
+  pending: 'Scheduled', scheduled: 'Scheduled',
+  reschedule: 'Rescheduled', rescheduled: 'Rescheduled',
+  overdue: 'Lapsed', lapsed: 'Lapsed',
+  cancelled: 'Cancelled', canceled: 'Cancelled',
+};
+// A fully-done cell always reads as Completed; otherwise map the status token.
+const cellTone = (cell) => {
+  if (cell && cell.total > 0 && cell.done >= cell.total) return CELL_TONE.Completed;
+  const key = CELL_ALIAS[cell?.status] || cell?.status;
+  return CELL_TONE[key] || CELL_TONE.Scheduled;
+};
+const CELL_LEGEND = ['Completed', 'Scheduled', 'Rescheduled', 'Lapsed'].map((k) => CELL_TONE[k]);
 
 const StatCard = ({ icon: Icon, value, label, sub, tone = 'indigo' }) => {
   const tones = {
@@ -95,6 +122,9 @@ const ClientDashboard = () => {
   const stats = data?.stats;
   const scorecard = data?.scorecard || [];
   const statusTone = STATUS_TONE[co?.status] || STATUS_TONE['At Risk'];
+  // Client dashboard is scoped to one company, so clients_grid holds a single row.
+  const gridActivities = data?.activities ?? [];
+  const gridCells = data?.clients_grid?.[0]?.cells ?? {};
 
   return (
     <div className="space-y-5">
@@ -220,6 +250,67 @@ const ClientDashboard = () => {
               </table>
             </div>
           </div>
+
+          {/* Activity Status grid — per-activity done/total with a status colour.
+              Rows = the activity catalogue; each cell reflects this company's
+              scheduled-vs-completed count and its lifecycle status. */}
+          <Section
+            title="Activity Status"
+            subtitle="Scheduled vs. completed for each governance activity this month"
+            icon={Grid3x3}
+            action={<span className="hidden sm:inline text-[11px] font-bold text-[var(--text-muted)]">{gridActivities.length} activities</span>}
+          >
+            {/* Status legend */}
+            <div className="px-5 py-3 flex flex-wrap gap-2 border-b border-[var(--border)]">
+              {CELL_LEGEND.map((l) => (
+                <span key={l.label} className="inline-flex items-center gap-1.5 text-[10.5px] font-bold px-2.5 py-1 rounded-full" style={{ color: l.text, background: l.bg }}>
+                  <span className="w-1.5 h-1.5 rounded-full" style={{ background: l.text }} />{l.label}
+                </span>
+              ))}
+            </div>
+
+            {gridActivities.length === 0 ? (
+              <div className="px-5 py-10 text-center text-[13px] font-bold text-[var(--text-muted)]">No activities to display for this month.</div>
+            ) : (
+              <TableShell minWidth={520}>
+                <thead>
+                  <tr className="bg-[var(--table-header-bg)] border-b border-[var(--border)]">
+                    <Th className="w-8">#</Th>
+                    <Th>Activity</Th>
+                    <Th align="center">Done / Total</Th>
+                    <Th align="right">Status</Th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {gridActivities.map((a, i) => {
+                    const cell = gridCells[a.full];
+                    const has = !!(cell && cell.total);
+                    const tone = cellTone(cell);
+                    return (
+                      <tr key={a.full} className="group border-b border-[var(--border)] last:border-0 hover:bg-[var(--table-hover)] transition-colors">
+                        <Td className="text-[var(--text-muted)] font-bold">{i + 1}</Td>
+                        <Td className="font-bold whitespace-nowrap">{a.full}</Td>
+                        <Td align="center">
+                          {has
+                            ? <span className="inline-flex items-center justify-center min-w-[42px] text-[11px] font-black px-2 py-0.5 rounded-md tabular-nums" style={{ color: tone.text, background: tone.bg }}>{cell.done}/{cell.total}</span>
+                            : <span className="text-[var(--text-muted)] opacity-40">—</span>}
+                        </Td>
+                        <Td align="right">
+                          {has
+                            ? (
+                              <span className="inline-flex items-center gap-1.5 text-[10px] font-black px-2.5 py-1 rounded-full whitespace-nowrap" style={{ color: tone.text, background: tone.bg }}>
+                                <span className="w-1.5 h-1.5 rounded-full" style={{ background: tone.text }} />{tone.label}
+                              </span>
+                            )
+                            : <span className="text-[var(--text-muted)] opacity-40">—</span>}
+                        </Td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </TableShell>
+            )}
+          </Section>
 
           {/* Statistics footer cards */}
           <div className="flex flex-wrap gap-4">

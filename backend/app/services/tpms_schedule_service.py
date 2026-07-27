@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 from app.db.mongodb import get_collection
 from app.models.tpms import (
     COLL_ACTIVITIES, COLL_ACTIVITY_TRACKER, COLL_REMINDER_RULES,
-    RECURRENCE_ONE_TIME, RECURRENCE_MONTHLY, RECURRENCE_WEEKLY, RECURRENCE_PERIODICALLY,
+    RECURRENCE_ONE_TIME, RECURRENCE_DAILY, RECURRENCE_MONTHLY, RECURRENCE_WEEKLY, RECURRENCE_PERIODICALLY,
     SCOPE_HOD, STATUS_CANCELLED, STATUS_RESCHEDULED, STATUS_SCHEDULED, TPMS_EVENT_KIND,
     DEFAULT_REMIND_TIME, OFFSET_UNIT_SECONDS,
     CHANNEL_EMAIL, CHANNEL_WHATSAPP, CHANNEL_BOTH,
@@ -76,15 +76,52 @@ def _days_in_month(year: int, month: int) -> int:
     return (date(year + (month // 12), (month % 12) + 1, 1) - timedelta(days=1)).day
 
 
+# M14 — Sunday is a company holiday: no activity is scheduled on a Sunday or a holiday.
+# TPMS_WEEKLY_OFF uses Python weekday() (Mon=0 … Sun=6), so {6} == Sunday.
+TPMS_WEEKLY_OFF = {6}
+
+
+async def _load_tpms_holidays() -> set:
+    """Active holiday dates as ISO 'YYYY-MM-DD' strings — same master source (collection
+    'holidays') the task rollover and the date pickers use."""
+    try:
+        docs = await get_collection("holidays").find(
+            {"status": {"$ne": "inactive"}}, {"holiday_date": 1}).to_list(5000)
+        return {d.get("holiday_date") for d in docs if d.get("holiday_date")}
+    except Exception:
+        return set()
+
+
+def _is_off_day(d: date, holidays: set) -> bool:
+    return d.weekday() in TPMS_WEEKLY_OFF or d.isoformat() in holidays
+
+
+def _shift_off_days(dates: List[date], holidays: set, max_shift: int = 14) -> List[date]:
+    """Move any occurrence that lands on a Sunday/holiday forward to the next working day,
+    de-duplicating so two shifted occurrences never collide on the same date."""
+    out: List[date] = []
+    seen = set()
+    for d in dates:
+        nd = d
+        for _ in range(max_shift):
+            if not _is_off_day(nd, holidays):
+                break
+            nd = nd + timedelta(days=1)
+        if nd not in seen:
+            seen.add(nd)
+            out.append(nd)
+    return out
+
+
 # ─────────────────────────────────────────────────────────────
 # Recurrence — exact port of buildOccurrences_ (code.js:1304)
 # ─────────────────────────────────────────────────────────────
 def build_occurrences(payload: dict) -> List[date]:
     """Expand a schedule payload into its occurrence dates.
 
-    Mirrors the Apps Script exactly, including its quirks:
-      • "Daily" is offered by the calendar's filter UI but was never implemented in
-        buildOccurrences_ — it falls through and yields NOTHING. Reproduced as-is.
+    Mirrors the Apps Script, plus one closed gap:
+      • "Daily" now generates one occurrence per day from plan_start..plan_end (the Apps
+        Script offered it in the UI but never implemented it).
       • Monthly clamps the day-of-month to the target month's length, so a 31st start
         lands on the 28th/30th in shorter months, then returns to 31 where possible.
       • plan_end defaults to plan_start; an end before the start yields nothing.
@@ -102,7 +139,13 @@ def build_occurrences(payload: dict) -> List[date]:
 
     out: List[date] = []
 
-    if recurrence == RECURRENCE_MONTHLY:
+    if recurrence == RECURRENCE_DAILY:
+        d = start
+        while d <= end:
+            out.append(d)
+            d += timedelta(days=1)
+
+    elif recurrence == RECURRENCE_MONTHLY:
         day = start.day
         year, month = start.year, start.month
         while True:
@@ -363,6 +406,9 @@ async def create_schedule(user: dict, payload: dict) -> dict:
             status_code=400,
             detail="No dates generated. Check dates / recurrence / weekdays.",
         )
+    # M14 (signed off: Sunday is a holiday) — shift any occurrence off a Sunday/holiday to the
+    # next working day, keeping TPMS scheduling consistent with the task/todo rollover engine.
+    occurrences = _shift_off_days(occurrences, await _load_tpms_holidays())
 
     meta = await get_activity(activity)
     event_time = payload.get("event_time") or payload.get("eventTime")
@@ -371,6 +417,14 @@ async def create_schedule(user: dict, payload: dict) -> dict:
     now = datetime.utcnow()
     creator_id = str(user.get("_id"))
     company_name = str(payload.get("company_name") or payload.get("companyName") or "")
+    # M1 — "Scheduled by" dimension: was this schedule created by a client (the doer's own
+    # side) or by internal SMOps/OM? Stored per occurrence so the calendar/dashboards can
+    # badge and filter on it.
+    creator_role = (user.get("role") or "").lower()
+    scheduled_by_side = "client" if creator_role in CLIENT_ROLES else "internal"
+    scheduled_by_name = (user.get("full_name")
+                         or " ".join(filter(None, [user.get("first_name"), user.get("last_name")])).strip()
+                         or user.get("name") or user.get("email") or "")
 
     docs = []
     for idx, day in enumerate(occurrences):
@@ -401,6 +455,8 @@ async def create_schedule(user: dict, payload: dict) -> dict:
             "reschedule_count": 0,
             "learner_done": False,
             "user_id": creator_id,
+            "scheduled_by_side": scheduled_by_side,   # M1 — internal | client
+            "scheduled_by_name": scheduled_by_name,
             "created_at": now,
             "activity_meta": {
                 "scope": (meta or {}).get("scope"),

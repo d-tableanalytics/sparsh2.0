@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   RefreshCw, Siren, Info, AlertTriangle, Flame, Timer, CheckCircle2, ListOrdered,
+  ArrowUpCircle, Layers, Mail, ArrowRight,
 } from 'lucide-react';
 import {
   DashboardHero, HeroButton, HeaderSelect, Section, Th, Td, TableShell, KpiTile,
@@ -25,6 +26,20 @@ const TIMELINE = [
   { stage: 'Escalation L1', tone: 'red',    timing: 'T + 5 days',   trigger: '3rd reminder unanswered', action: 'Escalate to HOD',       recipient: 'HOD + OM CC',           subject: '[ESCALATION] {Activity} Overdue | {Client}' },
   { stage: 'Escalation L2', tone: 'red',    timing: 'T + 7 days',   trigger: 'HOD unresponsive',        action: 'Escalate to HR',        recipient: 'HR + OM',               subject: '[ESCALATION L2] {Activity} | {Client} | HOD Unresponsive' },
   { stage: 'Escalation L3', tone: 'red',    timing: 'T + 10 days',  trigger: 'HR unresponsive',         action: 'Escalate to MD',        recipient: 'MD + OM',               subject: '[CRITICAL] {Activity} | {Client} | MD Attention Required' },
+];
+
+/* ─── Escalation Ladder reference (static documentation, not live data) ───
+   Two engines are ported from the source Apps Script and run in parallel:
+   Engine A = recipient mail cadence (day-based); Engine B = dashboard levels. */
+const MAIL_LADDER = [
+  { when: 'D + 1', tone: 'green',  tag: '[Pending Action]', to: 'Owners + HODs + HRs' },
+  { when: 'D + 2', tone: 'orange', tag: '[CRITICAL]',       to: 'MDs' },
+  { when: 'D + 3', tone: 'red',    tag: '[LAPSED]',         to: 'Everyone · status → Lapsed' },
+];
+const LEVEL_LADDER = [
+  { when: 'T + 5',  tone: 'green',  tag: 'L1', to: 'HOD' },
+  { when: 'T + 7',  tone: 'orange', tag: 'L2', to: 'HR' },
+  { when: 'T + 10', tone: 'red',    tag: 'L3', to: 'MD' },
 ];
 
 // level 1 → HOD, 2 → HR, 3 → MD (escLevel_ in the source)
@@ -74,8 +89,13 @@ const Escalations = () => {
   const resolved = data?.resolved || [];
   const cards = data?.cards || {};
 
+  // L1 (HOD) count — prefer the backend field; otherwise derive it defensively
+  // from the active total minus the higher levels, clamped at ≥ 0.
+  const l1Count = cards.l1 ?? Math.max(0, (cards.active_count ?? 0) - ((cards.l2 ?? 0) + (cards.l3 ?? 0)));
+
   const kpis = [
     { value: cards.active_count ?? 0,   label: 'Active Escalations', sub: 'Need OM action',   tone: cards.active_count ? 'red' : 'plain', icon: AlertTriangle },
+    { value: l1Count,                   label: 'Level 1 (HOD)',      sub: 'First-line escalation', tone: l1Count ? 'yellow' : 'plain', icon: ArrowUpCircle },
     { value: (cards.l2 ?? 0) + (cards.l3 ?? 0), label: 'Critical (L2+)', sub: 'HR / MD involved', tone: (cards.l2 || cards.l3) ? 'red' : 'plain', icon: Flame },
     { value: cards.avg_overdue ?? 0,    label: 'Avg Days Overdue',   sub: 'Across active',    tone: 'yellow',                             icon: Timer },
     { value: cards.resolved_month ?? 0, label: 'Resolved',           sub: 'This month',       tone: 'green',                              icon: CheckCircle2 },
@@ -115,7 +135,7 @@ const Escalations = () => {
       </div>
 
       {/* KPI tiles */}
-      <div className="grid grid-cols-2 xl:grid-cols-4 gap-3">
+      <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-3">
         {kpis.map((k) => <KpiTile key={k.label} {...k} />)}
       </div>
 
@@ -179,6 +199,59 @@ const Escalations = () => {
             ))}
           </tbody>
         </TableShell>
+      </Section>
+
+      {/* Escalation Ladder — static reference (documentation, not live data) */}
+      <Section title="Escalation Ladder" subtitle="Two parallel cadences, both ported from the source" icon={Layers}>
+        <div className="p-5 grid gap-4 md:grid-cols-2">
+          {/* Engine A — Mail cadence (day-based) */}
+          <div className="rounded-xl border border-[var(--border)] bg-[var(--input-bg)] p-4">
+            <div className="flex items-center gap-2.5 mb-3.5">
+              <span className="w-7 h-7 rounded-lg bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] flex items-center justify-center shrink-0"><Mail size={14} /></span>
+              <div className="min-w-0">
+                <p className="text-[12.5px] font-extrabold leading-tight">Mail Cadence <span className="text-[var(--text-muted)] font-bold">· Engine A</span></p>
+                <p className="text-[10.5px] text-[var(--text-muted)] mt-0.5">Recipient reminder mails (day-based)</p>
+              </div>
+            </div>
+            <div className="space-y-2.5">
+              {MAIL_LADDER.map((r) => (
+                <div key={r.when} className="flex items-center gap-2.5">
+                  <span className="w-[52px] shrink-0"><Pill label={r.when} tone={r.tone} /></span>
+                  <ArrowRight size={13} className="text-[var(--text-muted)] shrink-0" />
+                  <code className="inline-block text-[11px] font-mono px-2 py-0.5 rounded-md bg-[var(--bg-card)] border border-[var(--border)] text-[var(--text-main)] whitespace-nowrap">{r.tag}</code>
+                  <span className="text-[11.5px] font-medium text-[var(--text-muted)] truncate">{r.to}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Engine B — Dashboard levels (activity-relative) */}
+          <div className="rounded-xl border border-[var(--border)] bg-[var(--input-bg)] p-4">
+            <div className="flex items-center gap-2.5 mb-3.5">
+              <span className="w-7 h-7 rounded-lg bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] flex items-center justify-center shrink-0"><ListOrdered size={14} /></span>
+              <div className="min-w-0">
+                <p className="text-[12.5px] font-extrabold leading-tight">Dashboard Levels <span className="text-[var(--text-muted)] font-bold">· Engine B</span></p>
+                <p className="text-[10.5px] text-[var(--text-muted)] mt-0.5">Auto-feed sweep (activity-relative)</p>
+              </div>
+            </div>
+            <div className="space-y-2.5">
+              {LEVEL_LADDER.map((r) => (
+                <div key={r.when} className="flex items-center gap-2.5">
+                  <span className="w-[52px] shrink-0"><Pill label={r.when} tone={r.tone} /></span>
+                  <ArrowRight size={13} className="text-[var(--text-muted)] shrink-0" />
+                  <span className="inline-flex items-center justify-center min-w-[26px] text-[11px] font-extrabold px-1.5 py-0.5 rounded-md tabular-nums" style={{ color: TONE[r.tone].c, background: TONE[r.tone].bg }}>{r.tag}</span>
+                  <span className="text-[11.5px] font-medium text-[var(--text-muted)] truncate">Escalate to {r.to}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+        <div className="px-5 pb-4 -mt-1">
+          <p className="text-[11px] text-[var(--text-muted)] leading-relaxed">
+            <Info size={11} className="inline-block mr-1 -mt-0.5 text-[var(--accent-indigo)]" />
+            Both cadences are ported from the source Apps Script, which runs the two engines in parallel.
+          </p>
+        </div>
       </Section>
 
       {/* Resolved Escalations */}

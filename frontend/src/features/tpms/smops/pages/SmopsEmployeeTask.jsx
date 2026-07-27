@@ -68,10 +68,12 @@ const SmopsEmployeeTask = () => {
   const designationOpts = useMemo(
     () => [{ id: '', name: 'All Designations' }, ...(data?.designation_options || []).map((d) => ({ id: d, name: d }))], [data]);
   const periodOpts = useMemo(() => {
-    const opts = data?.period_options || [];
-    return opts.some((o) => String(o.id) === period)
+    // "All Months" (empty id) tells the backend to aggregate across every month.
+    const opts = [{ id: '', name: 'All Months' }, ...(data?.period_options || [])];
+    // Keep the current period pickable if it isn't already in the list (concrete months only).
+    return !period || opts.some((o) => String(o.id) === period)
       ? opts
-      : [{ id: period, name: periodLabel(period) || period }, ...opts];
+      : [{ id: '', name: 'All Months' }, { id: period, name: periodLabel(period) || period }, ...(data?.period_options || [])];
   }, [data, period]);
 
   const clearFilters = () => { setPeriod(currentPeriod()); setCompanyId(''); setMember(''); setDesignation(''); };

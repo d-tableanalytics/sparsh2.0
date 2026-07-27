@@ -32,6 +32,9 @@ COLL_ACTION_ITEMS        = "tpms_action_items"
 COLL_SUCCESS_MEASURES    = "tpms_success_measures"
 COLL_MAIL_TEMPLATES      = "tpms_mail_templates"
 COLL_MIGRATION_MAP       = "tpms_migration_map"   # sheet id → Mongo _id, for re-runnable migration
+COLL_DEPARTMENTS         = "tpms_departments"     # H5 — department master (governance roles + custom)
+COLL_REMINDER_LOGS       = "tpms_reminder_logs"   # H10 — per-reminder send ledger
+COLL_WHATSAPP_TEMPLATES  = "tpms_whatsapp_templates"  # H1 — Meta WhatsApp template config
 
 # Discriminator marking a calendar event as a TPMS activity.
 TPMS_EVENT_KIND = "tpms_activity"
@@ -79,20 +82,31 @@ CHANNEL_WHATSAPP = "WhatsApp"
 CHANNEL_BOTH     = "Both"
 
 RECURRENCE_ONE_TIME     = "One-time"
+RECURRENCE_DAILY        = "Daily"
 RECURRENCE_MONTHLY      = "Monthly"
 RECURRENCE_WEEKLY       = "Weekly"
 RECURRENCE_PERIODICALLY = "Periodically"
-# NB: the Apps Script calendar filter offers "Daily" but buildOccurrences_ never
-# implements it (code.js:1304). Reproduced as-is — Daily generates nothing.
-RECURRENCES = [RECURRENCE_ONE_TIME, RECURRENCE_MONTHLY, RECURRENCE_WEEKLY, RECURRENCE_PERIODICALLY]
+# "Daily" is now implemented (one occurrence per day from plan_start..plan_end). The Apps
+# Script offered it in the filter UI but buildOccurrences_ never implemented it (code.js:1304);
+# the ERP closes that gap.
+RECURRENCES = [RECURRENCE_ONE_TIME, RECURRENCE_DAILY, RECURRENCE_MONTHLY, RECURRENCE_WEEKLY, RECURRENCE_PERIODICALLY]
 
 REQUEST_PENDING  = "Pending"
 REQUEST_APPROVED = "Approved"
 REQUEST_REJECTED = "Rejected"
 
 # Client-side departments the doers are grouped by. Matches the `Department` sheet and
-# the hardcoded list in frontend ScheduleCalendarModal.jsx.
+# the hardcoded list in frontend ScheduleCalendarModal.jsx. Retained as the built-in
+# fallback; the authoritative list now lives in the tpms_departments master (H5).
 TPMS_DEPARTMENTS = ["HOD", "MD", "HR", "IMPLEMENTOR"]
+
+# H5 — department master seed. The 4 governance roles are flagged `is_governance_role` so
+# escalation/form logic can tell them apart from custom client departments (Sales, Ops…),
+# which admins add via the API. Seed is insert-only; company_id=None means global/default.
+DEPARTMENT_SEED = [
+    {"name": d, "code": d.lower(), "is_governance_role": True, "company_id": None, "active": True}
+    for d in TPMS_DEPARTMENTS
+]
 
 
 # ─────────────────────────────────────────────────────────────
@@ -396,4 +410,8 @@ TPMS_INDEXES = [
                                 ("scope", 1), ("hod_id", 1)],                        {"unique": True, "name": "uniq_company_activity_period_scope"}),
     (COLL_SUCCESS_MEASURES,    [("company_id", 1), ("period", 1)],                   {"name": "by_company_period"}),
     (COLL_MAIL_TEMPLATES,      [("activity", 1), ("side", 1), ("event", 1)],         {"unique": True, "name": "uniq_activity_side_event"}),
+    (COLL_DEPARTMENTS,         [("name", 1), ("company_id", 1)],                     {"unique": True, "name": "uniq_name_company"}),
+    (COLL_REMINDER_LOGS,       [("event_id", 1)],                                    {"name": "by_event"}),
+    (COLL_REMINDER_LOGS,       [("sent_at", -1)],                                    {"name": "by_sent_at"}),
+    (COLL_WHATSAPP_TEMPLATES,  [("activity", 1), ("side", 1), ("event", 1)],         {"unique": True, "name": "uniq_activity_side_event"}),
 ]

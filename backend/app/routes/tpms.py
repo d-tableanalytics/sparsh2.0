@@ -26,8 +26,11 @@ from app.controllers.auth_controller import get_current_user
 from app.db.mongodb import get_collection
 from app.models.tpms import (
     COLL_ACTIVITIES, COLL_REMINDER_RULES, COLL_SUCCESS_MEASURES, TPMS_DEPARTMENTS,
+    COLL_DEPARTMENTS, COLL_REMINDER_LOGS, COLL_MAIL_TEMPLATES,
     TPMS_EVENT_KIND, REQUEST_PENDING, STATUS_SCHEDULED,
 )
+from bson import ObjectId
+from bson.errors import InvalidId
 from app.services.tpms_score_service import run_daily as run_score_daily, save_manual_score
 from app.services.tpms_schedule_service import (
     CAL_COLLECTIONS, check_schedule_conflict, create_schedule,
@@ -78,13 +81,167 @@ async def list_activities(
     return {"activities": [_serialize(d) for d in docs]}
 
 
+_VALID_SCOPES = {"company", "hod"}
+_VALID_SCORE_MODES = {"manual", "form", "auto"}
+
+
+@router.post("/activities")
+async def create_activity(payload: dict, current_user: dict = Depends(get_current_user)):
+    """H4 — admin adds a new activity to the catalogue (previously a code change). Upserts on
+    name so it is idempotent; never hard-deletes."""
+    if (current_user.get("role") or "").lower() not in STAFF_ROLES:
+        raise HTTPException(status_code=403, detail="Only Admin / Super Admin can manage activities.")
+    name = str(payload.get("name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Activity name is required")
+    scope = str(payload.get("scope") or "company").lower()
+    score_mode = str(payload.get("score_mode") or "manual").lower()
+    if scope not in _VALID_SCOPES:
+        raise HTTPException(status_code=400, detail="scope must be 'company' or 'hod'")
+    if score_mode not in _VALID_SCORE_MODES:
+        raise HTTPException(status_code=400, detail="score_mode must be manual/form/auto")
+    doc = {
+        "name": name,
+        "short": str(payload.get("short") or name)[:24],
+        "frequency": str(payload.get("frequency") or "once in a month"),
+        "scope": scope,
+        "upload_required": bool(payload.get("upload_required")),
+        "score_mode": score_mode,
+        "active": True,
+    }
+    await get_collection(COLL_ACTIVITIES).update_one({"name": name}, {"$set": doc}, upsert=True)
+    return {"ok": True, "name": name}
+
+
+@router.patch("/activities/{activity_id}")
+async def update_activity(activity_id: str, payload: dict, current_user: dict = Depends(get_current_user)):
+    """H4 — edit an activity's fields or retire it (active:false). Delete is a soft-deactivate;
+    catalogue rows are never hard-deleted so historical schedules/scores stay intact."""
+    if (current_user.get("role") or "").lower() not in STAFF_ROLES:
+        raise HTTPException(status_code=403, detail="Only Admin / Super Admin can manage activities.")
+    try:
+        oid = ObjectId(activity_id)
+    except (InvalidId, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid activity id")
+    updates = {}
+    for f in ("short", "frequency"):
+        if f in payload:
+            updates[f] = str(payload[f])
+    if "scope" in payload:
+        s = str(payload["scope"]).lower()
+        if s not in _VALID_SCOPES:
+            raise HTTPException(status_code=400, detail="scope must be 'company' or 'hod'")
+        updates["scope"] = s
+    if "score_mode" in payload:
+        m = str(payload["score_mode"]).lower()
+        if m not in _VALID_SCORE_MODES:
+            raise HTTPException(status_code=400, detail="score_mode must be manual/form/auto")
+        updates["score_mode"] = m
+    if "upload_required" in payload:
+        updates["upload_required"] = bool(payload["upload_required"])
+    if "active" in payload:
+        updates["active"] = bool(payload["active"])
+    if not updates:
+        raise HTTPException(status_code=400, detail="Nothing to update")
+    res = await get_collection(COLL_ACTIVITIES).update_one({"_id": oid}, {"$set": updates})
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Activity not found")
+    return {"ok": True}
+
+
+@router.get("/reminder-logs")
+async def list_reminder_logs(
+    event_id: Optional[str] = Query(None),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(200, ge=1, le=2000),
+    current_user: dict = Depends(get_current_user),
+):
+    """H10 — per-reminder send ledger (recipient + channel + status + error). Admin only."""
+    if (current_user.get("role") or "").lower() not in STAFF_ROLES:
+        raise HTTPException(status_code=403, detail="Admin only")
+    query = {}
+    if event_id:
+        query["event_id"] = event_id
+    total = await get_collection(COLL_REMINDER_LOGS).count_documents(query)
+    docs = await (get_collection(COLL_REMINDER_LOGS).find(query)
+                  .sort("sent_at", -1).skip(skip).limit(limit).to_list(limit))
+    return {"total": total, "skip": skip, "limit": limit, "logs": [_serialize(d) for d in docs]}
+
+
 @router.get("/departments")
-async def list_departments(current_user: dict = Depends(get_current_user)):
-    """Client-side departments the doers are grouped by. Matches the `Department` sheet
-    and the values stored on client users' `department` field."""
+async def list_departments(
+    company_id: Optional[str] = Query(None, description="Include this company's custom departments too"),
+    current_user: dict = Depends(get_current_user),
+):
+    """H5 — department master. Returns the governance roles plus any custom departments
+    (global, or scoped to the given company). Falls back to the built-in list if the master
+    collection is empty (older deployments before seeding)."""
     if not _can_read(current_user):
         raise HTTPException(status_code=403, detail="Not authorized")
-    return {"departments": list(TPMS_DEPARTMENTS)}
+    if (current_user.get("role") or "").lower() in CLIENT_ROLES:
+        company_id = str(current_user.get("company_id") or "")
+    query = {"active": {"$ne": False}, "$or": [{"company_id": None}]}
+    if company_id:
+        query["$or"].append({"company_id": company_id})
+    docs = await get_collection(COLL_DEPARTMENTS).find(query).to_list(500)
+    if not docs:
+        # Fallback for a not-yet-seeded deployment.
+        return {"departments": list(TPMS_DEPARTMENTS),
+                "items": [{"name": d, "is_governance_role": True} for d in TPMS_DEPARTMENTS]}
+    docs.sort(key=lambda d: (not d.get("is_governance_role"), (d.get("name") or "").lower()))
+    return {"departments": [d["name"] for d in docs], "items": [_serialize(d) for d in docs]}
+
+
+@router.post("/departments")
+async def create_department(payload: dict, current_user: dict = Depends(get_current_user)):
+    """H5 — admin adds a custom department (e.g. Sales, Ops, Finance). Governance roles are
+    seeded, not created here. `company_id` optional (null = global)."""
+    if (current_user.get("role") or "").lower() not in STAFF_ROLES:
+        raise HTTPException(status_code=403, detail="Only Admin / Super Admin can manage departments.")
+    name = str(payload.get("name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Department name is required")
+    company_id = str(payload.get("company_id") or "").strip() or None
+    doc = {
+        "name": name,
+        "code": name.lower().replace(" ", "_"),
+        "is_governance_role": False,
+        "company_id": company_id,
+        "active": True,
+    }
+    try:
+        res = await get_collection(COLL_DEPARTMENTS).update_one(
+            {"name": name, "company_id": company_id}, {"$set": doc}, upsert=True)
+    except Exception:
+        raise HTTPException(status_code=409, detail="Department already exists")
+    return {"ok": True, "name": name, "upserted": bool(res.upserted_id)}
+
+
+@router.patch("/departments/{dept_id}")
+async def update_department(dept_id: str, payload: dict, current_user: dict = Depends(get_current_user)):
+    """H5 — rename or (soft) deactivate a custom department. Governance roles cannot be
+    edited/removed. Data is never hard-deleted — set active:false to retire one."""
+    if (current_user.get("role") or "").lower() not in STAFF_ROLES:
+        raise HTTPException(status_code=403, detail="Only Admin / Super Admin can manage departments.")
+    try:
+        oid = ObjectId(dept_id)
+    except (InvalidId, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid department id")
+    existing = await get_collection(COLL_DEPARTMENTS).find_one({"_id": oid})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Department not found")
+    if existing.get("is_governance_role"):
+        raise HTTPException(status_code=400, detail="Governance roles cannot be edited.")
+    updates = {}
+    if "name" in payload and str(payload["name"]).strip():
+        updates["name"] = str(payload["name"]).strip()
+        updates["code"] = updates["name"].lower().replace(" ", "_")
+    if "active" in payload:
+        updates["active"] = bool(payload["active"])
+    if not updates:
+        raise HTTPException(status_code=400, detail="Nothing to update")
+    await get_collection(COLL_DEPARTMENTS).update_one({"_id": oid}, {"$set": updates})
+    return {"ok": True}
 
 
 @router.get("/reminder-rules")
@@ -101,6 +258,86 @@ async def list_reminder_rules(
         query["$or"] = [{"activity": "*"}, {"activity": activity}]
     docs = await get_collection(COLL_REMINDER_RULES).find(query).to_list(200)
     return {"rules": [_serialize(d) for d in docs]}
+
+
+# ─── M12 — admin CRUD for reminder rules + mail templates (was DB-only) ───
+@router.post("/reminder-rules")
+async def create_reminder_rule(payload: dict, current_user: dict = Depends(get_current_user)):
+    """Admin adds/updates a default reminder rule. `activity='*'` applies to all activities."""
+    if (current_user.get("role") or "").lower() not in STAFF_ROLES:
+        raise HTTPException(status_code=403, detail="Only Admin / Super Admin can manage reminder rules.")
+    doc = {
+        "activity": str(payload.get("activity") or "*"),
+        "stage": str(payload.get("stage") or "reminder"),
+        "offset_value": int(payload.get("offset_value") or 1),
+        "offset_unit": str(payload.get("offset_unit") or "days"),
+        "offset_dir": str(payload.get("offset_dir") or "before"),
+        "channel": str(payload.get("channel") or "email"),
+        "active": True,
+    }
+    if doc["offset_value"] < 1:
+        raise HTTPException(status_code=400, detail="offset_value must be ≥ 1")
+    res = await get_collection(COLL_REMINDER_RULES).insert_one(doc)
+    return {"ok": True, "id": str(res.inserted_id)}
+
+
+@router.patch("/reminder-rules/{rule_id}")
+async def update_reminder_rule(rule_id: str, payload: dict, current_user: dict = Depends(get_current_user)):
+    """Edit a reminder rule or retire it (active:false)."""
+    if (current_user.get("role") or "").lower() not in STAFF_ROLES:
+        raise HTTPException(status_code=403, detail="Only Admin / Super Admin can manage reminder rules.")
+    try:
+        oid = ObjectId(rule_id)
+    except (InvalidId, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid rule id")
+    allowed = {"activity", "stage", "offset_value", "offset_unit", "offset_dir", "channel", "active"}
+    updates = {k: payload[k] for k in allowed if k in payload}
+    if "offset_value" in updates and int(updates["offset_value"]) < 1:
+        raise HTTPException(status_code=400, detail="offset_value must be ≥ 1")
+    if not updates:
+        raise HTTPException(status_code=400, detail="Nothing to update")
+    res = await get_collection(COLL_REMINDER_RULES).update_one({"_id": oid}, {"$set": updates})
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Rule not found")
+    return {"ok": True}
+
+
+@router.get("/mail-templates")
+async def list_mail_templates(
+    activity: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Mail templates (activity × side × event). Admin only."""
+    if (current_user.get("role") or "").lower() not in STAFF_ROLES:
+        raise HTTPException(status_code=403, detail="Admin only")
+    query = {}
+    if activity:
+        query["activity"] = activity
+    docs = await get_collection(COLL_MAIL_TEMPLATES).find(query).to_list(500)
+    docs.sort(key=lambda d: (d.get("activity") or "", d.get("event") or "", d.get("side") or ""))
+    return {"templates": [_serialize(d) for d in docs]}
+
+
+@router.post("/mail-templates")
+async def upsert_mail_template(payload: dict, current_user: dict = Depends(get_current_user)):
+    """Create/update a mail template, keyed (activity, side, event). Admin only."""
+    if (current_user.get("role") or "").lower() not in STAFF_ROLES:
+        raise HTTPException(status_code=403, detail="Only Admin / Super Admin can manage templates.")
+    activity = str(payload.get("activity") or "").strip()
+    side = str(payload.get("side") or "").strip().lower()
+    event = str(payload.get("event") or "").strip().lower()
+    if not (activity and side in {"staff", "company"} and event):
+        raise HTTPException(status_code=400, detail="activity, side (staff|company) and event are required")
+    doc = {
+        "activity": activity, "side": side, "event": event,
+        "subject": str(payload.get("subject") or ""),
+        "body_html": str(payload.get("body_html") or ""),
+        "active": bool(payload.get("active", True)),
+        "source": "admin_edit",
+    }
+    await get_collection(COLL_MAIL_TEMPLATES).update_one(
+        {"activity": activity, "side": side, "event": event}, {"$set": doc}, upsert=True)
+    return {"ok": True}
 
 
 @router.post("/schedules/check-conflict")
@@ -195,6 +432,8 @@ async def list_tpms_schedules(
                 "upload_required": bool((e.get("activity_meta") or {}).get("upload_required")),
                 "reminder_count": len(e.get("reminders") or []),
                 "mine": str(e.get("user_id") or "") == uid,
+                "scheduled_by": e.get("scheduled_by_side") or "",       # M1 — internal | client
+                "scheduled_by_name": e.get("scheduled_by_name") or "",
             })
     events.sort(key=lambda x: (x["date"], x["time"]))
     return {"events": events}
@@ -326,9 +565,12 @@ async def success_measures(
 @router.post("/manual-scores")
 async def manual_scores_save(payload: dict, current_user: dict = Depends(get_current_user)):
     """Enter a manual score for one of the 10 manually-scored activities. `scope` is
-    'company' or 'hod'; HOD-scoped entries are averaged across HODs by the sync."""
-    if (current_user.get("role") or "").lower() in CLIENT_ROLES:
-        raise HTTPException(status_code=403, detail="Only internal staff can enter scores.")
+    'company' or 'hod'; HOD-scoped entries are averaged across HODs by the sync.
+
+    Restricted to Admin / Super Admin (H12): scoring is a governance-authority action, so
+    general SMOps/staff can no longer enter scores directly."""
+    if (current_user.get("role") or "").lower() not in STAFF_ROLES:
+        raise HTTPException(status_code=403, detail="Only Admin / Super Admin can enter scores.")
     return await save_manual_score(current_user, payload)
 
 

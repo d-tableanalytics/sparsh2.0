@@ -86,7 +86,10 @@ async def escalation_recipients(event: dict) -> Dict[str, List[str]]:
             email = (u.get("email") or "").strip()
             if not email:
                 continue
-            dept = (u.get("department") or "").strip().lower()
+            # C8 — escalation routing keys on the governance ROLE. Prefer an explicit
+            # `governance_role` (HOD/HR/MD) when present, so `department` can hold the real
+            # org department (Sales, Ops…); falls back to `department` for un-migrated users.
+            dept = (u.get("governance_role") or u.get("department") or "").strip().lower()
             if str(u["_id"]) in member_ids:
                 owners.append(email)
             if dept == "hod":

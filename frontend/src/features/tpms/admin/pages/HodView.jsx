@@ -31,6 +31,30 @@ const monthOptions = () => {
   return out;
 };
 
+// Previous calendar month as 'YYYY-MM', computed client-side (backend takes a
+// single month only — no ranges). NOTE: presets are quick single-month picks;
+// a true "This Quarter" range can't be honored by this endpoint, so it's omitted.
+const previousPeriod = () => {
+  const d = new Date();
+  const p = new Date(d.getFullYear(), d.getMonth() - 1, 1);
+  return `${p.getFullYear()}-${String(p.getMonth() + 1).padStart(2, '0')}`;
+};
+
+// Small white-pill preset chip for the gradient hero, with an active state.
+const PresetChip = ({ active, onClick, children }) => (
+  <button
+    type="button"
+    onClick={onClick}
+    className={`px-3 py-2 rounded-lg text-[12.5px] font-bold border shadow-sm transition-all ${
+      active
+        ? 'bg-white text-[var(--accent-indigo)] border-white'
+        : 'bg-white/15 text-white border-white/30 hover:bg-white/25'
+    }`}
+  >
+    {children}
+  </button>
+);
+
 const OCC = {
   Completed: { c: 'var(--accent-green)',  bg: 'var(--accent-green-bg)',  bd: 'var(--accent-green-border)' },
   Done:      { c: 'var(--accent-green)',  bg: 'var(--accent-green-bg)',  bd: 'var(--accent-green-border)' },
@@ -52,6 +76,9 @@ const HodView = () => {
   const canPickCompany = ['admin', 'superadmin', 'om'].includes(role);
 
   const months = useMemo(() => monthOptions(), []);
+  // Preset target months (stable for the session) — the dropdown stays as "Custom".
+  const thisMonth = useMemo(() => currentPeriod(), []);
+  const lastMonth = useMemo(() => previousPeriod(), []);
   const [company, setCompany] = useState('');
   const [member, setMember] = useState('');
   const [period, setPeriod] = useState(currentPeriod());
@@ -137,7 +164,13 @@ const HodView = () => {
       <DashboardHero icon={UserCog} title="HOD Activity" highlight={hodName} subtitle="Per-HOD activity scoring & accountability">
         {canPickCompany && <HeaderSelect value={company} onChange={(v) => { setCompany(v); setMember(''); }} options={companyOpts} />}
         <HeaderSelect value={member} onChange={setMember} options={hodOpts.length ? hodOpts : [{ id: '', name: 'No HODs' }]} />
-        <HeaderSelect value={period} onChange={setPeriod} options={months} />
+        {/* Period presets — quick single-month picks; changing period refetches via `load`. */}
+        <div className="inline-flex items-center gap-2">
+          <span className="text-[10px] font-bold uppercase tracking-widest text-white/70">Period</span>
+          <PresetChip active={period === thisMonth} onClick={() => setPeriod(thisMonth)}>This Month</PresetChip>
+          <PresetChip active={period === lastMonth} onClick={() => setPeriod(lastMonth)}>Last Month</PresetChip>
+          <HeaderSelect value={period} onChange={setPeriod} options={months} />
+        </div>
         <HeroButton icon={RefreshCw} onClick={load}>Refresh</HeroButton>
       </DashboardHero>
 

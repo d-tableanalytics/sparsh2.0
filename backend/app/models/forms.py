@@ -155,6 +155,26 @@ def submission_collection(form_type: str) -> Optional[str]:
     return FORM_COLLECTIONS.get(form_type)
 
 
+# M10 — question master. Stores the editable TEXT of each form's criteria/questions, keyed by
+# the immutable item id (criterion code / question id). Business can reword prompts; item ids
+# are never changed here, so scoring and cell-level validation stay intact.
+QUESTION_COLLECTION = "tpms_form_questions"
+
+
+def definition_items(form_type: str, definition: dict) -> List[dict]:
+    """Flatten a form definition's criteria/questions into master rows (for seeding)."""
+    kind = definition.get("kind")
+    if kind == KIND_RATING_MATRIX:
+        return [{"form_type": form_type, "kind": kind, "item_id": c["code"],
+                 "title": c.get("title", ""), "prompt": c.get("prompt", ""),
+                 "order": i, "active": True}
+                for i, c in enumerate(definition.get("criteria", []))]
+    return [{"form_type": form_type, "kind": kind, "item_id": str(q["id"]),
+             "title": q.get("title", ""), "desc": q.get("desc", ""),
+             "order": i, "active": True}
+            for i, q in enumerate(definition.get("questions", []))]
+
+
 # ─────────────────────────────────────────────────────────────
 # Activity catalogue — the Success-Measure activities scheduled on the calendar and
 # scored on the client dashboard. Keep in sync with the frontend Schedule Calendar list.

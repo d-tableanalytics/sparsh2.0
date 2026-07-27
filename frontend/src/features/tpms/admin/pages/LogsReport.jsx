@@ -40,6 +40,33 @@ const StatusPill = ({ v }) => {
 const stickyHead = 'sticky left-0 z-10 bg-[var(--table-header-bg)]';
 const stickyCell = 'sticky left-0 z-10 bg-[var(--bg-card)] group-hover:bg-[var(--table-hover)]';
 
+// Compact 14-day message-volume sparkline (inline SVG, no extra deps).
+// `points` is [{ key: 'yyyy-mm-dd', count }]. Bars stretch to fill width.
+const SPARK_DAYS = 14;
+const Sparkline = ({ points }) => {
+  const pts = Array.isArray(points) ? points : [];
+  const n = pts.length || 1;
+  const max = Math.max(1, ...pts.map((p) => p?.count || 0));
+  const bw = 8;
+  const gap = 4;
+  const H = 40;
+  const W = n * (bw + gap) - gap;
+  return (
+    <svg width="100%" height={H} viewBox={`0 0 ${Math.max(W, 1)} ${H}`} preserveAspectRatio="none" role="img" aria-label="Message volume, last 14 days">
+      {pts.map((p, i) => {
+        const c = p?.count || 0;
+        const h = c > 0 ? Math.max(2, Math.round((c / max) * (H - 2))) : 1;
+        return (
+          <rect key={p?.key || i} x={i * (bw + gap)} y={H - h} width={bw} height={h} rx={2}
+            fill={c > 0 ? 'var(--accent-indigo)' : 'var(--border)'}>
+            <title>{`${p?.key || ''}: ${c}`}</title>
+          </rect>
+        );
+      })}
+    </svg>
+  );
+};
+
 // Quick presets set the from/to date range that is sent to the server.
 const iso = (d) => d.toISOString().slice(0, 10);
 const rangeFor = (k) => {
@@ -127,13 +154,67 @@ const LogsReport = () => {
     { value: counts.skipped ?? 0, label: 'Skipped', sub: 'no phone / no tpl', tone: 'yellow', icon: MinusCircle },
   ];
 
+  // 14-day volume sparkline: prefer a backend `spark[]` daily series; otherwise
+  // derive it client-side by grouping the loaded rows' timestamps by calendar day.
+  const spark = useMemo(() => {
+    const today = new Date();
+    const buckets = [];
+    const idxByKey = {};
+    for (let i = SPARK_DAYS - 1; i >= 0; i -= 1) {
+      const d = new Date(today);
+      d.setDate(today.getDate() - i);
+      const key = iso(d);
+      idxByKey[key] = buckets.length;
+      buckets.push({ key, count: 0 });
+    }
+    const series = Array.isArray(data?.spark) ? data.spark : null;
+    if (series && series.length) {
+      if (series.every((p) => typeof p === 'number')) {
+        const tail = series.slice(-SPARK_DAYS);
+        tail.forEach((v, i) => {
+          const b = buckets[buckets.length - tail.length + i];
+          if (b) b.count = Number(v) || 0;
+        });
+      } else {
+        series.forEach((p) => {
+          const key = String(p?.date ?? p?.day ?? p?.key ?? '').slice(0, 10);
+          const v = Number(p?.count ?? p?.value ?? 0);
+          if (key in idxByKey && Number.isFinite(v)) buckets[idxByKey[key]].count = v;
+        });
+      }
+      return buckets;
+    }
+    const dateIdx = columns.findIndex((c) => /date|time|created|sent|timestamp/i.test(c));
+    if (dateIdx >= 0) {
+      allRows.forEach((r) => {
+        const raw = (r || [])[dateIdx];
+        if (!raw) return;
+        const d = new Date(raw);
+        if (Number.isNaN(d.getTime())) return;
+        const key = iso(d);
+        if (key in idxByKey) buckets[idxByKey[key]].count += 1;
+      });
+    }
+    return buckets;
+  }, [data, columns, allRows]);
+  const sparkTotal = useMemo(() => spark.reduce((a, b) => a + b.count, 0), [spark]);
+
+  // Export the currently loaded page as CSV, entirely client-side (no new API call).
+  // Quotes any field containing a comma, quote or newline per RFC-4180.
   const exportCsv = () => {
-    if (!columns.length) return;
-    const esc = (c) => `"${String(c ?? '').replace(/"/g, '""')}"`;
+    if (!columns.length || !allRows.length) return;
+    const esc = (c) => {
+      const s = String(c ?? '');
+      return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
     const lines = [columns.map(esc).join(','), ...allRows.map((r) => (r || []).map(esc).join(','))];
-    const url = URL.createObjectURL(new Blob([lines.join('\n')], { type: 'text/csv' }));
+    const url = URL.createObjectURL(new Blob([lines.join('\r\n')], { type: 'text/csv;charset=utf-8' }));
     const a = document.createElement('a');
-    a.href = url; a.download = `tpms-logs-${channel}.csv`; a.click();
+    a.href = url;
+    a.download = `tpms-logs-${channel}-${iso(new Date())}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
     URL.revokeObjectURL(url);
   };
 
@@ -157,7 +238,7 @@ const LogsReport = () => {
           ))}
         </div>
         <HeroButton icon={RefreshCw} onClick={load}>Refresh</HeroButton>
-        <HeroButton icon={Download} onClick={exportCsv}>CSV</HeroButton>
+        <HeroButton icon={Download} onClick={exportCsv}>Export CSV</HeroButton>
       </DashboardHero>
 
       {error && (
@@ -169,6 +250,15 @@ const LogsReport = () => {
       {/* KPI tiles */}
       <div className="grid grid-cols-2 xl:grid-cols-4 gap-3">
         {kpis.map((k) => <KpiTile key={k.label} {...k} />)}
+      </div>
+
+      {/* 14-day message volume sparkline */}
+      <div className="rounded-2xl border border-[var(--border)] bg-[var(--bg-card)] shadow-sm p-4">
+        <div className="flex items-center justify-between mb-2">
+          <span className={labelCls}>Volume · last 14 days</span>
+          <span className="text-[11px] font-bold text-[var(--text-muted)] tabular-nums">{sparkTotal} msg{sparkTotal === 1 ? '' : 's'}</span>
+        </div>
+        <Sparkline points={spark} />
       </div>
 
       {/* Filter bar */}
@@ -191,7 +281,7 @@ const LogsReport = () => {
             <span className={labelCls}>Search</span>
             <div className="relative">
               <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-[var(--text-muted)]" />
-              <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="recipient, action, error…" className={`${inputCls} w-full pl-9`} />
+              <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search this page…" className={`${inputCls} w-full pl-9`} />
             </div>
           </label>
         </div>

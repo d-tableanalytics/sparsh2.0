@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   CalendarDays, Plus, RefreshCw, Inbox, X, Clock, Building2, Tag, Users2,
-  UserCog, CheckCircle2, Paperclip, Upload, FileText, RotateCcw, Trash2, Pencil,
+  UserCog, CheckCircle2, Paperclip, Upload, FileText, RotateCcw, Trash2, Pencil, Pin,
 } from 'lucide-react';
 import { DashboardHero, HeroButton, KpiTile, FilterSelect } from '../common/dashboardKit';
 import ScheduleCalendarModal from '../../../components/calendar/ScheduleCalendarModal';
@@ -32,6 +32,18 @@ const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
 const STATUSES = ['Scheduled', 'Rescheduled', 'Cancelled', 'Completed', 'Lapsed'];
 
+// Recurrence options for the client-side recurrence filter. Values match the
+// labels the catalogue/scheduler uses on `activity_meta.recurrence` (or a flat
+// `recurrence` field). If events carry no recurrence data the filter no-ops.
+const RECURRENCES = ['One-time', 'Daily', 'Weekly', 'Monthly', 'Periodically'];
+
+// "Scheduled by" filter options — value matches the event's scheduled_by field.
+const SCHED_BY_OPTIONS = [
+  { id: '', name: 'All Scheduled by' },
+  { id: 'internal', name: 'OM/Staff' },
+  { id: 'client', name: 'Client' },
+];
+
 // TPMS status → ERP accent tokens. No hex literals: dark mode comes free.
 const TONE = {
   Scheduled:   { c: 'var(--accent-indigo)', bg: 'var(--accent-indigo-bg)', bd: 'var(--accent-indigo-border)' },
@@ -41,6 +53,25 @@ const TONE = {
   Lapsed:      { c: 'var(--text-muted)',    bg: 'var(--input-bg)',         bd: 'var(--border)' },
 };
 const toneOf = (s) => TONE[s] || TONE.Scheduled;
+
+// "Scheduled by" tone tokens — internal (OM/Staff) reads indigo, client reads amber.
+const SCHED_BY = {
+  internal: { label: 'OM/Staff', c: 'var(--accent-indigo)', bg: 'var(--accent-indigo-bg)', bd: 'var(--accent-indigo-border)' },
+  client:   { label: 'Client',   c: 'var(--accent-orange)', bg: 'var(--accent-orange-bg)', bd: 'var(--accent-orange-border)' },
+};
+
+// Small badge naming who put the activity on the calendar; hidden when unknown.
+const SchedByBadge = ({ by, name }) => {
+  const t = SCHED_BY[by];
+  if (!t) return null;
+  return (
+    <span title={name ? `Scheduled by ${name}` : `Scheduled by ${t.label}`}
+      className="inline-flex items-center text-[10px] font-bold px-2 py-0.5 rounded-full border whitespace-nowrap"
+      style={{ color: t.c, background: t.bg, borderColor: t.bd }}>
+      {t.label}
+    </span>
+  );
+};
 
 const ymd = (y, m, d) => `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
 
@@ -53,6 +84,32 @@ const Badge = ({ status }) => {
     </span>
   );
 };
+
+// Small pin marking activities the current user created. Cosmetic only.
+const MinePin = () => (
+  <Pin size={11} title="Created by you" aria-label="Created by you"
+    className="shrink-0" style={{ color: 'var(--accent-indigo)' }} />
+);
+
+// Legend mapping each status to the exact color dot the pills use (reuses TONE).
+const StatusLegend = () => (
+  <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 px-4 py-2.5 border-t border-[var(--border)]">
+    <span className="text-[10.5px] font-black text-[var(--text-muted)] uppercase tracking-wide">Legend</span>
+    {STATUSES.map((s) => {
+      const t = toneOf(s);
+      return (
+        <span key={s} className="inline-flex items-center gap-1.5 text-[11px] font-bold text-[var(--text-muted)]">
+          <span className="w-2.5 h-2.5 rounded-full border"
+            style={{ background: t.c, borderColor: t.bd }} />
+          {s}
+        </span>
+      );
+    })}
+    <span className="inline-flex items-center gap-1.5 text-[11px] font-bold text-[var(--text-muted)]">
+      <MinePin /> Created by you
+    </span>
+  </div>
+);
 
 /** Proof-of-work panel, shown only for activities the catalogue flags upload_required. */
 const UploadBlock = ({ eventId, canUpload }) => {
@@ -140,6 +197,9 @@ const TpmsCalendar = () => {
 
   const [fActivity, setFActivity] = useState('');
   const [fStatus, setFStatus] = useState('');
+  const [fCompany, setFCompany] = useState('');       // company_id (as string) or ''
+  const [fRecurrence, setFRecurrence] = useState(''); // one of RECURRENCES or ''
+  const [fSchedBy, setFSchedBy] = useState('');       // 'internal' | 'client' | ''
 
   const [openDay, setOpenDay] = useState(null);
   const [showModal, setShowModal] = useState(false);
@@ -173,8 +233,39 @@ const TpmsCalendar = () => {
     getActivities().then(({ data }) => setActivities(data.activities || [])).catch(() => {});
   }, []);
 
+  // Recurrence lives on activity_meta.recurrence (preferred) or a flat recurrence
+  // field; may be absent on older/sparse events.
+  const recurrenceOf = (e) => e?.activity_meta?.recurrence || e?.recurrence || '';
+
+  // Company dropdown is derived from the current month's loaded events — keyed by
+  // company_id (falling back to company name) so labels stay stable.
+  const companyOptions = useMemo(() => {
+    const map = new Map();
+    events.forEach((e) => {
+      const key = e.company_id ?? e.company;
+      if (key == null || key === '') return;
+      const id = String(key);
+      if (!map.has(id)) map.set(id, e.company || id);
+    });
+    return [...map.entries()]
+      .map(([id, name]) => ({ id, name }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [events]);
+
   const filtered = useMemo(() => events.filter((e) =>
-    (!fActivity || e.activity === fActivity) && (!fStatus || e.status === fStatus)), [events, fActivity, fStatus]);
+    (!fActivity || e.activity === fActivity)
+    && (!fStatus || e.status === fStatus)
+    && (!fCompany || String(e.company_id ?? e.company) === fCompany)
+    // Recurrence filters client-side; events with no recurrence value always pass
+    // so the control degrades to a no-op when the data isn't present.
+    && (!fRecurrence || !recurrenceOf(e) || recurrenceOf(e) === fRecurrence)
+    // Scheduled-by filters client-side; events missing scheduled_by only show under "All".
+    && (!fSchedBy || e.scheduled_by === fSchedBy)),
+  [events, fActivity, fStatus, fCompany, fRecurrence, fSchedBy]);
+
+  const clearFilters = () => {
+    setFActivity(''); setFStatus(''); setFCompany(''); setFRecurrence(''); setFSchedBy('');
+  };
 
   const byDate = useMemo(() => {
     const map = {};
@@ -262,6 +353,17 @@ const TpmsCalendar = () => {
             options={[{ id: '', name: 'All Activities' }, ...activities.map((a) => ({ id: a.name, name: a.name }))]} />
           <FilterSelect value={fStatus} onChange={setFStatus}
             options={[{ id: '', name: 'All Status' }, ...STATUSES.map((s) => ({ id: s, name: s }))]} />
+          <FilterSelect value={fCompany} onChange={setFCompany}
+            options={[{ id: '', name: 'All Companies' }, ...companyOptions]} />
+          <FilterSelect value={fRecurrence} onChange={setFRecurrence}
+            options={[{ id: '', name: 'All Recurrence' }, ...RECURRENCES.map((r) => ({ id: r, name: r }))]} />
+          <FilterSelect value={fSchedBy} onChange={setFSchedBy} options={SCHED_BY_OPTIONS} />
+          {(fActivity || fStatus || fCompany || fRecurrence || fSchedBy) && (
+            <button onClick={clearFilters}
+              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-[var(--border)] text-[12px] font-black text-[var(--text-muted)] hover:bg-[var(--table-hover)]">
+              <RotateCcw size={13} /> Clear
+            </button>
+          )}
         </div>
 
         <div className="grid grid-cols-7 gap-px bg-[var(--border)]">
@@ -284,7 +386,7 @@ const TpmsCalendar = () => {
                   {evs.slice(0, 3).map((e) => {
                     const t = toneOf(e.status);
                     return (
-                      <div key={e.id} title={`${e.title} — ${e.status}`}
+                      <div key={e.id} title={`${e.title} — ${e.status}${e.mine ? ' · Created by you' : ''}`}
                         className="truncate text-[10px] font-bold px-1.5 py-0.5 rounded border"
                         style={{ color: t.c, background: t.bg, borderColor: t.bd }}>
                         {e.mine ? '📌 ' : ''}{e.time ? `${e.time} ` : ''}{e.title}
@@ -299,6 +401,7 @@ const TpmsCalendar = () => {
             );
           })}
         </div>
+        <StatusLegend />
         {loading && <div className="px-5 py-3 text-[12px] font-bold text-[var(--text-muted)]">Loading…</div>}
       </div>
 
@@ -310,11 +413,14 @@ const TpmsCalendar = () => {
             return (
               <div key={e.id} className="rounded-xl border border-[var(--border)] p-3 mb-2.5">
                 <div className="flex items-start justify-between gap-2 mb-1.5">
-                  <h4 className="text-[13.5px] font-black text-[var(--text-main)]">{e.title}</h4>
+                  <h4 className="text-[13.5px] font-black text-[var(--text-main)] inline-flex items-center gap-1.5">
+                    {e.mine && <MinePin />}{e.title}
+                  </h4>
                   <div className="flex items-center gap-1.5">
                     {e.reschedule_count > 0 && (
                       <span className="text-[10px] font-bold text-[var(--text-muted)]">↻ {e.reschedule_count}</span>
                     )}
+                    <SchedByBadge by={e.scheduled_by} name={e.scheduled_by_name} />
                     <Badge status={e.status} />
                   </div>
                 </div>

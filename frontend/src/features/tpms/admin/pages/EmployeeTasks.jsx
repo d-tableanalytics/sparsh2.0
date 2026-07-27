@@ -58,7 +58,8 @@ const EmployeeTasks = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
-  const months = useMemo(() => periodOptions(), []);
+  // "All Months" (empty id) lets the backend aggregate across every month.
+  const months = useMemo(() => [{ id: '', name: 'All Months' }, ...periodOptions()], []);
 
   // Company list for the picker (role-scoped server-side by the endpoint too).
   useEffect(() => {

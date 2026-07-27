@@ -12,9 +12,11 @@ import { Section, Th, Td, Fraction, KpiTile, FilterSelect, TableShell } from './
  *   kpis        [{ value, label, sub, tone, icon }]
  *   activities  [{ full, short }]                 — matrix columns (activity catalogue)
  *   matrix      clients_grid rows { company, cells:{ [full]:{done,total} }, done }
- *   alerts      [{ level, text }]                 — level 'ok' == all-clear
- *   actions     open_actions [{ company, activity, action, owner, employee_id,
- *                               target, actual, status, learner_delay, staff_delay }]
+ *   actions        open_actions [{ company, activity, action, owner, employee_id,
+ *                                   target, actual, status, learner_delay, staff_delay }]
+ *   action_required [{ id, event_id, company, activity, action, owner, target,
+ *                      overdue, days_overdue, urgency }] — the "Action Required From Me"
+ *                      feed (overdue-first, de-duplicated by the backend).
  */
 const stickyHead = 'sticky left-0 z-10 bg-[var(--table-header-bg)]';
 const stickyCell = 'sticky left-0 z-10 bg-[var(--bg-card)] group-hover:bg-[var(--table-hover)]';
@@ -26,7 +28,7 @@ const delayColor = (v) => {
   return 'var(--accent-red)';
 };
 
-const OmDashboardBody = ({ kpis = [], activities = [], matrix = [], alerts = [], actions = [] }) => {
+const OmDashboardBody = ({ kpis = [], activities = [], matrix = [], actions = [], action_required: actionRequired = [] }) => {
   const [fActivity, setFActivity] = useState('All Activities');
   const [fClient, setFClient] = useState('All Clients');
   const [fOwner, setFOwner] = useState('All Owners');
@@ -43,9 +45,6 @@ const OmDashboardBody = ({ kpis = [], activities = [], matrix = [], alerts = [],
     () => ['All Owners', ...Array.from(new Set(actions.map((a) => a?.owner).filter(Boolean)))],
     [actions],
   );
-
-  // The backend always emits a single { level: 'ok' } placeholder when nothing is due.
-  const realAlerts = useMemo(() => alerts.filter((a) => a?.level !== 'ok'), [alerts]);
 
   const filteredActions = actions.filter((a) =>
     (fActivity === 'All Activities' || a?.activity === fActivity) &&
@@ -103,24 +102,43 @@ const OmDashboardBody = ({ kpis = [], activities = [], matrix = [], alerts = [],
       {/* Action Required From Me */}
       <Section
         title="Action Required From Me"
-        subtitle={realAlerts.length ? `${realAlerts.length} item${realAlerts.length > 1 ? 's' : ''} need your attention` : 'Nothing overdue'}
+        subtitle={actionRequired.length ? `${actionRequired.length} item${actionRequired.length > 1 ? 's' : ''} need your attention` : 'Nothing overdue'}
         icon={AlertTriangle}
         tone="red"
+        action={actionRequired.length ? <span className="hidden sm:inline text-[11px] font-bold text-[var(--text-muted)]">{actionRequired.length} open</span> : undefined}
       >
-        {realAlerts.length === 0 ? (
+        {actionRequired.length === 0 ? (
           <div className="flex items-center gap-2.5 px-5 py-6">
             <span className="w-8 h-8 rounded-lg bg-[var(--accent-green-bg)] text-[var(--accent-green)] flex items-center justify-center"><CheckCircle2 size={16} /></span>
             <p className="text-[13px] font-bold text-[var(--accent-green)]">All clear — no actions overdue.</p>
           </div>
         ) : (
-          <div className="divide-y divide-[var(--border)]">
-            {realAlerts.map((a, i) => (
-              <div key={i} className="flex items-start gap-3 px-5 py-3.5 hover:bg-[var(--table-hover)] transition-colors">
-                <span className="w-6 h-6 rounded-lg bg-[var(--accent-red-bg)] text-[var(--accent-red)] flex items-center justify-center mt-0.5 shrink-0"><AlertTriangle size={13} /></span>
-                <span className="text-[12.5px] font-medium leading-relaxed">{a.text}</span>
-              </div>
-            ))}
-          </div>
+          <TableShell minWidth={820}>
+            <thead>
+              <tr className="bg-[var(--table-header-bg)] border-b border-[var(--border)]">
+                <Th className={stickyHead}>Company</Th>
+                <Th>Activity</Th><Th>Action</Th><Th>Owner</Th><Th>Due</Th><Th align="center">Status</Th>
+              </tr>
+            </thead>
+            <tbody>
+              {actionRequired.map((r) => (
+                <tr key={r.id} className="group border-b border-[var(--border)] last:border-0 hover:bg-[var(--table-hover)] transition-colors">
+                  <Td className={`font-bold ${stickyCell}`}>{r.company}</Td>
+                  <Td className="text-[var(--text-muted)]">{r.activity}</Td>
+                  <Td>{r.action}</Td>
+                  <Td className="text-[var(--text-muted)]">{r.owner || '—'}</Td>
+                  <Td className="tabular-nums">{r.target || '—'}</Td>
+                  <Td align="center">
+                    {r.overdue ? (
+                      <span className="text-[10.5px] font-bold px-2 py-1 rounded-full whitespace-nowrap" style={{ color: 'var(--accent-red)', background: 'var(--accent-red-bg)' }}>{r.days_overdue}d overdue</span>
+                    ) : (
+                      <span className="text-[10.5px] font-bold px-2 py-1 rounded-full whitespace-nowrap" style={{ color: 'var(--accent-orange)', background: 'var(--accent-orange-bg)' }}>Due soon</span>
+                    )}
+                  </Td>
+                </tr>
+              ))}
+            </tbody>
+          </TableShell>
         )}
       </Section>
 

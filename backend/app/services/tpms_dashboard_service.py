@@ -364,6 +364,52 @@ async def _open_actions(allowed: Optional[List[str]]) -> List[dict]:
     return out
 
 
+async def _action_required(allowed: Optional[List[str]]) -> List[dict]:
+    """H8 — the OM's "Action Required From Me" feed: open action items that are OVERDUE or
+    due within the next 3 days, de-duplicated by event, overdue first (most overdue first),
+    then by soonest due date. This is the OM's primary work driver."""
+    query: dict = {"status": {"$ne": "Closed"}}
+    if allowed is not None:
+        query["company_id"] = {"$in": allowed}
+    rows = await get_collection(COLL_ACTION_ITEMS).find(query).to_list(5000)
+
+    today = _today()
+    horizon = (date.fromisoformat(today) + timedelta(days=3)).isoformat()
+    seen = set()
+    feed: List[dict] = []
+    for a in rows:
+        target = str(a.get("target_date") or "")[:10]
+        if not target:
+            continue
+        overdue = target < today
+        due_soon = today <= target <= horizon
+        if not (overdue or due_soon):
+            continue
+        # De-dup by the source event (one row per activity occurrence).
+        key = str(a.get("event_id") or a.get("_id"))
+        if key in seen:
+            continue
+        seen.add(key)
+        days_overdue = a.get("delay_days") or 0
+        feed.append({
+            "id": str(a["_id"]),
+            "event_id": str(a.get("event_id") or ""),
+            "company": a.get("company_name") or "",
+            "activity": a.get("activity") or "",
+            "action": a.get("action") or "",
+            "owner": a.get("owner_name") or "",
+            "target": target,
+            "overdue": overdue,
+            "days_overdue": days_overdue if overdue else 0,
+            "urgency": "overdue" if overdue else "due_soon",
+        })
+    # Overdue first (most overdue first), then due-soon by soonest target date.
+    feed.sort(key=lambda r: (0 if r["overdue"] else 1,
+                             -r["days_overdue"] if r["overdue"] else 0,
+                             r["target"]))
+    return feed
+
+
 # ─────────────────────────────────────────────────────────────
 # 1) Admin analytics — getAnalytics (code.js:1322)
 # ─────────────────────────────────────────────────────────────
@@ -520,6 +566,7 @@ async def get_staff_dashboard(user: dict, scope: dict) -> dict:
     return {
         "cards": cards, "activities": activities, "clients_grid": grid,
         "open_actions": await _open_actions(allowed), "alerts": alerts,
+        "action_required": await _action_required(allowed),  # H8 — OM work feed
         "selected_period": scope.get("period") or window[0][:7],
         "filters": await _filters(companies, allowed),
     }

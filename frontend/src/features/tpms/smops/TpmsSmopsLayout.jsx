@@ -21,9 +21,6 @@ const SMOPS_NAV = [
   { group: 'Reports', items: [
     { name: 'Review Report',  path: '/tpms/smops/reviews',      icon: BarChart3 },
   ] },
-  { group: 'Account', items: [
-    { name: 'My Profile',     path: '/tpms/smops/profile',      icon: UserCircle },
-  ] },
 ];
 const SMOPS_LINKS = SMOPS_NAV.flatMap((g) => g.items);
 

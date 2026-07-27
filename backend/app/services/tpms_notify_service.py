@@ -19,6 +19,7 @@ second mail stack. Every send is logged with a `tpms_*` slug so the Logs Report 
 separate TPMS traffic from the rest of the ERP.
 """
 import logging
+import os
 import re
 from datetime import datetime
 from typing import Dict, List, Optional
@@ -49,9 +50,46 @@ def fill(template: str, mapping: Dict[str, str]) -> str:
     return _PLACEHOLDER.sub(repl, str(template or ""))
 
 
-def build_map(event: dict, extra: Optional[dict] = None) -> Dict[str, str]:
+async def _resolve_names(ids, collection: str) -> str:
+    """Comma-joined display names for a list of user ids from a collection."""
+    from bson import ObjectId
+    oids = []
+    for i in ids or []:
+        try:
+            oids.append(ObjectId(str(i)))
+        except Exception:
+            pass
+    if not oids:
+        return ""
+    names = []
+    for u in await get_collection(collection).find({"_id": {"$in": oids}}).to_list(200):
+        n = (u.get("full_name")
+             or " ".join(filter(None, [u.get("first_name"), u.get("last_name")])).strip()
+             or u.get("email") or "")
+        if n:
+            names.append(n)
+    return ", ".join(names)
+
+
+def _form_link(event: dict) -> str:
+    """In-app form link for form-scored activities. Absolute when FRONTEND_URL is set,
+    else a relative path. Empty for non-form activities."""
+    try:
+        from app.models.forms import ACTIVITY_FORM_MAP
+        forms = ACTIVITY_FORM_MAP.get(event.get("activity") or "")
+    except Exception:
+        forms = None
+    if not forms:
+        return ""
+    path = f"/tpms/forms/{forms[0].replace('_', '-')}"
+    base = os.getenv("FRONTEND_URL", "").rstrip("/")
+    return (base + path) if base else path
+
+
+async def build_map(event: dict, extra: Optional[dict] = None) -> Dict[str, str]:
     """Placeholder values available to every template (buildMap_, code.js:1084)."""
     start = str(event.get("start") or "")
+    meta = event.get("activity_meta") or {}
     mapping = {
         "Title": event.get("title") or "",
         "Activity": event.get("activity") or "",
@@ -63,6 +101,11 @@ def build_map(event: dict, extra: Optional[dict] = None) -> Dict[str, str]:
         "Departments": ", ".join(event.get("assigned_departments") or []),
         "Comment": event.get("additional_details") or "",
         "Schedule_ID": str(event.get("_id") or ""),
+        # Previously-unfilled placeholders (rendered as literal {{…}} before this fix).
+        "Staff_Assigner": await _resolve_names(event.get("coach_ids"), "staff"),
+        "Company_Assigners": await _resolve_names(event.get("assigned_member_ids"), "learners"),
+        "Session_Type": (str(meta.get("scope") or "").upper() or (event.get("activity") or "")),
+        "Form_Link": _form_link(event),
     }
     if extra:
         mapping.update({k: v for k, v in extra.items() if v is not None})
@@ -120,18 +163,81 @@ async def _recipients(event: dict) -> Dict[str, List[dict]]:
                 pass
         return out
 
+    def phone_of(u):
+        return u.get("mobile") or u.get("phone") or u.get("whatsapp") or ""
+
     company, staff = [], []
     member_oids = to_oids(event.get("assigned_member_ids"))
     if member_oids:
         for u in await get_collection("learners").find({"_id": {"$in": member_oids}}).to_list(500):
             if u.get("email"):
-                company.append({"email": u["email"], "name": name_of(u), "id": str(u["_id"])})
+                company.append({"email": u["email"], "name": name_of(u), "id": str(u["_id"]), "phone": phone_of(u)})
     staff_oids = to_oids(event.get("coach_ids"))
     if staff_oids:
         for u in await get_collection("staff").find({"_id": {"$in": staff_oids}}).to_list(500):
             if u.get("email"):
-                staff.append({"email": u["email"], "name": name_of(u), "id": str(u["_id"])})
+                staff.append({"email": u["email"], "name": name_of(u), "id": str(u["_id"]), "phone": phone_of(u)})
     return {SIDE_COMPANY: company, SIDE_STAFF: staff}
+
+
+# ─────────────────────────────────────────────────────────────
+# H1 — WhatsApp send layer (Meta templates). Sending is gated by the TPMS switch, so this is
+# fully dormant while notifications are off; the resolution/normalisation logic is ready.
+# ─────────────────────────────────────────────────────────────
+def normalize_phone(raw: str) -> str:
+    """Strip non-digits; prefix country code 91 for a bare 10-digit Indian number."""
+    digits = re.sub(r"\D", "", str(raw or ""))
+    if not digits:
+        return ""
+    if len(digits) == 10:
+        digits = "91" + digits
+    return digits
+
+
+async def get_whatsapp_template(activity: str, event_kind: str, side: str) -> Optional[dict]:
+    """Most-specific WhatsApp template wins: exact activity, then '*'. Returns None when no
+    row exists — the business's per-event on/off switch ("no template row = skip")."""
+    from app.models.tpms import COLL_WHATSAPP_TEMPLATES
+    coll = get_collection(COLL_WHATSAPP_TEMPLATES)
+    for name in (activity, "*"):
+        if not name:
+            continue
+        doc = await coll.find_one({"activity": name, "side": side,
+                                   "event": event_kind, "active": {"$ne": False}})
+        if doc:
+            return doc
+    return None
+
+
+async def send_whatsapp(event: dict, event_kind: str, side: str) -> dict:
+    """Resolve a Meta template, map ordered positional params from build_map, normalise
+    phones, and send. No template row → skip (returns skipped=1). Gated by the TPMS switch."""
+    if not TPMS_NOTIFICATIONS_ENABLED:
+        return {"sent": 0, "skipped": 0}
+    tpl = await get_whatsapp_template(event.get("activity") or "", event_kind, side)
+    if not tpl:
+        return {"sent": 0, "skipped": 1}  # no template = intentional skip
+    from app.services.notification_service import send_whatsapp_template
+
+    mapping = await build_map(event)
+    # Meta requires ORDERED params; the template row stores the variable order.
+    var_keys = tpl.get("variables") or []
+    params = [str(mapping.get(k) or "-") for k in var_keys]  # empty-param "-" guard
+    people = await _recipients(event)
+    sent = failed = 0
+    for person in people.get(side) or []:
+        phone = normalize_phone(person.get("phone"))
+        if not phone:
+            continue
+        try:
+            await send_whatsapp_template(phone, tpl.get("meta_template_name") or tpl.get("name"),
+                                         tpl.get("language") or "en", params,
+                                         user_id=person.get("id"), slug=f"tpms_wa_{event_kind}_{side}")
+            sent += 1
+        except Exception as e:
+            failed += 1
+            logger.error(f"TPMS WhatsApp to {phone} failed: {e}")
+    return {"sent": sent, "failed": failed, "skipped": 0}
 
 
 async def _dispatch(event: dict, event_kind: str, heading: str,
@@ -143,7 +249,7 @@ async def _dispatch(event: dict, event_kind: str, heading: str,
         return {"sent": 0, "failed": 0}
     from app.services.notification_service import send_email_notification
 
-    mapping = build_map(event, extra)
+    mapping = await build_map(event, extra)
     people = await _recipients(event)
     activity = event.get("activity") or ""
     sent = failed = 0
@@ -196,7 +302,7 @@ async def notify_learner_done(event: dict, doer_name: str) -> dict:
     from app.services.notification_service import send_email_notification
 
     people = await _recipients(event)
-    mapping = build_map(event, {"Doer_Name": doer_name})
+    mapping = await build_map(event, {"Doer_Name": doer_name})
     subject = fill("[Marked Done] {{Title}} – awaiting your confirmation", mapping)
     html = (
         '<div style="font-family:Arial,sans-serif;color:#1e293b;font-size:14px">'
@@ -214,3 +320,119 @@ async def notify_learner_done(event: dict, doer_name: str) -> dict:
         except Exception as e:
             logger.error(f"TPMS learner-done mail to {person['email']} failed: {e}")
     return {"sent": sent}
+
+
+async def notify_reschedule_request(event: dict, requester_name: str, new_date: str) -> dict:
+    """H9 — tell internal staff a doer has REQUESTED a reschedule. Staff-side only."""
+    if not TPMS_NOTIFICATIONS_ENABLED:
+        return {"sent": 0}
+    from app.services.notification_service import send_email_notification
+
+    people = await _recipients(event)
+    mapping = await build_map(event, {"Requested_By": requester_name, "New_Date": new_date})
+    subject = fill("[Reschedule Requested] {{Title}} – {{Activity}}", mapping)
+    html = (
+        '<div style="font-family:Arial,sans-serif;color:#1e293b;font-size:14px">'
+        '<h3 style="color:#b45309;margin:0 0 10px">Reschedule requested</h3>'
+        f'<p><b>{requester_name}</b> requested to reschedule <b>{mapping["Activity"]}</b> '
+        f'({mapping["Company_Name"]}) to <b>{new_date}</b>. Please review and approve or reject.</p>'
+        "</div>"
+    )
+    sent = 0
+    for person in people.get(SIDE_STAFF) or []:
+        try:
+            await send_email_notification(person["email"], subject, html,
+                                          user_id=person.get("id"), slug="tpms_reschedule_request")
+            sent += 1
+        except Exception as e:
+            logger.error(f"TPMS reschedule-request mail to {person['email']} failed: {e}")
+    return {"sent": sent}
+
+
+async def notify_reschedule_decision(event: dict, approved: bool, note: str = "") -> dict:
+    """H9 — tell the doer(s) their reschedule request was approved/rejected. Company-side only.
+    (Approval ALSO sends the standard reschedule status mail to both sides via notify_status.)"""
+    if not TPMS_NOTIFICATIONS_ENABLED:
+        return {"sent": 0}
+    from app.services.notification_service import send_email_notification
+
+    people = await _recipients(event)
+    mapping = await build_map(event, {"Note": note})
+    verdict = "approved" if approved else "rejected"
+    color = "#15803d" if approved else "#b91c1c"
+    subject = fill(f"[Reschedule {verdict.title()}] {{{{Title}}}} – {{{{Activity}}}}", mapping)
+    html = (
+        '<div style="font-family:Arial,sans-serif;color:#1e293b;font-size:14px">'
+        f'<h3 style="color:{color};margin:0 0 10px">Reschedule {verdict}</h3>'
+        f'<p>Your reschedule request for <b>{mapping["Activity"]}</b> ({mapping["Company_Name"]}) '
+        f'was <b>{verdict}</b>.{(" Note: " + note) if note else ""}</p>'
+        "</div>"
+    )
+    sent = 0
+    for person in people.get(SIDE_COMPANY) or []:
+        try:
+            await send_email_notification(person["email"], subject, html,
+                                          user_id=person.get("id"), slug=f"tpms_reschedule_{verdict}")
+            sent += 1
+        except Exception as e:
+            logger.error(f"TPMS reschedule-decision mail to {person['email']} failed: {e}")
+    return {"sent": sent}
+
+
+async def notify_form_submission(*, form_type: str, title: str, company_id: str, period: str,
+                                 respondent_id: str, respondent_name: str,
+                                 ratings: Optional[List[dict]] = None) -> dict:
+    """H3 — after a review form is submitted: a summary mail to the HOD/MD respondent, plus a
+    per-employee scorecard mail to each rated team member (rating forms only). Gated."""
+    if not TPMS_NOTIFICATIONS_ENABLED:
+        return {"summary_sent": 0, "employee_sent": 0}
+    from bson import ObjectId
+    from app.services.notification_service import send_email_notification
+
+    def _wrap(heading, inner, color="#4f46e5"):
+        return ('<div style="font-family:Arial,sans-serif;color:#1e293b;font-size:14px;max-width:600px;margin:auto">'
+                f'<h3 style="color:{color};margin:0 0 10px">{heading}</h3>' + inner + '</div>')
+
+    async def _find(uid):
+        try:
+            return await get_collection("learners").find_one({"_id": ObjectId(str(uid))})
+        except Exception:
+            return None
+
+    summary_sent = employee_sent = 0
+
+    # 1) Respondent (HOD/MD) summary.
+    respondent = await _find(respondent_id)
+    if respondent and respondent.get("email"):
+        html = _wrap(f"{title} submitted",
+                     f"<p>Your <b>{title}</b> submission for <b>{period}</b> has been received. Thank you.</p>")
+        try:
+            await send_email_notification(respondent["email"], f"[{title}] Submission received – {period}",
+                                          html, user_id=str(respondent["_id"]), slug=f"tpms_form_{form_type}_summary")
+            summary_sent += 1
+        except Exception as e:
+            logger.error(f"TPMS form summary mail failed: {e}")
+
+    # 2) Per-employee scorecards (rating forms only).
+    if ratings:
+        by_member: Dict[tuple, List[dict]] = {}
+        for c in ratings:
+            by_member.setdefault((str(c.get("member_id")), c.get("member_name") or ""), []).append(c)
+        for (mid, mname), cells in by_member.items():
+            member = await _find(mid)
+            if not member or not member.get("email"):
+                continue
+            rows = "".join(
+                f'<tr><td style="padding:3px 12px 3px 0;color:#64748b">{c.get("criterion_code")}</td>'
+                f'<td style="padding:3px 0"><b>{c.get("rating")}</b>/5</td></tr>' for c in cells)
+            html = _wrap(f"Your {title} scorecard – {period}",
+                         f'<p>Hello {mname or member.get("full_name","")}, your ratings for <b>{period}</b>:</p>'
+                         f'<table style="border-collapse:collapse;font-size:14px">{rows}</table>')
+            try:
+                await send_email_notification(member["email"], f"[{title}] Your scorecard – {period}",
+                                              html, user_id=str(member["_id"]), slug=f"tpms_form_{form_type}_scorecard")
+                employee_sent += 1
+            except Exception as e:
+                logger.error(f"TPMS form scorecard mail failed: {e}")
+
+    return {"summary_sent": summary_sent, "employee_sent": employee_sent}

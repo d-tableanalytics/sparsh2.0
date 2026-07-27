@@ -135,6 +135,12 @@ async def trigger_reminder_notification(event, reminder):
         for cid in event.get("coach_ids", []) or []:
             if cid: user_ids.add(cid)
     
+    # H2 — honour the reminder's Channel (email / whatsapp / both). Only applied to TPMS
+    # activities; every other event/task keeps the original email-always behaviour.
+    is_tpms = event.get("kind") == TPMS_EVENT_KIND
+    channel = ((reminder or {}).get("reminder_type") or "both").lower()
+    send_email_flag = (not is_tpms) or channel in ("email", "both")
+
     for uid in user_ids:
         if not uid or uid == "null": continue
         try:
@@ -145,10 +151,45 @@ async def trigger_reminder_notification(event, reminder):
                 for col_name in ["staff", "learners"]:
                     user_data = await get_collection(col_name).find_one({"_id": oid})
                     if user_data: break
-            except: 
+            except:
                 pass # Continue search to other users
 
-            if user_data:
+            if user_data and send_email_flag:
                 await send_reminder_email(user_data, event)
+                await _log_tpms_reminder(event, reminder, user_data, "sent", None)
         except Exception as e:
             logger.error(f"Error notifying user {uid} for reminder: {e}")
+            await _log_tpms_reminder(event, reminder, locals().get("user_data"), "failed", str(e))
+
+    # H1/H2 — WhatsApp reminder for TPMS activities when the channel includes it (gated OFF).
+    if is_tpms and channel in ("whatsapp", "both"):
+        try:
+            from app.services.tpms_notify_service import send_whatsapp
+            for side in ("company", "staff"):
+                await send_whatsapp(event, "reminder", side)
+        except Exception as e:
+            logger.error(f"TPMS WhatsApp reminder failed: {e}")
+
+
+async def _log_tpms_reminder(event, reminder, user_data, status, error):
+    """H10 — per-reminder send ledger (TPMS activities only): who, which channel, and any
+    error. Best-effort; a logging failure must never affect the reminder itself."""
+    if event.get("kind") != TPMS_EVENT_KIND:
+        return
+    try:
+        from app.models.tpms import COLL_REMINDER_LOGS
+        await get_collection(COLL_REMINDER_LOGS).insert_one({
+            "event_id": str(event.get("_id") or ""),
+            "activity": event.get("activity") or "",
+            "company_id": event.get("company_id") or "",
+            "recipient": (user_data or {}).get("email") or "",
+            "recipient_name": (user_data or {}).get("full_name") or (user_data or {}).get("name") or "",
+            "channel": (reminder or {}).get("reminder_type") or "email",
+            "offset_minutes": (reminder or {}).get("offset_minutes"),
+            "timing_type": (reminder or {}).get("timing_type"),
+            "status": status,
+            "error": error,
+            "sent_at": datetime.utcnow(),
+        })
+    except Exception as le:
+        logger.error(f"TPMS reminder-log write failed: {le}")

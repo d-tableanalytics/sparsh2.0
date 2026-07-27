@@ -39,6 +39,8 @@ from app.models.forms import (
     SCALE_MAX,
     KIND_RATING_MATRIX,
     KIND_YESNO_CHECKLIST,
+    QUESTION_COLLECTION,
+    definition_items,
 )
 from app.models.tpms import period_parts, period_tokens
 
@@ -84,7 +86,9 @@ def _can_read(user: dict) -> bool:
 
 
 def _user_department(user: dict) -> str:
-    return (user.get("department") or "").strip().lower()
+    # C8 — form audience is a governance ROLE (hod/md). Prefer an explicit `governance_role`
+    # so `department` can hold the real org department; fall back for un-migrated users.
+    return (user.get("governance_role") or user.get("department") or "").strip().lower()
 
 
 def _is_hod(user: dict) -> bool:
@@ -140,11 +144,137 @@ def _user_display_name(user: dict) -> str:
 # ─────────────────────────────────────────────────────────────
 # Form definitions (criteria registry)
 # ─────────────────────────────────────────────────────────────
+# ─── M10 — question master (editable question TEXT; item ids never change) ───
+async def _seed_questions_if_empty():
+    coll = get_collection(QUESTION_COLLECTION)
+    if await coll.count_documents({}) > 0:
+        return
+    rows = []
+    for ft, d in FORM_DEFINITIONS.items():
+        rows.extend(definition_items(ft, d))
+    if rows:
+        try:
+            await coll.insert_many(rows)
+        except Exception:
+            pass
+
+
+async def _effective_definition(form_type: str, definition: dict) -> dict:
+    """Overlay the master's edited text onto a form definition (same item ids/order)."""
+    docs = await get_collection(QUESTION_COLLECTION).find(
+        {"form_type": form_type, "active": {"$ne": False}}
+    ).sort("order", 1).to_list(200)
+    if not docs:
+        return definition
+    d = dict(definition)
+    if definition.get("kind") == KIND_RATING_MATRIX:
+        d["criteria"] = [{"code": x["item_id"], "title": x.get("title", ""),
+                          "prompt": x.get("prompt", "")} for x in docs]
+    else:
+        d["questions"] = [{"id": x["item_id"], "title": x.get("title", ""),
+                           "desc": x.get("desc", "")} for x in docs]
+    return d
+
+
+async def _effective_criteria_codes(form_type: str) -> list:
+    """Live criterion codes for a rating form (question master overlaid), so add/remove of
+    criteria takes effect for submission validation. Falls back to the hard-coded list."""
+    await _seed_questions_if_empty()
+    d = await _effective_definition(form_type, get_definition(form_type) or {})
+    return [c["code"] for c in d.get("criteria", [])]
+
+
+async def _effective_question_map(form_type: str) -> dict:
+    """Live question map for a checklist form (question master overlaid)."""
+    await _seed_questions_if_empty()
+    d = await _effective_definition(form_type, get_definition(form_type) or {})
+    return {str(q["id"]): q for q in d.get("questions", [])}
+
+
 @router.get("/definitions")
 async def list_definitions(current_user: dict = Depends(get_current_user)):
     if not _can_read(current_user):
         raise HTTPException(status_code=403, detail="Not authorized")
-    return {"definitions": list(FORM_DEFINITIONS.values())}
+    await _seed_questions_if_empty()
+    out = []
+    for ft, d in FORM_DEFINITIONS.items():
+        out.append(await _effective_definition(ft, d))
+    return {"definitions": out}
+
+
+@router.get("/questions")
+async def list_questions(
+    form_type: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """M10 — the editable question master (Admin)."""
+    if (current_user.get("role") or "").lower() not in {"superadmin", "admin"}:
+        raise HTTPException(status_code=403, detail="Admin only")
+    await _seed_questions_if_empty()
+    query = {}
+    if form_type:
+        query["form_type"] = form_type
+    docs = await get_collection(QUESTION_COLLECTION).find(query).sort([("form_type", 1), ("order", 1)]).to_list(500)
+    for d in docs:
+        d["_id"] = str(d["_id"])
+    return {"questions": docs}
+
+
+@router.post("/questions")
+async def create_question(payload: dict, current_user: dict = Depends(get_current_user)):
+    """M10 (add) — append a new criterion/question to a form. The pooled scoring formula is
+    robust to the number of items, and submission validation now reads this master, so adds
+    take effect immediately. `item_id` must be unique within the form; auto-generated if omitted."""
+    if (current_user.get("role") or "").lower() not in {"superadmin", "admin"}:
+        raise HTTPException(status_code=403, detail="Admin only")
+    await _seed_questions_if_empty()
+    form_type = str(payload.get("form_type") or "").strip()
+    definition = FORM_DEFINITIONS.get(form_type)
+    if not definition:
+        raise HTTPException(status_code=400, detail="Unknown form_type")
+    title = str(payload.get("title") or "").strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="Title is required")
+    kind = definition.get("kind")
+    coll = get_collection(QUESTION_COLLECTION)
+    existing = await coll.find({"form_type": form_type}).to_list(500)
+    item_id = str(payload.get("item_id") or "").strip()
+    if not item_id:
+        prefix = "Q" if kind == KIND_YESNO_CHECKLIST else (form_type[:1].upper() or "X")
+        item_id = f"{prefix}{len(existing) + 1}"
+    if any(str(e.get("item_id")) == item_id for e in existing):
+        raise HTTPException(status_code=409, detail=f"Item id '{item_id}' already exists for this form")
+    doc = {
+        "form_type": form_type, "kind": kind, "item_id": item_id,
+        "title": title,
+        "prompt": str(payload.get("prompt") or "") if kind == KIND_RATING_MATRIX else "",
+        "desc": str(payload.get("desc") or "") if kind == KIND_YESNO_CHECKLIST else "",
+        "order": max([int(e.get("order") or 0) for e in existing], default=-1) + 1,
+        "active": True,
+    }
+    await coll.insert_one(doc)
+    return {"ok": True, "item_id": item_id}
+
+
+@router.patch("/questions/{question_id}")
+async def update_question(question_id: str, payload: dict, current_user: dict = Depends(get_current_user)):
+    """M10 — reword a question/criterion (text only). Item ids are immutable so scoring and
+    submission validation are unaffected."""
+    if (current_user.get("role") or "").lower() not in {"superadmin", "admin"}:
+        raise HTTPException(status_code=403, detail="Admin only")
+    try:
+        oid = ObjectId(question_id)
+    except (InvalidId, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid question id")
+    updates = {k: str(payload[k]) for k in ("title", "prompt", "desc") if k in payload}
+    if "active" in payload:
+        updates["active"] = bool(payload["active"])
+    if not updates:
+        raise HTTPException(status_code=400, detail="Nothing to update")
+    res = await get_collection(QUESTION_COLLECTION).update_one({"_id": oid}, {"$set": updates})
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Question not found")
+    return {"ok": True}
 
 
 # ─────────────────────────────────────────────────────────────
@@ -241,7 +371,7 @@ async def submit_ratings(
     if not definition.get("available"):
         raise HTTPException(status_code=400, detail=f"Form '{form_type}' is not yet available for submission")
 
-    valid_codes = set(criteria_codes(form_type))
+    valid_codes = set(await _effective_criteria_codes(form_type))  # live master (add/remove)
     if not valid_codes:
         raise HTTPException(status_code=400, detail=f"Form '{form_type}' has no criteria configured")
 
@@ -299,7 +429,7 @@ async def submit_ratings(
             "$setOnInsert": {
                 **key,
                 "kind": KIND_RATING_MATRIX,
-                "criteria_codes": criteria_codes(form_type),
+                "criteria_codes": list(valid_codes),
                 "scale": {"min": SCALE_MIN, "max": SCALE_MAX},
                 "created_at": now,
                 "created_by": who,
@@ -310,6 +440,20 @@ async def submit_ratings(
     )
 
     total_saved = sum(len(v) for v in saved.values()) + added
+
+    # H3 — form-submission mails (HOD summary + per-employee scorecards). Gated by the TPMS
+    # notification switch, so this is a no-op while notifications are off.
+    try:
+        from app.services.tpms_notify_service import notify_form_submission
+        await notify_form_submission(
+            form_type=form_type, title=definition["title"],
+            company_id=payload.company_id, period=payload.period,
+            respondent_id=payload.hod_id, respondent_name=payload.hod_name or "",
+            ratings=[c.model_dump() for c in payload.ratings],
+        )
+    except Exception as _e:
+        pass  # mail must never fail the submission
+
     return {
         "message": f"{definition['title']}: {added} rating(s) saved",
         "count": added,
@@ -371,7 +515,7 @@ async def submit_feedback(
     if not definition.get("available"):
         raise HTTPException(status_code=400, detail=f"Form '{form_type}' is not yet available for submission")
 
-    qmap = question_map(form_type)
+    qmap = await _effective_question_map(form_type)  # live master (add/remove)
     if not qmap:
         raise HTTPException(status_code=400, detail=f"Form '{form_type}' has no questions configured")
 
@@ -440,6 +584,18 @@ async def submit_feedback(
         },
         upsert=True,
     )
+
+    # H3 — MD summary mail (feedback has no per-employee scorecards). Gated → no-op while off.
+    try:
+        from app.services.tpms_notify_service import notify_form_submission
+        await notify_form_submission(
+            form_type=form_type, title=definition["title"],
+            company_id=payload.company_id, period=payload.period,
+            respondent_id=payload.md_id, respondent_name=payload.md_name or "",
+            ratings=None,
+        )
+    except Exception as _e:
+        pass
 
     return {
         "message": f"{definition['title']}: {len(new_answers)} answer(s) saved",
@@ -670,7 +826,32 @@ async def client_dashboard(
     overall_status = "On Track" if completion_pct >= 80 else ("At Risk" if completion_pct >= 50 else "Critical")
     avg_score = round(sum(score_values) / len(score_values)) if score_values else 0
 
+    # M4 — client × activity status grid for the Client Dashboard. One row (this company);
+    # a cell per scheduled activity with done/total and a representative status.
+    grid_cells: dict = {}
+    for activity in ACTIVITY_CATALOGUE:
+        evs = by_activity.get(activity, [])
+        if not evs:
+            continue
+        planned = len(evs)
+        completed = len([e for e in evs if e.get("status") == "completed"])
+        statuses = [str(e.get("tpms_status") or e.get("status") or "").lower() for e in evs]
+        if any("laps" in s for s in statuses):
+            st = "Lapsed"
+        elif planned and completed == planned:
+            st = "Completed"
+        elif any("reschedul" in s for s in statuses):
+            st = "Rescheduled"
+        else:
+            st = "Scheduled"
+        grid_cells[activity] = {"done": completed, "total": planned, "status": st}
+    activities_out = [{"full": a, "short": a} for a in ACTIVITY_CATALOGUE]
+    clients_grid_out = [{"company": company_name, "company_id": company_id,
+                         "done": total_completed, "cells": grid_cells}]
+
     return {
+        "activities": activities_out,
+        "clients_grid": clients_grid_out,
         "company": {
             "id": company_id,
             "name": company_name,

@@ -10,10 +10,33 @@ import api from './api';
  */
 
 // ── Master data ──
-export const getActivities = () => api.get('/tpms/activities');
-export const getDepartments = () => api.get('/tpms/departments');
+export const getActivities = (includeInactive = false) =>
+  api.get('/tpms/activities', { params: { include_inactive: includeInactive || undefined } });
+// H4 — activity catalogue CRUD (Admin). Delete = soft-deactivate via updateActivity({active:false}).
+export const createActivity = (payload) => api.post('/tpms/activities', payload);
+export const updateActivity = (id, payload) => api.patch(`/tpms/activities/${id}`, payload);
+
+export const getDepartments = (companyId) =>
+  api.get('/tpms/departments', { params: { company_id: companyId || undefined } });
+// H5 — department master CRUD (Admin). Governance roles are seeded and cannot be edited.
+export const createDepartment = (payload) => api.post('/tpms/departments', payload);
+export const updateDepartment = (id, payload) => api.patch(`/tpms/departments/${id}`, payload);
+
 export const getReminderRules = (activity) =>
   api.get('/tpms/reminder-rules', { params: { activity: activity || undefined } });
+// M12 — reminder-rule + mail-template CRUD (Admin).
+export const createReminderRule = (payload) => api.post('/tpms/reminder-rules', payload);
+export const updateReminderRule = (id, payload) => api.patch(`/tpms/reminder-rules/${id}`, payload);
+export const getMailTemplates = (activity) =>
+  api.get('/tpms/mail-templates', { params: { activity: activity || undefined } });
+export const upsertMailTemplate = (payload) => api.post('/tpms/mail-templates', payload);
+// H10 — per-reminder send ledger (Admin).
+export const getReminderLogs = (params) => api.get('/tpms/reminder-logs', { params });
+// M10 — review-form question master (Admin): reword question/criterion text.
+export const getFormQuestions = (formType) =>
+  api.get('/forms/questions', { params: { form_type: formType || undefined } });
+export const createFormQuestion = (payload) => api.post('/forms/questions', payload);
+export const updateFormQuestion = (id, payload) => api.patch(`/forms/questions/${id}`, payload);
 
 // ── Scheduling ──
 // Month feed for the calendar grid. `month` is 1-12.

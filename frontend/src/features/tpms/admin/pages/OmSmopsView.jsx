@@ -95,8 +95,8 @@ const OmSmopsView = () => {
           kpis={kpis}
           activities={data?.activities || []}
           matrix={data?.clients_grid || []}
-          alerts={data?.alerts || []}
           actions={data?.open_actions || []}
+          action_required={data?.action_required || []}
         />
       )}
     </div>

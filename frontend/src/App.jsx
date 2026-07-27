@@ -55,6 +55,12 @@ import Escalations from './features/tpms/admin/pages/Escalations';
 import LogsReport from './features/tpms/admin/pages/LogsReport';
 import HodView from './features/tpms/admin/pages/HodView';
 import EmployeeTasks from './features/tpms/admin/pages/EmployeeTasks';
+import ActivityManagement from './features/tpms/admin/pages/ActivityManagement';
+import DepartmentManagement from './features/tpms/admin/pages/DepartmentManagement';
+import ClientActivityCalendar from './features/tpms/admin/pages/ClientActivityCalendar';
+import MailTemplateAdmin from './features/tpms/admin/pages/MailTemplateAdmin';
+import ReminderRuleAdmin from './features/tpms/admin/pages/ReminderRuleAdmin';
+import FormQuestionAdmin from './features/tpms/admin/pages/FormQuestionAdmin';
 import ReviewReport from './features/tpms/common/ReviewReport';
 import ImplementationFeedback from './features/tpms/admin/pages/forms/ImplementationFeedback';
 import Ownership from './features/tpms/admin/pages/forms/Ownership';
@@ -171,6 +177,12 @@ const AppRoutes = () => {
         <Route path="hod"            element={<HodView />} />
         <Route path="employee-tasks" element={<EmployeeTasks />} />
         <Route path="calendar"       element={<TpmsCalendar />} />
+        <Route path="client-calendar" element={<ClientActivityCalendar />} />
+        <Route path="activities"     element={<ActivityManagement />} />
+        <Route path="departments"    element={<DepartmentManagement />} />
+        <Route path="mail-templates" element={<MailTemplateAdmin />} />
+        <Route path="reminder-rules" element={<ReminderRuleAdmin />} />
+        <Route path="form-questions" element={<FormQuestionAdmin />} />
         {/* Forms sub-module: Implementation Feedback / Ownership / Culture / Accountability */}
         <Route path="forms" element={<Outlet />}>
           <Route index element={<Navigate to="implementation-feedback" replace />} />

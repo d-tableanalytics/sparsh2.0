@@ -81,8 +81,8 @@ async def _ensure_tpms_collections(db):
     must never block startup."""
     try:
         from app.models.tpms import (
-            TPMS_INDEXES, ACTIVITY_SEED, REMINDER_RULE_SEED,
-            COLL_ACTIVITIES, COLL_REMINDER_RULES,
+            TPMS_INDEXES, ACTIVITY_SEED, REMINDER_RULE_SEED, DEPARTMENT_SEED,
+            COLL_ACTIVITIES, COLL_REMINDER_RULES, COLL_DEPARTMENTS,
         )
         existing = set(await db.list_collection_names())
         for coll_name, keys, options in TPMS_INDEXES:
@@ -100,7 +100,8 @@ async def _ensure_tpms_collections(db):
 
         # Seed master data only when the collection is completely empty.
         for coll_name, seed in ((COLL_ACTIVITIES, ACTIVITY_SEED),
-                                (COLL_REMINDER_RULES, REMINDER_RULE_SEED)):
+                                (COLL_REMINDER_RULES, REMINDER_RULE_SEED),
+                                (COLL_DEPARTMENTS, DEPARTMENT_SEED)):
             if await db[coll_name].count_documents({}) == 0 and seed:
                 await db[coll_name].insert_many([dict(row) for row in seed])
                 print(f"[OK] Seeded {coll_name} with {len(seed)} row(s)")

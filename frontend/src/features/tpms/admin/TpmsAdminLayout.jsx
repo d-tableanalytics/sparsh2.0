@@ -33,9 +33,6 @@ const ADMIN_NAV = [
     { name: 'Logs Report',          path: '/tpms/admin/logs',            icon: ScrollText },
     { name: 'Review Report',        path: '/tpms/admin/reviews',         icon: BarChart3 },
   ] },
-  { group: 'Account', items: [
-    { name: 'My Profile',           path: '/tpms/admin/profile',         icon: UserCircle },
-  ] },
 ];
 const ADMIN_LINKS = ADMIN_NAV.flatMap((g) => g.items);
 

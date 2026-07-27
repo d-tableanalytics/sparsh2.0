@@ -204,8 +204,8 @@ const AdminView = () => {
                 ) : oms.map((r, i) => (
                   <tr key={r.om_id || r.om} className="group border-b border-[var(--border)] last:border-0 hover:bg-[var(--table-hover)] transition-colors">
                     <Td align="center">
-                      {i === 0
-                        ? <Medal size={18} className="inline" style={{ color: '#f59e0b' }} />
+                      {i <= 2
+                        ? <Medal size={18} className="inline" style={{ color: ['#f59e0b', '#9ca3af', '#b45309'][i] }} />
                         : <span className="inline-flex items-center justify-center w-6 h-6 rounded-full bg-[var(--input-bg)] text-[var(--text-muted)] font-bold text-[11px]">{i + 1}</span>}
                     </Td>
                     <Td className={`font-bold ${stickyCell}`}>{r.om || '—'}</Td>
