@@ -21,6 +21,7 @@ import {
     Eye, Lock, ClipboardList, FileText, ChevronDown, CheckCircle2, Circle
 } from 'lucide-react';
 import ReminderModal from '../components/calendar/ReminderModal';
+import MiniDatePicker from '../components/tasks/MiniDatePicker';
 import { canAccessTaskManagement } from '../utils/taskAccess';
 
 const CustomTimePicker = ({ value, onChange, label }) => {
@@ -166,6 +167,7 @@ const TodoRepeatSection = ({ form, setForm, minEndDate }) => {
     const [freqOpen, setFreqOpen] = useState(false);
     const [customIntervalOpen, setCustomIntervalOpen] = useState(false);
     const [customUnitOpen, setCustomUnitOpen] = useState(false);
+    const [repeatEndPickerOpen, setRepeatEndPickerOpen] = useState(false);
 
     const data = form.repeat_data || EMPTY_REPEAT_DATA;
     const isRepeating = form.repeat !== 'Does not repeat';
@@ -248,14 +250,18 @@ const TodoRepeatSection = ({ form, setForm, minEndDate }) => {
                             `start` is a recurrence anchor distinct from its deadline. A todo's
                             due date IS its start, so the series simply runs from the Due Date
                             picked above — only the end of the series is collected here. */}
-                        <div className="relative flex items-center gap-1.5 px-3 py-1.5 bg-[var(--bg-card)] border border-[var(--border)] rounded-full text-[10px] font-black uppercase tracking-wider text-[var(--text-muted)] cursor-pointer hover:border-[var(--accent-indigo)]">
+                        <button type="button" onClick={() => setRepeatEndPickerOpen(true)}
+                            className="relative flex items-center gap-1.5 px-3 py-1.5 bg-[var(--bg-card)] border border-[var(--border)] rounded-full text-[10px] font-black uppercase tracking-wider text-[var(--text-muted)] cursor-pointer hover:border-[var(--accent-indigo)]">
                             <CalendarDays size={12} />
                             {form.repeat_end_date ? new Date(form.repeat_end_date).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' }) : 'End Date'}
-                            <input type="date" min={minEndDate}
-                                className="absolute inset-0 opacity-0 cursor-pointer"
-                                value={form.repeat_end_date ? form.repeat_end_date.split('T')[0] : ''}
-                                onChange={e => setForm({ ...form, repeat_end_date: e.target.value })} />
-                        </div>
+                        </button>
+                        <MiniDatePicker 
+                            isOpen={repeatEndPickerOpen} 
+                            onClose={() => setRepeatEndPickerOpen(false)}
+                            value={form.repeat_end_date} 
+                            title="Repeat End Date" 
+                            onApply={(iso) => setForm({ ...form, repeat_end_date: iso })}
+                        />
                     </>
                 )}
             </div>
