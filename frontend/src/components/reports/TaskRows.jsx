@@ -18,6 +18,7 @@ const TaskRows = ({ employeeId, params }) => {
 
   useEffect(() => {
     let alive = true;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setLoading(true);
     getEmployeeAssignments(employeeId, { ...params, limit: 50 })
       .then((r) => { if (alive) setTasks(r.items || []); })

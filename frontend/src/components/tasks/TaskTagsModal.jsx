@@ -12,6 +12,7 @@ const TaskTagsModal = ({ isOpen, onClose, tags = [], selected = [], onApply }) =
 
   useEffect(() => {
     if (!isOpen) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setPending([...selected]);
     setAddingNew(false);
     setNewTag('');

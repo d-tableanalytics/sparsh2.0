@@ -6,6 +6,7 @@ import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContaine
 // dashboard). This is a simplified view distinct from the 7-state STATUS_CONFIG used
 // elsewhere (badges/cards) — every task falls into exactly one of these four buckets
 // (see bucketOf() in TaskDashboard.jsx) so the stacked segments never double-count.
+// eslint-disable-next-line react-refresh/only-export-components
 export const REPORT_LEGEND = [
   { key: 'pending', label: 'Pending', color: 'var(--accent-orange)' },
   { key: 'overdue', label: 'Overdue', color: 'var(--accent-red)' },

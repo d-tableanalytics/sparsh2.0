@@ -1,6 +1,7 @@
 import React from 'react';
 
 // Matches the `period` values accepted by GET /api/tasks/dashboard (backend/app/routes/tasks.py::_period_to_range)
+// eslint-disable-next-line react-refresh/only-export-components
 export const PERIODS = [
   { key: 'today', label: 'Today' },
   { key: 'yesterday', label: 'Yesterday' },

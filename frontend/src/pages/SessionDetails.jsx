@@ -372,7 +372,7 @@ const SessionDetails = () => {
                             target="_blank" 
                             rel="noreferrer" 
                             onClick={async () => {
-                                try { await api.post(`/calendar/events/${sessionId}/track-join`); } catch(e){}
+                                try { await api.post(`/calendar/events/${sessionId}/track-join`); } catch(_e){ /* ignore tracking errors */ }
                             }}
                             className="flex items-center gap-2 h-10 px-6 bg-blue-600 text-white rounded-xl text-[12px] font-black hover:bg-blue-700 transition-all shadow-lg active:scale-95 uppercase tracking-widest"
                         >

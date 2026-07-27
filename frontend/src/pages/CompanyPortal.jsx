@@ -332,7 +332,7 @@ const CompanyPortal = () => {
                                                 target="_blank"
                                                 rel="noreferrer"
                                                 onClick={async () => {
-                                                    try { await api.post(`/calendar/events/${selectedSessionId}/track-join`); } catch (e) { }
+                                                    try { await api.post(`/calendar/events/${selectedSessionId}/track-join`); } catch (_e) { /* ignore tracking errors */ }
                                                 }}
                                                 className="shrink-0 h-14 px-8 bg-black text-white rounded-[22px] flex items-center gap-3 text-[13px] font-black uppercase tracking-widest hover:scale-105 active:scale-95 transition-all shadow-xl hover:shadow-indigo-500/20"
                                             >

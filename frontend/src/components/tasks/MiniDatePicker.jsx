@@ -28,6 +28,7 @@ const MiniDatePicker = ({ isOpen, onClose, value, onApply, title = 'Select Due D
   useEffect(() => {
     if (!isOpen) return;
     const d = value ? new Date(value) : new Date();
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setViewMonth(d.getMonth());
     setViewYear(d.getFullYear());
     setSelectedDate(d);
