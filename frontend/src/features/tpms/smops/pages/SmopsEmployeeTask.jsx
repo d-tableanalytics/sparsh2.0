@@ -33,6 +33,7 @@ const SmopsEmployeeTask = () => {
   const [companyId, setCompanyId] = useState('');
   const [member, setMember] = useState('');
   const [designation, setDesignation] = useState('');
+  const [scheduledBy, setScheduledBy] = useState('');
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -46,6 +47,7 @@ const SmopsEmployeeTask = () => {
         company_id: companyId || undefined,
         member_id: member || undefined,
         designation: designation || undefined,
+        scheduled_by: scheduledBy || undefined,
       });
       setData(res.data);
     } catch (e) {
@@ -53,7 +55,7 @@ const SmopsEmployeeTask = () => {
     } finally {
       setLoading(false);
     }
-  }, [period, companyId, member, designation]);
+  }, [period, companyId, member, designation, scheduledBy]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -67,6 +69,8 @@ const SmopsEmployeeTask = () => {
     () => [{ id: '', name: 'All Employees' }, ...(data?.member_options || [])], [data]);
   const designationOpts = useMemo(
     () => [{ id: '', name: 'All Designations' }, ...(data?.designation_options || []).map((d) => ({ id: d, name: d }))], [data]);
+  const scheduledByOpts = useMemo(
+    () => [{ id: '', name: 'All Scheduled by' }, { id: 'internal', name: 'OM/SMOps' }, { id: 'client', name: 'Client' }], []);
   const periodOpts = useMemo(() => {
     // "All Months" (empty id) tells the backend to aggregate across every month.
     const opts = [{ id: '', name: 'All Months' }, ...(data?.period_options || [])];
@@ -76,7 +80,7 @@ const SmopsEmployeeTask = () => {
       : [{ id: '', name: 'All Months' }, { id: period, name: periodLabel(period) || period }, ...(data?.period_options || [])];
   }, [data, period]);
 
-  const clearFilters = () => { setPeriod(currentPeriod()); setCompanyId(''); setMember(''); setDesignation(''); };
+  const clearFilters = () => { setPeriod(currentPeriod()); setCompanyId(''); setMember(''); setDesignation(''); setScheduledBy(''); };
 
   const kpis = [
     { value: cards.total_employees ?? 0,  label: 'Employees',   sub: 'In scope',         tone: 'blue',   icon: Users },
@@ -94,6 +98,7 @@ const SmopsEmployeeTask = () => {
         <HeaderSelect value={period} onChange={setPeriod} options={periodOpts} />
         <HeaderSelect value={member} onChange={setMember} options={memberOpts} />
         <HeaderSelect value={designation} onChange={setDesignation} options={designationOpts} />
+        <HeaderSelect value={scheduledBy} onChange={setScheduledBy} options={scheduledByOpts} />
         <button onClick={clearFilters} className="inline-flex items-center px-3.5 py-2 rounded-lg bg-white/15 text-white text-[12.5px] font-bold ring-1 ring-white/25 hover:bg-white/25 transition-all">Clear</button>
         <HeroButton icon={RefreshCw} onClick={load}>Refresh</HeroButton>
       </DashboardHero>

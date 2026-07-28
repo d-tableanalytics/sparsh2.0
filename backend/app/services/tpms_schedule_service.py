@@ -578,6 +578,10 @@ async def update_schedule(user: dict, event_id: str, payload: dict) -> dict:
         requested = str(payload["status"])
         updates["tpms_status"] = requested
         updates["status"] = erp_status_for(requested)
+        # Re-activating an activity clears the escalation ladder (spec §5: esc_stage resets on
+        # Scheduled/Rescheduled/Completed). Completion has its own reset in confirm_completion.
+        if requested in (STATUS_SCHEDULED, STATUS_RESCHEDULED):
+            updates["esc_stage"] = 0
 
     await get_collection(coll).update_one({"_id": doc["_id"]}, {"$set": updates})
 

@@ -1,106 +1,182 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  CalendarRange, RefreshCw, Grid3x3, Building2, ListChecks, CheckCircle2,
-  AlertTriangle, Inbox,
+  CalendarRange, RefreshCw, RotateCcw, AlertTriangle, X, Clock, Tag, Building2,
+  Users2,
 } from 'lucide-react';
 import {
-  DashboardHero, HeroButton, Section, Th, Td, TableShell, KpiTile,
+  DashboardHero, HeroButton, KpiTile, FilterSelect,
 } from '../../common/dashboardKit';
-import { getSchedules, getActivities } from '../../../../services/tpmsApi';
-import api from '../../../../services/api';
+import { getSchedules, getCalendarFilters } from '../../../../services/tpmsApi';
 import { useAuth } from '../../../../context/AuthContext';
 
 /* ─────────────────────────────────────────────────────────────
    Admin Panel ▸ Client-wise Activity Calendar (H6).
 
-   A client × activity monthly matrix: ROWS = client companies,
-   COLUMNS = activities (short names). Each cell shows that client's
-   scheduled occurrences for the activity in the chosen month, with a
-   count and a colour-coded status indicator. Empty cell = nothing
-   scheduled.
+   A full MONTH-GRID calendar (SUN–SAT) of every client's scheduled
+   activities for the chosen month — a faithful port of the AppScript
+   AdminDashboard `cwc` section. Each day cell shows the day number, a
+   count badge, and up to two "Company: Activity" pills coloured by
+   status. Clicking a day opens a read-only day-detail modal.
 
-   The matrix is assembled client-side by grouping the month's schedule
-   feed (getSchedules, all companies in scope) by (company_id, activity).
+   The whole month is fetched via getSchedules (company_id omitted → all
+   clients in the acting admin's scope); every filter runs client-side.
    ───────────────────────────────────────────────────────────── */
 
 const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June',
   'July', 'August', 'September', 'October', 'November', 'December'];
+const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
-/* TPMS status → ERP accent tokens (no hex literals: dark mode comes free). */
+const STATUSES = ['Scheduled', 'Rescheduled', 'Completed', 'Cancelled', 'Lapsed'];
+
+/* "Scheduled by" filter — value matches the event's scheduled_by field. */
+const SIDE_OPTIONS = [
+  { id: '', name: 'Scheduled by: Any' },
+  { id: 'internal', name: 'Scheduled by: OM' },
+  { id: 'client', name: 'Scheduled by: Client' },
+];
+
+/* TPMS status → ERP accent tokens. No hex literals: dark mode comes free. */
 const TONE = {
-  Completed:   { c: 'var(--accent-green)',  bg: 'var(--accent-green-bg)',  bd: 'var(--accent-green-border)' },
   Scheduled:   { c: 'var(--accent-indigo)', bg: 'var(--accent-indigo-bg)', bd: 'var(--accent-indigo-border)' },
-  Rescheduled: { c: 'var(--accent-yellow)', bg: 'var(--accent-yellow-bg)', bd: 'var(--accent-yellow-border)' },
-  Lapsed:      { c: 'var(--accent-red)',    bg: 'var(--accent-red-bg)',    bd: 'var(--accent-red-border)' },
+  Rescheduled: { c: 'var(--accent-orange)', bg: 'var(--accent-yellow-bg)', bd: 'var(--accent-yellow-border)' },
+  Completed:   { c: 'var(--accent-green)',  bg: 'var(--accent-green-bg)',  bd: 'var(--accent-green-border)' },
   Cancelled:   { c: 'var(--text-muted)',    bg: 'var(--input-bg)',         bd: 'var(--border)' },
+  Lapsed:      { c: 'var(--accent-red)',    bg: 'var(--accent-red-bg)',    bd: 'var(--accent-red-border)' },
 };
-/* Priority (worst → best) — decides the cell's dominant dot colour. */
-const STATUS_ORDER = ['Lapsed', 'Cancelled', 'Rescheduled', 'Scheduled', 'Completed'];
 const toneOf = (s) => TONE[s] || TONE.Scheduled;
 
-const stickyHead = 'sticky left-0 z-10 bg-[var(--table-header-bg)]';
-const stickyCell = 'sticky left-0 z-10 bg-[var(--bg-card)] group-hover:bg-[var(--table-hover)]';
+/* "Scheduled by" → readable side label (OM / Client) for badges + day modal. */
+const sideLabel = (by) => (by === 'internal' ? 'OM' : by === 'client' ? 'Client' : '');
+const SIDE_TONE = {
+  internal: { c: 'var(--accent-indigo)', bg: 'var(--accent-indigo-bg)', bd: 'var(--accent-indigo-border)' },
+  client:   { c: 'var(--accent-orange)', bg: 'var(--accent-orange-bg)', bd: 'var(--accent-orange-border)' },
+};
 
-/* One matrix cell: count + a dot per status present. Empty → faint dash. */
-const Cell = ({ occ }) => {
-  if (!occ || !occ.total) return <span className="text-[13px] text-[var(--text-muted)] opacity-40">·</span>;
-  const present = STATUS_ORDER.filter((s) => occ.byStatus[s]);
-  const title = present.map((s) => `${s}: ${occ.byStatus[s]}`).join(' · ');
-  const dominant = toneOf(present[0]);
+const ymd = (y, m, d) => `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+
+const Badge = ({ status }) => {
+  const t = toneOf(status);
   return (
-    <span
-      title={title}
-      className="inline-flex flex-col items-center gap-1 px-1.5 py-1 rounded-lg border"
-      style={{ color: dominant.c, background: dominant.bg, borderColor: dominant.bd }}
-    >
-      <span className="text-[12.5px] font-extrabold tabular-nums leading-none">{occ.total}</span>
-      <span className="flex items-center gap-[3px]">
-        {present.map((s) => (
-          <span key={s} className="w-1.5 h-1.5 rounded-full" style={{ background: toneOf(s).c }} />
-        ))}
-      </span>
+    <span className="inline-flex items-center text-[10px] font-bold px-2 py-0.5 rounded-full border whitespace-nowrap"
+      style={{ color: t.c, background: t.bg, borderColor: t.bd }}>
+      {status}
     </span>
   );
 };
 
-const LegendDot = ({ status }) => (
-  <span className="inline-flex items-center gap-1.5 text-[11px] font-bold text-[var(--text-muted)]">
-    <span className="w-2 h-2 rounded-full" style={{ background: toneOf(status).c }} />{status}
-  </span>
+const SideBadge = ({ by }) => {
+  const t = SIDE_TONE[by];
+  if (!t) return null;
+  return (
+    <span className="inline-flex items-center text-[10px] font-bold px-2 py-0.5 rounded-full border whitespace-nowrap"
+      style={{ color: t.c, background: t.bg, borderColor: t.bd }}>
+      {sideLabel(by)}
+    </span>
+  );
+};
+
+const StatusLegend = () => (
+  <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 px-4 py-2.5 border-t border-[var(--border)]">
+    <span className="text-[10.5px] font-black text-[var(--text-muted)] uppercase tracking-wide">Legend</span>
+    {STATUSES.map((s) => {
+      const t = toneOf(s);
+      return (
+        <span key={s} className="inline-flex items-center gap-1.5 text-[11px] font-bold text-[var(--text-muted)]">
+          <span className="w-2.5 h-2.5 rounded-full border" style={{ background: t.c, borderColor: t.bd }} />
+          {s}
+        </span>
+      );
+    })}
+  </div>
 );
 
+/* Read-only day-detail modal (mirrors TpmsCalendar's day drawer, no actions). */
+const DayOverlay = ({ title, events, onClose }) => (
+  <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40" onClick={onClose}>
+    <div onClick={(e) => e.stopPropagation()}
+      className="w-full max-w-2xl rounded-2xl bg-[var(--bg-card)] shadow-2xl overflow-hidden">
+      <div className="flex items-center justify-between px-5 py-3.5 border-b border-[var(--border)]">
+        <h3 className="text-[14px] font-black text-[var(--text-main)]">{title}</h3>
+        <button onClick={onClose} className="p-1 rounded-lg text-[var(--text-muted)] hover:bg-[var(--table-hover)]"><X size={17} /></button>
+      </div>
+      <div className="px-5 py-4 max-h-[65vh] overflow-y-auto">
+        {events.length === 0 ? (
+          <p className="text-[12.5px] font-bold text-[var(--text-muted)]">No activities on this day.</p>
+        ) : events.map((e) => (
+          <div key={e.id} className="rounded-xl border border-[var(--border)] p-3 mb-2.5">
+            <div className="flex items-start justify-between gap-2 mb-1.5">
+              <h4 className="text-[13.5px] font-black text-[var(--text-main)] inline-flex items-center gap-1.5">
+                <Building2 size={13} /> {e.company || 'Unknown client'}
+              </h4>
+              <div className="flex items-center gap-1.5">
+                <SideBadge by={e.scheduled_by} />
+                <Badge status={e.status} />
+              </div>
+            </div>
+            <p className="text-[12.5px] font-bold text-[var(--text-main)] mb-1">{e.title || e.activity}</p>
+            <div className="text-[11.5px] text-[var(--text-muted)] font-semibold space-y-0.5">
+              {e.time && <div className="flex items-center gap-1.5"><Clock size={11} /> {e.time}</div>}
+              {e.activity && <div className="flex items-center gap-1.5"><Tag size={11} /> {e.activity}</div>}
+              {!!e.departments?.length && <div className="flex items-center gap-1.5"><Users2 size={11} /> {e.departments.join(', ')}</div>}
+              {e.scheduled_by_name && (
+                <div className="flex items-center gap-1.5">
+                  <Users2 size={11} /> Scheduled by {e.scheduled_by_name}{sideLabel(e.scheduled_by) ? ` (${sideLabel(e.scheduled_by)})` : ''}
+                </div>
+              )}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  </div>
+);
+
+const navBtn = 'px-3 py-1.5 rounded-lg border border-[var(--border)] text-[12px] font-black text-[var(--text-muted)] hover:bg-[var(--table-hover)]';
+
 const ClientActivityCalendar = () => {
-  // Admin scope: this screen is mounted under the admin panel; useAuth gives the
-  // acting user so the feed is fetched with their (org-wide) visibility.
+  // Admin scope: mounted under the admin panel; useAuth supplies the acting user
+  // so the month feed is pulled with their org-wide visibility.
   const { user } = useAuth();
 
-  const today = new Date();
+  // Stable "now" so month-list memos don't re-run every render.
+  const today = useMemo(() => new Date(), []);
   const [year, setYear] = useState(today.getFullYear());
   const [month, setMonth] = useState(today.getMonth() + 1);   // 1-12
   const [events, setEvents] = useState([]);
-  const [activities, setActivities] = useState([]);
-  const [companies, setCompanies] = useState([]);
-  const [onlyActive, setOnlyActive] = useState(true);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
-  // Company roster + activity catalogue are static per session — load once.
+  const [fCompany, setFCompany] = useState('');  // company_id (as string) or ''
+  const [fHod, setFHod] = useState('');           // HOD id (as string) or ''
+  const [fOm, setFOm] = useState('');             // OM id (as string) or ''
+  const [fSide, setFSide] = useState('');          // 'internal' | 'client' | ''
+  const [openDay, setOpenDay] = useState(null);
+
+  // Master filter lists (full company / HOD / OM rosters), fetched once on mount
+  // so the dropdowns stay complete even when the month's events are sparse.
+  const [masters, setMasters] = useState({ companies: [], hods: [], oms: [] });
+  const [mastersLoading, setMastersLoading] = useState(true);
+  const [mastersError, setMastersError] = useState('');
+
   useEffect(() => {
     let alive = true;
     (async () => {
+      setMastersLoading(true);
+      setMastersError('');
       try {
-        const [actRes, coRes] = await Promise.all([getActivities(), api.get('/companies')]);
+        const { data } = await getCalendarFilters();
         if (!alive) return;
-        setActivities((actRes.data?.activities || []).map((a) => ({
-          name: a.name || '',
-          short: a.short || a.name || '',
-        })).filter((a) => a.name));
-        setCompanies((coRes.data || []).map((c) => ({
-          id: String(c._id || c.id || ''),
-          name: c.name || c._id || c.id || '',
-        })).filter((c) => c.id));
-      } catch {
-        if (alive) setError('Failed to load activity catalogue or company list');
+        setMasters({
+          companies: data?.companies ?? [],
+          hods: data?.hods ?? [],
+          oms: data?.oms ?? [],
+        });
+      } catch (e) {
+        if (!alive) return;
+        setMastersError(e.response?.data?.detail || 'Failed to load filter options');
+        setMasters({ companies: [], hods: [], oms: [] });
+      } finally {
+        if (alive) setMastersLoading(false);
       }
     })();
     return () => { alive = false; };
@@ -115,6 +191,7 @@ const ClientActivityCalendar = () => {
       setEvents(data?.events || []);
     } catch (e) {
       setError(e.response?.data?.detail || 'Failed to load the activity calendar');
+      setEvents([]);
     } finally {
       setLoading(false);
     }
@@ -130,50 +207,120 @@ const ClientActivityCalendar = () => {
     setMonth(m); setYear(y);
   };
 
-  // (company_id, activity name) → { total, byStatus }.
-  const matrix = useMemo(() => {
+  const clearFilters = () => { setFCompany(''); setFHod(''); setFOm(''); setFSide(''); };
+  const hasFilters = fCompany || fHod || fOm || fSide;
+
+  // If the selected client narrows the HOD list past the current HOD pick, drop it.
+  useEffect(() => {
+    if (!fCompany || !fHod) return;
+    const stillValid = (masters.hods ?? [])
+      .some((h) => String(h.id) === fHod && String(h.company_id) === fCompany);
+    if (!stillValid) setFHod('');
+  }, [fCompany, fHod, masters.hods]);
+
+  // Period select — recent months (12 back incl. current) driving year/month.
+  const periodValue = `${year}-${String(month).padStart(2, '0')}`;
+  const periodOptions = useMemo(() => {
+    const out = [];
+    const base = new Date(today.getFullYear(), today.getMonth(), 1);
+    for (let i = 0; i < 12; i += 1) {
+      const d = new Date(base.getFullYear(), base.getMonth() - i, 1);
+      const id = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+      out.push({ id, name: `${MONTHS[d.getMonth()]} ${d.getFullYear()}` });
+    }
+    // Keep the active period selectable even if it's outside the recent window.
+    if (!out.some((o) => o.id === periodValue)) {
+      out.unshift({ id: periodValue, name: `${MONTHS[month - 1]} ${year}` });
+    }
+    return out;
+  }, [today, periodValue, month, year]);
+
+  const onPeriodChange = (val) => {
+    const [y, m] = val.split('-').map(Number);
+    if (y && m) { setYear(y); setMonth(m); }
+  };
+
+  // Filter option lists come from the master rosters (full company / HOD / OM
+  // lists) so a dropdown is never limited to whatever the sparse month happens
+  // to contain.
+  const companyOptions = useMemo(() => (masters.companies ?? [])
+    .map((c) => ({ id: String(c.id), name: c.name || String(c.id) }))
+    .sort((a, b) => a.name.localeCompare(b.name)),
+  [masters.companies]);
+
+  // "All HODs": full HOD roster. When a client is selected, narrow to that
+  // company's HODs via `company_id`.
+  const hodOptions = useMemo(() => (masters.hods ?? [])
+    .filter((h) => !fCompany || String(h.company_id) === fCompany)
+    .map((h) => ({ id: String(h.id), name: h.name || String(h.id) }))
+    .sort((a, b) => a.name.localeCompare(b.name)),
+  [masters.hods, fCompany]);
+
+  // "All OMs": full OM roster.
+  const omOptions = useMemo(() => (masters.oms ?? [])
+    .map((o) => ({ id: String(o.id), name: o.name || String(o.id) }))
+    .sort((a, b) => a.name.localeCompare(b.name)),
+  [masters.oms]);
+
+  // Selected OM's name — used as a fallback match when an event carries no
+  // staff_ids but records the scheduler by name.
+  const selectedOmName = useMemo(() => {
+    if (!fOm) return '';
+    const hit = (masters.oms ?? []).find((o) => String(o.id) === fOm);
+    return hit?.name || '';
+  }, [masters.oms, fOm]);
+
+  const filtered = useMemo(() => events.filter((e) => {
+    if (fCompany && String(e.company_id) !== fCompany) return false;
+    if (fHod && !(e.member_ids ?? []).map(String).includes(fHod)) return false;
+    if (fOm) {
+      const staff = (e.staff_ids ?? []).map(String);
+      const byId = staff.includes(fOm);
+      const byName = staff.length === 0 && selectedOmName
+        && e.scheduled_by_name === selectedOmName;
+      if (!byId && !byName) return false;
+    }
+    if (fSide && e.scheduled_by !== fSide) return false;
+    return true;
+  }), [events, fCompany, fHod, fOm, fSide, selectedOmName]);
+
+  const byDate = useMemo(() => {
     const map = {};
-    events.forEach((e) => {
-      const cid = String(e.company_id || '');
-      const act = e.activity || '';
-      if (!cid || !act) return;
-      const row = (map[cid] ||= {});
-      const cell = (row[act] ||= { total: 0, byStatus: {} });
-      cell.total += 1;
-      const st = e.status || 'Scheduled';
-      cell.byStatus[st] = (cell.byStatus[st] || 0) + 1;
-    });
+    filtered.forEach((e) => { (map[e.date] ||= []).push(e); });
     return map;
-  }, [events]);
+  }, [filtered]);
 
-  // Rows = the company roster, plus any company that appears in the feed but
-  // is missing from /companies (defensive — never drop scheduled work).
-  const rows = useMemo(() => {
-    const byId = {};
-    companies.forEach((c) => { byId[c.id] = c.name; });
-    events.forEach((e) => {
-      const cid = String(e.company_id || '');
-      if (cid && !(cid in byId)) byId[cid] = e.company || cid;
-    });
-    let list = Object.entries(byId).map(([id, name]) => ({ id, name }));
-    if (onlyActive) list = list.filter((c) => matrix[c.id]);
-    return list.sort((a, b) => a.name.localeCompare(b.name));
-  }, [companies, events, matrix, onlyActive]);
+  const todayStr = ymd(today.getFullYear(), today.getMonth() + 1, today.getDate());
 
+  // KPI counts (client-side, matching AppScript cwc):
+  //  Planned   = all events except Cancelled
+  //  Completed = status Completed · Lapsed = status Lapsed
+  //  of the still-open (Scheduled/Rescheduled): Delayed = past-due, Pending = upcoming
   const stats = useMemo(() => {
-    const s = { total: events.length, Completed: 0, activeClients: Object.keys(matrix).length };
-    events.forEach((e) => { if (e.status === 'Completed') s.Completed += 1; });
+    const s = { planned: 0, completed: 0, pending: 0, delayed: 0, lapsed: 0 };
+    filtered.forEach((e) => {
+      const st = e.status || 'Scheduled';
+      if (st === 'Cancelled') return;
+      s.planned += 1;
+      if (st === 'Completed') { s.completed += 1; return; }
+      if (st === 'Lapsed') { s.lapsed += 1; return; }
+      if (e.date && e.date < todayStr) s.delayed += 1;
+      else s.pending += 1;
+    });
     return s;
-  }, [events, matrix]);
+  }, [filtered, todayStr]);
 
   const kpis = [
-    { value: stats.total,          label: 'Scheduled Occurrences', sub: `${MONTHS[month - 1]} ${year}`, tone: 'blue',  icon: ListChecks },
-    { value: stats.activeClients,  label: 'Active Clients',        sub: 'With activity',                tone: 'blue',  icon: Building2 },
-    { value: activities.length,    label: 'Activities Tracked',    sub: 'Catalogue columns',            tone: 'plain', icon: Grid3x3 },
-    { value: stats.Completed,      label: 'Completed',             sub: 'Confirmed done',               tone: 'green', icon: CheckCircle2 },
+    { value: stats.planned,   label: 'Planned',   sub: 'Total scheduled', tone: 'yellow', icon: CalendarRange },
+    { value: stats.completed, label: 'Completed', sub: 'Activities done', tone: 'green',  icon: CalendarRange },
+    { value: stats.pending,   label: 'Pending',   sub: 'Upcoming',        tone: 'blue',   icon: Clock },
+    { value: stats.delayed,   label: 'Delayed',   sub: 'Past due',        tone: 'red',    icon: AlertTriangle },
+    { value: stats.lapsed,    label: 'Lapsed',    sub: 'Auto-lapsed',     tone: 'red',    icon: AlertTriangle },
   ];
 
-  const matrixCols = activities.length + 1; // Client + activities
+  // Grid geometry.
+  const firstDow = new Date(year, month - 1, 1).getDay();
+  const daysInMonth = new Date(year, month, 0).getDate();
 
   return (
     <div className="space-y-5">
@@ -181,101 +328,112 @@ const ClientActivityCalendar = () => {
         icon={CalendarRange}
         title="Client-wise Activity Calendar"
         highlight={`${MONTHS[month - 1]} ${year}`}
-        subtitle="Client × activity matrix of scheduled occurrences for the month"
+        subtitle="Month grid of every client's scheduled activities"
       >
         <HeroButton icon={RefreshCw} onClick={load}>Refresh</HeroButton>
       </DashboardHero>
 
-      {error && (
+      {(error || mastersError) && (
         <div className="rounded-2xl border border-[var(--accent-red-border)] bg-[var(--accent-red-bg)] px-4 py-3 flex items-center gap-2.5 text-[12px] font-bold text-[var(--accent-red)]">
-          <AlertTriangle size={15} /><span>{error}</span>
+          <AlertTriangle size={15} /><span>{error || mastersError}</span>
         </div>
       )}
 
-      {/* KPI tiles */}
-      <div className="grid grid-cols-2 xl:grid-cols-4 gap-3">
-        {kpis.map((k) => <KpiTile key={k.label} {...k} />)}
-      </div>
-
-      {/* Matrix */}
-      <Section
-        title="Client-wise Activity Matrix"
-        subtitle="Each cell: occurrences this month, with a status dot per outcome"
-        icon={Grid3x3}
-        action={(
-          <label className="hidden sm:inline-flex items-center gap-1.5 text-[11px] font-bold text-[var(--text-muted)] cursor-pointer select-none">
-            <input type="checkbox" checked={onlyActive} onChange={(e) => setOnlyActive(e.target.checked)} className="accent-[var(--accent-indigo)]" />
-            Only clients with activity
-          </label>
-        )}
-      >
-        {/* Month nav + legend */}
-        <div className="flex flex-wrap items-center gap-3 px-4 py-3 border-b border-[var(--border)]">
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => changeMonth(-1)}
-              className="px-3 py-1.5 rounded-lg border border-[var(--border)] text-[12px] font-black text-[var(--text-muted)] hover:bg-[var(--table-hover)]"
-              aria-label="Previous month"
-            >‹</button>
-            <span className="text-[14px] font-black text-[var(--text-main)] min-w-[150px] text-center">
-              {MONTHS[month - 1]} {year}
-            </span>
-            <button
-              onClick={() => changeMonth(1)}
-              className="px-3 py-1.5 rounded-lg border border-[var(--border)] text-[12px] font-black text-[var(--text-muted)] hover:bg-[var(--table-hover)]"
-              aria-label="Next month"
-            >›</button>
-          </div>
-          <div className="flex-1" />
-          <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-            {STATUS_ORDER.map((s) => <LegendDot key={s} status={s} />)}
-          </div>
+      <div className="rounded-2xl border border-[var(--border)] bg-[var(--bg-card)] shadow-sm overflow-hidden">
+        {/* ── Filter row ── */}
+        <div className="flex flex-wrap items-center gap-2.5 px-4 py-3 border-b border-[var(--border)]">
+          <FilterSelect value={periodValue} onChange={onPeriodChange} options={periodOptions} />
+          <FilterSelect value={fCompany} onChange={setFCompany}
+            options={[{ id: '', name: mastersLoading ? 'Loading clients…' : 'All Clients' }, ...companyOptions]} />
+          <FilterSelect value={fHod} onChange={setFHod}
+            options={[{ id: '', name: mastersLoading ? 'Loading HODs…' : 'All HODs' }, ...hodOptions]} />
+          <FilterSelect value={fOm} onChange={setFOm}
+            options={[{ id: '', name: mastersLoading ? 'Loading OMs…' : 'All OMs' }, ...omOptions]} />
+          <FilterSelect value={fSide} onChange={setFSide} options={SIDE_OPTIONS} />
+          <button onClick={load} className={`inline-flex items-center gap-1.5 ${navBtn} py-2`}>
+            <RefreshCw size={13} /> Refresh
+          </button>
+          {hasFilters && (
+            <button onClick={clearFilters} className={`inline-flex items-center gap-1.5 ${navBtn} py-2`}>
+              <RotateCcw size={13} /> Clear
+            </button>
+          )}
         </div>
 
-        {loading && events.length === 0 ? (
-          <div className="px-5 py-16 text-center text-[13px] font-bold text-[var(--text-muted)]">Loading calendar…</div>
-        ) : activities.length === 0 ? (
-          <div className="flex items-center gap-2.5 px-5 py-10 justify-center">
-            <span className="w-8 h-8 rounded-lg bg-[var(--input-bg)] text-[var(--text-muted)] flex items-center justify-center"><Inbox size={16} /></span>
-            <p className="text-[13px] font-bold text-[var(--text-muted)]">No activities in the catalogue to build columns.</p>
+        {/* ── KPI tiles ── */}
+        <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-5 gap-3 p-4 border-b border-[var(--border)]">
+          {kpis.map((k) => <KpiTile key={k.label} {...k} />)}
+        </div>
+
+        {/* ── Month nav ── */}
+        <div className="flex items-center justify-center gap-4 px-4 py-3">
+          <button onClick={() => changeMonth(-1)} className={navBtn} aria-label="Previous month">‹ Prev</button>
+          <span className="text-[14px] font-black text-[var(--text-main)] min-w-[160px] text-center">
+            {MONTHS[month - 1]} {year}
+          </span>
+          <button onClick={() => changeMonth(1)} className={navBtn} aria-label="Next month">Next ›</button>
+        </div>
+
+        {/* ── Month grid ── */}
+        <div className="grid grid-cols-7 gap-px bg-[var(--border)]">
+          {DOW.map((d) => (
+            <div key={d} className="bg-[var(--table-header-bg)] px-2 py-2 text-center text-[11px] font-black text-[var(--text-muted)]">{d}</div>
+          ))}
+          {Array.from({ length: firstDow }).map((_, i) => (
+            <div key={`e${i}`} className="bg-[var(--bg-card)] min-h-[108px]" />
+          ))}
+          {Array.from({ length: daysInMonth }).map((_, i) => {
+            const day = i + 1;
+            const ds = ymd(year, month, day);
+            const evs = byDate[ds] || [];
+            const isToday = ds === todayStr;
+            return (
+              <button key={ds} onClick={() => evs.length && setOpenDay(ds)}
+                className={`bg-[var(--bg-card)] min-h-[108px] p-1.5 text-left align-top hover:bg-[var(--table-hover)] transition-colors ${evs.length ? 'cursor-pointer' : 'cursor-default'}`}>
+                <div className="flex items-center gap-1.5 mb-1">
+                  <span className={`text-[11.5px] font-black ${isToday
+                    ? 'inline-flex items-center justify-center w-6 h-6 rounded-full bg-[var(--accent-indigo)] text-white'
+                    : 'text-[var(--text-muted)]'}`}>{day}</span>
+                  {evs.length > 0 && (
+                    <span className="inline-flex items-center justify-center text-[10px] font-bold text-white rounded-full px-1.5 py-[1px]"
+                      style={{ background: 'var(--accent-indigo)' }}>{evs.length}</span>
+                  )}
+                </div>
+                <div className="space-y-1">
+                  {evs.slice(0, 2).map((e) => {
+                    const t = toneOf(e.status);
+                    return (
+                      <div key={e.id} title={`${e.company || ''} — ${e.title || e.activity} · ${e.status}`}
+                        className="truncate text-[10px] font-bold px-1.5 py-0.5 rounded border"
+                        style={{ color: t.c, background: t.bg, borderColor: t.bd }}>
+                        {e.company ? `${e.company}: ` : ''}{e.title || e.activity}
+                      </div>
+                    );
+                  })}
+                  {evs.length > 2 && (
+                    <div className="text-[10px] font-bold text-[var(--text-muted)] px-1.5">+{evs.length - 2} more</div>
+                  )}
+                </div>
+              </button>
+            );
+          })}
+        </div>
+
+        <StatusLegend />
+        {loading && <div className="px-5 py-3 text-[12px] font-bold text-[var(--text-muted)]">Loading calendar…</div>}
+        {!loading && filtered.length === 0 && (
+          <div className="px-5 py-8 text-center text-[13px] font-bold text-[var(--text-muted)]">
+            Nothing scheduled for {MONTHS[month - 1]} {year}{hasFilters ? ' with these filters' : ''}.
           </div>
-        ) : rows.length === 0 ? (
-          <div className="flex items-center gap-2.5 px-5 py-10 justify-center">
-            <span className="w-8 h-8 rounded-lg bg-[var(--input-bg)] text-[var(--text-muted)] flex items-center justify-center"><Inbox size={16} /></span>
-            <p className="text-[13px] font-bold text-[var(--text-muted)]">
-              Nothing scheduled for {MONTHS[month - 1]} {year}.
-            </p>
-          </div>
-        ) : (
-          <TableShell minWidth={Math.max(720, 220 + activities.length * 88)}>
-            <thead>
-              <tr className="bg-[var(--table-header-bg)] border-b border-[var(--border)]">
-                <Th className={stickyHead}>Client</Th>
-                {activities.map((a) => <Th key={a.name} align="center"><span title={a.name}>{a.short}</span></Th>)}
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((r) => {
-                const cells = matrix[r.id] || {};
-                return (
-                  <tr key={r.id} className="group border-b border-[var(--border)] last:border-0 hover:bg-[var(--table-hover)] transition-colors">
-                    <Td className={`font-bold whitespace-nowrap ${stickyCell}`}>{r.name}</Td>
-                    {activities.map((a) => (
-                      <Td key={a.name} align="center"><Cell occ={cells[a.name]} /></Td>
-                    ))}
-                  </tr>
-                );
-              })}
-              {rows.length === 0 && (
-                <tr><td colSpan={matrixCols} className="px-5 py-10 text-center text-[13px] font-bold text-[var(--text-muted)]">No clients for this month.</td></tr>
-              )}
-            </tbody>
-          </TableShell>
         )}
-      </Section>
+      </div>
+
+      {openDay && (
+        <DayOverlay title={`Activities on ${openDay}`} events={byDate[openDay] || []} onClose={() => setOpenDay(null)} />
+      )}
 
       <p className="text-[11px] text-[var(--text-muted)] font-medium px-1">
-        Scope: {user?.name || user?.username || 'admin'} · Columns use activity short codes (hover for full name).
+        Scope: {user?.name || user?.username || 'admin'} · Click a day to see its activities.
       </p>
     </div>
   );

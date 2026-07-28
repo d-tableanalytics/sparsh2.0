@@ -82,7 +82,10 @@ def _can_write(user: dict) -> bool:
 def _can_read(user: dict) -> bool:
     if _is_staff(user) or _is_client(user):
         return True
-    return bool(user.get("permissions", {}).get("forms", {}).get("read", True))
+    # Not open-by-default: any other role (e.g. SMOps `staff`, who read reviews via the
+    # scoped review-report route instead) needs an explicit grant. Closes the previous
+    # default-True that let a non-client caller list submissions across every company.
+    return bool(user.get("permissions", {}).get("forms", {}).get("read", False))
 
 
 def _user_department(user: dict) -> str:
@@ -106,7 +109,10 @@ def _enforce_client_scope(user: dict, company_id: str, respondent_id: str, form_
     if _is_staff(user):
         return
     if not _is_client(user):
-        return  # other roles fall through to the permission-flag path
+        # Only staff (bypass) and clients (scoped below) may write forms. Any other role —
+        # even one holding the granular create flag — is rejected rather than being allowed
+        # an unscoped, arbitrary-company submission.
+        raise HTTPException(status_code=403, detail="Not authorized to submit forms.")
     if company_id != (user.get("company_id") or ""):
         raise HTTPException(status_code=403, detail="You can only submit forms for your own company.")
     if respondent_id != _self_id(user):
@@ -202,6 +208,70 @@ async def list_definitions(current_user: dict = Depends(get_current_user)):
     return {"definitions": out}
 
 
+# ─── Schedule-driven "My Forms" — the forms this user must fill, by period + status ───
+_FORM_TYPE_ORDER = ["accountability", "ownership", "culture", "implementation_feedback"]
+
+
+@router.get("/my-forms")
+async def my_forms(current_user: dict = Depends(get_current_user)):
+    """The connected form flow: for the logged-in respondent (HOD/MD), list the forms they
+    must fill — one entry per (form × period) derived from the SCHEDULED form-activities for
+    their company (plus the current period), each with submission status. Replaces the flat
+    Forms menu with a contextual, schedule-driven task list."""
+    if not _is_client(current_user):
+        return {"forms": []}  # forms are filled by client-side HOD/MD respondents
+    company_id = str(current_user.get("company_id") or "")
+    uid = str(current_user.get("_id") or "")
+    dept = _user_department(current_user)  # governance role (hod/md), governance_role-aware
+
+    # Which forms can this respondent fill (by audience)?
+    eligible = [ft for ft in _FORM_TYPE_ORDER
+                if AUDIENCE_DEPARTMENT.get(form_audience(ft)) == dept]
+    if not eligible or not company_id:
+        return {"forms": []}
+
+    # form_type → the activity that feeds it.
+    rev: dict = {}
+    for activity, forms in ACTIVITY_FORM_MAP.items():
+        for f in forms:
+            rev.setdefault(f, activity)
+
+    now = datetime.utcnow()
+    current_period = f"{now.year:04d}-{now.month:02d}"
+
+    out = []
+    for ft in eligible:
+        activity = rev.get(ft)
+        if not activity:
+            continue
+        # Periods where this form-activity was scheduled for the company (+ the current month).
+        periods = {current_period}
+        for coll in _CAL_COLLECTIONS:
+            for e in await get_collection(coll).find(
+                {"company_id": company_id, "activity": activity}
+            ).to_list(500):
+                dt = _parse_dt(e.get("start"))
+                if dt:
+                    periods.add(f"{dt.year:04d}-{dt.month:02d}")
+        # This respondent's existing submissions (match hod_id / md_id).
+        my_sub_periods = set()
+        for s in await get_collection(submission_collection(ft)).find(
+            {"company_id": company_id}
+        ).to_list(3000):
+            if str(s.get("hod_id") or s.get("md_id") or "") == uid:
+                my_sub_periods.add(str(s.get("period") or ""))
+        for period in sorted(periods, reverse=True):
+            tokens = set(period_tokens(period)) | {period}
+            out.append({
+                "form_type": ft,
+                "title": FORM_DEFINITIONS[ft]["title"],
+                "activity": activity,
+                "period": period,
+                "status": "submitted" if (tokens & my_sub_periods) else "pending",
+            })
+    return {"forms": out}
+
+
 @router.get("/questions")
 async def list_questions(
     form_type: Optional[str] = Query(None),
@@ -294,12 +364,22 @@ async def list_members(
     if not company_id:
         raise HTTPException(status_code=400, detail="company_id is required")
 
-    query = {"company_id": company_id, "is_active": {"$ne": False}}
-    staff = await get_collection("staff").find(query).to_list(1000)
-    learners = await get_collection("learners").find(query).to_list(1000)
+    base = {"company_id": company_id, "is_active": {"$ne": False}}
+    # AppScript flow: an HOD rates only THEIR OWN TEAM — the learners whose `reporting_manager`
+    # is this HOD (the ERP equivalent of the source's HOD_IDs mapping). Until that mapping is
+    # populated an HOD has no team, so we fall back to the full company roster to keep the form
+    # usable; `scoped_to_team` tells the UI which mode is in effect.
+    team = []
+    if hod_id:
+        team = await get_collection("learners").find(
+            {**base, "reporting_manager": hod_id}).to_list(1000)
+    scoped_to_team = bool(team)
+    pool = team if scoped_to_team else (
+        (await get_collection("staff").find(base).to_list(1000))
+        + (await get_collection("learners").find(base).to_list(1000)))
 
     members = []
-    for u in staff + learners:
+    for u in pool:
         uid = str(u["_id"])
         emp = u.get("employee_id") or u.get("emp_id") or u.get("emp_code")
         if hod_id and hod_id in (uid, emp):
@@ -313,7 +393,7 @@ async def list_members(
             "role": u.get("role"),
         })
     members.sort(key=lambda m: (m.get("member_name") or "").lower())
-    return {"members": members}
+    return {"members": members, "scoped_to_team": scoped_to_team}
 
 
 # ─────────────────────────────────────────────────────────────
@@ -386,6 +466,18 @@ async def submit_ratings(
         hod_name = _user_display_name(current_user)
     _enforce_client_scope(current_user, company_id, hod_id, form_type)
 
+    # Valid members = the company's own roster (staff + learners). Criteria are validated
+    # against the live master above; members must be validated too so a client can't inject
+    # an arbitrary person into their company's ratings.
+    valid_members: set = set()
+    for coll_name in ("staff", "learners"):
+        for u in await get_collection(coll_name).find(
+                {"company_id": company_id, "is_active": {"$ne": False}},
+                {"_id": 1, "employee_id": 1}).to_list(2000):
+            valid_members.add(str(u["_id"]))
+            if u.get("employee_id"):
+                valid_members.add(str(u["employee_id"]))
+
     key = _matrix_key(form_type, company_id, payload.period, hod_id)
     existing = await get_collection(submission_collection(form_type)).find_one(key)
     saved = (existing or {}).get("ratings", {})
@@ -399,6 +491,8 @@ async def submit_ratings(
     for cell in payload.ratings:
         if cell.criterion_code not in valid_codes:
             raise HTTPException(status_code=400, detail=f"Unknown criterion '{cell.criterion_code}'")
+        if valid_members and str(cell.member_id) not in valid_members:
+            raise HTTPException(status_code=400, detail=f"Unknown member '{cell.member_id}'")
         # Skip a cell that's already on file (append-only, no duplicates).
         if saved.get(cell.criterion_code, {}).get(cell.member_id) is not None:
             continue
@@ -447,8 +541,8 @@ async def submit_ratings(
         from app.services.tpms_notify_service import notify_form_submission
         await notify_form_submission(
             form_type=form_type, title=definition["title"],
-            company_id=payload.company_id, period=payload.period,
-            respondent_id=payload.hod_id, respondent_name=payload.hod_name or "",
+            company_id=company_id, period=payload.period,
+            respondent_id=hod_id, respondent_name=hod_name or "",
             ratings=[c.model_dump() for c in payload.ratings],
         )
     except Exception as _e:
@@ -590,8 +684,8 @@ async def submit_feedback(
         from app.services.tpms_notify_service import notify_form_submission
         await notify_form_submission(
             form_type=form_type, title=definition["title"],
-            company_id=payload.company_id, period=payload.period,
-            respondent_id=payload.md_id, respondent_name=payload.md_name or "",
+            company_id=company_id, period=payload.period,
+            respondent_id=md_id, respondent_name=md_name or "",
             ratings=None,
         )
     except Exception as _e:

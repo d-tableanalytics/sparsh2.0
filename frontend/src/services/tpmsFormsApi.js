@@ -9,6 +9,9 @@ import api from './api';
 // All form definitions (criteria/scale registry).
 export const getFormDefinitions = () => api.get('/forms/definitions');
 
+// Schedule-driven "My Forms": the forms this respondent must fill, by period + status.
+export const getMyForms = () => api.get('/forms/my-forms');
+
 // Companies for the selector (reuses the existing companies endpoint).
 export const getCompanies = () => api.get('/companies');
 

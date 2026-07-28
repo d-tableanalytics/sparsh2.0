@@ -8,6 +8,7 @@ import api from '../../services/api';
 import {
   checkScheduleConflict as checkTpmsConflict,
   createSchedule as createTpmsSchedule,
+  updateSchedule as updateTpmsSchedule,
 } from '../../services/tpmsApi';
 import { useAuth } from '../../context/AuthContext';
 import { useNotification } from '../../context/NotificationContext';
@@ -191,8 +192,11 @@ const SearchableMultiSelect = ({ options, selectedIds, onToggle, placeholder, di
  *   recurrence set, keeps doers and staff in separate fields, and runs the
  *   once-per-month conflict check before saving.
  */
-const ScheduleCalendarModal = ({ isOpen, onClose, onSaved, mode = 'erp' }) => {
+const ScheduleCalendarModal = ({ isOpen, onClose, onSaved, mode = 'erp', event = null }) => {
   const isTpms = mode === 'tpms';
+  // Edit mode is TPMS-only: an `event` turns the create modal into an edit-in-place
+  // form. Left null (or in ERP mode) the modal behaves exactly as before.
+  const isEditing = isTpms && !!event;
   const [conflict, setConflict] = useState(null);   // {info, payload} — TPMS duplicate warning
   const { showSuccess, showError } = useNotification();
   const { user } = useAuth();
@@ -214,8 +218,27 @@ const ScheduleCalendarModal = ({ isOpen, onClose, onSaved, mode = 'erp' }) => {
   // locked to their own company (no company list, no staff picker — both are staff-only).
   useEffect(() => {
     if (!isOpen) return;
-    const base = emptyForm();
-    if (isClient && user?.company_id) base.companyId = String(user.company_id);
+    let base;
+    if (isTpms && event) {
+      // Edit mode — pre-fill from the existing event. Recurrence is NOT edited
+      // per-occurrence, so it's forced to One-time and its controls are hidden.
+      base = {
+        ...emptyForm(),
+        title: event.title || '',
+        time: event.time || '',
+        activity: event.activity || '',
+        companyId: event.company_id != null && event.company_id !== '' ? String(event.company_id) : '',
+        recurrence: 'One-time',
+        planDate: event.date || '',
+        departments: event.departments || [],
+        doerIds: (event.member_ids || []).map(String),
+        staffIds: (event.staff_ids || event.coach_ids || []).map(String),
+        comment: event.comment || event.additional_details || '',
+      };
+    } else {
+      base = emptyForm();
+      if (isClient && user?.company_id) base.companyId = String(user.company_id);
+    }
     setForm(base);
     setCompanyUsers([]);
     setCompanyName('');
@@ -241,7 +264,7 @@ const ScheduleCalendarModal = ({ isOpen, onClose, onSaved, mode = 'erp' }) => {
       }
     })();
     return () => { alive = false; };
-  }, [isOpen, isClient, user, showError]);
+  }, [isOpen, isClient, user, showError, isTpms, event]);
 
   // Load the selected company's users (the doer pool) when the company changes.
   useEffect(() => {
@@ -324,12 +347,17 @@ const ScheduleCalendarModal = ({ isOpen, onClose, onSaved, mode = 'erp' }) => {
   const saveTpms = async (payload) => {
     setSaving(true);
     try {
-      await createTpmsSchedule(payload);
-      showSuccess('Activity scheduled — reminders and mails are on their way.');
+      if (isEditing) {
+        await updateTpmsSchedule(event.id, payload);
+        showSuccess('Activity updated.');
+      } else {
+        await createTpmsSchedule(payload);
+        showSuccess('Activity scheduled — reminders and mails are on their way.');
+      }
       onSaved?.();
       onClose();
     } catch (err) {
-      showError(err.response?.data?.detail || 'Failed to schedule activity');
+      showError(err.response?.data?.detail || (isEditing ? 'Failed to update activity' : 'Failed to schedule activity'));
     } finally {
       setSaving(false);
     }
@@ -352,6 +380,9 @@ const ScheduleCalendarModal = ({ isOpen, onClose, onSaved, mode = 'erp' }) => {
           return showError('Select at least one weekday');
       }
       const payload = tpmsPayload();
+      // Editing an existing activity skips the duplicate/conflict check — that guard
+      // is for brand-new schedules only.
+      if (isEditing) return saveTpms(payload);
       // Advisory duplicate check for once-a-month activities — the user may proceed.
       try {
         const { data } = await checkTpmsConflict(payload);
@@ -432,7 +463,7 @@ const ScheduleCalendarModal = ({ isOpen, onClose, onSaved, mode = 'erp' }) => {
           <div className="px-6 py-5 flex items-center justify-between text-white bg-gradient-to-r from-indigo-600 to-violet-500">
             <div className="flex items-center gap-2.5">
               <CalendarClock size={20} />
-              <h3 className="text-[15px] font-black tracking-tight">Schedule Activity</h3>
+              <h3 className="text-[15px] font-black tracking-tight">{isEditing ? 'Edit Activity' : 'Schedule Activity'}</h3>
             </div>
             <button onClick={onClose} className="p-1.5 hover:bg-white/20 rounded-full transition-all"><X size={20} /></button>
           </div>
@@ -471,14 +502,17 @@ const ScheduleCalendarModal = ({ isOpen, onClose, onSaved, mode = 'erp' }) => {
                   />
                 )}
               </div>
-              <div>
-                <Label req><RefreshCw size={11} className="inline mr-1" />Recurrence</Label>
-                <select value={form.recurrence} onChange={(e) => set({ recurrence: e.target.value })} className={field}>
-                  {isTpms
-                    ? TPMS_RECURRENCE.map((r) => <option key={r} value={r}>{r === 'Periodically' ? 'Periodically (specific weekdays)' : r}</option>)
-                    : RECURRENCE.map((r) => <option key={r.label} value={r.label}>{r.label}</option>)}
-                </select>
-              </div>
+              {/* Recurrence is not editable per-occurrence — hidden entirely in edit mode. */}
+              {!isEditing && (
+                <div>
+                  <Label req><RefreshCw size={11} className="inline mr-1" />Recurrence</Label>
+                  <select value={form.recurrence} onChange={(e) => set({ recurrence: e.target.value })} className={field}>
+                    {isTpms
+                      ? TPMS_RECURRENCE.map((r) => <option key={r} value={r}>{r === 'Periodically' ? 'Periodically (specific weekdays)' : r}</option>)
+                      : RECURRENCE.map((r) => <option key={r.label} value={r.label}>{r.label}</option>)}
+                  </select>
+                </div>
+              )}
               <div>
                 <Label req>{isTpms && form.recurrence !== 'One-time' ? 'Plan start Date' : 'Plan Date'}</Label>
                 <input type="date" value={form.planDate} onChange={(e) => set({ planDate: e.target.value })} className={field} />
@@ -590,7 +624,7 @@ const ScheduleCalendarModal = ({ isOpen, onClose, onSaved, mode = 'erp' }) => {
             <button onClick={handleSave} disabled={saving}
               className="inline-flex items-center gap-2 px-6 py-2.5 rounded-xl bg-gradient-to-r from-indigo-600 to-violet-500 text-white text-[12px] font-black shadow-lg shadow-indigo-500/30 hover:scale-[1.02] active:scale-95 transition-all disabled:opacity-60">
               {saving ? <RefreshCw size={15} className="animate-spin" /> : <Save size={15} />}
-              {saving ? 'Saving…' : 'Save Schedule'}
+              {saving ? 'Saving…' : (isEditing ? 'Save Changes' : 'Save Schedule')}
             </button>
           </div>
         </motion.div>

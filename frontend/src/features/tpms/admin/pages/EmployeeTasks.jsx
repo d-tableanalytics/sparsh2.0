@@ -52,6 +52,7 @@ const EmployeeTasks = () => {
   const [period, setPeriod] = useState(currentPeriod());
   const [member, setMember] = useState('');
   const [designation, setDesignation] = useState('');
+  const [scheduledBy, setScheduledBy] = useState('');
 
   const [companies, setCompanies] = useState([]);
   const [data, setData] = useState(null);
@@ -84,6 +85,7 @@ const EmployeeTasks = () => {
         company_id: company || undefined,
         member_id: member || undefined,
         designation: designation || undefined,
+        scheduled_by: scheduledBy || undefined,
       });
       setData(res.data);
     } catch (e) {
@@ -92,7 +94,7 @@ const EmployeeTasks = () => {
     } finally {
       setLoading(false);
     }
-  }, [period, company, member, designation]);
+  }, [period, company, member, designation, scheduledBy]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -111,8 +113,10 @@ const EmployeeTasks = () => {
     () => [{ id: '', name: 'All Employees' }, ...(data?.member_options || [])], [data]);
   const designationOpts = useMemo(
     () => ['', ...(data?.designation_options || [])].map((d) => ({ id: d, name: d || 'All Designations' })), [data]);
+  const scheduledByOpts = useMemo(
+    () => [{ id: '', name: 'All Scheduled by' }, { id: 'internal', name: 'OM/SMOps' }, { id: 'client', name: 'Client' }], []);
 
-  const clearFilters = () => { setCompany(''); setPeriod(currentPeriod()); setMember(''); setDesignation(''); };
+  const clearFilters = () => { setCompany(''); setPeriod(currentPeriod()); setMember(''); setDesignation(''); setScheduledBy(''); };
 
   const kpis = [
     { value: cards.total_employees ?? 0,   label: 'Employees',   sub: 'In scope',          tone: 'blue',   icon: Users },
@@ -135,6 +139,7 @@ const EmployeeTasks = () => {
         <HeaderSelect value={period} onChange={setPeriod} options={months} />
         <HeaderSelect value={member} onChange={setMember} options={memberOpts} />
         <HeaderSelect value={designation} onChange={setDesignation} options={designationOpts} />
+        <HeaderSelect value={scheduledBy} onChange={setScheduledBy} options={scheduledByOpts} />
         <button onClick={clearFilters} className="inline-flex items-center px-3.5 py-2 rounded-lg bg-white/15 text-white text-[12.5px] font-bold ring-1 ring-white/25 hover:bg-white/25 transition-all">Clear</button>
         <HeroButton icon={RefreshCw} onClick={load}>Refresh</HeroButton>
       </DashboardHero>

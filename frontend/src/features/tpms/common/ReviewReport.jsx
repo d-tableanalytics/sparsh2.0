@@ -115,6 +115,10 @@ const ReviewReport = ({ title = 'Review Reports', subtitle = 'Evaluation & feedb
   const totals = data?.totals || {};
   const isYesno = !!data?.is_yesno;
   const sourceMeta = data?.source || {};
+  // Privacy: client HOD/employees are locked to their own reviews (server
+  // already filters the data). Only admin/staff/client-admin/MD can pick a
+  // different respondent, signalled by can_pick. Hide the picker otherwise.
+  const canPick = data?.can_pick !== false;
 
   // M7 — form-appropriate status vocabulary. Checklist (yes/no) forms read as
   // compliance; rating (matrix) forms read as review health. Thresholds match
@@ -224,7 +228,8 @@ const ReviewReport = ({ title = 'Review Reports', subtitle = 'Evaluation & feedb
             { label: 'Form', value: source, set: setSource, opts: sources.map((s) => ({ id: s.id, name: s.label })) },
             { label: 'Period', value: period, set: setPeriod, opts: periods },
             { label: 'Company', value: companyId, set: setCompanyId, opts: companyOpts },
-            { label: 'Respondent', value: respondentId, set: setRespondentId, opts: respondentOpts },
+            // Respondent picker only for users allowed to view others (can_pick).
+            ...(canPick ? [{ label: 'Respondent', value: respondentId, set: setRespondentId, opts: respondentOpts }] : []),
           ].map((f) => (
             <label key={f.label} className="flex flex-col gap-1">
               <span className="text-[10px] font-bold uppercase tracking-widest text-[var(--text-muted)]">{f.label}</span>

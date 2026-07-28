@@ -6,6 +6,9 @@ class CompanyBase(BaseModel):
     name: str
     domain: Optional[str] = None
     owner: Optional[str] = None
+    # Internal SMOps/OM staff who manage this client. Read-side dashboard scoping honours
+    # owner + admin_id + smops_ids (see tpms_dashboard_service._allowed_companies).
+    smops_ids: Optional[List[str]] = []
     email: Optional[EmailStr] = None
     contact: Optional[str] = None
     
@@ -31,6 +34,7 @@ class CompanyCreate(CompanyBase):
 class CompanyUpdate(BaseModel):
     name: Optional[str] = None
     owner: Optional[str] = None
+    smops_ids: Optional[List[str]] = None
     is_active: Optional[bool] = None
 
 class CompanyResponse(CompanyBase):

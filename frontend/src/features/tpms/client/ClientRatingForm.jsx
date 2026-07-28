@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Save, RefreshCw, Users, ClipboardCheck, Lock, User } from 'lucide-react';
+import { useSearchParams } from 'react-router-dom';
+import { Save, RefreshCw, Users, ClipboardCheck, Lock } from 'lucide-react';
 import { DashboardHero, Section, TableShell, Th, Td } from '../common/dashboardKit';
 import { useNotification } from '../../../context/NotificationContext';
 import { useAuth } from '../../../context/AuthContext';
@@ -8,12 +9,11 @@ import { getFormDefinitions, getFormMembers, getRatings, submitRatings } from '.
 /**
  * Client-side rating-matrix form (self-service).
  *
- * Company + respondent are the logged-in user — there are no selectors. Two modes,
- * driven by the backend definition:
- *   • audience "hod"  (Accountability / Ownership) → the HOD rates each TEAM member.
- *   • self_rating     (Culture)                    → the user rates THEMSELVES.
- * Cell-level partial submission is preserved: already-saved cells load locked; submit
- * appends only the newly-filled ones. The backend scopes every read/write to the caller.
+ * Company + respondent are the logged-in user — there are no selectors. The HOD
+ * rates each TEAM member on every criterion (audience "hod": Accountability /
+ * Ownership / Culture). Cell-level partial submission is preserved: already-saved
+ * cells load locked; submit appends only the newly-filled ones. The backend scopes
+ * every read/write to the caller.
  */
 
 // Default period token, e.g. "jul26" (matches the source form's MID style).
@@ -21,6 +21,17 @@ const defaultPeriod = (now) => {
   const d = now || new Date();
   const mon = d.toLocaleString('en-US', { month: 'short' }).toLowerCase();
   return `${mon}${String(d.getFullYear()).slice(-2)}`;
+};
+
+// Convert a ?period= query value to the form's token format. A 'YYYY-MM' value
+// (from "My Forms") is mapped to the same "jul26" token defaultPeriod() emits;
+// a value already in the form's format is accepted as-is. Blank/unknown → null.
+const periodFromParam = (raw) => {
+  const v = (raw || '').trim();
+  if (!v) return null;
+  const m = /^(\d{4})-(\d{2})$/.exec(v);
+  if (m) return defaultPeriod(new Date(Number(m[1]), Number(m[2]) - 1, 1));
+  return v;
 };
 
 const ScaleRadio = ({ min, max, value, onChange, name, disabled }) => {
@@ -48,6 +59,7 @@ const ScaleRadio = ({ min, max, value, onChange, name, disabled }) => {
 const ClientRatingForm = ({ formType, icon }) => {
   const { showSuccess, showError } = useNotification();
   const { user } = useAuth();
+  const [searchParams] = useSearchParams();
 
   const companyId = user?.company_id || '';
   const selfId = String(user?._id || user?.id || '');
@@ -55,7 +67,8 @@ const ClientRatingForm = ({ formType, icon }) => {
 
   const [definition, setDefinition] = useState(null);
   const [loadingDefs, setLoadingDefs] = useState(true);
-  const [period, setPeriod] = useState(defaultPeriod());
+  // Pre-fill the period from a ?period= deep-link ("My Forms"), else default.
+  const [period, setPeriod] = useState(() => periodFromParam(searchParams.get('period')) || defaultPeriod());
 
   const [rows, setRows] = useState([]);
   const [loadingMembers, setLoadingMembers] = useState(false);
@@ -68,7 +81,6 @@ const ClientRatingForm = ({ formType, icon }) => {
   const criteria = definition?.criteria || [];
   const scaleMin = definition?.scale?.min ?? 0;
   const scaleMax = definition?.scale?.max ?? 5;
-  const selfRating = !!definition?.self_rating;
 
   // ── Load definition once ──
   useEffect(() => {
@@ -88,15 +100,10 @@ const ClientRatingForm = ({ formType, icon }) => {
     return () => { alive = false; };
   }, [formType, showError]);
 
-  // ── Build the rows to rate: self (culture) or the team roster (HOD forms) ──
+  // ── Build the rows to rate: the team roster (HOD forms) ──
   useEffect(() => {
     if (!definition) return;
     let alive = true;
-    if (selfRating) {
-      setRows([{ member_id: selfId, member_name: selfName, designation: user?.designation || null, employee_id: user?.employee_id || null, key: selfId }]);
-      setPicks({});
-      return () => { alive = false; };
-    }
     (async () => {
       setLoadingMembers(true);
       try {
@@ -111,7 +118,7 @@ const ClientRatingForm = ({ formType, icon }) => {
       }
     })();
     return () => { alive = false; };
-  }, [definition, selfRating, companyId, selfId, selfName, user, showError]);
+  }, [definition, companyId, selfId, selfName, user, showError]);
 
   // ── Load already-saved ratings (lock state) ──
   const refreshSaved = React.useCallback(async () => {
@@ -148,7 +155,7 @@ const ClientRatingForm = ({ formType, icon }) => {
   const handleSubmit = async () => {
     if (!companyId) return showError('Your account has no company assigned. Contact your administrator.');
     if (!period.trim()) return showError('Please enter the month / period');
-    if (!rows.length) return showError(selfRating ? 'Nothing to rate.' : 'You have no team members to rate.');
+    if (!rows.length) return showError('You have no team members to rate.');
 
     const cells = [];
     criteria.forEach((c) => rows.forEach((m) => {
@@ -214,7 +221,7 @@ const ClientRatingForm = ({ formType, icon }) => {
         icon={icon || ClipboardCheck}
         title={title}
         highlight={highlight}
-        subtitle={selfRating ? 'Rate yourself on each criterion (0–5).' : 'Rate each of your team members on every criterion (0–5).'}
+        subtitle="Rate each of your team members on every criterion (0–5)."
       >
         <button
           onClick={handleSubmit}
@@ -227,7 +234,7 @@ const ClientRatingForm = ({ formType, icon }) => {
       </DashboardHero>
 
       {/* Period + progress */}
-      <Section title="Submission Details" icon={selfRating ? User : Users}>
+      <Section title="Submission Details" icon={Users}>
         <div className="px-5 py-4 grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div>
             <label className="block text-[11px] font-bold uppercase tracking-widest text-[var(--text-muted)] mb-1.5">Month / Period</label>
@@ -253,7 +260,7 @@ const ClientRatingForm = ({ formType, icon }) => {
           <TableShell minWidth={560}>
             <thead>
               <tr className="border-b border-[var(--border)]">
-                <Th>{selfRating ? 'You' : 'Team Member'}</Th>
+                <Th>Team Member</Th>
                 <Th align="center">Rating ({scaleMin}–{scaleMax})</Th>
               </tr>
             </thead>

@@ -170,11 +170,29 @@ _MON_FULL = ["january", "february", "march", "april", "may", "june",
 
 
 def period_parts(period: str):
-    """'YYYY-MM' → (year, month). Raises ValueError on anything else."""
-    year, month = int(str(period)[:4]), int(str(period)[5:7])
-    if not 1 <= month <= 12:
-        raise ValueError(f"invalid month in period {period!r}")
-    return year, month
+    """Canonical 'YYYY-MM' OR a legacy token ('jul26', 'july26', 'jul-26') → (year, month).
+    Form submissions store the token spelling the client sends, so this must parse both."""
+    s = str(period or "").strip()
+    # Canonical ISO 'YYYY-MM'
+    if len(s) >= 7 and s[4] == "-" and s[:4].isdigit():
+        year, month = int(s[:4]), int(s[5:7])
+        if not 1 <= month <= 12:
+            raise ValueError(f"invalid month in period {period!r}")
+        return year, month
+    # Legacy token: <month-name><yy> with an optional '-' (e.g. 'jul26', 'july26', 'jul-26').
+    t = s.lower().replace("-", "")
+    for i in range(12):
+        full, short = _MON_FULL[i], _MON_SHORT[i]
+        if t.startswith(full):
+            yy = t[len(full):]
+        elif t.startswith(short):
+            yy = t[len(short):]
+        else:
+            continue
+        if len(yy) == 2 and yy.isdigit():
+            return 2000 + int(yy), i + 1
+        break
+    raise ValueError(f"unrecognised period {period!r}")
 
 
 def period_tokens(period: str) -> List[str]:
@@ -198,8 +216,12 @@ def period_from_date(value) -> str:
 
 
 def period_display(period: str) -> str:
-    """'2026-07' → 'July26' (the sheet's display form, succMonthDisplay_ code.js:1914)."""
-    year, month = period_parts(period)
+    """'2026-07' or 'jul26' → 'July26' (succMonthDisplay_, code.js:1914). Never raises —
+    an unrecognised period is echoed back so a report can't crash on odd stored data."""
+    try:
+        year, month = period_parts(period)
+    except (ValueError, TypeError):
+        return str(period or "")
     return _MON_FULL[month - 1].capitalize() + str(year)[-2:]
 
 

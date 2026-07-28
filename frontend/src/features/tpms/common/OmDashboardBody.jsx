@@ -25,6 +25,7 @@ const stickyCell = 'sticky left-0 z-10 bg-[var(--bg-card)] group-hover:bg-[var(-
 const delayColor = (v) => {
   if (!v || v === '—') return 'var(--text-muted)';
   if (v === 'On time') return 'var(--accent-green)';
+  if (/pending/i.test(v)) return 'var(--accent-orange)';
   return 'var(--accent-red)';
 };
 

@@ -7,7 +7,7 @@ import {
   DashboardHero, HeroButton, HeaderSelect, Section, Th, Td, TableShell, KpiTile,
 } from '../../common/dashboardKit';
 import { useAuth } from '../../../../context/AuthContext';
-import { getHodDashboard, currentPeriod, periodLabel } from '../../../../services/tpmsApi';
+import { getHodDashboard, periodLabel } from '../../../../services/tpmsApi';
 
 /* ─────────────────────────────────────────────────────────────
    SMOPS ▸ HOD Activity — per-HOD activity dashboard.
@@ -17,16 +17,36 @@ import { getHodDashboard, currentPeriod, periodLabel } from '../../../../service
    so the selectors below are driven entirely by the server response.
    ───────────────────────────────────────────────────────────── */
 
-// Last 12 months as { id: 'YYYY-MM', name: 'July26' } for the period selector.
-const monthOptions = (now) => {
+// Range presets for the dashboard filter (mirrors the AppScript doc).
+const RANGE_OPTIONS = [
+  { id: 'this_month', name: 'This Month' },
+  { id: 'last_month', name: 'Last Month' },
+  { id: 'quarter', name: 'This Quarter' },
+  { id: 'custom', name: 'Custom' },
+];
+
+// Manual YYYY-MM-DD formatting (no external date lib in this codebase).
+const fmtDate = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+
+// Resolve a preset → { from, to } as YYYY-MM-DD. Grouping stays per-month on the
+// backend, so a multi-month range simply yields one column per month. A custom
+// range returns nulls until both endpoints are set (so we don't fetch early).
+const rangeFor = (preset, customFrom, customTo, now) => {
   const base = now || new Date();
-  const out = [];
-  for (let i = 0; i < 12; i += 1) {
-    const d = new Date(base.getFullYear(), base.getMonth() - i, 1);
-    const id = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
-    out.push({ id, name: periodLabel(id) || id });
+  const y = base.getFullYear();
+  const m = base.getMonth();
+  if (preset === 'last_month') {
+    return { from: fmtDate(new Date(y, m - 1, 1)), to: fmtDate(new Date(y, m, 0)) };
   }
-  return out;
+  if (preset === 'quarter') {
+    const qStart = Math.floor(m / 3) * 3;
+    return { from: fmtDate(new Date(y, qStart, 1)), to: fmtDate(base) };
+  }
+  if (preset === 'custom') {
+    return { from: customFrom || null, to: customTo || null };
+  }
+  // this_month (default): first day of the current month → today.
+  return { from: fmtDate(new Date(y, m, 1)), to: fmtDate(base) };
 };
 
 const OCC = {
@@ -39,14 +59,19 @@ const OccPill = ({ v }) => {
   return <span className="inline-flex items-center gap-1.5 text-[10px] font-bold tracking-wide px-2.5 py-1 rounded-full border" style={{ color: s.c, background: s.bg, borderColor: s.bd }}><span className="w-1.5 h-1.5 rounded-full" style={{ background: s.c }} />{v || '—'}</span>;
 };
 const scoreColor = (v) => (v >= 80 ? 'var(--accent-green)' : v >= 50 ? 'var(--accent-orange)' : 'var(--accent-red)');
-const delayColor = (v) => (v === 'On time' ? 'var(--accent-green)' : (v && v !== '—' ? 'var(--accent-red)' : 'var(--text-muted)'));
+const delayColor = (v) => (v === 'On time' ? 'var(--accent-green)' : (/pending/i.test(v || '') ? 'var(--accent-orange)' : (v && v !== '—' ? 'var(--accent-red)' : 'var(--text-muted)')));
 const stickyHead = 'sticky left-0 z-10 bg-[var(--table-header-bg)]';
 const stickyCell = 'sticky left-0 z-10 bg-[var(--bg-card)] group-hover:bg-[var(--table-hover)]';
 
 const HodActivity = () => {
   const { user } = useAuth();
-  const months = useMemo(() => monthOptions(), []);
-  const [period, setPeriod] = useState(currentPeriod());
+  const [rangePreset, setRangePreset] = useState('this_month');
+  const [customFrom, setCustomFrom] = useState('');
+  const [customTo, setCustomTo] = useState('');
+  const { from, to } = useMemo(
+    () => rangeFor(rangePreset, customFrom, customTo),
+    [rangePreset, customFrom, customTo],
+  );
   const [hodId, setHodId] = useState(''); // '' → let the backend pick the default HOD
   const [tick, setTick] = useState(0);
   const [data, setData] = useState(null);
@@ -60,8 +85,9 @@ const HodActivity = () => {
       setError('');
       try {
         const res = await getHodDashboard({
-          period: period || undefined,
           member_id: hodId || undefined,
+          from: from || undefined,
+          to: to || undefined,
         });
         if (alive) setData(res.data);
       } catch (e) {
@@ -71,7 +97,7 @@ const HodActivity = () => {
       }
     })();
     return () => { alive = false; };
-  }, [period, hodId, tick]);
+  }, [from, to, hodId, tick]);
 
   const hod = data?.hod || null;
   const cards = data?.cards || {};
@@ -99,7 +125,15 @@ const HodActivity = () => {
         {hodOptions.length > 0 && (
           <HeaderSelect value={data?.selected_hod || ''} onChange={setHodId} options={hodOptions} />
         )}
-        <HeaderSelect value={period} onChange={setPeriod} options={months} />
+        <HeaderSelect value={rangePreset} onChange={setRangePreset} options={RANGE_OPTIONS} />
+        {rangePreset === 'custom' && (
+          <>
+            <input type="date" value={customFrom} onChange={(e) => setCustomFrom(e.target.value)}
+              className="px-3 py-2 rounded-lg bg-white/95 text-slate-800 text-[12.5px] font-bold outline-none border border-white/30 shadow-sm hover:bg-white transition-all cursor-pointer" />
+            <input type="date" value={customTo} onChange={(e) => setCustomTo(e.target.value)}
+              className="px-3 py-2 rounded-lg bg-white/95 text-slate-800 text-[12.5px] font-bold outline-none border border-white/30 shadow-sm hover:bg-white transition-all cursor-pointer" />
+          </>
+        )}
         <HeroButton icon={RefreshCw} onClick={() => setTick((t) => t + 1)}>Refresh</HeroButton>
       </DashboardHero>
 

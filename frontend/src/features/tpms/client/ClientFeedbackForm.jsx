@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { Save, RefreshCw, User, ClipboardList, CheckCircle2, Lock } from 'lucide-react';
 import { DashboardHero, Section } from '../common/dashboardKit';
 import { useNotification } from '../../../context/NotificationContext';
@@ -19,9 +20,21 @@ const defaultPeriod = (now) => {
   return `${mon}${String(d.getFullYear()).slice(-2)}`;
 };
 
+// Convert a ?period= query value to the form's token format. A 'YYYY-MM' value
+// (from "My Forms") is mapped to the same "jul26" token defaultPeriod() emits;
+// a value already in the form's format is accepted as-is. Blank/unknown → null.
+const periodFromParam = (raw) => {
+  const v = (raw || '').trim();
+  if (!v) return null;
+  const m = /^(\d{4})-(\d{2})$/.exec(v);
+  if (m) return defaultPeriod(new Date(Number(m[1]), Number(m[2]) - 1, 1));
+  return v;
+};
+
 const ClientFeedbackForm = ({ formType, icon }) => {
   const { showSuccess, showError } = useNotification();
   const { user } = useAuth();
+  const [searchParams] = useSearchParams();
 
   const companyId = user?.company_id || '';
   const selfId = String(user?._id || user?.id || '');
@@ -29,7 +42,8 @@ const ClientFeedbackForm = ({ formType, icon }) => {
 
   const [definition, setDefinition] = useState(null);
   const [loadingDefs, setLoadingDefs] = useState(true);
-  const [period, setPeriod] = useState(defaultPeriod());
+  // Pre-fill the period from a ?period= deep-link ("My Forms"), else default.
+  const [period, setPeriod] = useState(() => periodFromParam(searchParams.get('period')) || defaultPeriod());
 
   const [saved, setSaved] = useState({});      // { question_id: {checked, remark, question} } (locked)
   const [draft, setDraft] = useState({});      // { question_id: {checked, remark} } (editable)

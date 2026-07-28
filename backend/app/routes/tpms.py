@@ -85,6 +85,51 @@ _VALID_SCOPES = {"company", "hod"}
 _VALID_SCORE_MODES = {"manual", "form", "auto"}
 
 
+def _display(u: dict) -> str:
+    return (u.get("full_name")
+            or " ".join(filter(None, [u.get("first_name"), u.get("last_name")])).strip()
+            or u.get("name") or u.get("email") or "")
+
+
+@router.get("/calendar-filters")
+async def calendar_filters(current_user: dict = Depends(get_current_user)):
+    """Master lists that populate the Client-wise Calendar dropdowns dynamically (independent
+    of how sparse the current month is): all companies, all HODs, all OMs/SMOps."""
+    if not _can_read(current_user):
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    role = (current_user.get("role") or "").lower()
+    own_company = str(current_user.get("company_id") or "")
+
+    # Companies (client-side users see only their own).
+    cq = {"is_active": {"$ne": False}}
+    companies = await get_collection("companies").find(cq).to_list(2000)
+    comp = [{"id": str(c["_id"]), "name": c.get("name") or ""} for c in companies]
+    if role in CLIENT_ROLES and own_company:
+        comp = [c for c in comp if c["id"] == own_company]
+    comp.sort(key=lambda c: (c["name"] or "").lower())
+
+    # HODs — client users whose governance role (or department) is HOD.
+    hq = {"$or": [{"governance_role": {"$regex": "^hod$", "$options": "i"}},
+                  {"department": {"$regex": "^hod$", "$options": "i"}}]}
+    if role in CLIENT_ROLES and own_company:
+        hq = {"$and": [hq, {"company_id": own_company}]}
+    hod_docs = await get_collection("learners").find(hq).to_list(3000)
+    hods = [{"id": str(h["_id"]), "name": _display(h), "company_id": str(h.get("company_id") or "")}
+            for h in hod_docs]
+    hods.sort(key=lambda h: (h["name"] or "").lower())
+
+    # OMs = all internal staff (business decision). The calendar filters events by whether a
+    # selected OM's id appears in the activity's staff_ids (the assigned SMOps), so any staff
+    # member is a valid filter. Consistent with the Admin Dashboard's OM list (also all staff).
+    oms = []
+    for s in await get_collection("staff").find({"is_active": {"$ne": False}}).to_list(500):
+        oms.append({"id": str(s["_id"]), "name": _display(s)})
+    oms.sort(key=lambda o: (o["name"] or "").lower())
+
+    return {"companies": comp, "hods": hods, "oms": oms}
+
+
 @router.post("/activities")
 async def create_activity(payload: dict, current_user: dict = Depends(get_current_user)):
     """H4 — admin adds a new activity to the catalogue (previously a code change). Upserts on
@@ -642,13 +687,17 @@ async def dashboard_hod(
     period: Optional[str] = Query(None),
     company_id: Optional[str] = Query(None),
     member_id: Optional[str] = Query(None, description="HOD to report on"),
+    date_from: Optional[str] = Query(None, alias="from"),
+    date_to: Optional[str] = Query(None, alias="to"),
     current_user: dict = Depends(get_current_user),
 ):
-    """One HOD's activity scorecard, occurrence tracker, alerts and open follow-ups."""
+    """One HOD's activity scorecard, occurrence tracker, alerts and open follow-ups.
+    A date-range (from/to) overrides `period` for the This-Month/Last-Month/Quarter/Custom
+    presets; grouping stays per-month so a multi-month range shows one column per month."""
     if not _can_read(current_user):
         raise HTTPException(status_code=403, detail="Not authorized")
     scope = _scope(period, company_id, None)
-    scope["member_id"] = member_id
+    scope.update({"member_id": member_id, "date_from": date_from, "date_to": date_to})
     return await get_hod_dashboard(current_user, scope)
 
 
@@ -658,13 +707,15 @@ async def dashboard_employee_activity(
     company_id: Optional[str] = Query(None),
     member_id: Optional[str] = Query(None),
     designation: Optional[str] = Query(None),
+    scheduled_by: Optional[str] = Query(None, description="internal | client"),
     current_user: dict = Depends(get_current_user),
 ):
     """Per-employee task completion across the company, with a per-activity breakdown."""
     if not _can_read(current_user):
         raise HTTPException(status_code=403, detail="Not authorized")
     scope = _scope(period, company_id, None)
-    scope.update({"member_id": member_id, "designation": designation})
+    scope.update({"member_id": member_id, "designation": designation,
+                  "scheduled_by": scheduled_by})
     return await get_employee_activity(current_user, scope)
 
 
@@ -685,6 +736,7 @@ async def dashboard_implementation(
 async def reports_logs(
     channel: str = Query("email", description="email | whatsapp"),
     status: Optional[str] = Query(None),
+    side: Optional[str] = Query(None, description="staff | company"),
     date_from: Optional[str] = Query(None, alias="from"),
     date_to: Optional[str] = Query(None, alias="to"),
     skip: int = Query(0, ge=0),
@@ -696,7 +748,8 @@ async def reports_logs(
     if (current_user.get("role") or "").lower() not in STAFF_ROLES:
         raise HTTPException(status_code=403, detail="Admin only")
     return await get_logs_report(current_user, channel, {
-        "status": status, "from": date_from, "to": date_to, "skip": skip, "limit": limit,
+        "status": status, "side": side, "from": date_from, "to": date_to,
+        "skip": skip, "limit": limit,
     })
 
 

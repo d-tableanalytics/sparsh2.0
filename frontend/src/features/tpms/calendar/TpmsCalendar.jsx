@@ -203,6 +203,7 @@ const TpmsCalendar = () => {
 
   const [openDay, setOpenDay] = useState(null);
   const [showModal, setShowModal] = useState(false);
+  const [editEvent, setEditEvent] = useState(null);   // event being edited (null = create)
   const [requests, setRequests] = useState([]);
   const [showRequests, setShowRequests] = useState(false);
   const [rr, setRr] = useState(null);        // reschedule-request form target
@@ -442,6 +443,12 @@ const TpmsCalendar = () => {
                 {e.upload_required && <UploadBlock eventId={e.id} canUpload={canAct} />}
 
                 <div className="flex flex-wrap gap-2 mt-3">
+                  {/* Edit — Admin/Staff may edit any activity; a learner only their own. */}
+                  {(isStaffSide || e.mine) && (
+                    <Btn ghost onClick={() => { setEditEvent(e); setOpenDay(null); }}>
+                      <Pencil size={12} /> Edit
+                    </Btn>
+                  )}
                   {isClient && canAct && !e.learner_done && (
                     <>
                       <Btn onClick={() => act(() => markLearnerDone(e.id), 'Marked done — staff will confirm')}>✅ Mark Done</Btn>
@@ -520,9 +527,10 @@ const TpmsCalendar = () => {
 
       <ScheduleCalendarModal
         mode="tpms"
-        isOpen={showModal}
-        onClose={() => setShowModal(false)}
-        onSaved={() => { load(); }}
+        event={editEvent}
+        isOpen={showModal || !!editEvent}
+        onClose={() => { setShowModal(false); setEditEvent(null); }}
+        onSaved={() => { load(); setShowModal(false); setEditEvent(null); }}
       />
     </div>
   );

@@ -84,6 +84,7 @@ const LogsReport = () => {
 
   const [channel, setChannel] = useState('email');
   const [status, setStatus] = useState('All');
+  const [side, setSide] = useState('All');
   const [from, setFrom] = useState('');
   const [to, setTo] = useState('');
   const [quick, setQuick] = useState('all');
@@ -101,6 +102,7 @@ const LogsReport = () => {
       const res = await getLogsReport({
         channel,
         status: status !== 'All' ? status : undefined,
+        side: side !== 'All' ? side.toLowerCase() : undefined,
         from: from || undefined,
         to: to || undefined,
         skip,
@@ -117,7 +119,7 @@ const LogsReport = () => {
     } finally {
       setLoading(false);
     }
-  }, [channel, status, from, to, skip]);
+  }, [channel, status, side, from, to, skip]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -125,6 +127,7 @@ const LogsReport = () => {
   const resetPaging = () => setSkip(0);
   const pickChannel = (k) => { setChannel(k); resetPaging(); };
   const pickStatus = (v) => { setStatus(v); resetPaging(); };
+  const pickSide = (v) => { setSide(v); resetPaging(); };
   const pickFrom = (v) => { setFrom(v); setQuick('all'); resetPaging(); };
   const pickTo = (v) => { setTo(v); setQuick('all'); resetPaging(); };
   const pickQuick = (k) => { const r = rangeFor(k); setQuick(k); setFrom(r.from); setTo(r.to); resetPaging(); };
@@ -263,10 +266,11 @@ const LogsReport = () => {
 
       {/* Filter bar */}
       <div className="rounded-2xl border border-[var(--border)] bg-[var(--bg-card)] shadow-sm p-4">
-        <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-5 gap-3 items-end">
+        <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3 items-end">
           <label className="flex flex-col gap-1"><span className={labelCls}>From</span><input type="date" value={from} onChange={(e) => pickFrom(e.target.value)} className={inputCls} /></label>
           <label className="flex flex-col gap-1"><span className={labelCls}>To</span><input type="date" value={to} onChange={(e) => pickTo(e.target.value)} className={inputCls} /></label>
           <label className="flex flex-col gap-1"><span className={labelCls}>Status</span><FilterSelect value={status} onChange={pickStatus} options={['All', 'Sent', 'Failed', 'Skipped']} /></label>
+          <label className="flex flex-col gap-1"><span className={labelCls}>Side</span><FilterSelect value={side} onChange={pickSide} options={['All', 'Staff', 'Company']} /></label>
           <div className="flex flex-col gap-1">
             <span className={labelCls}>Quick</span>
             <div className="flex items-center gap-1">

@@ -181,7 +181,7 @@ async def run_escalation_ladder() -> dict:
         updates: dict = {}
 
         if overdue >= LADDER_PENDING_DAYS and stage < 1:
-            to = recipients["owners"] + recipients["hods"] + recipients["hrs"]
+            to = recipients["owners"] + recipients["hods"] + recipients["hrs"] + recipients["smops"]
             if to:
                 await _send(
                     list(dict.fromkeys(to)),
@@ -195,7 +195,8 @@ async def run_escalation_ladder() -> dict:
             pending += 1
 
         if overdue >= LADDER_CRITICAL_DAYS and stage < 2:
-            to = recipients["mds"] or (recipients["hods"] + recipients["hrs"])
+            to = (recipients["mds"] or (recipients["hods"] + recipients["hrs"])) \
+                + recipients["owners"] + recipients["smops"]
             if to:
                 await _send(
                     list(dict.fromkeys(to)),
@@ -210,7 +211,7 @@ async def run_escalation_ladder() -> dict:
 
         if overdue >= LADDER_LAPSE_DAYS and stage < 3:
             to = (recipients["owners"] + recipients["hods"]
-                  + recipients["hrs"] + recipients["mds"])
+                  + recipients["hrs"] + recipients["mds"] + recipients["smops"])
             if to:
                 await _send(
                     list(dict.fromkeys(to)),

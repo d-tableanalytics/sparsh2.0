@@ -74,7 +74,6 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen }) => {
         { name: 'Escalations', path: '/tpms/admin/escalations', icon: AlertTriangle },
         { name: 'HOD View', path: '/tpms/admin/hod', icon: UserCog },
         { name: 'Employee Tasks', path: '/tpms/admin/employee-tasks', icon: ListChecks },
-        { name: 'Client Calendar', path: '/tpms/admin/client-calendar', icon: CalendarDays },
         { name: 'Activities', path: '/tpms/admin/activities', icon: ClipboardList },
         { name: 'Departments', path: '/tpms/admin/departments', icon: Building2 },
         { name: 'Mail Templates', path: '/tpms/admin/mail-templates', icon: ScrollText },

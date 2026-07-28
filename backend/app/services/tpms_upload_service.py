@@ -42,13 +42,18 @@ async def upload_task_file(user: dict, event_id: str, file: UploadFile) -> dict:
         if str(doc.get("company_id") or "") != str(user.get("company_id") or ""):
             raise HTTPException(status_code=403, detail="Not your company activity.")
 
+    # Uploads are only accepted for activities flagged `upload_required` in the catalogue.
+    meta = doc.get("activity_meta") or {}
+    if not meta.get("upload_required"):
+        raise HTTPException(status_code=400,
+                            detail="This activity does not require a file upload.")
+
     payload = await file.read()
     if len(payload) > UPLOAD_MAX_BYTES:
         raise HTTPException(status_code=400, detail="Max file size 25 MB")
     if not payload:
         raise HTTPException(status_code=400, detail="Choose a file first")
 
-    meta = doc.get("activity_meta") or {}
     day = str(doc.get("start") or "")[:10]
     try:
         stored = upload_file_to_s3_with_key(

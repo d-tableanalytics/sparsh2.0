@@ -18,6 +18,8 @@ export const updateActivity = (id, payload) => api.patch(`/tpms/activities/${id}
 
 export const getDepartments = (companyId) =>
   api.get('/tpms/departments', { params: { company_id: companyId || undefined } });
+// Master lists for the Client-wise Calendar filters (companies, HODs, OMs) — dynamic.
+export const getCalendarFilters = () => api.get('/tpms/calendar-filters');
 // H5 — department master CRUD (Admin). Governance roles are seeded and cannot be edited.
 export const createDepartment = (payload) => api.post('/tpms/departments', payload);
 export const updateDepartment = (id, payload) => api.patch(`/tpms/departments/${id}`, payload);

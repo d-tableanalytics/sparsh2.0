@@ -12,6 +12,15 @@ import asyncio
 
 logger = logging.getLogger(__name__)
 
+# ─────────────────────────────────────────────────────────────────────────────
+# GLOBAL notification switch (currently ENABLED — all non-TPMS modules notify normally).
+# When set to False it becomes a kill-switch: NO template-based notification (email or
+# WhatsApp) is sent for ANY module, since everything funnels through
+# send_notification_from_template() below. Left ON so other ERP modules (calendar, tasks,
+# ORM…) remain unchanged; TPMS is silenced separately via TPMS_NOTIFICATIONS_ENABLED.
+# Flip to False for a full ERP-wide blackout (requires a backend restart to take effect).
+NOTIFICATIONS_ENABLED = True
+
 SESSION_HTML_TEMPLATE = """<!DOCTYPE html>
 <html>
 <head>
@@ -478,11 +487,15 @@ async def send_whatsapp_template(phone: str, template_name: str, language: str, 
         return False
 
 async def send_notification_from_template(user_obj: dict, template_slug: str, context: Dict[str, Any], delivery_type: str = "both", scope_override: str = None):
+    # GLOBAL kill-switch: suppress every template-based notification (email + WhatsApp) while off.
+    if not NOTIFICATIONS_ENABLED:
+        logger.info(f"[NOTIFY-OFF] Suppressed '{template_slug}' notification — global switch is off")
+        return {}
     company_id = user_obj.get("company_id")
-    
+
     # If scope is explicitly staff, ignore the company ID to fetch staff templates
     effective_company_id = None if scope_override == "staff" else company_id
-    
+
     email_t = await fetch_template(f"{template_slug}_email", effective_company_id)
     whatsapp_t = await fetch_template(f"{template_slug}_whatsapp", effective_company_id)
     
@@ -491,16 +504,10 @@ async def send_notification_from_template(user_obj: dict, template_slug: str, co
     phone = user_obj.get("mobile")
     results = {}
 
-    print(f"[DEBUG-NOTIFY] Slug: {template_slug}, ScopeOverride: {scope_override}, EffectiveCompany: {effective_company_id}")
-    print(f"[DEBUG-NOTIFY] Email Found: {bool(email_t)}, WhatsApp Found: {bool(whatsapp_t)}, Target Email: {email}")
-
     if delivery_type in ["email", "both"] and email and email_t:
         rendered_body = render_template(email_t["body"], context)
         rendered_subject = render_template(email_t.get("subject", "Notification"), context)
         results["email"] = await send_email_notification(email, rendered_subject, rendered_body, user_id, email_t.get("slug", f"{template_slug}_email"))
-        print(f"[DEBUG-NOTIFY] Email send attempt result: {results.get('email')}")
-    elif delivery_type in ["email", "both"]:
-        print(f"[DEBUG-NOTIFY] Email skip: target={email}, template={bool(email_t)}")
 
     if delivery_type in ["whatsapp", "both"] and phone and whatsapp_t:
         wa_slug = whatsapp_t.get("slug", f"{template_slug}_whatsapp")
@@ -508,12 +515,10 @@ async def send_notification_from_template(user_obj: dict, template_slug: str, co
         if meta_name:
             # Business-initiated → must use a Meta-approved template with positional params.
             params = [str(context.get(k, "")) for k in whatsapp_t.get("meta_params", [])]
-            print(f"[DEBUG-NOTIFY] WhatsApp template='{meta_name}' lang={whatsapp_t.get('meta_lang', 'en')} params={params} -> {phone}")
             results["whatsapp"] = await send_whatsapp_template(
                 phone, meta_name, whatsapp_t.get("meta_lang", "en"), params, user_id, wa_slug)
         else:
             # Fallback: free-form text (only delivered within the 24h window).
-            print(f"[DEBUG-NOTIFY] WhatsApp free-text fallback (no meta_template_name set) -> {phone}")
             rendered_body = render_template(whatsapp_t["body"], context)
             results["whatsapp"] = await send_whatsapp_notification(phone, rendered_body, user_id, wa_slug)
         print(f"[DEBUG-NOTIFY] WhatsApp send result: {results.get('whatsapp')}")

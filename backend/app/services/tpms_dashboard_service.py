@@ -110,10 +110,18 @@ async def _load_companies() -> Dict[str, dict]:
     for c in await get_collection("companies").find({}).to_list(1000):
         cid = str(c["_id"])
         owner = str(c.get("owner") or "").strip()
+        # Full ownership set for scoping: owner + admin_id + smops_ids (matches the write-side
+        # assert_can_schedule). `om_key` stays = owner so the OM league grouping is unchanged.
+        om_keys = {k for k in (
+            owner,
+            str(c.get("admin_id") or "").strip(),
+            *[str(x).strip() for x in (c.get("smops_ids") or [])],
+        ) if k}
         out[cid] = {
             "name": c.get("name") or cid,
             "om_key": owner,
             "om_name": staff.get(owner, owner),
+            "om_keys": om_keys,
         }
     return out
 
@@ -138,7 +146,8 @@ def _allowed_companies(user: dict, companies: Dict[str, dict],
         return [str(user["company_id"])]
     if role not in STAFF_ROLES:
         uid = str(user.get("_id"))
-        owned = [cid for cid, i in companies.items() if i["om_key"] == uid]
+        owned = [cid for cid, i in companies.items()
+                 if uid in (i.get("om_keys") or set()) or i.get("om_key") == uid]
         return owned
     return None
 
@@ -343,9 +352,19 @@ async def _open_actions(allowed: Optional[List[str]]) -> List[dict]:
     if allowed is not None:
         query["company_id"] = {"$in": allowed}
     rows = await get_collection(COLL_ACTION_ITEMS).find(query).to_list(5000)
+    # Events whose doer has already clicked "Mark Done" — the delay clock has moved from the
+    # client side to the staff side (spec §8). Drives the in-flight "Pending (…side)" labels.
+    learner_done_events = {str(e["_id"]) for e in await _load_events(allowed)
+                           if e.get("learner_done")}
     out = []
     for a in rows:
         delay = a.get("delay_days") or 0
+        eid = str(a.get("event_id") or "")
+        # Two-stage delay display: while an activity is still open there is no numeric delay
+        # yet — we show which side it is waiting on. Once closed, the numeric split is stamped
+        # onto the row (and closed rows are excluded from this open-items query).
+        waiting_staff = eid in learner_done_events
+        pending_label = "Pending (Staff side)" if waiting_staff else "Pending (Client side)"
         out.append({
             "id": str(a["_id"]),
             "company": a.get("company_name") or "",
@@ -356,8 +375,9 @@ async def _open_actions(allowed: Optional[List[str]]) -> List[dict]:
             "target": a.get("target_date") or "",
             "actual": "",
             "status": a.get("status") or "Pending",
-            "learner_delay": _delay_label(a.get("learner_delay_days")),
-            "staff_delay": _delay_label(a.get("staff_delay_days")),
+            "pending_side": "staff" if waiting_staff else "client",
+            "learner_delay": pending_label,
+            "staff_delay": pending_label,
             "follow_up": f"Overdue {delay}d" if delay else "On track",
         })
     out.sort(key=lambda r: r["company"])
@@ -445,6 +465,24 @@ async def get_analytics(user: dict, scope: dict) -> dict:
             "escalations": escalations.get(cid, 0),
             "action_closure": closure_pct(cid),
         })
+    # Zero-activity companies still appear in the health matrix (0/0/0%, AT-RISK) so Admin can
+    # see "unplanned" clients at a glance — matches the source's health-matrix inclusion. These
+    # rows carry no planned/overdue, so they don't affect the cards or Top-Delayed list.
+    seen = {c["company_id"] for c in clients}
+    for cid in (allowed if allowed is not None else list(companies.keys())):
+        if cid in seen:
+            continue
+        info = companies.get(cid) or {}
+        clients.append({
+            "company_id": cid,
+            "company": info.get("name") or cid,
+            "om": info.get("om_name") or "",
+            "done": 0, "pending": 0, "overdue": 0,
+            "planned": 0, "completion": 0, "avg_delay": 0, "trend": "Flat",
+            "status": _status_band(0),
+            "escalations": escalations.get(cid, 0),
+            "action_closure": closure_pct(cid),
+        })
     clients.sort(key=lambda c: (c["company"] or "").lower())
 
     om_companies: Dict[str, List[str]] = {}
@@ -508,10 +546,13 @@ async def get_analytics(user: dict, scope: dict) -> dict:
 async def _filters(companies: Dict[str, dict], allowed: Optional[List[str]]) -> dict:
     scoped = {cid: i for cid, i in companies.items()
               if allowed is None or cid in set(allowed)}
+    # OM = SMOps: list the full internal staff roster (consistent with the Client-wise
+    # Calendar's OM filter), not just the handful of company owners.
     oms = {}
-    for i in scoped.values():
-        if i["om_key"]:
-            oms[i["om_key"]] = i["om_name"] or i["om_key"]
+    for s in await get_collection("staff").find({"is_active": {"$ne": False}}).to_list(500):
+        oms[str(s["_id"])] = (s.get("full_name")
+                              or " ".join(filter(None, [s.get("first_name"), s.get("last_name")])).strip()
+                              or s.get("email") or str(s["_id"]))
     periods = sorted({str(r.get("period")) for r in
                       await get_collection(COLL_SUCCESS_MEASURES).find({}, {"period": 1}).to_list(20000)
                       if r.get("period")}, reverse=True)
@@ -780,6 +821,14 @@ async def get_employee_activity(user: dict, scope: dict) -> dict:
     people = await _company_users(allowed)
     rows_raw = await _tracker_rows(allowed, period)
 
+    # Optional "Scheduled by OM/Client" filter — the tracker row doesn't carry who scheduled it,
+    # so resolve it from the source calendar event's scheduled_by_side (internal = OM, client).
+    sched_filter = str(scope.get("scheduled_by") or "").lower()
+    event_side: Dict[str, str] = {}
+    if sched_filter:
+        for e in await _load_events(allowed):
+            event_side[str(e["_id"])] = str(e.get("scheduled_by_side") or "").lower()
+
     agg: Dict[str, dict] = {}
     periods = set()
     for r in rows_raw:
@@ -788,6 +837,8 @@ async def get_employee_activity(user: dict, scope: dict) -> dict:
             continue
         status = str(r.get("status") or "")
         if status == STATUS_CANCELLED:
+            continue
+        if sched_filter and event_side.get(str(r.get("event_id")), "") != sched_filter:
             continue
         if r.get("period"):
             periods.add(str(r["period"]))
@@ -858,6 +909,11 @@ async def get_hod_dashboard(user: dict, scope: dict) -> dict:
     allowed = _allowed_companies(user, companies, scope)
     window = _period_window(scope.get("period"))
     frm, to = window[0], window[1]
+    # Date-range presets (This Month / Last Month / Quarter / Custom): an explicit from/to
+    # overrides the single-month window. Grouping stays per-period, so a multi-month range
+    # naturally yields one column per month.
+    if scope.get("date_from") and scope.get("date_to"):
+        frm, to = str(scope["date_from"])[:10], str(scope["date_to"])[:10]
     today = _today()
 
     people = await _company_users(allowed)
@@ -938,6 +994,7 @@ async def get_hod_dashboard(user: dict, scope: dict) -> dict:
         "score_rows": score_rows, "tracker": tracker,
         "alerts": alerts, "open_actions": actions,
         "selected_period": scope.get("period") or frm[:7],
+        "range_from": frm, "range_to": to,
     }
 
 
@@ -1000,7 +1057,16 @@ async def get_logs_report(user: dict, channel: str, scope: dict) -> dict:
     Here the query is paginated server-side; the client asks for what it renders.
     """
     scope = scope or {}
-    query: dict = {"channel": channel} if channel else {}
+    # Sends are logged by notification_service.log_notification into the `notifications`
+    # collection (fields: sent_at, error_message, template_slug). TPMS sends are slugged
+    # `tpms_*`, so scope the report to those to keep it a TPMS-only log view.
+    query: dict = {"template_slug": {"$regex": "^tpms"}}
+    # Side filter: TPMS sends are slugged tpms_{kind}_{side} (side = staff | company).
+    side = str(scope.get("side") or "").lower()
+    if side in ("staff", "company"):
+        query["template_slug"] = {"$regex": f"^tpms.*_{side}$"}
+    if channel:
+        query["channel"] = channel
     if scope.get("status"):
         query["status"] = scope["status"]
     if scope.get("from") or scope.get("to"):
@@ -1009,13 +1075,13 @@ async def get_logs_report(user: dict, channel: str, scope: dict) -> dict:
             rng["$gte"] = datetime.fromisoformat(str(scope["from"])[:10])
         if scope.get("to"):
             rng["$lte"] = datetime.fromisoformat(str(scope["to"])[:10]) + timedelta(days=1)
-        query["created_at"] = rng
+        query["sent_at"] = rng
 
     limit = min(int(scope.get("limit") or 500), 3000)
     skip = int(scope.get("skip") or 0)
-    coll = get_collection("notification_logs")
+    coll = get_collection("notifications")
     total = await coll.count_documents(query)
-    docs = await coll.find(query).sort("created_at", -1).skip(skip).limit(limit).to_list(limit)
+    docs = await coll.find(query).sort("sent_at", -1).skip(skip).limit(limit).to_list(limit)
 
     counts = {"total": total, "sent": 0, "failed": 0, "skipped": 0}
     spark: Dict[str, int] = {}
@@ -1028,13 +1094,13 @@ async def get_logs_report(user: dict, channel: str, scope: dict) -> dict:
             counts["failed"] += 1
         else:
             counts["skipped"] += 1
-        created = d.get("created_at")
+        created = d.get("sent_at")
         day = created.date().isoformat() if isinstance(created, datetime) else ""
         if day:
             spark[day] = spark.get(day, 0) + 1
         rows.append([
             day, d.get("template_slug") or "", d.get("channel") or "",
-            d.get("target_contact") or "", d.get("status") or "", d.get("error") or "",
+            d.get("target_contact") or "", d.get("status") or "", d.get("error_message") or "",
         ])
 
     return {
@@ -1086,6 +1152,18 @@ async def get_review_reports(user: dict, source_id: str, scope: dict) -> dict:
 
     docs = await get_collection(submission_collection(ft)).find(query).to_list(5000)
     respondent_key = "md_id" if is_yesno else "hod_id"
+
+    # Self-lock (forcedHod): staff/admin see everyone; a client-admin / MD oversees all
+    # respondents in their own company; every other client respondent (an HOD or employee)
+    # may only see their OWN reviews — never a peer's.
+    role = (user.get("role") or "").lower()
+    gov = (user.get("governance_role") or "").strip().lower()
+    sees_all = (role in STAFF_ROLES or role == "clientadmin"
+                or gov in ("md", "managing director"))
+    if role in CLIENT_ROLES and not sees_all:
+        self_id = str(user.get("_id"))
+        docs = [d for d in docs if str(d.get(respondent_key)) == self_id]
+
     if scope.get("respondent_id"):
         docs = [d for d in docs if str(d.get(respondent_key)) == str(scope["respondent_id"])]
 
@@ -1189,6 +1267,6 @@ async def get_review_reports(user: dict, source_id: str, scope: dict) -> dict:
         "respondent_options": sorted(
             [{"id": k, "name": v} for k, v in respondents.items()],
             key=lambda r: r["name"].lower()),
-        "can_pick": (user.get("role") or "").lower() not in CLIENT_ROLES,
+        "can_pick": sees_all,
         "selected_period": scope.get("period") or "",
     }

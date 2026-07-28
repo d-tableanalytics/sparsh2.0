@@ -50,6 +50,7 @@ const Pill = ({ label }) => {
 const delayColor = (v) => {
   if (v === 'On time') return 'var(--accent-green)';
   if (!v || v === '—') return 'var(--text-muted)';
+  if (/pending/i.test(v)) return 'var(--accent-orange)';
   return 'var(--accent-red)';
 };
 

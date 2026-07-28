@@ -10,6 +10,7 @@ import {
 } from '../../common/dashboardKit';
 import { useAuth } from '../../../../context/AuthContext';
 import { getAnalyticsDashboard, currentPeriod, periodLabel } from '../../../../services/tpmsApi';
+import ClientActivityCalendar from './ClientActivityCalendar';
 
 /* ─────────────────────────────────────────────────────────────
    Admin View — high-level operational dashboard (ERP-grade).
@@ -133,11 +134,7 @@ const AdminView = () => {
       )}
 
       {tab === 'calendar' ? (
-        <div className="rounded-2xl border border-dashed border-[var(--border)] bg-[var(--bg-card)] py-20 text-center">
-          <CalendarDays size={28} className="mx-auto text-[var(--text-muted)]" />
-          <p className="text-[13px] font-bold mt-3">Client-wise Calendar</p>
-          <p className="text-[12px] text-[var(--text-muted)] mt-1">Calendar view coming next.</p>
-        </div>
+        <ClientActivityCalendar />
       ) : loading && !data ? (
         <div className="py-24 flex flex-col items-center justify-center text-[var(--text-muted)]">
           <RefreshCw size={26} className="animate-spin mb-3 opacity-60" />
