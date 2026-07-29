@@ -107,7 +107,9 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, scope, onChanged, onEdit })
   useEffect(() => {
     if (!isOpen) return;
     fetchDetail();
-    api.get('/tasks/assignable-users').then(res => setUsers(res.data || [])).catch(() => {});
+    // `?all=true` → full directory for name resolution (must include the assigner/higher-rank
+    // users the viewer can't assign to, so they don't show as "Unknown").
+    api.get('/tasks/assignable-users?all=true').then(res => setUsers(res.data || [])).catch(() => {});
     // Categories/tags for the "Add Subtask" form.
     api.get('/task-categories').then(r => setMetaCats((r.data || []).map(c => c.name).filter(Boolean))).catch(() => {});
     api.get('/task-tags').then(r => setMetaTags((r.data || []).map(t => t.name).filter(Boolean))).catch(() => {});

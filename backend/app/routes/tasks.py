@@ -13,6 +13,8 @@ from app.controllers.auth_controller import (
     has_task_access, is_client_side_user,
     TASK_ACCESS_DENIED_MESSAGE, DELEGATION_DISABLED_MESSAGE,
     get_ineligible_recipient_ids, recipient_denied_message,
+    get_rank_ineligible_assignees, ASSIGN_RANK_DENIED_MESSAGE,
+    ADMIN_TIER, client_rank,
 )
 from app.utils.calendar_utils import CALENDAR_COLLECTIONS, find_event_across_collections
 from app.services.activity_log_service import log_activity
@@ -38,6 +40,21 @@ def _can_view_all_tasks(user: dict) -> bool:
         return True
     # Optional explicit grant for a specific non-admin who should see everything.
     return bool(user.get("permissions", {}).get("tasks", {}).get("view_all_tasks"))
+
+
+# ── Internal vs client task separation ───────────────────────────────────────────
+# The two environments are fully independent: an internal Sparsh task is never visible to
+# client users, and a client task is never visible to internal Sparsh users (not even an
+# internal Super Admin/Admin). Client-created tasks carry notification_scope='company' (and
+# usually a company_id); internal tasks are 'staff'/unset with no company_id.
+def _is_client_task(task: dict) -> bool:
+    return (task.get("notification_scope") == "company"
+            or bool(str(task.get("company_id") or "").strip()))
+
+# Mongo clause selecting ONLY internal tasks (no company scope, no company_id) — used to keep
+# the internal "all tasks" view from ever returning client-company tasks.
+_INTERNAL_TASK_CLAUSE = {"notification_scope": {"$ne": "company"},
+                         "company_id": {"$in": [None, ""]}}
 
 # Richer workflow taken on by type=="task" docs. The legacy `status` field
 # (schedule/completed/canceled/reschedule) stays authoritative for the Calendar page.
@@ -185,6 +202,10 @@ async def _fetch_tasks(
         # falls back to their own tasks (no 403), so "All Tasks" never leaks others' data.
         if not _can_view_all_tasks(current_user):
             clauses.append({"$or": _visibility_clauses(user_id)})
+        else:
+            # Internal admins see every INTERNAL task, but NEVER client-company tasks — the two
+            # environments stay fully separate.
+            clauses.append(_INTERNAL_TASK_CLAUSE)
     elif scope == "group":
         if not group_id:
             raise HTTPException(status_code=400, detail="group_id is required for group scope")
@@ -198,6 +219,8 @@ async def _fetch_tasks(
     elif scope == "deleted":
         if not _can_view_all_tasks(current_user):
             clauses.append({"$or": _visibility_clauses(user_id)})
+        else:
+            clauses.append(_INTERNAL_TASK_CLAUSE)
     else:
         raise HTTPException(status_code=400, detail="Invalid scope")
 
@@ -331,7 +354,9 @@ def _is_participant(existing: dict, current_user: dict) -> bool:
     on a task (add checklist items, comment, attach files), broader than who can edit
     the core task fields or change its status."""
     user_id = str(current_user["_id"])
-    if current_user.get("role") == "superadmin":
+    # The Super Admin oversight bypass applies to INTERNAL tasks only — a client task is never
+    # visible to internal Sparsh, so it must fall through to genuine participant membership.
+    if current_user.get("role") == "superadmin" and not _is_client_task(existing):
         return True
     if existing.get("user_id") == user_id:
         return True
@@ -590,7 +615,14 @@ async def task_event_stream(token: str = Query(...)):
 # never exposed to a client company. Mirrors get_ineligible_recipient_ids, which enforces the
 # same split on save.
 @router.get("/assignable-users")
-async def list_assignable_users(current_user: dict = Depends(require_task_access)):
+async def list_assignable_users(
+    include_all: bool = Query(False, alias="all"),
+    current_user: dict = Depends(require_task_access),
+):
+    """Default: the rank-filtered "who I may ASSIGN to" list (drives the assign picker).
+    `?all=true`: the full company/internal-scoped directory for NAME RESOLUTION on task/
+    delegation detail & list views — it must still include people the viewer can't assign to
+    (e.g. the admin or MD who assigned them the task), so those don't render as "Unknown"."""
     if is_client_side_user(current_user):
         company_id = current_user.get("company_id")
         if not company_id:
@@ -598,8 +630,15 @@ async def list_assignable_users(current_user: dict = Depends(require_task_access
         docs = await get_collection("learners").find({
             "company_id": str(company_id), "is_active": {"$ne": False},
         }).to_list(1000)
+        # Assign picker only: a client may assign at or below their own MD>HR>HOD>Implementor rank.
+        if not include_all:
+            actor_rank = client_rank(current_user)
+            docs = [u for u in docs if client_rank(u) <= actor_rank]
     else:
         docs = await get_collection("staff").find({"is_active": {"$ne": False}}).to_list(1000)
+        # Assign picker only: SMOPS assign to other SMOPS — hide admin/superadmin from the list.
+        if not include_all and (current_user.get("role") or "").lower() not in ADMIN_TIER:
+            docs = [u for u in docs if (u.get("role") or "").lower() not in ADMIN_TIER]
     return [{
         "_id": str(u["_id"]),
         "full_name": u.get("full_name") or (f"{u.get('first_name', '')} {u.get('last_name', '')}".strip() or None) or u.get("email"),
@@ -646,10 +685,16 @@ async def update_task_status(task_id: str, body: dict, current_user: dict = Depe
         bad = await get_ineligible_recipient_ids(current_user, [doer_id])
         if bad:
             raise HTTPException(status_code=403, detail=recipient_denied_message(current_user))
+        rank_bad = await get_rank_ineligible_assignees(current_user, [doer_id])
+        if rank_bad:
+            raise HTTPException(status_code=403, detail=ASSIGN_RANK_DENIED_MESSAGE)
         reassign_doer = doer_id
 
     user_id = str(current_user["_id"])
-    is_admin = current_user.get("role") == "superadmin"
+    # The Super Admin bypass is for INTERNAL tasks only. On a CLIENT task it does not apply, so
+    # verification/finalize/reopen stays with the client user who assigned it — an internal
+    # Super Admin/Admin can never verify or act on a client-side task.
+    is_admin = current_user.get("role") == "superadmin" and not _is_client_task(existing)
     is_creator = existing.get("user_id") == user_id
     is_assignee = user_id in (existing.get("target_staff_id") or [])
     if not (is_admin or is_creator or is_assignee):

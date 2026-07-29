@@ -5,6 +5,7 @@ from app.controllers.auth_controller import (
     get_current_user, has_task_access, is_client_side_user,
     TASK_ACCESS_DENIED_MESSAGE, DELEGATION_DISABLED_MESSAGE,
     get_ineligible_recipient_ids, recipient_denied_message,
+    get_rank_ineligible_assignees, ASSIGN_RANK_DENIED_MESSAGE,
 )
 from app.models.calendar_event import CalendarEventCreate, CalendarEventResponse
 from app.services.task_notifications import notify_task_event, recipients_for_event
@@ -305,6 +306,11 @@ async def create_event(event: CalendarEventCreate, background_tasks: BackgroundT
         bad = await get_ineligible_recipient_ids(current_user, (event_dict.get("target_staff_id") or []) + (event_dict.get("watchers") or []))
         if bad:
             raise HTTPException(status_code=403, detail=recipient_denied_message(current_user))
+        # Assignment rank rule (assignees only): SMOPS can't assign up to admin; a client can't
+        # assign above their own MD>HR>HOD>Implementor rank.
+        rank_bad = await get_rank_ineligible_assignees(current_user, event_dict.get("target_staff_id") or [])
+        if rank_bad:
+            raise HTTPException(status_code=403, detail=ASSIGN_RANK_DENIED_MESSAGE)
     elif event_dict.get("type") == TODO_TYPE:
         # A todo is personal planning: every authenticated user may create their own, so the
         # generic `calendar.create` bit is not required (a staff member without it must still
@@ -549,6 +555,10 @@ async def update_event(event_id: str, updates: dict, background_tasks: Backgroun
             bad = await get_ineligible_recipient_ids(current_user, recipients)
             if bad:
                 raise HTTPException(status_code=403, detail=recipient_denied_message(current_user))
+        if "target_staff_id" in updates:
+            rank_bad = await get_rank_ineligible_assignees(current_user, updates.get("target_staff_id") or [])
+            if rank_bad:
+                raise HTTPException(status_code=403, detail=ASSIGN_RANK_DENIED_MESSAGE)
 
     # A todo answers to its owner alone — not to admins, not to a calendar.update grant.
     _require_todo_owner(existing, current_user)

@@ -224,7 +224,8 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
   }, []);
 
   useEffect(() => {
-    api.get('/tasks/assignable-users').then(res => setUsers(res.data || [])).catch(() => {});
+    // Name-resolution map — full directory so every participant renders (not just assignable users).
+    api.get('/tasks/assignable-users?all=true').then(res => setUsers(res.data || [])).catch(() => {});
     // Holidays block dates in the Reopen picker.
     getHolidays().then(res => setHolidayDates((res.data || []).map(h => h.holiday_date).filter(Boolean))).catch(() => setHolidayDates([]));
   }, []);

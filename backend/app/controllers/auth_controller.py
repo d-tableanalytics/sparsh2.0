@@ -205,6 +205,66 @@ async def get_ineligible_recipient_ids(actor: dict, user_ids) -> list:
     return [i for i in ids if i not in eligible]
 
 
+# ── Role-rank rules for Task/Delegation ASSIGNMENT ───────────────────────────────
+# These apply to ASSIGNEES only (target_staff_id) — in-loop watchers are NOT rank-restricted,
+# so a junior may still loop in a senior as an observer (existing behaviour preserved).
+#   • Internal: admin/superadmin assign to ALL internal users; SMOPS (staff/coach) assign to
+#     other SMOPS only — never to admin/superadmin, and never to a different SMOPS org (there
+#     is only one SMOPS team today, so "same team" = "any SMOPS").
+#   • Client: MD > HR > HOD > Implementor. A user may assign only at or below their own rank,
+#     within their own company (same-company is enforced by get_ineligible_recipient_ids).
+ADMIN_TIER = {"superadmin", "admin"}
+CLIENT_RANK = {"MD": 4, "HR": 3, "HOD": 2, "IMPLEMENTOR": 1}
+ASSIGN_RANK_DENIED_MESSAGE = (
+    "You can only assign tasks to your own level or below within your team/company."
+)
+
+
+def client_rank(user: dict) -> int:
+    """MD>HR>HOD>Implementor rank. A clientadmin is the company admin → MD-level. A client
+    user with no governance_role is treated as the lowest rank (Implementor)."""
+    if (user.get("role") or "").lower() == "clientadmin":
+        return CLIENT_RANK["MD"]
+    return CLIENT_RANK.get((user.get("governance_role") or "").strip().upper(),
+                           CLIENT_RANK["IMPLEMENTOR"])
+
+
+async def get_rank_ineligible_assignees(actor: dict, assignee_ids) -> list:
+    """Assignee ids `actor` may NOT assign to by ROLE RANK — layered on top of
+    get_ineligible_recipient_ids (which already blocks internal↔client and cross-company).
+    Adds: SMOPS cannot assign up to admin/superadmin; a client cannot assign to a HIGHER
+    governance role than their own. Assignees only — not in-loop watchers."""
+    from bson import ObjectId
+    ids = [str(i) for i in (assignee_ids or []) if i]
+    if not ids:
+        return []
+    oids = []
+    for i in ids:
+        try:
+            oids.append(ObjectId(i))
+        except Exception:
+            pass
+
+    if not is_client_side_user(actor):
+        # Admin tier assigns to every internal user; only SMOPS are restricted.
+        if (actor.get("role") or "").lower() in ADMIN_TIER:
+            return []
+        bad = set()
+        async for u in get_collection("staff").find({"_id": {"$in": oids}}, {"role": 1}):
+            if (u.get("role") or "").lower() in ADMIN_TIER:
+                bad.add(str(u["_id"]))
+        return list(bad)
+
+    # Client actor: cannot assign upward.
+    actor_rank = client_rank(actor)
+    bad = []
+    async for u in get_collection("learners").find(
+            {"_id": {"$in": oids}}, {"_id": 1, "role": 1, "governance_role": 1}):
+        if client_rank(u) > actor_rank:
+            bad.append(str(u["_id"]))
+    return bad
+
+
 async def get_non_internal_user_ids(user_ids) -> list:
     """Given a list of user id strings (task assignees + watchers), return those that are
     NOT internal Sparsh users. Internal = present in the `staff` collection. Any id not
