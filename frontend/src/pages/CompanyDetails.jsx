@@ -132,6 +132,62 @@ const generatePerformanceData = () => {
   }));
 };
 
+// ─── Searchable Reporting-Manager select ───
+// Simple inline searchable dropdown. Stores the selected option's `_id`.
+// value '' means no manager (the "— None —" option).
+const ReportingManagerSelect = ({ options, value, onChange }) => {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState('');
+  const ref = useRef(null);
+
+  useEffect(() => {
+    const handler = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  const selected = options.find(o => o._id === value);
+  const q = query.trim().toLowerCase();
+  const filtered = q
+    ? options.filter(o =>
+        (o.full_name || '').toLowerCase().includes(q) ||
+        (o.email || '').toLowerCase().includes(q) ||
+        (o.designation || '').toLowerCase().includes(q))
+    : options;
+
+  const label = selected
+    ? `${selected.full_name || selected.email}${selected.designation ? ' · ' + selected.designation : ''}`
+    : '— None —';
+
+  return (
+    <div className="relative" ref={ref}>
+      <button type="button" onClick={() => setOpen(o => !o)}
+        className="w-full px-3 py-1.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-md text-[13px] text-[var(--text-main)] outline-none flex items-center justify-between gap-2 text-left">
+        <span className={selected ? 'truncate' : 'truncate text-[var(--text-muted)]'}>{label}</span>
+        <ChevronDown size={14} className="shrink-0 text-[var(--text-muted)]" />
+      </button>
+      {open && (
+        <div className="absolute z-50 mt-1 w-full bg-[var(--bg-card)] border border-[var(--input-border)] rounded-md shadow-lg max-h-56 overflow-auto">
+          <input autoFocus value={query} onChange={e => setQuery(e.target.value)} placeholder="Search name, email, designation…"
+            className="w-full px-3 py-1.5 bg-[var(--input-bg)] border-b border-[var(--input-border)] text-[12px] text-[var(--text-main)] outline-none sticky top-0" />
+          <button type="button" onClick={() => { onChange(''); setOpen(false); setQuery(''); }}
+            className="w-full text-left px-3 py-1.5 text-[12px] text-[var(--text-muted)] hover:bg-[var(--input-bg)]">— None —</button>
+          {filtered.map(o => (
+            <button key={o._id} type="button" onClick={() => { onChange(o._id); setOpen(false); setQuery(''); }}
+              className="w-full text-left px-3 py-1.5 hover:bg-[var(--input-bg)]">
+              <div className="text-[12px] text-[var(--text-main)] truncate">{o.full_name || o.email}</div>
+              <div className="text-[10px] text-[var(--text-muted)] truncate">{o.email}{o.designation ? ' · ' + o.designation : ''}{o.role ? ' · ' + o.role : ''}</div>
+            </button>
+          ))}
+          {filtered.length === 0 && (
+            <div className="px-3 py-2 text-[12px] text-[var(--text-muted)]">No matches</div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+};
+
 // ─── Main Component ───
 const CompanyDetails = () => {
   const { companyId } = useParams();
@@ -155,8 +211,11 @@ const CompanyDetails = () => {
 
   const [newUser, setNewUser] = useState({
     email: '', password: '', first_name: '', last_name: '', mobile: '',
-    role: 'clientuser', session_type: 'None', designation: '', department: 'Other'
+    role: 'clientuser', session_type: 'None', designation: '', department: 'Other',
+    reporting_manager: ''
   });
+  // Reporting-manager dropdown options (active users of THIS company)
+  const [managerOptions, setManagerOptions] = useState([]);
 
   // Training Path State
   const [trainingPath, setTrainingPath] = useState([]);
@@ -239,6 +298,15 @@ const CompanyDetails = () => {
     if (activeTab === 'batches') fetchTrainingPath();
   }, [companyId, activeTab]);
 
+  // Load reporting-manager options for THIS company when the Add-User modal opens.
+  // Refetches if the company (companyId) changes.
+  useEffect(() => {
+    if (!showAddUser || !companyId) return;
+    api.get('/users/reporting-manager-options', { params: { company_id: companyId } })
+      .then(res => setManagerOptions(Array.isArray(res.data) ? res.data : []))
+      .catch(() => setManagerOptions([]));
+  }, [showAddUser, companyId]);
+
   // ─── Handlers ───
   const handleSaveEdit = async () => {
     try {
@@ -295,10 +363,11 @@ const CompanyDetails = () => {
       const cleanUser = { ...newUser };
       if (!cleanUser.mobile) cleanUser.mobile = null;
       if (!cleanUser.designation) cleanUser.designation = null;
+      if (!cleanUser.reporting_manager) cleanUser.reporting_manager = null;
       await api.post(`/companies/${companyId}/users/bulk`, [cleanUser]);
       setShowAddUser(false);
       showSuccess('User added successfully');
-      setNewUser({ email: '', password: '', first_name: '', last_name: '', mobile: '', role: 'clientuser', session_type: 'None', designation: '', department: 'Other' });
+      setNewUser({ email: '', password: '', first_name: '', last_name: '', mobile: '', role: 'clientuser', session_type: 'None', designation: '', department: 'Other', reporting_manager: '' });
       fetchData();
     } catch (err) { showError(err.response?.data?.detail || 'Failed to create user'); }
   };
@@ -1059,6 +1128,9 @@ const CompanyDetails = () => {
               <select className="w-full px-3 py-1.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-md text-[13px] text-[var(--text-main)] outline-none" value={newUser.department} onChange={e => setNewUser({...newUser, department: e.target.value})}>
                 <option value="HOD">HOD</option><option value="Implementor">Implementor</option><option value="EA">EA</option><option value="MD">MD</option><option value="Other">Other</option>
               </select></div>
+          </div>
+          <div className="space-y-1"><label className="text-[10px] font-bold text-[var(--text-muted)] uppercase tracking-widest">Reporting Manager</label>
+            <ReportingManagerSelect options={managerOptions} value={newUser.reporting_manager} onChange={val => setNewUser({...newUser, reporting_manager: val})} />
           </div>
           <div className="flex gap-3 mt-6">
             <button type="submit" className="flex-1 py-2 bg-[var(--btn-primary)] text-white rounded-lg text-[13px] font-bold hover:bg-[var(--btn-primary-hover)] transition-all">Create User</button>

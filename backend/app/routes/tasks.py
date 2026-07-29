@@ -201,7 +201,13 @@ async def _fetch_tasks(
         # Only Super Admin + Sparsh Admin see every task system-wide. Everyone else silently
         # falls back to their own tasks (no 403), so "All Tasks" never leaks others' data.
         if not _can_view_all_tasks(current_user):
-            clauses.append({"$or": _visibility_clauses(user_id)})
+            vis = _visibility_clauses(user_id)
+            # A reporting manager additionally sees tasks assigned to their direct reports
+            # (same environment, so no cross-wall leak).
+            report_ids = await _direct_report_ids(current_user)
+            if report_ids:
+                vis = vis + [{"target_staff_id": {"$in": report_ids}}]
+            clauses.append({"$or": vis})
         else:
             # Internal admins see every INTERNAL task, but NEVER client-company tasks — the two
             # environments stay fully separate.
@@ -365,6 +371,44 @@ def _is_participant(existing: dict, current_user: dict) -> bool:
     if user_id in (existing.get("watchers") or []):
         return True
     return False
+
+
+# ── Reporting-Manager hierarchy ──────────────────────────────────────────────────
+# A user's reporting manager (users.reporting_manager = the manager's id) can additionally
+# see and verify tasks assigned to that user. Same environment only (internal manager ↔ staff
+# reports; client manager ↔ same-company reports), so this never crosses the internal/client
+# wall. Null reporting_manager → no manager, behaves exactly as before.
+async def _direct_report_ids(user: dict) -> list:
+    """Ids of users who report directly to `user`, within the same environment."""
+    uid = str(user.get("_id") or "")
+    if not uid:
+        return []
+    coll = "learners" if is_client_side_user(user) else "staff"
+    query = {"reporting_manager": uid, "is_active": {"$ne": False}}
+    if is_client_side_user(user) and user.get("company_id"):
+        query["company_id"] = str(user["company_id"])
+    docs = await get_collection(coll).find(query, {"_id": 1}).to_list(2000)
+    return [str(d["_id"]) for d in docs]
+
+
+async def _is_manager_of_assignee(task: dict, user: dict) -> bool:
+    """True if `user` is the reporting manager of any assignee on `task` (same environment)."""
+    uid = str(user.get("_id") or "")
+    assignees = [str(a) for a in (task.get("target_staff_id") or []) if a]
+    if not uid or not assignees:
+        return False
+    oids = []
+    for a in assignees:
+        try:
+            oids.append(ObjectId(a))
+        except Exception:
+            pass
+    if not oids:
+        return False
+    coll = "learners" if is_client_side_user(user) else "staff"
+    doc = await get_collection(coll).find_one(
+        {"_id": {"$in": oids}, "reporting_manager": uid}, {"_id": 1})
+    return doc is not None
 
 
 async def _get_task_or_404(task_id: str):
@@ -651,7 +695,9 @@ async def list_assignable_users(
 @router.get("/{task_id}")
 async def get_task_detail(task_id: str, current_user: dict = Depends(require_task_access)):
     existing, _ = await _get_task_or_404(task_id)
-    if not _is_participant(existing, current_user):
+    # A participant OR the reporting manager of an assignee may view the full task (this single
+    # response carries status, progress, comments, attachments and both histories).
+    if not _is_participant(existing, current_user) and not await _is_manager_of_assignee(existing, current_user):
         raise HTTPException(status_code=403, detail="Not authorized to view this task")
     uid = str(current_user["_id"])
     detail = _serialize_task_detail(existing, uid)
@@ -697,13 +743,16 @@ async def update_task_status(task_id: str, body: dict, current_user: dict = Depe
     is_admin = current_user.get("role") == "superadmin" and not _is_client_task(existing)
     is_creator = existing.get("user_id") == user_id
     is_assignee = user_id in (existing.get("target_staff_id") or [])
-    if not (is_admin or is_creator or is_assignee):
+    # The assignee's reporting manager may act on the task as an authorized verifier (same as
+    # the assigner) — both to update status and to verify/finalize/reopen.
+    is_manager = await _is_manager_of_assignee(existing, current_user)
+    if not (is_admin or is_creator or is_assignee or is_manager):
         raise HTTPException(status_code=403, detail="Not authorized to update this task")
 
     old_status = _resolve_workflow_status(existing)
-    # Only the assigner/delegator (creator) or an admin may finalize or reopen a task that
-    # has been submitted for verification — never the assignee alone.
-    is_assigner_or_admin = is_admin or is_creator
+    # Only the assigner/delegator (creator), an admin, or the assignee's reporting manager may
+    # finalize or reopen a task submitted for verification — never the assignee alone.
+    is_assigner_or_admin = is_admin or is_creator or is_manager
     if old_status == "verification" and not is_assigner_or_admin:
         raise HTTPException(status_code=403, detail="Only the assigner can verify, finalize, or reopen this task.")
     if new_status == "in_progress_reopened" and not is_assigner_or_admin:
