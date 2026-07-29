@@ -263,7 +263,7 @@ async def _fetch_tasks(
     return results
 
 
-def _serialize_task(doc: dict, current_user_id: str) -> dict:
+def _serialize_task(doc: dict, current_user_id: str, report_ids: set = None) -> dict:
     ws = _resolve_workflow_status(doc)
     now = datetime.utcnow()
     return {
@@ -291,6 +291,11 @@ def _serialize_task(doc: dict, current_user_id: str) -> dict:
         "parentTaskId": doc.get("parent_task_id"),
         "recurringGroupId": doc.get("recurring_group_id"),
         "isCreator": doc.get("user_id") == current_user_id,
+        # True when the viewer is the reporting manager of one of this task's assignees — so the
+        # list dropdown shows them the VERIFIER options (Complete / Approve), not "Request for
+        # Verification". Uses a pre-fetched report_ids set, so there's no per-row DB query.
+        "isReportingManager": bool(report_ids) and not doc.get("user_id") == current_user_id
+        and bool({str(a) for a in (doc.get("target_staff_id") or [])} & (report_ids or set())),
         "deletedAt": doc.get("deleted_at"),
         # Exposed on the list payload too (not just detail) so list dropdowns can apply the
         # verification-aware labels / role-based options without a second fetch.
@@ -411,6 +416,30 @@ async def _is_manager_of_assignee(task: dict, user: dict) -> bool:
     return doc is not None
 
 
+async def _manager_ids_for_task(task: dict) -> set:
+    """Reporting-manager ids of the task's assignees. They monitor and verify the task, so the
+    verification request (and other real-time status events) reach them alongside the assigner."""
+    assignees = [str(a) for a in (task.get("target_staff_id") or []) if a]
+    if not assignees:
+        return set()
+    oids = []
+    for a in assignees:
+        try:
+            oids.append(ObjectId(a))
+        except Exception:
+            pass
+    out: set = set()
+    if not oids:
+        return out
+    for coll in ("staff", "learners"):
+        async for u in get_collection(coll).find(
+                {"_id": {"$in": oids}}, {"reporting_manager": 1}):
+            mgr = str(u.get("reporting_manager") or "").strip()
+            if mgr:
+                out.add(mgr)
+    return out
+
+
 async def _get_task_or_404(task_id: str):
     existing, col_name = await find_event_across_collections(task_id)
     if not existing or existing.get("type") != "task":
@@ -513,7 +542,10 @@ async def list_tasks(
     start_iso, end_iso = _period_to_range(period, startDate, endDate)
     docs = await _fetch_tasks(current_user, scope, category, tag, frequency, assignedTo, search, start_iso, end_iso, groupId)
     user_id = str(current_user["_id"])
-    return [_serialize_task(d, user_id) for d in docs]
+    # Which of these tasks belong to the viewer's direct reports (computed once) — so the list
+    # can flag them and show the manager the verifier controls instead of "Request for Verification".
+    report_ids = set(await _direct_report_ids(current_user))
+    return [_serialize_task(d, user_id, report_ids) for d in docs]
 
 
 # Actions written to `activity_logs` that represent task lifecycle events (see log_activity
@@ -697,11 +729,15 @@ async def get_task_detail(task_id: str, current_user: dict = Depends(require_tas
     existing, _ = await _get_task_or_404(task_id)
     # A participant OR the reporting manager of an assignee may view the full task (this single
     # response carries status, progress, comments, attachments and both histories).
-    if not _is_participant(existing, current_user) and not await _is_manager_of_assignee(existing, current_user):
+    is_mgr = await _is_manager_of_assignee(existing, current_user)
+    if not _is_participant(existing, current_user) and not is_mgr:
         raise HTTPException(status_code=403, detail="Not authorized to view this task")
     uid = str(current_user["_id"])
     detail = _serialize_task_detail(existing, uid)
     detail["subtasks"] = await _fetch_subtasks(task_id, uid)
+    # Lets the UI show the reporting manager the same task-action controls as an admin —
+    # scoped to only their reports' tasks (status, Complete, Block, Dependent, Verify, Reopen).
+    detail["isReportingManager"] = is_mgr
     return detail
 
 
@@ -887,6 +923,9 @@ async def update_task_status(task_id: str, body: dict, current_user: dict = Depe
 
     projected = {**existing, **updates}
     recipients = task_events.recipients_for(existing) | task_events.recipients_for(projected)
+    # The assignees' reporting managers also monitor & verify the task, so the verification
+    # request (and every status event) reaches them alongside the assigner.
+    recipients |= await _manager_ids_for_task(projected)
     await task_events.publish(recipients, {
         "type": event_type,
         "task_id": task_id,
@@ -1111,8 +1150,11 @@ async def revise_task_deadline(task_id: str, body: dict, current_user: dict = De
     is_admin = current_user.get("role") == "superadmin"
     is_creator = existing.get("user_id") == str(current_user["_id"])
     is_assignee = str(current_user["_id"]) in (existing.get("target_staff_id") or [])
-    if not (is_admin or is_creator or is_assignee):
-        raise HTTPException(status_code=403, detail="Only the assigner or assignee can revise this task's deadline")
+    # The assignee's reporting manager may revise the deadline too — the Reopen flow uses this
+    # to send a task back with a new due date, so without it the manager can't reopen.
+    is_manager = await _is_manager_of_assignee(existing, current_user)
+    if not (is_admin or is_creator or is_assignee or is_manager):
+        raise HTTPException(status_code=403, detail="Only the assigner, assignee, or reporting manager can revise this task's deadline")
 
     old_end = existing.get("end")
     if old_end == new_end:

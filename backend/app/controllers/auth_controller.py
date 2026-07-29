@@ -265,6 +265,30 @@ async def get_rank_ineligible_assignees(actor: dict, assignee_ids) -> list:
     return bad
 
 
+async def is_reporting_manager_of_assignee(task: dict, user: dict) -> bool:
+    """True if `user` is the reporting manager of any assignee (target_staff_id) on `task`,
+    within the same environment (internal↔staff, client↔same-company learners). Grants
+    ADMIN-level task authority (incl. edit/delete) on reports' tasks. Works identically for
+    Sparsh-internal and client-side users. Shared by tasks.py and calendar_events.py."""
+    from bson import ObjectId
+    uid = str(user.get("_id") or "")
+    assignees = [str(a) for a in (task.get("target_staff_id") or []) if a]
+    if not uid or not assignees:
+        return False
+    oids = []
+    for a in assignees:
+        try:
+            oids.append(ObjectId(a))
+        except Exception:
+            pass
+    if not oids:
+        return False
+    coll = "learners" if is_client_side_user(user) else "staff"
+    doc = await get_collection(coll).find_one(
+        {"_id": {"$in": oids}, "reporting_manager": uid}, {"_id": 1})
+    return doc is not None
+
+
 async def get_non_internal_user_ids(user_ids) -> list:
     """Given a list of user id strings (task assignees + watchers), return those that are
     NOT internal Sparsh users. Internal = present in the `staff` collection. Any id not
