@@ -99,6 +99,7 @@ class UserEditRequest(BaseModel):
     session_type: Optional[str] = None
     designation: Optional[str] = None
     department: Optional[str] = None
+    reporting_manager: Optional[str] = None  # admin Edit form must be able to save this
     permissions: Optional[dict] = None
 
 class UserStatusUpdate(BaseModel):
