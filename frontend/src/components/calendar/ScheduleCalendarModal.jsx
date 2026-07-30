@@ -39,8 +39,17 @@ const ACTIVITIES = [
   'Organization Result Matrix',
 ];
 
-// Client-side departments the doers are grouped by (matches the user.department values).
+// Client-side departments the doers are grouped by.
 const DEPARTMENTS = ['HOD', 'MD', 'HR', 'IMPLEMENTOR'];
+
+// These four are governance ROLES (see tpms.TPMS_DEPARTMENTS, seeded with is_governance_role).
+// A company user carries theirs in `governance_role`, with `department` as the fallback for
+// un-migrated users — `department` is free text from the user import and may legitimately hold
+// a real org department ("Sales", "Operations") instead. Reading only `department` left the
+// doer pool empty for every migrated user. Same precedence the backend uses:
+// forms._user_department, and the HOD lookup in tpms.py.
+const govRole = (u) => ((u?.governance_role || u?.department || '') + '').trim().toUpperCase();
+const inDept = (u, dept) => govRole(u) === (dept || '').trim().toUpperCase();
 
 // Recurrence label → backend `repeat` value (see calendar_event.py / _next_occurrence).
 const RECURRENCE = [
@@ -266,8 +275,15 @@ const ScheduleCalendarModal = ({ isOpen, onClose, onSaved, mode = 'erp', event =
     return () => { alive = false; };
   }, [isOpen, isClient, user, showError, isTpms, event]);
 
-  // Load the selected company's users (the doer pool) when the company changes.
+  // Load the selected company's users (the doer pool).
+  //
+  // `isOpen` is a dependency, not just a guard: the open effect above clears companyUsers on
+  // every open, but companyId is often UNCHANGED between opens (reopening the same activity,
+  // or editing a second activity of the same company). Keyed on companyId alone this effect
+  // would not re-run, so the list stayed permanently empty after the first close — the doer
+  // dropdown showed "No matches." for every activity except the first one opened per page load.
   useEffect(() => {
+    if (!isOpen) return;
     if (!form.companyId) { setCompanyUsers([]); return; }
     let alive = true;
     (async () => {
@@ -283,9 +299,7 @@ const ScheduleCalendarModal = ({ isOpen, onClose, onSaved, mode = 'erp', event =
       }
     })();
     return () => { alive = false; };
-  }, [form.companyId, showError]);
-
-  const inDept = (u, dept) => (u?.department || '').toString().toUpperCase() === dept.toUpperCase();
+  }, [isOpen, form.companyId, showError]);
 
   // Doers available for the currently-selected departments (or all if none chosen).
   const doerPool = useMemo(() => {
@@ -407,7 +421,9 @@ const ScheduleCalendarModal = ({ isOpen, onClose, onSaved, mode = 'erp', event =
     // Snapshot names/company so any assignee can view details without extra lookups.
     const coName = isClient ? companyName : (companies.find((c) => String(c._id || c.id) === form.companyId)?.name || '');
     const smops = staff.filter((u) => form.staffIds.includes(uid(u))).map((u) => ({ id: uid(u), name: displayName(u) }));
-    const doers = companyUsers.filter((u) => form.doerIds.includes(uid(u))).map((u) => ({ id: uid(u), name: displayName(u), department: u.department || '' }));
+    // `department` on the snapshot carries the governance role the doer was picked under, so it
+    // stays consistent with the DEPARTMENTS filter rather than showing a blank or an org dept.
+    const doers = companyUsers.filter((u) => form.doerIds.includes(uid(u))).map((u) => ({ id: uid(u), name: displayName(u), department: govRole(u) }));
 
     const payload = {
       title: form.title.trim(),
@@ -581,7 +597,7 @@ const ScheduleCalendarModal = ({ isOpen, onClose, onSaved, mode = 'erp', event =
               <SearchableMultiSelect
                 disabled={!form.companyId}
                 placeholder={!form.companyId ? 'Select company & departments' : (loadingUsers ? 'Loading…' : 'Search doers…')}
-                options={doerPool.map((u) => ({ id: uid(u), label: `${displayName(u)}${u.department ? ` · ${u.department}` : ''}` }))}
+                options={doerPool.map((u) => ({ id: uid(u), label: `${displayName(u)}${govRole(u) ? ` · ${govRole(u)}` : ''}` }))}
                 selectedIds={form.doerIds}
                 onToggle={toggleDoer}
                 accent="violet"
