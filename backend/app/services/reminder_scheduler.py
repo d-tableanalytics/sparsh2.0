@@ -9,6 +9,24 @@ logger = logging.getLogger(__name__)
 
 from app.utils.calendar_utils import CALENDAR_COLLECTIONS, find_user_by_id
 
+# Which field a reminder's offset is measured from.
+# An event happens at `start`, so its reminders anchor there. A task and a todo do NOT:
+# both carry the moment that matters — the deadline / due date — in `end`. A task's `start`
+# is its recurrence anchor and a todo's `start` is merely its creation timestamp, which is
+# why the calendar grid also places both under `end` (see CalendarPage: displayStart).
+# Anchoring these to `start` made every "before" reminder resolve to a past trigger time and
+# fire on the next 60s tick — a todo's reminder went out seconds after it was created.
+DUE_ANCHORED_TYPES = {"task", "todo"}
+
+
+def get_reminder_anchor(event: dict):
+    """The ISO datetime string a reminder's offset is measured against."""
+    if event.get("type") in DUE_ANCHORED_TYPES:
+        # Fall back to `start` for older docs saved without an `end`.
+        return event.get("end") or event.get("start")
+    return event.get("start")
+
+
 async def start_reminder_scheduler():
     logger.info("Starting reminder scheduler background worker...")
     last_recurring_day = None
@@ -45,7 +63,7 @@ async def check_and_trigger_reminders():
         
         for event in events:
             reminders = event.get("reminders", [])
-            event_time_str = event.get("start")
+            event_time_str = get_reminder_anchor(event)
             if not event_time_str: continue
             
             try:
@@ -109,6 +127,8 @@ async def trigger_reminder_notification(event, reminder):
                 pass # Continue search to other users
 
             if user_data:
-                await send_reminder_email(user_data, event)
+                # The reminder goes through so the channel the user picked in the Reminder
+                # modal (email / whatsapp / both) is the one actually used.
+                await send_reminder_email(user_data, event, reminder)
         except Exception as e:
             logger.error(f"Error notifying user {uid} for reminder: {e}")

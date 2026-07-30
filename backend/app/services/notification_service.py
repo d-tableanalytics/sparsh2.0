@@ -690,20 +690,49 @@ async def send_event_deleted_email(user_obj: dict, event_data: dict, deleted_by:
 
     return await send_notification_from_template(user_obj, "event_deleted", context, delivery_type, scope)
 
-async def send_reminder_email(user_obj: dict, event: dict):
-    is_task = event.get("type") == "task"
-    dt_str = event.get("start", "")
+def _describe_offset(reminder: dict) -> str:
+    """'10 minutes before' / '2 hours after' — the reminder's own rule, in words.
+
+    The shipped reminder template's subject reads "Upcoming: {{title}} in {{reminder_time}}",
+    so this has to be a duration. It previously rendered the current UTC clock time.
+    """
+    if not reminder: return "a moment"
+    mins = int(reminder.get("offset_minutes") or 0)
+    timing = reminder.get("timing_type", "before")
+    if mins and mins % 1440 == 0: amount, unit = mins // 1440, "day"
+    elif mins and mins % 60 == 0: amount, unit = mins // 60, "hour"
+    else: amount, unit = mins, "minute"
+    return f"{amount} {unit}{'s' if amount != 1 else ''} {timing}"
+
+
+async def send_reminder_email(user_obj: dict, event: dict, reminder: dict = None):
+    ev_type = event.get("type")
+    # Mirror the scheduler's anchor exactly (see reminder_scheduler.get_reminder_anchor), so the
+    # time in the message is the same one the offset was measured against. A task's deadline and
+    # a todo's due date live in `end`; only an event is anchored to `start`.
+    is_due_anchored = ev_type in ("task", "todo")
+    dt_str = (event.get("end") or event.get("start")) if is_due_anchored else event.get("start", "")
     formatted_dt = format_datetime_standard(dt_str)
-    
+
+    # The channel the user chose in the Reminder modal. Reminders saved before this was wired
+    # through have no type here, so fall back to email rather than sending nothing.
+    delivery_type = (reminder or {}).get("reminder_type") or "email"
+
     context = {
+        # The stock reminder template greets "Hello {{name}}" — without this the placeholder
+        # was left in the message verbatim, since render_template only substitutes known keys.
+        "name": user_obj.get("full_name") or user_obj.get("first_name") or "there",
         "title": event.get("title"),
-        "reminder_time": datetime.utcnow().strftime("%H:%M %p"),
-        "event_time": formatted_dt if not is_task else "N/A",
-        "task_deadline": formatted_dt if is_task else "N/A",
+        "reminder_time": _describe_offset(reminder),
+        # Always populated: the stock template only references {{event_time}}, so restricting it
+        # to non-task types printed "starting at N/A" on every task reminder. {{task_deadline}}
+        # stays available for templates that word it as a deadline.
+        "event_time": formatted_dt,
+        "task_deadline": formatted_dt if is_due_anchored else "N/A",
         "meeting_url": event.get("meeting_link") or "View in Dashboard",
         "description": event.get("additional_details") or "No further details."
     }
-    return await send_notification_from_template(user_obj, "reminder", context, "email", event.get("notification_scope"))
+    return await send_notification_from_template(user_obj, "reminder", context, delivery_type, event.get("notification_scope"))
 
 async def send_conflict_notification_email(user_obj: dict, event_data: dict, existing_event: dict, send_company_copy: bool = True):
     # Subject: Reschedule time mail due to conflict
