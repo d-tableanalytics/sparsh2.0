@@ -58,6 +58,7 @@ const EmployeeTasks = () => {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [drill, setDrill] = useState(null);   // employee whose per-activity breakdown is open
 
   // "All Months" (empty id) lets the backend aggregate across every month.
   const months = useMemo(() => [{ id: '', name: 'All Months' }, ...periodOptions()], []);
@@ -187,7 +188,7 @@ const EmployeeTasks = () => {
                   <Td align="center" className="font-extrabold" style={{ color: scoreColor(sc) }}>{sc}%</Td>
                   <Td><ScoreBar v={sc} /></Td>
                   <Td align="right">
-                    <button className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--border)] text-[12px] font-bold text-[var(--text-muted)] hover:text-[var(--accent-indigo)] hover:bg-[var(--accent-indigo-bg)] hover:border-[var(--accent-indigo-border)] transition-all">
+                    <button onClick={() => setDrill(e)} className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--border)] text-[12px] font-bold text-[var(--text-muted)] hover:text-[var(--accent-indigo)] hover:bg-[var(--accent-indigo-bg)] hover:border-[var(--accent-indigo-border)] transition-all">
                       <Eye size={13} /> View
                     </button>
                   </Td>
@@ -200,6 +201,49 @@ const EmployeeTasks = () => {
           </tbody>
         </TableShell>
       </Section>
+
+      {/* Per-employee drill-down: the activity-by-activity breakdown behind the row totals. */}
+      {drill && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40" onClick={() => setDrill(null)}>
+          <div onClick={(ev) => ev.stopPropagation()} className="w-full max-w-lg rounded-2xl bg-[var(--bg-card)] border border-[var(--border)] shadow-2xl overflow-hidden">
+            <div className="flex items-center justify-between px-5 py-4 border-b border-[var(--border)]">
+              <div>
+                <h3 className="text-[15px] font-black text-[var(--text-main)]">{drill.name}</h3>
+                <p className="text-[11.5px] font-bold text-[var(--text-muted)] uppercase tracking-wide">{drill.designation || '—'} · {drill.department || '—'}</p>
+              </div>
+              <button onClick={() => setDrill(null)} className="p-1.5 rounded-lg text-[var(--text-muted)] hover:bg-[var(--table-hover)] transition-all"><XCircle size={18} /></button>
+            </div>
+            <div className="px-5 py-3 grid grid-cols-4 gap-2 text-center border-b border-[var(--border)]">
+              <div><div className="text-[16px] font-black text-[var(--text-main)] tabular-nums">{drill.total ?? 0}</div><div className="text-[9.5px] font-black uppercase tracking-wide text-[var(--text-muted)]">Total</div></div>
+              <div><div className="text-[16px] font-black text-[var(--accent-green)] tabular-nums">{drill.completed ?? 0}</div><div className="text-[9.5px] font-black uppercase tracking-wide text-[var(--text-muted)]">Done</div></div>
+              <div><div className="text-[16px] font-black text-[var(--accent-red)] tabular-nums">{drill.missed ?? 0}</div><div className="text-[9.5px] font-black uppercase tracking-wide text-[var(--text-muted)]">Missed</div></div>
+              <div><div className="text-[16px] font-black text-[var(--accent-orange)] tabular-nums">{drill.pending ?? 0}</div><div className="text-[9.5px] font-black uppercase tracking-wide text-[var(--text-muted)]">Pending</div></div>
+            </div>
+            <div className="max-h-[52vh] overflow-y-auto">
+              {(drill.activities || []).length === 0 ? (
+                <p className="px-5 py-10 text-center text-[13px] font-bold text-[var(--text-muted)]">No activity breakdown for this period.</p>
+              ) : (
+                <table className="w-full text-[13px]">
+                  <thead><tr className="text-[9.5px] uppercase tracking-wide text-[var(--text-muted)] bg-[var(--table-header-bg)]">
+                    <th className="text-left px-5 py-2.5 font-black">Activity</th>
+                    <th className="text-center px-3 py-2.5 font-black">Done / Total</th>
+                    <th className="text-right px-5 py-2.5 font-black">Score</th>
+                  </tr></thead>
+                  <tbody>
+                    {(drill.activities || []).map((a, i) => (
+                      <tr key={i} className="border-t border-[var(--border)]">
+                        <td className="px-5 py-2.5 font-bold text-[var(--text-main)]">{a.activity}</td>
+                        <td className="px-3 py-2.5 text-center tabular-nums font-bold text-[var(--text-muted)]">{a.completed}/{a.total}</td>
+                        <td className="px-5 py-2.5 text-right font-black tabular-nums" style={{ color: scoreColor(a.pct) }}>{a.pct}%</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
