@@ -76,7 +76,8 @@ const TaskDashboard = () => {
   const [modalOpen, setModalOpen] = useState(false);
 
   useEffect(() => {
-    api.get('/tasks/assignable-users').then(res => setUsers(res.data || [])).catch(() => {});
+    // Name-resolution map — full directory so every participant renders (not just assignable users).
+    api.get('/tasks/assignable-users?all=true').then(res => setUsers(res.data || [])).catch(() => {});
   }, []);
 
   const userMap = useMemo(() => {

@@ -124,6 +124,8 @@ const MemberDashboard = () => {
   const [loading, setLoading] = useState(true);
   const [editMode, setEditMode] = useState(false);
   const [editData, setEditData] = useState({});
+  // Reporting Manager options for this member's company (searchable dropdown source).
+  const [managers, setManagers] = useState([]);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [activeTab, setActiveTab] = useState('overview');
   const [userEvents, setUserEvents] = useState([]);
@@ -153,6 +155,11 @@ const MemberDashboard = () => {
       setMember(userRes.data);
       setEditData(userRes.data);
       setActivity(activityRes.data);
+      // Reporting Manager options — this member's own company (client-side).
+      if (userRes.data?.company_id) {
+        api.get('/users/reporting-manager-options', { params: { company_id: userRes.data.company_id, exclude: userId } })
+          .then(r => setManagers(r.data || [])).catch(() => setManagers([]));
+      }
     } catch (err) {
       console.error(err);
     } finally {
@@ -434,6 +441,11 @@ const MemberDashboard = () => {
                 <select value={editData.department || ''} onChange={e => setEditData({ ...editData, department: e.target.value })} className="w-full px-3 py-1.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-md text-[13px] text-[var(--text-main)] outline-none">
                   <option value="HOD">HOD</option><option value="Implementor">Implementor</option><option value="EA">EA</option><option value="MD">MD</option><option value="Other">Other</option>
                 </select></div>
+              <div className="space-y-1"><label className="text-[10px] font-bold text-[var(--text-muted)] uppercase tracking-widest">Reporting Manager</label>
+                <select value={editData.reporting_manager || ''} onChange={e => setEditData({ ...editData, reporting_manager: e.target.value })} className="w-full px-3 py-1.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-md text-[13px] text-[var(--text-main)] outline-none">
+                  <option value="">— None —</option>
+                  {managers.map(mgr => <option key={mgr._id} value={mgr._id}>{mgr.full_name}{mgr.designation ? ` · ${mgr.designation}` : ''}</option>)}
+                </select></div>
             </div>
             <div className="flex gap-3 mt-6">
               <button onClick={handleSaveEdit} className="h-9 px-6 bg-[var(--accent-green)] text-white rounded-lg text-[12px] font-bold flex items-center gap-2"><Save size={14} /> Save</button>
@@ -480,6 +492,7 @@ const MemberDashboard = () => {
                 <InfoCard icon={Briefcase} label="Designation" value={member.designation} color="yellow" />
                 <InfoCard icon={Building2} label="Department" value={member.department} color="green" />
                 <InfoCard icon={BookOpen} label="Session Type" value={member.session_type} color="orange" />
+                <InfoCard icon={User} label="Reporting Manager" value={(member.reporting_manager && managers.find(mg => mg._id === member.reporting_manager)?.full_name) || '—'} color="indigo" />
                 <InfoCard icon={Building2} label="Company ID" value={member.company_id} color="indigo" />
               </div>
             </div>

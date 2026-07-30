@@ -224,7 +224,8 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
   }, []);
 
   useEffect(() => {
-    api.get('/tasks/assignable-users').then(res => setUsers(res.data || [])).catch(() => {});
+    // Name-resolution map — full directory so every participant renders (not just assignable users).
+    api.get('/tasks/assignable-users?all=true').then(res => setUsers(res.data || [])).catch(() => {});
     // Holidays block dates in the Reopen picker.
     getHolidays().then(res => setHolidayDates((res.data || []).map(h => h.holiday_date).filter(Boolean))).catch(() => setHolidayDates([]));
   }, []);
@@ -642,7 +643,9 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
                       {scope === 'deleted' ? (
                         <span className="px-3 py-1.5 rounded-lg text-[10px] font-black border" style={{ background: cfg.bg, color: cfg.color, borderColor: cfg.border }}>{cfg.label}</span>
                       ) : (() => {
-                        const rowIsAssigner = task.isCreator || isAdmin;
+                        // A reporting manager is a verifier for their reports' tasks — treat them
+                        // like the assigner so they see Complete / Approve, not "Request for Verification".
+                        const rowIsAssigner = task.isCreator || isAdmin || task.isReportingManager;
                         const rowIsDoerSide = scope === 'my' && !rowIsAssigner;
                         // In-Loop observer, or an assignee waiting on a dependency doer: frozen.
                         const rowFrozenReason = frozenReason(task);
@@ -707,7 +710,7 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
             const rowProps = (task, { indent = false } = {}) => ({
               task, scope, userMap, indent,
               statusPending: completing.has(task.id),
-              isAssigner: task.isCreator || isAdmin,
+              isAssigner: task.isCreator || isAdmin || task.isReportingManager,
               frozenReason: frozenReason(task),
               isDependencyDoer: isDependencyDoer(task),
               checked: selected.has(task.id),

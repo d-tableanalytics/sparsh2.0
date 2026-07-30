@@ -1,14 +1,73 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
-import { 
-  UserCircle2, Shield, Mail, Phone, Clock, 
-  ChevronLeft, Edit3, Trash2, CheckCircle2, 
-  XCircle, MoreHorizontal, History, Zap, 
-  Lock, Settings2, Save, X, Building2, MapPin
+import {
+  UserCircle2, Shield, Mail, Phone, Clock,
+  ChevronLeft, Edit3, Trash2, CheckCircle2,
+  XCircle, MoreHorizontal, History, Zap,
+  Lock, Settings2, Save, X, Building2, MapPin, Search, ChevronDown
 } from 'lucide-react';
 import api from '../services/api';
 import { useNotification } from '../context/NotificationContext';
+
+// Searchable "Reporting Manager" select. `value` is a manager _id ('' = none).
+const ManagerSelect = ({ value, managers, onChange }) => {
+    const [open, setOpen] = useState(false);
+    const [query, setQuery] = useState('');
+    const ref = useRef(null);
+    const selected = managers.find((m) => m._id === value);
+    const filtered = managers.filter((m) =>
+        `${m.full_name || ''} ${m.email || ''} ${m.designation || ''} ${m.role || ''}`
+            .toLowerCase()
+            .includes(query.toLowerCase())
+    );
+
+    useEffect(() => {
+        const handler = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+        document.addEventListener('mousedown', handler);
+        return () => document.removeEventListener('mousedown', handler);
+    }, []);
+
+    return (
+        <div className="relative" ref={ref}>
+            <button type="button" onClick={() => setOpen((o) => !o)}
+                className="w-full bg-[var(--input-bg)] p-4 rounded-xl text-[14px] font-bold border border-[var(--border)] flex items-center justify-between gap-2 text-left">
+                <span className={selected ? 'text-[var(--text-main)]' : 'text-[var(--text-muted)]'}>
+                    {selected ? selected.full_name : '— None —'}
+                </span>
+                <ChevronDown size={16} className="text-[var(--text-muted)] shrink-0" />
+            </button>
+            {open && (
+                <div className="absolute z-20 mt-2 w-full bg-[var(--bg-card)] border border-[var(--border)] rounded-xl shadow-2xl overflow-hidden">
+                    <div className="flex items-center gap-2 px-3 py-2 border-b border-[var(--border)]">
+                        <Search size={14} className="text-[var(--text-muted)] shrink-0" />
+                        <input autoFocus value={query} onChange={(e) => setQuery(e.target.value)}
+                            placeholder="Search managers..."
+                            className="w-full bg-transparent text-[13px] font-bold outline-none" />
+                    </div>
+                    <div className="max-h-56 overflow-y-auto py-1">
+                        <div onClick={() => { onChange(''); setOpen(false); setQuery(''); }}
+                            className={`px-4 py-2.5 text-[13px] font-bold cursor-pointer hover:bg-[var(--input-bg)] ${!value ? 'text-[var(--accent-indigo)]' : 'text-[var(--text-muted)]'}`}>
+                            — None —
+                        </div>
+                        {filtered.map((m) => (
+                            <div key={m._id} onClick={() => { onChange(m._id); setOpen(false); setQuery(''); }}
+                                className={`px-4 py-2.5 cursor-pointer hover:bg-[var(--input-bg)] ${value === m._id ? 'bg-[var(--accent-indigo-bg)]' : ''}`}>
+                                <div className="text-[13px] font-black text-[var(--text-main)]">{m.full_name}</div>
+                                <div className="text-[11px] font-bold text-[var(--text-muted)] truncate">
+                                    {[m.designation || m.role, m.email].filter(Boolean).join(' • ')}
+                                </div>
+                            </div>
+                        ))}
+                        {filtered.length === 0 && (
+                            <div className="px-4 py-3 text-[12px] font-bold text-[var(--text-muted)] italic">No matches</div>
+                        )}
+                    </div>
+                </div>
+            )}
+        </div>
+    );
+};
 
 const UserDetails = () => {
     const { userId } = useParams();
@@ -18,6 +77,9 @@ const UserDetails = () => {
     const [loading, setLoading] = useState(true);
     const [isEditing, setIsEditing] = useState(false);
     const [editForm, setEditForm] = useState({});
+    // reporting_manager holds a user _id; resolve to a name via the manager-options
+    // endpoint (internal staff → no company_id).
+    const [managers, setManagers] = useState([]);
 
     // ─── Fetching Logic ───
     const fetchData = async () => {
@@ -44,10 +106,20 @@ const UserDetails = () => {
     };
     useEffect(() => { fetchData(); }, [userId]);
 
+    useEffect(() => {
+        api.get('/users/reporting-manager-options', { params: { exclude: userId } })
+            .then((res) => setManagers(Array.isArray(res.data) ? res.data : []))
+            .catch(() => setManagers([]));
+    }, [userId]);
+
+    const reportingManagerName =
+        (user?.reporting_manager && managers.find((m) => m._id === user.reporting_manager)?.full_name) || '—';
+
     // ─── Update Logic ───
     const handleUpdate = async () => {
         try {
-            await api.put(`/users/${userId}`, editForm);
+            const payload = { ...editForm, reporting_manager: editForm.reporting_manager || null };
+            await api.put(`/users/${userId}`, payload);
             setIsEditing(false);
             showSuccess("Profile updated");
             fetchData();
@@ -147,6 +219,10 @@ const UserDetails = () => {
                                            <p className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest">Mobile Contact</p>
                                            <div className="flex items-center gap-2 text-[var(--text-main)] font-bold text-[14px]"><Phone size={16}/> {user.mobile || 'Not linked'}</div>
                                        </div>
+                                       <div className="bg-[var(--input-bg)] p-4 rounded-2xl border border-[var(--border)] space-y-1">
+                                           <p className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest">Reporting Manager</p>
+                                           <div className="flex items-center gap-2 text-[var(--text-main)] font-bold text-[14px]"><UserCircle2 size={16}/> {reportingManagerName}</div>
+                                       </div>
                                    </div>
                                )}
                                {isEditing && (
@@ -156,7 +232,15 @@ const UserDetails = () => {
                                        <select className="bg-[var(--input-bg)] p-4 rounded-xl text-[14px] font-bold border border-[var(--border)]" value={editForm.role} onChange={e => setEditForm({...editForm, role: e.target.value})}>
                                             <option value="superadmin">Superadmin</option><option value="admin">Admin</option><option value="coach">Coach</option>
                                        </select>
-                                       <button onClick={handleUpdate} className="bg-[var(--btn-primary)] text-white rounded-xl font-black flex items-center justify-center gap-2 tracking-widest uppercase text-[12px] hover:opacity-90"> <Save size={16}/> Update Registry </button>
+                                       <div className="sm:col-span-2 space-y-1.5">
+                                           <label className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest">Reporting Manager</label>
+                                           <ManagerSelect
+                                               value={editForm.reporting_manager || ''}
+                                               managers={managers}
+                                               onChange={(val) => setEditForm({ ...editForm, reporting_manager: val })}
+                                           />
+                                       </div>
+                                       <button onClick={handleUpdate} className="sm:col-span-2 bg-[var(--btn-primary)] text-white rounded-xl py-4 font-black flex items-center justify-center gap-2 tracking-widest uppercase text-[12px] hover:opacity-90"> <Save size={16}/> Update Registry </button>
                                    </div>
                                )}
                            </div>

@@ -5,6 +5,8 @@ from app.controllers.auth_controller import (
     get_current_user, has_task_access, is_client_side_user,
     TASK_ACCESS_DENIED_MESSAGE, DELEGATION_DISABLED_MESSAGE,
     get_ineligible_recipient_ids, recipient_denied_message,
+    get_rank_ineligible_assignees, ASSIGN_RANK_DENIED_MESSAGE,
+    is_company_task_admin,
 )
 from app.models.calendar_event import CalendarEventCreate, CalendarEventResponse
 from app.services.task_notifications import notify_task_event, recipients_for_event
@@ -305,6 +307,11 @@ async def create_event(event: CalendarEventCreate, background_tasks: BackgroundT
         bad = await get_ineligible_recipient_ids(current_user, (event_dict.get("target_staff_id") or []) + (event_dict.get("watchers") or []))
         if bad:
             raise HTTPException(status_code=403, detail=recipient_denied_message(current_user))
+        # Assignment rank rule (assignees only): SMOPS can't assign up to admin; a client can't
+        # assign above their own MD>HR>HOD>Implementor rank.
+        rank_bad = await get_rank_ineligible_assignees(current_user, event_dict.get("target_staff_id") or [])
+        if rank_bad:
+            raise HTTPException(status_code=403, detail=ASSIGN_RANK_DENIED_MESSAGE)
     elif event_dict.get("type") == TODO_TYPE:
         # A todo is personal planning: every authenticated user may create their own, so the
         # generic `calendar.create` bit is not required (a staff member without it must still
@@ -372,7 +379,12 @@ async def create_event(event: CalendarEventCreate, background_tasks: BackgroundT
     # ─── Recursive Generation Engine ───
     repeat_type = event_dict.get("repeat", "Does not repeat")
     end_date_str = event_dict.get("repeat_end_date")
-    if repeat_type != "Does not repeat" and end_date_str:
+    is_todo = event_dict.get("type") == TODO_TYPE
+    # A series needs a group id for the nightly rollover engine to pick it up. Tasks/events
+    # only get one when an end date bounds the series; a TODO does not require an end date —
+    # an open-ended personal todo (no stop date) still recurs, rolling forward one occurrence
+    # per period indefinitely (the engine treats a missing repeat_end_date as "no stop").
+    if repeat_type != "Does not repeat" and (end_date_str or is_todo):
         # Generate a unique series ID to group these occurrences
         event_dict["recurring_group_id"] = str(ObjectId())
 
@@ -544,6 +556,10 @@ async def update_event(event_id: str, updates: dict, background_tasks: Backgroun
             bad = await get_ineligible_recipient_ids(current_user, recipients)
             if bad:
                 raise HTTPException(status_code=403, detail=recipient_denied_message(current_user))
+        if "target_staff_id" in updates:
+            rank_bad = await get_rank_ineligible_assignees(current_user, updates.get("target_staff_id") or [])
+            if rank_bad:
+                raise HTTPException(status_code=403, detail=ASSIGN_RANK_DENIED_MESSAGE)
 
     # A todo answers to its owner alone — not to admins, not to a calendar.update grant.
     _require_todo_owner(existing, current_user)
@@ -554,8 +570,11 @@ async def update_event(event_id: str, updates: dict, background_tasks: Backgroun
     is_admin = current_user.get("role") == "superadmin"
     has_update_perm = current_user.get("permissions", {}).get("calendar", {}).get("update")
     is_creator = existing.get("user_id") == str(current_user["_id"])
+    # A client MD administers every TASK in their own company (see auth_controller). Scoped to
+    # tasks so this never widens authority over sessions/events, which the MD has no part in.
+    is_company_admin = is_task_update and is_company_task_admin(existing, current_user)
 
-    if not (is_admin or has_update_perm or is_creator):
+    if not (is_admin or has_update_perm or is_creator or is_company_admin):
         raise HTTPException(status_code=403, detail="Not authorized to edit this event.")
          
     # ─── Record Completion Timestamp ───
@@ -903,11 +922,15 @@ async def delete_event(event_id: str, background_tasks: BackgroundTasks, current
     is_admin = current_user.get("role") == "superadmin"
     has_delete_perm = current_user.get("permissions", {}).get("calendar", {}).get("delete")
     is_creator = existing.get("user_id") == str(current_user["_id"])
+    # A client MD administers every TASK in their own company — tasks only, so a session/event
+    # (and, via the owner check below, a todo) is unaffected.
+    is_company_admin = (existing.get("type") == "task"
+                        and is_company_task_admin(existing, current_user))
 
     # Only the owner may delete their todo — a calendar.delete grant does not reach it.
     _require_todo_owner(existing, current_user)
 
-    if not (is_admin or has_delete_perm or is_creator):
+    if not (is_admin or has_delete_perm or is_creator or is_company_admin):
          raise HTTPException(status_code=403, detail="Not authorized to delete this event")
 
     await get_collection(col_name).delete_one({"_id": ObjectId(event_id)})

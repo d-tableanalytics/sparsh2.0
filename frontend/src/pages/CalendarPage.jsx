@@ -228,7 +228,7 @@ const TodoRepeatSection = ({ form, setForm, minEndDate }) => {
                 {isRepeating && (
                     <>
                         <div className="relative" onClick={e => e.stopPropagation()}>
-                            <button type="button" onClick={() => setFreqOpen(o => !o)}
+                            <button type="button" onClick={() => { setFreqOpen(o => !o); setCustomIntervalOpen(false); setCustomUnitOpen(false); }}
                                 className="flex items-center gap-1.5 px-3 py-1.5 bg-[var(--bg-card)] border border-[var(--border)] rounded-full text-[10px] font-black uppercase tracking-wider text-[var(--text-main)]">
                                 {REPEAT_OPTIONS.find(o => o.value === form.repeat)?.label || 'Daily'}
                                 <ChevronDown size={12} className={`transition-transform ${freqOpen ? 'rotate-180' : ''}`} />
@@ -382,6 +382,7 @@ const CalendarPage = () => {
     const [isEdit, setIsEdit] = useState(false);
     const [currentEventId, setCurrentEventId] = useState(null);
     const [showReminderModal, setShowReminderModal] = useState(false);
+    const [dueDatePickerOpen, setDueDatePickerOpen] = useState(false); // todo Due date/time calendar
 
     const initialForm = {
         title: '', type: 'event', start: '', end: '', all_day: true,
@@ -414,12 +415,10 @@ const CalendarPage = () => {
             ]);
             setEvents(evRes.data.map(e => {
                 const evType = e.extendedProps?.type || e.type;
-                // Tasks have no user-facing "start" of their own (that field is only the
-                // recurrence-series start, defaulted to creation time — see TaskFormModal);
-                // the date the user actually picked is the due date (`end`, "Set Deadline").
-                // Anchor the calendar's day-cell placement to that instead, so a task shows
-                // up under the day it's due, not the day it happened to be created.
-                const displayStart = (evType === 'task' && e.end) ? e.end : e.start;
+                // Tasks and todos are placed on the calendar under their DUE day (`end`), not
+                // their series-start: a task's start is a recurrence anchor, and a todo now
+                // carries an explicit start + due, so the due date is where the user expects it.
+                const displayStart = ((evType === 'task' || evType === 'todo') && e.end) ? e.end : e.start;
                 return {
                     id: e.id, title: e.title, start: displayStart, end: e.end,
                     backgroundColor: 'transparent', borderColor: 'transparent',
@@ -640,25 +639,14 @@ const CalendarPage = () => {
         setShowSummary(true);
     };
 
-    // "YYYY-MM-DD" -> a real local timestamp anchored at noon that day.
-    //
-    // A bare date string is parsed by JS as UTC midnight, so every later
-    // `new Date(start).setHours(...).toISOString()` round-trip works off UTC midnight instead
-    // of the local day — which is what made a todo picked for 11 July save/display as 10 July.
-    // Seeding an actual local timestamp removes the ambiguity, and noon is the safe anchor:
-    // no real timezone offset can push midday across a date boundary, so the day the user
-    // picks is the day that gets stored, shown and reminded on.
-    const localNoonFromDateKey = (dateKey) => {
-        const [y, m, d] = (dateKey || '').split('-').map(Number);
-        const dt = (y && m && d) ? new Date(y, m - 1, d, 12, 0, 0, 0) : new Date(new Date().setHours(12, 0, 0, 0));
-        return dt.toISOString();
-    };
-
     const openCreateModal = (type) => {
         setIsEdit(false); setCurrentEventId(null);
         if (type === 'todo') {
-            const anchored = localNoonFromDateKey(summaryDate);
-            setEventForm({ ...initialForm, type, start: anchored, end: anchored });
+            // A new todo defaults to the CURRENT date + time — that "now" is what the header
+            // badge shows and what the Start Date field reads. Start time is the creation time
+            // (there is no separate Start Time field); the user picks the Due date + time.
+            const nowIso = new Date().toISOString();
+            setEventForm({ ...initialForm, type, start: nowIso, end: nowIso, all_day: false });
         } else {
             setEventForm({ ...initialForm, type, start: summaryDate, end: summaryDate });
         }
@@ -672,7 +660,7 @@ const CalendarPage = () => {
         const startRaw = ev.start; const endRaw = ev.end || ev.start;
         setEventForm({
             ...initialForm, title: ev.title, type: props.type, start: startRaw, end: endRaw,
-            all_day: ev.allDay, session_type: props.session_type, priority: props.priority || 'Normal',
+            all_day: props.type === 'todo' ? false : ev.allDay, session_type: props.session_type, priority: props.priority || 'Normal',
             session_template_id: props.session_template_id, batch_id: props.batch_id,
             quarter_id: props.quarter_id, assigned_departments: props.assigned_departments || [],
             assigned_member_ids: props.assigned_member_ids || [], coach_ids: props.coach_ids || [],
@@ -772,8 +760,14 @@ const CalendarPage = () => {
             if (isEdit) await api.patch(`/calendar/events/${currentEventId}`, eventForm);
             else await api.post('/calendar/events', eventForm);
             showSuccess(isTodo ? (isEdit ? 'Todo updated' : 'Todo created') : (isEdit ? 'Event updated' : 'Event scheduled successfully'));
-            fetchData(); setShowModal(false); setShowSummary(false); 
-        } catch (err) { showError('Failed to save event'); console.error(err); }
+            fetchData(); setShowModal(false); setShowSummary(false);
+        } catch (err) {
+            // Surface the backend's real reason (e.g. a past-date block) instead of a generic
+            // message, so the user knows what to fix rather than seeing "Failed to save".
+            const detail = err.response?.data?.detail;
+            showError(typeof detail === 'string' && detail ? detail : (isTodo ? 'Failed to save todo' : 'Failed to save event'));
+            console.error(err);
+        }
     };
 
     const role = user?.role?.toLowerCase();
@@ -882,7 +876,7 @@ const CalendarPage = () => {
                         <span className="flex items-center gap-1 opacity-60"> <Clock size={11} /> {type === 'todo' ? 'Due:' : 'Deadline:'} </span>
                         {/* Todos render in the user's own timezone so the card matches the date
                             they picked; sessions/tasks keep the existing IST rendering. */}
-                        <span className="text-[var(--text-main)]">{type === 'todo' ? formatTodoShort(ev.start, ev.allDay ?? ev.extendedProps?.all_day) : formatShortIST(ev.start)}</span>
+                        <span className="text-[var(--text-main)]">{type === 'todo' ? formatTodoShort(ev.end || ev.start, ev.allDay ?? ev.extendedProps?.all_day) : formatShortIST(ev.start)}</span>
                     </div>
                     {ev.extendedProps.completed_at && (
                         <div className="flex items-center justify-between text-emerald-600 bg-emerald-500/5 px-2 py-0.5 rounded-md">
@@ -1565,47 +1559,64 @@ const CalendarPage = () => {
                                 <div className="space-y-4">
                                     {eventForm.type === 'todo' && (
                                         <label className="text-[9px] font-black text-[var(--text-muted)] uppercase tracking-wider flex items-center gap-1.5">
-                                            <CalendarDays size={12} /> Due Date
+                                            <CalendarDays size={12} /> Due Date / Time
                                         </label>
                                     )}
                                     <div className="flex items-center gap-4 flex-wrap">
-                                        <div className="flex items-center gap-2 bg-[var(--input-bg)] px-4 py-2.5 rounded-xl border border-[var(--border)] relative cursor-pointer hover:border-[var(--accent-indigo)] transition-all">
-                                            <CalendarDays size={18} className="text-[var(--accent-indigo)]" />
-                                            <span className="text-[13px] font-black">{new Date(eventForm.start).toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' })}</span>
-                                            <input type="date" className="absolute inset-0 opacity-0 cursor-pointer" 
-                                                   value={getLocalDatePart(eventForm.start)}
-                                                   onChange={(e) => {
-                                                       const newStart = updateDateTimePart(eventForm.start, e.target.value, true);
-                                                       const newEnd = updateDateTimePart(eventForm.end, e.target.value, true);
-                                                       setEventForm({...eventForm, start: newStart, end: newEnd});
-                                                   }} />
-                                        </div>
-                                        <label className="flex items-center gap-3 cursor-pointer bg-[var(--input-bg)] border border-[var(--border)] px-4 py-2.5 rounded-xl shadow-inner group">
-                                            <input type="checkbox" checked={eventForm.all_day} onChange={e => setEventForm({ ...eventForm, all_day: e.target.checked })} className="w-4 h-4 accent-[var(--accent-indigo)]" />
-                                            <span className="text-[11px] font-black uppercase text-[var(--text-muted)] group-hover:text-[var(--accent-indigo)] transition-colors">Full Day Block</span>
-                                        </label>
-                                        {!eventForm.all_day && (
-                                            <div className="flex items-center gap-2 bg-[var(--accent-indigo-bg)] p-1 rounded-xl border border-[var(--border)] shadow-inner">
-                                                <CustomTimePicker 
-                                                    value={new Date(eventForm.start).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })}
-                                                    onChange={(newTime) => {
-                                                        const [hours, minutes] = newTime.split(':');
-                                                        const newDate = new Date(eventForm.start);
-                                                        newDate.setHours(parseInt(hours), parseInt(minutes));
-                                                        setEventForm({ ...eventForm, start: newDate.toISOString() });
-                                                    }}
-                                                />
-                                                <ArrowRightLeft size={10} className="text-[var(--accent-indigo)] opacity-40" />
-                                                <CustomTimePicker 
-                                                    value={new Date(eventForm.end).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })}
-                                                    onChange={(newTime) => {
-                                                        const [hours, minutes] = newTime.split(':');
-                                                        const newDate = new Date(eventForm.end);
-                                                        newDate.setHours(parseInt(hours), parseInt(minutes));
-                                                        setEventForm({ ...eventForm, end: newDate.toISOString() });
-                                                    }}
-                                                />
+                                        {eventForm.type === 'todo' ? (
+                                            /* A todo shows only its Due — opens the shared month-grid
+                                               DATE/TIME calendar (MiniDatePicker) instead of the native
+                                               popup. The start is the creation timestamp (in the header). */
+                                            <div className="flex flex-col gap-1">
+                                                <span className="text-[9px] font-black uppercase tracking-wider text-[var(--text-muted)]">Due</span>
+                                                <button type="button" onClick={() => setDueDatePickerOpen(true)}
+                                                    className="flex items-center gap-2 bg-[var(--input-bg)] px-4 py-2.5 rounded-xl border border-[var(--border)] cursor-pointer hover:border-[var(--accent-indigo)] transition-all">
+                                                    <CalendarDays size={18} className="text-[var(--accent-indigo)]" />
+                                                    <span className="text-[13px] font-black">{new Date(eventForm.end).toLocaleString(undefined, { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', hour12: true })}</span>
+                                                </button>
                                             </div>
+                                        ) : (
+                                            <>
+                                                <div className="flex items-center gap-2 bg-[var(--input-bg)] px-4 py-2.5 rounded-xl border border-[var(--border)] relative cursor-pointer hover:border-[var(--accent-indigo)] transition-all">
+                                                    <CalendarDays size={18} className="text-[var(--accent-indigo)]" />
+                                                    <span className="text-[13px] font-black">{new Date(eventForm.start).toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' })}</span>
+                                                    <input type="date" className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                                                           value={getLocalDatePart(eventForm.start)}
+                                                           onClick={(e) => { try { e.currentTarget.showPicker(); } catch { /* click still focuses */ } }}
+                                                           onChange={(e) => {
+                                                               const newStart = updateDateTimePart(eventForm.start, e.target.value, true);
+                                                               const newEnd = updateDateTimePart(eventForm.end, e.target.value, true);
+                                                               setEventForm({...eventForm, start: newStart, end: newEnd});
+                                                           }} />
+                                                </div>
+                                                <label className="flex items-center gap-3 cursor-pointer bg-[var(--input-bg)] border border-[var(--border)] px-4 py-2.5 rounded-xl shadow-inner group">
+                                                    <input type="checkbox" checked={eventForm.all_day} onChange={e => setEventForm({ ...eventForm, all_day: e.target.checked })} className="w-4 h-4 accent-[var(--accent-indigo)]" />
+                                                    <span className="text-[11px] font-black uppercase text-[var(--text-muted)] group-hover:text-[var(--accent-indigo)] transition-colors">Full Day Block</span>
+                                                </label>
+                                                {!eventForm.all_day && (
+                                                    <div className="flex items-center gap-2 bg-[var(--accent-indigo-bg)] p-1 rounded-xl border border-[var(--border)] shadow-inner">
+                                                        <CustomTimePicker
+                                                            value={new Date(eventForm.start).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })}
+                                                            onChange={(newTime) => {
+                                                                const [hours, minutes] = newTime.split(':');
+                                                                const newDate = new Date(eventForm.start);
+                                                                newDate.setHours(parseInt(hours), parseInt(minutes));
+                                                                setEventForm({ ...eventForm, start: newDate.toISOString() });
+                                                            }}
+                                                        />
+                                                        <ArrowRightLeft size={10} className="text-[var(--accent-indigo)] opacity-40" />
+                                                        <CustomTimePicker
+                                                            value={new Date(eventForm.end).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })}
+                                                            onChange={(newTime) => {
+                                                                const [hours, minutes] = newTime.split(':');
+                                                                const newDate = new Date(eventForm.end);
+                                                                newDate.setHours(parseInt(hours), parseInt(minutes));
+                                                                setEventForm({ ...eventForm, end: newDate.toISOString() });
+                                                            }}
+                                                        />
+                                                    </div>
+                                                )}
+                                            </>
                                         )}
                                     </div>
 
@@ -1667,6 +1678,15 @@ const CalendarPage = () => {
                                 onClose={() => setShowReminderModal(false)}
                                 reminders={eventForm.reminders}
                                 onApply={(reminders) => setEventForm({ ...eventForm, reminders })}
+                            />
+
+                            {/* Todo Due date/time — the shared month-grid DATE/TIME calendar. */}
+                            <MiniDatePicker
+                                isOpen={dueDatePickerOpen}
+                                onClose={() => setDueDatePickerOpen(false)}
+                                value={eventForm.end}
+                                title="Select Due Date"
+                                onApply={(iso) => setEventForm(f => ({ ...f, end: iso }))}
                             />
 
                             {!(isEdit && !isStaff && !eventForm.isCreator) && eventForm.status !== 'completed' && (
