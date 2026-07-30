@@ -14,7 +14,8 @@ from app.controllers.auth_controller import (
     TASK_ACCESS_DENIED_MESSAGE, DELEGATION_DISABLED_MESSAGE,
     get_ineligible_recipient_ids, recipient_denied_message,
     get_rank_ineligible_assignees, ASSIGN_RANK_DENIED_MESSAGE,
-    ADMIN_TIER, client_rank,
+    ADMIN_TIER, client_rank, CLIENT_RANK,
+    company_admin_company_id, is_company_task_admin,
 )
 from app.utils.calendar_utils import CALENDAR_COLLECTIONS, find_event_across_collections
 from app.services.activity_log_service import log_activity
@@ -207,6 +208,10 @@ async def _fetch_tasks(
             report_ids = await _direct_report_ids(current_user)
             if report_ids:
                 vis = vis + [{"target_staff_id": {"$in": report_ids}}]
+            # A client user additionally sees whatever their governance rank entitles them to
+            # (today: an MD sees their whole company). Unioned in, never replacing the two
+            # rules above — see _company_admin_clauses.
+            vis = vis + _company_admin_clauses(current_user)
             clauses.append({"$or": vis})
         else:
             # Internal admins see every INTERNAL task, but NEVER client-company tasks — the two
@@ -224,7 +229,9 @@ async def _fetch_tasks(
         # generic `if group_id:` clause below scopes results to this group's tasks.
     elif scope == "deleted":
         if not _can_view_all_tasks(current_user):
-            clauses.append({"$or": _visibility_clauses(user_id)})
+            # An MD may restore any of their company's tasks, so the Deleted view has to show
+            # them — otherwise they hold the authority with nothing to use it on.
+            clauses.append({"$or": _visibility_clauses(user_id) + _company_admin_clauses(current_user)})
         else:
             clauses.append(_INTERNAL_TASK_CLAUSE)
     else:
@@ -263,7 +270,8 @@ async def _fetch_tasks(
     return results
 
 
-def _serialize_task(doc: dict, current_user_id: str, report_ids: set = None) -> dict:
+def _serialize_task(doc: dict, current_user_id: str, report_ids: set = None,
+                    admin_company_id: str = None) -> dict:
     ws = _resolve_workflow_status(doc)
     now = datetime.utcnow()
     return {
@@ -296,6 +304,11 @@ def _serialize_task(doc: dict, current_user_id: str, report_ids: set = None) -> 
         # Verification". Uses a pre-fetched report_ids set, so there's no per-row DB query.
         "isReportingManager": bool(report_ids) and not doc.get("user_id") == current_user_id
         and bool({str(a) for a in (doc.get("target_staff_id") or [])} & (report_ids or set())),
+        # Same purpose as isReportingManager, for a company MD: the UI gates Edit / Delete /
+        # Verify on role names a client MD ("clientadmin") isn't part of, so it needs the flag.
+        # Uses a pre-resolved company id, so there's no per-row work here either.
+        "isCompanyAdmin": bool(admin_company_id)
+        and str(doc.get("company_id") or "") == admin_company_id,
         "deletedAt": doc.get("deleted_at"),
         # Exposed on the list payload too (not just detail) so list dropdowns can apply the
         # verification-aware labels / role-based options without a second fetch.
@@ -329,7 +342,7 @@ async def _user_names(user_ids: list) -> dict:
     return names
 
 
-async def _fetch_subtasks(parent_id: str, current_user_id: str):
+async def _fetch_subtasks(parent_id: str, current_user_id: str, admin_company_id: str = None):
     """Child tasks (parent_task_id == parent_id) across the task collections, oldest first."""
     out = []
     for col_name in TASK_COLLECTIONS:
@@ -337,7 +350,7 @@ async def _fetch_subtasks(parent_id: str, current_user_id: str):
             "type": "task", "parent_task_id": parent_id, "deleted_at": None,
         }).to_list(500)
         for d in docs:
-            out.append(_serialize_task(d, current_user_id))
+            out.append(_serialize_task(d, current_user_id, None, admin_company_id))
     out.sort(key=lambda t: str(t.get("createdAt") or ""))
     return out
 
@@ -369,6 +382,9 @@ def _is_participant(existing: dict, current_user: dict) -> bool:
     # visible to internal Sparsh, so it must fall through to genuine participant membership.
     if current_user.get("role") == "superadmin" and not _is_client_task(existing):
         return True
+    # The client-side equivalent: a company's MD participates in every task of that company.
+    if is_company_task_admin(existing, current_user):
+        return True
     if existing.get("user_id") == user_id:
         return True
     if user_id in (existing.get("target_staff_id") or []):
@@ -376,6 +392,32 @@ def _is_participant(existing: dict, current_user: dict) -> bool:
     if user_id in (existing.get("watchers") or []):
         return True
     return False
+
+
+# ── Client governance authority ──────────────────────────────────────────────────
+# Client-side access follows the company's governance ladder (MD > HR > HOD > Implementor,
+# see auth_controller.client_rank), layered on top of — never instead of — the personal
+# access every user already has (created / assigned / in-loop) and the reporting-manager rule
+# below. Visibility is the UNION of all three, expressed as one Mongo $or.
+#
+# Rolling out one rank at a time. Implemented so far:
+#   MD (governance_role == "MD", or role == "clientadmin") → full admin over their own
+#   company's tasks: sees them all, and acts on them all. The client-side counterpart of the
+#   internal Super Admin bypass, bounded by company instead of by the whole system.
+# Every other rank returns None here and keeps exactly the access it has today.
+#
+# The predicate itself lives in auth_controller (is_company_task_admin) because
+# calendar_events.py needs the same test for task edit/delete.
+def _company_admin_clauses(user: dict) -> list:
+    """Mongo $or arm giving a client MD every task in their own company.
+
+    Matching the task's own `company_id` is what keeps SELF-ASSIGNED tasks in the result:
+    those carry assigned_to == "myself" and can have an empty target_staff_id (see the "my"
+    scope above), so an assignee-based match would silently drop them. It also makes company
+    isolation structural — a task from another company can never satisfy the clause.
+    """
+    company_id = company_admin_company_id(user)
+    return [{"company_id": company_id}] if company_id else []
 
 
 # ── Reporting-Manager hierarchy ──────────────────────────────────────────────────
@@ -545,7 +587,9 @@ async def list_tasks(
     # Which of these tasks belong to the viewer's direct reports (computed once) — so the list
     # can flag them and show the manager the verifier controls instead of "Request for Verification".
     report_ids = set(await _direct_report_ids(current_user))
-    return [_serialize_task(d, user_id, report_ids) for d in docs]
+    # Resolved once for the same reason as report_ids — the rows only need a string compare.
+    admin_company_id = company_admin_company_id(current_user)
+    return [_serialize_task(d, user_id, report_ids, admin_company_id) for d in docs]
 
 
 # Actions written to `activity_logs` that represent task lifecycle events (see log_activity
@@ -730,14 +774,20 @@ async def get_task_detail(task_id: str, current_user: dict = Depends(require_tas
     # A participant OR the reporting manager of an assignee may view the full task (this single
     # response carries status, progress, comments, attachments and both histories).
     is_mgr = await _is_manager_of_assignee(existing, current_user)
+    # A company MD passes _is_participant on any of their company's tasks, so no extra arm here.
     if not _is_participant(existing, current_user) and not is_mgr:
         raise HTTPException(status_code=403, detail="Not authorized to view this task")
     uid = str(current_user["_id"])
+    admin_company_id = company_admin_company_id(current_user)
     detail = _serialize_task_detail(existing, uid)
-    detail["subtasks"] = await _fetch_subtasks(task_id, uid)
+    detail["subtasks"] = await _fetch_subtasks(task_id, uid, admin_company_id)
     # Lets the UI show the reporting manager the same task-action controls as an admin —
     # scoped to only their reports' tasks (status, Complete, Block, Dependent, Verify, Reopen).
     detail["isReportingManager"] = is_mgr
+    # Same idea for a company MD, whose authority covers every task in their own company. The
+    # UI gates on role names that a client MD ("clientadmin") is not part of, so it needs this
+    # flag to unlock Edit / Delete / Verify / Reopen.
+    detail["isCompanyAdmin"] = is_company_task_admin(existing, current_user)
     return detail
 
 
@@ -776,7 +826,10 @@ async def update_task_status(task_id: str, body: dict, current_user: dict = Depe
     # The Super Admin bypass is for INTERNAL tasks only. On a CLIENT task it does not apply, so
     # verification/finalize/reopen stays with the client user who assigned it — an internal
     # Super Admin/Admin can never verify or act on a client-side task.
-    is_admin = current_user.get("role") == "superadmin" and not _is_client_task(existing)
+    # A company MD is the client-side admin: same authority, bounded by their own company. That
+    # includes the verify / finalize / reopen rights below, via is_assigner_or_admin.
+    is_admin = ((current_user.get("role") == "superadmin" and not _is_client_task(existing))
+                or is_company_task_admin(existing, current_user))
     is_creator = existing.get("user_id") == user_id
     is_assignee = user_id in (existing.get("target_staff_id") or [])
     # The assignee's reporting manager may act on the task as an authorized verifier (same as
@@ -1147,7 +1200,8 @@ async def revise_task_deadline(task_id: str, body: dict, current_user: dict = De
 
     existing, col_name = await _get_task_or_404(task_id)
 
-    is_admin = current_user.get("role") == "superadmin"
+    is_admin = (current_user.get("role") == "superadmin"
+                or is_company_task_admin(existing, current_user))
     is_creator = existing.get("user_id") == str(current_user["_id"])
     is_assignee = str(current_user["_id"]) in (existing.get("target_staff_id") or [])
     # The assignee's reporting manager may revise the deadline too — the Reopen flow uses this
@@ -1193,7 +1247,8 @@ async def soft_delete_task(task_id: str, current_user: dict = Depends(require_ta
     if not existing or existing.get("type") != "task":
         raise HTTPException(status_code=404, detail="Task not found")
 
-    is_admin = current_user.get("role") == "superadmin"
+    is_admin = (current_user.get("role") == "superadmin"
+                or is_company_task_admin(existing, current_user))
     is_creator = existing.get("user_id") == str(current_user["_id"])
     if not (is_admin or is_creator):
         raise HTTPException(status_code=403, detail="Not authorized to delete this task")
@@ -1223,7 +1278,8 @@ async def restore_task(task_id: str, current_user: dict = Depends(require_task_a
     if not existing or existing.get("type") != "task":
         raise HTTPException(status_code=404, detail="Task not found")
 
-    is_admin = current_user.get("role") == "superadmin"
+    is_admin = (current_user.get("role") == "superadmin"
+                or is_company_task_admin(existing, current_user))
     is_creator = existing.get("user_id") == str(current_user["_id"])
     if not (is_admin or is_creator):
         raise HTTPException(status_code=403, detail="Not authorized to restore this task")

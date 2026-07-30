@@ -265,6 +265,38 @@ async def get_rank_ineligible_assignees(actor: dict, assignee_ids) -> list:
     return bad
 
 
+def company_admin_company_id(user: dict):
+    """The company whose tasks `user` administers, or None if they administer none.
+
+    A client MD is the top of their company's governance ladder (MD > HR > HOD > Implementor,
+    see client_rank), and is the client-side counterpart of the internal Super Admin: full
+    authority, but bounded by their own company instead of the whole system. `clientadmin`
+    maps to MD by role, so both routes into the rank qualify.
+    """
+    if not is_client_side_user(user):
+        return None
+    company_id = str(user.get("company_id") or "")
+    if not company_id:
+        return None
+    if client_rank(user) < CLIENT_RANK["MD"]:
+        return None
+    return company_id
+
+
+def is_company_task_admin(task: dict, user: dict) -> bool:
+    """True if `user` administers `task` as their company's MD — view AND act.
+
+    Deliberately sync and DB-free so it can sit inside the hot per-request participant check.
+    That is possible because every client-created task is stamped with its creator's
+    `company_id` at insert time (see calendar_events.create_event), which makes the task's own
+    company the authoritative test — no user-roster lookup needed.
+
+    Shared by tasks.py and calendar_events.py, mirroring is_reporting_manager_of_assignee.
+    """
+    company_id = company_admin_company_id(user)
+    return bool(company_id) and str(task.get("company_id") or "") == company_id
+
+
 async def is_reporting_manager_of_assignee(task: dict, user: dict) -> bool:
     """True if `user` is the reporting manager of any assignee (target_staff_id) on `task`,
     within the same environment (internal↔staff, client↔same-company learners). Grants

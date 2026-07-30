@@ -6,6 +6,7 @@ from app.controllers.auth_controller import (
     TASK_ACCESS_DENIED_MESSAGE, DELEGATION_DISABLED_MESSAGE,
     get_ineligible_recipient_ids, recipient_denied_message,
     get_rank_ineligible_assignees, ASSIGN_RANK_DENIED_MESSAGE,
+    is_company_task_admin,
 )
 from app.models.calendar_event import CalendarEventCreate, CalendarEventResponse
 from app.services.task_notifications import notify_task_event, recipients_for_event
@@ -569,8 +570,11 @@ async def update_event(event_id: str, updates: dict, background_tasks: Backgroun
     is_admin = current_user.get("role") == "superadmin"
     has_update_perm = current_user.get("permissions", {}).get("calendar", {}).get("update")
     is_creator = existing.get("user_id") == str(current_user["_id"])
+    # A client MD administers every TASK in their own company (see auth_controller). Scoped to
+    # tasks so this never widens authority over sessions/events, which the MD has no part in.
+    is_company_admin = is_task_update and is_company_task_admin(existing, current_user)
 
-    if not (is_admin or has_update_perm or is_creator):
+    if not (is_admin or has_update_perm or is_creator or is_company_admin):
         raise HTTPException(status_code=403, detail="Not authorized to edit this event.")
          
     # ─── Record Completion Timestamp ───
@@ -918,11 +922,15 @@ async def delete_event(event_id: str, background_tasks: BackgroundTasks, current
     is_admin = current_user.get("role") == "superadmin"
     has_delete_perm = current_user.get("permissions", {}).get("calendar", {}).get("delete")
     is_creator = existing.get("user_id") == str(current_user["_id"])
+    # A client MD administers every TASK in their own company — tasks only, so a session/event
+    # (and, via the owner check below, a todo) is unaffected.
+    is_company_admin = (existing.get("type") == "task"
+                        and is_company_task_admin(existing, current_user))
 
     # Only the owner may delete their todo — a calendar.delete grant does not reach it.
     _require_todo_owner(existing, current_user)
 
-    if not (is_admin or has_delete_perm or is_creator):
+    if not (is_admin or has_delete_perm or is_creator or is_company_admin):
          raise HTTPException(status_code=403, detail="Not authorized to delete this event")
 
     await get_collection(col_name).delete_one({"_id": ObjectId(event_id)})
