@@ -32,13 +32,26 @@ class UserBase(BaseModel):
     joining_date: Optional[str] = None  # ISO "YYYY-MM-DD"
     
     # Highly Granular CRUD Permissions
+    # HRMS modules default to all-False (unlike the LMS modules above, which default read=True):
+    # employee records, payroll and KYC are need-to-know, so access is granted deliberately by an
+    # admin rather than inherited by every staff account. The module gate itself
+    # (auth_controller.require_hrms_access) is separate and already limits HRMS to internal staff.
     permissions: dict = {
         "batches": {"create": False, "read": True, "update": False, "delete": False},
         "calendar": {"create": False, "read": True, "update": False, "delete": False},
         "users": {"create": False, "read": True, "update": False, "delete": False},
         "companies": {"create": False, "read": True, "update": False, "delete": False},
         "logs": {"create": False, "read": True, "update": False, "delete": False},
-        "templates": {"create": False, "read": True, "update": False, "delete": False}
+        "templates": {"create": False, "read": True, "update": False, "delete": False},
+        # ─── HRMS ───
+        # hrms        — employee master, org structure, exit documentation
+        # recruitment — requisitions, JDs, postings, candidates, interviews, offers, onboarding
+        # attendance  — team attendance + manual entry (a user's OWN punch needs no grant)
+        # payroll     — run payroll and read everyone's payslips (own payslip needs no grant)
+        "hrms": {"create": False, "read": False, "update": False, "delete": False},
+        "recruitment": {"create": False, "read": False, "update": False, "delete": False},
+        "attendance": {"create": False, "read": False, "update": False, "delete": False},
+        "payroll": {"create": False, "read": False, "update": False, "delete": False},
     }
 
 class UserCreate(UserBase):

@@ -157,6 +157,41 @@ async def require_task_access(current_user: dict = Depends(get_current_user)):
     )
 
 
+# ─── HRMS access gate (internal-Sparsh-only) ───
+# The HRMS manages Sparsh's OWN workforce, so — unlike the calendar or ORM — there is no
+# per-company toggle and no client-side path into it at all. `is_internal_user` is the whole
+# rule: staff-collection users (superadmin/admin/coach/staff). A client company user can never
+# reach it, by design, so employee records, payroll and KYC stay inside Sparsh.
+HRMS_ACCESS_DENIED_MESSAGE = "The HRMS is only available to Sparsh internal staff."
+
+
+def has_hrms_access(user: dict) -> bool:
+    """Whether `user` may use the HRMS at all. Internal staff only — see above."""
+    return is_internal_user(user)
+
+
+async def require_hrms_access(current_user: dict = Depends(get_current_user)):
+    """Dependency that 403s any non-internal user. Returns the user, so an endpoint can swap
+    `Depends(get_current_user)` -> `Depends(require_hrms_access)` and still receive it."""
+    if not has_hrms_access(current_user):
+        raise HTTPException(status_code=403, detail=HRMS_ACCESS_DENIED_MESSAGE)
+    return current_user
+
+
+def has_hrms_permission(user: dict, module: str, action: str) -> bool:
+    """Fine-grained check *within* the HRMS, layered on top of require_hrms_access.
+
+    `module` is one of the HRMS permission modules seeded in models/user.py
+    (hrms | recruitment | attendance | payroll); `action` is create/read/update/delete.
+    Super Admin bypasses, matching every other module in the app.
+    """
+    if not user:
+        return False
+    if user.get("role") == "superadmin":
+        return True
+    return bool(user.get("permissions", {}).get(module, {}).get(action))
+
+
 TASK_RECIPIENT_DENIED_MESSAGE = (
     "Task and Delegation module is only for Sparsh internal users. "
     "Client-side users cannot be assigned or added in loop."

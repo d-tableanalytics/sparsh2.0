@@ -9,6 +9,7 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { canAccessTaskManagement } from '../../utils/taskAccess';
+import { canAccessHrms } from '../../utils/hrmsAccess';
 
 import logo1 from '../../assets/Sparsh Magic  Logo PNG1.png';
 import logo2 from '../../assets/Sparsh Magic  Logo PNG2.png';
@@ -62,6 +63,12 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen }) => {
         { name: 'Activity', path: '/tasks/activity', icon: Activity },
         { name: 'Deleted Tasks', path: '/tasks/deleted', icon: Trash2 },
       ],
+    },
+    {
+      // HRMS — Sparsh's own workforce. Internal-staff-only, so it is gated by a predicate
+      // (not a plain role list) and a client-side user never sees it. See utils/hrmsAccess.js.
+      name: 'HRMS', path: '/hrms', icon: Briefcase,
+      roles: [], visibleFn: canAccessHrms,
     },
     { name: 'Reports', path: '/admin/reports', icon: BarChart3, roles: ['superadmin', 'admin'] },
     { name: 'Company Settings', path: '/settings', icon: Settings, roles: ['clientadmin'] },

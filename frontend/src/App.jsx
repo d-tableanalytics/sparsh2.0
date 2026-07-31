@@ -46,6 +46,8 @@ import DeletedTasks from './pages/DeletedTasks';
 import ForgotPassword from './pages/ForgotPassword';
 import PrivateRoute from './components/common/PrivateRoute';
 import RequireTaskAccess from './components/common/RequireTaskAccess';
+import RequireHrmsAccess from './components/common/RequireHrmsAccess';
+import HrmsDashboard from './pages/HRMS/HrmsDashboard';
 import AssistantWidget from './features/assistant';
 import './index.css';
 import { useAuth } from './context/AuthContext';
@@ -105,6 +107,11 @@ const AppRoutes = () => {
       <Route path="/tasks/activity" element={<PrivateRoute><RequireTaskAccess><TaskActivity /></RequireTaskAccess></PrivateRoute>} />
       <Route path="/tasks/holiday" element={<PrivateRoute><RequireTaskAccess><Holiday /></RequireTaskAccess></PrivateRoute>} />
       <Route path="/tasks/deleted" element={<PrivateRoute><RequireTaskAccess><DeletedTasks /></RequireTaskAccess></PrivateRoute>} />
+
+      {/* HRMS Module — internal-Sparsh-only (RequireHrmsAccess). Sections are added per phase;
+          each will pass its own `module`/`action` so a staff user without the grant is told the
+          permission is missing rather than the module. See docs/HRMS_REPLICATION_ROADMAP.md */}
+      <Route path="/hrms" element={<PrivateRoute><RequireHrmsAccess><HrmsDashboard /></RequireHrmsAccess></PrivateRoute>} />
       <Route path="/sessions" element={<PrivateRoute><LearnerSessions /></PrivateRoute>} />
       <Route path="/company-portal" element={<PrivateRoute><CompanyPortal /></PrivateRoute>} />
       <Route path="/my-reports" element={<PrivateRoute><MyReports /></PrivateRoute>} />

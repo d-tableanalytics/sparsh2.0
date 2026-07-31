@@ -4,10 +4,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
 from app.db.mongodb import connect_to_mongo, close_mongo_connection
-from app.routes import auth, user, company, batch, quarter, session_template, calendar_events, settings, gpt, dashboard, notification, media, media_ai, media_chunk, tasks, holiday, group, task_meta, reports, orm, orm_sheet, orm_requests
+from app.routes import auth, user, company, batch, quarter, session_template, calendar_events, settings, gpt, dashboard, notification, media, media_ai, media_chunk, tasks, holiday, group, task_meta, reports, orm, orm_sheet, orm_requests, hrms
 from app.assistant.router import router as assistant_router
 
 from app.services.reminder_scheduler import start_reminder_scheduler
+from app.services.hrms_index_service import ensure_hrms_indexes
 import asyncio
 
 @asynccontextmanager
@@ -17,6 +18,9 @@ async def lifespan(app: FastAPI):
         await connect_to_mongo()
         # Start the background scheduler
         asyncio.create_task(start_reminder_scheduler())
+        # Declare the HRMS indexes. Create-only and idempotent, and scoped by a hard guard to
+        # the `hrms_*` collections this module owns — it never touches existing app data.
+        await ensure_hrms_indexes()
     except Exception as e:
         print(f"CRITICAL: Application started but background tasks failed: {e}")
     yield
@@ -64,6 +68,7 @@ app.include_router(notification.router, prefix="/api")
 app.include_router(orm.router, prefix="/api")
 app.include_router(orm_sheet.router, prefix="/api")
 app.include_router(orm_requests.router, prefix="/api")
+app.include_router(hrms.router, prefix="/api")
 app.include_router(media.router, prefix="/api")
 app.include_router(media_ai.router, prefix="/api")
 app.include_router(media_chunk.router, prefix="/api")
