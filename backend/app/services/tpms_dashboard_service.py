@@ -28,6 +28,7 @@ from app.models.tpms import (
     COLL_ACTION_ITEMS, COLL_ACTIVITIES, COLL_ESCALATIONS, COLL_SUCCESS_MEASURES,
     SCOPE_COMPANY, SCOPE_HOD, SCORE_MODE_MANUAL,
     STATUS_CANCELLED, STATUS_COMPLETED, STATUS_LAPSED, STATUS_RESCHEDULED, STATUS_SCHEDULED,
+    STATUS_MET, STATUS_PARTIAL, achievement_status, is_md_like,
     TPMS_EVENT_KIND, period_display,
 )
 from app.services.tpms_schedule_service import CAL_COLLECTIONS
@@ -157,6 +158,47 @@ def _allowed_companies(user: dict, companies: Dict[str, dict],
                  if uid in (i.get("om_keys") or set()) or i.get("om_key") == uid]
         return owned
     return None
+
+
+def _spark_14d(by_day: Dict[str, int]) -> List[dict]:
+    """The last 14 calendar days ending today, oldest first (spec §14).
+
+    Days with no sends are emitted as 0 rather than omitted, so the sparkline keeps an even
+    time axis instead of silently compressing quiet stretches.
+    """
+    today = date.today()
+    days = [(today - timedelta(days=n)).isoformat() for n in range(13, -1, -1)]
+    return [{"day": d, "count": by_day.get(d, 0)} for d in days]
+
+
+def _picker_companies(user: dict, companies: Dict[str, dict]) -> List[dict]:
+    """Companies this user may CHOOSE BETWEEN, for a dropdown.
+
+    Passes an empty scope so the answer reflects the caller's role alone — a currently
+    selected company must never shrink the list of things they can select next.
+    """
+    role_allowed = _allowed_companies(user, companies, {})
+    return sorted(
+        [{"id": cid, "name": i["name"]} for cid, i in companies.items()
+         if role_allowed is None or cid in set(role_allowed)],
+        key=lambda c: (c["name"] or "").lower())
+
+
+def _narrow_to_om(allowed: Optional[List[str]], companies: Dict[str, dict],
+                  om_id: Optional[str]) -> Optional[List[str]]:
+    """Apply the "OM" dropdown to an already role-scoped company list.
+
+    `_allowed_companies` handles role + explicit company scoping but knows nothing about
+    om_id, so any dashboard offering an OM filter must narrow separately — otherwise the
+    dropdown silently does nothing. Applied AFTER role scoping, so it can only ever
+    subtract from what the caller may already see. Empty om_id is a no-op.
+    """
+    om = str(om_id or "").strip()
+    if not om:
+        return allowed
+    owned = [cid for cid, i in companies.items()
+             if om in (i.get("om_keys") or set()) or i.get("om_key") == om]
+    return owned if allowed is None else [c for c in allowed if c in set(owned)]
 
 
 async def _action_closure() -> Dict[str, dict]:
@@ -294,10 +336,18 @@ async def _success_rollup(allowed: Optional[List[str]]) -> dict:
 # Client × activity grid — shared by the Staff and Client dashboards
 # ─────────────────────────────────────────────────────────────
 async def _clients_grid(events: List[dict], allowed: Optional[List[str]],
-                        companies: Dict[str, dict], window: tuple) -> tuple:
+                        companies: Dict[str, dict], window: tuple,
+                        scheduled_by: str = "") -> tuple:
+    """Company × activity "done/total" cells.
+
+    `scheduled_by` ("internal" | "client") is the spec §9.1 "Scheduled by OM / Client"
+    filter — it narrows the grid to occurrences raised by that side. Empty = no filter,
+    so the existing callers are unaffected.
+    """
     frm, to, _pf, _pt = window
     today = _today()
     allow = set(allowed) if allowed is not None else None
+    side = str(scheduled_by or "").strip().lower()
 
     catalogue = await get_collection(COLL_ACTIVITIES).find(
         {"active": {"$ne": False}}
@@ -311,6 +361,8 @@ async def _clients_grid(events: List[dict], allowed: Optional[List[str]],
             continue
         day = str(e.get("start") or "")[:10]
         if not _in_range(day, frm, to):
+            continue
+        if side and str(e.get("scheduled_by_side") or "").lower() != side:
             continue
         activity = e.get("activity") or ""
         status = e.get("tpms_status") or STATUS_SCHEDULED
@@ -541,12 +593,17 @@ async def get_analytics(user: dict, scope: dict) -> dict:
     tot_actions = sum(closure[c]["total"] for c in scoped if c in closure)
     tot_esc = sum(escalations.get(c, 0) for c in scoped)
     planned_clients = len([c for c in clients if c["planned"] > 0])
+    # Spec §9.1 — "Total OMs = distinct SMOps in scope", i.e. every OM who owns a scoped
+    # company. Counting `by_om` instead would silently drop any OM whose clients happen to
+    # have no activity this period, which is exactly the case an Admin needs to see.
+    total_oms = len({(companies.get(c) or {}).get("om_key") for c in scoped
+                     if (companies.get(c) or {}).get("om_key")})
 
     cards = {
         "total_clients": len(scoped),
         "planned_clients": planned_clients,
         "unplanned_clients": len(scoped) - planned_clients,
-        "total_oms": len(by_om),
+        "total_oms": total_oms,
         "planned": totals["planned"], "completed": totals["done"],
         "completion": _pct(totals["done"], totals["planned"]),
         "avg_delay": _avg_delay(totals),
@@ -555,10 +612,17 @@ async def get_analytics(user: dict, scope: dict) -> dict:
         **rollup,
     }
 
+    # Spec §9.1 — the Admin dashboard also carries the OM-Clients activity-status grid and
+    # the open action-item feed (both already powering the OM/Client dashboards).
+    activities, grid = await _clients_grid(events, allowed, companies, window,
+                                           scheduled_by=str(scope.get("scheduled_by") or ""))
+
     return {
         "period": {"from": window[0], "to": window[1]},
         "selected_period": scope.get("period") or window[0][:7],
         "cards": cards, "clients": clients, "oms": oms, "top_delayed": top_delayed,
+        "activities": activities, "clients_grid": grid,
+        "open_actions": await _open_actions(allowed),
         "filters": await _filters(companies, allowed),
     }
 
@@ -598,7 +662,11 @@ async def get_staff_dashboard(user: dict, scope: dict) -> dict:
     totals, by_company, _by_om = _accumulate(events, allowed, companies, window, om_filter)
     closure = await _action_closure()
     escalations = await _active_escalations()
-    activities, grid = await _clients_grid(events, allowed, companies, window)
+    # Spec §9.2 / §17 — the OM dashboard carries the same "Scheduled by OM / Client"
+    # narrowing as the Admin grid.
+    sched_by = str(scope.get("scheduled_by") or "")
+    activities, grid = await _clients_grid(events, allowed, companies, window,
+                                           scheduled_by=sched_by)
 
     scoped = allowed if allowed is not None else list(companies.keys())
     tot_closed = sum(closure[c]["closed"] for c in scoped if c in closure)
@@ -660,17 +728,13 @@ async def get_learner_dashboard(user: dict, scope: dict) -> dict:
         actual, target = m.get("score_actual"), m.get("score_target")
         ach = m.get("achievement")
         has_data = actual is not None
-        if not has_data:
-            status = "Not Met"
-            not_met += 1
-        elif (ach or 0) >= 100:
-            status = "Met"
+        # Spec §7 band — ≥100 Met · 50–99 Partial · <50 Not Met.
+        status = achievement_status(ach, has_data)
+        if status == STATUS_MET:
             met += 1
-        elif (ach or 0) > 0:
-            status = "Partial"
+        elif status == STATUS_PARTIAL:
             partial += 1
         else:
-            status = "Not Met"
             not_met += 1
         if ach is not None:
             ach_sum += ach
@@ -712,6 +776,9 @@ async def get_escalation_dashboard(user: dict, scope: dict) -> dict:
     scope = scope or {}
     companies = await _load_companies()
     allowed = _allowed_companies(user, companies, scope)
+    # Spec §17 — this dashboard offers an OM filter. `_allowed_companies` never looks at
+    # om_id, so without this the dropdown was accepted and silently discarded.
+    allowed = _narrow_to_om(allowed, companies, scope.get("om_id"))
 
     query: dict = {}
     if allowed is not None:
@@ -803,6 +870,10 @@ async def _company_users(company_ids: Optional[List[str]]) -> Dict[str, dict]:
                      or u.get("email") or str(u["_id"])),
             "designation": u.get("designation") or "",
             "department": u.get("department") or "",
+            # C8 — the HOD/MD/HR governance role is separate from the org department, so a
+            # user can be governance_role "hod" while `department` holds "Sales". Pickers
+            # must key on this, not on `department`, or migrated HODs go missing.
+            "governance_role": (u.get("governance_role") or u.get("department") or "").strip().lower(),
             "email": u.get("email") or "",
             "company_id": str(u.get("company_id") or ""),
         }
@@ -940,15 +1011,28 @@ async def get_hod_dashboard(user: dict, scope: dict) -> dict:
     hod_options = sorted(
         [{"id": p["id"], "name": p["name"], "company_id": p["company_id"],
           "company": (companies.get(p["company_id"]) or {}).get("name") or ""}
-         for p in people.values() if (p["department"] or "").lower() == "hod"],
+         for p in people.values() if p["governance_role"] == "hod"],
         key=lambda h: h["name"].lower())
 
-    target = str(scope.get("member_id") or "")
-    if not target:
-        # A client-side user defaults to themselves when they are an HOD.
-        me = str(user.get("_id"))
-        target = me if any(h["id"] == me for h in hod_options) else (
-            hod_options[0]["id"] if hod_options else "")
+    me = str(user.get("_id"))
+    is_own_hod = any(h["id"] == me for h in hod_options)
+    # Spec §9.4 — "a Learner who is themselves an HOD is locked to self". Defaulting to self
+    # is not enough: an explicit member_id must be IGNORED for them, or an HOD can read a
+    # peer's scores by passing another id. MD / client-admin oversee the whole company and
+    # keep the picker; internal staff and admins are unrestricted.
+    locked_to_self = (
+        (user.get("role") or "").lower() in CLIENT_ROLES
+        and is_own_hod
+        and (user.get("role") or "").lower() != "clientadmin"
+        and not is_md_like(user)
+    )
+    if locked_to_self:
+        target = me
+        hod_options = [h for h in hod_options if h["id"] == me]
+    else:
+        target = str(scope.get("member_id") or "")
+        if not target:
+            target = me if is_own_hod else (hod_options[0]["id"] if hod_options else "")
 
     meta = people.get(target) or {}
     hod = {
@@ -1030,10 +1114,7 @@ async def get_implementation_tracker(user: dict, scope: dict) -> dict:
     # OM filter — narrow to the companies that OM owns or co-owns. Applied AFTER the role
     # scoping above so it can only ever subtract from what the caller may already see.
     om_filter = str(scope.get("om_id") or "")
-    if om_filter:
-        owned = [cid for cid, i in companies.items()
-                 if om_filter in (i.get("om_keys") or set()) or i.get("om_key") == om_filter]
-        allowed = owned if allowed is None else [c for c in allowed if c in set(owned)]
+    allowed = _narrow_to_om(allowed, companies, om_filter)
 
     window = _period_window(scope.get("period"))
     period = scope.get("period") or window[0][:7]
@@ -1103,11 +1184,13 @@ async def get_implementation_tracker(user: dict, scope: dict) -> dict:
         "selected_period": period,
         "selected_company": company_id,
         "selected_om": om_filter or None,
+        # Spec §7 band — ≥100 Met · 50–99 Partial · <50 Not Met.
         "cards": {
             "total": total,
-            "met": len([s for s in scorecard if (s["achievement"] or 0) >= 100]),
-            "partial": len([s for s in scorecard if 0 < (s["achievement"] or 0) < 100]),
-            "not_met": len([s for s in scorecard if not s["achievement"]]),
+            "met": len([s for s in scorecard if achievement_status(s["achievement"]) == STATUS_MET]),
+            "partial": len([s for s in scorecard if achievement_status(s["achievement"]) == STATUS_PARTIAL]),
+            "not_met": len([s for s in scorecard
+                            if achievement_status(s["achievement"]) not in (STATUS_MET, STATUS_PARTIAL)]),
         },
         "scorecard": scorecard, "uploads": uploads,
         "manual_activities": manual,
@@ -1168,32 +1251,45 @@ async def get_logs_report(user: dict, channel: str, scope: dict) -> dict:
         day = created.date().isoformat() if isinstance(created, datetime) else ""
         if day:
             spark[day] = spark.get(day, 0) + 1
+        # Spec §14 — Activity / Company context recorded on the log at send time.
         rows.append([
-            day, d.get("template_slug") or "", d.get("channel") or "",
+            day, d.get("activity") or "", d.get("company_name") or "",
+            d.get("template_slug") or "", d.get("channel") or "",
             d.get("target_contact") or "", d.get("status") or "", d.get("error_message") or "",
         ])
 
     return {
         "type": channel or "all",
-        "columns": ["Timestamp", "Action", "Channel", "Recipient", "Log Status", "Error"],
+        "columns": ["Timestamp", "Activity", "Company", "Action", "Channel",
+                    "Recipient", "Log Status", "Error"],
         "rows": rows, "counts": counts,
-        "spark": [{"day": k, "count": v} for k, v in sorted(spark.items())],
+        # Spec §14 — a 14-DAY sparkline. Without the window it spans however far the 3000-row
+        # page reaches, which can be months and flattens the shape into noise. Days with no
+        # sends are emitted as 0 so the series is continuous rather than gap-collapsed.
+        "spark": _spark_14d(spark),
         "truncated": total > len(rows),
         "total": total, "skip": skip, "limit": limit,
     }
 
 
 # 9) Review reports — getReviewReports (code.js:3388)
+# Per-source status vocabulary (spec §10). Each form reads in its own language — a review
+# is not "Strong", it is "Accountable" / "Taking Ownership" / "Follows Culture". Bands are
+# the same everywhere: ≥85 high · 70–84 mid · <70 low.
 REVIEW_SOURCES = [
     {"id": "accountability", "label": "Accountability Rating",
-     "status": {"high": "Strong", "mid": "Moderate", "low": "Needs Focus"}},
+     "status": {"high": "Accountable", "mid": "Partially Accountable", "low": "Non-Accountable"}},
     {"id": "ownership", "label": "Ownership Rating",
-     "status": {"high": "Strong", "mid": "Moderate", "low": "Needs Focus"}},
+     "status": {"high": "Taking Ownership", "mid": "Lack of Ownership", "low": "Irresponsible"}},
     {"id": "culture", "label": "Culture Rating",
-     "status": {"high": "Strong", "mid": "Moderate", "low": "Needs Focus"}},
+     "status": {"high": "Follows Culture", "mid": "Knows but not Followed", "low": "Ignore Culture"}},
     {"id": "implementation_feedback", "label": "Implementation Update Feedback",
      "status": {"high": "On Track", "mid": "Partial", "low": "Needs Focus"}},
 ]
+
+# Review-report band thresholds (spec §10) — shared with the frontend via `source.status`.
+REVIEW_BAND_HIGH = 85
+REVIEW_BAND_MID = 70
 
 
 async def get_review_reports(user: dict, source_id: str, scope: dict) -> dict:
@@ -1213,12 +1309,12 @@ async def get_review_reports(user: dict, source_id: str, scope: dict) -> dict:
     companies = await _load_companies()
     allowed = _allowed_companies(user, companies, scope)
 
+    # Spec §10: "Monthly Trend chart data ignores the month filter (shows full history) but
+    # respects company/HOD scope." So the period filter is NOT pushed into the query — it is
+    # applied further down, after the full-history trend has been built.
     query: dict = {}
     if allowed is not None:
         query["company_id"] = {"$in": allowed}
-    if scope.get("period"):
-        from app.models.tpms import period_tokens
-        query["period"] = {"$in": period_tokens(scope["period"])}
 
     docs = await get_collection(submission_collection(ft)).find(query).to_list(5000)
     respondent_key = "md_id" if is_yesno else "hod_id"
@@ -1227,9 +1323,7 @@ async def get_review_reports(user: dict, source_id: str, scope: dict) -> dict:
     # respondents in their own company; every other client respondent (an HOD or employee)
     # may only see their OWN reviews — never a peer's.
     role = (user.get("role") or "").lower()
-    gov = (user.get("governance_role") or "").strip().lower()
-    sees_all = (role in STAFF_ROLES or role == "clientadmin"
-                or gov in ("md", "managing director"))
+    sees_all = role in STAFF_ROLES or role == "clientadmin" or is_md_like(user)
     if role in CLIENT_ROLES and not sees_all:
         self_id = str(user.get("_id"))
         docs = [d for d in docs if str(d.get(respondent_key)) == self_id]
@@ -1241,8 +1335,9 @@ async def get_review_reports(user: dict, source_id: str, scope: dict) -> dict:
     criteria = definition.get("criteria") or []
     questions = definition.get("questions") or []
 
-    entries, periods, respondents = [], set(), {}
-    total_ratings = total_sum = total_yes = total_answers = 0
+    # Built over the FULL history in scope. The month filter is applied to `entries` below;
+    # the trend keeps every period (spec §10).
+    all_entries, periods = [], set()
 
     for d in docs:
         per = str(d.get("period") or "")
@@ -1250,7 +1345,6 @@ async def get_review_reports(user: dict, source_id: str, scope: dict) -> dict:
         rid = str(d.get(respondent_key) or "")
         rname = (d.get("hod_name") or d.get("md_name")
                  or (people.get(rid) or {}).get("name") or rid)
-        respondents[rid] = rname
         company = (companies.get(str(d.get("company_id"))) or {}).get("name") or ""
 
         if is_yesno:
@@ -1263,12 +1357,10 @@ async def get_review_reports(user: dict, source_id: str, scope: dict) -> dict:
                               "answer": "Yes" if checked else "No",
                               "remark": ans.get("remark") or ""})
             n = len(items)
-            total_yes += yes
-            total_answers += n
-            entries.append({"respondent_id": rid, "name": rname, "company": company,
-                            "period": per, "period_label": period_display(per) if per else "",
-                            "yesno": True, "items": items, "yes": yes, "total": n,
-                            "score_pct": _pct(yes, n)})
+            all_entries.append({"respondent_id": rid, "name": rname, "company": company,
+                                "period": per, "period_label": period_display(per) if per else "",
+                                "yesno": True, "items": items, "yes": yes, "total": n,
+                                "score_pct": _pct(yes, n)})
         else:
             members: Dict[str, dict] = {}
             for code, cells in (d.get("ratings") or {}).items():
@@ -1282,8 +1374,6 @@ async def get_review_reports(user: dict, source_id: str, scope: dict) -> dict:
                     m["ratings"][code] = r
                     m["sum"] += r
                     m["n"] += 1
-                    total_sum += r
-                    total_ratings += 1
             employees = [{
                 "id": mid, "name": m["name"], "ratings": m["ratings"],
                 "grand_total": m["sum"],
@@ -1292,7 +1382,7 @@ async def get_review_reports(user: dict, source_id: str, scope: dict) -> dict:
             employees.sort(key=lambda e: e["name"].lower())
             grand = sum(e["grand_total"] for e in employees)
             answered = sum(len(e["ratings"]) for e in employees)
-            entries.append({
+            all_entries.append({
                 "respondent_id": rid, "name": rname, "company": company, "period": per,
                 "period_label": period_display(per) if per else "",
                 "matrix": True,
@@ -1302,11 +1392,12 @@ async def get_review_reports(user: dict, source_id: str, scope: dict) -> dict:
                 "score_pct": round(grand / (answered * SCALE_MAX) * 100) if answered else 0,
             })
 
-    entries.sort(key=lambda e: (e["period"], e["name"].lower()), reverse=True)
+    all_entries.sort(key=lambda e: (e["period"], e["name"].lower()), reverse=True)
 
-    # Monthly trend: score % per rated person across periods.
+    # Monthly trend: score % per rated person across EVERY period in scope (spec §10 — the
+    # chart deliberately ignores the month filter so a trend line is still a trend).
     trend_people: Dict[str, dict] = {}
-    for e in entries:
+    for e in all_entries:
         if e.get("yesno"):
             t = trend_people.setdefault(e["respondent_id"],
                                         {"name": e["name"], "company": e["company"], "scores": {}})
@@ -1317,13 +1408,33 @@ async def get_review_reports(user: dict, source_id: str, scope: dict) -> dict:
                                             {"name": emp["name"], "company": e["company"], "scores": {}})
                 t["scores"][e["period"]] = emp["score_pct"]
 
+    # ── Month filter — applied to the table only, never to the trend above ──
+    entries = all_entries
+    if scope.get("period"):
+        from app.models.tpms import period_tokens
+        wanted = set(period_tokens(scope["period"])) | {str(scope["period"])}
+        entries = [e for e in all_entries if str(e.get("period") or "") in wanted]
+
+    # Totals describe what the table shows, so they come from the filtered entries.
+    # Matrix: Σratings ÷ count → avg rating. Checklist: yes ÷ answered → yes %.
+    respondents = {e["respondent_id"]: e["name"] for e in entries}
+    total_sum = total_ratings = total_yes = total_answers = 0
+    for e in entries:
+        if e.get("yesno"):
+            total_yes += e.get("yes") or 0
+            total_answers += e.get("total") or 0
+        else:
+            for emp in e.get("employees") or []:
+                total_sum += emp.get("grand_total") or 0
+                total_ratings += len(emp.get("ratings") or {})
+
     ordered = sorted(periods, reverse=True)
     return {
         "sources": [{"id": s["id"], "label": s["label"]} for s in REVIEW_SOURCES],
         "source": source,
         "is_yesno": is_yesno,
         "totals": {
-            "responses": len(docs),
+            "responses": len(entries),
             "respondent_count": len(respondents),
             "avg_rating": round(total_sum / total_ratings, 2) if total_ratings else "",
             "yes_pct": _pct(total_yes, total_answers) if total_answers else "",
@@ -1333,6 +1444,15 @@ async def get_review_reports(user: dict, source_id: str, scope: dict) -> dict:
             "periods": [{"id": p, "name": period_display(p) if p else ""} for p in ordered],
             "people": sorted(trend_people.values(), key=lambda t: t["name"].lower()),
         },
+        # Spec §3 — the Company picker offers exactly what this caller may see. A client-side
+        # MD is scoped to one company, so listing the full roster here would leak every other
+        # customer's name even though their DATA is correctly filtered out.
+        #
+        # Scoped by ROLE only, deliberately not by `allowed`: once a company is selected,
+        # `_allowed_companies` narrows to that single company, and building the picker from it
+        # would collapse the list to one entry — hiding the control and stranding the user on
+        # whatever they last picked.
+        "companies": _picker_companies(user, companies),
         "period_options": [{"id": p, "name": period_display(p) if p else ""} for p in ordered],
         "respondent_options": sorted(
             [{"id": k, "name": v} for k, v in respondents.items()],

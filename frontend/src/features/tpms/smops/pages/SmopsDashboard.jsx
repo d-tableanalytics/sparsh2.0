@@ -26,9 +26,18 @@ const buildKpis = (cards = {}) => [
   { value: cards.escalations ?? 0,         label: 'Active Escalations', sub: 'Need action',     tone: 'red',    icon: AlertTriangle },
 ];
 
+// Spec §9.2 / §17 — "Scheduled-by side". Matches `scheduled_by_side` on the activity.
+const SCHEDULED_BY_OPTIONS = [
+  { id: '', name: 'Scheduled by: Anyone' },
+  { id: 'internal', name: 'Scheduled by: OM' },
+  { id: 'client', name: 'Scheduled by: Client' },
+];
+
 const SmopsDashboard = () => {
   const [client, setClient] = useState('');
   const [period, setPeriod] = useState(currentPeriod());
+  // Spec §9.2 / §17 — "Scheduled-by side"; narrows the activity grid server-side.
+  const [schedBy, setSchedBy] = useState('');
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -40,6 +49,7 @@ const SmopsDashboard = () => {
       const res = await getStaffDashboard({
         period: period || undefined,
         company_id: client || undefined,
+        scheduled_by: schedBy || undefined,
       });
       setData(res.data);
     } catch (e) {
@@ -48,7 +58,7 @@ const SmopsDashboard = () => {
     } finally {
       setLoading(false);
     }
-  }, [period, client]);
+  }, [period, client, schedBy]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -73,6 +83,7 @@ const SmopsDashboard = () => {
       <DashboardHero icon={Briefcase} title="OM Dashboard" highlight={highlight} subtitle="Your operational performance across assigned companies">
         <HeaderSelect value={client} onChange={setClient} options={clientOpts} />
         <HeaderSelect value={period} onChange={setPeriod} options={periodOpts} />
+        <HeaderSelect value={schedBy} onChange={setSchedBy} options={SCHEDULED_BY_OPTIONS} />
         <HeroButton icon={RefreshCw} onClick={load}>Refresh</HeroButton>
       </DashboardHero>
 

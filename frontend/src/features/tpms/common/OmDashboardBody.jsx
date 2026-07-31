@@ -29,10 +29,19 @@ const delayColor = (v) => {
   return 'var(--accent-red)';
 };
 
+// Spec §9.2 / §17 — "Action pending-side". Values match `pending_side` from _open_actions.
+const PENDING_SIDE_OPTIONS = [
+  { id: '', name: 'Either side' },
+  { id: 'client', name: 'Pending: Client' },
+  { id: 'staff', name: 'Pending: OM' },
+];
+
 const OmDashboardBody = ({ kpis = [], activities = [], matrix = [], actions = [], action_required: actionRequired = [] }) => {
   const [fActivity, setFActivity] = useState('All Activities');
   const [fClient, setFClient] = useState('All Clients');
   const [fOwner, setFOwner] = useState('All Owners');
+  // Spec §9.2 / §17 — "Action pending-side": whose court the follow-up is sitting in.
+  const [fSide, setFSide] = useState('');
 
   const activityOpts = useMemo(
     () => ['All Activities', ...Array.from(new Set(actions.map((a) => a?.activity).filter(Boolean)))],
@@ -50,9 +59,13 @@ const OmDashboardBody = ({ kpis = [], activities = [], matrix = [], actions = []
   const filteredActions = actions.filter((a) =>
     (fActivity === 'All Activities' || a?.activity === fActivity) &&
     (fClient === 'All Clients' || a?.company === fClient) &&
-    (fOwner === 'All Owners' || a?.owner === fOwner));
+    (fOwner === 'All Owners' || a?.owner === fOwner) &&
+    (!fSide || a?.pending_side === fSide));
 
-  const clearFilters = () => { setFActivity('All Activities'); setFClient('All Clients'); setFOwner('All Owners'); };
+  const clearFilters = () => {
+    setFActivity('All Activities'); setFClient('All Clients');
+    setFOwner('All Owners'); setFSide('');
+  };
 
   const matrixCols = activities.length + 2; // Client + activities + Done
 
@@ -153,6 +166,7 @@ const OmDashboardBody = ({ kpis = [], activities = [], matrix = [], actions = []
             <FilterSelect value={fActivity} onChange={setFActivity} options={activityOpts} />
             <FilterSelect value={fClient} onChange={setFClient} options={clientOpts} />
             <FilterSelect value={fOwner} onChange={setFOwner} options={ownerOpts} />
+            <FilterSelect value={fSide} onChange={setFSide} options={PENDING_SIDE_OPTIONS} />
             <button onClick={clearFilters} className="px-3 py-2 rounded-lg border border-[var(--border)] text-[var(--text-muted)] text-[12.5px] font-bold hover:bg-[var(--input-bg)] transition-all">Clear</button>
           </div>
         }

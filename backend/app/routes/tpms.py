@@ -27,7 +27,7 @@ from app.db.mongodb import get_collection
 from app.models.tpms import (
     COLL_ACTIVITIES, COLL_REMINDER_RULES, COLL_SUCCESS_MEASURES, TPMS_DEPARTMENTS,
     COLL_DEPARTMENTS, COLL_REMINDER_LOGS, COLL_MAIL_TEMPLATES,
-    TPMS_EVENT_KIND, REQUEST_PENDING, STATUS_SCHEDULED,
+    TPMS_EVENT_KIND, REQUEST_PENDING, STATUS_SCHEDULED, is_md_like,
 )
 from bson import ObjectId
 from bson.errors import InvalidId
@@ -440,10 +440,18 @@ async def list_tpms_schedules(
 
     query = {"kind": TPMS_EVENT_KIND}
     # Client-side users only ever see their own company.
-    if (current_user.get("role") or "").lower() in CLIENT_ROLES:
+    role = (current_user.get("role") or "").lower()
+    is_client = role in CLIENT_ROLES
+    if is_client:
         query["company_id"] = str(current_user.get("company_id") or "")
     elif company_id:
         query["company_id"] = company_id
+
+    # Spec §3 — a Learner who is neither MD nor client-admin is additionally scoped to
+    # activities they are a DOER on, or that they CREATED ("isDoer OR mine"). MD and
+    # client-admin oversee the whole company, so they skip this narrowing.
+    oversees_company = role == "clientadmin" or is_md_like(current_user)
+    self_scoped = is_client and not oversees_company
     if activity:
         query["activity"] = activity
     if status:
@@ -457,6 +465,10 @@ async def list_tpms_schedules(
     events = []
     for coll in CAL_COLLECTIONS:
         for e in await get_collection(coll).find(query).to_list(2000):
+            is_doer = uid in {str(m) for m in (e.get("assigned_member_ids") or [])}
+            mine = str(e.get("user_id") or "") == uid
+            if self_scoped and not (is_doer or mine):
+                continue
             start = str(e.get("start") or "")
             events.append({
                 "id": str(e["_id"]),
@@ -476,7 +488,8 @@ async def list_tpms_schedules(
                 "completed_at": e.get("completed_at"),
                 "upload_required": bool((e.get("activity_meta") or {}).get("upload_required")),
                 "reminder_count": len(e.get("reminders") or []),
-                "mine": str(e.get("user_id") or "") == uid,
+                "mine": mine,
+                "is_doer": is_doer,
                 "scheduled_by": e.get("scheduled_by_side") or "",       # M1 — internal | client
                 "scheduled_by_name": e.get("scheduled_by_name") or "",
             })
@@ -631,13 +644,16 @@ async def dashboard_analytics(
     period: Optional[str] = Query(None, description="'YYYY-MM'; defaults to this month"),
     company_id: Optional[str] = Query(None),
     om_id: Optional[str] = Query(None),
+    scheduled_by: Optional[str] = Query(None, description="internal | client — OM-Clients grid filter"),
     current_user: dict = Depends(get_current_user),
 ):
-    """Admin overview — 14 KPI cards, the client matrix, OM league table and top-delayed
-    clients. Role-scoped: SMOps see only their own companies, clients only themselves."""
+    """Admin overview — KPI cards, the client health matrix, OM league table, top-delayed
+    clients, the OM-Clients activity-status grid and the open action-item feed.
+    Role-scoped: SMOps see only their own companies, clients only themselves."""
     if not _can_read(current_user):
         raise HTTPException(status_code=403, detail="Not authorized")
-    return await get_analytics(current_user, _scope(period, company_id, om_id))
+    return await get_analytics(
+        current_user, {**_scope(period, company_id, om_id), "scheduled_by": scheduled_by})
 
 
 @router.get("/dashboards/staff")
@@ -645,12 +661,14 @@ async def dashboard_staff(
     period: Optional[str] = Query(None),
     company_id: Optional[str] = Query(None),
     om_id: Optional[str] = Query(None),
+    scheduled_by: Optional[str] = Query(None, description="internal | client — activity-grid filter"),
     current_user: dict = Depends(get_current_user),
 ):
     """OM / SMOps view — my clients, the activity grid and open follow-ups."""
     if not _can_read(current_user):
         raise HTTPException(status_code=403, detail="Not authorized")
-    return await get_staff_dashboard(current_user, _scope(period, company_id, om_id))
+    return await get_staff_dashboard(
+        current_user, {**_scope(period, company_id, om_id), "scheduled_by": scheduled_by})
 
 
 @router.get("/dashboards/client")

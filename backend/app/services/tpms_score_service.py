@@ -294,6 +294,24 @@ async def sync_success_measures(period: Optional[str] = None) -> dict:
     return {"updated": updated, "skipped": skipped, "period": period}
 
 
+def pct_num(v):
+    """Port of pctNum_ (spec §18).
+
+    Accepts 95, "95", "95%" or 0.95 (a fraction) and always returns an integer 0-100, or
+    None for blank/unparseable input. A bare value below 1 is read as a fraction — a real
+    1% would be entered as "1", not "0.01" — and the result is clamped to the 0-100 range.
+    """
+    if v is None or v == "":
+        return None
+    try:
+        n = float(str(v).strip().replace("%", "").strip())
+    except (TypeError, ValueError):
+        return None
+    if 0 < n < 1:
+        n *= 100
+    return max(0, min(100, int(round(n))))
+
+
 async def save_manual_score(user: dict, payload: dict) -> dict:
     """Upsert a manually-entered score (saveManualScore, code.js:2636).
     `scope` is 'company' or 'hod'; HOD-scoped rows carry hod_id and are averaged by sync."""
@@ -310,18 +328,12 @@ async def save_manual_score(user: dict, payload: dict) -> dict:
         from fastapi import HTTPException
         raise HTTPException(status_code=400, detail="hod_id is required for HOD-scoped scores")
 
-    def _num(v):
-        try:
-            return None if v in (None, "") else int(round(float(v)))
-        except (TypeError, ValueError):
-            return None
-
     await get_collection(COLL_SUCCESS_MEASURES).update_one(
         {"company_id": company_id, "activity": activity, "period": period,
          "scope": scope, "hod_id": hod_id},
         {"$set": {
-            "score_target": _num(payload.get("target")),
-            "score_actual": _num(payload.get("actual")),
+            "score_target": pct_num(payload.get("target")),
+            "score_actual": pct_num(payload.get("actual")),
             "hod_name": payload.get("hod_name"),
             "updated_by": user.get("full_name") or user.get("email"),
             "updated_at": datetime.utcnow(),

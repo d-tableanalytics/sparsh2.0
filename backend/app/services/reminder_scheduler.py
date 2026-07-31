@@ -10,6 +10,10 @@ logger = logging.getLogger(__name__)
 from app.utils.calendar_utils import CALENDAR_COLLECTIONS, find_user_by_id
 from app.models.tpms import TPMS_EVENT_KIND, TPMS_NOTIFICATIONS_ENABLED
 
+# How far past its trigger a TPMS reminder may be and still be worth sending. Anything older
+# is marked sent and skipped — see the note at the send site in check_and_trigger_reminders.
+TPMS_REMINDER_MAX_AGE_HOURS = 48
+
 async def start_reminder_scheduler():
     logger.info("Starting reminder scheduler background worker...")
     last_recurring_day = None
@@ -82,7 +86,8 @@ async def check_and_trigger_reminders():
             # This gate is TPMS-only (keyed on the `tpms_activity` discriminator) — reminders
             # for every other event/task fire exactly as before. Leaving them unsent (rather
             # than marking them sent) means re-enabling the flag restores them intact.
-            if event.get("kind") == TPMS_EVENT_KIND and not TPMS_NOTIFICATIONS_ENABLED:
+            is_tpms_event = event.get("kind") == TPMS_EVENT_KIND
+            if is_tpms_event and not TPMS_NOTIFICATIONS_ENABLED:
                 continue
             reminders = event.get("reminders", [])
             event_time_str = event.get("start")
@@ -110,13 +115,57 @@ async def check_and_trigger_reminders():
                 
                 # If trigger time reached or passed
                 if trigger_time <= now:
-                    # Trigger notification to relevant parties
-                    await trigger_reminder_notification(event, reminder)
+                    # A TPMS reminder that is long overdue is consumed WITHOUT sending.
+                    # While notifications are disabled these accumulate unsent (see the gate
+                    # above), so without this window the first tick after enabling the flag
+                    # would deliver every historical reminder at once — three per activity,
+                    # to every doer and coach. Recent ones still fire normally.
+                    # Scoped to TPMS: other modules have been sending all along and have no
+                    # backlog, so their behaviour is unchanged.
+                    stale = (is_tpms_event
+                             and (now - trigger_time) > timedelta(hours=TPMS_REMINDER_MAX_AGE_HOURS))
+                    if stale:
+                        logger.info(
+                            f"TPMS reminder skipped as stale ({trigger_time.isoformat()}) "
+                            f"for event {event.get('_id')}"
+                        )
+                    else:
+                        await trigger_reminder_notification(event, reminder)
                     reminder["sent"] = True
                     updated = True
             
             if updated:
                 await col.update_one({"_id": event["_id"]}, {"$set": {"reminders": reminders}})
+
+
+async def _send_tpms_reminder_email(user_data, event):
+    """Render a TPMS activity reminder through the module's own template layer.
+
+    Side is decided by which collection the recipient came from: a learner is the company
+    side, internal staff are the staff side. Falls back to the ported default body when no
+    template row is configured, exactly as every other TPMS mail kind does.
+    """
+    from app.services.tpms_notify_service import (
+        EVENT_REMINDER, SIDE_COMPANY, SIDE_STAFF,
+        build_map, fill, get_template, log_context, _default_body,
+    )
+    from app.services.notification_service import send_email_notification
+
+    side = SIDE_COMPANY if user_data.get("company_id") else SIDE_STAFF
+    mapping = await build_map(event)
+    mapping["Recipient_Name"] = (user_data.get("full_name")
+                                 or " ".join(filter(None, [user_data.get("first_name"),
+                                                           user_data.get("last_name")])).strip()
+                                 or user_data.get("email") or "")
+    tpl = await get_template(event.get("activity") or "", EVENT_REMINDER, side)
+    subject_tpl = (tpl or {}).get("subject") or "[Reminder] {{Title}} – {{Activity}}"
+    body_tpl = (tpl or {}).get("body_html")
+    html = fill(body_tpl, mapping) if body_tpl else _default_body(mapping, "Reminder")
+    await send_email_notification(
+        user_data.get("email"), fill(subject_tpl, mapping), html,
+        user_id=str(user_data.get("_id")), slug=f"tpms_reminder_{side}",
+        meta=log_context(event),
+    )
 
 
 async def trigger_reminder_notification(event, reminder):
@@ -155,7 +204,13 @@ async def trigger_reminder_notification(event, reminder):
                 pass # Continue search to other users
 
             if user_data and send_email_flag:
-                await send_reminder_email(user_data, event)
+                # Spec §11 — a TPMS activity reminder uses the per-activity `reminder`
+                # template (activity × reminder × side) so a configured body is actually
+                # applied. Anything else keeps the generic ERP reminder mail.
+                if is_tpms:
+                    await _send_tpms_reminder_email(user_data, event)
+                else:
+                    await send_reminder_email(user_data, event)
                 await _log_tpms_reminder(event, reminder, user_data, "sent", None)
         except Exception as e:
             logger.error(f"Error notifying user {uid} for reminder: {e}")

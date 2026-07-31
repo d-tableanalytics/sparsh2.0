@@ -14,6 +14,7 @@ Scheduled TPMS activities are NOT stored here — they are calendar events carry
 `kind == TPMS_EVENT_KIND` (see app/models/calendar_event.py), so they reuse the ERP's
 recurrence engine, reminder scheduler and calendar UI.
 """
+import re
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict
 from datetime import datetime
@@ -154,6 +155,67 @@ def escalation_level(days_overdue: int) -> Dict:
         if days_overdue >= min_days:
             return {"level": level, "to": to}
     return {"level": 0, "to": ""}
+
+
+# ─────────────────────────────────────────────────────────────
+# Success-measure achievement band (spec §7)
+#     ≥100% → Met · 50–99% → Partial · <50% → Not Met
+# Anything below half of target is NOT a partial success — it reads as Not Met. Defined
+# once here because the band is applied on three surfaces (client dashboard, implementation
+# tracker cards, per-activity scorecard) and they must never disagree.
+# ─────────────────────────────────────────────────────────────
+ACHIEVEMENT_MET_MIN = 100
+ACHIEVEMENT_PARTIAL_MIN = 50
+
+STATUS_MET = "Met"
+STATUS_PARTIAL = "Partial"
+STATUS_NOT_MET = "Not Met"
+
+
+# ─────────────────────────────────────────────────────────────
+# Governance-role detection (spec §2 / §3)
+#
+# The source matched a free-text `Role` column against
+#     /\bmd\b|managing director|client|owner|founder|ceo/i
+# to decide who oversees a whole company. The ERP prefers the controlled
+# `governance_role` (HOD/MD/HR), falling back to `department` for un-migrated users — and
+# keeps the source's synonyms so a user still carrying "Owner"/"CEO"/"Founder" is read as
+# MD rather than silently losing company-wide visibility.
+#
+# Defined once here because MD detection gates three separate surfaces (calendar scope,
+# review-report self-lock, HOD-dashboard self-lock) that must agree.
+# ─────────────────────────────────────────────────────────────
+_MD_ROLE_PATTERN = re.compile(r"\bmd\b|managing director|client|owner|founder|ceo", re.I)
+
+
+def governance_role_of(user: dict) -> str:
+    """The user's governance role, lower-cased. Prefers the controlled field."""
+    return (user.get("governance_role") or user.get("department") or "").strip().lower()
+
+
+def is_md_like(user: dict) -> bool:
+    """Does this user oversee their entire company? (spec §3 "Learner (MD)")"""
+    return bool(_MD_ROLE_PATTERN.search(governance_role_of(user)))
+
+
+def is_hod_like(user: dict) -> bool:
+    return governance_role_of(user) == "hod"
+
+
+def achievement_status(achievement, has_data: bool = True) -> str:
+    """Band an Achievement_% figure. No data / no score reads as Not Met, matching the
+    source (a blank actual scores 0, which falls below the partial floor anyway)."""
+    if not has_data or achievement is None:
+        return STATUS_NOT_MET
+    try:
+        value = float(achievement)
+    except (TypeError, ValueError):
+        return STATUS_NOT_MET
+    if value >= ACHIEVEMENT_MET_MIN:
+        return STATUS_MET
+    if value >= ACHIEVEMENT_PARTIAL_MIN:
+        return STATUS_PARTIAL
+    return STATUS_NOT_MET
 
 
 # ─────────────────────────────────────────────────────────────

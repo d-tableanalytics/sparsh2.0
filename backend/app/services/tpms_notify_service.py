@@ -18,6 +18,7 @@ Delivery reuses the ERP's existing notification service (SMTP + logging), so TPM
 second mail stack. Every send is logged with a `tpms_*` slug so the Logs Report can
 separate TPMS traffic from the rest of the ERP.
 """
+import asyncio
 import logging
 import os
 import re
@@ -71,9 +72,23 @@ async def _resolve_names(ids, collection: str) -> str:
     return ", ".join(names)
 
 
+# Spec §11 — a form may set `noCid` to suppress the company parameter on its deep link.
+# Keyed by form_type; add an entry to opt a form out.
+FORM_NO_CID = {
+    # "implementation_feedback": True,
+}
+
+
 def _form_link(event: dict) -> str:
-    """In-app form link for form-scored activities. Absolute when FRONTEND_URL is set,
-    else a relative path. Empty for non-form activities."""
+    """In-app deep link for form-scored activities (spec §11 "HOD Form Links").
+
+    Carries CID / EID / MID (Company / Employee / Month) so the form opens already scoped
+    instead of dropping the recipient on a blank month — unless the form sets `noCid`, in
+    which case the company parameter is omitted. `period` is emitted alongside MID because
+    the ERP form components read that name; same value, both spellings, so the link works
+    from mail and from the in-app "My Forms" list alike.
+    Absolute when FRONTEND_URL is set, else relative. Empty for non-form activities.
+    """
     try:
         from app.models.forms import ACTIVITY_FORM_MAP
         forms = ACTIVITY_FORM_MAP.get(event.get("activity") or "")
@@ -81,7 +96,22 @@ def _form_link(event: dict) -> str:
         forms = None
     if not forms:
         return ""
-    path = f"/tpms/forms/{forms[0].replace('_', '-')}"
+
+    from urllib.parse import urlencode
+    form_type = forms[0]
+    members = event.get("assigned_member_ids") or []
+    params = {
+        "CID": "" if FORM_NO_CID.get(form_type) else str(event.get("company_id") or ""),
+        "EID": str(members[0]) if members else "",
+        "MID": str(event.get("start") or "")[:7],   # YYYY-MM
+    }
+    params = {k: v for k, v in params.items() if v}
+    if params.get("MID"):
+        params["period"] = params["MID"]
+
+    path = f"/tpms/forms/{form_type.replace('_', '-')}"
+    if params:
+        path = f"{path}?{urlencode(params)}"
     base = os.getenv("FRONTEND_URL", "").rstrip("/")
     return (base + path) if base else path
 
@@ -110,6 +140,19 @@ async def build_map(event: dict, extra: Optional[dict] = None) -> Dict[str, str]
     if extra:
         mapping.update({k: v for k, v in extra.items() if v is not None})
     return mapping
+
+
+def log_context(event: dict) -> Dict[str, str]:
+    """Spec §14 — the delivery log is joined to its activity so the Logs Report can show
+    Activity / Company / Date next to the send result. Recorded at write time rather than
+    resolved afterwards, because the log has no other route back to the schedule."""
+    return {
+        "event_id": str(event.get("_id") or ""),
+        "activity": event.get("activity") or "",
+        "company_id": str(event.get("company_id") or ""),
+        "company_name": event.get("company_name") or "",
+        "event_date": str(event.get("start") or "")[:10],
+    }
 
 
 async def get_template(activity: str, event_kind: str, side: str) -> Optional[dict]:
@@ -185,13 +228,49 @@ async def _recipients(event: dict) -> Dict[str, List[dict]]:
 # fully dormant while notifications are off; the resolution/normalisation logic is ready.
 # ─────────────────────────────────────────────────────────────
 def normalize_phone(raw: str) -> str:
-    """Strip non-digits; prefix country code 91 for a bare 10-digit Indian number."""
+    """Spec §11 — strip non-digits, strip leading zeros, then prefix the country code when
+    exactly 10 digits remain. The zero-strip is what makes a locally-dialled "09876543210"
+    resolve to the same number as "9876543210"."""
     digits = re.sub(r"\D", "", str(raw or ""))
+    digits = digits.lstrip("0")
     if not digits:
         return ""
     if len(digits) == 10:
         digits = "91" + digits
     return digits
+
+
+# Spec §11 — waGuessField_: when a template variable isn't a known placeholder name, infer
+# the intended field from the words in it. Ordered most-specific first, because "event date"
+# must match the date rule before the generic "event" one would ever apply.
+_WA_GUESS_RULES = [
+    (("date", "day", "schedule"), "Event_Date"),
+    (("time", "hour"), "Event_Time"),
+    (("activity", "task"), "Activity"),
+    (("company", "client", "org"), "Company_Name"),
+    (("title", "subject", "name of"), "Title"),
+    (("status", "state"), "Status"),
+    (("department", "dept"), "Departments"),
+    (("staff", "om", "smops"), "Staff_Assigner"),
+    (("doer", "assigner", "member", "employee"), "Company_Assigners"),
+    (("link", "url", "form"), "Form_Link"),
+    (("comment", "note", "remark"), "Comment"),
+    (("recipient", "to"), "Recipient_Name"),
+]
+
+
+def wa_guess_field(variable: str, mapping: Dict[str, str]) -> str:
+    """Best-effort value for an unmapped template variable. Returns "" when nothing fits,
+    which leaves the caller's "-" guard in charge (Meta rejects blank params)."""
+    needle = str(variable or "").replace("_", " ").lower()
+    if not needle:
+        return ""
+    for words, field in _WA_GUESS_RULES:
+        if any(w in needle for w in words):
+            value = mapping.get(field)
+            if value:
+                return str(value)
+    return ""
 
 
 async def get_whatsapp_template(activity: str, event_kind: str, side: str) -> Optional[dict]:
@@ -220,9 +299,11 @@ async def send_whatsapp(event: dict, event_kind: str, side: str) -> dict:
     from app.services.notification_service import send_whatsapp_template
 
     mapping = await build_map(event)
-    # Meta requires ORDERED params; the template row stores the variable order.
+    # Meta requires ORDERED params; the template row stores the variable order. A variable
+    # that doesn't name a known field falls back to the heuristic guesser (spec §11) rather
+    # than silently sending "-".
     var_keys = tpl.get("variables") or []
-    params = [str(mapping.get(k) or "-") for k in var_keys]  # empty-param "-" guard
+    params = [str(mapping.get(k) or wa_guess_field(k, mapping) or "-") for k in var_keys]
     people = await _recipients(event)
     sent = failed = 0
     for person in people.get(side) or []:
@@ -270,6 +351,7 @@ async def _dispatch(event: dict, event_kind: str, heading: str,
                 await send_email_notification(
                     person["email"], subject, html,
                     user_id=person.get("id"), slug=f"tpms_{event_kind}_{side}",
+                    meta=log_context(event),
                 )
                 sent += 1
             except Exception as e:
@@ -287,11 +369,57 @@ async def notify_schedule(event: dict) -> dict:
     return await _dispatch(event, EVENT_SCHEDULE, "Scheduled")
 
 
+# ─────────────────────────────────────────────────────────────
+# Async status mail (spec §11 "Async Mail Queue", §1.4, §5.18)
+#
+# The source queued the job and fired a one-off trigger ~3 seconds later so updateSchedule
+# returned to the UI immediately. The asyncio equivalent is to detach the send onto the
+# running loop: the caller returns as soon as the hand-off is accepted, and the sends
+# proceed in the background.
+#
+# §18.14 — if the hand-off cannot be scheduled (no running loop), the mail is sent inline
+# straight away rather than lost. Strong references are held until each task finishes,
+# otherwise the loop may garbage-collect a send mid-flight.
+# ─────────────────────────────────────────────────────────────
+_BACKGROUND_SENDS: set = set()
+
+
+async def _dispatch_detached(event: dict, event_kind: str, heading: str,
+                             extra: Optional[dict]) -> None:
+    try:
+        await _dispatch(event, event_kind, heading, extra)
+    except Exception as e:
+        logger.error(f"TPMS detached {event_kind} mail failed: {e}")
+
+
+def _enqueue_status_mail(event: dict, event_kind: str, heading: str,
+                         extra: Optional[dict]) -> bool:
+    """Hand the send to the event loop. False = could not be scheduled, send inline."""
+    if not TPMS_NOTIFICATIONS_ENABLED:
+        return False          # nothing to queue; _dispatch will no-op immediately
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return False          # no loop (sync context / shutdown) → inline fallback
+    task = loop.create_task(_dispatch_detached(event, event_kind, heading, extra))
+    _BACKGROUND_SENDS.add(task)
+    task.add_done_callback(_BACKGROUND_SENDS.discard)
+    return True
+
+
 async def notify_status(event: dict, status_kind: str, extra: Optional[dict] = None) -> dict:
-    """Sent on reschedule / cancel / completion (sendStatusEmails_, code.js:970)."""
+    """Sent on reschedule / cancel / completion (sendStatusEmails_, code.js:970).
+
+    Detached so the caller — updateSchedule, confirmCompletion, the reschedule decision —
+    returns without waiting on delivery to every assigned recipient. Schedule mail is
+    deliberately NOT detached: the spec scopes the queue to status-change mail only.
+    """
     headings = {EVENT_RESCHEDULE: "Rescheduled", EVENT_CANCEL: "Cancelled",
                 EVENT_COMPLETED: "Completed"}
-    return await _dispatch(event, status_kind, headings.get(status_kind, "Update"), extra)
+    heading = headings.get(status_kind, "Update")
+    if _enqueue_status_mail(event, status_kind, heading, extra):
+        return {"queued": 1, "sent": 0, "failed": 0}
+    return await _dispatch(event, status_kind, heading, extra)
 
 
 async def notify_learner_done(event: dict, doer_name: str) -> dict:

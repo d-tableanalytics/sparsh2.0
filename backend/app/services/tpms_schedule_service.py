@@ -547,6 +547,17 @@ async def update_schedule(user: dict, event_id: str, payload: dict) -> dict:
     doc, coll = await find_tpms_event(event_id)
     await assert_can_schedule(user, str(doc.get("company_id") or ""))
 
+    # Spec §3 permission matrix — "Edit any" is Admin/Staff only. A client-side Learner may
+    # edit ONLY an activity they created ("Edit own created"); a non-creator has no edit
+    # right at all, and instead uses Request Reschedule / Mark Done. assert_can_schedule
+    # above only proves company membership, which is not sufficient on its own.
+    if (user.get("role") or "").lower() in CLIENT_ROLES \
+            and str(doc.get("user_id") or "") != str(user.get("_id")):
+        raise HTTPException(
+            status_code=403,
+            detail="You can only edit activities you created. Use Request Reschedule instead.",
+        )
+
     old_start = str(doc.get("start") or "")
     old_date, old_time = old_start[:10], old_start[11:16]
     new_date = str(payload.get("plan_start") or payload.get("planStart") or old_date)[:10]

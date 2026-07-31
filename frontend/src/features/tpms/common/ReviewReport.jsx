@@ -11,7 +11,6 @@ import {
 import { DashboardHero, HeroButton, Section, KpiTile, FilterSelect, TILE } from './dashboardKit';
 import { useAuth } from '../../../context/AuthContext';
 import { getReviewReports, currentPeriod, periodLabel } from '../../../services/tpmsApi';
-import api from '../../../services/api';
 
 /* ─────────────────────────────────────────────────────────────
    Review Report — review-form responses with a Cards view and a
@@ -371,26 +370,16 @@ const ReviewReport = ({ title = 'Review Reports', subtitle = 'Evaluation & feedb
   const [respondentId, setRespondentId] = useState('');
   const [q, setQ] = useState('');
 
-  const [companies, setCompanies] = useState([]);
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   // The submission whose full breakdown is open in the detail dialog (null = closed).
   const [detail, setDetail] = useState(null);
 
-  // Companies list for the picker (loaded once; server still scopes by role).
-  useEffect(() => {
-    let alive = true;
-    (async () => {
-      try {
-        const res = await api.get('/companies');
-        if (alive) setCompanies(res.data || []);
-      } catch {
-        if (alive) setCompanies([]);
-      }
-    })();
-    return () => { alive = false; };
-  }, []);
+  // The company list comes from the report payload, which is already role-scoped (spec §3).
+  // It must NOT be loaded from /companies — that endpoint returns every client in the system,
+  // which would show a client-side MD the names of every other customer.
+  const companies = useMemo(() => data?.companies || [], [data]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -421,19 +410,23 @@ const ReviewReport = ({ title = 'Review Reports', subtitle = 'Evaluation & feedb
   // different respondent, signalled by can_pick. Hide the picker otherwise.
   const canPick = data?.can_pick !== false;
 
-  // M7 — form-appropriate status vocabulary. Checklist (yes/no) forms read as
-  // compliance; rating (matrix) forms read as review health. Thresholds match
-  // the backend bands (≥85 / ≥70 / below).
+  // Spec §10 — each form has its OWN status vocabulary (Accountable / Taking Ownership /
+  // Follows Culture …), served on `source.status` so the wording lives in one place. The
+  // generic fallback only applies if an unknown form_type ever appears.
   const isChecklist = isYesno || (source || '') === 'implementation_feedback';
-  const statusVocab = isChecklist
+  const statusVocab = sourceMeta.status || (isChecklist
     ? { high: 'Compliant', mid: 'Partial', low: 'At Risk' }
-    : { high: 'Strong', mid: 'Healthy', low: 'Needs Focus' };
+    : { high: 'Strong', mid: 'Healthy', low: 'Needs Focus' });
+  // Bands: ≥85 high · 70–84 mid · <70 low.
   const statusLabel = (p) => (p >= 85 ? statusVocab.high : p >= 70 ? statusVocab.mid : statusVocab.low);
 
   const companyOpts = useMemo(
-    () => [{ id: '', name: 'All Companies' }, ...companies.map((c) => ({ id: String(c._id || c.id), name: c.name }))],
+    () => [{ id: '', name: 'All Companies' }, ...companies.map((c) => ({ id: String(c.id), name: c.name }))],
     [companies],
   );
+  // A caller scoped to one company has nothing to choose between — drop the picker rather
+  // than show a one-item dropdown that hints other companies exist.
+  const canPickCompany = companies.length > 1;
   const respondentOpts = useMemo(
     () => [{ id: '', name: 'All Respondents' },
       ...(data?.respondent_options || []).map((r) => ({ id: String(r.id), name: r.name }))],
@@ -619,7 +612,8 @@ const ReviewReport = ({ title = 'Review Reports', subtitle = 'Evaluation & feedb
           {[
             { label: 'Form', value: source, set: setSource, opts: sources.map((s) => ({ id: s.id, name: s.label })) },
             { label: 'Period', value: period, set: setPeriod, opts: periods },
-            { label: 'Company', value: companyId, set: setCompanyId, opts: companyOpts },
+            // Company picker only when the caller actually spans more than one (spec §3).
+            ...(canPickCompany ? [{ label: 'Company', value: companyId, set: setCompanyId, opts: companyOpts }] : []),
             // Respondent picker only for users allowed to view others (can_pick).
             ...(canPick ? [{ label: 'Respondent', value: respondentId, set: setRespondentId, opts: respondentOpts }] : []),
           ].map((f) => (

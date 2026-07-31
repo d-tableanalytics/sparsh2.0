@@ -40,7 +40,9 @@ const ROW_STATUS_TONE = {
   'Not Met': { text: 'var(--accent-red)', bg: 'var(--accent-red-bg)' },
 };
 
-const barColor = (p) => (p >= 100 ? 'var(--accent-green)' : p > 0 ? 'var(--accent-orange)' : 'var(--accent-red)');
+// Tracks the spec §7 achievement band (≥100 Met · 50–99 Partial · <50 Not Met) so the
+// progress bar never reads amber next to a red "Not Met" pill.
+const barColor = (p) => (p >= 100 ? 'var(--accent-green)' : p >= 50 ? 'var(--accent-orange)' : 'var(--accent-red)');
 
 // Colour vocabulary for the client × activity status grid. The backend cell.status
 // is emitted in two spellings across sources — the TPMS status labels (Completed /

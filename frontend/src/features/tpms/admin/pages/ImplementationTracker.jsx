@@ -43,7 +43,10 @@ import {
    above refreshes with the new achievement in the same round-trip.
    ───────────────────────────────────────────────────────────── */
 
-const statusOf = (a) => (a >= 100 ? 'Met' : a > 0 ? 'Partial' : 'Not Met');
+// Spec §7 achievement band — ≥100 Met · 50–99 Partial · <50 Not Met. Anything under half
+// of target is Not Met, not a partial success. Mirrors achievement_status() in
+// backend/app/models/tpms.py; keep the two in step.
+const statusOf = (a) => (a >= 100 ? 'Met' : a >= 50 ? 'Partial' : 'Not Met');
 const STATUS = {
   'Met':     { c: 'var(--accent-green)',  bg: 'var(--accent-green-bg)',  bd: 'var(--accent-green-border)' },
   'Partial': { c: 'var(--accent-orange)', bg: 'var(--accent-orange-bg)', bd: 'var(--accent-orange-border)' },
@@ -317,8 +320,8 @@ const ImplementationTracker = () => {
           <b> Calendar Discipline</b> = completion across all other activities (excluding Action Closure Review) ·
           <b> Achievement %</b> = Actual Score ÷ Score Target × 100 —
           <span className="text-[var(--accent-green)] font-bold"> Met ≥100%</span> ·
-          <span className="text-[var(--accent-orange)] font-bold"> Partial 1–99%</span> ·
-          <span className="text-[var(--accent-red)] font-bold"> Not Met 0%</span>.
+          <span className="text-[var(--accent-orange)] font-bold"> Partial 50–99%</span> ·
+          <span className="text-[var(--accent-red)] font-bold"> Not Met &lt;50%</span>.
         </p>
       </div>
 

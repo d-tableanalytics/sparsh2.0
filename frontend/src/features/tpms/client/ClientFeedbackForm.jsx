@@ -42,8 +42,10 @@ const ClientFeedbackForm = ({ formType, icon }) => {
 
   const [definition, setDefinition] = useState(null);
   const [loadingDefs, setLoadingDefs] = useState(true);
-  // Pre-fill the period from a ?period= deep-link ("My Forms"), else default.
-  const [period, setPeriod] = useState(() => periodFromParam(searchParams.get('period')) || defaultPeriod());
+  // Pre-fill the period from a deep-link: `period` ("My Forms") or `MID` (the CID/EID/MID
+  // params a notification link carries, spec §11). Falls back to the current month.
+  const [period, setPeriod] = useState(
+    () => periodFromParam(searchParams.get('period') || searchParams.get('MID')) || defaultPeriod());
 
   const [saved, setSaved] = useState({});      // { question_id: {checked, remark, question} } (locked)
   const [draft, setDraft] = useState({});      // { question_id: {checked, remark} } (editable)

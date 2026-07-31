@@ -135,16 +135,23 @@ def _esc_body(event: dict, label: str, note: str) -> str:
     )
 
 
-async def _send(recipients: List[str], subject: str, html: str, slug: str) -> int:
-    # TPMS notifications globally disabled → suppress escalation mails only. The ladder's
-    # STATE transitions (esc_stage bumps, Lapsed status) still run — this silences the mail.
+async def _send(recipients: List[str], subject: str, html: str, slug: str,
+                cc: Optional[List[str]] = None) -> int:
+    """Spec §6 — `recipients` are addressed on To, `cc` is copied. Each To recipient gets
+    their own message with the same CC list, so nobody sees the full distribution.
+
+    TPMS notifications globally disabled → suppress escalation mails only. The ladder's
+    STATE transitions (esc_stage bumps, Lapsed status) still run; this silences the mail.
+    """
     if not TPMS_NOTIFICATIONS_ENABLED:
         return 0
     from app.services.notification_service import send_email_notification
+    to_list = list(dict.fromkeys(e for e in recipients if e))
+    cc_list = [e for e in dict.fromkeys(cc or []) if e and e not in to_list]
     sent = 0
-    for email in recipients:
+    for email in to_list:
         try:
-            await send_email_notification(email, subject, html, slug=slug)
+            await send_email_notification(email, subject, html, slug=slug, cc=cc_list)
             sent += 1
         except Exception as e:
             logger.error(f"TPMS escalation mail to {email} failed: {e}")
@@ -180,46 +187,51 @@ async def run_escalation_ladder() -> dict:
         activity = event.get("activity") or ""
         updates: dict = {}
 
+        # Spec §6 recipient table — To: Owner, HOD, HR. CC: SMOps/OM.
         if overdue >= LADDER_PENDING_DAYS and stage < 1:
-            to = recipients["owners"] + recipients["hods"] + recipients["hrs"] + recipients["smops"]
+            to = recipients["owners"] + recipients["hods"] + recipients["hrs"]
             if to:
                 await _send(
-                    list(dict.fromkeys(to)),
+                    to,
                     f"[Pending Action] {title} – {activity} not updated",
                     _esc_body(event, "Pending Action Escalation",
                               f"This activity was scheduled on {event_day} and has not been "
                               "marked complete. Please update its status today."),
                     "tpms_escalation_pending",
+                    cc=recipients["smops"],
                 )
             updates["esc_stage"] = stage = 1
             pending += 1
 
+        # To: MD (falling back to HOD+HR when no MD resolves). CC: SMOps, Owner.
         if overdue >= LADDER_CRITICAL_DAYS and stage < 2:
-            to = (recipients["mds"] or (recipients["hods"] + recipients["hrs"])) \
-                + recipients["owners"] + recipients["smops"]
+            to = recipients["mds"] or (recipients["hods"] + recipients["hrs"])
             if to:
                 await _send(
-                    list(dict.fromkeys(to)),
+                    to,
                     f"[CRITICAL] {title} – {activity} overdue",
                     _esc_body(event, "Critical Escalation",
                               f"This activity (scheduled {event_day}) is still not completed "
                               "after 2 days. Immediate attention required before it lapses."),
                     "tpms_escalation_critical",
+                    cc=recipients["smops"] + recipients["owners"],
                 )
             updates["esc_stage"] = stage = 2
             critical += 1
 
+        # To: Owner, HOD, HR, MD. CC: SMOps.
         if overdue >= LADDER_LAPSE_DAYS and stage < 3:
             to = (recipients["owners"] + recipients["hods"]
-                  + recipients["hrs"] + recipients["mds"] + recipients["smops"])
+                  + recipients["hrs"] + recipients["mds"])
             if to:
                 await _send(
-                    list(dict.fromkeys(to)),
+                    to,
                     f"[LAPSED] {title} – {activity}",
                     _esc_body(event, "Activity Lapsed",
                               f"This activity (scheduled {event_day}) was not completed within "
                               "the allowed window and has been automatically marked LAPSED."),
                     "tpms_escalation_lapsed",
+                    cc=recipients["smops"],
                 )
             updates.update({
                 "esc_stage": 3,
@@ -296,7 +308,10 @@ async def sync_auto_feed() -> dict:
             else:
                 members = event.get("assigned_member_ids") or []
                 owner_id = str(members[0]) if members else None
-                owner_name, owner_email = None, None
+                # Spec §18 — the auto-created follow-up's Owner defaults to the first doer,
+                # or literally "HOD" when the activity carries none, so the Action Items
+                # table never shows a blank owner.
+                owner_name, owner_email = ("HOD" if not owner_id else None), None
                 if owner_id:
                     from app.utils.calendar_utils import find_user_by_id
                     u = await find_user_by_id(owner_id)

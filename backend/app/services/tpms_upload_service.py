@@ -13,6 +13,7 @@ company-wise vs HOD-wise proof correctly.
 """
 import io
 import logging
+import re
 from datetime import datetime
 from typing import List, Optional
 
@@ -25,6 +26,13 @@ from app.services.s3_service import get_signed_url, upload_file_to_s3_with_key
 logger = logging.getLogger(__name__)
 
 CLIENT_ROLES = {"clientadmin", "clientuser"}
+
+
+def _sanitize_name(name: str) -> str:
+    """Strip path separators and anything else that could break a storage key, collapse
+    whitespace, and keep the result to a sane length (spec §12)."""
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", str(name or "")).strip("-.")
+    return (cleaned or "file")[:180]
 
 
 def _display_name(user: dict) -> str:
@@ -55,10 +63,19 @@ async def upload_task_file(user: dict, event_id: str, file: UploadFile) -> dict:
         raise HTTPException(status_code=400, detail="Choose a file first")
 
     day = str(doc.get("start") or "")[:10]
+    period = period_from_date(day)
+    # Spec §12 — {Activity}_{CompanyID}_{Month}_{timestamp}_{originalName}, sanitised of
+    # path-breaking characters. The timestamp is what stops a second upload of the same
+    # filename to the same activity from overwriting the first.
+    stamp = datetime.utcnow().strftime("%Y%m%d%H%M%S")
+    stored_name = _sanitize_name(
+        f"{doc.get('activity') or 'Activity'}_{doc.get('company_id') or ''}"
+        f"_{period or 'na'}_{stamp}_{file.filename or 'file'}"
+    )
     try:
         stored = upload_file_to_s3_with_key(
             io.BytesIO(payload),
-            f"tpms/{event_id}/{file.filename}",
+            f"tpms/{event_id}/{stored_name}",
             file.content_type or "application/octet-stream",
         )
     except Exception as e:

@@ -812,13 +812,10 @@ async def _activity_score_pct(activity: str, company_id: str, tokens: list):
 
 
 def _status_for(achievement, has_data):
-    if not has_data:
-        return "Not Met"
-    if achievement >= 100:
-        return "Met"
-    if achievement > 0:
-        return "Partial"
-    return "Not Met"
+    """Spec §7 band — ≥100 Met · 50–99 Partial · <50 Not Met. Delegates to the single
+    definition in app.models.tpms so this page can't drift from the TPMS dashboards."""
+    from app.models.tpms import achievement_status
+    return achievement_status(achievement, has_data)
 
 
 @router.get("/dashboard")

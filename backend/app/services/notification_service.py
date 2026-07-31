@@ -343,7 +343,10 @@ async def create_in_app_notification(user_id: str, title: str, message: str, typ
         logger.error(f"Failed to create in-app notification: {e}")
 
 
-async def log_notification(user_id: str, contact: str, channel: str, slug: str, content: str, status: str, error: str = None):
+async def log_notification(user_id: str, contact: str, channel: str, slug: str, content: str, status: str, error: str = None, meta: dict = None):
+    """`meta` is optional context merged onto the log row. TPMS uses it to record which
+    activity a send belonged to, so the Logs Report can show Activity/Company alongside the
+    delivery result without a second lookup. Reserved keys are never overwritten."""
     try:
         log_entry = {
             "user_id": str(user_id) if user_id else "system",
@@ -355,33 +358,42 @@ async def log_notification(user_id: str, contact: str, channel: str, slug: str, 
             "error_message": error,
             "sent_at": datetime.utcnow()
         }
+        for k, v in (meta or {}).items():
+            if k not in log_entry and v not in (None, ""):
+                log_entry[k] = v
         col = get_collection("notifications")
         await col.insert_one(log_entry)
     except Exception as e:
         logger.error(f"Failed to log notification: {e}")
 
-async def send_email_notification(to_email: str, subject: str, message: str, user_id: str = None, slug: str = "manual"):
+async def send_email_notification(to_email: str, subject: str, message: str, user_id: str = None, slug: str = "manual", cc: list = None, meta: dict = None):
+    """`cc` and `meta` are optional and default to None, so existing callers are unaffected.
+    `cc` exists for the TPMS escalation ladder, which addresses owners/HODs directly and
+    copies SMOps; `meta` records which activity a send belonged to, for the Logs Report."""
     if not settings.SMTP_USERNAME or not settings.SMTP_PASSWORD:
         logger.warning("SMTP credentials not configured")
         return False
-    
+
     try:
+        cc_list = [c for c in (cc or []) if c and c != to_email]
         msg = MIMEMultipart()
         msg['From'] = settings.SMTP_USERNAME
         msg['To'] = to_email
+        if cc_list:
+            msg['Cc'] = ", ".join(cc_list)
         msg['Subject'] = subject
         msg.attach(MIMEText(message, 'html'))
-        
+
         server = smtplib.SMTP(settings.SMTP_SERVER, settings.SMTP_PORT)
         server.starttls()
         server.login(settings.SMTP_USERNAME, settings.SMTP_PASSWORD)
-        server.send_message(msg)
+        server.send_message(msg, to_addrs=[to_email] + cc_list)
         server.quit()
-        await log_notification(user_id, to_email, "email", slug, message, "sent")
+        await log_notification(user_id, to_email, "email", slug, message, "sent", meta=meta)
         return True
     except Exception as e:
         logger.error(f"Failed to send email: {e}")
-        await log_notification(user_id, to_email, "email", slug, message, "failed", str(e))
+        await log_notification(user_id, to_email, "email", slug, message, "failed", str(e), meta=meta)
         return False
 
 # ─── Meta WhatsApp Cloud API helpers ───

@@ -2,11 +2,11 @@ import React, { useEffect, useMemo, useState } from 'react';
 import {
   RefreshCw, LayoutDashboard, CalendarDays, Medal, Building2, CalendarClock, CalendarX,
   Users, ClipboardList, CheckCircle2, Target, Timer, ClipboardCheck, AlertTriangle,
-  Star, Sparkles, FileCheck, Trophy, Activity, Clock,
+  Star, Sparkles, FileCheck, Trophy, Activity, Clock, Grid3x3,
 } from 'lucide-react';
 import {
   DashboardHero, HeroButton, Section, Th, Td, Trend, StatusBadge, Progress,
-  KpiTile, HeaderSelect, TableShell,
+  KpiTile, HeaderSelect, FilterSelect, TableShell,
 } from '../../common/dashboardKit';
 import { useAuth } from '../../../../context/AuthContext';
 import { getAnalyticsDashboard, currentPeriod, periodLabel } from '../../../../services/tpmsApi';
@@ -37,6 +37,48 @@ const pctCell = (v) => (v === '' || v == null ? '—' : `${v}%`);
 const stickyHead = 'sticky left-0 z-10 bg-[var(--table-header-bg)]';
 const stickyCell = 'sticky left-0 z-10 bg-[var(--bg-card)] group-hover:bg-[var(--table-hover)]';
 
+// Spec §9.1 grid/action filters. "Scheduled by" maps to the stored scheduled_by_side.
+const SCHEDULED_BY_OPTIONS = [
+  { id: '', name: 'Anyone' },
+  { id: 'internal', name: 'OM / SMOps' },
+  { id: 'client', name: 'Client' },
+];
+const PENDING_SIDE_OPTIONS = [
+  { id: '', name: 'Either side' },
+  { id: 'client', name: 'Client side' },
+  { id: 'staff', name: 'OM side' },
+];
+
+// Ratio-cell colour by the cell's dominant status (done > pending > overdue > cancelled).
+const CELL_TONE = {
+  done:      { c: 'var(--accent-green)',  bg: 'var(--accent-green-bg)' },
+  pending:   { c: 'var(--accent-indigo)', bg: 'var(--accent-indigo-bg)' },
+  overdue:   { c: 'var(--accent-red)',    bg: 'var(--accent-red-bg)' },
+  cancelled: { c: 'var(--text-muted)',    bg: 'var(--input-bg)' },
+};
+
+/** Open action items carry a side label, not a number, until they close (spec §8). */
+const DelayChip = ({ value, active }) => {
+  if (!value) return <span className="text-[var(--text-muted)] opacity-40">—</span>;
+  const tone = active
+    ? { color: 'var(--accent-orange)', background: 'var(--accent-orange-bg)' }
+    : { color: 'var(--text-muted)', background: 'var(--input-bg)' };
+  return (
+    <span className="inline-flex items-center gap-1.5 text-[10.5px] font-black px-2.5 py-1 rounded-full whitespace-nowrap" style={tone}>
+      {active && <span className="w-1.5 h-1.5 rounded-full" style={{ background: 'var(--accent-orange)' }} />}
+      {value}
+    </span>
+  );
+};
+
+/** ['', ...distinct sorted values] as {id,name} options for a client-side filter. */
+const optionsFrom = (rows, key, allLabel) => [
+  { id: '', name: allLabel },
+  ...[...new Set(rows.map((r) => r[key]).filter(Boolean))]
+    .sort((a, b) => String(a).localeCompare(String(b)))
+    .map((v) => ({ id: v, name: v })),
+];
+
 const AdminView = () => {
   const { user } = useAuth();
   const months = useMemo(() => monthOptions(), []);
@@ -51,6 +93,14 @@ const AdminView = () => {
   const [error, setError] = useState('');
   const [refreshKey, setRefreshKey] = useState(0);
 
+  // §9.1 section filters. `schedBy` is applied server-side (it re-scopes the grid);
+  // the action-item filters are client-side over the already-fetched feed.
+  const [schedBy, setSchedBy] = useState('');
+  const [actActivity, setActActivity] = useState('');
+  const [actClient, setActClient] = useState('');
+  const [actOwner, setActOwner] = useState('');
+  const [actSide, setActSide] = useState('');
+
   useEffect(() => {
     let alive = true;
     (async () => {
@@ -61,6 +111,7 @@ const AdminView = () => {
           period: period || undefined,
           om_id: om || undefined,
           company_id: client || undefined,
+          scheduled_by: schedBy || undefined,
         });
         if (alive) setData(res.data);
       } catch (e) {
@@ -70,7 +121,7 @@ const AdminView = () => {
       }
     })();
     return () => { alive = false; };
-  }, [period, om, client, refreshKey]);
+  }, [period, om, client, schedBy, refreshKey]);
 
   const reload = () => setRefreshKey((k) => k + 1);
 
@@ -78,6 +129,20 @@ const AdminView = () => {
   const clients = data?.clients || [];
   const oms = data?.oms || [];
   const topDelayed = data?.top_delayed || [];
+  const gridActivities = useMemo(() => data?.activities || [], [data]);
+  const gridRows = useMemo(() => data?.clients_grid || [], [data]);
+  const openActions = useMemo(() => data?.open_actions || [], [data]);
+
+  const activityOpts = useMemo(() => optionsFrom(openActions, 'activity', 'All activities'), [openActions]);
+  const actionClientOpts = useMemo(() => optionsFrom(openActions, 'company', 'All clients'), [openActions]);
+  const ownerOpts = useMemo(() => optionsFrom(openActions, 'owner', 'All owners'), [openActions]);
+
+  const actionRows = useMemo(() => openActions.filter((a) => (
+    (!actActivity || a.activity === actActivity)
+    && (!actClient || a.company === actClient)
+    && (!actOwner || a.owner === actOwner)
+    && (!actSide || a.pending_side === actSide)
+  )), [openActions, actActivity, actClient, actOwner, actSide]);
 
   const omOpts = useMemo(
     () => [{ id: '', name: 'All OMs' }, ...(data?.filters?.oms || [])], [data]);
@@ -244,6 +309,107 @@ const AdminView = () => {
                 ))}
               </tbody>
             </TableShell>
+          </Section>
+
+          {/* Spec §9.1 — OM Clients · Activity Status grid. Ratio cells ("done/total")
+              per client × activity, narrowable to who raised the occurrence. */}
+          <Section title="OM Clients — Activity Status" icon={Grid3x3}
+            subtitle="Completed / scheduled per activity, for every client in scope"
+            action={(
+              <div className="flex items-center gap-2">
+                <span className="hidden sm:inline text-[10px] font-bold uppercase tracking-widest text-[var(--text-muted)]">Scheduled by</span>
+                <FilterSelect value={schedBy} onChange={setSchedBy} options={SCHEDULED_BY_OPTIONS} />
+              </div>
+            )}>
+            {gridRows.length === 0 ? (
+              <div className="py-12 text-center text-[13px] font-bold text-[var(--text-muted)]">No activity for this period.</div>
+            ) : (
+              <TableShell minWidth={Math.max(720, 240 + gridActivities.length * 66)}>
+                <thead>
+                  <tr className="bg-[var(--table-header-bg)] border-b border-[var(--border)]">
+                    <Th className={stickyHead}>Client</Th>
+                    {gridActivities.map((a) => <Th key={a.full} align="center">{a.short}</Th>)}
+                  </tr>
+                </thead>
+                <tbody>
+                  {gridRows.map((r) => (
+                    <tr key={r.company_id} className="group border-b border-[var(--border)] last:border-0 hover:bg-[var(--table-hover)] transition-colors">
+                      <Td className={`font-bold ${stickyCell}`}>{r.company}</Td>
+                      {gridActivities.map((a) => {
+                        const cell = r.cells?.[a.full];
+                        if (!cell || !cell.total) {
+                          return <Td key={a.full} align="center" className="text-[var(--text-muted)] opacity-40">—</Td>;
+                        }
+                        const tone = CELL_TONE[cell.status] || CELL_TONE.pending;
+                        return (
+                          <Td key={a.full} align="center">
+                            <span className="inline-flex items-center justify-center min-w-[44px] text-[11px] font-black px-2 py-0.5 rounded-md tabular-nums"
+                              style={{ color: tone.c, background: tone.bg }}>
+                              {cell.done}/{cell.total}
+                            </span>
+                          </Td>
+                        );
+                      })}
+                    </tr>
+                  ))}
+                </tbody>
+              </TableShell>
+            )}
+          </Section>
+
+          {/* Spec §9.1 — Open Action Items, with the Client/OM delay split. */}
+          <Section title="Open Action Items" icon={ClipboardCheck} tone="red"
+            subtitle="Follow-ups awaiting closure across your clients"
+            action={openActions.length > 0 && (
+              <span className="text-[10.5px] font-black px-2.5 py-1 rounded-full whitespace-nowrap"
+                style={{ color: 'var(--accent-red)', background: 'var(--accent-red-bg)' }}>
+                {actionRows.length} of {openActions.length}
+              </span>
+            )}>
+            <div className="px-5 py-3.5 border-b border-[var(--border)] flex flex-wrap items-end gap-3">
+              {[
+                { label: 'Activity', value: actActivity, set: setActActivity, opts: activityOpts },
+                { label: 'Client', value: actClient, set: setActClient, opts: actionClientOpts },
+                { label: 'Owner', value: actOwner, set: setActOwner, opts: ownerOpts },
+                { label: 'Pending from', value: actSide, set: setActSide, opts: PENDING_SIDE_OPTIONS },
+              ].map((f) => (
+                <label key={f.label} className="flex flex-col gap-1">
+                  <span className="text-[10px] font-bold uppercase tracking-widest text-[var(--text-muted)]">{f.label}</span>
+                  <FilterSelect value={f.value} onChange={f.set} options={f.opts} />
+                </label>
+              ))}
+            </div>
+            {actionRows.length === 0 ? (
+              <div className="py-12 flex flex-col items-center gap-2 text-center">
+                <CheckCircle2 size={22} className="text-[var(--accent-green)]" />
+                <p className="text-[13px] font-bold">No open action items.</p>
+              </div>
+            ) : (
+              <TableShell minWidth={900}>
+                <thead>
+                  <tr className="bg-[var(--table-header-bg)] border-b border-[var(--border)]">
+                    <Th className={stickyHead}>Client</Th><Th>Activity</Th><Th>Action</Th><Th>Owner</Th>
+                    <Th align="center">Target</Th><Th align="center">Client Delay</Th><Th align="center">OM Delay</Th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {actionRows.map((a) => {
+                    const waitingStaff = a.pending_side === 'staff';
+                    return (
+                      <tr key={a.id} className="group border-b border-[var(--border)] last:border-0 hover:bg-[var(--table-hover)] transition-colors">
+                        <Td className={`font-bold ${stickyCell}`}>{a.company || '—'}</Td>
+                        <Td className="whitespace-nowrap">{a.activity || '—'}</Td>
+                        <Td className="text-[var(--text-muted)]">{a.action || '—'}</Td>
+                        <Td className="whitespace-nowrap">{a.owner || '—'}</Td>
+                        <Td align="center" className="tabular-nums whitespace-nowrap">{a.target || '—'}</Td>
+                        <Td align="center"><DelayChip value={a.learner_delay} active={!waitingStaff} /></Td>
+                        <Td align="center"><DelayChip value={a.staff_delay} active={waitingStaff} /></Td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </TableShell>
+            )}
           </Section>
         </>
       )}
