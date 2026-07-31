@@ -1,12 +1,12 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
-  LayoutDashboard, RefreshCw, CalendarDays, CheckCircle2, ClipboardList,
-  Percent, Timer, TrendingUp, AlertTriangle, ShieldCheck, Building2, Grid3x3,
+  LayoutDashboard, RefreshCw, CheckCircle2, ClipboardList,
+  Percent, Timer, AlertTriangle, Building2, Grid3x3, ListTodo,
 } from 'lucide-react';
 import { useAuth } from '../../../context/AuthContext';
 import { useNotification } from '../../../context/NotificationContext';
 import { getClientDashboard } from '../../../services/tpmsFormsApi';
-import { Section, Th, Td, TableShell } from '../common/dashboardKit';
+import { Section, Th, Td, TableShell, HeaderSelect } from '../common/dashboardKit';
 
 /**
  * Client TPMS Dashboard — Success-Measure scorecard for the logged-in company,
@@ -79,7 +79,7 @@ const StatCard = ({ icon: Icon, value, label, sub, tone = 'indigo' }) => {
       <div className="flex items-center justify-between">
         <span className="text-[26px] font-black tracking-tight" style={{ color: c }}>{value}</span>
         <div className="w-9 h-9 rounded-xl flex items-center justify-center" style={{ background: `${c}1a`, color: c }}>
-          <Icon size={18} />
+          {Icon && <Icon size={18} />}
         </div>
       </div>
       <div className="mt-1 text-[12px] font-bold text-[var(--text-main)]">{label}</div>
@@ -91,6 +91,34 @@ const StatCard = ({ icon: Icon, value, label, sub, tone = 'indigo' }) => {
 const Pill = ({ label, tone }) => (
   <span className="px-3 py-1 rounded-full text-[11px] font-black" style={{ color: tone.text, background: tone.bg }}>{label}</span>
 );
+
+/* ── Pending Actions ──────────────────────────────────────────
+   Open follow-ups (tpms_action_items) raised when an activity runs
+   overdue, closed only when internal staff confirm completion.
+
+   While an item is open there is no numeric delay split yet — the
+   server sends which side the clock is sitting on, so both delay
+   columns carry the same label. Rather than print it twice at equal
+   weight, the side actually being waited on is highlighted and the
+   other is muted, so the hand-off is readable at a glance.
+   ──────────────────────────────────────────────────────────── */
+const todayIso = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
+
+const DelayCell = ({ value, active }) => {
+  if (!value || value === '—') return <span className="text-[var(--text-muted)] opacity-40">—</span>;
+  const tone = active
+    ? { color: 'var(--accent-orange)', background: 'var(--accent-orange-bg)' }
+    : { color: 'var(--text-muted)', background: 'var(--input-bg)' };
+  return (
+    <span className="inline-flex items-center gap-1.5 text-[10.5px] font-black px-2.5 py-1 rounded-full whitespace-nowrap" style={tone}>
+      {active && <span className="w-1.5 h-1.5 rounded-full" style={{ background: 'var(--accent-orange)' }} />}
+      {value}
+    </span>
+  );
+};
 
 const ClientDashboard = () => {
   const { user } = useAuth();
@@ -119,12 +147,13 @@ const ClientDashboard = () => {
 
   const co = data?.company;
   const cards = data?.cards;
-  const stats = data?.stats;
   const scorecard = data?.scorecard || [];
   const statusTone = STATUS_TONE[co?.status] || STATUS_TONE['At Risk'];
   // Client dashboard is scoped to one company, so clients_grid holds a single row.
   const gridActivities = data?.activities ?? [];
   const gridCells = data?.clients_grid?.[0]?.cells ?? {};
+  const pendingActions = data?.pending_actions ?? [];
+  const today = todayIso();
 
   return (
     <div className="space-y-5">
@@ -140,10 +169,9 @@ const ClientDashboard = () => {
               </p>
             </div>
           </div>
-          <select value={month} onChange={(e) => setMonth(e.target.value)}
-            className="h-9 px-3 rounded-lg bg-white text-[12px] font-black text-gray-800 outline-none shadow-sm cursor-pointer">
-            {months.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
-          </select>
+          {/* Shared hero select — the rest of the TPMS headers use this; this page was the
+              only one hand-rolling its own, which is how it drifted out of theme. */}
+          <HeaderSelect value={month} onChange={setMonth} options={months} />
         </div>
       </div>
 
@@ -174,7 +202,7 @@ const ClientDashboard = () => {
             <Pill label={co.status?.toUpperCase()} tone={statusTone} />
           </div>
 
-          {/* Summary cards */}
+          {/* Summary cards — operational delivery for the selected month */}
           <div className="flex flex-wrap gap-4">
             <StatCard icon={ClipboardList} value={cards.planned} label="Planned" sub="This period" tone="orange" />
             <StatCard icon={CheckCircle2} value={cards.completed} label="Completed" sub="Activities done" tone="green" />
@@ -186,15 +214,6 @@ const ClientDashboard = () => {
           <div className="rounded-[20px] border border-[var(--border)] overflow-hidden bg-[var(--bg-card)] shadow-sm">
             <div className="px-5 py-3.5 bg-[var(--table-header-bg,#1e293b)]" style={{ background: 'var(--sidebar-bg)' }}>
               <h2 className="text-[13px] font-black uppercase tracking-widest text-[var(--text-main)]">Activity Scorecard — Success Measures</h2>
-            </div>
-
-            {/* Stat badges */}
-            <div className="px-5 py-3 flex flex-wrap gap-2 border-b border-[var(--border)]">
-              <Pill label={`Met ${stats.met}/${stats.total_activities}`} tone={ROW_STATUS_TONE.Met} />
-              <Pill label={`Partial ${stats.partial}/${stats.total_activities}`} tone={ROW_STATUS_TONE.Partial} />
-              <Pill label={`Not Met ${stats.not_met}/${stats.total_activities}`} tone={ROW_STATUS_TONE['Not Met']} />
-              <Pill label={`Avg Score ${stats.avg_score_pct}%`} tone={{ text: 'var(--accent-indigo)', bg: 'var(--accent-indigo-bg)' }} />
-              <Pill label={`Target ${stats.target_score_pct}%`} tone={{ text: '#8b5cf6', bg: 'rgba(139,92,246,0.12)' }} />
             </div>
 
             {/* Table (scrolls horizontally on small screens) */}
@@ -312,14 +331,74 @@ const ClientDashboard = () => {
             )}
           </Section>
 
-          {/* Statistics footer cards */}
-          <div className="flex flex-wrap gap-4">
-            <StatCard icon={ShieldCheck} value={stats.met} label="Met Activities" tone="green" />
-            <StatCard icon={TrendingUp} value={stats.partial} label="Partial Activities" tone="orange" />
-            <StatCard icon={AlertTriangle} value={stats.not_met} label="Not Met Activities" tone="red" />
-            <StatCard icon={Percent} value={`${stats.avg_score_pct}%`} label="Average Score" tone="indigo" />
-            <StatCard icon={CalendarDays} value={`${stats.target_score_pct}%`} label="Target Score" tone="violet" />
-          </div>
+          {/* Pending Actions — open follow-ups awaiting closure */}
+          <Section
+            title="Pending Actions"
+            subtitle="Open follow-ups awaiting closure — shown across all periods, not just the selected month"
+            icon={ListTodo}
+            tone={pendingActions.length ? 'red' : 'green'}
+            action={pendingActions.length > 0 && (
+              <span className="text-[10.5px] font-black px-2.5 py-1 rounded-full whitespace-nowrap"
+                style={{ color: 'var(--accent-red)', background: 'var(--accent-red-bg)' }}>
+                {pendingActions.length} open
+              </span>
+            )}
+          >
+            {pendingActions.length === 0 ? (
+              <div className="px-5 py-10 flex flex-col items-center gap-2 text-center">
+                <CheckCircle2 size={24} className="text-[var(--accent-green)]" />
+                <p className="text-[13px] font-bold">No pending actions.</p>
+                <p className="text-[12px] text-[var(--text-muted)]">Follow-ups are raised automatically when an activity runs overdue.</p>
+              </div>
+            ) : (
+              <TableShell minWidth={880}>
+                <thead>
+                  <tr className="bg-[var(--table-header-bg)] border-b border-[var(--border)]">
+                    <Th>Activity</Th>
+                    <Th>Action</Th>
+                    <Th>Owner</Th>
+                    <Th align="center">Target Date</Th>
+                    <Th align="center">Status</Th>
+                    <Th align="center">Learner Delay</Th>
+                    <Th align="center">Staff Delay</Th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {pendingActions.map((a) => {
+                    const target = String(a.target || '').slice(0, 10);
+                    const overdue = target && target < today;
+                    const waitingStaff = a.pending_side === 'staff';
+                    return (
+                      <tr key={a.id} className="border-b border-[var(--border)] last:border-0 hover:bg-[var(--table-hover)] transition-colors">
+                        <Td className="font-black whitespace-nowrap">{a.activity || '—'}</Td>
+                        <Td className="text-[var(--text-muted)]">{a.action || '—'}</Td>
+                        <Td className="whitespace-nowrap">{a.owner || '—'}</Td>
+                        <Td align="center" className="tabular-nums whitespace-nowrap">
+                          <span className="font-bold" style={{ color: overdue ? 'var(--accent-red)' : 'var(--text-main)' }}>
+                            {target || '—'}
+                          </span>
+                          {overdue && (
+                            <span className="block text-[10px] font-black" style={{ color: 'var(--accent-red)' }}>
+                              {a.follow_up || 'Overdue'}
+                            </span>
+                          )}
+                        </Td>
+                        <Td align="center">
+                          <span className="px-2.5 py-1 rounded-full text-[10px] font-black whitespace-nowrap"
+                            style={{ color: 'var(--accent-orange)', background: 'var(--accent-orange-bg)' }}>
+                            {a.status || 'Pending'}
+                          </span>
+                        </Td>
+                        <Td align="center"><DelayCell value={a.learner_delay} active={!waitingStaff} /></Td>
+                        <Td align="center"><DelayCell value={a.staff_delay} active={waitingStaff} /></Td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </TableShell>
+            )}
+          </Section>
+
         </>
       )}
     </div>

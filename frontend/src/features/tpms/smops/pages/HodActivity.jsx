@@ -129,9 +129,9 @@ const HodActivity = () => {
         {rangePreset === 'custom' && (
           <>
             <input type="date" value={customFrom} onChange={(e) => setCustomFrom(e.target.value)}
-              className="px-3 py-2 rounded-lg bg-white/95 text-slate-800 text-[12.5px] font-bold outline-none border border-white/30 shadow-sm hover:bg-white transition-all cursor-pointer" />
+              className="px-3 py-2 rounded-lg bg-[var(--bg-card)] text-[var(--text-main)] text-[12.5px] font-bold outline-none border border-[var(--border)] shadow-sm hover:opacity-90 transition-opacity cursor-pointer" />
             <input type="date" value={customTo} onChange={(e) => setCustomTo(e.target.value)}
-              className="px-3 py-2 rounded-lg bg-white/95 text-slate-800 text-[12.5px] font-bold outline-none border border-white/30 shadow-sm hover:bg-white transition-all cursor-pointer" />
+              className="px-3 py-2 rounded-lg bg-[var(--bg-card)] text-[var(--text-main)] text-[12.5px] font-bold outline-none border border-[var(--border)] shadow-sm hover:opacity-90 transition-opacity cursor-pointer" />
           </>
         )}
         <HeroButton icon={RefreshCw} onClick={() => setTick((t) => t + 1)}>Refresh</HeroButton>

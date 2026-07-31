@@ -1,11 +1,14 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
 import {
-  RefreshCw, Download, ClipboardCheck, Users, Star, Search, LayoutGrid, LineChart as LineIcon, MessageSquare, AlertTriangle,
+  RefreshCw, Download, ClipboardCheck, Users, Star, Search, LayoutGrid, LineChart as LineIcon,
+  MessageSquare, AlertTriangle, Sigma, Filter, UserCheck, ListChecks, CheckCircle2, XCircle,
+  X, Building2, CalendarDays, StickyNote, Maximize2,
 } from 'lucide-react';
 import {
   ResponsiveContainer, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
 } from 'recharts';
-import { DashboardHero, HeroButton, Section, KpiTile, FilterSelect } from './dashboardKit';
+import { DashboardHero, HeroButton, Section, KpiTile, FilterSelect, TILE } from './dashboardKit';
 import { useAuth } from '../../../context/AuthContext';
 import { getReviewReports, currentPeriod, periodLabel } from '../../../services/tpmsApi';
 import api from '../../../services/api';
@@ -38,9 +41,31 @@ const monthOptions = () => {
   return out;
 };
 
+// Rating scale ceiling — matches SCALE_MAX in backend/app/models/forms.py. Score % for a
+// matrix is Σratings ÷ (answered × SCALE_MAX) × 100, which is how the server computes it too.
+const SCALE_MAX = 5;
+
 // Status bands mirror the backend (≥85 strong / ≥70 moderate / below).
 const scoreColor = (p) => (p >= 85 ? 'var(--accent-green)' : p >= 70 ? 'var(--accent-orange)' : 'var(--accent-red)');
 const initials = (name) => (name || '?').split(' ').filter(Boolean).map((x) => x[0]).join('').slice(0, 2).toUpperCase();
+const nOrDash = (v) => (v == null ? '—' : v);
+
+/** One figure in the Grand Total strip — icon chip, label, value, context line. */
+const TotalStat = ({ icon: Icon, label, value, sub, tone = 'plain' }) => {
+  const t = TILE[tone] || TILE.plain;
+  return (
+    <div className="bg-[var(--bg-card)] px-4 py-3.5 flex items-start gap-3">
+      <span className="w-9 h-9 rounded-xl flex items-center justify-center shrink-0" style={{ background: t.bg, color: t.fg }}>
+        {Icon && <Icon size={16} />}
+      </span>
+      <div className="min-w-0">
+        <p className="text-[10px] font-bold uppercase tracking-widest text-[var(--text-muted)] truncate">{label}</p>
+        <p className="text-[21px] font-extrabold tabular-nums leading-tight mt-0.5" style={{ color: t.fg }}>{value}</p>
+        {sub && <p className="text-[10.5px] text-[var(--text-muted)] mt-0.5 truncate">{sub}</p>}
+      </div>
+    </div>
+  );
+};
 
 const Stars = ({ value }) => (
   <span className="inline-flex items-center gap-0.5">
@@ -49,6 +74,280 @@ const Stars = ({ value }) => (
     ))}
   </span>
 );
+
+/* ─────────────────────────────────────────────────────────────
+   Submission detail — the full breakdown behind one review card.
+
+   A modal rather than a route: this page is mounted at two paths
+   (/tpms/admin/reviews and /tpms/smops/reviews), and a dialog keeps
+   the caller's filter + scroll state intact on close.
+
+   Everything rendered here already ships in the list payload
+   (entry.questions × entry.employees[].ratings, or entry.items for a
+   checklist) — opening a card costs no extra request.
+   ───────────────────────────────────────────────────────────── */
+const MotionDiv = motion.div;
+
+/** A 0–5 cell coloured on the same bands as the percentages elsewhere. */
+const RatingCell = ({ value }) => {
+  if (typeof value !== 'number') {
+    return <span className="text-[var(--text-muted)] opacity-50">—</span>;
+  }
+  const c = scoreColor((value / SCALE_MAX) * 100);
+  return (
+    <span className="inline-flex items-center justify-center w-8 h-8 rounded-lg text-[12.5px] font-extrabold tabular-nums"
+      style={{ color: c, background: `${c}1a` }}>
+      {value}
+    </span>
+  );
+};
+
+const ReviewDetailModal = ({ entry, sourceLabel, isYesno, statusLabel, onClose }) => {
+  // Esc to dismiss + freeze the page behind the dialog.
+  useEffect(() => {
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => {
+      document.body.style.overflow = prevOverflow;
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [onClose]);
+
+  const employees = entry.employees || [];
+  const items = entry.items || [];
+  const pct = Number(entry.score_pct) || 0;
+
+  // Column set = the form's criteria, PLUS any code that actually carries a rating. The list
+  // payload reads the hard-coded form definition, so a criterion added through the question
+  // master (M10) would otherwise be silently dropped from the breakdown.
+  const columns = useMemo(() => {
+    const cols = (entry.questions || []).map((qq) => ({ id: String(qq.id), text: qq.text || String(qq.id) }));
+    const seen = new Set(cols.map((c) => c.id));
+    (entry.employees || []).forEach((emp) => Object.keys(emp.ratings || {}).forEach((code) => {
+      if (!seen.has(String(code))) {
+        seen.add(String(code));
+        cols.push({ id: String(code), text: String(code) });
+      }
+    }));
+    return cols;
+  }, [entry]);
+
+  /** Mean rating a criterion drew across everyone this respondent rated. */
+  const columnAvg = (code) => {
+    const vals = employees.map((e) => e.ratings?.[code]).filter((v) => typeof v === 'number');
+    return vals.length ? Math.round((vals.reduce((a, b) => a + b, 0) / vals.length) * 10) / 10 : null;
+  };
+
+  const answered = employees.reduce((a, e) => a + Object.keys(e.ratings || {}).length, 0);
+  const grandTotal = employees.reduce((a, e) => a + (Number(e.grand_total) || 0), 0);
+
+  const summary = isYesno
+    ? [
+      { label: 'Score', value: `${pct}%` },
+      { label: 'Yes', value: entry.yes ?? 0 },
+      { label: 'No', value: Math.max(0, (entry.total ?? 0) - (entry.yes ?? 0)) },
+      { label: 'Questions', value: entry.total ?? 0 },
+    ]
+    : [
+      { label: 'Score', value: `${pct}%` },
+      { label: 'Employees', value: employees.length },
+      { label: 'Ratings', value: answered },
+      { label: 'Grand Total', value: `${grandTotal} / ${answered * SCALE_MAX}` },
+    ];
+
+  return (
+    <MotionDiv className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={onClose} />
+      <MotionDiv
+        role="dialog" aria-modal="true" aria-label={`${entry.name} — ${sourceLabel} detail`}
+        initial={{ opacity: 0, y: 14, scale: 0.98 }}
+        animate={{ opacity: 1, y: 0, scale: 1 }}
+        exit={{ opacity: 0, y: 14, scale: 0.98 }}
+        transition={{ duration: 0.22, ease: [0.4, 0, 0.2, 1] }}
+        className="relative w-full max-w-4xl max-h-[90vh] flex flex-col rounded-2xl border border-[var(--border)] bg-[var(--bg-card)] shadow-xl overflow-hidden">
+
+        {/* Header */}
+        <div className="flex items-start justify-between gap-3 px-5 py-4 border-b border-[var(--border)]">
+          <div className="flex items-center gap-3 min-w-0">
+            <span className="w-11 h-11 rounded-2xl text-white text-[13px] font-bold flex items-center justify-center shrink-0" style={{ background: 'var(--avatar-bg)' }}>
+              {initials(entry.name)}
+            </span>
+            <div className="min-w-0">
+              <h3 className="text-[15.5px] font-extrabold tracking-tight truncate">{entry.name || '—'}</h3>
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 mt-0.5 text-[11.5px] text-[var(--text-muted)]">
+                <span className="inline-flex items-center gap-1 truncate"><Building2 size={12} />{entry.company || '—'}</span>
+                <span className="inline-flex items-center gap-1"><CalendarDays size={12} />{entry.period_label || entry.period || '—'}</span>
+                <span className="inline-flex items-center gap-1"><ClipboardCheck size={12} />{sourceLabel}</span>
+              </div>
+            </div>
+          </div>
+          <button type="button" onClick={onClose} aria-label="Close"
+            className="w-8 h-8 rounded-lg flex items-center justify-center text-[var(--text-muted)] hover:bg-[var(--input-bg)] transition-colors shrink-0">
+            <X size={16} />
+          </button>
+        </div>
+
+        {/* Headline score */}
+        <div className="px-5 py-3.5 border-b border-[var(--border)] flex flex-wrap items-center gap-x-4 gap-y-2">
+          {!isYesno && entry.avg !== '' && entry.avg != null && <Stars value={Number(entry.avg)} />}
+          <span className="text-[22px] font-extrabold tabular-nums leading-none" style={{ color: scoreColor(pct) }}>{pct}%</span>
+          <span className="text-[10.5px] font-bold px-2.5 py-1 rounded-full" style={{ color: scoreColor(pct), background: `${scoreColor(pct)}1a` }}>
+            {statusLabel(pct)}
+          </span>
+          {!isYesno && entry.avg !== '' && entry.avg != null && (
+            <span className="text-[11.5px] font-semibold text-[var(--text-muted)]">
+              avg <span className="tabular-nums font-extrabold text-[var(--text-main)]">{entry.avg}</span> / {SCALE_MAX}
+            </span>
+          )}
+        </div>
+
+        {/* Summary strip */}
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-px bg-[var(--border)] border-b border-[var(--border)]">
+          {summary.map((s) => (
+            <div key={s.label} className="bg-[var(--bg-card)] px-4 py-3">
+              <p className="text-[10px] font-bold uppercase tracking-widest text-[var(--text-muted)]">{s.label}</p>
+              <p className="text-[16px] font-extrabold tabular-nums mt-0.5">{s.value}</p>
+            </div>
+          ))}
+        </div>
+
+        {/* Breakdown */}
+        <div className="overflow-auto no-scrollbar flex-1">
+          {isYesno ? (
+            items.length === 0 ? (
+              <p className="py-14 text-center text-[13px] font-bold text-[var(--text-muted)]">No answers recorded.</p>
+            ) : (
+              <div className="divide-y divide-[var(--border)]">
+                {items.map((it, k) => (
+                  <div key={k} className="px-5 py-3.5 flex items-start justify-between gap-4">
+                    <div className="min-w-0">
+                      <p className="text-[12.5px] font-semibold leading-snug">
+                        <span className="text-[var(--text-muted)] font-bold mr-1.5 tabular-nums">{k + 1}.</span>
+                        {it.question}
+                      </p>
+                      {/* Remarks are invisible on the card — some questions (e.g. "which
+                          departments…") carry their real answer here, not in the Yes/No. */}
+                      {it.remark && (
+                        <p className="mt-1.5 text-[11.5px] text-[var(--text-muted)] flex items-start gap-1.5">
+                          <StickyNote size={12} className="mt-0.5 shrink-0" />
+                          <span className="italic">{it.remark}</span>
+                        </p>
+                      )}
+                    </div>
+                    <span className="text-[10.5px] font-bold px-2.5 py-1 rounded-full shrink-0"
+                      style={{
+                        color: it.yes ? 'var(--accent-green)' : 'var(--accent-red)',
+                        background: it.yes ? 'var(--accent-green-bg)' : 'var(--accent-red-bg)',
+                      }}>
+                      {it.answer}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )
+          ) : employees.length === 0 ? (
+            <p className="py-14 text-center text-[13px] font-bold text-[var(--text-muted)]">No ratings recorded.</p>
+          ) : (
+            <>
+              <div className="overflow-x-auto no-scrollbar">
+                <table className="w-full" style={{ minWidth: Math.max(560, 300 + columns.length * 72) }}>
+                  <thead>
+                    <tr className="bg-[var(--table-header-bg)] border-b border-[var(--border)]">
+                      <th className="px-4 py-3 text-left text-[10px] font-bold uppercase tracking-widest text-[var(--text-muted)] sticky left-0 z-10 bg-[var(--table-header-bg)]">
+                        Employee
+                      </th>
+                      {columns.map((c) => (
+                        <th key={c.id} title={c.text}
+                          className="px-2 py-3 text-center text-[10px] font-bold uppercase tracking-widest text-[var(--text-muted)] whitespace-nowrap">
+                          {c.id}
+                        </th>
+                      ))}
+                      <th className="px-3 py-3 text-center text-[10px] font-bold uppercase tracking-widest text-[var(--text-muted)]">Total</th>
+                      <th className="px-4 py-3 text-center text-[10px] font-bold uppercase tracking-widest text-[var(--text-muted)]">Score</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {employees.map((emp) => {
+                      const n = Object.keys(emp.ratings || {}).length;
+                      const empPct = Number(emp.score_pct) || 0;
+                      return (
+                        <tr key={emp.id} className="group border-b border-[var(--border)] hover:bg-[var(--table-hover)] transition-colors">
+                          <td className="px-4 py-3 text-[12.5px] font-bold sticky left-0 z-10 bg-[var(--bg-card)] group-hover:bg-[var(--table-hover)]">
+                            {emp.name}
+                          </td>
+                          {columns.map((c) => (
+                            <td key={c.id} className="px-2 py-3 text-center">
+                              <RatingCell value={emp.ratings?.[c.id]} />
+                            </td>
+                          ))}
+                          <td className="px-3 py-3 text-center text-[12.5px] font-bold tabular-nums text-[var(--text-muted)]">
+                            {emp.grand_total ?? 0}<span className="opacity-60">/{n * SCALE_MAX}</span>
+                          </td>
+                          <td className="px-4 py-3 text-center text-[12.5px] font-extrabold tabular-nums" style={{ color: scoreColor(empPct) }}>
+                            {empPct}%
+                          </td>
+                        </tr>
+                      );
+                    })}
+                    {/* Per-criterion mean across everyone this respondent rated. */}
+                    <tr className="bg-[var(--table-header-bg)]">
+                      <td className="px-4 py-3 text-[10px] font-bold uppercase tracking-widest text-[var(--text-muted)] sticky left-0 z-10 bg-[var(--table-header-bg)]">
+                        Criterion avg
+                      </td>
+                      {columns.map((c) => {
+                        const a = columnAvg(c.id);
+                        return (
+                          <td key={c.id} className="px-2 py-3 text-center text-[12px] font-extrabold tabular-nums"
+                            style={{ color: a == null ? 'var(--text-muted)' : scoreColor((a / SCALE_MAX) * 100) }}>
+                            {a == null ? '—' : a}
+                          </td>
+                        );
+                      })}
+                      <td className="px-3 py-3 text-center text-[12px] font-extrabold tabular-nums text-[var(--text-muted)]">
+                        {grandTotal}<span className="opacity-60">/{answered * SCALE_MAX}</span>
+                      </td>
+                      <td className="px-4 py-3 text-center text-[12px] font-extrabold tabular-nums" style={{ color: scoreColor(pct) }}>{pct}%</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+
+              {/* Column headers are criterion codes — spell them out. */}
+              {columns.length > 0 && (
+                <div className="px-5 py-4 border-t border-[var(--border)]">
+                  <p className="text-[10px] font-bold uppercase tracking-widest text-[var(--text-muted)] mb-2">Criteria</p>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-1.5">
+                    {columns.map((c) => (
+                      <p key={c.id} className="text-[11.5px] text-[var(--text-muted)] leading-snug">
+                        <span className="font-extrabold text-[var(--accent-indigo)] mr-1.5">{c.id}</span>{c.text}
+                      </p>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div className="px-5 py-3 border-t border-[var(--border)] flex items-center justify-between gap-3">
+          <span className="text-[11px] font-medium text-[var(--text-muted)]">
+            {isYesno
+              ? `${entry.yes ?? 0} of ${entry.total ?? 0} answered yes`
+              : `${employees.length} employee${employees.length === 1 ? '' : 's'} · ${answered} rating${answered === 1 ? '' : 's'}`}
+          </span>
+          <button type="button" onClick={onClose}
+            className="px-3.5 py-2 rounded-lg bg-[var(--accent-indigo)] text-white text-[12.5px] font-bold hover:opacity-90 transition-opacity">
+            Close
+          </button>
+        </div>
+      </MotionDiv>
+    </MotionDiv>
+  );
+};
 
 const ChartTooltip = ({ active, payload, label }) => {
   if (!active || !payload?.length) return null;
@@ -76,6 +375,8 @@ const ReviewReport = ({ title = 'Review Reports', subtitle = 'Evaluation & feedb
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  // The submission whose full breakdown is open in the detail dialog (null = closed).
+  const [detail, setDetail] = useState(null);
 
   // Companies list for the picker (loaded once; server still scopes by role).
   useEffect(() => {
@@ -151,12 +452,95 @@ const ReviewReport = ({ title = 'Review Reports', subtitle = 'Evaluation & feedb
     });
   }, [data, respondentId, q]);
 
+  // Respondent + Search narrow `rows` client-side, so the server `totals` no longer describe
+  // what is on screen. Everything summarised below is recomputed from `rows` — the same set
+  // the cards and the CSV export use — so the headline figures, the Grand Total and the
+  // export can never disagree with each other.
+  const isFiltered = Boolean(respondentId || q.trim());
+
+  const agg = useMemo(() => {
+    const respondentIds = new Set();
+    const employeeIds = new Set();
+    const bands = { high: 0, mid: 0, low: 0 };
+    let ratingSum = 0, ratingCount = 0, yes = 0, answered = 0;
+
+    rows.forEach((r) => {
+      if (r.respondent_id) respondentIds.add(String(r.respondent_id));
+      const pct = Number(r.score_pct) || 0;
+      bands[pct >= 85 ? 'high' : pct >= 70 ? 'mid' : 'low'] += 1;
+
+      if (r.yesno) {
+        yes += r.yes || 0;
+        answered += r.total || 0;
+      } else {
+        (r.employees || []).forEach((emp) => {
+          // An employee rated by two different HODs is one person but two rating sets —
+          // count the person once, the ratings twice.
+          employeeIds.add(String(emp.id));
+          ratingSum += Number(emp.grand_total) || 0;
+          ratingCount += Object.keys(emp.ratings || {}).length;
+        });
+      }
+    });
+
+    return {
+      responses: rows.length,
+      respondents: respondentIds.size,
+      employees: employeeIds.size,
+      ratingSum,
+      ratingCount,
+      avgRating: ratingCount ? Math.round((ratingSum / ratingCount) * 100) / 100 : null,
+      scorePct: ratingCount ? Math.round((ratingSum / (ratingCount * SCALE_MAX)) * 100) : null,
+      yes,
+      no: Math.max(0, answered - yes),
+      answered,
+      yesPct: answered ? Math.round((yes / answered) * 100) : null,
+      bands,
+    };
+  }, [rows]);
+
+  const overallPct = isYesno ? agg.yesPct : agg.scorePct;
+
   const kpis = [
-    { value: totals.responses ?? 0, label: 'Responses', sub: 'Submitted', tone: 'blue', icon: ClipboardCheck },
-    { value: totals.respondent_count ?? 0, label: 'Respondents', sub: 'Reviewers', tone: 'green', icon: Users },
+    {
+      value: agg.responses, label: 'Responses',
+      sub: isFiltered ? `of ${totals.responses ?? 0} submitted` : 'Submitted',
+      tone: 'blue', icon: ClipboardCheck,
+    },
+    {
+      value: agg.respondents, label: 'Respondents',
+      sub: isFiltered ? `of ${totals.respondent_count ?? 0} reviewers` : 'Reviewers',
+      tone: 'green', icon: Users,
+    },
     isYesno
-      ? { value: totals.yes_pct === '' || totals.yes_pct == null ? '—' : `${totals.yes_pct}%`, label: 'Yes Rate', sub: 'Checklist', tone: 'yellow', icon: Star }
-      : { value: totals.avg_rating === '' || totals.avg_rating == null ? '—' : totals.avg_rating, label: 'Avg Rating', sub: 'Out of 5', tone: 'yellow', icon: Star },
+      ? { value: agg.yesPct == null ? '—' : `${agg.yesPct}%`, label: 'Yes Rate', sub: `${agg.yes} of ${agg.answered} answered`, tone: 'yellow', icon: Star }
+      : { value: nOrDash(agg.avgRating), label: 'Avg Rating', sub: `Out of ${SCALE_MAX}`, tone: 'yellow', icon: Star },
+  ];
+
+  // ── Grand Total ───────────────────────────────────────────────
+  // Responses / Respondents / Avg Rating already head the page as KPI tiles, and the filter
+  // bar already names the form, period and company — so none of that is repeated here. This
+  // band carries only the figures that exist nowhere else on the page.
+  const grandSubtitle = isFiltered
+    ? `Aggregated across ${agg.responses} of ${totals.responses ?? 0} responses`
+    : 'Aggregated across every response shown above';
+
+  // A checklist totals its answers; a rating matrix totals the scores themselves — the sheet's
+  // grand total is Σ of every rating given, against the maximum that many cells could score.
+  const grandStats = isYesno ? [
+    { label: 'Questions Answered', value: agg.answered, sub: 'Across all responses', tone: 'blue', icon: ListChecks },
+    { label: 'Yes', value: agg.yes, sub: 'Answered yes', tone: 'green', icon: CheckCircle2 },
+    { label: 'No', value: agg.no, sub: 'Answered no', tone: 'red', icon: XCircle },
+  ] : [
+    { label: 'Employees Rated', value: agg.employees, sub: 'Distinct people', tone: 'blue', icon: UserCheck },
+    { label: 'Ratings Counted', value: agg.ratingCount, sub: `Cells scored 0–${SCALE_MAX}`, tone: 'plain', icon: ListChecks },
+    { label: 'Sum of Ratings', value: agg.ratingSum, sub: `of ${agg.ratingCount * SCALE_MAX} possible`, tone: 'green', icon: Sigma },
+  ];
+
+  const bandSegments = [
+    { key: 'high', label: statusVocab.high, count: agg.bands.high, color: 'var(--accent-green)' },
+    { key: 'mid', label: statusVocab.mid, count: agg.bands.mid, color: 'var(--accent-orange)' },
+    { key: 'low', label: statusVocab.low, count: agg.bands.low, color: 'var(--accent-red)' },
   ];
 
   // Monthly trend: average score % across rated people per period (ascending).
@@ -180,14 +564,22 @@ const ReviewReport = ({ title = 'Review Reports', subtitle = 'Evaluation & feedb
       return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
     };
     const lastHeader = isYesno ? 'Yes %' : 'Avg Rating';
-    const header = ['Respondent', 'Company', 'Period', 'Score %', lastHeader];
-    const table = [header, ...rows.map((r) => {
+    const countHeader = isYesno ? 'Answered' : 'Rated';
+    const header = ['Respondent', 'Company', 'Period', countHeader, 'Score %', lastHeader];
+    const body = rows.map((r) => {
       const last = isYesno
         ? (r.total ? Math.round(((r.yes || 0) / r.total) * 100) : (r.score_pct ?? ''))
         : (r.avg ?? '');
-      return [r.name ?? '', r.company ?? '', r.period_label || r.period || '', r.score_pct ?? '', last];
-    })];
-    const csv = table.map((row) => row.map(cell).join(',')).join('\r\n');
+      const count = isYesno ? (r.total ?? 0) : (r.employees || []).length;
+      return [r.name ?? '', r.company ?? '', r.period_label || r.period || '', count, r.score_pct ?? '', last];
+    });
+    // Trailing Grand Total row — the same figures the on-screen summary shows.
+    const totalRow = isYesno
+      ? ['GRAND TOTAL', `${agg.respondents} respondents`, `${agg.responses} responses`,
+        agg.answered, agg.yesPct ?? '', agg.yesPct ?? '']
+      : ['GRAND TOTAL', `${agg.respondents} respondents`, `${agg.responses} responses`,
+        agg.employees, agg.scorePct ?? '', agg.avgRating ?? ''];
+    const csv = [header, ...body, totalRow].map((row) => row.map(cell).join(',')).join('\r\n');
     const blob = new Blob(['﻿', csv], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -198,7 +590,7 @@ const ReviewReport = ({ title = 'Review Reports', subtitle = 'Evaluation & feedb
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
-  }, [rows, isYesno, source]);
+  }, [rows, isYesno, source, agg]);
 
   return (
     <div className="space-y-5">
@@ -291,7 +683,14 @@ const ReviewReport = ({ title = 'Review Reports', subtitle = 'Evaluation & feedb
           {rows.map((r, i) => {
             const pctVal = Number(r.score_pct) || 0;
             return (
-              <div key={`${r.respondent_id}-${r.period}-${i}`} className="rounded-2xl border border-[var(--border)] bg-[var(--bg-card)] shadow-sm p-4 flex flex-col hover:shadow-md transition-all">
+              <div key={`${r.respondent_id}-${r.period}-${i}`}
+                role="button" tabIndex={0}
+                aria-label={`Open ${r.name} rating breakdown`}
+                onClick={() => setDetail(r)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setDetail(r); }
+                }}
+                className="group/card cursor-pointer rounded-2xl border border-[var(--border)] bg-[var(--bg-card)] shadow-sm p-4 flex flex-col transition-all hover:shadow-md hover:border-[var(--accent-indigo)] focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent-indigo)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--bg-main)]">
                 <div className="flex items-start justify-between gap-2">
                   <div className="flex items-center gap-2.5 min-w-0">
                     <span className="w-9 h-9 rounded-xl text-white text-[11px] font-bold flex items-center justify-center shrink-0" style={{ background: 'var(--avatar-bg)' }}>
@@ -302,7 +701,10 @@ const ReviewReport = ({ title = 'Review Reports', subtitle = 'Evaluation & feedb
                       <p className="text-[11px] text-[var(--text-muted)] truncate">{r.company || '—'}</p>
                     </div>
                   </div>
-                  <span className="text-[10px] font-bold px-2 py-1 rounded-md shrink-0 tabular-nums" style={{ color: 'var(--accent-indigo)', background: 'var(--input-bg)' }}>{r.period_label || r.period}</span>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <span className="text-[10px] font-bold px-2 py-1 rounded-md tabular-nums" style={{ color: 'var(--accent-indigo)', background: 'var(--input-bg)' }}>{r.period_label || r.period}</span>
+                    <Maximize2 size={13} className="text-[var(--text-muted)] opacity-0 group-hover/card:opacity-100 transition-opacity" />
+                  </div>
                 </div>
 
                 <div className="flex items-center gap-2 mt-3">
@@ -330,9 +732,11 @@ const ReviewReport = ({ title = 'Review Reports', subtitle = 'Evaluation & feedb
                     ))}
                 </div>
 
+                {/* The form name is the same on every card (it's the Form filter) — the slot
+                    is better spent signalling that the card opens a breakdown. */}
                 <div className="flex items-center justify-between mt-3 pt-3 border-t border-[var(--border)] text-[11px] font-medium text-[var(--text-muted)]">
                   <span>{isYesno ? `${r.yes ?? 0}/${r.total ?? 0} yes` : `${(r.employees || []).length} rated`}</span>
-                  <span className="tabular-nums">{sourceMeta.label || ''}</span>
+                  <span className="font-bold group-hover/card:text-[var(--accent-indigo)] transition-colors">View breakdown</span>
                 </div>
               </div>
             );
@@ -340,25 +744,68 @@ const ReviewReport = ({ title = 'Review Reports', subtitle = 'Evaluation & feedb
         </div>
       )}
 
-      {/* M6 — Grand Total summary (from server totals across the fetched set). */}
-      {!loading && view === 'cards' && (
-        <Section title="Grand Total" subtitle="Overall totals for the current form & filters" icon={ClipboardCheck}>
-          <div className="grid grid-cols-1 sm:grid-cols-3 divide-y sm:divide-y-0 sm:divide-x divide-[var(--border)]">
-            {[
-              { label: 'Total Responses', value: totals.responses ?? 0 },
-              { label: 'Respondents', value: totals.respondent_count ?? 0 },
-              isYesno
-                ? { label: 'Overall Yes %', value: totals.yes_pct === '' || totals.yes_pct == null ? '—' : `${totals.yes_pct}%` }
-                : { label: 'Overall Avg Rating', value: totals.avg_rating === '' || totals.avg_rating == null ? '—' : totals.avg_rating },
-            ].map((c) => (
-              <div key={c.label} className="px-5 py-4 flex flex-col gap-1">
-                <span className="text-[10px] font-bold uppercase tracking-widest text-[var(--text-muted)]">{c.label}</span>
-                <span className="text-[20px] font-extrabold tabular-nums text-[var(--text-main)]">{c.value}</span>
-              </div>
-            ))}
+      {/* M6 — Grand Total. Computed from the filtered rows, so it always describes exactly
+          what the cards above show (and what Export CSV writes out). */}
+      {!loading && rows.length > 0 && (
+        <Section title="Grand Total" icon={Sigma} subtitle={grandSubtitle}
+          action={isFiltered && (
+            <span className="inline-flex items-center gap-1.5 text-[10.5px] font-bold px-2.5 py-1 rounded-full border shrink-0"
+              style={{ color: 'var(--accent-indigo)', background: 'var(--accent-indigo-bg)', borderColor: 'var(--accent-indigo-border)' }}>
+              <Filter size={11} /> Filtered view
+            </span>
+          )}>
+          {/* Hairline grid — gap-px over the border colour keeps the rules clean at any wrap. */}
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-px bg-[var(--border)]">
+            {grandStats.map((s) => <TotalStat key={s.label} {...s} />)}
+          </div>
+
+          {/* Spread across the status bands the cards are labelled with. */}
+          <div className="px-5 py-4 border-t border-[var(--border)] space-y-2.5">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="text-[10px] font-bold uppercase tracking-widest text-[var(--text-muted)]">
+                {isChecklist ? 'Compliance spread' : 'Review health spread'}
+              </span>
+              <span className="text-[11.5px] font-bold text-[var(--text-muted)]">
+                Overall{' '}
+                <span className="text-[13px] tabular-nums" style={{ color: scoreColor(overallPct || 0) }}>
+                  {overallPct == null ? '—' : `${overallPct}%`}
+                </span>
+              </span>
+            </div>
+            <div className="h-2.5 rounded-full overflow-hidden flex bg-[var(--input-bg)]">
+              {bandSegments.filter((s) => s.count > 0).map((s) => (
+                <div key={s.key} title={`${s.label}: ${s.count}`} style={{ width: `${(s.count / agg.responses) * 100}%`, background: s.color }} />
+              ))}
+            </div>
+            <div className="flex flex-wrap items-center gap-x-5 gap-y-1.5">
+              {bandSegments.map((s) => (
+                <span key={s.key} className="inline-flex items-center gap-1.5 text-[11.5px] font-semibold">
+                  <span className="w-2 h-2 rounded-full shrink-0" style={{ background: s.color }} />
+                  <span className="text-[var(--text-muted)]">{s.label}</span>
+                  <span className="tabular-nums font-extrabold" style={{ color: s.color }}>{s.count}</span>
+                  <span className="text-[10.5px] text-[var(--text-muted)] tabular-nums">
+                    ({agg.responses ? Math.round((s.count / agg.responses) * 100) : 0}%)
+                  </span>
+                </span>
+              ))}
+            </div>
           </div>
         </Section>
       )}
+
+      {/* Full breakdown for the clicked card. */}
+      <AnimatePresence>
+        {detail && (
+          <ReviewDetailModal
+            key={`${detail.respondent_id}-${detail.period}`}
+            entry={detail}
+            sourceLabel={sourceMeta.label || ''}
+            isYesno={!!detail.yesno}
+            statusLabel={statusLabel}
+            onClose={() => setDetail(null)}
+          />
+        )}
+      </AnimatePresence>
     </div>
   );
 };

@@ -147,9 +147,13 @@ const normaliseOptions = (options = []) =>
     ? { value: String(o.id ?? o.value ?? ''), label: String(o.name ?? o.label ?? o.id ?? '') }
     : { value: String(o), label: String(o) }));
 
+/* Theme tokens rather than a hard-coded white pill: the option list inherits the select's
+   colours, so a fixed `bg-white` + dark text renders unreadable entries once the browser
+   paints the popup in the dark scheme. --bg-card is white in light mode (unchanged look on
+   the gradient hero) and card-navy in dark, and both stay legible against --text-main. */
 export const HeaderSelect = ({ value, onChange, options }) => (
   <select value={value} onChange={(e) => onChange(e.target.value)}
-    className="px-3 py-2 rounded-lg bg-white/95 text-slate-800 text-[12.5px] font-bold outline-none border border-white/30 shadow-sm hover:bg-white transition-all cursor-pointer">
+    className="px-3 py-2 rounded-lg bg-[var(--bg-card)] text-[var(--text-main)] text-[12.5px] font-bold outline-none border border-[var(--border)] shadow-sm hover:opacity-90 transition-opacity cursor-pointer">
     {normaliseOptions(options).map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
   </select>
 );

@@ -943,9 +943,16 @@ async def client_dashboard(
     clients_grid_out = [{"company": company_name, "company_id": company_id,
                          "done": total_completed, "cells": grid_cells}]
 
+    # Open follow-ups for this company. Deliberately NOT filtered to `month`: an action item
+    # is outstanding work, and hiding one raised in an earlier month is exactly the wrong
+    # behaviour for a "what still needs closing" panel. The rows carry their own target date.
+    from app.services.tpms_dashboard_service import list_open_actions
+    pending_actions = await list_open_actions([company_id])
+
     return {
         "activities": activities_out,
         "clients_grid": clients_grid_out,
+        "pending_actions": pending_actions,
         "company": {
             "id": company_id,
             "name": company_name,

@@ -723,13 +723,14 @@ async def dashboard_employee_activity(
 async def dashboard_implementation(
     period: Optional[str] = Query(None),
     company_id: Optional[str] = Query(None),
+    om_id: Optional[str] = Query(None, description="Narrow to the companies this OM owns"),
     current_user: dict = Depends(get_current_user),
 ):
-    """Implementation Tracker — Success-Measure scorecard, proof uploads and the
-    client × activity matrix. Pick a single company to see its detail."""
+    """Implementation Tracker — Success-Measure scorecard, manual-score entry, proof
+    uploads and the client × activity matrix. Pick a single company to see its detail."""
     if not _can_read(current_user):
         raise HTTPException(status_code=403, detail="Not authorized")
-    return await get_implementation_tracker(current_user, _scope(period, company_id, None))
+    return await get_implementation_tracker(current_user, _scope(period, company_id, om_id))
 
 
 @router.get("/reports/logs")

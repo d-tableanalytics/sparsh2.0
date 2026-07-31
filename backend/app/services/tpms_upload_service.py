@@ -75,6 +75,7 @@ async def upload_task_file(user: dict, event_id: str, file: UploadFile) -> dict:
         "member_id": str(user.get("_id")),
         "member_name": _display_name(user),
         "file_name": file.filename,
+        "size": len(payload),
         "s3_key": stored["key"],
         "uploaded_by": str(user.get("_id")),
         "uploaded_by_name": _display_name(user),

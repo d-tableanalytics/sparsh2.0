@@ -26,6 +26,7 @@ from typing import Dict, List, Optional
 from app.db.mongodb import get_collection
 from app.models.tpms import (
     COLL_ACTION_ITEMS, COLL_ACTIVITIES, COLL_ESCALATIONS, COLL_SUCCESS_MEASURES,
+    SCOPE_COMPANY, SCOPE_HOD, SCORE_MODE_MANUAL,
     STATUS_CANCELLED, STATUS_COMPLETED, STATUS_LAPSED, STATUS_RESCHEDULED, STATUS_SCHEDULED,
     TPMS_EVENT_KIND, period_display,
 )
@@ -72,6 +73,12 @@ def _blank() -> dict:
 
 def _today() -> str:
     return date.today().isoformat()
+
+
+def _person_name(doc: dict) -> str:
+    return (doc.get("full_name")
+            or " ".join(filter(None, [doc.get("first_name"), doc.get("last_name")])).strip()
+            or doc.get("email") or str(doc.get("_id") or ""))
 
 
 def _period_window(period: Optional[str]) -> tuple:
@@ -311,6 +318,9 @@ async def _clients_grid(events: List[dict], allowed: Optional[List[str]],
         row = grid.setdefault(cid, {
             "company_id": cid,
             "company": (companies.get(cid) or {}).get("name") or e.get("company_name") or cid,
+            # OM (the owning SMOps) — rendered as its own column on the Implementation
+            # Tracker's score matrix. Additive: existing consumers simply ignore it.
+            "om": (companies.get(cid) or {}).get("om_name") or "",
             "cells": {}, "done": 0, "total": 0,
         })
         cell = row["cells"].setdefault(activity, {"done": 0, "total": 0, "status": "pending"})
@@ -382,6 +392,16 @@ async def _open_actions(allowed: Optional[List[str]]) -> List[dict]:
         })
     out.sort(key=lambda r: r["company"])
     return out
+
+
+async def list_open_actions(company_ids: Optional[List[str]] = None) -> List[dict]:
+    """Public entry point for the open follow-up feed.
+
+    The client-facing dashboard lives on the /forms router and needs the same rows the TPMS
+    dashboards render, with the same "Pending (Client/Staff side)" labelling — so it calls
+    this rather than growing a second, drifting copy of the logic.
+    """
+    return await _open_actions(company_ids)
 
 
 async def _action_required(allowed: Optional[List[str]]) -> List[dict]:
@@ -1000,11 +1020,21 @@ async def get_hod_dashboard(user: dict, scope: dict) -> dict:
 
 # 7) Implementation tracker — getSuccessDashboard (code.js:2449)
 async def get_implementation_tracker(user: dict, scope: dict) -> dict:
-    """Assembles the Success-Measure scorecard, the proof-upload panel and the
-    client × activity matrix into the Implementation Tracker view."""
+    """Assembles the Success-Measure scorecard, the manual-score entry panel, the
+    proof-upload panel and the client × activity matrix into the Implementation
+    Tracker view."""
     scope = scope or {}
     companies = await _load_companies()
     allowed = _allowed_companies(user, companies, scope)
+
+    # OM filter — narrow to the companies that OM owns or co-owns. Applied AFTER the role
+    # scoping above so it can only ever subtract from what the caller may already see.
+    om_filter = str(scope.get("om_id") or "")
+    if om_filter:
+        owned = [cid for cid, i in companies.items()
+                 if om_filter in (i.get("om_keys") or set()) or i.get("om_key") == om_filter]
+        allowed = owned if allowed is None else [c for c in allowed if c in set(owned)]
+
     window = _period_window(scope.get("period"))
     period = scope.get("period") or window[0][:7]
     company_id = allowed[0] if allowed and len(allowed) == 1 else None
@@ -1012,30 +1042,67 @@ async def get_implementation_tracker(user: dict, scope: dict) -> dict:
     events = await _load_events(allowed)
     activities, grid = await _clients_grid(events, allowed, companies, window)
 
-    scorecard, uploads = [], []
+    catalogue = await get_collection(COLL_ACTIVITIES).find({"active": {"$ne": False}}).to_list(200)
+    # The manually-scored activities, split by the scope they are entered at: company-wide
+    # ones take a single figure, HOD-scoped ones take one figure per HOD which the
+    # Success-Measure sync then averages back onto the company row.
+    manual = [{"activity": a["name"], "scope": a.get("scope") or SCOPE_COMPANY}
+              for a in catalogue if a.get("score_mode") == SCORE_MODE_MANUAL]
+
+    scorecard, uploads, hods = [], [], []
+    manual_scores: Dict[str, dict] = {}       # activity → {score_target, score_actual}  (company-scoped)
+    manual_hod_scores: Dict[str, dict] = {}   # hod_id → activity → {score_target, score_actual}
     if company_id:
         measures = await get_collection(COLL_SUCCESS_MEASURES).find(
             {"company_id": company_id, "period": period}
         ).to_list(500)
+
+        hod_names: Dict[str, str] = {}
         for m in sorted(measures, key=lambda x: (x.get("activity") or "").lower()):
+            activity = m.get("activity")
+            cell = {"score_target": m.get("score_target"), "score_actual": m.get("score_actual")}
+            # HOD-scoped rows are manual INPUTS, not outputs — the sync averages them into the
+            # company row. Keep them out of the scorecard (they would render as duplicate
+            # activity rows) and surface them to the HOD-wise entry tab instead.
+            if str(m.get("scope") or SCOPE_COMPANY) == SCOPE_HOD:
+                hod_id = str(m.get("hod_id") or "")
+                if not hod_id:
+                    continue
+                manual_hod_scores.setdefault(hod_id, {})[activity] = cell
+                if m.get("hod_name"):
+                    hod_names[hod_id] = m["hod_name"]
+                continue
+            manual_scores[activity] = cell
             scorecard.append({
-                "activity": m.get("activity"), "scope": m.get("scope"),
+                "activity": activity, "scope": m.get("scope"),
                 "hod_id": m.get("hod_id"), "hod_name": m.get("hod_name"),
                 "impl_target": m.get("impl_target"), "impl_actual": m.get("impl_actual"),
                 "score_target": m.get("score_target"), "score_actual": m.get("score_actual"),
                 "achievement": m.get("achievement"),
             })
+
         from app.services.tpms_upload_service import list_task_uploads
         uploads = await list_task_uploads(user, company_id=company_id, period=period)
 
-    catalogue = await get_collection(COLL_ACTIVITIES).find({"active": {"$ne": False}}).to_list(200)
-    manual = [{"activity": a["name"], "scope": a.get("scope")}
-              for a in catalogue if a.get("score_mode") == "manual"]
+        # HODs of this company, for the HOD-wise score picker. Same governance-role rule the
+        # calendar filters use, plus anyone who already has a score on file for the period so
+        # a historical entry never becomes uneditable.
+        hod_docs = await get_collection("learners").find({
+            "company_id": company_id,
+            "$or": [{"governance_role": {"$regex": "^hod$", "$options": "i"}},
+                    {"department": {"$regex": "^hod$", "$options": "i"}}],
+        }).to_list(1000)
+        found = {str(h["_id"]): _person_name(h) for h in hod_docs}
+        for hod_id, name in hod_names.items():
+            found.setdefault(hod_id, name)
+        hods = sorted(({"id": k, "name": v} for k, v in found.items()),
+                      key=lambda h: (h["name"] or "").lower())
 
     total = len(scorecard) or len(catalogue)
     return {
         "selected_period": period,
         "selected_company": company_id,
+        "selected_om": om_filter or None,
         "cards": {
             "total": total,
             "met": len([s for s in scorecard if (s["achievement"] or 0) >= 100]),
@@ -1044,6 +1111,9 @@ async def get_implementation_tracker(user: dict, scope: dict) -> dict:
         },
         "scorecard": scorecard, "uploads": uploads,
         "manual_activities": manual,
+        "manual_scores": manual_scores,
+        "manual_hod_scores": manual_hod_scores,
+        "hods": hods,
         "matrix_activities": activities, "clients": grid,
         "filters": await _filters(companies, allowed),
     }
