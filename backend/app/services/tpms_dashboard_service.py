@@ -1487,10 +1487,14 @@ async def get_review_reports(user: dict, source_id: str, scope: dict) -> dict:
         # would collapse the list to one entry — hiding the control and stranding the user on
         # whatever they last picked.
         "companies": _picker_companies(user, companies),
-        "period_options": [{"id": p, "name": period_display(p) if p else ""} for p in ordered],
+        # Blank ids are dropped from both pickers. A submission with no period, or with no
+        # hod_id/md_id, yields an option whose value is "" — which collides with the "All
+        # …" placeholder the UI prepends (duplicate React keys), and picking it would
+        # silently mean "no filter". The entries themselves are unaffected.
+        "period_options": [{"id": p, "name": period_display(p)} for p in ordered if p],
         "respondent_options": sorted(
-            [{"id": k, "name": v} for k, v in respondents.items()],
-            key=lambda r: r["name"].lower()),
+            [{"id": k, "name": v} for k, v in respondents.items() if k],
+            key=lambda r: (r["name"] or "").lower()),
         "can_pick": sees_all,
         "selected_period": scope.get("period") or "",
     }

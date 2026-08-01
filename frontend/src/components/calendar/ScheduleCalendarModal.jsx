@@ -301,6 +301,15 @@ const ScheduleCalendarModal = ({ isOpen, onClose, onSaved, mode = 'erp', event =
     return () => { alive = false; };
   }, [isOpen, form.companyId, showError]);
 
+  /* TPMS is opt-in per company (companies.tpms_enabled, default false) and the API rejects a
+     schedule aimed at a disabled one. Offer only what can actually be saved; the ERP calendar
+     path has no such gate, so it keeps the full list. An event being edited keeps its own
+     company visible even if TPMS was switched off afterwards. */
+  const selectableCompanies = useMemo(() => {
+    if (!isTpms) return companies;
+    return companies.filter((c) => c.tpms_enabled || String(c._id || c.id) === form.companyId);
+  }, [companies, isTpms, form.companyId]);
+
   // Doers available for the currently-selected departments (or all if none chosen).
   const doerPool = useMemo(() => {
     if (!form.departments.length) return companyUsers;
@@ -511,11 +520,20 @@ const ScheduleCalendarModal = ({ isOpen, onClose, onSaved, mode = 'erp', event =
                   <div className={`${field} truncate`}>{companyName || 'Your Company'}</div>
                 ) : (
                   <SearchableSelect
-                    options={companies.map((c) => ({ id: String(c._id || c.id), label: c.name }))}
+                    options={selectableCompanies.map((c) => ({ id: String(c._id || c.id), label: c.name }))}
                     value={form.companyId}
                     onChange={(id) => set({ companyId: id, doerIds: [], departments: [] })}
                     placeholder="— Select —"
                   />
+                )}
+                {/* The backend refuses to schedule into a TPMS-disabled company, so the picker
+                    must not offer one. When that leaves nothing to pick, say why — otherwise an
+                    empty dropdown reads as a broken page. */}
+                {isTpms && !isClient && companies.length > 0 && selectableCompanies.length === 0 && (
+                  <p className="text-[11px] font-bold text-amber-600 mt-1.5 leading-snug">
+                    No company has TPMS enabled yet. Turn TPMS on for a company from its
+                    Company Details page, then schedule here.
+                  </p>
                 )}
               </div>
               {/* Recurrence is not editable per-occurrence — hidden entirely in edit mode. */}
@@ -647,9 +665,12 @@ const ScheduleCalendarModal = ({ isOpen, onClose, onSaved, mode = 'erp', event =
       </div>
 
       {/* TPMS ▸ once-per-month duplicate warning. Advisory only — "Schedule Anyway"
-          overrides it, exactly as the source's conflict modal did. */}
+          overrides it, exactly as the source's conflict modal did.
+          z-index must stay ABOVE the schedule modal (z-250): this dialog is opened *from*
+          it and asks the user to confirm. Underneath it, Save appeared to do nothing at
+          all — no dialog, no request, no toast. */}
       {conflict && (
-        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/40">
+        <div className="fixed inset-0 z-[310] flex items-center justify-center p-4 bg-black/40">
           <div className="w-full max-w-lg rounded-2xl bg-white shadow-2xl overflow-hidden">
             <div className="px-6 py-4 bg-amber-50 border-b border-amber-200">
               <h3 className="text-[15px] font-black text-amber-700">⚠ Already Scheduled</h3>

@@ -31,13 +31,28 @@ const monthOptions = () => {
   return out;
 };
 
-// Previous calendar month as 'YYYY-MM', computed client-side (backend takes a
-// single month only — no ranges). NOTE: presets are quick single-month picks;
-// a true "This Quarter" range can't be honored by this endpoint, so it's omitted.
+// Previous calendar month as 'YYYY-MM', computed client-side.
 const previousPeriod = () => {
   const d = new Date();
   const p = new Date(d.getFullYear(), d.getMonth() - 1, 1);
   return `${p.getFullYear()}-${String(p.getMonth() + 1).padStart(2, '0')}`;
+};
+
+// Local-date ISO (yyyy-mm-dd). NOT toISOString(), which converts to UTC and can land on
+// the previous day for anyone east of Greenwich — shifting the quarter boundary.
+const isoDay = (d) =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+
+// Current calendar quarter as an explicit {from,to} range (spec §17 "This Quarter").
+// The endpoint takes from/to and overrides the single-month window with it, grouping
+// per-month — so a quarter renders as three monthly columns.
+const quarterRange = () => {
+  const d = new Date();
+  const q = Math.floor(d.getMonth() / 3);
+  return {
+    from: isoDay(new Date(d.getFullYear(), q * 3, 1)),
+    to: isoDay(new Date(d.getFullYear(), q * 3 + 3, 0)),   // day 0 of next quarter = last day of this one
+  };
 };
 
 // Small white-pill preset chip for the gradient hero, with an active state.
@@ -79,6 +94,10 @@ const HodView = () => {
   // Preset target months (stable for the session) — the dropdown stays as "Custom".
   const thisMonth = useMemo(() => currentPeriod(), []);
   const lastMonth = useMemo(() => previousPeriod(), []);
+  // Stable identity so it can sit in `load`'s dependency list without refetch loops.
+  const quarter = useMemo(() => quarterRange(), []);
+  // null = single-month mode (`period` drives the query); set = explicit from/to range.
+  const [range, setRange] = useState(null);
   const [company, setCompany] = useState('');
   const [member, setMember] = useState('');
   const [period, setPeriod] = useState(currentPeriod());
@@ -109,6 +128,9 @@ const HodView = () => {
         period: period || undefined,
         company_id: company || undefined,
         member_id: member || undefined,
+        // from/to override `period` server-side; `period` still goes along as the fallback.
+        from: range?.from,
+        to: range?.to,
       });
       setData(res.data);
     } catch (e) {
@@ -117,7 +139,7 @@ const HodView = () => {
     } finally {
       setLoading(false);
     }
-  }, [period, company, member]);
+  }, [period, company, member, range]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -161,15 +183,27 @@ const HodView = () => {
   return (
     <div className="space-y-5">
       {/* Hero */}
-      <DashboardHero icon={UserCog} title="HOD Activity" highlight={hodName} subtitle="Per-HOD activity scoring & accountability">
+      <DashboardHero
+        icon={UserCog}
+        title="HOD Activity"
+        highlight={hodName}
+        /* Spell out the active window when it isn't a single month — otherwise the month
+           dropdown still reads "July 2026" while the table covers a whole quarter. */
+        subtitle={range
+          ? `Quarter · ${range.from} → ${range.to}`
+          : 'Per-HOD activity scoring & accountability'}
+      >
         {canPickCompany && <HeaderSelect value={company} onChange={(v) => { setCompany(v); setMember(''); }} options={companyOpts} />}
         <HeaderSelect value={member} onChange={setMember} options={hodOpts.length ? hodOpts : [{ id: '', name: 'No HODs' }]} />
-        {/* Period presets — quick single-month picks; changing period refetches via `load`. */}
+        {/* Period presets (spec §17: This Month / Last Month / Quarter / Custom).
+            The month chips and the dropdown clear `range`, so the two modes can never
+            both look active — whatever is highlighted is what the data reflects. */}
         <div className="inline-flex items-center gap-2">
           <span className="text-[10px] font-bold uppercase tracking-widest text-white/70">Period</span>
-          <PresetChip active={period === thisMonth} onClick={() => setPeriod(thisMonth)}>This Month</PresetChip>
-          <PresetChip active={period === lastMonth} onClick={() => setPeriod(lastMonth)}>Last Month</PresetChip>
-          <HeaderSelect value={period} onChange={setPeriod} options={months} />
+          <PresetChip active={!range && period === thisMonth} onClick={() => { setRange(null); setPeriod(thisMonth); }}>This Month</PresetChip>
+          <PresetChip active={!range && period === lastMonth} onClick={() => { setRange(null); setPeriod(lastMonth); }}>Last Month</PresetChip>
+          <PresetChip active={!!range} onClick={() => setRange(quarter)}>This Quarter</PresetChip>
+          <HeaderSelect value={period} onChange={(v) => { setRange(null); setPeriod(v); }} options={months} />
         </div>
         <HeroButton icon={RefreshCw} onClick={load}>Refresh</HeroButton>
       </DashboardHero>
