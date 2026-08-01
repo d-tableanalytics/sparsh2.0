@@ -8,12 +8,6 @@ export const AuthProvider = ({ children }) => {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
 
-  const logout = () => {
-    localStorage.removeItem('token');
-    localStorage.removeItem('sparsh_pwd');
-    setUser(null);
-    delete axios.defaults.headers.common['Authorization'];
-  };
 
   useEffect(() => {
     const token = localStorage.getItem('token');
