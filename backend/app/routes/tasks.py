@@ -22,6 +22,7 @@ from app.services.activity_log_service import log_activity
 from app.services.s3_service import upload_file_to_s3_with_key
 from app.routes.group import _is_member_or_manager
 from app.services import task_events
+from app.services.task_notifications import notify_task_event
 
 router = APIRouter(prefix="/tasks", tags=["Tasks"])
 
@@ -856,9 +857,19 @@ async def update_task_status(task_id: str, body: dict, current_user: dict = Depe
     # the original assignee keeps seeing it sitting at "Dependent on Other".
     #
     # The doer's "completed" therefore resolves their dependency and pops the task back to whoever
-    # delegated it (who resumes at In Progress). It is NOT a completion of the task, so the
-    # checklist / evidence / verification rules below — which gate the real assignee's completion —
-    # must not apply to it.
+    # delegated it. It is NOT the doer completing the task itself, so the checklist / evidence /
+    # verification rules below — which gate the real assignee's completion — must not be charged
+    # to the doer.
+    #
+    # Where the hand-back lands depends on what is left to do:
+    #   • Verification Required = YES → the assignee resumes at In Progress and later submits for
+    #     verification, so the existing verification flow runs untouched (assigner approves/reopens).
+    #   • Verification Required = NO  → once the chain has fully unwound back to the real assignee
+    #     there is nothing left for anyone to do, so the assignee's task is auto-completed. It must
+    #     NOT travel on to the assigner.
+    # Auto-completion still respects the checklist / evidence gates: if either is outstanding the
+    # task simply resumes In Progress so the assignee can satisfy it, rather than 400-ing the doer
+    # out of resolving a dependency that is genuinely done.
     dependency_stack = existing.get("dependency_stack") or []
     prev_level = dependency_stack[-1] if dependency_stack else None
     resolving_dependency = (
@@ -866,8 +877,21 @@ async def update_task_status(task_id: str, body: dict, current_user: dict = Depe
         and prev_level is not None
         and existing.get("dependency_doer_id") == user_id
     )
+    auto_complete_on_return = False
     if resolving_dependency:
-        new_status = "in_progress"
+        fully_unwound = len(dependency_stack) == 1  # popping this level returns it to the assignee
+        checklist_clear = not [
+            c for c in (existing.get("checklist") or [])
+            if not (isinstance(c, dict) and c.get("completed"))
+        ]
+        evidence_clear = not existing.get("evidence_required") or bool(existing.get("completion_attachments") or [])
+        auto_complete_on_return = (
+            fully_unwound
+            and not existing.get("verification_required")
+            and checklist_clear
+            and evidence_clear
+        )
+        new_status = "completed" if auto_complete_on_return else "in_progress"
 
     if new_status == "completed":
         # Completion rule: every check point (checklist item) must be done first.
@@ -923,6 +947,8 @@ async def update_task_status(task_id: str, body: dict, current_user: dict = Depe
         returned_names = ", ".join(names.get(uid, "the assignee") for uid in returned_to) or "the assignee"
         actor = current_user.get("full_name") or current_user.get("email")
         history_note = f"Dependency completed by {actor}. Task returned to {returned_names}."
+        if auto_complete_on_return:
+            history_note += " No verification required — task auto-completed."
     was_completed = old_status == "completed"
     if new_status == "completed" and not was_completed:
         updates["completed_at"] = datetime.now(timezone.utc)
@@ -989,6 +1015,42 @@ async def update_task_status(task_id: str, body: dict, current_user: dict = Depe
         "watchers": existing.get("watchers") or [],
         "actor_id": user_id,
     })
+
+    # ─── Email / WhatsApp / in-app (Task Management triggers only — never the Calendar's) ───
+    # Only a real transition is worth an email; a no-op re-save of the same status isn't.
+    # `notify_event` is the *most specific* thing that happened, so each transition sends
+    # exactly one notification: an assigner approving a verification gets "verification
+    # approved" (to the assignee), not that plus a generic "completed".
+    if old_status != new_status or history_note:
+        if reassign_doer or new_status == "dependent_on_others":
+            notify_event = "dependent_on_other"
+        elif new_status == "verification":
+            notify_event = "verification_requested"
+        elif old_status == "verification" and new_status == "completed":
+            notify_event = "verification_approved"
+        elif new_status == "in_progress_reopened":
+            notify_event = "reopened"
+        elif new_status == "completed":
+            notify_event = "completed"
+        elif new_status == "accepted":
+            notify_event = "accepted"
+        elif new_status == "blocked":
+            notify_event = "blocked"
+        else:
+            # Includes the dependency hand-back (doer completes → task returns to In Progress).
+            notify_event = "updated"
+
+        await notify_task_event(
+            notify_event,
+            projected,
+            current_user,
+            extra={
+                "reason": reason,
+                "doer_name": doer_name,
+                "doer_id": reassign_doer or existing.get("dependency_doer_id"),
+            },
+        )
+
     return {"id": task_id, "workflow_status": new_status}
 
 
@@ -1101,6 +1163,7 @@ async def add_task_follow_up(task_id: str, body: dict, current_user: dict = Depe
         "watchers": existing.get("watchers") or [],
         "actor_id": str(current_user["_id"]),
     })
+    await notify_task_event("follow_up_added", existing, current_user, extra={"remark": remark})
     return {"id": task_id, "follow_up": {**entry, "created_at": entry["created_at"].isoformat()}}
 
 
@@ -1238,6 +1301,12 @@ async def revise_task_deadline(task_id: str, body: dict, current_user: dict = De
         "watchers": existing.get("watchers") or [],
         "actor_id": str(current_user["_id"]),
     })
+    await notify_task_event(
+        "deadline_revised",
+        {**existing, "end": new_end},
+        current_user,
+        extra={"old_end": old_end, "new_end": new_end, "reason": reason},
+    )
     return {"id": task_id, "end": new_end}
 
 
@@ -1269,6 +1338,9 @@ async def soft_delete_task(task_id: str, current_user: dict = Depends(require_ta
         "watchers": existing.get("watchers") or [],
         "actor_id": str(current_user["_id"]),
     })
+    # The delegation module soft-deletes (the Calendar's hard DELETE has its own trigger),
+    # so without this the assignees were never told their task went away.
+    await notify_task_event("deleted", existing, current_user)
     return {"message": "Task moved to Deleted Tasks"}
 
 

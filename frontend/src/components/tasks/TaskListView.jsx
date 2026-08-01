@@ -7,7 +7,7 @@ import {
 } from 'lucide-react';
 import api from '../../services/api';
 import { getTasks, softDeleteTask, restoreTask, updateTaskStatus, reviseTaskDeadline } from '../../services/taskApi';
-import { getTaskCategories, getTaskTags } from '../../services/taskMetaApi';
+import { getTaskCategories, getTaskTags, uniqueNames } from '../../services/taskMetaApi';
 import { openTaskEventStream } from '../../services/taskEventsApi';
 import { getHolidays } from '../../services/holidayApi';
 import { useAuth } from '../../context/AuthContext';
@@ -216,8 +216,9 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
   const fetchTaxonomy = useCallback(async () => {
     try {
       const [catRes, tagRes] = await Promise.all([getTaskCategories(), getTaskTags()]);
-      setCategories((catRes.data || []).map(c => c.name));
-      setTagOptions((tagRes.data || []).map(t => t.name));
+      // See uniqueNames — blank/duplicate names would become repeated React keys.
+      setCategories(uniqueNames(catRes.data));
+      setTagOptions(uniqueNames(tagRes.data));
     } catch {
       // Non-fatal: task list/creation still works, just without a live options list.
     }

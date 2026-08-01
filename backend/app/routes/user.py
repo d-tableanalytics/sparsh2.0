@@ -8,7 +8,7 @@ from app.controllers.auth_controller import (
 from app.db.mongodb import get_collection
 from bson import ObjectId
 from datetime import datetime
-from pydantic import BaseModel
+from pydantic import BaseModel, EmailStr
 from app.services.notification_service import send_user_updated_email, send_access_control_email
 from app.services.activity_log_service import log_activity
 
@@ -94,6 +94,7 @@ class UserEditRequest(BaseModel):
     first_name: Optional[str] = None
     last_name: Optional[str] = None
     full_name: Optional[str] = None
+    email: Optional[EmailStr] = None
     mobile: Optional[str] = None
     role: Optional[str] = None
     session_type: Optional[str] = None
@@ -129,10 +130,11 @@ async def read_users_me(current_user: dict = Depends(get_current_active_user)):
         try:
             company = await get_collection("companies").find_one({"_id": ObjectId(company_id)})
             current_user["orm_enabled"] = bool(company.get("orm_enabled", True)) if company else True
-            current_user["delegation_enabled"] = bool(company.get("delegation_enabled", False)) if company else False
+            # TPMS is opt-in: absent flag means OFF, so an un-migrated company stays dark.
+            current_user["tpms_enabled"] = bool(company.get("tpms_enabled", False)) if company else False
         except Exception:
             current_user["orm_enabled"] = True
-            current_user["delegation_enabled"] = False
+            current_user["tpms_enabled"] = False
     return current_user
 
 # ─── Helper to find user in any collection ───
@@ -243,7 +245,20 @@ async def update_user(user_id: str, updates: UserEditRequest, background_tasks: 
         ln_str = ln if ln else ""
         
         update_data["full_name"] = f"{fn_str} {ln_str}".strip()
-    
+
+    # ─── Email doubles as the login identity (auth resolves it across staff + learners),
+    # so normalize it and reject a value already taken by another account ───
+    if "email" in update_data:
+        new_email = str(update_data["email"]).lower().strip()
+        if new_email != user.get("email"):
+            for col in ("staff", "learners"):
+                clash = await get_collection(col).find_one(
+                    {"email": new_email, "_id": {"$ne": ObjectId(user_id)}}
+                )
+                if clash:
+                    raise HTTPException(status_code=409, detail="That email is already in use by another account")
+        update_data["email"] = new_email
+
     # ─── Check for Role/Access Change ───
     old_role = user.get("role")
     new_role = update_data.get("role")

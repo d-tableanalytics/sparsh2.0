@@ -113,7 +113,7 @@ const Login = () => {
 
           <footer className="login-footer">
             <p className="footer-company">
-              Designed & Managed by <span style={{ color: '#2563eb' }}>D-TABLE ANALYTICS</span>
+<a href="https://www.dtableanalytics.com/" target="_blank" rel="noopener noreferrer" style={{ color: '#2563eb', fontWeight: 800, textDecoration: 'none' }}>Powered by D Table Analytics</a>
             </p>
             <p className="footer-copyright">
               Copyright © 2026 Sparsh Magic Pvt. Ltd.

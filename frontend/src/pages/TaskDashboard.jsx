@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Table2, BarChart3 as BarChartIcon, Plus, ListChecks, Search } from 'lucide-react';
 import api from '../services/api';
 import { getTaskDashboard, getTasks } from '../services/taskApi';
-import { getTaskCategories, getTaskTags } from '../services/taskMetaApi';
+import { getTaskCategories, getTaskTags, uniqueNames } from '../services/taskMetaApi';
 import { openTaskEventStream } from '../services/taskEventsApi';
 import { useAuth } from '../context/AuthContext';
 import { useNotification } from '../context/NotificationContext';
@@ -148,8 +148,10 @@ const TaskDashboard = () => {
   const fetchTaxonomy = useCallback(async () => {
     try {
       const [catRes, tagRes] = await Promise.all([getTaskCategories(), getTaskTags()]);
-      setCategories((catRes.data || []).map(c => c.name));
-      setTags((tagRes.data || []).map(t => t.name));
+      // Names are rendered as <option key={name}>, so blanks and duplicates would collide
+      // into repeated React keys. A nameless category/tag is meaningless as an option.
+      setCategories(uniqueNames(catRes.data));
+      setTags(uniqueNames(tagRes.data));
     } catch {
       // Non-fatal
     }

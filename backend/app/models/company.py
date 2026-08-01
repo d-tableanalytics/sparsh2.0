@@ -6,6 +6,9 @@ class CompanyBase(BaseModel):
     name: str
     domain: Optional[str] = None
     owner: Optional[str] = None
+    # Internal SMOps/OM staff who manage this client. Read-side dashboard scoping honours
+    # owner + admin_id + smops_ids (see tpms_dashboard_service._allowed_companies).
+    smops_ids: Optional[List[str]] = []
     email: Optional[EmailStr] = None
     contact: Optional[str] = None
     
@@ -24,9 +27,8 @@ class CompanyBase(BaseModel):
     status: str = "active"  # active, hold, inactive
     is_active: bool = True
     orm_enabled: bool = True  # Whether the ORM module is available to this company
-    # Whether the Task & Delegation module is available to this company. Defaults to OFF:
-    # Delegation was internal-only before this toggle, so access is opt-in per company.
-    delegation_enabled: bool = False
+    # TPMS is opt-in per company: a missing flag means OFF, unlike ORM which defaults on.
+    tpms_enabled: bool = False
 
 class CompanyCreate(CompanyBase):
     pass
@@ -34,6 +36,7 @@ class CompanyCreate(CompanyBase):
 class CompanyUpdate(BaseModel):
     name: Optional[str] = None
     owner: Optional[str] = None
+    smops_ids: Optional[List[str]] = None
     is_active: Optional[bool] = None
 
 class CompanyResponse(CompanyBase):

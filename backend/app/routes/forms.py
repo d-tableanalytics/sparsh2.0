@@ -1,0 +1,1007 @@
+"""
+TPMS ▸ Forms sub-module — API routes.
+
+Endpoints (all mounted under /api):
+  GET  /forms/definitions                         list all form definitions
+  GET  /forms/{form_type}/definition              one form's criteria/scale
+  GET  /forms/members                             candidate team members to rate
+  POST /forms/{form_type}/submissions             save a submission
+  GET  /forms/{form_type}/submissions             list submissions (filterable)
+  GET  /forms/submissions/{submission_id}         fetch one submission
+
+Data is stored atomically per (company, period, hod, member, criterion) so that
+future Success Measure calculations can aggregate freely. No Success Measure
+computation is performed here — this module only captures and serves the data.
+"""
+from fastapi import APIRouter, Depends, HTTPException, Query
+from typing import List, Optional
+from datetime import datetime
+from bson import ObjectId
+from bson.errors import InvalidId
+
+from app.controllers.auth_controller import get_current_user
+from app.db.mongodb import get_collection
+from app.models.forms import (
+    AUDIENCE_DEPARTMENT,
+    FORM_DEFINITIONS,
+    FORM_COLLECTIONS,
+    ACTIVITY_CATALOGUE,
+    ACTIVITY_FORM_MAP,
+    submission_collection,
+    get_definition,
+    criteria_codes,
+    form_kind,
+    form_audience,
+    question_map,
+    RatingSubmissionCreate,
+    FeedbackSubmissionCreate,
+    SCALE_MIN,
+    SCALE_MAX,
+    KIND_RATING_MATRIX,
+    KIND_YESNO_CHECKLIST,
+    QUESTION_COLLECTION,
+    definition_items,
+)
+from app.models.tpms import period_parts, period_tokens, TPMS_EVENT_KIND
+
+async def _tpms_company_gate(current_user: dict = Depends(get_current_user)) -> None:
+    """Router-wide guard — see the twin in routes/tpms.py. The TPMS forms module is part of
+    TPMS, so a company with TPMS switched off cannot open, submit or read any of it."""
+    from app.utils.tpms_access import ensure_tpms_enabled
+    await ensure_tpms_enabled(current_user)
+
+
+router = APIRouter(prefix="/forms", tags=["TPMS Forms"],
+                   dependencies=[Depends(_tpms_company_gate)])
+
+# Each form is stored in its own collection ("table") — see FORM_COLLECTIONS in
+# app.models.forms. Resolve the collection for a form_type via submission_collection().
+
+# Internal staff (the /tpms/admin panel) may submit on behalf of anyone.
+STAFF_ROLES = {"superadmin", "admin"}
+# Client-side users fill TPMS forms for themselves (HODs rate their team; everyone
+# submits Culture + Implementation Feedback). Their writes are self-scoped below.
+CLIENT_ROLES = {"clientadmin", "clientuser"}
+
+
+def _is_staff(user: dict) -> bool:
+    return user.get("role") in STAFF_ROLES
+
+
+def _is_client(user: dict) -> bool:
+    return user.get("role") in CLIENT_ROLES
+
+
+def _self_id(user: dict) -> str:
+    """The identity a client-side user submits under. Standardised to the Mongo _id
+    (also used to exclude self from the team roster and to scope reads/writes)."""
+    return str(user.get("_id"))
+
+
+def _can_write(user: dict) -> bool:
+    if _is_staff(user):
+        return True
+    if _is_client(user):
+        return True
+    # Also honour the granular permission flag if present.
+    return bool(user.get("permissions", {}).get("forms", {}).get("create"))
+
+
+def _can_read(user: dict) -> bool:
+    if _is_staff(user) or _is_client(user):
+        return True
+    # Not open-by-default: any other role (e.g. SMOps `staff`, who read reviews via the
+    # scoped review-report route instead) needs an explicit grant. Closes the previous
+    # default-True that let a non-client caller list submissions across every company.
+    return bool(user.get("permissions", {}).get("forms", {}).get("read", False))
+
+
+def _user_department(user: dict) -> str:
+    # C8 — form audience is a governance ROLE (hod/md). Prefer an explicit `governance_role`
+    # so `department` can hold the real org department; fall back for un-migrated users.
+    return (user.get("governance_role") or user.get("department") or "").strip().lower()
+
+
+def _is_hod(user: dict) -> bool:
+    return _user_department(user) == "hod"
+
+
+def _enforce_client_scope(user: dict, company_id: str, respondent_id: str, form_type: str) -> None:
+    """Defence-in-depth for client-side submissions. Staff bypass all of this.
+    A client user may only write:
+      • within their own company, and
+      • under their own identity (as the HOD/MD/respondent),
+      • and department-gated forms only from the matching department
+        ('hod' → Accountability/Ownership/Culture, 'md' → Implementation Feedback).
+    """
+    if _is_staff(user):
+        return
+    if not _is_client(user):
+        # Only staff (bypass) and clients (scoped below) may write forms. Any other role —
+        # even one holding the granular create flag — is rejected rather than being allowed
+        # an unscoped, arbitrary-company submission.
+        raise HTTPException(status_code=403, detail="Not authorized to submit forms.")
+    if company_id != (user.get("company_id") or ""):
+        raise HTTPException(status_code=403, detail="You can only submit forms for your own company.")
+    if respondent_id != _self_id(user):
+        raise HTTPException(status_code=403, detail="You can only submit your own form.")
+    required_dept = AUDIENCE_DEPARTMENT.get(form_audience(form_type))
+    if required_dept and _user_department(user) != required_dept:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Only a{'n' if required_dept == 'hod' else ''} {required_dept.upper()} can submit this form.",
+        )
+
+
+def _require_form_type(form_type: str) -> dict:
+    definition = get_definition(form_type)
+    if not definition:
+        raise HTTPException(status_code=404, detail=f"Unknown form type '{form_type}'")
+    return definition
+
+
+def _serialize(doc: dict) -> dict:
+    doc["_id"] = str(doc["_id"])
+    return doc
+
+
+def _user_display_name(user: dict) -> str:
+    return (
+        user.get("full_name")
+        or " ".join(filter(None, [user.get("first_name"), user.get("last_name")])).strip()
+        or user.get("name")
+        or user.get("email")
+        or "Unknown"
+    )
+
+
+# ─────────────────────────────────────────────────────────────
+# Form definitions (criteria registry)
+# ─────────────────────────────────────────────────────────────
+# ─── M10 — question master (editable question TEXT; item ids never change) ───
+async def _seed_questions_if_empty():
+    coll = get_collection(QUESTION_COLLECTION)
+    if await coll.count_documents({}) > 0:
+        return
+    rows = []
+    for ft, d in FORM_DEFINITIONS.items():
+        rows.extend(definition_items(ft, d))
+    if rows:
+        try:
+            await coll.insert_many(rows)
+        except Exception:
+            pass
+
+
+async def _effective_definition(form_type: str, definition: dict) -> dict:
+    """Overlay the master's edited text onto a form definition (same item ids/order)."""
+    docs = await get_collection(QUESTION_COLLECTION).find(
+        {"form_type": form_type, "active": {"$ne": False}}
+    ).sort("order", 1).to_list(200)
+    if not docs:
+        return definition
+    d = dict(definition)
+    if definition.get("kind") == KIND_RATING_MATRIX:
+        d["criteria"] = [{"code": x["item_id"], "title": x.get("title", ""),
+                          "prompt": x.get("prompt", "")} for x in docs]
+    else:
+        d["questions"] = [{"id": x["item_id"], "title": x.get("title", ""),
+                           "desc": x.get("desc", "")} for x in docs]
+    return d
+
+
+async def _effective_criteria_codes(form_type: str) -> list:
+    """Live criterion codes for a rating form (question master overlaid), so add/remove of
+    criteria takes effect for submission validation. Falls back to the hard-coded list."""
+    await _seed_questions_if_empty()
+    d = await _effective_definition(form_type, get_definition(form_type) or {})
+    return [c["code"] for c in d.get("criteria", [])]
+
+
+async def _effective_question_map(form_type: str) -> dict:
+    """Live question map for a checklist form (question master overlaid)."""
+    await _seed_questions_if_empty()
+    d = await _effective_definition(form_type, get_definition(form_type) or {})
+    return {str(q["id"]): q for q in d.get("questions", [])}
+
+
+@router.get("/definitions")
+async def list_definitions(current_user: dict = Depends(get_current_user)):
+    if not _can_read(current_user):
+        raise HTTPException(status_code=403, detail="Not authorized")
+    await _seed_questions_if_empty()
+    out = []
+    for ft, d in FORM_DEFINITIONS.items():
+        out.append(await _effective_definition(ft, d))
+    return {"definitions": out}
+
+
+# ─── Schedule-driven "My Forms" — the forms this user must fill, by period + status ───
+_FORM_TYPE_ORDER = ["accountability", "ownership", "culture", "implementation_feedback"]
+
+
+@router.get("/my-forms")
+async def my_forms(current_user: dict = Depends(get_current_user)):
+    """The connected form flow: for the logged-in respondent (HOD/MD), list the forms they
+    must fill — one entry per (form × period) derived from the SCHEDULED form-activities for
+    their company (plus the current period), each with submission status. Replaces the flat
+    Forms menu with a contextual, schedule-driven task list."""
+    if not _is_client(current_user):
+        return {"forms": []}  # forms are filled by client-side HOD/MD respondents
+    company_id = str(current_user.get("company_id") or "")
+    uid = str(current_user.get("_id") or "")
+    dept = _user_department(current_user)  # governance role (hod/md), governance_role-aware
+
+    # Which forms can this respondent fill (by audience)?
+    eligible = [ft for ft in _FORM_TYPE_ORDER
+                if AUDIENCE_DEPARTMENT.get(form_audience(ft)) == dept]
+    if not eligible or not company_id:
+        return {"forms": []}
+
+    # form_type → the activity that feeds it.
+    rev: dict = {}
+    for activity, forms in ACTIVITY_FORM_MAP.items():
+        for f in forms:
+            rev.setdefault(f, activity)
+
+    now = datetime.utcnow()
+    current_period = f"{now.year:04d}-{now.month:02d}"
+
+    out = []
+    for ft in eligible:
+        activity = rev.get(ft)
+        if not activity:
+            continue
+        # Periods where this form-activity was scheduled for the company (+ the current month).
+        periods = {current_period}
+        for coll in _CAL_COLLECTIONS:
+            for e in await get_collection(coll).find(
+                {"company_id": company_id, "activity": activity}
+            ).to_list(500):
+                dt = _parse_dt(e.get("start"))
+                if dt:
+                    periods.add(f"{dt.year:04d}-{dt.month:02d}")
+        # This respondent's existing submissions (match hod_id / md_id).
+        my_sub_periods = set()
+        for s in await get_collection(submission_collection(ft)).find(
+            {"company_id": company_id}
+        ).to_list(3000):
+            if str(s.get("hod_id") or s.get("md_id") or "") == uid:
+                my_sub_periods.add(str(s.get("period") or ""))
+        for period in sorted(periods, reverse=True):
+            tokens = set(period_tokens(period)) | {period}
+            out.append({
+                "form_type": ft,
+                "title": FORM_DEFINITIONS[ft]["title"],
+                "activity": activity,
+                "period": period,
+                "status": "submitted" if (tokens & my_sub_periods) else "pending",
+            })
+    return {"forms": out}
+
+
+@router.get("/questions")
+async def list_questions(
+    form_type: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """M10 — the editable question master (Admin)."""
+    if (current_user.get("role") or "").lower() not in {"superadmin", "admin"}:
+        raise HTTPException(status_code=403, detail="Admin only")
+    await _seed_questions_if_empty()
+    query = {}
+    if form_type:
+        query["form_type"] = form_type
+    docs = await get_collection(QUESTION_COLLECTION).find(query).sort([("form_type", 1), ("order", 1)]).to_list(500)
+    for d in docs:
+        d["_id"] = str(d["_id"])
+    return {"questions": docs}
+
+
+@router.post("/questions")
+async def create_question(payload: dict, current_user: dict = Depends(get_current_user)):
+    """M10 (add) — append a new criterion/question to a form. The pooled scoring formula is
+    robust to the number of items, and submission validation now reads this master, so adds
+    take effect immediately. `item_id` must be unique within the form; auto-generated if omitted."""
+    if (current_user.get("role") or "").lower() not in {"superadmin", "admin"}:
+        raise HTTPException(status_code=403, detail="Admin only")
+    await _seed_questions_if_empty()
+    form_type = str(payload.get("form_type") or "").strip()
+    definition = FORM_DEFINITIONS.get(form_type)
+    if not definition:
+        raise HTTPException(status_code=400, detail="Unknown form_type")
+    title = str(payload.get("title") or "").strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="Title is required")
+    kind = definition.get("kind")
+    coll = get_collection(QUESTION_COLLECTION)
+    existing = await coll.find({"form_type": form_type}).to_list(500)
+    item_id = str(payload.get("item_id") or "").strip()
+    if not item_id:
+        prefix = "Q" if kind == KIND_YESNO_CHECKLIST else (form_type[:1].upper() or "X")
+        item_id = f"{prefix}{len(existing) + 1}"
+    if any(str(e.get("item_id")) == item_id for e in existing):
+        raise HTTPException(status_code=409, detail=f"Item id '{item_id}' already exists for this form")
+    doc = {
+        "form_type": form_type, "kind": kind, "item_id": item_id,
+        "title": title,
+        "prompt": str(payload.get("prompt") or "") if kind == KIND_RATING_MATRIX else "",
+        "desc": str(payload.get("desc") or "") if kind == KIND_YESNO_CHECKLIST else "",
+        "order": max([int(e.get("order") or 0) for e in existing], default=-1) + 1,
+        "active": True,
+    }
+    await coll.insert_one(doc)
+    return {"ok": True, "item_id": item_id}
+
+
+@router.patch("/questions/{question_id}")
+async def update_question(question_id: str, payload: dict, current_user: dict = Depends(get_current_user)):
+    """M10 — reword a question/criterion (text only). Item ids are immutable so scoring and
+    submission validation are unaffected."""
+    if (current_user.get("role") or "").lower() not in {"superadmin", "admin"}:
+        raise HTTPException(status_code=403, detail="Admin only")
+    try:
+        oid = ObjectId(question_id)
+    except (InvalidId, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid question id")
+    updates = {k: str(payload[k]) for k in ("title", "prompt", "desc") if k in payload}
+    if "active" in payload:
+        updates["active"] = bool(payload["active"])
+    if not updates:
+        raise HTTPException(status_code=400, detail="Nothing to update")
+    res = await get_collection(QUESTION_COLLECTION).update_one({"_id": oid}, {"$set": updates})
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Question not found")
+    return {"ok": True}
+
+
+# ─────────────────────────────────────────────────────────────
+# Candidate members to rate (sourced from existing users)
+# ─────────────────────────────────────────────────────────────
+@router.get("/members")
+async def list_members(
+    company_id: str = Query(..., description="Company to load team members for"),
+    hod_id: Optional[str] = Query(None, description="Exclude this HOD from the member list"),
+    current_user: dict = Depends(get_current_user),
+):
+    if not _can_read(current_user):
+        raise HTTPException(status_code=403, detail="Not authorized")
+    # Client-side users may only load their own company's roster.
+    if _is_client(current_user):
+        company_id = current_user.get("company_id") or ""
+    if not company_id:
+        raise HTTPException(status_code=400, detail="company_id is required")
+
+    base = {"company_id": company_id, "is_active": {"$ne": False}}
+    # AppScript flow: an HOD rates only THEIR OWN TEAM — the learners whose `reporting_manager`
+    # is this HOD (the ERP equivalent of the source's HOD_IDs mapping). Until that mapping is
+    # populated an HOD has no team, so we fall back to the full company roster to keep the form
+    # usable; `scoped_to_team` tells the UI which mode is in effect.
+    team = []
+    if hod_id:
+        team = await get_collection("learners").find(
+            {**base, "reporting_manager": hod_id}).to_list(1000)
+    scoped_to_team = bool(team)
+    pool = team if scoped_to_team else (
+        (await get_collection("staff").find(base).to_list(1000))
+        + (await get_collection("learners").find(base).to_list(1000)))
+
+    members = []
+    for u in pool:
+        uid = str(u["_id"])
+        emp = u.get("employee_id") or u.get("emp_id") or u.get("emp_code")
+        if hod_id and hod_id in (uid, emp):
+            continue
+        members.append({
+            "member_id": uid,
+            "employee_id": emp,
+            "member_name": _user_display_name(u),
+            "designation": u.get("designation"),
+            "department": u.get("department"),
+            "role": u.get("role"),
+        })
+    members.sort(key=lambda m: (m.get("member_name") or "").lower())
+    return {"members": members, "scoped_to_team": scoped_to_team}
+
+
+# ─────────────────────────────────────────────────────────────
+# Submissions
+# ─────────────────────────────────────────────────────────────
+def _matrix_key(form_type: str, company_id: str, period: str, hod_id: str) -> dict:
+    return {"form_type": form_type, "company_id": company_id, "period": period, "hod_id": hod_id}
+
+
+@router.get("/{form_type}/ratings")
+async def get_ratings(
+    form_type: str,
+    company_id: str = Query(...),
+    period: str = Query(...),
+    hod_id: str = Query(...),
+    current_user: dict = Depends(get_current_user),
+):
+    """Existing ratings for (company, period, HOD) so the UI can lock saved cells."""
+    definition = _require_form_type(form_type)
+    if definition.get("kind") != KIND_RATING_MATRIX:
+        raise HTTPException(status_code=400, detail=f"Form '{form_type}' is not a rating form")
+    if not _can_read(current_user):
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    # Client-side users are scoped to their own company + identity.
+    if _is_client(current_user):
+        company_id = current_user.get("company_id") or ""
+        hod_id = _self_id(current_user)
+
+    doc = await get_collection(submission_collection(form_type)).find_one(
+        _matrix_key(form_type, company_id.strip(), period.strip(), hod_id.strip())
+    )
+    ratings = (doc or {}).get("ratings", {})           # { code: { member_id: {rating, ...} } }
+    count = sum(len(v) for v in ratings.values())
+    return {
+        "submitted": count > 0,
+        "submitted_on": (doc or {}).get("created_at"),
+        "ratings": ratings,
+        "count": count,
+    }
+
+
+@router.post("/{form_type}/ratings")
+async def submit_ratings(
+    form_type: str,
+    payload: RatingSubmissionCreate,
+    current_user: dict = Depends(get_current_user),
+):
+    """Cell-level partial submit: append only (criterion × member) cells not already saved."""
+    definition = _require_form_type(form_type)
+    if definition.get("kind") != KIND_RATING_MATRIX:
+        raise HTTPException(status_code=400, detail=f"Form '{form_type}' is not a rating form; use the feedback endpoint")
+    if not _can_write(current_user):
+        raise HTTPException(status_code=403, detail="Not authorized to submit forms")
+    if not definition.get("available"):
+        raise HTTPException(status_code=400, detail=f"Form '{form_type}' is not yet available for submission")
+
+    valid_codes = set(await _effective_criteria_codes(form_type))  # live master (add/remove)
+    if not valid_codes:
+        raise HTTPException(status_code=400, detail=f"Form '{form_type}' has no criteria configured")
+
+    # Client-side users submit for themselves in their own company — the payload's
+    # company_id/hod_id are ignored in favour of the authenticated identity.
+    company_id = payload.company_id
+    hod_id = payload.hod_id
+    hod_name = payload.hod_name
+    if _is_client(current_user):
+        company_id = current_user.get("company_id") or ""
+        hod_id = _self_id(current_user)
+        hod_name = _user_display_name(current_user)
+    _enforce_client_scope(current_user, company_id, hod_id, form_type)
+
+    # Valid members = the company's own roster (staff + learners). Criteria are validated
+    # against the live master above; members must be validated too so a client can't inject
+    # an arbitrary person into their company's ratings.
+    valid_members: set = set()
+    for coll_name in ("staff", "learners"):
+        for u in await get_collection(coll_name).find(
+                {"company_id": company_id, "is_active": {"$ne": False}},
+                {"_id": 1, "employee_id": 1}).to_list(2000):
+            valid_members.add(str(u["_id"]))
+            if u.get("employee_id"):
+                valid_members.add(str(u["employee_id"]))
+
+    key = _matrix_key(form_type, company_id, payload.period, hod_id)
+    existing = await get_collection(submission_collection(form_type)).find_one(key)
+    saved = (existing or {}).get("ratings", {})
+
+    now = datetime.utcnow()
+    who = str(current_user.get("_id"))
+    who_name = _user_display_name(current_user)
+
+    set_fields: Dict[str, dict] = {}
+    added = 0
+    for cell in payload.ratings:
+        if cell.criterion_code not in valid_codes:
+            raise HTTPException(status_code=400, detail=f"Unknown criterion '{cell.criterion_code}'")
+        if valid_members and str(cell.member_id) not in valid_members:
+            raise HTTPException(status_code=400, detail=f"Unknown member '{cell.member_id}'")
+        # Skip a cell that's already on file (append-only, no duplicates).
+        if saved.get(cell.criterion_code, {}).get(cell.member_id) is not None:
+            continue
+        set_fields[f"ratings.{cell.criterion_code}.{cell.member_id}"] = {
+            "rating": cell.rating,
+            "member_name": cell.member_name,
+            "designation": cell.designation,
+            "employee_id": cell.employee_id,
+            "criterion": cell.criterion_code,
+            "rated_at": now,
+            "rated_by": who,
+            "rated_by_name": who_name,
+        }
+        added += 1
+
+    if not added:
+        raise HTTPException(
+            status_code=400,
+            detail="Nothing new to save — the selected cells were already submitted.",
+        )
+
+    set_fields["updated_at"] = now
+    set_fields["hod_name"] = hod_name
+    await get_collection(submission_collection(form_type)).update_one(
+        key,
+        {
+            "$set": set_fields,
+            "$setOnInsert": {
+                **key,
+                "kind": KIND_RATING_MATRIX,
+                "criteria_codes": list(valid_codes),
+                "scale": {"min": SCALE_MIN, "max": SCALE_MAX},
+                "created_at": now,
+                "created_by": who,
+                "created_by_name": who_name,
+            },
+        },
+        upsert=True,
+    )
+
+    total_saved = sum(len(v) for v in saved.values()) + added
+
+    # H3 — form-submission mails (HOD summary + per-employee scorecards). Gated by the TPMS
+    # notification switch, so this is a no-op while notifications are off.
+    try:
+        from app.services.tpms_notify_service import notify_form_submission
+        await notify_form_submission(
+            form_type=form_type, title=definition["title"],
+            company_id=company_id, period=payload.period,
+            respondent_id=hod_id, respondent_name=hod_name or "",
+            ratings=[c.model_dump() for c in payload.ratings],
+        )
+    except Exception as _e:
+        pass  # mail must never fail the submission
+
+    return {
+        "message": f"{definition['title']}: {added} rating(s) saved",
+        "count": added,
+        "total_saved": total_saved,
+    }
+
+
+# ─────────────────────────────────────────────────────────────
+# yesno_checklist (Implementation Feedback) — partial submission
+# ─────────────────────────────────────────────────────────────
+def _feedback_key(form_type: str, company_id: str, period: str, md_id: str) -> dict:
+    return {"form_type": form_type, "company_id": company_id, "period": period, "md_id": md_id}
+
+
+@router.get("/{form_type}/feedback")
+async def get_feedback(
+    form_type: str,
+    company_id: str = Query(...),
+    period: str = Query(...),
+    md_id: str = Query(...),
+    current_user: dict = Depends(get_current_user),
+):
+    """Existing answers for (company, period, MD) so the UI can lock what's already saved."""
+    definition = _require_form_type(form_type)
+    if definition.get("kind") != KIND_YESNO_CHECKLIST:
+        raise HTTPException(status_code=400, detail=f"Form '{form_type}' is not a feedback form")
+    if not _can_read(current_user):
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    # Client-side users are scoped to their own company + identity.
+    if _is_client(current_user):
+        company_id = current_user.get("company_id") or ""
+        md_id = _self_id(current_user)
+
+    doc = await get_collection(submission_collection(form_type)).find_one(
+        _feedback_key(form_type, company_id.strip(), period.strip(), md_id.strip())
+    )
+    answers = (doc or {}).get("answers", {})
+    return {
+        "submitted": bool(answers),
+        "submitted_on": (doc or {}).get("created_at"),
+        "answers": answers,          # { question_id: {question, checked, remark, ...} }
+        "count": len(answers),
+    }
+
+
+@router.post("/{form_type}/feedback")
+async def submit_feedback(
+    form_type: str,
+    payload: FeedbackSubmissionCreate,
+    current_user: dict = Depends(get_current_user),
+):
+    """Slot-by-slot submit: append only questions not already saved for this (company, period, MD)."""
+    definition = _require_form_type(form_type)
+    if definition.get("kind") != KIND_YESNO_CHECKLIST:
+        raise HTTPException(status_code=400, detail=f"Form '{form_type}' is not a feedback form")
+    if not _can_write(current_user):
+        raise HTTPException(status_code=403, detail="Not authorized to submit forms")
+    if not definition.get("available"):
+        raise HTTPException(status_code=400, detail=f"Form '{form_type}' is not yet available for submission")
+
+    qmap = await _effective_question_map(form_type)  # live master (add/remove)
+    if not qmap:
+        raise HTTPException(status_code=400, detail=f"Form '{form_type}' has no questions configured")
+
+    # Client-side users submit their own response in their own company.
+    company_id = payload.company_id
+    md_id = payload.md_id
+    md_name = payload.md_name
+    if _is_client(current_user):
+        company_id = current_user.get("company_id") or ""
+        md_id = _self_id(current_user)
+        md_name = _user_display_name(current_user)
+    _enforce_client_scope(current_user, company_id, md_id, form_type)
+
+    key = _feedback_key(form_type, company_id, payload.period, md_id)
+    existing = await get_collection(submission_collection(form_type)).find_one(key)
+    already = set((existing or {}).get("answers", {}).keys())
+
+    now = datetime.utcnow()
+    who = str(current_user.get("_id"))
+    who_name = _user_display_name(current_user)
+
+    new_answers: Dict[str, dict] = {}
+    skipped_unknown, skipped_existing = [], []
+    for a in payload.answers:
+        qid = a.question_id
+        if qid not in qmap:
+            skipped_unknown.append(qid)
+            continue
+        if qid in already:
+            skipped_existing.append(qid)
+            continue
+        # Only persist a slot that was actually answered (ticked) or has a remark.
+        if not a.checked and not (a.remark or "").strip():
+            continue
+        new_answers[qid] = {
+            "question": a.question or qmap[qid].get("title", ""),
+            "checked": bool(a.checked),
+            "answer": "Yes" if a.checked else "No",
+            "remark": (a.remark or "").strip(),
+            "answered_at": now,
+            "answered_by": who,
+            "answered_by_name": who_name,
+        }
+
+    if not new_answers:
+        raise HTTPException(
+            status_code=400,
+            detail="Nothing new to save — tick a box or add a remark on an unanswered question.",
+        )
+
+    set_fields = {f"answers.{qid}": val for qid, val in new_answers.items()}
+    set_fields["updated_at"] = now
+    set_fields["md_name"] = md_name
+
+    await get_collection(submission_collection(form_type)).update_one(
+        key,
+        {
+            "$set": set_fields,
+            "$setOnInsert": {
+                **key,
+                "kind": KIND_YESNO_CHECKLIST,
+                "created_at": now,
+                "created_by": who,
+                "created_by_name": who_name,
+            },
+        },
+        upsert=True,
+    )
+
+    # H3 — MD summary mail (feedback has no per-employee scorecards). Gated → no-op while off.
+    try:
+        from app.services.tpms_notify_service import notify_form_submission
+        await notify_form_submission(
+            form_type=form_type, title=definition["title"],
+            company_id=company_id, period=payload.period,
+            respondent_id=md_id, respondent_name=md_name or "",
+            ratings=None,
+        )
+    except Exception as _e:
+        pass
+
+    return {
+        "message": f"{definition['title']}: {len(new_answers)} answer(s) saved",
+        "count": len(new_answers),
+        "skipped_already_saved": skipped_existing,
+        "total_saved": len(already) + len(new_answers),
+        "total_questions": len(qmap),
+    }
+
+
+@router.get("/{form_type}/submissions")
+async def list_submissions(
+    form_type: str,
+    company_id: Optional[str] = None,
+    period: Optional[str] = None,
+    hod_id: Optional[str] = None,
+    limit: int = Query(200, ge=1, le=1000),
+    current_user: dict = Depends(get_current_user),
+):
+    _require_form_type(form_type)
+    if not _can_read(current_user):
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    query: dict = {"form_type": form_type}
+    if _is_client(current_user):
+        # A client may only list their own submissions in their own company.
+        query["company_id"] = current_user.get("company_id") or ""
+        if form_kind(form_type) == KIND_YESNO_CHECKLIST:
+            query["md_id"] = _self_id(current_user)
+        else:
+            query["hod_id"] = _self_id(current_user)
+        if period:
+            query["period"] = period
+    else:
+        if company_id:
+            query["company_id"] = company_id
+        if period:
+            query["period"] = period
+        if hod_id:
+            query["hod_id"] = hod_id
+
+    cursor = get_collection(submission_collection(form_type)).find(query).sort("created_at", -1)
+    docs = await cursor.to_list(length=limit)
+    return {"submissions": [_serialize(d) for d in docs]}
+
+
+@router.get("/submissions/{submission_id}")
+async def get_submission(submission_id: str, current_user: dict = Depends(get_current_user)):
+    if not _can_read(current_user):
+        raise HTTPException(status_code=403, detail="Not authorized")
+    try:
+        oid = ObjectId(submission_id)
+    except (InvalidId, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid submission id")
+
+    # Submissions live in one collection per form — search each until found.
+    doc = None
+    for coll_name in FORM_COLLECTIONS.values():
+        doc = await get_collection(coll_name).find_one({"_id": oid})
+        if doc:
+            break
+    if not doc:
+        raise HTTPException(status_code=404, detail="Submission not found")
+
+    # A client may only fetch their own submission.
+    if _is_client(current_user):
+        if doc.get("company_id") != (current_user.get("company_id") or ""):
+            raise HTTPException(status_code=403, detail="Not authorized")
+        respondent = doc.get("md_id") if doc.get("kind") == KIND_YESNO_CHECKLIST else doc.get("hod_id")
+        if respondent != _self_id(current_user):
+            raise HTTPException(status_code=403, detail="Not authorized")
+
+    return {"submission": _serialize(doc)}
+
+
+# ─────────────────────────────────────────────────────────────
+# Client dashboard — Success-Measure scorecard for one company + month.
+#
+# Data sources (all scoped to the client's own company):
+#   • Scheduled activities → calendar events carrying an `activity` label (created by
+#     the Schedule Calendar modal). These drive Planned / Completed / Actual Impl %.
+#   • TPMS form submissions → the Accountability/Ownership/Culture/Implementation tables
+#     drive Actual Score % for the three form-backed activities.
+# Success Measure math is deliberately simple and transparent (documented inline) — it
+# aggregates only the data that exists; everything else renders as "no data" (— / 0%).
+# ─────────────────────────────────────────────────────────────
+_CAL_COLLECTIONS = ["STAFF_CALENDER", "LEARNER_CALENDER", "calendar_events"]
+
+
+def _month_parts(month: str):
+    """Accept 'YYYY-MM' and return (year, month_num, [period tokens forms may use]).
+    Delegates to the shared TPMS period helpers so there is exactly one definition of
+    how a period is spelled across the module."""
+    try:
+        year, month_num = period_parts(month)
+        return year, month_num, period_tokens(month)
+    except (ValueError, IndexError):
+        raise HTTPException(status_code=400, detail="month must be 'YYYY-MM'")
+
+
+def _parse_dt(s):
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(str(s).replace("Z", "+00:00")).replace(tzinfo=None)
+    except Exception:
+        return None
+
+
+async def _activity_score_pct(activity: str, company_id: str, tokens: list):
+    """Delegates to the Success-Measure engine so the whole module reports ONE number.
+
+    This previously averaged each source form's percentage separately. The Apps Script
+    pools sum/count across all of an activity's forms and divides once — which differs
+    whenever the forms carry different numbers of ratings (partial submission makes that
+    the norm). See tpms_score_service.activity_score_pct.
+    """
+    from app.services.tpms_score_service import activity_score_pct
+    return await activity_score_pct(activity, company_id, tokens=tokens)
+
+
+def _status_for(achievement, has_data):
+    """Spec §7 band — ≥100 Met · 50–99 Partial · <50 Not Met. Delegates to the single
+    definition in app.models.tpms so this page can't drift from the TPMS dashboards."""
+    from app.models.tpms import achievement_status
+    return achievement_status(achievement, has_data)
+
+
+@router.get("/dashboard")
+async def client_dashboard(
+    month: str = Query(..., description="Month to report on, 'YYYY-MM'"),
+    company_id: Optional[str] = Query(None, description="Staff only — target company"),
+    current_user: dict = Depends(get_current_user),
+):
+    if not _can_read(current_user):
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    # Client-side users are locked to their own company; staff may pass company_id.
+    if _is_client(current_user):
+        company_id = current_user.get("company_id") or ""
+    if not company_id:
+        raise HTTPException(status_code=400, detail="company_id is required")
+
+    year, month_num, period_tokens = _month_parts(month)
+
+    # Company name.
+    company = None
+    try:
+        company = await get_collection("companies").find_one({"_id": ObjectId(company_id)})
+    except Exception:
+        company = None
+    company_name = (company or {}).get("name") or company_id
+    om_name = (company or {}).get("owner")
+
+    # Scheduled activities for this company + month (events carrying an `activity`).
+    # Scoped to TPMS activities by the `kind` discriminator, as every other TPMS aggregation
+    # is (see _load_events). Without it any calendar event that merely carries an `activity`
+    # field counts toward this company's Planned total, inflating it with non-TPMS work.
+    scheduled = []
+    for coll in _CAL_COLLECTIONS:
+        docs = await get_collection(coll).find(
+            {"company_id": company_id, "kind": TPMS_EVENT_KIND,
+             "activity": {"$nin": [None, ""]}}
+        ).to_list(3000)
+        scheduled.extend(docs)
+    month_events = []
+    for e in scheduled:
+        dt = _parse_dt(e.get("start"))
+        if dt and dt.year == year and dt.month == month_num:
+            month_events.append(e)
+
+    by_activity: dict = {}
+    for e in month_events:
+        by_activity.setdefault(e.get("activity"), []).append(e)
+
+    # The activity list this page reports on. Two sources, unioned:
+    #   1. the LIVE catalogue — admins add activities at runtime (H4), so a hardcoded list
+    #      goes stale the moment one is created;
+    #   2. every activity name actually present in this month's events.
+    # Without (2), an occurrence whose activity is not in the catalogue still counts toward
+    # Planned but has no scorecard row — the "Planned says 12, the table shows 11" mismatch.
+    # ACTIVITY_CATALOGUE remains the fallback if the collection is empty or unreachable.
+    try:
+        live = await get_collection("tpms_activities").find(
+            {"active": {"$ne": False}}).to_list(200)
+        activity_names = [a["name"] for a in live if a.get("name")]
+    except Exception:
+        activity_names = []
+    if not activity_names:
+        activity_names = list(ACTIVITY_CATALOGUE)
+    for name in by_activity:
+        if name and name not in activity_names:
+            activity_names.append(name)
+
+    # Build the scorecard over the full activity catalogue.
+    scorecard = []
+    met = partial = not_met = 0
+    score_values = []
+    for activity in activity_names:
+        evs = by_activity.get(activity, [])
+        planned = len(evs)
+        completed = len([e for e in evs if e.get("status") == "completed"])
+        actual_impl = round(completed / planned * 100) if planned else None
+        actual_score = await _activity_score_pct(activity, company_id, period_tokens)
+
+        vals = [v for v in (actual_impl, actual_score) if v is not None]
+        has_data = bool(vals)
+        achievement = round(sum(vals) / len(vals)) if vals else 0
+        status = _status_for(achievement, has_data)
+
+        if status == "Met":
+            met += 1
+        elif status == "Partial":
+            partial += 1
+        else:
+            not_met += 1
+        if actual_score is not None:
+            score_values.append(actual_score)
+
+        scorecard.append({
+            "activity": activity,
+            "impl_target_pct": 100,
+            "actual_impl_pct": actual_impl,
+            "score_target_pct": 100,
+            "actual_score_pct": actual_score,
+            "achievement_pct": achievement,
+            "progress_pct": achievement,
+            "status": status,
+            "planned": planned,
+            "completed": completed,
+        })
+
+    # Month-level summary cards (across all scheduled activities).
+    total_planned = len(month_events)
+    total_completed = len([e for e in month_events if e.get("status") == "completed"])
+    completion_pct = round(total_completed / total_planned * 100) if total_planned else 0
+
+    delays = []
+    for e in month_events:
+        if e.get("status") != "completed":
+            continue
+        start_dt = _parse_dt(e.get("start"))
+        done_dt = _parse_dt(e.get("completed_at") or e.get("updated_at"))
+        if start_dt and done_dt:
+            delays.append(max(0, (done_dt.date() - start_dt.date()).days))
+    avg_delay = round(sum(delays) / len(delays), 1) if delays else 0
+
+    overall_status = "On Track" if completion_pct >= 80 else ("At Risk" if completion_pct >= 50 else "Critical")
+    avg_score = round(sum(score_values) / len(score_values)) if score_values else 0
+
+    # M4 — client × activity status grid for the Client Dashboard. One row (this company);
+    # a cell per scheduled activity with done/total and a representative status.
+    grid_cells: dict = {}
+    for activity in activity_names:
+        evs = by_activity.get(activity, [])
+        if not evs:
+            continue
+        planned = len(evs)
+        completed = len([e for e in evs if e.get("status") == "completed"])
+        statuses = [str(e.get("tpms_status") or e.get("status") or "").lower() for e in evs]
+        if any("laps" in s for s in statuses):
+            st = "Lapsed"
+        elif planned and completed == planned:
+            st = "Completed"
+        elif any("reschedul" in s for s in statuses):
+            st = "Rescheduled"
+        else:
+            st = "Scheduled"
+        grid_cells[activity] = {"done": completed, "total": planned, "status": st}
+    activities_out = [{"full": a, "short": a} for a in activity_names]
+    clients_grid_out = [{"company": company_name, "company_id": company_id,
+                         "done": total_completed, "cells": grid_cells}]
+
+    # Open follow-ups for this company. Deliberately NOT filtered to `month`: an action item
+    # is outstanding work, and hiding one raised in an earlier month is exactly the wrong
+    # behaviour for a "what still needs closing" panel. The rows carry their own target date.
+    from app.services.tpms_dashboard_service import list_open_actions
+    pending_actions = await list_open_actions([company_id])
+
+    return {
+        "activities": activities_out,
+        "clients_grid": clients_grid_out,
+        "pending_actions": pending_actions,
+        "company": {
+            "id": company_id,
+            "name": company_name,
+            "om_name": om_name,
+            "completion_pct": completion_pct,
+            "status": overall_status,
+        },
+        "month": month,
+        "cards": {
+            "planned": total_planned,
+            "completed": total_completed,
+            "completion_pct": completion_pct,
+            "avg_delay_days": avg_delay,
+        },
+        "scorecard": scorecard,
+        "stats": {
+            "met": met,
+            "partial": partial,
+            "not_met": not_met,
+            "total_activities": len(activity_names),
+            "avg_score_pct": avg_score,
+            "target_score_pct": 100,
+        },
+    }

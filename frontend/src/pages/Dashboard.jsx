@@ -5,7 +5,7 @@ import api from '../services/api';
 import { 
   Users, Building2, Calendar, Target, 
   TrendingUp, Activity, Plus, Clock, 
-  ChevronRight, ArrowUpRight, Zap 
+  ChevronRight, ArrowUpRight, Zap
 } from 'lucide-react';
 import { 
   AreaChart, Area, XAxis, YAxis, CartesianGrid, 
@@ -88,9 +88,6 @@ const Dashboard = () => {
         <div>
           <h1 className="text-3xl font-black text-[var(--text-main)] tracking-tight">Executive Overview</h1>
           <p className="text-[14px] text-[var(--text-muted)] font-bold">Welcome back, {user?.full_name}. Here is your organizational pulse.</p>
-        </div>
-        <div className="flex items-center gap-3">
-            {/* Action buttons removed as per request */}
         </div>
       </div>
 

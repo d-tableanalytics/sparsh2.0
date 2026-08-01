@@ -28,8 +28,8 @@ router = APIRouter(prefix="/calendar/events", tags=["Calendar"])
 
 from app.utils.calendar_utils import (
 
-    CALENDAR_COLLECTIONS, find_user_by_id, 
-    get_target_collection_name, find_event_across_collections
+    CALENDAR_COLLECTIONS, find_user_by_id,
+    get_target_collection_name, find_event_across_collections, exclude_tpms
 )
 
 async def detect_conflicts(event_dict: dict, event_id: str = None, sessions_only: bool = False):
@@ -512,9 +512,7 @@ async def create_event(event: CalendarEventCreate, background_tasks: BackgroundT
         else:
             background_tasks.add_task(notify_task_event, "created", event_dict, current_user)
         background_tasks.add_task(sync_task_meta, event_dict.get("category"), event_dict.get("tags"), str(current_user["_id"]))
-    elif event_dict.get("type") != TODO_TYPE:
-        # Todos never send email/WhatsApp on create — a reminder the user configured is the
-        # ONLY notification a todo can produce (fired by the reminder scheduler at its time).
+    else:
         background_tasks.add_task(notify_users_instant, event_dict, "created", creator_name)
     await log_activity(current_user, "Create Task" if is_task else "Create Event", col_name, f"{'Task' if is_task else 'Event'} created: {event_dict['title']}",
                        meta={"task_id": str(result.inserted_id), "group_id": event_dict.get("group_id")} if is_task else None)
@@ -646,8 +644,7 @@ async def update_event(event_id: str, updates: dict, background_tasks: Backgroun
         if already_in_loop:
             background_tasks.add_task(notify_task_event, "updated", final_doc, current_user,
                                       None, list(already_in_loop))
-    elif final_doc.get("type") != TODO_TYPE:
-        # Todos never email on update (including completing one from the edit form).
+    else:
         background_tasks.add_task(notify_users_instant, final_doc, "updated", creator_name)
 
     # ─── Recurring Series Timeline Sync ───
@@ -919,6 +916,7 @@ async def add_resource_from_media(event_id: str, background_tasks: BackgroundTas
 async def delete_event(event_id: str, background_tasks: BackgroundTasks, current_user: dict = Depends(get_current_user)):
     existing, col_name = await find_event_across_collections(event_id)
     if not existing: raise HTTPException(status_code=404, detail="Event not found")
+
     is_admin = current_user.get("role") == "superadmin"
     has_delete_perm = current_user.get("permissions", {}).get("calendar", {}).get("delete")
     is_creator = existing.get("user_id") == str(current_user["_id"])
@@ -937,8 +935,7 @@ async def delete_event(event_id: str, background_tasks: BackgroundTasks, current
     creator_name = current_user.get("full_name") or current_user.get("first_name", "System Admin")
     if existing.get("type") == "task":
         background_tasks.add_task(notify_task_event, "deleted", existing, current_user)
-    elif existing.get("type") != TODO_TYPE:
-        # Todos never email on delete.
+    else:
         background_tasks.add_task(notify_users_instant, existing, "deleted", creator_name)
     return {"message": "Deleted successfully"}
 
@@ -1054,8 +1051,9 @@ async def get_all_events(target_user_id: Optional[str] = None, view_mode: str = 
                         {"target_staff_id": {"$in": [current_uid]}}
                     ]
                 }
-            query = {"$and": [query, not_others_todo]} if query else not_others_todo
-            db_docs = await custom_col.find(query).to_list(1000)
+            # TPMS activities live in these collections too — they belong to the TPMS
+            # Calendar, not the Session Calendar. See calendar_utils.exclude_tpms.
+            db_docs = await custom_col.find(exclude_tpms(query)).to_list(1000)
         else:
             # Privacy Logic: 
             # Visible if Creator OR explicitly involved in any capacity (Attendee, Coach, Target)
@@ -1068,7 +1066,8 @@ async def get_all_events(target_user_id: Optional[str] = None, view_mode: str = 
                 {"coach_ids": {"$in": [effective_user_id]}},
                 {"target_staff_id": {"$in": [effective_user_id]}}
             ]
-            db_docs = await custom_col.find({"$and": [{"$or": involvement_clauses}, not_others_todo]}).to_list(1000)
+            db_docs = await custom_col.find(
+                exclude_tpms({"$or": involvement_clauses})).to_list(1000)
         
         for c in db_docs:
             events.append({
@@ -1252,7 +1251,7 @@ Structure your response clearly. Use markdown.
 async def complete_event(event_id: str, background_tasks: BackgroundTasks, current_user: dict = Depends(get_current_user)):
     event, col_name = await find_event_across_collections(event_id)
     if not event: raise HTTPException(status_code=404, detail="Event not found")
-    
+
     is_admin = current_user.get("role") == "superadmin"
     has_update_perm = current_user.get("permissions", {}).get("calendar", {}).get("update")
     is_creator = event.get("user_id") == str(current_user["_id"])

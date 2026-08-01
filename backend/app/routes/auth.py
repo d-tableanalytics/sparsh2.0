@@ -169,7 +169,17 @@ async def change_password(data: PasswordChange, current_user: dict = Depends(get
     # Verify current password
     if not verify_password(data.current_password, current_user["password"]):
         raise HTTPException(status_code=400, detail="Incorrect current password")
-    
+
+    # Spec §15 — the new password must be at least 6 characters and must not repeat the
+    # current one. Compared against the stored hash, so an identical password is caught
+    # even though we never hold the old plaintext.
+    if len(data.new_password or "") < 6:
+        raise HTTPException(status_code=400,
+                            detail="New password must be at least 6 characters long.")
+    if verify_password(data.new_password, current_user["password"]):
+        raise HTTPException(status_code=400,
+                            detail="New password must be different from your current password.")
+
     # Hash and update
     hashed_password = get_password_hash(data.new_password)
     col_name = "staff" if current_user["role"] in ["superadmin", "admin", "coach", "staff"] else "learners"
