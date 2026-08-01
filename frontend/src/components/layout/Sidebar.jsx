@@ -5,7 +5,7 @@ import {
   LayoutDashboard, Users, Briefcase, CheckSquare,
   Settings, Building2,
   PieChart, MessageSquare, LogOut, Layers, Copy, Calendar, Sparkles, PlayCircle, Target, BarChart3, Library, X,
-  Forward, Bell, Trash2, ChevronDown, Activity, CalendarDays, Database, ExternalLink, LayoutGrid,
+  Forward, Bell, Trash2, ChevronDown, Activity, CalendarDays, Database, LayoutGrid,
   Gauge, GitBranch, AlertTriangle, UserCog, ListChecks, ScrollText, UserCircle, ClipboardList, ClipboardCheck
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
@@ -162,17 +162,6 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen }) => {
   });
 
   const sidebarWidth = isMobile ? 240 : (isCollapsed ? 72 : 240);
-
-  // External Apps Script automation launcher (staff-side only).
-  const AUTOMATION_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbx5lehRzFPHb4xxgp4QffcWIil0NTq-0BQtuyP91zQ/dev';
-  const canUseAutomation = ['superadmin', 'admin', 'coach', 'staff'].includes(user?.role);
-  const openAutomation = () => {
-    const email = user?.email || user?.sub || '';
-    const pwd = localStorage.getItem('sparsh_pwd') || '';
-    const url = `${AUTOMATION_SCRIPT_URL}?userEmail=${encodeURIComponent(email)}&password=${encodeURIComponent(pwd)}`;
-    window.open(url, '_blank', 'noopener,noreferrer');
-    if (isMobile) setIsMobileOpen(false);
-  };
 
   // Auto-expand whichever dropdown group owns the current route.
   useEffect(() => {
@@ -383,35 +372,6 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen }) => {
             </NavLink>
           );
         })}
-
-        {/* External automation launcher — opens Apps Script with userEmail + password */}
-        {canUseAutomation && (
-          <button
-            type="button"
-            onClick={openAutomation}
-            className={`
-              group w-full flex items-center gap-3 p-2.5 rounded-lg transition-colors relative
-              text-[var(--text-muted)] hover:bg-[var(--input-bg)] hover:text-[var(--text-main)]
-              ${(isCollapsed && !isMobile) ? 'justify-center' : ''}
-            `}
-          >
-            <ExternalLink size={18} className="transition-transform group-hover:scale-105" />
-            {(!isCollapsed || isMobile) && (
-              <motion.span
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                className="text-[13px] tracking-tight font-medium"
-              >
-                Automation
-              </motion.span>
-            )}
-            {(isCollapsed && !isMobile) && (
-              <div className="absolute left-full ml-4 px-2.5 py-1.5 bg-[var(--bg-card)] border border-[var(--border)] text-[var(--text-main)] text-[10px] font-bold uppercase tracking-widest rounded-lg opacity-0 group-hover:opacity-100 pointer-events-none transition-all duration-300 z-50 shadow-lg">
-                Automation
-              </div>
-            )}
-          </button>
-        )}
       </nav>
 
       {/* Footer */}

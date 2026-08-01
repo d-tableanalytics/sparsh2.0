@@ -76,8 +76,11 @@ async def read_users_me(current_user: dict = Depends(get_current_active_user)):
         try:
             company = await get_collection("companies").find_one({"_id": ObjectId(company_id)})
             current_user["orm_enabled"] = bool(company.get("orm_enabled", True)) if company else True
+            # TPMS is opt-in: absent flag means OFF, so an un-migrated company stays dark.
+            current_user["tpms_enabled"] = bool(company.get("tpms_enabled", False)) if company else False
         except Exception:
             current_user["orm_enabled"] = True
+            current_user["tpms_enabled"] = False
     return current_user
 
 # ─── Helper to find user in any collection ───

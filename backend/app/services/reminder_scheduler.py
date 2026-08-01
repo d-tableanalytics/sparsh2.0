@@ -14,9 +14,26 @@ from app.models.tpms import TPMS_EVENT_KIND, TPMS_NOTIFICATIONS_ENABLED
 # is marked sent and skipped — see the note at the send site in check_and_trigger_reminders.
 TPMS_REMINDER_MAX_AGE_HOURS = 48
 
+# ── Spec §16 trigger schedule ─────────────────────────────────────────────────
+# The source installed one time-driven trigger per job. There is a single loop here, so the
+# clock times are enforced by gating on the hour and remembering the last run.
+#
+# Gates use `hour >= N`, not `== N`: if the process is restarted or busy at the scheduled
+# minute, the job still runs on the next tick that day rather than being skipped entirely.
+# Each job is remembered separately, so a failure in one never consumes another's slot.
+#
+# Times are UTC — the source's triggers were in the sheet's local zone. Set these to the
+# UTC equivalents of your 06:00/07:00 if the business cares about local time of day.
+TPMS_AUTOFEED_HOUR = 6      # syncAutoFeed            — daily @ 06:00
+TPMS_SCORE_SYNC_HOUR = 6    # syncSuccessMeasures     — daily @ 06:00
+TPMS_LADDER_HOUR = 7        # runEscalationLadder     — daily @ 07:00
+TPMS_SEED_HOUR = 6          # seedSuccessMeasures     — monthly, 1st @ 06:00
+
+
 async def start_reminder_scheduler():
     logger.info("Starting reminder scheduler background worker...")
     last_recurring_day = None
+    tpms_last_run: dict = {}
     while True:
         try:
             await check_and_trigger_reminders()
@@ -32,43 +49,61 @@ async def start_reminder_scheduler():
                 except Exception as e:
                     logger.error(f"Error generating recurring tasks: {e}")
 
-                # TPMS daily sweeps. Each is isolated so a TPMS failure can never stop
-                # the reminder loop the rest of the ERP depends on.
-                await run_tpms_daily_jobs()
+            # TPMS scheduled sweeps, each at its own hour. Isolated so a TPMS failure can
+            # never stop the reminder loop the rest of the ERP depends on.
+            await run_tpms_scheduled_jobs(tpms_last_run)
         except Exception as e:
             logger.error(f"Error in reminder scheduler: {e}")
-        await asyncio.sleep(60) # Check every minute
+        await asyncio.sleep(60)  # tick every minute; each job gates itself on the clock
 
-async def run_tpms_daily_jobs():
-    """TPMS's once-a-day sweeps, ported from the Apps Script's time-driven triggers.
 
-    Order mirrors the source's trigger times: the auto-feed ran at ~06:00 and the
-    escalation ladder at ~07:00, so the feed sees the previous day's statuses before
-    the ladder can lapse anything.
+async def _run_job(state: dict, key, stamp, label: str, fn):
+    """Run `fn` once per `stamp` (a date, or a (year, month) tuple for monthly jobs).
 
-    Each job is wrapped individually — a TPMS failure must never break the reminder
-    loop that Tasks and the Calendar depend on.
+    The stamp is recorded only on success, so a failed run is retried on the next tick
+    instead of being silently lost until tomorrow.
     """
+    if state.get(key) == stamp:
+        return
     try:
+        result = await fn()
+        state[key] = stamp
+        logger.info(f"TPMS {label}: {result}")
+    except Exception as e:
+        logger.error(f"TPMS {label} failed: {e}")
+
+
+async def run_tpms_scheduled_jobs(state: dict):
+    """Spec §16 — the four time-driven TPMS jobs, at their specified times.
+
+    Order matters at 06:00: the auto-feed runs before the score sync so the sync sees the
+    statuses the feed has just settled. The ladder deliberately runs an hour later, as in
+    the source, so it never lapses an activity the feed has not yet accounted for.
+    """
+    now = datetime.utcnow()
+    today = now.date()
+
+    # ── Monthly, 1st @ 06:00 — seed the new month's success-measure rows (insert-only) ──
+    if today.day == 1 and now.hour >= TPMS_SEED_HOUR:
+        from app.services.tpms_score_service import seed_success_measures
+        period = f"{today.year:04d}-{today.month:02d}"
+        await _run_job(state, "seed", (today.year, today.month), "success-measure seed",
+                       lambda: seed_success_measures(period))
+
+    # ── Daily @ 06:00 — auto-feed, then the score sync ──
+    if now.hour >= TPMS_AUTOFEED_HOUR:
         from app.services.tpms_escalation_service import sync_auto_feed
-        result = await sync_auto_feed()
-        logger.info(f"TPMS auto-feed: {result}")
-    except Exception as e:
-        logger.error(f"TPMS auto-feed failed: {e}")
+        await _run_job(state, "autofeed", today, "auto-feed", sync_auto_feed)
 
-    try:
+    if now.hour >= TPMS_SCORE_SYNC_HOUR:
+        from app.services.tpms_score_service import sync_success_measures
+        await _run_job(state, "score_sync", today, "success-measure sync",
+                       lambda: sync_success_measures())
+
+    # ── Daily @ 07:00 — the escalation ladder ──
+    if now.hour >= TPMS_LADDER_HOUR:
         from app.services.tpms_escalation_service import run_escalation_ladder
-        result = await run_escalation_ladder()
-        logger.info(f"TPMS escalation ladder: {result}")
-    except Exception as e:
-        logger.error(f"TPMS escalation ladder failed: {e}")
-
-    try:
-        from app.services.tpms_score_service import run_daily as tpms_scores
-        result = await tpms_scores()
-        logger.info(f"TPMS success measures: {result}")
-    except Exception as e:
-        logger.error(f"TPMS success-measure sync failed: {e}")
+        await _run_job(state, "ladder", today, "escalation ladder", run_escalation_ladder)
 
 
 async def check_and_trigger_reminders():

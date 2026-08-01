@@ -2,11 +2,15 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   RefreshCw, Mail, Plus, Pencil, X, ShieldAlert, CheckCircle2, AlertTriangle, Filter,
+  MessageCircle,
 } from 'lucide-react';
 import {
   DashboardHero, HeroButton, HeaderSelect, Section, Th, Td, TableShell,
 } from '../../common/dashboardKit';
-import { getMailTemplates, upsertMailTemplate, getActivities } from '../../../../services/tpmsApi';
+import {
+  getMailTemplates, upsertMailTemplate, getActivities,
+  getWhatsappTemplates, setTemplateStatus,
+} from '../../../../services/tpmsApi';
 import { useAuth } from '../../../../context/AuthContext';
 import { isTpmsAdmin } from '../../access';
 
@@ -57,6 +61,95 @@ const Pill = ({ label, tone = 'muted' }) => {
 };
 
 const SIDE_TONE = { staff: 'indigo', company: 'orange' };
+
+const CHANNELS = [
+  { id: 'mail', label: 'Email', icon: Mail },
+  { id: 'whatsapp', label: 'WhatsApp', icon: MessageCircle },
+];
+
+/**
+ * Active/Inactive switch for one template row — the same control the ERP module toggles use.
+ * Purely presentational: the parent owns the confirmation step, so a stray click can never
+ * change a notification's status on its own.
+ */
+const StatusToggle = ({ active, disabled, onRequest }) => (
+  <button
+    type="button"
+    role="switch"
+    aria-checked={active}
+    aria-label={`Notification ${active ? 'active' : 'inactive'}`}
+    disabled={disabled}
+    onClick={onRequest}
+    title={disabled ? 'Only Admin / Super Admin can change notification status'
+      : active ? 'Deactivate this notification' : 'Activate this notification'}
+    className="inline-flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+  >
+    <span className="relative inline-flex w-9 h-5 rounded-full transition-colors shrink-0"
+      style={{ background: active ? 'var(--accent-green)' : 'var(--border)' }}>
+      <span className="absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-all"
+        style={{ left: active ? '18px' : '2px' }} />
+    </span>
+    <span className="text-[10px] font-bold uppercase tracking-widest w-12 text-left"
+      style={{ color: active ? 'var(--accent-green)' : 'var(--text-muted)' }}>
+      {active ? 'Active' : 'Inactive'}
+    </span>
+  </button>
+);
+
+/** Confirmation step required before any status change (both directions). */
+const ConfirmStatusModal = ({ target, channelLabel, busy, onCancel, onConfirm }) => {
+  const turningOff = target.active !== false;
+  return (
+    <MotionDiv className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={busy ? undefined : onCancel} />
+      <MotionDiv
+        role="dialog" aria-modal="true"
+        initial={{ opacity: 0, y: 14, scale: 0.98 }}
+        animate={{ opacity: 1, y: 0, scale: 1 }}
+        exit={{ opacity: 0, y: 14, scale: 0.98 }}
+        transition={{ duration: 0.22, ease: [0.4, 0, 0.2, 1] }}
+        className="relative w-full max-w-md rounded-2xl border border-[var(--border)] bg-[var(--bg-card)] shadow-xl overflow-hidden">
+        <div className="flex items-center gap-2.5 px-5 py-4 border-b border-[var(--border)]">
+          <span className="w-8 h-8 rounded-lg flex items-center justify-center"
+            style={turningOff
+              ? { background: 'var(--accent-orange-bg)', color: 'var(--accent-orange)' }
+              : { background: 'var(--accent-green-bg)', color: 'var(--accent-green)' }}>
+            {turningOff ? <AlertTriangle size={16} /> : <CheckCircle2 size={16} />}
+          </span>
+          <h3 className="text-[15px] font-extrabold tracking-tight">
+            {turningOff ? 'Deactivate notification?' : 'Activate notification?'}
+          </h3>
+        </div>
+        <div className="px-5 py-4 space-y-3">
+          <div className="rounded-lg bg-[var(--input-bg)] border border-[var(--border)] px-3.5 py-2.5 text-[12.5px]">
+            <div className="font-bold">{target.activity || '*'}</div>
+            <div className="text-[var(--text-muted)] mt-0.5">
+              {channelLabel} · {target.side || '—'} · {target.event || '—'}
+            </div>
+          </div>
+          <p className="text-[13px] text-[var(--text-main)] leading-relaxed">
+            {turningOff
+              ? `This ${channelLabel} notification will stop being sent. Everything else keeps working exactly as now — activities still schedule, complete and escalate, scores still calculate. Only the message is suppressed.`
+              : `This ${channelLabel} notification will start being sent again to its usual recipients.`}
+          </p>
+        </div>
+        <div className="px-5 py-3 border-t border-[var(--border)] flex items-center justify-end gap-2">
+          <button type="button" onClick={onCancel} disabled={busy}
+            className="px-4 py-2 rounded-lg text-[13px] font-bold text-[var(--text-muted)] hover:bg-[var(--input-bg)] transition-colors disabled:opacity-50">
+            Cancel
+          </button>
+          <button type="button" onClick={onConfirm} disabled={busy}
+            className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-white text-[13px] font-bold shadow-sm hover:opacity-90 transition-opacity disabled:opacity-60"
+            style={{ background: turningOff ? 'var(--accent-orange)' : 'var(--accent-green)' }}>
+            {busy ? <RefreshCw size={14} className="animate-spin" /> : <CheckCircle2 size={14} />}
+            {busy ? 'Saving…' : turningOff ? 'Deactivate' : 'Activate'}
+          </button>
+        </div>
+      </MotionDiv>
+    </MotionDiv>
+  );
+};
 
 /* Shared field styles for the modal. */
 const inputCls =
@@ -215,20 +308,45 @@ const MailTemplateAdmin = () => {
   const [error, setError] = useState('');
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState(null);
+  // Which channel's templates are listed. Email is authored here; WhatsApp is listed so its
+  // Active switch has a home (authoring against Meta-approved names stays out of scope).
+  const [channel, setChannel] = useState('mail');
+  // The row awaiting confirmation before its status flips. null = no dialog open.
+  const [confirmTarget, setConfirmTarget] = useState(null);
+  const [statusSaving, setStatusSaving] = useState(false);
+
+  const channelLabel = channel === 'whatsapp' ? 'WhatsApp' : 'Email';
 
   const load = useCallback(async () => {
     setLoading(true);
     setError('');
     try {
-      const res = await getMailTemplates(filter || undefined);
+      const fetcher = channel === 'whatsapp' ? getWhatsappTemplates : getMailTemplates;
+      const res = await fetcher(filter || undefined);
       const list = res?.data?.templates;
       setTemplates(Array.isArray(list) ? list : []);
     } catch (e) {
-      setError(errMsg(e, 'Failed to load mail templates.'));
+      setError(errMsg(e, `Failed to load ${channel === 'whatsapp' ? 'WhatsApp' : 'mail'} templates.`));
     } finally {
       setLoading(false);
     }
-  }, [filter]);
+  }, [filter, channel]);
+
+  /** Apply the confirmed status change, then refresh so the row reflects the stored value. */
+  const applyStatusChange = useCallback(async () => {
+    if (!confirmTarget) return;
+    setStatusSaving(true);
+    try {
+      await setTemplateStatus(channel, confirmTarget._id, confirmTarget.active === false);
+      setConfirmTarget(null);
+      await load();
+    } catch (e) {
+      setError(errMsg(e, 'Failed to update notification status.'));
+      setConfirmTarget(null);
+    } finally {
+      setStatusSaving(false);
+    }
+  }, [confirmTarget, channel, load]);
 
   const loadActivities = useCallback(async () => {
     try {
@@ -283,9 +401,20 @@ const MailTemplateAdmin = () => {
 
   return (
     <div className="space-y-5">
-      <DashboardHero icon={Mail} title="Mail Templates" subtitle="Transactional mail templates keyed by activity, side & event (M12)">
+      <DashboardHero icon={Mail} title="Notification Templates"
+        subtitle="Email & WhatsApp templates keyed by activity, side & event — switch any notification off without affecting the workflow behind it">
+        <div className="flex items-center gap-1 bg-white/20 p-1 rounded-lg">
+          {CHANNELS.map((c) => (
+            <button key={c.id} onClick={() => setChannel(c.id)} type="button"
+              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[12px] font-bold transition-all ${
+                channel === c.id ? 'bg-white text-[var(--accent-indigo)] shadow-sm' : 'text-white/80 hover:text-white'}`}>
+              <c.icon size={13} /> {c.label}
+            </button>
+          ))}
+        </div>
         <HeaderSelect value={filter} onChange={setFilter} options={filterOptions} />
-        <HeroButton icon={Plus} onClick={openAdd}>Add Template</HeroButton>
+        {/* Authoring is Email-only; WhatsApp rows are configured against Meta-approved names. */}
+        {channel === 'mail' && <HeroButton icon={Plus} onClick={openAdd}>Add Template</HeroButton>}
         <HeroButton icon={RefreshCw} onClick={load}>Refresh</HeroButton>
       </DashboardHero>
 
@@ -331,7 +460,15 @@ const MailTemplateAdmin = () => {
                     <Td align="center"><Pill label={t.side || '—'} tone={SIDE_TONE[t.side] || 'muted'} /></Td>
                     <Td align="center"><Pill label={t.event || '—'} tone="indigo" /></Td>
                     <Td className="font-medium max-w-[360px] truncate" title={t.subject || ''}>{t.subject || '—'}</Td>
-                    <Td align="center"><Pill label={isActive ? 'Active' : 'Inactive'} tone={isActive ? 'green' : 'muted'} /></Td>
+                    <Td align="center">
+                      <div className="flex justify-center">
+                        <StatusToggle
+                          active={isActive}
+                          disabled={!admin}
+                          onRequest={() => setConfirmTarget(t)}
+                        />
+                      </div>
+                    </Td>
                     <Td align="right">
                       <button type="button" onClick={() => openEdit(t)}
                         className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11.5px] font-bold text-[var(--accent-indigo)] bg-[var(--accent-indigo-bg)] border border-[var(--accent-indigo-border)] hover:opacity-90 transition-opacity">
@@ -354,6 +491,20 @@ const MailTemplateAdmin = () => {
             activityOptions={formActivityOptions}
             onClose={() => { setModalOpen(false); setEditing(null); }}
             onSubmit={handleSubmit}
+          />
+        )}
+      </AnimatePresence>
+
+      {/* Status changes always go through a confirmation step, in both directions. */}
+      <AnimatePresence>
+        {confirmTarget && (
+          <ConfirmStatusModal
+            key={confirmTarget._id}
+            target={confirmTarget}
+            channelLabel={channelLabel}
+            busy={statusSaving}
+            onCancel={() => setConfirmTarget(null)}
+            onConfirm={applyStatusChange}
           />
         )}
       </AnimatePresence>

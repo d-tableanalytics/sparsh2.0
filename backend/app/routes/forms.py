@@ -42,9 +42,17 @@ from app.models.forms import (
     QUESTION_COLLECTION,
     definition_items,
 )
-from app.models.tpms import period_parts, period_tokens
+from app.models.tpms import period_parts, period_tokens, TPMS_EVENT_KIND
 
-router = APIRouter(prefix="/forms", tags=["TPMS Forms"])
+async def _tpms_company_gate(current_user: dict = Depends(get_current_user)) -> None:
+    """Router-wide guard — see the twin in routes/tpms.py. The TPMS forms module is part of
+    TPMS, so a company with TPMS switched off cannot open, submit or read any of it."""
+    from app.utils.tpms_access import ensure_tpms_enabled
+    await ensure_tpms_enabled(current_user)
+
+
+router = APIRouter(prefix="/forms", tags=["TPMS Forms"],
+                   dependencies=[Depends(_tpms_company_gate)])
 
 # Each form is stored in its own collection ("table") — see FORM_COLLECTIONS in
 # app.models.forms. Resolve the collection for a form_type via submission_collection().
@@ -845,10 +853,14 @@ async def client_dashboard(
     om_name = (company or {}).get("owner")
 
     # Scheduled activities for this company + month (events carrying an `activity`).
+    # Scoped to TPMS activities by the `kind` discriminator, as every other TPMS aggregation
+    # is (see _load_events). Without it any calendar event that merely carries an `activity`
+    # field counts toward this company's Planned total, inflating it with non-TPMS work.
     scheduled = []
     for coll in _CAL_COLLECTIONS:
         docs = await get_collection(coll).find(
-            {"company_id": company_id, "activity": {"$nin": [None, ""]}}
+            {"company_id": company_id, "kind": TPMS_EVENT_KIND,
+             "activity": {"$nin": [None, ""]}}
         ).to_list(3000)
         scheduled.extend(docs)
     month_events = []
@@ -861,11 +873,30 @@ async def client_dashboard(
     for e in month_events:
         by_activity.setdefault(e.get("activity"), []).append(e)
 
+    # The activity list this page reports on. Two sources, unioned:
+    #   1. the LIVE catalogue — admins add activities at runtime (H4), so a hardcoded list
+    #      goes stale the moment one is created;
+    #   2. every activity name actually present in this month's events.
+    # Without (2), an occurrence whose activity is not in the catalogue still counts toward
+    # Planned but has no scorecard row — the "Planned says 12, the table shows 11" mismatch.
+    # ACTIVITY_CATALOGUE remains the fallback if the collection is empty or unreachable.
+    try:
+        live = await get_collection("tpms_activities").find(
+            {"active": {"$ne": False}}).to_list(200)
+        activity_names = [a["name"] for a in live if a.get("name")]
+    except Exception:
+        activity_names = []
+    if not activity_names:
+        activity_names = list(ACTIVITY_CATALOGUE)
+    for name in by_activity:
+        if name and name not in activity_names:
+            activity_names.append(name)
+
     # Build the scorecard over the full activity catalogue.
     scorecard = []
     met = partial = not_met = 0
     score_values = []
-    for activity in ACTIVITY_CATALOGUE:
+    for activity in activity_names:
         evs = by_activity.get(activity, [])
         planned = len(evs)
         completed = len([e for e in evs if e.get("status") == "completed"])
@@ -920,7 +951,7 @@ async def client_dashboard(
     # M4 — client × activity status grid for the Client Dashboard. One row (this company);
     # a cell per scheduled activity with done/total and a representative status.
     grid_cells: dict = {}
-    for activity in ACTIVITY_CATALOGUE:
+    for activity in activity_names:
         evs = by_activity.get(activity, [])
         if not evs:
             continue
@@ -936,7 +967,7 @@ async def client_dashboard(
         else:
             st = "Scheduled"
         grid_cells[activity] = {"done": completed, "total": planned, "status": st}
-    activities_out = [{"full": a, "short": a} for a in ACTIVITY_CATALOGUE]
+    activities_out = [{"full": a, "short": a} for a in activity_names]
     clients_grid_out = [{"company": company_name, "company_id": company_id,
                          "done": total_completed, "cells": grid_cells}]
 
@@ -969,7 +1000,7 @@ async def client_dashboard(
             "met": met,
             "partial": partial,
             "not_met": not_met,
-            "total_activities": len(ACTIVITY_CATALOGUE),
+            "total_activities": len(activity_names),
             "avg_score_pct": avg_score,
             "target_score_pct": 100,
         },

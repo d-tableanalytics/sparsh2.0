@@ -275,6 +275,15 @@ async def assert_can_schedule(user: dict, company_id: str) -> None:
     if not company_id:
         raise HTTPException(status_code=400, detail="company_id is required")
 
+    # Nothing may be scheduled INTO a company that has TPMS switched off — including by an
+    # admin, who would otherwise create activities the company can never see or act on.
+    from app.utils.tpms_access import is_tpms_enabled
+    if not await is_tpms_enabled(company_id):
+        raise HTTPException(
+            status_code=403,
+            detail="TPMS is not enabled for this company. Enable it on the company page first.",
+        )
+
     if role in STAFF_ROLES:
         return
 

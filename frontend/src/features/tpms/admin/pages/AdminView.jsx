@@ -43,6 +43,13 @@ const SCHEDULED_BY_OPTIONS = [
   { id: 'internal', name: 'OM / SMOps' },
   { id: 'client', name: 'Client' },
 ];
+// Spec §8 — the third delay display state (numeric "Nd") needs closed rows visible.
+const ACTION_STATUS_OPTIONS = [
+  { id: 'open', name: 'Open' },
+  { id: 'closed', name: 'Closed' },
+  { id: '', name: 'All' },
+];
+
 const PENDING_SIDE_OPTIONS = [
   { id: '', name: 'Either side' },
   { id: 'client', name: 'Client side' },
@@ -131,6 +138,7 @@ const AdminView = () => {
   const topDelayed = data?.top_delayed || [];
   const gridActivities = useMemo(() => data?.activities || [], [data]);
   const gridRows = useMemo(() => data?.clients_grid || [], [data]);
+  const [actStatus, setActStatus] = useState('open');
   const openActions = useMemo(() => data?.open_actions || [], [data]);
 
   const activityOpts = useMemo(() => optionsFrom(openActions, 'activity', 'All activities'), [openActions]);
@@ -142,7 +150,9 @@ const AdminView = () => {
     && (!actClient || a.company === actClient)
     && (!actOwner || a.owner === actOwner)
     && (!actSide || a.pending_side === actSide)
-  )), [openActions, actActivity, actClient, actOwner, actSide]);
+    // Spec §8 — Open (default) / Closed / All; closed rows carry the numeric delay split.
+    && (!actStatus || (actStatus === 'closed' ? !!a.closed : !a.closed))
+  )), [openActions, actActivity, actClient, actOwner, actSide, actStatus]);
 
   const omOpts = useMemo(
     () => [{ id: '', name: 'All OMs' }, ...(data?.filters?.oms || [])], [data]);
@@ -372,6 +382,7 @@ const AdminView = () => {
                 { label: 'Client', value: actClient, set: setActClient, opts: actionClientOpts },
                 { label: 'Owner', value: actOwner, set: setActOwner, opts: ownerOpts },
                 { label: 'Pending from', value: actSide, set: setActSide, opts: PENDING_SIDE_OPTIONS },
+                { label: 'Status', value: actStatus, set: setActStatus, opts: ACTION_STATUS_OPTIONS },
               ].map((f) => (
                 <label key={f.label} className="flex flex-col gap-1">
                   <span className="text-[10px] font-bold uppercase tracking-widest text-[var(--text-muted)]">{f.label}</span>

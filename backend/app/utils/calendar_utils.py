@@ -6,6 +6,27 @@ CALENDAR_COLLECTIONS = [
     "LEARNER_CALENDER"
 ]
 
+# TPMS activities are stored in these same collections, tagged `kind: "tpms_activity"`, so
+# they reuse the ERP's recurrence engine and reminder scheduler. They are NOT sessions and
+# must not surface in the Session Calendar or any company session list — TPMS has its own
+# calendar. Merge this into any session-side query.
+#
+# `$ne` also matches documents with no `kind` field at all, which is every ordinary session,
+# so this narrows nothing except TPMS.
+TPMS_EVENT_KIND = "tpms_activity"
+EXCLUDE_TPMS = {"kind": {"$ne": TPMS_EVENT_KIND}}
+
+
+def exclude_tpms(query: dict) -> dict:
+    """Return `query` with TPMS activities filtered out.
+
+    Kept as a helper so session-side callers cannot forget the clause, and so the rule lives
+    in one place if the discriminator ever changes.
+    """
+    merged = dict(query or {})
+    merged["kind"] = {"$ne": TPMS_EVENT_KIND}
+    return merged
+
 async def find_user_by_id(user_id: str):
     """Fallback search across all user-related collections."""
     if not user_id or user_id == "null" or user_id == "undefined": return None

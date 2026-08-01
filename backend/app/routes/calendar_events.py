@@ -25,8 +25,8 @@ router = APIRouter(prefix="/calendar/events", tags=["Calendar"])
 
 from app.utils.calendar_utils import (
 
-    CALENDAR_COLLECTIONS, find_user_by_id, 
-    get_target_collection_name, find_event_across_collections
+    CALENDAR_COLLECTIONS, find_user_by_id,
+    get_target_collection_name, find_event_across_collections, exclude_tpms
 )
 
 async def detect_conflicts(event_dict: dict, event_id: str = None):
@@ -925,7 +925,9 @@ async def get_all_events(target_user_id: Optional[str] = None, view_mode: str = 
                         {"target_staff_id": {"$in": [current_uid]}}
                     ]
                 }
-            db_docs = await custom_col.find(query).to_list(1000)
+            # TPMS activities live in these collections too — they belong to the TPMS
+            # Calendar, not the Session Calendar. See calendar_utils.exclude_tpms.
+            db_docs = await custom_col.find(exclude_tpms(query)).to_list(1000)
         else:
             # Privacy Logic: 
             # Visible if Creator OR explicitly involved in any capacity (Attendee, Coach, Target)
@@ -938,7 +940,8 @@ async def get_all_events(target_user_id: Optional[str] = None, view_mode: str = 
                 {"coach_ids": {"$in": [effective_user_id]}},
                 {"target_staff_id": {"$in": [effective_user_id]}}
             ]
-            db_docs = await custom_col.find({"$or": involvement_clauses}).to_list(1000)
+            db_docs = await custom_col.find(
+                exclude_tpms({"$or": involvement_clauses})).to_list(1000)
         
         for c in db_docs:
             events.append({

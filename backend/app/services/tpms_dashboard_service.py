@@ -106,6 +106,18 @@ def _in_range(d: str, a: str, b: str) -> bool:
 # Shared loaders
 # ─────────────────────────────────────────────────────────────
 async def _load_companies() -> Dict[str, dict]:
+    """company_id → info, for companies with TPMS SWITCHED ON only.
+
+    Every TPMS aggregation starts here, so excluding disabled companies at this single point
+    keeps them out of every dashboard, matrix, report, rollup and filter dropdown without
+    each caller needing to remember. TPMS is opt-in: a company with no flag is excluded.
+    """
+    from app.utils.tpms_access import tpms_enabled_company_ids
+    enabled = await tpms_enabled_company_ids()
+    return {cid: info for cid, info in (await _load_all_companies()).items() if cid in enabled}
+
+
+async def _load_all_companies() -> Dict[str, dict]:
     """company_id → {name, om_key, om_name}. `owner` may hold a staff id or a plain
     name, so resolve tolerantly and fall back to the raw value."""
     staff = {}
@@ -409,8 +421,16 @@ def _delay_label(days) -> str:
     return "On time" if n <= 0 else f"{n}d"
 
 
-async def _open_actions(allowed: Optional[List[str]]) -> List[dict]:
-    query: dict = {"status": {"$ne": "Closed"}}
+async def _open_actions(allowed: Optional[List[str]],
+                        include_closed: bool = True) -> List[dict]:
+    """Action items with the spec §8 two-stage delay display.
+
+    Closed rows are included by default and carry the NUMERIC split ("3d" / "On time") the
+    spec's third display row calls for; open rows carry the "Pending (…side)" labels. The
+    caller filters — every table defaults to Open, with Closed reachable, so the numbers
+    stamped at completion actually have a surface instead of only living in the database.
+    """
+    query: dict = {} if include_closed else {"status": {"$ne": "Closed"}}
     if allowed is not None:
         query["company_id"] = {"$in": allowed}
     rows = await get_collection(COLL_ACTION_ITEMS).find(query).to_list(5000)
@@ -422,11 +442,23 @@ async def _open_actions(allowed: Optional[List[str]]) -> List[dict]:
     for a in rows:
         delay = a.get("delay_days") or 0
         eid = str(a.get("event_id") or "")
-        # Two-stage delay display: while an activity is still open there is no numeric delay
-        # yet — we show which side it is waiting on. Once closed, the numeric split is stamped
-        # onto the row (and closed rows are excluded from this open-items query).
+        status = a.get("status") or "Pending"
+        closed = str(status) == "Closed"
         waiting_staff = eid in learner_done_events
-        pending_label = "Pending (Staff side)" if waiting_staff else "Pending (Client side)"
+
+        if closed:
+            # Spec §8 row 3 — the split computed at completion, rendered as "Nd".
+            learner_delay = _delay_label(a.get("learner_delay_days"))
+            staff_delay = _delay_label(a.get("staff_delay_days"))
+            pending_side = ""
+            follow_up = f"Closed · {_delay_label(a.get('delay_days'))}"
+        else:
+            # Spec §8 rows 1-2 — no numeric split yet; show which side it waits on.
+            pending_label = "Pending (Staff side)" if waiting_staff else "Pending (Client side)"
+            learner_delay = staff_delay = pending_label
+            pending_side = "staff" if waiting_staff else "client"
+            follow_up = f"Overdue {delay}d" if delay else "On track"
+
         out.append({
             "id": str(a["_id"]),
             "company": a.get("company_name") or "",
@@ -435,14 +467,16 @@ async def _open_actions(allowed: Optional[List[str]]) -> List[dict]:
             "owner": a.get("owner_name") or "",
             "employee_id": a.get("owner_id") or "",
             "target": a.get("target_date") or "",
-            "actual": "",
-            "status": a.get("status") or "Pending",
-            "pending_side": "staff" if waiting_staff else "client",
-            "learner_delay": pending_label,
-            "staff_delay": pending_label,
-            "follow_up": f"Overdue {delay}d" if delay else "On track",
+            "actual": str(a.get("closed_at") or "")[:10] if closed else "",
+            "status": status,
+            "closed": closed,
+            "pending_side": pending_side,
+            "learner_delay": learner_delay,
+            "staff_delay": staff_delay,
+            "follow_up": follow_up,
         })
-    out.sort(key=lambda r: r["company"])
+    # Open first, then by company — the actionable rows stay at the top of the table.
+    out.sort(key=lambda r: (r["closed"], r["company"]))
     return out
 
 

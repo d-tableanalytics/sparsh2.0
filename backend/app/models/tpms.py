@@ -137,8 +137,15 @@ REVIEW_MAX_RATING    = 5           # REVIEW_MAX_RATING (code.js:2016)
 # reminder scheduler are all suppressed. TPMS state changes (status, esc_stage, Lapsed,
 # tracker, scores) are UNAFFECTED — only the outbound messages are silenced.
 # This flag is TPMS-only: every other module's email/WhatsApp/reminder behaviour is
-# untouched because those paths never consult it. Flip to True to re-enable TPMS messaging.
-TPMS_NOTIFICATIONS_ENABLED = False
+# untouched because those paths never consult it. Flip to False to silence TPMS messaging.
+#
+# ENABLED. Two things make this safe to leave on:
+#   • Reminders older than TPMS_REMINDER_MAX_AGE_HOURS (reminder_scheduler) are consumed
+#     without sending, so the backlog that accumulated while this was off cannot flood out.
+#   • Each template carries its own Active switch (tpms_mail_templates /
+#     tpms_whatsapp_templates), checked at send time — individual notifications can be
+#     silenced from the admin UI without touching this master switch.
+TPMS_NOTIFICATIONS_ENABLED = True
 
 # Calendar Discipline is a pseudo-activity: its score is the completion rate across all
 # OTHER activities that month, excluding itself and Action Closure Review (code.js:1924).

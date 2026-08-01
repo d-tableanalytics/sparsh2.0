@@ -26,11 +26,12 @@ from app.controllers.auth_controller import get_current_user
 from app.db.mongodb import get_collection
 from app.models.tpms import (
     COLL_ACTIVITIES, COLL_REMINDER_RULES, COLL_SUCCESS_MEASURES, TPMS_DEPARTMENTS,
-    COLL_DEPARTMENTS, COLL_REMINDER_LOGS, COLL_MAIL_TEMPLATES,
+    COLL_DEPARTMENTS, COLL_REMINDER_LOGS, COLL_MAIL_TEMPLATES, COLL_WHATSAPP_TEMPLATES,
     TPMS_EVENT_KIND, REQUEST_PENDING, STATUS_SCHEDULED, is_md_like,
 )
 from bson import ObjectId
 from bson.errors import InvalidId
+from datetime import datetime
 from app.services.tpms_score_service import run_daily as run_score_daily, save_manual_score
 from app.services.tpms_schedule_service import (
     CAL_COLLECTIONS, check_schedule_conflict, create_schedule,
@@ -47,7 +48,16 @@ from app.services.tpms_lifecycle_service import (
     mark_learner_done, request_reschedule,
 )
 
-router = APIRouter(prefix="/tpms", tags=["TPMS"])
+async def _tpms_company_gate(current_user: dict = Depends(get_current_user)) -> None:
+    """Router-wide guard: a client-side user whose company has TPMS switched off is refused
+    on EVERY endpoint here, so the module cannot be reached by URL. Internal staff pass —
+    they administer TPMS across clients, and the data layer already hides disabled companies
+    from what they see."""
+    from app.utils.tpms_access import ensure_tpms_enabled
+    await ensure_tpms_enabled(current_user)
+
+
+router = APIRouter(prefix="/tpms", tags=["TPMS"], dependencies=[Depends(_tpms_company_gate)])
 
 STAFF_ROLES = {"superadmin", "admin"}
 CLIENT_ROLES = {"clientadmin", "clientuser"}
@@ -383,6 +393,70 @@ async def upsert_mail_template(payload: dict, current_user: dict = Depends(get_c
     await get_collection(COLL_MAIL_TEMPLATES).update_one(
         {"activity": activity, "side": side, "event": event}, {"$set": doc}, upsert=True)
     return {"ok": True}
+
+
+@router.get("/whatsapp-templates")
+async def list_whatsapp_templates(
+    activity: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """WhatsApp templates (activity × side × event). Admin only.
+
+    Read-only listing so the Active switch has something to act on — WhatsApp template
+    AUTHORING is unchanged and still out of scope here; rows are configured directly against
+    the Meta-approved template names.
+    """
+    if (current_user.get("role") or "").lower() not in STAFF_ROLES:
+        raise HTTPException(status_code=403, detail="Admin only")
+    query = {}
+    if activity:
+        query["activity"] = activity
+    docs = await get_collection(COLL_WHATSAPP_TEMPLATES).find(query).to_list(500)
+    docs.sort(key=lambda d: (d.get("activity") or "", d.get("event") or "", d.get("side") or ""))
+    return {"templates": [_serialize(d) for d in docs]}
+
+
+# Both channels resolve their template with an `active: {"$ne": False}` filter at send time
+# (tpms_notify_service.get_template / get_whatsapp_template), so flipping this flag is all
+# that is needed to stop a notification — the surrounding business logic is untouched and
+# still runs to completion.
+_TEMPLATE_COLLECTIONS = {"email": COLL_MAIL_TEMPLATES, "whatsapp": COLL_WHATSAPP_TEMPLATES}
+
+
+@router.patch("/{channel}-templates/{template_id}/status")
+async def update_template_status(
+    channel: str,
+    template_id: str,
+    payload: dict,
+    current_user: dict = Depends(get_current_user),
+):
+    """Activate / deactivate one notification template. Admin / Super Admin only.
+
+    `channel` is 'mail' or 'whatsapp'. Only the flag is written — subject, body and the
+    (activity, side, event) key are left exactly as they are, so toggling can never alter
+    the template's content.
+    """
+    if (current_user.get("role") or "").lower() not in STAFF_ROLES:
+        raise HTTPException(
+            status_code=403,
+            detail="Only Admin / Super Admin can change notification status.",
+        )
+    coll_name = _TEMPLATE_COLLECTIONS.get("email" if channel == "mail" else channel)
+    if not coll_name:
+        raise HTTPException(status_code=404, detail=f"Unknown template channel '{channel}'")
+    if "active" not in payload:
+        raise HTTPException(status_code=400, detail="`active` is required")
+    try:
+        oid = ObjectId(template_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid template id")
+
+    active = bool(payload["active"])
+    res = await get_collection(coll_name).update_one(
+        {"_id": oid}, {"$set": {"active": active, "updated_at": datetime.utcnow()}})
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Template not found")
+    return {"ok": True, "active": active}
 
 
 @router.post("/schedules/check-conflict")

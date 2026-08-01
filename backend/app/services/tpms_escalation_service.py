@@ -136,7 +136,7 @@ def _esc_body(event: dict, label: str, note: str) -> str:
 
 
 async def _send(recipients: List[str], subject: str, html: str, slug: str,
-                cc: Optional[List[str]] = None) -> int:
+                cc: Optional[List[str]] = None, event: Optional[dict] = None) -> int:
     """Spec §6 — `recipients` are addressed on To, `cc` is copied. Each To recipient gets
     their own message with the same CC list, so nobody sees the full distribution.
 
@@ -146,12 +146,16 @@ async def _send(recipients: List[str], subject: str, html: str, slug: str,
     if not TPMS_NOTIFICATIONS_ENABLED:
         return 0
     from app.services.notification_service import send_email_notification
+    from app.services.tpms_notify_service import log_context
+    # Spec §14 — carry the activity/company onto the delivery log so escalation sends show
+    # the same context in the Logs Report as every other TPMS mail kind.
+    meta = log_context(event) if event else None
     to_list = list(dict.fromkeys(e for e in recipients if e))
     cc_list = [e for e in dict.fromkeys(cc or []) if e and e not in to_list]
     sent = 0
     for email in to_list:
         try:
-            await send_email_notification(email, subject, html, slug=slug, cc=cc_list)
+            await send_email_notification(email, subject, html, slug=slug, cc=cc_list, meta=meta)
             sent += 1
         except Exception as e:
             logger.error(f"TPMS escalation mail to {email} failed: {e}")
@@ -198,7 +202,7 @@ async def run_escalation_ladder() -> dict:
                               f"This activity was scheduled on {event_day} and has not been "
                               "marked complete. Please update its status today."),
                     "tpms_escalation_pending",
-                    cc=recipients["smops"],
+                    cc=recipients["smops"], event=event,
                 )
             updates["esc_stage"] = stage = 1
             pending += 1
@@ -214,7 +218,7 @@ async def run_escalation_ladder() -> dict:
                               f"This activity (scheduled {event_day}) is still not completed "
                               "after 2 days. Immediate attention required before it lapses."),
                     "tpms_escalation_critical",
-                    cc=recipients["smops"] + recipients["owners"],
+                    cc=recipients["smops"] + recipients["owners"], event=event,
                 )
             updates["esc_stage"] = stage = 2
             critical += 1
@@ -231,7 +235,7 @@ async def run_escalation_ladder() -> dict:
                               f"This activity (scheduled {event_day}) was not completed within "
                               "the allowed window and has been automatically marked LAPSED."),
                     "tpms_escalation_lapsed",
-                    cc=recipients["smops"],
+                    cc=recipients["smops"], event=event,
                 )
             updates.update({
                 "esc_stage": 3,

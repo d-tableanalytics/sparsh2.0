@@ -36,12 +36,23 @@ const PENDING_SIDE_OPTIONS = [
   { id: 'staff', name: 'Pending: OM' },
 ];
 
+// Spec §8 — the delay columns have three display states, and the third (closed, showing the
+// numeric "Nd" split) only appears once closed rows are visible. Defaults to Open so the
+// table stays a work queue.
+const ACTION_STATUS_OPTIONS = [
+  { id: 'open', name: 'Open' },
+  { id: 'closed', name: 'Closed' },
+  { id: '', name: 'All' },
+];
+
 const OmDashboardBody = ({ kpis = [], activities = [], matrix = [], actions = [], action_required: actionRequired = [] }) => {
   const [fActivity, setFActivity] = useState('All Activities');
   const [fClient, setFClient] = useState('All Clients');
   const [fOwner, setFOwner] = useState('All Owners');
   // Spec §9.2 / §17 — "Action pending-side": whose court the follow-up is sitting in.
   const [fSide, setFSide] = useState('');
+  // Spec §8 — Open (default) / Closed / All. Closed rows carry the numeric delay split.
+  const [fStatus, setFStatus] = useState('open');
 
   const activityOpts = useMemo(
     () => ['All Activities', ...Array.from(new Set(actions.map((a) => a?.activity).filter(Boolean)))],
@@ -60,11 +71,12 @@ const OmDashboardBody = ({ kpis = [], activities = [], matrix = [], actions = []
     (fActivity === 'All Activities' || a?.activity === fActivity) &&
     (fClient === 'All Clients' || a?.company === fClient) &&
     (fOwner === 'All Owners' || a?.owner === fOwner) &&
-    (!fSide || a?.pending_side === fSide));
+    (!fSide || a?.pending_side === fSide) &&
+    (!fStatus || (fStatus === 'closed' ? !!a?.closed : !a?.closed)));
 
   const clearFilters = () => {
     setFActivity('All Activities'); setFClient('All Clients');
-    setFOwner('All Owners'); setFSide('');
+    setFOwner('All Owners'); setFSide(''); setFStatus('open');
   };
 
   const matrixCols = activities.length + 2; // Client + activities + Done
@@ -167,6 +179,7 @@ const OmDashboardBody = ({ kpis = [], activities = [], matrix = [], actions = []
             <FilterSelect value={fClient} onChange={setFClient} options={clientOpts} />
             <FilterSelect value={fOwner} onChange={setFOwner} options={ownerOpts} />
             <FilterSelect value={fSide} onChange={setFSide} options={PENDING_SIDE_OPTIONS} />
+            <FilterSelect value={fStatus} onChange={setFStatus} options={ACTION_STATUS_OPTIONS} />
             <button onClick={clearFilters} className="px-3 py-2 rounded-lg border border-[var(--border)] text-[var(--text-muted)] text-[12.5px] font-bold hover:bg-[var(--input-bg)] transition-all">Clear</button>
           </div>
         }

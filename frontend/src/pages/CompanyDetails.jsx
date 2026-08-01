@@ -37,6 +37,40 @@ const StatusBadge = ({ status }) => {
   );
 };
 
+/**
+ * Module access switch — used by BOTH the ORM and TPMS toggles so the two are identical by
+ * construction rather than by two copies of the same markup drifting apart.
+ *
+ * Off: neutral container, grey track, knob left.  On: green track, green state text, knob
+ * right. The label stays solid in both states so the control reads the same either way.
+ */
+const ModuleToggle = ({ label, enabled, onToggle, title }) => (
+  <button
+    type="button"
+    role="switch"
+    aria-checked={enabled}
+    aria-label={`${label} module ${enabled ? 'enabled' : 'disabled'} for this company`}
+    onClick={onToggle}
+    title={title}
+    className={`h-9 pl-3 pr-2.5 rounded-lg border flex items-center gap-2.5 transition-all ${
+      enabled
+        ? 'bg-[var(--accent-green-bg)] border-[var(--accent-green-border)]'
+        : 'bg-[var(--bg-card)] border-[var(--border)] hover:border-[var(--accent-green)]'
+    }`}
+  >
+    <span className="text-[12px] font-bold tracking-tight text-[var(--text-main)]">{label}</span>
+    <span className="relative inline-flex w-9 h-5 rounded-full transition-colors shrink-0"
+      style={{ background: enabled ? 'var(--accent-green)' : 'var(--border)' }}>
+      <span className="absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-all"
+        style={{ left: enabled ? '18px' : '2px' }} />
+    </span>
+    <span className="text-[10px] font-bold uppercase tracking-widest w-6 text-left"
+      style={{ color: enabled ? 'var(--accent-green)' : 'var(--text-muted)' }}>
+      {enabled ? 'On' : 'Off'}
+    </span>
+  </button>
+);
+
 const InfoRow = ({ icon: Icon, label, value }) => (
   <div className="flex items-start gap-3 py-2">
     <Icon size={14} className="text-[var(--accent-indigo)] mt-0.5 shrink-0" />
@@ -140,6 +174,9 @@ const CompanyDetails = () => {
   const canReadUsers = user?.role === 'superadmin' || user?.permissions?.users?.read;
   const canReadAnalytics = user?.role === 'superadmin' || user?.permissions?.companies?.read;
   const isStaff = ['superadmin', 'admin'].includes(user?.role);
+  // TPMS toggle is Admin / Super Admin only — deliberately stricter than the ORM
+  // toggle, which also accepts a companies.update permission grant.
+  const isTpmsToggler = ['superadmin', 'admin'].includes(user?.role);
 
   const fetchData = async () => {
     try {
@@ -241,6 +278,18 @@ const CompanyDetails = () => {
       setCompany(prev => ({ ...prev, orm_enabled: next }));
       showSuccess(`ORM ${next ? 'enabled' : 'disabled'} for ${company.name}`);
     } catch (err) { showError('Failed to update ORM access'); }
+  };
+
+  // TPMS is opt-in per company — absent flag means OFF, unlike ORM which defaults on.
+  const handleToggleTpms = async () => {
+    const next = !(company.tpms_enabled ?? false);
+    try {
+      await api.patch(`/companies/${companyId}/tpms-access`, { enabled: next });
+      setCompany(prev => ({ ...prev, tpms_enabled: next }));
+      showSuccess(`TPMS ${next ? 'enabled' : 'disabled'} for ${company.name}`);
+    } catch (err) {
+      showError(err.response?.data?.detail || 'Failed to update TPMS access');
+    }
   };
 
   const handleAddUser = async (e) => {
@@ -349,17 +398,23 @@ const CompanyDetails = () => {
         </div>
         <div className="flex items-center gap-2">
           {isStaff && canUpdate && (
-            <button
-              onClick={handleToggleOrm}
-              className={`h-9 px-4 rounded-lg text-[12px] font-bold flex items-center gap-2 border transition-all ${
-                (company.orm_enabled ?? true)
-                  ? 'bg-[var(--accent-green-bg)] border-[var(--accent-green-border)] text-[var(--accent-green)]'
-                  : 'bg-[var(--bg-card)] border-[var(--border)] text-[var(--text-muted)] hover:border-[var(--accent-green)]'
-              }`}
+            <ModuleToggle
+              label="ORM"
+              enabled={company.orm_enabled ?? true}
+              onToggle={handleToggleOrm}
               title="Toggle whether this company can access the ORM module"
-            >
-              <Layers size={14} /> ORM {(company.orm_enabled ?? true) ? 'On' : 'Off'}
-            </button>
+            />
+          )}
+          {/* TPMS access — a switch rather than a button, so the on/off state reads at a
+              glance. Admin/Super Admin only, and off by default: a company stays dark
+              until someone explicitly switches it on. */}
+          {isTpmsToggler && (
+            <ModuleToggle
+              label="TPMS"
+              enabled={company.tpms_enabled ?? false}
+              onToggle={handleToggleTpms}
+              title="Toggle whether this company can access the TPMS module"
+            />
           )}
           {canUpdate && (
             <>

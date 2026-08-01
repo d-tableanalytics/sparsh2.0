@@ -6,7 +6,15 @@ import {
 import { useAuth } from '../../../context/AuthContext';
 import { useNotification } from '../../../context/NotificationContext';
 import { getClientDashboard } from '../../../services/tpmsFormsApi';
-import { Section, Th, Td, TableShell, HeaderSelect } from '../common/dashboardKit';
+import { Section, Th, Td, TableShell, HeaderSelect, FilterSelect } from '../common/dashboardKit';
+
+// Spec §8 — the delay columns have three display states; the numeric "Nd" one only appears
+// once closed rows are visible. Defaults to Open so the table stays a work queue.
+const ACTION_STATUS_OPTIONS = [
+  { id: 'open', name: 'Open' },
+  { id: 'closed', name: 'Closed' },
+  { id: '', name: 'All' },
+];
 
 /**
  * Client TPMS Dashboard — Success-Measure scorecard for the logged-in company,
@@ -109,14 +117,20 @@ const todayIso = () => {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 };
 
-const DelayCell = ({ value, active }) => {
+const DelayCell = ({ value, active, closed }) => {
   if (!value || value === '—') return <span className="text-[var(--text-muted)] opacity-40">—</span>;
-  const tone = active
-    ? { color: 'var(--accent-orange)', background: 'var(--accent-orange-bg)' }
-    : { color: 'var(--text-muted)', background: 'var(--input-bg)' };
+  // Closed rows carry the numeric split stamped at completion (spec §8 row 3): "On time"
+  // when the side added no delay, otherwise "Nd". Open rows show which side is waiting.
+  const tone = closed
+    ? (value === 'On time'
+        ? { color: 'var(--accent-green)', background: 'var(--accent-green-bg)' }
+        : { color: 'var(--accent-red)', background: 'var(--accent-red-bg)' })
+    : (active
+        ? { color: 'var(--accent-orange)', background: 'var(--accent-orange-bg)' }
+        : { color: 'var(--text-muted)', background: 'var(--input-bg)' });
   return (
     <span className="inline-flex items-center gap-1.5 text-[10.5px] font-black px-2.5 py-1 rounded-full whitespace-nowrap" style={tone}>
-      {active && <span className="w-1.5 h-1.5 rounded-full" style={{ background: 'var(--accent-orange)' }} />}
+      {!closed && active && <span className="w-1.5 h-1.5 rounded-full" style={{ background: 'var(--accent-orange)' }} />}
       {value}
     </span>
   );
@@ -129,6 +143,7 @@ const ClientDashboard = () => {
   const months = useMemo(() => monthOptions(), []);
   const [month, setMonth] = useState(months[0].value);
   const [data, setData] = useState(null);
+  const [actionStatus, setActionStatus] = useState('open');
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -154,7 +169,13 @@ const ClientDashboard = () => {
   // Client dashboard is scoped to one company, so clients_grid holds a single row.
   const gridActivities = data?.activities ?? [];
   const gridCells = data?.clients_grid?.[0]?.cells ?? {};
-  const pendingActions = data?.pending_actions ?? [];
+  // Spec §8 — Open (default) / Closed / All. Closed rows carry the numeric delay split,
+  // which has no other surface; open rows show which side the clock is sitting on.
+  const allActions = data?.pending_actions ?? [];
+  const pendingActions = allActions.filter(
+    (a) => (!actionStatus || (actionStatus === 'closed' ? !!a?.closed : !a?.closed)));
+  const openCount = allActions.filter((a) => !a?.closed).length;
+  const closedCount = allActions.length - openCount;
   const today = todayIso();
 
   return (
@@ -333,23 +354,31 @@ const ClientDashboard = () => {
             )}
           </Section>
 
-          {/* Pending Actions — open follow-ups awaiting closure */}
+          {/* Action Items — open follow-ups, plus closed ones with their delay split */}
           <Section
-            title="Pending Actions"
-            subtitle="Open follow-ups awaiting closure — shown across all periods, not just the selected month"
+            title="Action Items"
+            subtitle="Follow-ups raised when an activity runs overdue — shown across all periods, not just the selected month"
             icon={ListTodo}
-            tone={pendingActions.length ? 'red' : 'green'}
-            action={pendingActions.length > 0 && (
-              <span className="text-[10.5px] font-black px-2.5 py-1 rounded-full whitespace-nowrap"
-                style={{ color: 'var(--accent-red)', background: 'var(--accent-red-bg)' }}>
-                {pendingActions.length} open
-              </span>
+            tone={openCount ? 'red' : 'green'}
+            action={(
+              <div className="flex items-center gap-2">
+                <span className="text-[10.5px] font-black px-2.5 py-1 rounded-full whitespace-nowrap"
+                  style={openCount
+                    ? { color: 'var(--accent-red)', background: 'var(--accent-red-bg)' }
+                    : { color: 'var(--accent-green)', background: 'var(--accent-green-bg)' }}>
+                  {openCount} open · {closedCount} closed
+                </span>
+                <FilterSelect value={actionStatus} onChange={setActionStatus}
+                  options={ACTION_STATUS_OPTIONS} />
+              </div>
             )}
           >
             {pendingActions.length === 0 ? (
               <div className="px-5 py-10 flex flex-col items-center gap-2 text-center">
                 <CheckCircle2 size={24} className="text-[var(--accent-green)]" />
-                <p className="text-[13px] font-bold">No pending actions.</p>
+                <p className="text-[13px] font-bold">
+                  {actionStatus === 'closed' ? 'No closed action items yet.' : 'No pending actions.'}
+                </p>
                 <p className="text-[12px] text-[var(--text-muted)]">Follow-ups are raised automatically when an activity runs overdue.</p>
               </div>
             ) : (
@@ -368,7 +397,9 @@ const ClientDashboard = () => {
                 <tbody>
                   {pendingActions.map((a) => {
                     const target = String(a.target || '').slice(0, 10);
-                    const overdue = target && target < today;
+                    const closed = !!a.closed;
+                    // An overdue warning is only meaningful while the item is still open.
+                    const overdue = !closed && target && target < today;
                     const waitingStaff = a.pending_side === 'staff';
                     return (
                       <tr key={a.id} className="border-b border-[var(--border)] last:border-0 hover:bg-[var(--table-hover)] transition-colors">
@@ -387,12 +418,14 @@ const ClientDashboard = () => {
                         </Td>
                         <Td align="center">
                           <span className="px-2.5 py-1 rounded-full text-[10px] font-black whitespace-nowrap"
-                            style={{ color: 'var(--accent-orange)', background: 'var(--accent-orange-bg)' }}>
+                            style={closed
+                              ? { color: 'var(--accent-green)', background: 'var(--accent-green-bg)' }
+                              : { color: 'var(--accent-orange)', background: 'var(--accent-orange-bg)' }}>
                             {a.status || 'Pending'}
                           </span>
                         </Td>
-                        <Td align="center"><DelayCell value={a.learner_delay} active={!waitingStaff} /></Td>
-                        <Td align="center"><DelayCell value={a.staff_delay} active={waitingStaff} /></Td>
+                        <Td align="center"><DelayCell value={a.learner_delay} active={!waitingStaff} closed={closed} /></Td>
+                        <Td align="center"><DelayCell value={a.staff_delay} active={waitingStaff} closed={closed} /></Td>
                       </tr>
                     );
                   })}

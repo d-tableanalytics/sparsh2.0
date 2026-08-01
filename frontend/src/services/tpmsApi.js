@@ -32,6 +32,14 @@ export const updateReminderRule = (id, payload) => api.patch(`/tpms/reminder-rul
 export const getMailTemplates = (activity) =>
   api.get('/tpms/mail-templates', { params: { activity: activity || undefined } });
 export const upsertMailTemplate = (payload) => api.post('/tpms/mail-templates', payload);
+// WhatsApp templates are listed read-only — authoring stays out of this screen; the Active
+// switch is what this endpoint exists for.
+export const getWhatsappTemplates = (activity) =>
+  api.get('/tpms/whatsapp-templates', { params: { activity: activity || undefined } });
+/** Activate / deactivate one template. `channel` is 'mail' or 'whatsapp'. Admin only —
+ *  writes just the flag, never the subject/body, so content cannot change by toggling. */
+export const setTemplateStatus = (channel, id, active) =>
+  api.patch(`/tpms/${channel}-templates/${id}/status`, { active });
 // H10 — per-reminder send ledger (Admin).
 export const getReminderLogs = (params) => api.get('/tpms/reminder-logs', { params });
 // M10 — review-form question master (Admin): reword question/criterion text.

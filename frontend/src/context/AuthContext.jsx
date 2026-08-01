@@ -50,9 +50,6 @@ export const AuthProvider = ({ children }) => {
     const { access_token } = response.data;
 
     localStorage.setItem('token', access_token);
-    // Stash the plaintext password for the sidebar "Automation" launcher (Apps Script
-    // needs it as a query param). NOTE: plaintext in localStorage — internal tool only.
-    localStorage.setItem('sparsh_pwd', password);
     const decoded = jwtDecode(access_token);
     setUser(decoded);
     axios.defaults.headers.common['Authorization'] = `Bearer ${access_token}`;
@@ -72,6 +69,10 @@ export const AuthProvider = ({ children }) => {
 
   const logout = () => {
     localStorage.removeItem('token');
+    // Legacy cleanup: the Automation launcher used to stash the plaintext password here.
+    // It is no longer written, but anyone who logged in before that change still has one
+    // sitting in localStorage — this clears it on their next logout. Safe to delete once
+    // every active session has cycled.
     localStorage.removeItem('sparsh_pwd');
     setUser(null);
     delete axios.defaults.headers.common['Authorization'];
