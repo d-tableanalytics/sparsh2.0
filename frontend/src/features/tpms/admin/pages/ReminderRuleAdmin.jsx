@@ -3,7 +3,7 @@ import {
   RefreshCw, BellRing, Plus, Check, X, ShieldAlert, Power, PowerOff, Info, AlertTriangle, Clock,
 } from 'lucide-react';
 import {
-  DashboardHero, HeroButton, Section, Th, Td, TableShell,
+  DashboardHero, HeroButton, Section, Th, Td, TableShell, usePaged, Pager,
 } from '../../common/dashboardKit';
 import { getReminderRules, createReminderRule, updateReminderRule } from '../../../../services/tpmsApi';
 import { useAuth } from '../../../../context/AuthContext';
@@ -128,6 +128,8 @@ const ReminderRuleAdmin = () => {
   }, []);
 
   useEffect(() => { if (admin) load(); }, [admin, load]);
+
+  const pRules = usePaged(rules || [], 10);
 
   const resetForm = () => setForm(EMPTY_FORM);
 
@@ -279,6 +281,7 @@ const ReminderRuleAdmin = () => {
             </button>
           </div>
         ) : (
+          <>
           <TableShell minWidth={860}>
             <thead>
               <tr className="bg-[var(--table-header-bg)] border-b border-[var(--border)]">
@@ -287,7 +290,7 @@ const ReminderRuleAdmin = () => {
               </tr>
             </thead>
             <tbody>
-              {rules.map((r, i) => {
+              {pRules.pageRows.map((r, i) => {
                 const isActive = r.active !== false;
                 const rowBusy = busyId === r._id;
                 return (
@@ -310,6 +313,8 @@ const ReminderRuleAdmin = () => {
               })}
             </tbody>
           </TableShell>
+          <Pager {...pRules} label="rules" />
+          </>
         )}
       </Section>
     </div>

@@ -6,7 +6,7 @@ import {
 } from 'lucide-react';
 import {
   DashboardHero, HeroButton, HeaderSelect, FilterSelect, Section, Th, Td, Progress,
-  TableShell, KpiTile,
+  TableShell, KpiTile, usePaged, Pager,
 } from '../../common/dashboardKit';
 import { useAuth } from '../../../../context/AuthContext';
 import { useNotification } from '../../../../context/NotificationContext';
@@ -184,6 +184,7 @@ const ImplementationTracker = () => {
   const matrixActivities = data?.matrix_activities || [];
   const clients = data?.clients || [];
   const uploads = useMemo(() => data?.uploads || [], [data]);
+  const pUploads = usePaged(uploads || [], 10);
   const filters = useMemo(() => data?.filters || {}, [data]);
   const manualActivities = useMemo(() => data?.manual_activities || [], [data]);
   const manualScores = useMemo(() => data?.manual_scores || {}, [data]);
@@ -467,6 +468,7 @@ const ImplementationTracker = () => {
           <EmptyState icon={Inbox} title="No files uploaded for this client this month."
             hint="Proof files are attached from the activity itself, on activities that require an upload." />
         ) : (
+          <>
           <TableShell minWidth={820}>
             <thead>
               <tr className="bg-[var(--table-header-bg)] border-b border-[var(--border)]">
@@ -475,7 +477,7 @@ const ImplementationTracker = () => {
               </tr>
             </thead>
             <tbody>
-              {uploads.map((u) => (
+              {pUploads.pageRows.map((u) => (
                 <tr key={u._id} className="border-b border-[var(--border)] last:border-0 hover:bg-[var(--table-hover)] transition-colors">
                   <Td>
                     <div className="flex items-center gap-2.5 min-w-0">
@@ -505,6 +507,8 @@ const ImplementationTracker = () => {
               ))}
             </tbody>
           </TableShell>
+          <Pager {...pUploads} label="uploads" />
+          </>
         )}
       </Section>
 

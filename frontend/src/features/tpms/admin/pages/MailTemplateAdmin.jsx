@@ -5,7 +5,7 @@ import {
   MessageCircle,
 } from 'lucide-react';
 import {
-  DashboardHero, HeroButton, HeaderSelect, Section, Th, Td, TableShell,
+  DashboardHero, HeroButton, HeaderSelect, Section, Th, Td, TableShell, usePaged, Pager,
 } from '../../common/dashboardKit';
 import {
   getMailTemplates, upsertMailTemplate, getActivities,
@@ -371,6 +371,8 @@ const MailTemplateAdmin = () => {
   // Form activity dropdown: catch-all '*' first, then every activity.
   const formActivityOptions = useMemo(() => ['*', ...activities], [activities]);
 
+  const pTemplates = usePaged(templates || [], 10);
+
   const openAdd = () => { setEditing(null); setModalOpen(true); };
   const openEdit = (row) => { setEditing(row); setModalOpen(true); };
 
@@ -443,6 +445,7 @@ const MailTemplateAdmin = () => {
             </button>
           </div>
         ) : (
+          <>
           <TableShell minWidth={920}>
             <thead>
               <tr className="bg-[var(--table-header-bg)] border-b border-[var(--border)]">
@@ -451,7 +454,7 @@ const MailTemplateAdmin = () => {
               </tr>
             </thead>
             <tbody>
-              {templates.map((t, i) => {
+              {pTemplates.pageRows.map((t, i) => {
                 const isActive = t.active !== false;
                 return (
                   <tr key={t._id || i} className="group border-b border-[var(--border)] last:border-0 hover:bg-[var(--table-hover)] transition-colors"
@@ -480,6 +483,8 @@ const MailTemplateAdmin = () => {
               })}
             </tbody>
           </TableShell>
+          <Pager {...pTemplates} label="templates" />
+          </>
         )}
       </Section>
 

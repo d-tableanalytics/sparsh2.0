@@ -178,6 +178,51 @@ OTP_HTML_TEMPLATE = """<!DOCTYPE html>
 </body>
 </html>"""
 
+TASK_REMINDER_HTML_TEMPLATE = """<!DOCTYPE html>
+<html>
+<head>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; color: #1f2430; line-height: 1.6; margin: 0; padding: 0; background-color: #f4f5fb; }
+        .container { max-width: 600px; margin: 24px auto; background: #ffffff; border: 1px solid #e6e8f0; border-radius: 14px; overflow: hidden; box-shadow: 0 6px 20px rgba(79,70,229,0.08); }
+        .header { background: linear-gradient(120deg, #4f46e5 0%, #6d28d9 100%); color: #ffffff; padding: 28px 24px; text-align: center; }
+        .header .bell { font-size: 26px; line-height: 1; }
+        .header h1 { margin: 8px 0 0; font-size: 22px; font-weight: 800; letter-spacing: .3px; }
+        .content { padding: 28px 26px; }
+        .task-title { font-size: 18px; font-weight: 800; color: #111827; margin: 0 0 6px; }
+        .lede { color: #4b5563; font-size: 14px; margin: 0 0 20px; }
+        .deadline { background: #fef2f2; border: 1px solid #fecaca; border-radius: 10px; padding: 14px 16px; margin: 0 0 18px; }
+        .deadline .label { font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: .6px; color: #b91c1c; }
+        .deadline .value { font-size: 15px; font-weight: 800; color: #991b1b; margin-top: 2px; }
+        .desc { background: #f8f9fc; border: 1px solid #eef0f6; border-radius: 10px; padding: 14px 16px; font-size: 14px; color: #374151; }
+        .desc .label { font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: .6px; color: #6b7280; display: block; margin-bottom: 4px; }
+        .foot-note { margin-top: 22px; color: #6b7280; font-size: 13px; }
+        .footer { padding: 18px; text-align: center; background: #0f172a; color: #cbd5e1; font-size: 12px; font-weight: 700; letter-spacing: .4px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div class="bell">&#128276;</div>
+            <h1>Task Reminder</h1>
+        </div>
+        <div class="content">
+            <p class="task-title">{{title}}</p>
+            <p class="lede">This is a reminder about your task. Please review it and keep it on track.</p>
+            <div class="deadline">
+                <div class="label">&#9200; Task Deadline</div>
+                <div class="value">{{task_deadline}}</div>
+            </div>
+            <div class="desc">
+                <span class="label">Description</span>
+                {{description}}
+            </div>
+            <p class="foot-note">Open Sparsh to view and update this task.</p>
+        </div>
+        <div class="footer">Sparsh Magic LLP</div>
+    </div>
+</body>
+</html>"""
+
 DEFAULT_TEMPLATES = {
     "user_creation_email": {
         "subject": "Welcome to Sparsh 2.0 - Your Account Details",
@@ -186,6 +231,12 @@ DEFAULT_TEMPLATES = {
     "task_created_email": {
         "subject": "New Task Assigned: {{task_name}}",
         "body": "Hello {{assigned_user}},\n\nA new task '{{task_name}}' has been assigned to you by {{assigned_by}}.\n\nDeadline: {{deadline}}\nPriority: {{critical_level}}\nDescription: {{description}}\n\nRegards,\nSparsh Notifications"
+    },
+    # Reminder for a TASK (type == "task"). Distinct from the Session Reminder ("reminder_email",
+    # DB-configured) so a task never renders the session-styled mail. Used by send_reminder_email.
+    "task_reminder_email": {
+        "subject": "⏰ Task Reminder: {{title}}",
+        "body": TASK_REMINDER_HTML_TEMPLATE
     },
     # ─── Task Management (Delegation) module ───
     # Separate triggers from the Calendar's. task_created/updated/deleted are the
@@ -780,8 +831,12 @@ async def send_event_deleted_email(user_obj: dict, event_data: dict, deleted_by:
 
     return await send_notification_from_template(user_obj, "event_deleted", context, delivery_type, scope)
 
-async def send_reminder_email(user_obj: dict, event: dict):
-    is_task = event.get("type") == "task"
+async def send_reminder_email(user_obj: dict, event: dict, reminder: dict = None):
+    # A reminder is a TASK reminder when the event is a task OR the reminder itself was
+    # authored as one (parent_type == "task"). Either signal → the Task Reminder template.
+    # Sessions/events (type "event", parent_type "event") keep the Session Reminder template
+    # unchanged. TPMS uses a separate branch entirely, so this touches the Task module only.
+    is_task = (event.get("type") == "task") or ((reminder or {}).get("parent_type") == "task")
     dt_str = event.get("start", "")
     formatted_dt = format_datetime_standard(dt_str)
     
@@ -793,7 +848,10 @@ async def send_reminder_email(user_obj: dict, event: dict):
         "meeting_url": event.get("meeting_link") or "View in Dashboard",
         "description": event.get("additional_details") or "No further details."
     }
-    return await send_notification_from_template(user_obj, "reminder", context, "email", event.get("notification_scope"))
+    # A TASK reminder uses the Task Reminder template ONLY; a session/event keeps the Session
+    # Reminder template. Same context either way — only the template (and its framing) differ.
+    slug = "task_reminder" if is_task else "reminder"
+    return await send_notification_from_template(user_obj, slug, context, "email", event.get("notification_scope"))
 
 async def send_conflict_notification_email(user_obj: dict, event_data: dict, existing_event: dict):
     # Subject: Reschedule time mail due to conflict

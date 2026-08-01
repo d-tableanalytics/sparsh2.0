@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import { AlertTriangle, Grid3x3, ClipboardList, CheckCircle2 } from 'lucide-react';
-import { Section, Th, Td, Fraction, KpiTile, FilterSelect, TableShell } from './dashboardKit';
+import { Section, Th, Td, Fraction, KpiTile, FilterSelect, TableShell, usePaged, Pager } from './dashboardKit';
 
 /**
  * Shared body for the "OM Dashboard" (KPI tiles + activity-status matrix
@@ -73,6 +73,10 @@ const OmDashboardBody = ({ kpis = [], activities = [], matrix = [], actions = []
     (fOwner === 'All Owners' || a?.owner === fOwner) &&
     (!fSide || a?.pending_side === fSide) &&
     (!fStatus || (fStatus === 'closed' ? !!a?.closed : !a?.closed)));
+
+  // Client-side pagination (pure presentation — slices already-fetched rows).
+  const pRequired = usePaged(actionRequired || [], 10);
+  const pActions = usePaged(filteredActions || [], 10);
 
   const clearFilters = () => {
     setFActivity('All Activities'); setFClient('All Clients');
@@ -147,7 +151,7 @@ const OmDashboardBody = ({ kpis = [], activities = [], matrix = [], actions = []
               </tr>
             </thead>
             <tbody>
-              {actionRequired.map((r) => (
+              {pRequired.pageRows.map((r) => (
                 <tr key={r.id} className="group border-b border-[var(--border)] last:border-0 hover:bg-[var(--table-hover)] transition-colors">
                   <Td className={`font-bold ${stickyCell}`}>{r.company}</Td>
                   <Td className="text-[var(--text-muted)]">{r.activity}</Td>
@@ -166,6 +170,7 @@ const OmDashboardBody = ({ kpis = [], activities = [], matrix = [], actions = []
             </tbody>
           </TableShell>
         )}
+        <Pager {...pRequired} label="actions" />
       </Section>
 
       {/* Open Action Items */}
@@ -201,7 +206,7 @@ const OmDashboardBody = ({ kpis = [], activities = [], matrix = [], actions = []
             </tr>
           </thead>
           <tbody>
-            {filteredActions.map((r) => (
+            {pActions.pageRows.map((r) => (
               <tr key={r.id} className="group border-b border-[var(--border)] last:border-0 hover:bg-[var(--table-hover)] transition-colors">
                 <Td className={`font-bold ${stickyCell}`}>{r.company}</Td>
                 <Td className="text-[var(--text-muted)]">{r.activity}</Td>
@@ -220,6 +225,7 @@ const OmDashboardBody = ({ kpis = [], activities = [], matrix = [], actions = []
             )}
           </tbody>
         </TableShell>
+        <Pager {...pActions} label="action items" />
       </Section>
     </>
   );

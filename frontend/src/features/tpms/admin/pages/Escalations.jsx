@@ -5,6 +5,7 @@ import {
 } from 'lucide-react';
 import {
   DashboardHero, HeroButton, HeaderSelect, Section, Th, Td, TableShell, KpiTile,
+  usePaged, Pager,
 } from '../../common/dashboardKit';
 import { getEscalationDashboard } from '../../../../services/tpmsApi';
 
@@ -89,6 +90,10 @@ const Escalations = () => {
   const resolved = data?.resolved || [];
   const cards = data?.cards || {};
 
+  // Client-side pagination for the two live data grids (presentation only).
+  const pActive = usePaged(active || [], 10);
+  const pResolved = usePaged(resolved || [], 10);
+
   // L1 (HOD) count — prefer the backend field; otherwise derive it defensively
   // from the active total minus the higher levels, clamped at ≥ 0.
   const l1Count = cards.l1 ?? Math.max(0, (cards.active_count ?? 0) - ((cards.l2 ?? 0) + (cards.l3 ?? 0)));
@@ -156,7 +161,7 @@ const Escalations = () => {
               </tr>
             </thead>
             <tbody>
-              {active.map((r, i) => (
+              {pActive.pageRows.map((r, i) => (
                 <tr key={i} className="group border-b border-[var(--border)] last:border-0 hover:bg-[var(--table-hover)] transition-colors">
                   <Td className="text-[var(--text-muted)] font-bold">{i + 1}</Td>
                   <Td className="font-bold">{r.company}</Td>
@@ -174,6 +179,7 @@ const Escalations = () => {
             </tbody>
           </TableShell>
         )}
+        <Pager {...pActive} label="escalations" />
       </Section>
 
       {/* Reminder Timeline (system logic) */}
@@ -267,7 +273,7 @@ const Escalations = () => {
               </tr>
             </thead>
             <tbody>
-              {resolved.map((r, i) => (
+              {pResolved.pageRows.map((r, i) => (
                 <tr key={i} className="group border-b border-[var(--border)] last:border-0 hover:bg-[var(--table-hover)] transition-colors">
                   <Td className={`font-bold ${stickyCell}`}>{r.company}</Td>
                   <Td className="text-[var(--text-muted)]">{r.om || '—'}</Td>
@@ -282,6 +288,7 @@ const Escalations = () => {
             </tbody>
           </TableShell>
         )}
+        <Pager {...pResolved} label="escalations" />
       </Section>
     </div>
   );

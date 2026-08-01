@@ -6,7 +6,7 @@ import {
 } from 'lucide-react';
 import {
   DashboardHero, HeroButton, Section, Th, Td, Trend, StatusBadge, Progress,
-  KpiTile, HeaderSelect, FilterSelect, TableShell,
+  KpiTile, HeaderSelect, FilterSelect, TableShell, usePaged, Pager,
 } from '../../common/dashboardKit';
 import { useAuth } from '../../../../context/AuthContext';
 import { getAnalyticsDashboard, currentPeriod, periodLabel } from '../../../../services/tpmsApi';
@@ -134,10 +134,13 @@ const AdminView = () => {
 
   const cards = data?.cards || {};
   const clients = data?.clients || [];
+  const pClients = usePaged(clients || [], 10);
   const oms = data?.oms || [];
+  const pOms = usePaged(oms || [], 10);
   const topDelayed = data?.top_delayed || [];
   const gridActivities = useMemo(() => data?.activities || [], [data]);
   const gridRows = useMemo(() => data?.clients_grid || [], [data]);
+  const pGrid = usePaged(gridRows || [], 10);
   const [actStatus, setActStatus] = useState('open');
   const openActions = useMemo(() => data?.open_actions || [], [data]);
 
@@ -153,6 +156,7 @@ const AdminView = () => {
     // Spec §8 — Open (default) / Closed / All; closed rows carry the numeric delay split.
     && (!actStatus || (actStatus === 'closed' ? !!a.closed : !a.closed))
   )), [openActions, actActivity, actClient, actOwner, actSide, actStatus]);
+  const pActions = usePaged(actionRows || [], 10);
 
   const omOpts = useMemo(
     () => [{ id: '', name: 'All OMs' }, ...(data?.filters?.oms || [])], [data]);
@@ -240,7 +244,7 @@ const AdminView = () => {
               <tbody>
                 {clients.length === 0 ? (
                   <tr><Td className="text-center text-[var(--text-muted)]" align="center"><span className="block py-8">No clients for this selection.</span></Td></tr>
-                ) : clients.map((r) => (
+                ) : pClients.pageRows.map((r) => (
                   <tr key={r.company_id || r.company} className="group border-b border-[var(--border)] last:border-0 hover:bg-[var(--table-hover)] transition-colors">
                     <Td className={`font-bold ${stickyCell}`}>{r.company}</Td>
                     <Td className="text-[var(--text-muted)]">{r.om || '—'}</Td>
@@ -258,6 +262,7 @@ const AdminView = () => {
                 ))}
               </tbody>
             </TableShell>
+            <Pager {...pClients} label="clients" />
           </Section>
 
           {/* OM Performance Comparison */}
@@ -273,7 +278,7 @@ const AdminView = () => {
               <tbody>
                 {oms.length === 0 ? (
                   <tr><Td className="text-center text-[var(--text-muted)]" align="center"><span className="block py-8">No OM data for this selection.</span></Td></tr>
-                ) : oms.map((r, i) => (
+                ) : pOms.pageRows.map((r, i) => (
                   <tr key={r.om_id || r.om} className="group border-b border-[var(--border)] last:border-0 hover:bg-[var(--table-hover)] transition-colors">
                     <Td align="center">
                       {i <= 2
@@ -294,6 +299,7 @@ const AdminView = () => {
                 ))}
               </tbody>
             </TableShell>
+            <Pager {...pOms} label="OMs" />
           </Section>
 
           {/* Top Delayed Clients */}
@@ -334,6 +340,7 @@ const AdminView = () => {
             {gridRows.length === 0 ? (
               <div className="py-12 text-center text-[13px] font-bold text-[var(--text-muted)]">No activity for this period.</div>
             ) : (
+              <>
               <TableShell minWidth={Math.max(720, 240 + gridActivities.length * 66)}>
                 <thead>
                   <tr className="bg-[var(--table-header-bg)] border-b border-[var(--border)]">
@@ -342,7 +349,7 @@ const AdminView = () => {
                   </tr>
                 </thead>
                 <tbody>
-                  {gridRows.map((r) => (
+                  {pGrid.pageRows.map((r) => (
                     <tr key={r.company_id} className="group border-b border-[var(--border)] last:border-0 hover:bg-[var(--table-hover)] transition-colors">
                       <Td className={`font-bold ${stickyCell}`}>{r.company}</Td>
                       {gridActivities.map((a) => {
@@ -364,6 +371,8 @@ const AdminView = () => {
                   ))}
                 </tbody>
               </TableShell>
+              <Pager {...pGrid} label="clients" />
+              </>
             )}
           </Section>
 
@@ -396,6 +405,7 @@ const AdminView = () => {
                 <p className="text-[13px] font-bold">No open action items.</p>
               </div>
             ) : (
+              <>
               <TableShell minWidth={900}>
                 <thead>
                   <tr className="bg-[var(--table-header-bg)] border-b border-[var(--border)]">
@@ -404,7 +414,7 @@ const AdminView = () => {
                   </tr>
                 </thead>
                 <tbody>
-                  {actionRows.map((a) => {
+                  {pActions.pageRows.map((a) => {
                     const waitingStaff = a.pending_side === 'staff';
                     return (
                       <tr key={a.id} className="group border-b border-[var(--border)] last:border-0 hover:bg-[var(--table-hover)] transition-colors">
@@ -420,6 +430,8 @@ const AdminView = () => {
                   })}
                 </tbody>
               </TableShell>
+              <Pager {...pActions} label="action items" />
+              </>
             )}
           </Section>
         </>

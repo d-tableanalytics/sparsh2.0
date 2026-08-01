@@ -3,7 +3,7 @@ import {
   RefreshCw, Users, ListChecks, CheckCircle2, XCircle, Clock, Gauge, Eye,
 } from 'lucide-react';
 import {
-  DashboardHero, HeroButton, HeaderSelect, Section, Th, Td, TableShell, KpiTile,
+  DashboardHero, HeroButton, HeaderSelect, Section, Th, Td, TableShell, KpiTile, usePaged, Pager,
 } from '../../common/dashboardKit';
 import { getEmployeeActivityDashboard, currentPeriod, periodLabel } from '../../../../services/tpmsApi';
 
@@ -63,6 +63,7 @@ const SmopsEmployeeTask = () => {
   const rows = data?.rows || [];
   const cards = data?.cards || {};
   const canPickCompany = data?.can_pick_company ?? true;
+  const pRows = usePaged(rows || [], 12);
 
   const companyOpts = useMemo(
     () => [{ id: '', name: 'All Companies' }, ...(data?.company_options || [])], [data]);
@@ -124,7 +125,7 @@ const SmopsEmployeeTask = () => {
             </tr>
           </thead>
           <tbody>
-            {rows.map((e) => {
+            {pRows.pageRows.map((e) => {
               const sc = e.score ?? 0;
               const name = e.name || '—';
               return (
@@ -158,6 +159,7 @@ const SmopsEmployeeTask = () => {
             )}
           </tbody>
         </TableShell>
+        <Pager {...pRows} label="employees" />
       </Section>
 
       {/* Per-employee drill-down: the activity-by-activity breakdown behind the row totals. */}

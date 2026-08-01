@@ -5,6 +5,7 @@ import {
 } from 'lucide-react';
 import {
   DashboardHero, HeroButton, HeaderSelect, Section, Th, Td, TableShell, KpiTile,
+  usePaged, Pager,
 } from '../../common/dashboardKit';
 import { useAuth } from '../../../../context/AuthContext';
 import { getHodDashboard, periodLabel } from '../../../../services/tpmsApi';
@@ -109,6 +110,10 @@ const HodActivity = () => {
   const needs = (data?.alerts || []).filter((a) => a.level !== 'ok');
   const hasHod = !!(hod && hod.id);
 
+  // Client-side pagination for the two big grids (occurrences & action items).
+  const pTracker = usePaged(tracker || [], 12);
+  const pActions = usePaged(actions || [], 10);
+
   const kpis = [
     { value: cards.activities ?? 0, label: 'Activities', sub: 'This period', tone: 'blue', icon: ListChecks },
     { value: cards.completed ?? 0, label: 'Completed', sub: 'Done', tone: 'green', icon: CheckCircle2 },
@@ -209,12 +214,13 @@ const HodActivity = () => {
             {tracker.length === 0 ? (
               <div className="px-5 py-10 text-center text-[13px] font-bold text-[var(--text-muted)]">No tracked occurrences this period.</div>
             ) : (
+              <>
               <TableShell minWidth={640}>
                 <thead><tr className="bg-[var(--table-header-bg)] border-b border-[var(--border)]">
                   <Th className={stickyHead}>Date</Th><Th>Month</Th><Th>Activity</Th><Th align="center">Status</Th>
                 </tr></thead>
                 <tbody>
-                  {tracker.map((r, i) => (
+                  {pTracker.pageRows.map((r, i) => (
                     <tr key={i} className="group border-b border-[var(--border)] last:border-0 hover:bg-[var(--table-hover)] transition-colors">
                       <Td className={`tabular-nums font-bold ${stickyCell}`}>{r.date}</Td>
                       <Td className="text-[var(--text-muted)]">{periodLabel(r.period) || r.period}</Td>
@@ -224,6 +230,8 @@ const HodActivity = () => {
                   ))}
                 </tbody>
               </TableShell>
+              <Pager {...pTracker} label="occurrences" />
+              </>
             )}
           </Section>
 
@@ -251,13 +259,14 @@ const HodActivity = () => {
             {actions.length === 0 ? (
               <div className="px-5 py-10 text-center text-[13px] font-bold text-[var(--text-muted)]">No open action items.</div>
             ) : (
+              <>
               <TableShell minWidth={980}>
                 <thead><tr className="bg-[var(--table-header-bg)] border-b border-[var(--border)]">
                   <Th className={stickyHead}>Activity</Th><Th>Action</Th><Th>Owner</Th><Th>Emp ID</Th><Th>Target Date</Th>
                   <Th align="center">Status</Th><Th>Client Delay</Th><Th>OM Delay</Th><Th>Follow-up</Th>
                 </tr></thead>
                 <tbody>
-                  {actions.map((r, i) => (
+                  {pActions.pageRows.map((r, i) => (
                     <tr key={r.id || i} className="group border-b border-[var(--border)] last:border-0 hover:bg-[var(--table-hover)] transition-colors">
                       <Td className={`font-bold ${stickyCell}`}>{r.activity}</Td>
                       <Td>{r.action}</Td>
@@ -272,6 +281,8 @@ const HodActivity = () => {
                   ))}
                 </tbody>
               </TableShell>
+              <Pager {...pActions} label="action items" />
+              </>
             )}
           </Section>
         </>

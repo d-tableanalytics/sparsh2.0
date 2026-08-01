@@ -125,6 +125,14 @@ async def check_and_trigger_reminders():
             if is_tpms_event and not TPMS_NOTIFICATIONS_ENABLED:
                 continue
             reminders = event.get("reminders", [])
+            # ── STRICT RULE ──────────────────────────────────────────────────────────
+            # A reminder is triggered ONLY when the task/event has one explicitly
+            # configured. If the task carries no reminders (empty or missing array),
+            # nothing is ever sent — full stop. The $elemMatch query above already
+            # selects only events with an unsent reminder; this explicit guard makes the
+            # "no reminder configured → no reminder fires" guarantee impossible to break.
+            if not reminders:
+                continue
             event_time_str = event.get("start")
             if not event_time_str: continue
             
@@ -245,7 +253,10 @@ async def trigger_reminder_notification(event, reminder):
                 if is_tpms:
                     await _send_tpms_reminder_email(user_data, event)
                 else:
-                    await send_reminder_email(user_data, event)
+                    # Pass the specific reminder so the template can be chosen by its
+                    # parent_type — a parent_type=="task" reminder always uses the Task
+                    # Reminder template, never the Session one.
+                    await send_reminder_email(user_data, event, reminder)
                 await _log_tpms_reminder(event, reminder, user_data, "sent", None)
         except Exception as e:
             logger.error(f"Error notifying user {uid} for reminder: {e}")

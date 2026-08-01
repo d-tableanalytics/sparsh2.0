@@ -8,7 +8,7 @@ import {
 import {
   ResponsiveContainer, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
 } from 'recharts';
-import { DashboardHero, HeroButton, Section, KpiTile, FilterSelect, TILE } from './dashboardKit';
+import { DashboardHero, HeroButton, Section, KpiTile, FilterSelect, TILE, usePaged, Pager } from './dashboardKit';
 import { useAuth } from '../../../context/AuthContext';
 import { getReviewReports, currentPeriod, periodLabel } from '../../../services/tpmsApi';
 
@@ -445,6 +445,9 @@ const ReviewReport = ({ title = 'Review Reports', subtitle = 'Evaluation & feedb
     });
   }, [data, respondentId, q]);
 
+  // Client-side pagination over the filtered submission cards (9 per page).
+  const pCards = usePaged(rows || [], 9);
+
   // Respondent + Search narrow `rows` client-side, so the server `totals` no longer describe
   // what is on screen. Everything summarised below is recomputed from `rows` — the same set
   // the cards and the CSV export use — so the headline figures, the Grand Total and the
@@ -673,8 +676,9 @@ const ReviewReport = ({ title = 'Review Reports', subtitle = 'Evaluation & feedb
           <p className="text-[12px] text-[var(--text-muted)] mt-1">Try a different form, period, company or respondent.</p>
         </div>
       ) : (
+        <>
         <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
-          {rows.map((r, i) => {
+          {pCards.pageRows.map((r, i) => {
             const pctVal = Number(r.score_pct) || 0;
             return (
               <div key={`${r.respondent_id}-${r.period}-${i}`}
@@ -736,6 +740,8 @@ const ReviewReport = ({ title = 'Review Reports', subtitle = 'Evaluation & feedb
             );
           })}
         </div>
+        <Pager {...pCards} label="submissions" />
+        </>
       )}
 
       {/* M6 — Grand Total. Computed from the filtered rows, so it always describes exactly

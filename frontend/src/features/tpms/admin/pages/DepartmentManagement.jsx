@@ -3,7 +3,7 @@ import {
   RefreshCw, Building2, Plus, Pencil, Check, X, ShieldCheck, Power, PowerOff, Info, Lock,
 } from 'lucide-react';
 import {
-  DashboardHero, HeroButton, Section, Th, Td, TableShell,
+  DashboardHero, HeroButton, Section, Th, Td, TableShell, usePaged, Pager,
 } from '../../common/dashboardKit';
 import { getDepartments, createDepartment, updateDepartment } from '../../../../services/tpmsApi';
 import { useAuth } from '../../../../context/AuthContext';
@@ -113,6 +113,8 @@ const DepartmentManagement = () => {
     }),
     [items],
   );
+
+  const pRows = usePaged(rows || [], 10);
 
   const governanceCount = rows.filter((r) => r.is_governance_role).length;
   const customCount = rows.length - governanceCount;
@@ -275,6 +277,7 @@ const DepartmentManagement = () => {
             <p className="text-[12px] text-[var(--text-muted)] mt-1">Use “Add Department” to create your first custom department.</p>
           </div>
         ) : (
+          <>
           <TableShell minWidth={840}>
             <thead>
               <tr className="bg-[var(--table-header-bg)] border-b border-[var(--border)]">
@@ -286,7 +289,7 @@ const DepartmentManagement = () => {
               </tr>
             </thead>
             <tbody>
-              {rows.map((row, i) => {
+              {pRows.pageRows.map((row, i) => {
                 const governance = !!row.is_governance_role;
                 const active = row.active !== false;
                 const busy = rowBusy === row._id;
@@ -344,6 +347,8 @@ const DepartmentManagement = () => {
               })}
             </tbody>
           </TableShell>
+          <Pager {...pRows} label="departments" />
+          </>
         )}
       </Section>
     </div>

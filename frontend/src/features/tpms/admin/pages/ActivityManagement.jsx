@@ -5,7 +5,7 @@ import {
   CheckCircle2, PauseCircle, PlayCircle, AlertTriangle,
 } from 'lucide-react';
 import {
-  DashboardHero, HeroButton, Section, Th, Td, TableShell, KpiTile,
+  DashboardHero, HeroButton, Section, Th, Td, TableShell, KpiTile, usePaged, Pager,
 } from '../../common/dashboardKit';
 import { getActivities, createActivity, updateActivity } from '../../../../services/tpmsApi';
 import { useAuth } from '../../../../context/AuthContext';
@@ -235,6 +235,8 @@ const ActivityManagement = () => {
     ];
   }, [activities]);
 
+  const pActs = usePaged(activities || [], 10);
+
   const openAdd = () => { setEditing(null); setModalOpen(true); };
   const openEdit = (row) => { setEditing(row); setModalOpen(true); };
 
@@ -317,6 +319,7 @@ const ActivityManagement = () => {
             </button>
           </div>
         ) : (
+          <>
           <TableShell minWidth={980}>
             <thead>
               <tr className="bg-[var(--table-header-bg)] border-b border-[var(--border)]">
@@ -326,7 +329,7 @@ const ActivityManagement = () => {
               </tr>
             </thead>
             <tbody>
-              {activities.map((a, i) => {
+              {pActs.pageRows.map((a, i) => {
                 const isActive = a.active !== false;
                 const rowBusy = busyId === a._id;
                 return (
@@ -368,6 +371,8 @@ const ActivityManagement = () => {
               })}
             </tbody>
           </TableShell>
+          <Pager {...pActs} label="activities" />
+          </>
         )}
       </Section>
 

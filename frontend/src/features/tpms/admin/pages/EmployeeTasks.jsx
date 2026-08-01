@@ -3,7 +3,7 @@ import {
   RefreshCw, Users, ListChecks, CheckCircle2, XCircle, Clock, Gauge, Eye,
 } from 'lucide-react';
 import {
-  DashboardHero, HeroButton, HeaderSelect, Section, Th, Td, TableShell, KpiTile,
+  DashboardHero, HeroButton, HeaderSelect, Section, Th, Td, TableShell, KpiTile, usePaged, Pager,
 } from '../../common/dashboardKit';
 import { useAuth } from '../../../../context/AuthContext';
 import { getEmployeeActivityDashboard, currentPeriod } from '../../../../services/tpmsApi';
@@ -102,6 +102,7 @@ const EmployeeTasks = () => {
   const rows = data?.rows || [];
   const cards = data?.cards || {};
   const canPick = data?.can_pick_company ?? ((user?.role || '').toLowerCase() !== 'client');
+  const pRows = usePaged(rows || [], 12);
 
   const companyOpts = useMemo(() => {
     const src = data?.company_options?.length
@@ -167,7 +168,7 @@ const EmployeeTasks = () => {
             </tr>
           </thead>
           <tbody>
-            {rows.map((e, i) => {
+            {pRows.pageRows.map((e, i) => {
               const sc = e.score ?? 0;
               return (
                 <tr key={e.id ?? i} className="group border-b border-[var(--border)] last:border-0 hover:bg-[var(--table-hover)] transition-colors">
@@ -200,6 +201,7 @@ const EmployeeTasks = () => {
             )}
           </tbody>
         </TableShell>
+        <Pager {...pRows} label="employees" />
       </Section>
 
       {/* Per-employee drill-down: the activity-by-activity breakdown behind the row totals. */}

@@ -77,6 +77,9 @@ const SettingsPage = () => {
 
     const getVarsForTemplate = (slug) => {
         const isClient = user?.role?.toLowerCase().includes('client');
+        // Task Reminder uses the reminder variables (title/task_deadline/…), NOT the
+        // delegation-task ones — check it before the generic 'task' branch below.
+        if (slug.includes('task_reminder')) return templateVariables.reminder_staff;
         if (slug.includes('task')) return templateVariables.task;
         if (slug.includes('event') || slug.includes('session_complete')) {
             return isClient ? templateVariables.event_learner : templateVariables.event_staff;
@@ -716,6 +719,7 @@ const SettingsPage = () => {
                                                 <option value="task_follow_up_added">Follow-up Added</option>
                                                 <option value="task_subtask_created">Subtask Created</option>
                                                 <option value="task_in_loop_added">In Loop Person</option>
+                                                <option value="task_reminder">Task Reminder</option>
                                             </optgroup>
                                             {user?.role === 'superadmin' && (
                                                 <>

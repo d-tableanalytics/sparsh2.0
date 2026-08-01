@@ -173,6 +173,55 @@ export const TableShell = ({ minWidth = 900, children }) => (
   </div>
 );
 
+/**
+ * Client-side pagination over an already-fetched array. Pure presentation — it
+ * only slices the rows the page already holds (no refetch, no backend change).
+ * Call it at the TOP of a component (Rules of Hooks), passing the array you would
+ * otherwise `.map()` over:
+ *
+ *   const p = usePaged(rows, 10);
+ *   … p.pageRows.map(…) …
+ *   <Pager {...p} label="employees" />
+ *
+ * `page` auto-clamps when the source shrinks (e.g. after a filter), so a stale
+ * high page never renders an empty table.
+ */
+export const usePaged = (rows = [], pageSize = 10) => {
+  const [page, setPage] = React.useState(1);
+  const total = rows.length;
+  const pageCount = Math.max(1, Math.ceil(total / pageSize));
+  React.useEffect(() => { setPage((p) => Math.min(Math.max(1, p), pageCount)); }, [pageCount]);
+  const safePage = Math.min(page, pageCount);
+  const start = (safePage - 1) * pageSize;
+  return { page: safePage, setPage, pageCount, total, pageSize, pageRows: rows.slice(start, start + pageSize) };
+};
+
+/**
+ * Footer pager bar matching the table styling. AUTO-HIDES when everything fits on
+ * one page, so it's safe to drop under any table. Spread a usePaged() result in:
+ *   <Pager {...p} label="rows" />
+ */
+export const Pager = ({ page, pageCount, total, pageSize, setPage, label = 'rows' }) => {
+  if (!total || total <= pageSize) return null;
+  const start = (page - 1) * pageSize + 1;
+  const end = Math.min(page * pageSize, total);
+  const btn = 'px-2.5 py-1.5 rounded-lg text-[12px] font-bold border border-[var(--border)] text-[var(--text-main)] transition-all disabled:opacity-40 disabled:cursor-not-allowed enabled:hover:bg-[var(--input-bg)]';
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 border-t border-[var(--border)]">
+      <span className="text-[12px] font-bold text-[var(--text-muted)] tabular-nums">
+        Showing {start}–{end} of {total} {label}
+      </span>
+      <div className="flex items-center gap-1.5">
+        <button type="button" className={btn} disabled={page <= 1} onClick={() => setPage(1)}>«</button>
+        <button type="button" className={btn} disabled={page <= 1} onClick={() => setPage(page - 1)}>Prev</button>
+        <span className="px-2 text-[12px] font-bold text-[var(--text-muted)] tabular-nums">Page {page} / {pageCount}</span>
+        <button type="button" className={btn} disabled={page >= pageCount} onClick={() => setPage(page + 1)}>Next</button>
+        <button type="button" className={btn} disabled={page >= pageCount} onClick={() => setPage(pageCount)}>»</button>
+      </div>
+    </div>
+  );
+};
+
 /** Polished gradient hero header for dashboards. `children` = filter controls. */
 export const DashboardHero = ({ icon: Icon, title, highlight, subtitle, children }) => (
   <div className="rounded-2xl px-5 py-4 sm:px-6 sm:py-5 flex flex-wrap items-center justify-between gap-4 shadow-md relative overflow-hidden" style={{ background: HEADER_GRADIENT }}>

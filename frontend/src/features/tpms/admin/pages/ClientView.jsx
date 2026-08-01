@@ -5,6 +5,7 @@ import {
 } from 'lucide-react';
 import {
   DashboardHero, HeroButton, HeaderSelect, Section, Th, Td, Progress, TableShell, KpiTile,
+  usePaged, Pager,
 } from '../../common/dashboardKit';
 import { getClientDashboard, currentPeriod, periodLabel } from '../../../../services/tpmsApi';
 import api from '../../../../services/api';
@@ -106,6 +107,7 @@ const ClientView = () => {
   const cards = data?.cards || {};
   const opCards = data?.op_cards || {};
   const clientName = data?.company || companies.find((c) => c.id === company)?.name || 'client';
+  const pPending = usePaged(pending || [], 10);
 
   const kpis = [
     { value: cards.total ?? 0,              label: 'Activities',      sub: 'Tracked',          tone: 'blue',   icon: ListChecks },
@@ -187,6 +189,7 @@ const ClientView = () => {
                 <p className="text-[13px] font-bold text-[var(--accent-green)]">No pending actions for {clientName}.</p>
               </div>
             ) : (
+              <>
               <TableShell minWidth={820}>
                 <thead>
                   <tr className="bg-[var(--table-header-bg)] border-b border-[var(--border)]">
@@ -195,7 +198,7 @@ const ClientView = () => {
                   </tr>
                 </thead>
                 <tbody>
-                  {pending.map((r, i) => (
+                  {pPending.pageRows.map((r, i) => (
                     <tr key={r.id || i} className="group border-b border-[var(--border)] last:border-0 hover:bg-[var(--table-hover)] transition-colors">
                       <Td className={`font-bold ${stickyCell}`}>{r.activity}</Td>
                       <Td>{r.action}</Td>
@@ -213,6 +216,8 @@ const ClientView = () => {
                   ))}
                 </tbody>
               </TableShell>
+              <Pager {...pPending} label="actions" />
+              </>
             )}
           </Section>
         </>
