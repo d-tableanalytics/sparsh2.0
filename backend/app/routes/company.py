@@ -25,6 +25,9 @@ class CompanyStatusUpdate(BaseModel):
 class CompanyORMAccessUpdate(BaseModel):
     enabled: bool
 
+class CompanyDelegationAccessUpdate(BaseModel):
+    enabled: bool
+
 class CompanyEditRequest(BaseModel):
     name: Optional[str] = None
     domain: Optional[str] = None

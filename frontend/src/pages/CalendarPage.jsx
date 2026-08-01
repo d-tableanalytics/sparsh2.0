@@ -7,6 +7,7 @@ import multiMonthPlugin from '@fullcalendar/multimonth';
 import interactionPlugin from '@fullcalendar/interaction';
 import { motion, AnimatePresence } from 'framer-motion';
 import api from '../services/api';
+import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { useNotification } from '../context/NotificationContext';
 import { useMemo } from 'react';
@@ -14,12 +15,14 @@ import { useMemo } from 'react';
 import {
     ChevronLeft, ChevronRight, Clock, X, UserCircle2,
     Zap, ListChecks, Users2, Activity, CalendarDays, Building2,
-    Layers, Trash2, AlertCircle, Link, Check, UserPlus2, ShieldCheck,
+    Layers, Trash2, AlertCircle, Link, Check, UserPlus2,
     Edit2, CheckCircle, ArrowRightLeft, Ban, PlayCircle, MoreHorizontal,
     PlusCircle, LayoutGrid, Calendar as CalendarIcon, Briefcase, Video, Bell,
-    Eye, Lock
+    Eye, Lock, ClipboardList, FileText, ChevronDown, CheckCircle2, Circle
 } from 'lucide-react';
 import ReminderModal from '../components/calendar/ReminderModal';
+import MiniDatePicker from '../components/tasks/MiniDatePicker';
+import { canAccessTaskManagement } from '../utils/taskAccess';
 
 const CustomTimePicker = ({ value, onChange, label }) => {
     const [isOpen, setIsOpen] = useState(false);
@@ -100,6 +103,254 @@ const CustomTimePicker = ({ value, onChange, label }) => {
     );
 };
 
+// ─── Todo recurrence ───
+// Frequency options, the repeat_data shape, the controls and the validation below are taken
+// from the Task & Delegation "Repeat" control (components/tasks/TaskFormModal.jsx) unchanged,
+// so a repeating todo and a repeating task are the same thing on the wire and are rolled
+// forward by the same backend engine (recurring_task_service.generate_due_recurring_tasks):
+// one occurrence per period, created on its own day, skipping holidays and weekly offs.
+// "periodic" is the stored value behind the "Periodically" label; "Yearly" is reference-only
+// (the engine matches "Annually"), exactly as it is for tasks today.
+const REPEAT_OPTIONS = [
+    { value: 'Daily', label: 'Daily' },
+    { value: 'Weekly', label: 'Weekly' },
+    { value: 'Monthly', label: 'Monthly' },
+    { value: 'Yearly', label: 'Yearly' },
+    { value: 'periodic', label: 'Periodically' },
+    { value: 'Custom', label: 'Custom' },
+];
+
+const EMPTY_REPEAT_DATA = { monthlyDates: [], weekdays: [], lastDay: false };
+
+// Reconciles whatever shape repeat_data comes back as (including the older single-value
+// day_of_month/weekday shape) into the { monthlyDates, weekdays, lastDay } shape the controls
+// use — same helper the task form applies, so editing an older doc doesn't crash.
+const normalizeRepeatData = (data) => {
+    if (!data) return { ...EMPTY_REPEAT_DATA };
+    if (Array.isArray(data.monthlyDates) || Array.isArray(data.weekdays)) {
+        return { ...EMPTY_REPEAT_DATA, ...data };
+    }
+    if (data.day_of_month === 'last') return { ...EMPTY_REPEAT_DATA, lastDay: true };
+    if (typeof data.day_of_month === 'number') return { ...EMPTY_REPEAT_DATA, monthlyDates: [data.day_of_month] };
+    if (typeof data.weekday === 'number') return { ...EMPTY_REPEAT_DATA, weekdays: [data.weekday] };
+    return { ...EMPTY_REPEAT_DATA };
+};
+
+const customUnitLabel = (unit, interval) => {
+    const singular = { Weeks: 'Week', Months: 'Month' }[unit || 'Months'];
+    return (interval || 1) === 1 ? singular : (unit || 'Months');
+};
+
+// The repeat rules from TaskFormModal.validate(), applied verbatim. A todo's due date is its
+// series start, so `start` is always present — the Start Date check is kept anyway so the two
+// forms stay line-for-line comparable. Returns an error string, or null when valid.
+const validateRepeat = (form) => {
+    if (form.repeat === 'Does not repeat') return null;
+    if (!form.start) return 'Start Date is required when Repeat is enabled';
+    if (!form.repeat) return 'Frequency is required when Repeat is enabled';
+    const data = form.repeat_data || EMPTY_REPEAT_DATA;
+    if (form.repeat === 'Monthly' && !data.lastDay && !(data.monthlyDates || []).length) {
+        return 'Select at least one date (or Last Day) for a Monthly repeat';
+    }
+    if (form.repeat === 'Custom' && (data.customUnit || 'Months') === 'Months' && !data.lastDay && !(data.monthlyDates || []).length) {
+        return 'Select at least one date (or Last Day) for a Custom repeat';
+    }
+    if (form.repeat_end_date && new Date(form.repeat_end_date) < new Date(form.start)) {
+        return 'End Date cannot be before Start Date';
+    }
+    return null;
+};
+
+// The Repeat control itself. Kept as its own component (rather than inlined in the already
+// long modal) purely for readability; the markup mirrors the task form's control.
+const TodoRepeatSection = ({ form, setForm, minEndDate }) => {
+    const [freqOpen, setFreqOpen] = useState(false);
+    const [customIntervalOpen, setCustomIntervalOpen] = useState(false);
+    const [customUnitOpen, setCustomUnitOpen] = useState(false);
+    const [repeatEndPickerOpen, setRepeatEndPickerOpen] = useState(false);
+
+    const data = form.repeat_data || EMPTY_REPEAT_DATA;
+    const isRepeating = form.repeat !== 'Does not repeat';
+    const setRepeatData = (patch) => setForm({ ...form, repeat_data: { ...data, ...patch } });
+
+    const toggleMonthlyDate = (day) => {
+        const current = data.monthlyDates || [];
+        const monthlyDates = current.includes(day) ? current.filter(d => d !== day) : [...current, day].sort((a, b) => a - b);
+        setRepeatData({ monthlyDates, lastDay: false });
+    };
+    const toggleLastDay = () => setRepeatData({ lastDay: !data.lastDay, monthlyDates: [] });
+    const toggleWeekday = (idx) => {
+        const current = data.weekdays || [];
+        setRepeatData({ weekdays: current.includes(idx) ? current.filter(d => d !== idx) : [...current, idx].sort((a, b) => a - b) });
+    };
+
+    const dayGrid = (
+        <div className="grid grid-cols-10 gap-1.5">
+            {Array.from({ length: 31 }, (_, i) => i + 1).map(day => (
+                <button type="button" key={day} onClick={() => toggleMonthlyDate(day)}
+                    className={`aspect-square flex items-center justify-center rounded-lg text-[11px] font-bold border transition-all ${(data.monthlyDates || []).includes(day) ? 'bg-[var(--accent-indigo)] text-white border-[var(--accent-indigo)]' : 'bg-[var(--bg-card)] text-[var(--text-muted)] border-[var(--border)] hover:text-[var(--text-main)]'}`}>
+                    {day}
+                </button>
+            ))}
+            <button type="button" onClick={toggleLastDay}
+                className={`col-span-3 flex items-center justify-center rounded-lg text-[10px] font-black uppercase tracking-wider border transition-all ${data.lastDay ? 'bg-[var(--accent-indigo)] text-white border-[var(--accent-indigo)]' : 'bg-[var(--bg-card)] text-[var(--text-muted)] border-[var(--border)] hover:text-[var(--text-main)]'}`}>
+                Last Day
+            </button>
+        </div>
+    );
+
+    const weekdayGrid = (order) => (
+        <div className="grid grid-cols-7 gap-1.5">
+            {order.map(([idx, label]) => (
+                <button type="button" key={label} onClick={() => toggleWeekday(idx)}
+                    className={`py-2 rounded-lg text-[10px] font-black uppercase tracking-wider border transition-all ${(data.weekdays || []).includes(idx) ? 'bg-[var(--accent-indigo)] text-white border-[var(--accent-indigo)]' : 'bg-[var(--bg-card)] text-[var(--text-muted)] border-[var(--border)] hover:text-[var(--text-main)]'}`}>
+                    {label}
+                </button>
+            ))}
+        </div>
+    );
+
+    return (
+        <div className="space-y-2">
+            <div className="flex items-center gap-2 flex-wrap p-3 bg-[var(--input-bg)] rounded-xl border border-[var(--border)]">
+                <button type="button"
+                    onClick={() => setForm({
+                        ...form,
+                        repeat: isRepeating ? 'Does not repeat' : 'Daily',
+                        // Turning Repeat off drops the series settings, so a stale end date or
+                        // day selection can never resurrect a recurrence the user cancelled.
+                        ...(isRepeating ? { repeat_end_date: '', repeat_interval: 1, repeat_data: { ...EMPTY_REPEAT_DATA } } : {}),
+                    })}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[10px] font-black uppercase tracking-wider border transition-all ${isRepeating ? 'bg-[var(--accent-indigo)] text-white border-[var(--accent-indigo)]' : 'border-[var(--border)] text-[var(--text-muted)]'}`}>
+                    {isRepeating ? <CheckCircle2 size={12} /> : <Circle size={12} />} Repeat
+                </button>
+
+                {isRepeating && (
+                    <>
+                        <div className="relative" onClick={e => e.stopPropagation()}>
+                            <button type="button" onClick={() => { setFreqOpen(o => !o); setCustomIntervalOpen(false); setCustomUnitOpen(false); }}
+                                className="flex items-center gap-1.5 px-3 py-1.5 bg-[var(--bg-card)] border border-[var(--border)] rounded-full text-[10px] font-black uppercase tracking-wider text-[var(--text-main)]">
+                                {REPEAT_OPTIONS.find(o => o.value === form.repeat)?.label || 'Daily'}
+                                <ChevronDown size={12} className={`transition-transform ${freqOpen ? 'rotate-180' : ''}`} />
+                            </button>
+                            {freqOpen && (
+                                <div className="absolute top-full left-0 mt-1.5 w-40 bg-[var(--bg-card)] border border-[var(--border)] rounded-2xl shadow-xl overflow-hidden z-20 p-1.5 space-y-0.5">
+                                    {REPEAT_OPTIONS.map(o => (
+                                        <button type="button" key={o.value}
+                                            onClick={() => { setForm({ ...form, repeat: o.value }); setFreqOpen(false); }}
+                                            className={`w-full text-left px-3 py-2 rounded-xl text-[11px] font-black uppercase tracking-wider transition-all ${form.repeat === o.value ? 'bg-[var(--accent-indigo)] text-white' : 'text-[var(--text-muted)] hover:bg-[var(--input-bg)]'}`}>
+                                            {o.label}
+                                        </button>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
+
+                        {/* The task form carries a separate Start Date chip because a task's
+                            `start` is a recurrence anchor distinct from its deadline. A todo's
+                            due date IS its start, so the series simply runs from the Due Date
+                            picked above — only the end of the series is collected here. */}
+                        <button type="button" onClick={() => setRepeatEndPickerOpen(true)}
+                            className="relative flex items-center gap-1.5 px-3 py-1.5 bg-[var(--bg-card)] border border-[var(--border)] rounded-full text-[10px] font-black uppercase tracking-wider text-[var(--text-muted)] cursor-pointer hover:border-[var(--accent-indigo)]">
+                            <CalendarDays size={12} />
+                            {form.repeat_end_date ? new Date(form.repeat_end_date).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' }) : 'End Date'}
+                        </button>
+                        <MiniDatePicker 
+                            isOpen={repeatEndPickerOpen} 
+                            onClose={() => setRepeatEndPickerOpen(false)}
+                            value={form.repeat_end_date} 
+                            title="Repeat End Date" 
+                            onApply={(iso) => setForm({ ...form, repeat_end_date: iso })}
+                        />
+                    </>
+                )}
+            </div>
+
+            {form.repeat === 'periodic' && (
+                <div className="p-3 bg-[var(--input-bg)] rounded-xl border border-[var(--border)] flex items-center justify-between">
+                    <span className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-wider">Repeat Every</span>
+                    <input type="number" min="1" value={form.repeat_interval}
+                        onChange={e => setForm({ ...form, repeat_interval: parseInt(e.target.value) || 1 })}
+                        className="w-16 text-center px-2 py-1.5 bg-[var(--bg-card)] border border-[var(--border)] rounded-lg text-[12px] font-bold text-[var(--text-main)] outline-none focus:border-[var(--accent-indigo)]" />
+                    <span className="text-[10px] font-black text-[var(--accent-indigo)] uppercase tracking-wider">Days</span>
+                </div>
+            )}
+
+            {form.repeat === 'Monthly' && (
+                <div className="p-3 bg-[var(--input-bg)] rounded-xl border border-[var(--border)]">{dayGrid}</div>
+            )}
+
+            {form.repeat === 'Weekly' && (
+                <div className="p-3 bg-[var(--input-bg)] rounded-xl border border-[var(--border)]">
+                    {weekdayGrid([[0, 'Sun'], [1, 'Mon'], [2, 'Tue'], [3, 'Wed'], [4, 'Thu'], [5, 'Fri'], [6, 'Sat']])}
+                </div>
+            )}
+
+            {form.repeat === 'Custom' && (
+                <div className="p-3 bg-[var(--input-bg)] rounded-xl border border-[var(--border)] space-y-3">
+                    <div className="flex items-center gap-2">
+                        <span className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-wider">Occur Every</span>
+
+                        <div className="relative" onClick={e => e.stopPropagation()}>
+                            <button type="button" onClick={() => { setCustomIntervalOpen(o => !o); setCustomUnitOpen(false); }}
+                                className="flex items-center gap-1 px-3 py-1.5 bg-[var(--bg-card)] border border-[var(--border)] rounded-lg text-[12px] font-bold text-[var(--text-main)]">
+                                {form.repeat_interval || 1}
+                                <ChevronDown size={12} className={`transition-transform ${customIntervalOpen ? 'rotate-180' : ''}`} />
+                            </button>
+                            {customIntervalOpen && (
+                                <div className="absolute top-full left-0 mt-1.5 w-16 max-h-48 overflow-y-auto no-scrollbar bg-[var(--bg-card)] border border-[var(--border)] rounded-xl shadow-xl z-20 p-1">
+                                    {Array.from({ length: 30 }, (_, i) => i + 1).map(n => (
+                                        <button type="button" key={n}
+                                            onClick={() => { setForm({ ...form, repeat_interval: n }); setCustomIntervalOpen(false); }}
+                                            className={`w-full text-center px-2 py-1.5 rounded-lg text-[11px] font-bold ${(form.repeat_interval || 1) === n ? 'bg-[var(--accent-indigo)] text-white' : 'text-[var(--text-muted)] hover:bg-[var(--input-bg)]'}`}>
+                                            {n}
+                                        </button>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
+
+                        <div className="relative" onClick={e => e.stopPropagation()}>
+                            <button type="button" onClick={() => { setCustomUnitOpen(o => !o); setCustomIntervalOpen(false); }}
+                                className="flex items-center gap-1 px-3 py-1.5 bg-[var(--bg-card)] border border-[var(--border)] rounded-lg text-[12px] font-bold text-[var(--text-main)]">
+                                {customUnitLabel(data.customUnit, form.repeat_interval)}
+                                <ChevronDown size={12} className={`transition-transform ${customUnitOpen ? 'rotate-180' : ''}`} />
+                            </button>
+                            {customUnitOpen && (
+                                <div className="absolute top-full left-0 mt-1.5 w-24 bg-[var(--bg-card)] border border-[var(--border)] rounded-xl shadow-xl z-20 p-1 space-y-0.5">
+                                    {['Weeks', 'Months'].map(unit => (
+                                        <button type="button" key={unit}
+                                            onClick={() => { setRepeatData({ customUnit: unit }); setCustomUnitOpen(false); }}
+                                            className={`w-full text-left px-2.5 py-1.5 rounded-lg text-[12px] font-bold ${(data.customUnit || 'Months') === unit ? 'bg-[var(--accent-indigo)] text-white' : 'text-[var(--text-muted)] hover:bg-[var(--input-bg)]'}`}>
+                                            {customUnitLabel(unit, form.repeat_interval)}
+                                        </button>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
+                    </div>
+
+                    {data.customUnit === 'Weeks' && (
+                        <div>
+                            <span className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-wider">Select Days :</span>
+                            <div className="mt-1.5">
+                                {weekdayGrid([[1, 'Mon'], [2, 'Tue'], [3, 'Wed'], [4, 'Thu'], [5, 'Fri'], [6, 'Sat'], [0, 'Sun']])}
+                            </div>
+                        </div>
+                    )}
+
+                    {(data.customUnit || 'Months') === 'Months' && (
+                        <div>
+                            <span className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-wider">Select Dates :</span>
+                            <div className="mt-1.5">{dayGrid}</div>
+                        </div>
+                    )}
+                </div>
+            )}
+        </div>
+    );
+};
+
 const CalendarPage = () => {
     const calendarRef = useRef(null);
     const { user } = useAuth();
@@ -131,6 +382,7 @@ const CalendarPage = () => {
     const [isEdit, setIsEdit] = useState(false);
     const [currentEventId, setCurrentEventId] = useState(null);
     const [showReminderModal, setShowReminderModal] = useState(false);
+    const [dueDatePickerOpen, setDueDatePickerOpen] = useState(false); // todo Due date/time calendar
 
     const initialForm = {
         title: '', type: 'event', start: '', end: '', all_day: true,
@@ -138,9 +390,12 @@ const CalendarPage = () => {
         batch_id: '', quarter_id: '', status: 'schedule', meeting_link: '',
         assigned_departments: [], assigned_member_ids: [], coach_ids: [],
         additional_details: '', category: 'General', repeat: 'Does not repeat',
-        repeat_end_date: '', repeat_interval: 1, assigned_to: 'myself', target_staff_id: [],
+        repeat_end_date: '', repeat_interval: 1, repeat_data: { ...EMPTY_REPEAT_DATA },
+        assigned_to: 'myself', target_staff_id: [],
         reminders: [], status_remark: '', gpt_projects: []
     };
+
+    const navigate = useNavigate();
 
     const [eventForm, setEventForm] = useState(initialForm);
 
@@ -191,6 +446,33 @@ const CalendarPage = () => {
         });
     };
 
+    // ─── Todo date display ───
+    // A todo's due date is picked in the user's OWN timezone, so it has to be displayed in
+    // that same timezone. formatIST/formatShortIST above render in Asia/Kolkata, which shows a
+    // different DAY for anyone not on IST: a todo set for 11 July (stored at local midday)
+    // reads back as "12 July, 12:30 AM". These render from the same local clock the date
+    // picker writes with, so the date shown always equals the date chosen.
+    // A full-day todo shows no time at all — the time carries no meaning for it.
+    const formatTodoDateTime = (dateStr, allDay) => {
+        if (!dateStr) return "";
+        const d = new Date(dateStr);
+        if (isNaN(d.getTime())) return "";
+        return d.toLocaleString(undefined, {
+            weekday: 'long', day: 'numeric', month: 'long', year: 'numeric',
+            ...(allDay ? {} : { hour: '2-digit', minute: '2-digit', hour12: true }),
+        });
+    };
+
+    const formatTodoShort = (dateStr, allDay) => {
+        if (!dateStr) return "";
+        const d = new Date(dateStr);
+        if (isNaN(d.getTime())) return "";
+        return d.toLocaleString(undefined, {
+            day: 'numeric', month: 'short',
+            ...(allDay ? {} : { hour: '2-digit', minute: '2-digit', hour12: true }),
+        });
+    };
+
 
     const getLocalDatePart = (dateStr) => {
         if (!dateStr) return "";
@@ -228,6 +510,9 @@ const CalendarPage = () => {
         if (status === 'completed') return '#10b981'; // Emerald
         if (status === 'canceled') return '#ef4444'; // Red
         
+        // Todos are always the creator's own (private), so they get one fixed colour.
+        if (type === 'todo') return '#8b5cf6'; // Violet
+
         if (isCreator) {
             return color || (type === 'task' ? '#f97316' : '#6366f1'); // Orange / Indigo
         } else {
@@ -308,16 +593,55 @@ const CalendarPage = () => {
             }).length;
         };
 
-        return [
-            { id: 'ev_total', label: 'Total Sessions', count: getCount('event', null), color: 'indigo', icon: <Activity size={14} />, filter: { type: 'event', status: null } },
-            { id: 'ev_com', label: 'Completed', count: getCount('event', 'completed'), color: 'emerald', icon: <CheckCircle size={14} />, filter: { type: 'event', status: 'completed' } },
-            { id: 'ev_pen', label: 'Pending', count: getCount('event', 'pending'), color: 'amber', icon: <Clock size={14} />, filter: { type: 'event', status: 'pending' } },
-            { id: 'ev_res', label: 'Rescheduled', count: getCount('event', 'reschedule'), color: 'orange', icon: <ArrowRightLeft size={14} />, filter: { type: 'event', status: 'reschedule' } },
-            { id: 'tk_total', label: 'Total Tasks', count: getCount('task', null), color: 'slate', icon: <ListChecks size={14} />, filter: { type: 'task', status: null } },
-            { id: 'tk_com', label: 'Task Complete', count: getCount('task', 'completed'), color: 'emerald', icon: <CheckCircle size={14} />, filter: { type: 'task', status: 'completed' } },
-            { id: 'tk_pen', label: 'Task Pending', count: getCount('task', 'pending'), color: 'rose', icon: <AlertCircle size={14} />, filter: { type: 'task', status: 'pending' } },
+        // Grouped by the module each metric belongs to, so Session / Task / Todo figures read
+        // as three separate stories instead of one undifferentiated row. Card definitions
+        // (labels, counts, colors, icons, filters) are unchanged — only their grouping is new.
+        const groups = [
+            {
+                key: 'sessions',
+                label: 'Sessions',
+                cards: [
+                    { id: 'ev_total', label: 'Total Sessions', count: getCount('event', null), color: 'indigo', icon: <Activity size={14} />, filter: { type: 'event', status: null } },
+                    { id: 'ev_com', label: 'Completed', count: getCount('event', 'completed'), color: 'emerald', icon: <CheckCircle size={14} />, filter: { type: 'event', status: 'completed' } },
+                    { id: 'ev_pen', label: 'Pending', count: getCount('event', 'pending'), color: 'amber', icon: <Clock size={14} />, filter: { type: 'event', status: 'pending' } },
+                    { id: 'ev_res', label: 'Rescheduled', count: getCount('event', 'reschedule'), color: 'orange', icon: <ArrowRightLeft size={14} />, filter: { type: 'event', status: 'reschedule' } },
+                ],
+            },
+            // Hidden entirely when the company's Delegation module is off — no heading, no cards.
+            ...(showTaskStats ? [{
+                key: 'tasks',
+                label: 'Task & Delegation',
+                cards: [
+                    { id: 'tk_total', label: 'Total Tasks', count: getCount('task', null), color: 'slate', icon: <ListChecks size={14} />, filter: { type: 'task', status: null } },
+                    { id: 'tk_com', label: 'Task Complete', count: getCount('task', 'completed'), color: 'emerald', icon: <CheckCircle size={14} />, filter: { type: 'task', status: 'completed' } },
+                    { id: 'tk_pen', label: 'Task Pending', count: getCount('task', 'pending'), color: 'rose', icon: <AlertCircle size={14} />, filter: { type: 'task', status: 'pending' } },
+                ],
+            }] : []),
+            {
+                // Always shown: todos are personal and independent of the Delegation module.
+                // Counts are computed the same way but on type "todo", so they can never
+                // overlap the Task counts above (a document is one type or the other).
+                key: 'todos',
+                label: 'Personal Todo',
+                cards: [
+                    { id: 'td_total', label: 'Total Todos', count: getCount('todo', null), color: 'violet', icon: <ClipboardList size={14} />, filter: { type: 'todo', status: null } },
+                    { id: 'td_com', label: 'Completed Todos', count: getCount('todo', 'completed'), color: 'emerald', icon: <CheckCircle size={14} />, filter: { type: 'todo', status: 'completed' } },
+                    // Amber, not violet: violet is the Todo module's own colour and is already
+                    // carried by the Total card, so a violet Pending card read as a duplicate.
+                    // Amber also matches "Pending" in the Sessions group.
+                    { id: 'td_pen', label: 'Pending Todos', count: getCount('todo', 'pending'), color: 'amber', icon: <Clock size={14} />, filter: { type: 'todo', status: 'pending' } },
+                ],
+            },
         ];
-    }, [events, currentViewDate]);
+        return groups;
+    }, [events, currentViewDate, showTaskStats]);
+
+    // The logged-in user's own todos for the day shown in the Day Summary. `isCreator` is a
+    // belt-and-braces guard: the API already scopes todos to their owner.
+    const dayTodos = useMemo(
+        () => dayEvents.filter(e => e.extendedProps?.type === 'todo' && e.extendedProps?.isCreator !== false),
+        [dayEvents]
+    );
 
     const activeFilter = statFilter;
     const filteredEvents = useMemo(() => {
@@ -345,7 +669,15 @@ const CalendarPage = () => {
 
     const openCreateModal = (type) => {
         setIsEdit(false); setCurrentEventId(null);
-        setEventForm({ ...initialForm, type, start: summaryDate, end: summaryDate });
+        if (type === 'todo') {
+            // A new todo defaults to the CURRENT date + time — that "now" is what the header
+            // badge shows and what the Start Date field reads. Start time is the creation time
+            // (there is no separate Start Time field); the user picks the Due date + time.
+            const nowIso = new Date().toISOString();
+            setEventForm({ ...initialForm, type, start: nowIso, end: nowIso, all_day: false });
+        } else {
+            setEventForm({ ...initialForm, type, start: summaryDate, end: summaryDate });
+        }
         setShowModal(true);
     };
 
@@ -356,7 +688,7 @@ const CalendarPage = () => {
         const startRaw = ev.start; const endRaw = ev.end || ev.start;
         setEventForm({
             ...initialForm, title: ev.title, type: props.type, start: startRaw, end: endRaw,
-            all_day: ev.allDay, session_type: props.session_type, priority: props.priority || 'Normal',
+            all_day: props.type === 'todo' ? false : ev.allDay, session_type: props.session_type, priority: props.priority || 'Normal',
             session_template_id: props.session_template_id, batch_id: props.batch_id,
             quarter_id: props.quarter_id, assigned_departments: props.assigned_departments || [],
             assigned_member_ids: props.assigned_member_ids || [], coach_ids: props.coach_ids || [],
@@ -366,6 +698,7 @@ const CalendarPage = () => {
             repeat: props.repeat || 'Does not repeat',
             repeat_end_date: props.repeat_end_date || '',
             repeat_interval: props.repeat_interval || 1,
+            repeat_data: normalizeRepeatData(props.repeat_data),
             assigned_to: props.assigned_to || 'myself',
             target_staff_id: props.target_staff_id || [],
             reminders: props.reminders || [],
@@ -410,7 +743,16 @@ const CalendarPage = () => {
     };
 
     const handleSave = async () => {
-        if (!eventForm.title) return showError("Add a title");
+        if (!eventForm.title) return showError(eventForm.type === 'todo' ? "Add a todo title" : "Add a title");
+        // A todo must say what actually has to be done — the details are the todo.
+        if (eventForm.type === 'todo' && !(eventForm.additional_details || '').trim()) {
+            return showError("Add the task details for this todo");
+        }
+        // Recurrence is validated by the Task & Delegation rules, unchanged — see validateRepeat.
+        if (eventForm.type === 'todo') {
+            const repeatError = validateRepeat(eventForm);
+            if (repeatError) return showError(repeatError);
+        }
 
         const eventStart = new Date(eventForm.start);
         const now = new Date();
@@ -423,22 +765,33 @@ const CalendarPage = () => {
         }
 
 
+        const isTodo = eventForm.type === 'todo';
+
         // ─── CONFLICT DETECTION WARNING (Logged) ───
-        try {
-            const conflictCheck = await api.post('/calendar/events/validate-conflict', { 
-                ...eventForm, id: currentEventId 
-            });
-            if (conflictCheck.data.has_conflict) {
-                console.warn("Conflict detected:", conflictCheck.data.conflicts.map(c => c.title).join(", "));
-            }
-        } catch (e) { console.error("Conflict check failed", e); }
+        // Skipped for todos: they have no attendees, so there is nobody to clash with.
+        if (!isTodo) {
+            try {
+                const conflictCheck = await api.post('/calendar/events/validate-conflict', {
+                    ...eventForm, id: currentEventId
+                });
+                if (conflictCheck.data.has_conflict) {
+                    console.warn("Conflict detected:", conflictCheck.data.conflicts.map(c => c.title).join(", "));
+                }
+            } catch (e) { console.error("Conflict check failed", e); }
+        }
 
         try {
             if (isEdit) await api.patch(`/calendar/events/${currentEventId}`, eventForm);
             else await api.post('/calendar/events', eventForm);
-            showSuccess(isEdit ? 'Event updated' : 'Event scheduled successfully');
-            fetchData(); setShowModal(false); setShowSummary(false); 
-        } catch (err) { showError('Failed to save event'); console.error(err); }
+            showSuccess(isTodo ? (isEdit ? 'Todo updated' : 'Todo created') : (isEdit ? 'Event updated' : 'Event scheduled successfully'));
+            fetchData(); setShowModal(false); setShowSummary(false);
+        } catch (err) {
+            // Surface the backend's real reason (e.g. a past-date block) instead of a generic
+            // message, so the user knows what to fix rather than seeing "Failed to save".
+            const detail = err.response?.data?.detail;
+            showError(typeof detail === 'string' && detail ? detail : (isTodo ? 'Failed to save todo' : 'Failed to save event'));
+            console.error(err);
+        }
     };
 
     const role = user?.role?.toLowerCase();
@@ -530,7 +883,8 @@ const CalendarPage = () => {
                 <div className="flex items-start justify-between mb-2">
                     <div className="space-y-1.5">
                         <div className="flex items-center gap-2">
-                                {type === 'task' ? <CheckCircle size={10} style={{ color: isCreator ? '#f97316' : '#e11d48' }} /> : 
+                                {type === 'todo' ? <ClipboardList size={10} style={{ color: '#8b5cf6' }} /> :
+                                 type === 'task' ? <CheckCircle size={10} style={{ color: isCreator ? '#f97316' : '#e11d48' }} /> :
                                  type === 'orm_reminder' ? <Layers size={10} className="text-amber-600" /> :
                                  <Activity size={10} style={{ color: isCreator ? '#6366f1' : '#0d9488' }} />}
                                 {type === 'orm_reminder' ? 'ORM REMINDER' : type}
@@ -543,8 +897,10 @@ const CalendarPage = () => {
                 </div>
                 <div className="flex flex-col gap-1.5 text-[10px] font-bold text-[var(--text-muted)] mt-2 border-t border-[var(--border)] pt-2 border-dashed">
                     <div className="flex items-center justify-between">
-                        <span className="flex items-center gap-1 opacity-60"> <Clock size={11} /> Deadline: </span>
-                        <span className="text-[var(--text-main)]">{formatShortIST(ev.start)}</span>
+                        <span className="flex items-center gap-1 opacity-60"> <Clock size={11} /> {type === 'todo' ? 'Due:' : 'Deadline:'} </span>
+                        {/* Todos render in the user's own timezone so the card matches the date
+                            they picked; sessions/tasks keep the existing IST rendering. */}
+                        <span className="text-[var(--text-main)]">{type === 'todo' ? formatTodoShort(ev.end || ev.start, ev.allDay ?? ev.extendedProps?.all_day) : formatShortIST(ev.start)}</span>
                     </div>
                     {ev.extendedProps.completed_at && (
                         <div className="flex items-center justify-between text-emerald-600 bg-emerald-500/5 px-2 py-0.5 rounded-md">
@@ -641,10 +997,24 @@ const CalendarPage = () => {
 
             <div className="flex-1 bg-[var(--bg-card)] border border-[var(--border)] rounded-[24px] md:rounded-[40px] overflow-hidden shadow-2xl p-3 md:p-6 fc-theme-orlando relative">
                 {loading && (<div className="absolute inset-0 flex items-center justify-center bg-[var(--bg-card)]/80 backdrop-blur-sm z-[100]"> <div className="w-12 h-12 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin"></div> </div>)}
-                {/* ─── Stats Dashboard Row ─── */}
-                <div className="flex flex-nowrap items-center gap-3 mb-6 p-1 overflow-x-auto no-scrollbar scroll-smooth">
-
-                    {currentMonthStats.map(s => {
+                {/* ─── Stats Dashboard — one container per module, side by side ─── */}
+                {/* flex-wrap + flex-1 (rather than a fixed grid) is what keeps the row gap-free:
+                    3 containers share the row on desktop, 2 per row on tablet with the third
+                    growing to full width, 1 per row on mobile — and when the Task & Delegation
+                    container is hidden the remaining two expand to fill the space on their own.
+                    Equal height comes free from the flex row's default `align-items: stretch`. */}
+                <div className="flex flex-wrap items-stretch gap-3 mb-6">
+                    {currentMonthStats.map(group => (
+                        <div key={group.key} className="flex-1 min-w-[260px] flex flex-col gap-2.5 p-3 md:p-4 bg-[var(--input-bg)] border border-[var(--border)] rounded-[24px]">
+                            <div className="flex items-center gap-2">
+                                <span className="text-[9px] font-black text-[var(--text-muted)] uppercase tracking-[0.2em] whitespace-nowrap">{group.label}</span>
+                                <span className="flex-1 h-px bg-[var(--border)]" />
+                            </div>
+                            {/* Two columns inside every container so the cards line up across all
+                                three. A container with an odd number of cards lets its last card
+                                span both columns, so there is never a hole in the grid. */}
+                            <div className="grid grid-cols-2 gap-2.5 [&>*:last-child:nth-child(odd)]:col-span-2">
+                                {group.cards.map(s => {
                         const isActive = statFilter?.type === s.filter.type && statFilter?.status === s.filter.status;
                         const colorMap = {
                             indigo: 'bg-indigo-50 border-indigo-100 text-indigo-700 active:bg-indigo-500 active:text-white',
@@ -653,6 +1023,7 @@ const CalendarPage = () => {
                             orange: 'bg-orange-50 border-orange-100 text-orange-700 active:bg-orange-500 active:text-white',
                             slate: 'bg-slate-50 border-slate-100 text-slate-700 active:bg-slate-500 active:text-white',
                             rose: 'bg-rose-50 border-rose-100 text-rose-700 active:bg-rose-500 active:text-white',
+                            violet: 'bg-violet-50 border-violet-100 text-violet-700 active:bg-violet-500 active:text-white',
                         };
                         const activeColorMap = {
                             indigo: 'bg-indigo-600 border-indigo-600 text-white ring-4 ring-indigo-100',
@@ -661,19 +1032,23 @@ const CalendarPage = () => {
                             orange: 'bg-orange-600 border-orange-600 text-white ring-4 ring-orange-100',
                             slate: 'bg-slate-700 border-slate-700 text-white ring-4 ring-slate-100',
                             rose: 'bg-rose-600 border-rose-600 text-white ring-4 ring-rose-100',
+                            violet: 'bg-violet-600 border-violet-600 text-white ring-4 ring-violet-100',
                         };
 
                         return (
                             <button key={s.id} onClick={() => setStatFilter(isActive ? null : s.filter)}
-                                className={`flex flex-col min-w-[110px] p-3 rounded-[20px] border-2 transition-all duration-300 transform active:scale-95 text-left shrink-0 ${isActive ? activeColorMap[s.color] : colorMap[s.color]}`}>
+                                className={`flex flex-col justify-between w-full min-w-0 p-3 rounded-[20px] border-2 transition-all duration-300 transform active:scale-95 text-left ${isActive ? activeColorMap[s.color] : colorMap[s.color]}`}>
                                 <div className="flex items-center justify-between mb-2">
                                     <div className={`p-1.5 rounded-lg ${isActive ? 'bg-white/20' : 'bg-white shadow-sm'}`}>{s.icon}</div>
                                     <span className="text-[18px] font-black leading-none">{s.count}</span>
                                 </div>
-                                <span className={`text-[10px] font-black uppercase tracking-widest opacity-80 ${isActive ? 'text-white' : ''}`}>{s.label}</span>
+                                <span className={`text-[10px] font-black uppercase tracking-widest opacity-80 truncate ${isActive ? 'text-white' : ''}`}>{s.label}</span>
                             </button>
                         );
-                    })}
+                                })}
+                            </div>
+                        </div>
+                    ))}
                 </div>
 
                 {/* ─── Month Jump Bar ─── */}
@@ -714,21 +1089,24 @@ const CalendarPage = () => {
                         const dotColor = info.event.extendedProps.dotColor;
                         const isTask = type === 'task';
                         const isORM = type === 'orm_reminder';
-                        
+                        const isTodo = type === 'todo';
+
                         return (
                             <div className={`flex items-center gap-1.5 px-2 py-0.5 max-w-full overflow-hidden group/ev transition-all border border-transparent hover:border-indigo-200/50 ${s === 'completed' ? 'opacity-40 grayscale' : ''} ${info.isStart ? 'rounded-l-lg' : ''} ${info.isEnd ? 'rounded-r-lg' : ''} ${!info.isStart && !info.isEnd ? '' : 'rounded-lg'}`}
                                  style={{ 
-                                     background: isORM 
-                                        ? 'rgba(245, 158, 11, 0.1)' 
-                                        : (isCreator 
-                                           ? (isTask ? 'rgba(249, 115, 22, 0.08)' : 'rgba(99, 102, 241, 0.08)')
-                                           : (isTask ? 'rgba(225, 29, 72, 0.08)' : 'rgba(13, 148, 136, 0.08)')),
+                                     background: isORM
+                                        ? 'rgba(245, 158, 11, 0.1)'
+                                        : isTodo
+                                           ? 'rgba(139, 92, 246, 0.08)'
+                                           : (isCreator
+                                              ? (isTask ? 'rgba(249, 115, 22, 0.08)' : 'rgba(99, 102, 241, 0.08)')
+                                              : (isTask ? 'rgba(225, 29, 72, 0.08)' : 'rgba(13, 148, 136, 0.08)')),
                                      marginLeft: info.isStart ? '0' : '-8px',
                                      marginRight: info.isEnd ? '0' : '-8px',
                                  }}>
                                 <div className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ background: isORM ? '#f59e0b' : dotColor }}></div>
                                 {isORM && <span className="px-1.5 py-0.5 bg-amber-500 text-white rounded text-[7px] font-black uppercase tracking-tighter shrink-0">ORM</span>}
-                                <span className={`text-[10px] font-black truncate ${isORM ? 'text-amber-700' : (isTask ? 'text-orange-700' : 'text-indigo-700')}`} style={{ textDecoration: s === 'completed' ? 'line-through' : 'none' }}>
+                                <span className={`text-[10px] font-black truncate ${isORM ? 'text-amber-700' : isTodo ? 'text-violet-700' : (isTask ? 'text-orange-700' : 'text-indigo-700')}`} style={{ textDecoration: s === 'completed' ? 'line-through' : 'none' }}>
                                     {info.event.title}
                                 </span>
                             </div>
@@ -781,19 +1159,22 @@ const CalendarPage = () => {
                                     </div>
                                 </div>
 
-                                {/* ─── Section 2: Strategic Tasks ─── */}
+                                {/* ─── Section 2: Personal Todos ─── */}
+                                {/* Todos only — the user's own private planning list. The backend
+                                    never returns anyone else's todo, and the isCreator guard keeps
+                                    that true here too. Delegation tasks live in Task & Delegation. */}
                                 <div className="space-y-4">
                                     <div className="flex items-center justify-between border-b border-[var(--border)] pb-2">
-                                        <h3 className="text-[11px] font-black text-orange-500 uppercase tracking-[0.2em] flex items-center gap-1.5"> <CheckCircle size={14} /> Tasks ({dayEvents.filter(e => e.extendedProps.type === 'task').length}) </h3>
+                                        <h3 className="text-[11px] font-black text-violet-500 uppercase tracking-[0.2em] flex items-center gap-1.5"> <ClipboardList size={14} /> Todos ({dayTodos.length}) </h3>
                                         {(canCreate && (!summaryDate || new Date(summaryDate + "T23:59:59") >= new Date() || backdateSettings.allow_backdate || backdateSettings.exception_users.includes(user?.email))) && (
-                                            <button onClick={() => openCreateModal('task')} className="flex items-center gap-1.5 px-4 py-1.5 bg-[var(--input-bg)] border border-[var(--border)] text-[var(--text-main)] rounded-lg text-[10px] font-black hover:bg-gray-100 transition-all uppercase tracking-widest"> <PlusCircle size={12} /> Add Task </button>
+                                            <button onClick={() => openCreateModal('todo')} className="flex items-center gap-1.5 px-4 py-1.5 bg-[var(--input-bg)] border border-[var(--border)] text-[var(--text-main)] rounded-lg text-[10px] font-black hover:bg-gray-100 transition-all uppercase tracking-widest"> <PlusCircle size={12} /> Add Todo </button>
                                         )}
                                     </div>
                                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                        {dayEvents.filter(e => e.extendedProps.type === 'task').map(ev => renderEventTile(ev))}
-                                        {dayEvents.filter(e => e.extendedProps.type === 'task').length === 0 && (
+                                        {dayTodos.map(ev => renderEventTile(ev))}
+                                        {dayTodos.length === 0 && (
                                             <div className="col-span-full py-8 flex flex-col items-center justify-center bg-gray-50/50 rounded-[24px] border border-dashed border-gray-200 opacity-50">
-                                                <p className="text-[9px] font-black text-gray-400 uppercase tracking-widest">No tasks listed.</p>
+                                                <p className="text-[9px] font-black text-gray-400 uppercase tracking-widest">No todos listed.</p>
                                             </div>
                                         )}
                                     </div>
@@ -821,7 +1202,7 @@ const CalendarPage = () => {
                                 <div className="flex items-center gap-3">
                                     <div className={`w-2.5 h-2.5 rounded-full animate-pulse ${eventForm.status === 'completed' ? 'bg-green-500' : 'bg-indigo-500'}`} />
                                     <span className="text-[10px] font-black uppercase tracking-widest text-[var(--accent-indigo)]"> 
-                                        {isEdit ? `Edit Operation [${eventForm.status}]` : (eventForm.type === 'task' ? 'Architect Tasks' : 'Architect Session')} 
+                                        {isEdit ? `Edit Operation [${eventForm.status}]` : (eventForm.type === 'todo' ? 'Personal Todo' : (eventForm.type === 'task' ? 'Architect Tasks' : 'Architect Session'))}
                                     </span>
                                 </div>
                                 <div className="flex items-center gap-2">
@@ -831,7 +1212,9 @@ const CalendarPage = () => {
                                             {(!isStaff) && (
                                                 <button onClick={() => setEventForm({ ...eventForm, status: 'completed' })} className={`p-2 rounded-lg transition-all ${eventForm.status === 'completed' ? 'bg-green-500 text-white shadow-lg' : 'text-gray-400 hover:text-green-500'}`}> <CheckCircle size={16} /> </button>
                                             )}
-                                            <button onClick={() => setEventForm({ ...eventForm, status: 'canceled' })} className={`p-2 rounded-lg transition-all ${eventForm.status === 'canceled' ? 'bg-red-500 text-white shadow-lg' : 'text-gray-400 hover:text-red-500'}`}> <Ban size={16} /> </button>
+                                            {eventForm.type !== 'todo' && (
+                                                <button onClick={() => setEventForm({ ...eventForm, status: 'canceled' })} className={`p-2 rounded-lg transition-all ${eventForm.status === 'canceled' ? 'bg-red-500 text-white shadow-lg' : 'text-gray-400 hover:text-red-500'}`}> <Ban size={16} /> </button>
+                                            )}
                                             
                                             {canDelete && <button onClick={() => handleQuickAction(currentEventId, 'delete')} className="p-2 text-gray-400 hover:text-red-500 hover:bg-red-500/10 rounded-lg"> <Trash2 size={16} /> </button>}
                                         </div>
@@ -906,15 +1289,27 @@ const CalendarPage = () => {
                                 ) : (
                                     <>
                                         <div className="space-y-3">
-                                    <input autoFocus placeholder={eventForm.type === 'task' ? "Task Name" : "Session Title"} className="w-full text-2xl font-black bg-transparent border-b border-dashed border-gray-200 focus:border-[var(--accent-indigo)] outline-none pb-2 text-[var(--text-main)] transition-colors"
+                                    <input autoFocus placeholder={eventForm.type === 'todo' ? "Example: Prepare weekly report" : (eventForm.type === 'task' ? "Task Name" : "Session Title")} className="w-full text-2xl font-black bg-transparent border-b border-dashed border-gray-200 focus:border-[var(--accent-indigo)] outline-none pb-2 text-[var(--text-main)] transition-colors"
                                         value={eventForm.title} onChange={e => setEventForm({ ...eventForm, title: e.target.value })} />
 
                                     <div className="flex flex-wrap items-center gap-3">
-                                        <div className="flex items-center gap-1.5 px-2 py-1 bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] text-[9px] font-black uppercase tracking-widest rounded-lg"> <Clock size={12} /> IST • {formatIST(eventForm.start)} </div>
+                                        <div className="flex items-center gap-1.5 px-2 py-1 bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] text-[9px] font-black uppercase tracking-widest rounded-lg">
+                                            <Clock size={12} />
+                                            {eventForm.type === 'todo'
+                                                ? formatTodoDateTime(eventForm.start, eventForm.all_day)
+                                                : `IST • ${formatIST(eventForm.start)}`}
+                                        </div>
                                         {isEdit && (
                                             <div className="flex items-center gap-1.5">
                                                 <label className="text-[9px] font-black text-gray-400 uppercase">Status:</label>
                                                 {(eventForm.isCreator || canUpdate) ? (
+                                                    eventForm.type === 'todo' ? (
+                                                        <button type="button"
+                                                            onClick={() => setEventForm({ ...eventForm, status: eventForm.status === 'completed' ? 'schedule' : 'completed' })}
+                                                            className={`flex items-center gap-1 px-3 py-1 rounded-md text-[10px] font-black uppercase transition-all ${eventForm.status === 'completed' ? 'bg-green-500 text-white shadow-lg' : 'bg-[var(--input-bg)] border border-[var(--border)] text-[var(--accent-indigo)] hover:border-green-500 hover:text-green-500'}`}>
+                                                            <CheckCircle size={12} /> {eventForm.status === 'completed' ? 'Completed' : 'Mark Complete'}
+                                                        </button>
+                                                    ) : (
                                                     <select value={eventForm.status} onChange={e => setEventForm({ ...eventForm, status: e.target.value })}
                                                         className="bg-[var(--input-bg)] border border-[var(--border)] rounded-md px-2 py-0.5 text-[10px] font-black text-[var(--accent-indigo)] uppercase outline-none focus:border-[var(--accent-indigo)]">
                                                         <option value="schedule">Scheduled</option>
@@ -922,6 +1317,7 @@ const CalendarPage = () => {
                                                         <option value="canceled">Canceled</option>
                                                         {!isStaff && <option value="completed">Completed</option>}
                                                     </select>
+                                                    )
                                                 ) : (
                                                     <span className="px-2 py-0.5 bg-gray-100 rounded text-[9px] font-black uppercase text-gray-500">{eventForm.status}</span>
                                                 )}
@@ -979,6 +1375,11 @@ const CalendarPage = () => {
                                     )}
                                 </div>
 
+                                {/* A todo has no configuration grid at all — it is just a title, details, a due
+                    date and an optional reminder (all rendered below, shared with the other
+                    types). No category, priority, repeat or delegation, matching a standard
+                    personal todo app. */}
+                {eventForm.type !== 'todo' && (
                                 <div className={`grid grid-cols-1 md:grid-cols-2 gap-6 ${(isEdit && !eventForm.isCreator && !canUpdate && eventForm.isAssigned) ? 'opacity-40 pointer-events-none' : ''}`}>
                                     {isStaff ? (
                                         eventForm.type === 'event' ? (
@@ -1141,8 +1542,10 @@ const CalendarPage = () => {
                                         )
                                     )}
                                 </div>
+                                )}
 
-                                {!(isStaff && eventForm.type === 'task') && (
+                                {/* Participant management never applies to a todo — it is personal. */}
+                                {eventForm.type !== 'todo' && !(isStaff && eventForm.type === 'task') && (
                                     <div className="space-y-3 p-4 bg-[var(--input-bg)] rounded-2xl border border-[var(--border)] shadow-sm">
                                         <div className="space-y-2">
                                             <label className="text-[9px] font-black text-[var(--text-muted)] uppercase tracking-wider flex items-center gap-1.5">
@@ -1178,46 +1581,83 @@ const CalendarPage = () => {
                                 )}
 
                                 <div className="space-y-4">
-                                    <div className="flex items-center gap-4 flex-wrap">
-                                        <div className="flex items-center gap-2 bg-[var(--input-bg)] px-4 py-2.5 rounded-xl border border-[var(--border)] relative cursor-pointer hover:border-[var(--accent-indigo)] transition-all">
-                                            <CalendarDays size={18} className="text-[var(--accent-indigo)]" />
-                                            <span className="text-[13px] font-black">{new Date(eventForm.start).toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' })}</span>
-                                            <input type="date" className="absolute inset-0 opacity-0 cursor-pointer" 
-                                                   value={getLocalDatePart(eventForm.start)}
-                                                   onChange={(e) => {
-                                                       const newStart = updateDateTimePart(eventForm.start, e.target.value, true);
-                                                       const newEnd = updateDateTimePart(eventForm.end, e.target.value, true);
-                                                       setEventForm({...eventForm, start: newStart, end: newEnd});
-                                                   }} />
-                                        </div>
-                                        <label className="flex items-center gap-3 cursor-pointer bg-[var(--input-bg)] border border-[var(--border)] px-4 py-2.5 rounded-xl shadow-inner group">
-                                            <input type="checkbox" checked={eventForm.all_day} onChange={e => setEventForm({ ...eventForm, all_day: e.target.checked })} className="w-4 h-4 accent-[var(--accent-indigo)]" />
-                                            <span className="text-[11px] font-black uppercase text-[var(--text-muted)] group-hover:text-[var(--accent-indigo)] transition-colors">Full Day Block</span>
+                                    {eventForm.type === 'todo' && (
+                                        <label className="text-[9px] font-black text-[var(--text-muted)] uppercase tracking-wider flex items-center gap-1.5">
+                                            <CalendarDays size={12} /> Due Date / Time
                                         </label>
-                                        {!eventForm.all_day && (
-                                            <div className="flex items-center gap-2 bg-[var(--accent-indigo-bg)] p-1 rounded-xl border border-[var(--border)] shadow-inner">
-                                                <CustomTimePicker 
-                                                    value={new Date(eventForm.start).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })}
-                                                    onChange={(newTime) => {
-                                                        const [hours, minutes] = newTime.split(':');
-                                                        const newDate = new Date(eventForm.start);
-                                                        newDate.setHours(parseInt(hours), parseInt(minutes));
-                                                        setEventForm({ ...eventForm, start: newDate.toISOString() });
-                                                    }}
-                                                />
-                                                <ArrowRightLeft size={10} className="text-[var(--accent-indigo)] opacity-40" />
-                                                <CustomTimePicker 
-                                                    value={new Date(eventForm.end).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })}
-                                                    onChange={(newTime) => {
-                                                        const [hours, minutes] = newTime.split(':');
-                                                        const newDate = new Date(eventForm.end);
-                                                        newDate.setHours(parseInt(hours), parseInt(minutes));
-                                                        setEventForm({ ...eventForm, end: newDate.toISOString() });
-                                                    }}
-                                                />
+                                    )}
+                                    <div className="flex items-center gap-4 flex-wrap">
+                                        {eventForm.type === 'todo' ? (
+                                            /* A todo shows only its Due — opens the shared month-grid
+                                               DATE/TIME calendar (MiniDatePicker) instead of the native
+                                               popup. The start is the creation timestamp (in the header). */
+                                            <div className="flex flex-col gap-1">
+                                                <span className="text-[9px] font-black uppercase tracking-wider text-[var(--text-muted)]">Due</span>
+                                                <button type="button" onClick={() => setDueDatePickerOpen(true)}
+                                                    className="flex items-center gap-2 bg-[var(--input-bg)] px-4 py-2.5 rounded-xl border border-[var(--border)] cursor-pointer hover:border-[var(--accent-indigo)] transition-all">
+                                                    <CalendarDays size={18} className="text-[var(--accent-indigo)]" />
+                                                    <span className="text-[13px] font-black">{new Date(eventForm.end).toLocaleString(undefined, { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', hour12: true })}</span>
+                                                </button>
                                             </div>
+                                        ) : (
+                                            <>
+                                                <div className="flex items-center gap-2 bg-[var(--input-bg)] px-4 py-2.5 rounded-xl border border-[var(--border)] relative cursor-pointer hover:border-[var(--accent-indigo)] transition-all">
+                                                    <CalendarDays size={18} className="text-[var(--accent-indigo)]" />
+                                                    <span className="text-[13px] font-black">{new Date(eventForm.start).toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' })}</span>
+                                                    <input type="date" className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                                                           value={getLocalDatePart(eventForm.start)}
+                                                           onClick={(e) => { try { e.currentTarget.showPicker(); } catch { /* click still focuses */ } }}
+                                                           onChange={(e) => {
+                                                               const newStart = updateDateTimePart(eventForm.start, e.target.value, true);
+                                                               const newEnd = updateDateTimePart(eventForm.end, e.target.value, true);
+                                                               setEventForm({...eventForm, start: newStart, end: newEnd});
+                                                           }} />
+                                                </div>
+                                                <label className="flex items-center gap-3 cursor-pointer bg-[var(--input-bg)] border border-[var(--border)] px-4 py-2.5 rounded-xl shadow-inner group">
+                                                    <input type="checkbox" checked={eventForm.all_day} onChange={e => setEventForm({ ...eventForm, all_day: e.target.checked })} className="w-4 h-4 accent-[var(--accent-indigo)]" />
+                                                    <span className="text-[11px] font-black uppercase text-[var(--text-muted)] group-hover:text-[var(--accent-indigo)] transition-colors">Full Day Block</span>
+                                                </label>
+                                                {!eventForm.all_day && (
+                                                    <div className="flex items-center gap-2 bg-[var(--accent-indigo-bg)] p-1 rounded-xl border border-[var(--border)] shadow-inner">
+                                                        <CustomTimePicker
+                                                            value={new Date(eventForm.start).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })}
+                                                            onChange={(newTime) => {
+                                                                const [hours, minutes] = newTime.split(':');
+                                                                const newDate = new Date(eventForm.start);
+                                                                newDate.setHours(parseInt(hours), parseInt(minutes));
+                                                                setEventForm({ ...eventForm, start: newDate.toISOString() });
+                                                            }}
+                                                        />
+                                                        <ArrowRightLeft size={10} className="text-[var(--accent-indigo)] opacity-40" />
+                                                        <CustomTimePicker
+                                                            value={new Date(eventForm.end).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })}
+                                                            onChange={(newTime) => {
+                                                                const [hours, minutes] = newTime.split(':');
+                                                                const newDate = new Date(eventForm.end);
+                                                                newDate.setHours(parseInt(hours), parseInt(minutes));
+                                                                setEventForm({ ...eventForm, end: newDate.toISOString() });
+                                                            }}
+                                                        />
+                                                    </div>
+                                                )}
+                                            </>
                                         )}
                                     </div>
+
+                                    {/* ─── Frequency (todo only) ───
+                                        The Task & Delegation Repeat control, reused as-is: same
+                                        options, same repeat_data, same validation, and the same
+                                        nightly rollover engine on the backend. A todo's due date
+                                        doubles as the series start, so the control sits directly
+                                        under it. */}
+                                    {eventForm.type === 'todo' && (
+                                        <div className="space-y-3 pt-2">
+                                            <label className="text-[9px] font-black text-[var(--text-muted)] uppercase tracking-wider flex items-center gap-1.5">
+                                                <ArrowRightLeft size={12} /> Frequency
+                                            </label>
+                                            <TodoRepeatSection form={eventForm} setForm={setEventForm} minEndDate={getLocalDatePart(eventForm.start)} />
+                                        </div>
+                                    )}
                                 </div>
                                 <div className="space-y-4 p-5 bg-orange-50/20 rounded-[24px] border border-orange-100 border-dashed">
                                     <div className="flex items-center justify-between">
@@ -1241,8 +1681,18 @@ const CalendarPage = () => {
                                     )}
                                 </div>
 
-                                <textarea placeholder={eventForm.type === 'task' ? "Task Details..." : "Instruction..." } rows={3} className="w-full bg-[var(--input-bg)] p-4 rounded-2xl text-[12px] font-medium border border-[var(--border)] outline-none focus:bg-white transition-all shadow-inner"
-                                    value={eventForm.additional_details} onChange={e => setEventForm({ ...eventForm, additional_details: e.target.value })} />
+                                {eventForm.type === 'todo' ? (
+                                    <div className="space-y-2">
+                                        <label className="text-[9px] font-black text-[var(--text-muted)] uppercase tracking-wider flex items-center gap-1.5">
+                                            <FileText size={12} /> Task Details <span className="text-[var(--accent-indigo)]">*</span>
+                                        </label>
+                                        <textarea placeholder="Example: Review all pending reports before 5 PM." rows={6} className="w-full bg-[var(--input-bg)] p-4 rounded-2xl text-[12px] font-medium border border-[var(--border)] outline-none focus:bg-white transition-all shadow-inner resize-y"
+                                            value={eventForm.additional_details} onChange={e => setEventForm({ ...eventForm, additional_details: e.target.value })} />
+                                    </div>
+                                ) : (
+                                    <textarea placeholder={eventForm.type === 'task' ? "Task Details..." : "Instruction..."} rows={3} className="w-full bg-[var(--input-bg)] p-4 rounded-2xl text-[12px] font-medium border border-[var(--border)] outline-none focus:bg-white transition-all shadow-inner"
+                                        value={eventForm.additional_details} onChange={e => setEventForm({ ...eventForm, additional_details: e.target.value })} />
+                                )}
                                     </>
                                 )}
                             </div>
@@ -1252,6 +1702,15 @@ const CalendarPage = () => {
                                 onClose={() => setShowReminderModal(false)}
                                 reminders={eventForm.reminders}
                                 onApply={(reminders) => setEventForm({ ...eventForm, reminders })}
+                            />
+
+                            {/* Todo Due date/time — the shared month-grid DATE/TIME calendar. */}
+                            <MiniDatePicker
+                                isOpen={dueDatePickerOpen}
+                                onClose={() => setDueDatePickerOpen(false)}
+                                value={eventForm.end}
+                                title="Select Due Date"
+                                onApply={(iso) => setEventForm(f => ({ ...f, end: iso }))}
                             />
 
                             {!(isEdit && !isStaff && !eventForm.isCreator) && eventForm.status !== 'completed' && (
@@ -1266,7 +1725,7 @@ const CalendarPage = () => {
                                     <button onClick={handleSave}
                                         disabled={isEdit && !(user.role === 'superadmin' || user.role === 'admin' || eventForm.isCreator)}
                                         className={`bg-[var(--btn-primary)] text-white px-10 py-3 rounded-xl text-[12px] font-black shadow-xl shadow-indigo-500/30 hover:scale-[1.02] active:scale-[0.98] transition-all tracking-[0.1em] uppercase ${isEdit && !(user.role === 'superadmin' || user.role === 'admin' || eventForm.isCreator) ? 'opacity-20 cursor-not-allowed grayscale' : ''}`}>
-                                        {isEdit ? 'Authorize Updates' : (eventForm.type === 'task' ? 'Schedule Task' : 'Schedule Session')}
+                                        {isEdit ? (eventForm.type === 'todo' ? 'Save Todo' : 'Authorize Updates') : (eventForm.type === 'todo' ? 'Create Todo' : (eventForm.type === 'task' ? 'Schedule Task' : 'Schedule Session'))}
                                     </button>
                                 </div>
                             )}

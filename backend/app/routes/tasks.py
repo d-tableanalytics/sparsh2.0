@@ -9,9 +9,13 @@ import re
 
 from app.db.mongodb import get_collection
 from app.controllers.auth_controller import (
-    get_current_user, get_user_from_token, require_task_access,
-    is_internal_user, TASK_ACCESS_DENIED_MESSAGE,
-    get_non_internal_user_ids, TASK_RECIPIENT_DENIED_MESSAGE,
+    get_user_from_token, require_task_access,
+    has_task_access, is_client_side_user,
+    TASK_ACCESS_DENIED_MESSAGE, DELEGATION_DISABLED_MESSAGE,
+    get_ineligible_recipient_ids, recipient_denied_message,
+    get_rank_ineligible_assignees, ASSIGN_RANK_DENIED_MESSAGE,
+    ADMIN_TIER, client_rank, CLIENT_RANK,
+    company_admin_company_id, is_company_task_admin,
 )
 from app.utils.calendar_utils import CALENDAR_COLLECTIONS, find_event_across_collections
 from app.services.activity_log_service import log_activity
@@ -38,6 +42,21 @@ def _can_view_all_tasks(user: dict) -> bool:
         return True
     # Optional explicit grant for a specific non-admin who should see everything.
     return bool(user.get("permissions", {}).get("tasks", {}).get("view_all_tasks"))
+
+
+# ── Internal vs client task separation ───────────────────────────────────────────
+# The two environments are fully independent: an internal Sparsh task is never visible to
+# client users, and a client task is never visible to internal Sparsh users (not even an
+# internal Super Admin/Admin). Client-created tasks carry notification_scope='company' (and
+# usually a company_id); internal tasks are 'staff'/unset with no company_id.
+def _is_client_task(task: dict) -> bool:
+    return (task.get("notification_scope") == "company"
+            or bool(str(task.get("company_id") or "").strip()))
+
+# Mongo clause selecting ONLY internal tasks (no company scope, no company_id) — used to keep
+# the internal "all tasks" view from ever returning client-company tasks.
+_INTERNAL_TASK_CLAUSE = {"notification_scope": {"$ne": "company"},
+                         "company_id": {"$in": [None, ""]}}
 
 # Richer workflow taken on by type=="task" docs. The legacy `status` field
 # (schedule/completed/canceled/reschedule) stays authoritative for the Calendar page.
@@ -184,7 +203,21 @@ async def _fetch_tasks(
         # Only Super Admin + Sparsh Admin see every task system-wide. Everyone else silently
         # falls back to their own tasks (no 403), so "All Tasks" never leaks others' data.
         if not _can_view_all_tasks(current_user):
-            clauses.append({"$or": _visibility_clauses(user_id)})
+            vis = _visibility_clauses(user_id)
+            # A reporting manager additionally sees tasks assigned to their direct reports
+            # (same environment, so no cross-wall leak).
+            report_ids = await _direct_report_ids(current_user)
+            if report_ids:
+                vis = vis + [{"target_staff_id": {"$in": report_ids}}]
+            # A client user additionally sees whatever their governance rank entitles them to
+            # (today: an MD sees their whole company). Unioned in, never replacing the two
+            # rules above — see _company_admin_clauses.
+            vis = vis + _company_admin_clauses(current_user)
+            clauses.append({"$or": vis})
+        else:
+            # Internal admins see every INTERNAL task, but NEVER client-company tasks — the two
+            # environments stay fully separate.
+            clauses.append(_INTERNAL_TASK_CLAUSE)
     elif scope == "group":
         if not group_id:
             raise HTTPException(status_code=400, detail="group_id is required for group scope")
@@ -197,7 +230,11 @@ async def _fetch_tasks(
         # generic `if group_id:` clause below scopes results to this group's tasks.
     elif scope == "deleted":
         if not _can_view_all_tasks(current_user):
-            clauses.append({"$or": _visibility_clauses(user_id)})
+            # An MD may restore any of their company's tasks, so the Deleted view has to show
+            # them — otherwise they hold the authority with nothing to use it on.
+            clauses.append({"$or": _visibility_clauses(user_id) + _company_admin_clauses(current_user)})
+        else:
+            clauses.append(_INTERNAL_TASK_CLAUSE)
     else:
         raise HTTPException(status_code=400, detail="Invalid scope")
 
@@ -234,7 +271,8 @@ async def _fetch_tasks(
     return results
 
 
-def _serialize_task(doc: dict, current_user_id: str) -> dict:
+def _serialize_task(doc: dict, current_user_id: str, report_ids: set = None,
+                    admin_company_id: str = None) -> dict:
     ws = _resolve_workflow_status(doc)
     now = datetime.utcnow()
     return {
@@ -262,6 +300,16 @@ def _serialize_task(doc: dict, current_user_id: str) -> dict:
         "parentTaskId": doc.get("parent_task_id"),
         "recurringGroupId": doc.get("recurring_group_id"),
         "isCreator": doc.get("user_id") == current_user_id,
+        # True when the viewer is the reporting manager of one of this task's assignees — so the
+        # list dropdown shows them the VERIFIER options (Complete / Approve), not "Request for
+        # Verification". Uses a pre-fetched report_ids set, so there's no per-row DB query.
+        "isReportingManager": bool(report_ids) and not doc.get("user_id") == current_user_id
+        and bool({str(a) for a in (doc.get("target_staff_id") or [])} & (report_ids or set())),
+        # Same purpose as isReportingManager, for a company MD: the UI gates Edit / Delete /
+        # Verify on role names a client MD ("clientadmin") isn't part of, so it needs the flag.
+        # Uses a pre-resolved company id, so there's no per-row work here either.
+        "isCompanyAdmin": bool(admin_company_id)
+        and str(doc.get("company_id") or "") == admin_company_id,
         "deletedAt": doc.get("deleted_at"),
         # Exposed on the list payload too (not just detail) so list dropdowns can apply the
         # verification-aware labels / role-based options without a second fetch.
@@ -279,18 +327,23 @@ def _serialize_task(doc: dict, current_user_id: str) -> dict:
 
 
 async def _user_names(user_ids: list) -> dict:
-    """user_id -> display name, from the staff collection. Used for the dependency history notes."""
+    """user_id -> display name. Looks in both staff and learners, so a company user's name
+    resolves too once their company has the Delegation module. Used for dependency history notes."""
     oids = [ObjectId(uid) for uid in user_ids if ObjectId.is_valid(uid)]
     if not oids:
         return {}
-    docs = await get_collection("staff").find({"_id": {"$in": oids}}).to_list(1000)
-    return {
-        str(d["_id"]): d.get("full_name") or d.get("first_name") or d.get("email") or "Unknown"
-        for d in docs
-    }
+    names = {}
+    for col_name in ("staff", "learners"):
+        docs = await get_collection(col_name).find({"_id": {"$in": oids}}).to_list(1000)
+        for d in docs:
+            names.setdefault(
+                str(d["_id"]),
+                d.get("full_name") or d.get("first_name") or d.get("email") or "Unknown",
+            )
+    return names
 
 
-async def _fetch_subtasks(parent_id: str, current_user_id: str):
+async def _fetch_subtasks(parent_id: str, current_user_id: str, admin_company_id: str = None):
     """Child tasks (parent_task_id == parent_id) across the task collections, oldest first."""
     out = []
     for col_name in TASK_COLLECTIONS:
@@ -298,7 +351,7 @@ async def _fetch_subtasks(parent_id: str, current_user_id: str):
             "type": "task", "parent_task_id": parent_id, "deleted_at": None,
         }).to_list(500)
         for d in docs:
-            out.append(_serialize_task(d, current_user_id))
+            out.append(_serialize_task(d, current_user_id, None, admin_company_id))
     out.sort(key=lambda t: str(t.get("createdAt") or ""))
     return out
 
@@ -326,7 +379,12 @@ def _is_participant(existing: dict, current_user: dict) -> bool:
     on a task (add checklist items, comment, attach files), broader than who can edit
     the core task fields or change its status."""
     user_id = str(current_user["_id"])
-    if current_user.get("role") == "superadmin":
+    # The Super Admin oversight bypass applies to INTERNAL tasks only — a client task is never
+    # visible to internal Sparsh, so it must fall through to genuine participant membership.
+    if current_user.get("role") == "superadmin" and not _is_client_task(existing):
+        return True
+    # The client-side equivalent: a company's MD participates in every task of that company.
+    if is_company_task_admin(existing, current_user):
         return True
     if existing.get("user_id") == user_id:
         return True
@@ -335,6 +393,94 @@ def _is_participant(existing: dict, current_user: dict) -> bool:
     if user_id in (existing.get("watchers") or []):
         return True
     return False
+
+
+# ── Client governance authority ──────────────────────────────────────────────────
+# Client-side access follows the company's governance ladder (MD > HR > HOD > Implementor,
+# see auth_controller.client_rank), layered on top of — never instead of — the personal
+# access every user already has (created / assigned / in-loop) and the reporting-manager rule
+# below. Visibility is the UNION of all three, expressed as one Mongo $or.
+#
+# Rolling out one rank at a time. Implemented so far:
+#   MD (governance_role == "MD", or role == "clientadmin") → full admin over their own
+#   company's tasks: sees them all, and acts on them all. The client-side counterpart of the
+#   internal Super Admin bypass, bounded by company instead of by the whole system.
+# Every other rank returns None here and keeps exactly the access it has today.
+#
+# The predicate itself lives in auth_controller (is_company_task_admin) because
+# calendar_events.py needs the same test for task edit/delete.
+def _company_admin_clauses(user: dict) -> list:
+    """Mongo $or arm giving a client MD every task in their own company.
+
+    Matching the task's own `company_id` is what keeps SELF-ASSIGNED tasks in the result:
+    those carry assigned_to == "myself" and can have an empty target_staff_id (see the "my"
+    scope above), so an assignee-based match would silently drop them. It also makes company
+    isolation structural — a task from another company can never satisfy the clause.
+    """
+    company_id = company_admin_company_id(user)
+    return [{"company_id": company_id}] if company_id else []
+
+
+# ── Reporting-Manager hierarchy ──────────────────────────────────────────────────
+# A user's reporting manager (users.reporting_manager = the manager's id) can additionally
+# see and verify tasks assigned to that user. Same environment only (internal manager ↔ staff
+# reports; client manager ↔ same-company reports), so this never crosses the internal/client
+# wall. Null reporting_manager → no manager, behaves exactly as before.
+async def _direct_report_ids(user: dict) -> list:
+    """Ids of users who report directly to `user`, within the same environment."""
+    uid = str(user.get("_id") or "")
+    if not uid:
+        return []
+    coll = "learners" if is_client_side_user(user) else "staff"
+    query = {"reporting_manager": uid, "is_active": {"$ne": False}}
+    if is_client_side_user(user) and user.get("company_id"):
+        query["company_id"] = str(user["company_id"])
+    docs = await get_collection(coll).find(query, {"_id": 1}).to_list(2000)
+    return [str(d["_id"]) for d in docs]
+
+
+async def _is_manager_of_assignee(task: dict, user: dict) -> bool:
+    """True if `user` is the reporting manager of any assignee on `task` (same environment)."""
+    uid = str(user.get("_id") or "")
+    assignees = [str(a) for a in (task.get("target_staff_id") or []) if a]
+    if not uid or not assignees:
+        return False
+    oids = []
+    for a in assignees:
+        try:
+            oids.append(ObjectId(a))
+        except Exception:
+            pass
+    if not oids:
+        return False
+    coll = "learners" if is_client_side_user(user) else "staff"
+    doc = await get_collection(coll).find_one(
+        {"_id": {"$in": oids}, "reporting_manager": uid}, {"_id": 1})
+    return doc is not None
+
+
+async def _manager_ids_for_task(task: dict) -> set:
+    """Reporting-manager ids of the task's assignees. They monitor and verify the task, so the
+    verification request (and other real-time status events) reach them alongside the assigner."""
+    assignees = [str(a) for a in (task.get("target_staff_id") or []) if a]
+    if not assignees:
+        return set()
+    oids = []
+    for a in assignees:
+        try:
+            oids.append(ObjectId(a))
+        except Exception:
+            pass
+    out: set = set()
+    if not oids:
+        return out
+    for coll in ("staff", "learners"):
+        async for u in get_collection(coll).find(
+                {"_id": {"$in": oids}}, {"reporting_manager": 1}):
+            mgr = str(u.get("reporting_manager") or "").strip()
+            if mgr:
+                out.add(mgr)
+    return out
 
 
 async def _get_task_or_404(task_id: str):
@@ -439,7 +585,12 @@ async def list_tasks(
     start_iso, end_iso = _period_to_range(period, startDate, endDate)
     docs = await _fetch_tasks(current_user, scope, category, tag, frequency, assignedTo, search, start_iso, end_iso, groupId)
     user_id = str(current_user["_id"])
-    return [_serialize_task(d, user_id) for d in docs]
+    # Which of these tasks belong to the viewer's direct reports (computed once) — so the list
+    # can flag them and show the manager the verifier controls instead of "Request for Verification".
+    report_ids = set(await _direct_report_ids(current_user))
+    # Resolved once for the same reason as report_ids — the rows only need a string compare.
+    admin_company_id = company_admin_company_id(current_user)
+    return [_serialize_task(d, user_id, report_ids, admin_company_id) for d in docs]
 
 
 # Actions written to `activity_logs` that represent task lifecycle events (see log_activity
@@ -549,8 +700,11 @@ async def task_event_stream(token: str = Query(...)):
     user = await get_user_from_token(token)
     if not user:
         raise HTTPException(status_code=401, detail="Invalid or missing token")
-    if not is_internal_user(user):
-        raise HTTPException(status_code=403, detail=TASK_ACCESS_DENIED_MESSAGE)
+    if not await has_task_access(user):
+        raise HTTPException(
+            status_code=403,
+            detail=DELEGATION_DISABLED_MESSAGE if is_client_side_user(user) else TASK_ACCESS_DENIED_MESSAGE,
+        )
     user_id = str(user["_id"])
 
     async def event_gen():
@@ -573,16 +727,42 @@ async def task_event_stream(token: str = Query(...)):
     )
 
 
-# Internal users who can be picked in a task's Assigned To / In Loop dropdowns. Defined
-# before /{task_id} (literal path) and gated by require_task_access, so any internal task
-# creator can load it (unlike GET /users, which needs the users.read permission). Returns
-# ONLY staff-collection (internal Sparsh) users — client-side users never appear here.
+# Users who can be picked in a task's Assigned To / In Loop dropdowns. Defined before
+# /{task_id} (literal path) and gated by require_task_access, so any task creator can load it
+# (unlike GET /users, which needs the users.read permission).
+#
+# An internal Sparsh user gets the staff directory. A company user (their company's Delegation
+# module is ON) gets ONLY their own company's active users — the internal Sparsh directory is
+# never exposed to a client company. Mirrors get_ineligible_recipient_ids, which enforces the
+# same split on save.
 @router.get("/assignable-users")
-async def list_assignable_users(current_user: dict = Depends(require_task_access)):
-    docs = await get_collection("staff").find({"is_active": {"$ne": False}}).to_list(1000)
+async def list_assignable_users(
+    include_all: bool = Query(False, alias="all"),
+    current_user: dict = Depends(require_task_access),
+):
+    """Default: the rank-filtered "who I may ASSIGN to" list (drives the assign picker).
+    `?all=true`: the full company/internal-scoped directory for NAME RESOLUTION on task/
+    delegation detail & list views — it must still include people the viewer can't assign to
+    (e.g. the admin or MD who assigned them the task), so those don't render as "Unknown"."""
+    if is_client_side_user(current_user):
+        company_id = current_user.get("company_id")
+        if not company_id:
+            return []
+        docs = await get_collection("learners").find({
+            "company_id": str(company_id), "is_active": {"$ne": False},
+        }).to_list(1000)
+        # Assign picker only: a client may assign at or below their own MD>HR>HOD>Implementor rank.
+        if not include_all:
+            actor_rank = client_rank(current_user)
+            docs = [u for u in docs if client_rank(u) <= actor_rank]
+    else:
+        docs = await get_collection("staff").find({"is_active": {"$ne": False}}).to_list(1000)
+        # Assign picker only: SMOPS assign to other SMOPS — hide admin/superadmin from the list.
+        if not include_all and (current_user.get("role") or "").lower() not in ADMIN_TIER:
+            docs = [u for u in docs if (u.get("role") or "").lower() not in ADMIN_TIER]
     return [{
         "_id": str(u["_id"]),
-        "full_name": u.get("full_name") or u.get("first_name") or u.get("email"),
+        "full_name": u.get("full_name") or (f"{u.get('first_name', '')} {u.get('last_name', '')}".strip() or None) or u.get("email"),
         "email": u.get("email"),
         "role": u.get("role"),
         "designation": u.get("designation"),
@@ -592,11 +772,23 @@ async def list_assignable_users(current_user: dict = Depends(require_task_access
 @router.get("/{task_id}")
 async def get_task_detail(task_id: str, current_user: dict = Depends(require_task_access)):
     existing, _ = await _get_task_or_404(task_id)
-    if not _is_participant(existing, current_user):
+    # A participant OR the reporting manager of an assignee may view the full task (this single
+    # response carries status, progress, comments, attachments and both histories).
+    is_mgr = await _is_manager_of_assignee(existing, current_user)
+    # A company MD passes _is_participant on any of their company's tasks, so no extra arm here.
+    if not _is_participant(existing, current_user) and not is_mgr:
         raise HTTPException(status_code=403, detail="Not authorized to view this task")
     uid = str(current_user["_id"])
+    admin_company_id = company_admin_company_id(current_user)
     detail = _serialize_task_detail(existing, uid)
-    detail["subtasks"] = await _fetch_subtasks(task_id, uid)
+    detail["subtasks"] = await _fetch_subtasks(task_id, uid, admin_company_id)
+    # Lets the UI show the reporting manager the same task-action controls as an admin —
+    # scoped to only their reports' tasks (status, Complete, Block, Dependent, Verify, Reopen).
+    detail["isReportingManager"] = is_mgr
+    # Same idea for a company MD, whose authority covers every task in their own company. The
+    # UI gates on role names that a client MD ("clientadmin") is not part of, so it needs this
+    # flag to unlock Edit / Delete / Verify / Reopen.
+    detail["isCompanyAdmin"] = is_company_task_admin(existing, current_user)
     return detail
 
 
@@ -618,26 +810,39 @@ async def update_task_status(task_id: str, body: dict, current_user: dict = Depe
 
     existing, col_name = await _get_task_or_404(task_id)
 
-    # Dependent on Other hands the task to the picked doer (must be an internal Sparsh user, same
-    # rule as create/update). Blocked captures the doer name only — no hand-off.
+    # Dependent on Other hands the task to the picked doer, who must be an eligible recipient
+    # for whoever is handing it over (internal staff, or their own company's users) — same rule
+    # as create/update. Blocked captures the doer name only — no hand-off.
     reassign_doer = None
     if new_status == "dependent_on_others" and doer_id and doer_id != existing.get("dependency_doer_id"):
-        bad = await get_non_internal_user_ids([doer_id])
+        bad = await get_ineligible_recipient_ids(current_user, [doer_id])
         if bad:
-            raise HTTPException(status_code=403, detail=TASK_RECIPIENT_DENIED_MESSAGE)
+            raise HTTPException(status_code=403, detail=recipient_denied_message(current_user))
+        rank_bad = await get_rank_ineligible_assignees(current_user, [doer_id])
+        if rank_bad:
+            raise HTTPException(status_code=403, detail=ASSIGN_RANK_DENIED_MESSAGE)
         reassign_doer = doer_id
 
     user_id = str(current_user["_id"])
-    is_admin = current_user.get("role") == "superadmin"
+    # The Super Admin bypass is for INTERNAL tasks only. On a CLIENT task it does not apply, so
+    # verification/finalize/reopen stays with the client user who assigned it — an internal
+    # Super Admin/Admin can never verify or act on a client-side task.
+    # A company MD is the client-side admin: same authority, bounded by their own company. That
+    # includes the verify / finalize / reopen rights below, via is_assigner_or_admin.
+    is_admin = ((current_user.get("role") == "superadmin" and not _is_client_task(existing))
+                or is_company_task_admin(existing, current_user))
     is_creator = existing.get("user_id") == user_id
     is_assignee = user_id in (existing.get("target_staff_id") or [])
-    if not (is_admin or is_creator or is_assignee):
+    # The assignee's reporting manager may act on the task as an authorized verifier (same as
+    # the assigner) — both to update status and to verify/finalize/reopen.
+    is_manager = await _is_manager_of_assignee(existing, current_user)
+    if not (is_admin or is_creator or is_assignee or is_manager):
         raise HTTPException(status_code=403, detail="Not authorized to update this task")
 
     old_status = _resolve_workflow_status(existing)
-    # Only the assigner/delegator (creator) or an admin may finalize or reopen a task that
-    # has been submitted for verification — never the assignee alone.
-    is_assigner_or_admin = is_admin or is_creator
+    # Only the assigner/delegator (creator), an admin, or the assignee's reporting manager may
+    # finalize or reopen a task submitted for verification — never the assignee alone.
+    is_assigner_or_admin = is_admin or is_creator or is_manager
     if old_status == "verification" and not is_assigner_or_admin:
         raise HTTPException(status_code=403, detail="Only the assigner can verify, finalize, or reopen this task.")
     if new_status == "in_progress_reopened" and not is_assigner_or_admin:
@@ -797,6 +1002,9 @@ async def update_task_status(task_id: str, body: dict, current_user: dict = Depe
 
     projected = {**existing, **updates}
     recipients = task_events.recipients_for(existing) | task_events.recipients_for(projected)
+    # The assignees' reporting managers also monitor & verify the task, so the verification
+    # request (and every status event) reaches them alongside the assigner.
+    recipients |= await _manager_ids_for_task(projected)
     await task_events.publish(recipients, {
         "type": event_type,
         "task_id": task_id,
@@ -1055,11 +1263,15 @@ async def revise_task_deadline(task_id: str, body: dict, current_user: dict = De
 
     existing, col_name = await _get_task_or_404(task_id)
 
-    is_admin = current_user.get("role") == "superadmin"
+    is_admin = (current_user.get("role") == "superadmin"
+                or is_company_task_admin(existing, current_user))
     is_creator = existing.get("user_id") == str(current_user["_id"])
     is_assignee = str(current_user["_id"]) in (existing.get("target_staff_id") or [])
-    if not (is_admin or is_creator or is_assignee):
-        raise HTTPException(status_code=403, detail="Only the assigner or assignee can revise this task's deadline")
+    # The assignee's reporting manager may revise the deadline too — the Reopen flow uses this
+    # to send a task back with a new due date, so without it the manager can't reopen.
+    is_manager = await _is_manager_of_assignee(existing, current_user)
+    if not (is_admin or is_creator or is_assignee or is_manager):
+        raise HTTPException(status_code=403, detail="Only the assigner, assignee, or reporting manager can revise this task's deadline")
 
     old_end = existing.get("end")
     if old_end == new_end:
@@ -1104,7 +1316,8 @@ async def soft_delete_task(task_id: str, current_user: dict = Depends(require_ta
     if not existing or existing.get("type") != "task":
         raise HTTPException(status_code=404, detail="Task not found")
 
-    is_admin = current_user.get("role") == "superadmin"
+    is_admin = (current_user.get("role") == "superadmin"
+                or is_company_task_admin(existing, current_user))
     is_creator = existing.get("user_id") == str(current_user["_id"])
     if not (is_admin or is_creator):
         raise HTTPException(status_code=403, detail="Not authorized to delete this task")
@@ -1137,7 +1350,8 @@ async def restore_task(task_id: str, current_user: dict = Depends(require_task_a
     if not existing or existing.get("type") != "task":
         raise HTTPException(status_code=404, detail="Task not found")
 
-    is_admin = current_user.get("role") == "superadmin"
+    is_admin = (current_user.get("role") == "superadmin"
+                or is_company_task_admin(existing, current_user))
     is_creator = existing.get("user_id") == str(current_user["_id"])
     if not (is_admin or is_creator):
         raise HTTPException(status_code=403, detail="Not authorized to restore this task")

@@ -13,6 +13,7 @@ const StatusReasonModal = ({ isOpen, status, users = [], onClose, onSubmit, savi
 
   useEffect(() => {
     if (!isOpen) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setDoerId('');
     setReason('');
   }, [isOpen]);

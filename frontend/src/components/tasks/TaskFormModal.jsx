@@ -10,6 +10,7 @@ import { createTask, updateTask, uploadTaskAttachment, deleteTaskAttachment } fr
 import { createTaskCategory, createTaskTag } from '../../services/taskMetaApi';
 import { getHolidays } from '../../services/holidayApi';
 import { useAuth } from '../../context/AuthContext';
+import { canManageTaskSettings } from '../../utils/taskAccess';
 import { useNotification } from '../../context/NotificationContext';
 import PickerModal from './PickerModal';
 import MiniDatePicker from './MiniDatePicker';
@@ -174,6 +175,12 @@ const TaskFormModal = ({ isOpen, onClose, onSaved, task = null, categories = [],
 
   const removeChecklistItem = (id) => setChecklist(c => c.filter(item => item.id !== id));
 
+  // Creating a category/tag is an internal task-settings action (the backend restricts it to
+  // internal admins). Company users on a Delegation-enabled company pick from the existing
+  // list; a brand-new name they type is still persisted server-side when the task itself is
+  // saved, so nothing is lost — this just avoids firing a call that would 403 for them.
+  const canManageTaxonomy = canManageTaskSettings(user);
+
   // Category/tags picked here are persisted immediately via the task_categories/task_tags
   // APIs (not just local form state) so they survive a refresh and show up in every other
   // task list/create view right away — see taskMetaApi.js. Re-saving an existing name is a
@@ -183,7 +190,7 @@ const TaskFormModal = ({ isOpen, onClose, onSaved, task = null, categories = [],
     if (!name) return;
     setForm(f => ({ ...f, category: name }));
     const isNew = !categories.some(c => c.toLowerCase() === name.toLowerCase());
-    if (isNew) {
+    if (isNew && canManageTaxonomy) {
       try {
         await createTaskCategory(name);
         onTaxonomyChanged?.();
@@ -198,7 +205,7 @@ const TaskFormModal = ({ isOpen, onClose, onSaved, task = null, categories = [],
   // is just appended and available to pick). Backend get-or-creates, so re-adds are no-ops.
   const handleCategoryAddNew = async (name) => {
     const n = (name || '').trim();
-    if (!n) return;
+    if (!n || !canManageTaxonomy) return;
     const exists = categories.some(c => c.toLowerCase() === n.toLowerCase());
     try {
       if (!exists) await createTaskCategory(n);
@@ -211,7 +218,7 @@ const TaskFormModal = ({ isOpen, onClose, onSaved, task = null, categories = [],
   const handleTagsApply = async (selectedTags) => {
     setForm(f => ({ ...f, tags: selectedTags }));
     const newTags = selectedTags.filter(t => !availableTags.some(a => a.toLowerCase() === t.toLowerCase()));
-    if (newTags.length) {
+    if (newTags.length && canManageTaxonomy) {
       try {
         await Promise.all(newTags.map(t => createTaskTag(t)));
         onTaxonomyChanged?.();

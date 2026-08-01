@@ -30,6 +30,24 @@ TPMS_LADDER_HOUR = 7        # runEscalationLadder     — daily @ 07:00
 TPMS_SEED_HOUR = 6          # seedSuccessMeasures     — monthly, 1st @ 06:00
 
 
+# Which field a reminder's offset is measured from.
+# An event happens at `start`, so its reminders anchor there. A task and a todo do NOT:
+# both carry the moment that matters — the deadline / due date — in `end`. A task's `start`
+# is its recurrence anchor and a todo's `start` is merely its creation timestamp, which is
+# why the calendar grid also places both under `end` (see CalendarPage: displayStart).
+# Anchoring these to `start` made every "before" reminder resolve to a past trigger time and
+# fire on the next 60s tick — a todo's reminder went out seconds after it was created.
+DUE_ANCHORED_TYPES = {"task", "todo"}
+
+
+def get_reminder_anchor(event: dict):
+    """The ISO datetime string a reminder's offset is measured against."""
+    if event.get("type") in DUE_ANCHORED_TYPES:
+        # Fall back to `start` for older docs saved without an `end`.
+        return event.get("end") or event.get("start")
+    return event.get("start")
+
+
 async def start_reminder_scheduler():
     logger.info("Starting reminder scheduler background worker...")
     last_recurring_day = None
@@ -40,7 +58,10 @@ async def start_reminder_scheduler():
 
             # Once per day (first tick after midnight, and at startup), roll recurring
             # task series forward — creating each day's/week's/month's next occurrence.
-            today = datetime.utcnow().date()
+            # The day boundary is IST (UTC+5:30), so the next occurrence is created at
+            # 12:00 AM IST, not 00:00 UTC (= 5:30 AM IST). The generator applies the same
+            # IST boundary internally, so trigger and generation agree.
+            today = (datetime.utcnow() + timedelta(hours=5, minutes=30)).date()
             if today != last_recurring_day:
                 try:
                     from app.services.recurring_task_service import generate_due_recurring_tasks

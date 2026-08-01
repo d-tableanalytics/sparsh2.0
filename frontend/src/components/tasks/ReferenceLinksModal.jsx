@@ -10,6 +10,7 @@ const ReferenceLinksModal = ({ isOpen, onClose, links = [], onApply }) => {
 
   useEffect(() => {
     if (!isOpen) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setPending([...links]);
     setUrl('');
   }, [isOpen]);

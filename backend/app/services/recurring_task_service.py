@@ -7,7 +7,9 @@ once per day at/after midnight by the reminder scheduler, creates the NEXT occur
 each active series whose date has arrived — catching up any missed days — so there is exactly
 one task per period, never a bulk dump of duplicates.
 
-Only type == "task" documents are handled; recurring events keep their own behaviour.
+Personal TODOS repeat through this same engine, by the same rules (Calendar ▸ Personal Todo ▸
+Frequency uses the delegation Repeat control), so the two never drift apart. Recurring
+sessions/events keep their own bulk-generation behaviour.
 """
 from datetime import datetime, timezone, timedelta
 import logging
@@ -19,6 +21,22 @@ logger = logging.getLogger(__name__)
 
 TASK_COLLECTIONS = CALENDAR_COLLECTIONS + ["calendar_events"]
 
+# Document types this engine rolls forward. Todos ride along with tasks so a repeating todo
+# gets exactly the delegation feature's behaviour — same cadences, same holiday / weekly-off
+# handling, same one-occurrence-per-period rule.
+RECURRING_TYPES = ["task", "todo"]
+
+# The product runs on Indian Standard Time (UTC+5:30). Every "which day is it / has this
+# occurrence's day arrived" decision below is made in IST, so the next occurrence is created
+# at 12:00 AM IST (local midnight), not at 00:00 UTC (which is 5:30 AM IST). The scheduler that
+# calls this job flips its day counter on the same IST boundary (see reminder_scheduler).
+IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def _ist_date(dt):
+    """The calendar date of a tz-aware datetime as seen in IST."""
+    return dt.astimezone(IST).date()
+
 # Weekly off day(s) — recurring occurrences never land here, matching the task due-date
 # picker which blocks the same day. Python date.weekday(): Mon=0 … Sun=6, so {6} == Sunday.
 # (There is no persisted per-user weekly-off setting in the backend yet — see the picker's
@@ -27,8 +45,10 @@ WEEKLY_OFF_WEEKDAYS = {6}
 
 
 def _is_off_day(dt, holiday_dates) -> bool:
-    """A date the task must never land on: a holiday or a weekly off (Sunday)."""
-    return dt.date().isoformat() in holiday_dates or dt.weekday() in WEEKLY_OFF_WEEKDAYS
+    """A date the task must never land on: a holiday or a weekly off (Sunday). Judged in IST
+    so the day/weekday matches the date the user actually picked."""
+    ist = dt.astimezone(IST)
+    return ist.date().isoformat() in holiday_dates or ist.weekday() in WEEKLY_OFF_WEEKDAYS
 
 
 def _steps_by_single_day(repeat_type, interval) -> bool:
@@ -77,7 +97,7 @@ async def generate_due_recurring_tasks():
     from app.routes.calendar_events import _next_occurrence
 
     now = datetime.now(timezone.utc)
-    today = now.date()
+    today = _ist_date(now)  # "today" in IST — the boundary the next occurrence is created on
     created = 0
     skipped_holidays = 0
     skipped_weekly_offs = 0
@@ -89,7 +109,7 @@ async def generate_due_recurring_tasks():
     for col_name in TASK_COLLECTIONS:
         col = get_collection(col_name)
         docs = await col.find({
-            "type": "task",
+            "type": {"$in": RECURRING_TYPES},
             "recurring_group_id": {"$ne": None},
             "repeat": {"$nin": [None, "", "Does not repeat"]},
             "deleted_at": None,
@@ -127,10 +147,10 @@ async def generate_due_recurring_tasks():
                     break
                 if nxt.tzinfo is None:
                     nxt = nxt.replace(tzinfo=timezone.utc)
-                if end_dt and nxt.date() > end_dt.date():
+                if end_dt and _ist_date(nxt) > _ist_date(end_dt):
                     break
-                if nxt.date() > today:
-                    break  # future occurrence — created on its own day
+                if _ist_date(nxt) > today:
+                    break  # future occurrence — created at 12 AM IST on its own day
                 # An off-day (holiday or weekly off) must never hold a task. How we handle it
                 # depends on the cadence:
                 #   • Daily-style (1-day step): drop that day — the next day is its own
@@ -142,17 +162,17 @@ async def generate_due_recurring_tasks():
                 target = nxt
                 if _is_off_day(nxt, holiday_dates):
                     if _steps_by_single_day(repeat_type, interval):
-                        if nxt.date().isoformat() in holiday_dates:
+                        if _ist_date(nxt).isoformat() in holiday_dates:
                             skipped_holidays += 1
                         else:
                             skipped_weekly_offs += 1
                         curr = nxt
                         continue
                     shifted = _shift_to_working_day(nxt, holiday_dates)
-                    if shifted is None or (end_dt and shifted.date() > end_dt.date()):
+                    if shifted is None or (end_dt and _ist_date(shifted) > _ist_date(end_dt)):
                         curr = nxt
                         continue
-                    if shifted.date() > today:
+                    if _ist_date(shifted) > today:
                         break  # shifted target hasn't arrived yet — created on its own day
                     shifted_occurrences += 1
                     target = shifted
@@ -171,7 +191,9 @@ async def generate_due_recurring_tasks():
                         new_task["end"] = (target + (oe - os)).isoformat()
                     new_task["created_at"] = datetime.utcnow()
                     new_task["updated_at"] = None
-                    new_task["workflow_status"] = "in_progress"  # new occurrences start In Progress
+                    if head.get("type") == "task":
+                        # Delegation workflow state — a todo has no workflow, only status.
+                        new_task["workflow_status"] = "in_progress"  # new occurrences start In Progress
                     new_task["status"] = "schedule"
                     new_task["completed_at"] = None
                     new_task["completed_by"] = None
@@ -192,7 +214,7 @@ async def generate_due_recurring_tasks():
 
     if created or skipped_holidays or skipped_weekly_offs or shifted_occurrences:
         logger.info(
-            f"Recurring engine: created {created} task occurrence(s); "
+            f"Recurring engine: created {created} task/todo occurrence(s); "
             f"skipped {skipped_holidays} holiday and {skipped_weekly_offs} weekly-off date(s); "
             f"shifted {shifted_occurrences} occurrence(s) to the next working day."
         )

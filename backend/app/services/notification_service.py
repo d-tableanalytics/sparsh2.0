@@ -839,12 +839,22 @@ async def send_reminder_email(user_obj: dict, event: dict, reminder: dict = None
     is_task = (event.get("type") == "task") or ((reminder or {}).get("parent_type") == "task")
     dt_str = event.get("start", "")
     formatted_dt = format_datetime_standard(dt_str)
-    
+
+    # The channel the user chose in the Reminder modal. Reminders saved before this was wired
+    # through have no type here, so fall back to email rather than sending nothing.
+    delivery_type = (reminder or {}).get("reminder_type") or "email"
+
     context = {
+        # The stock reminder template greets "Hello {{name}}" — without this the placeholder
+        # was left in the message verbatim, since render_template only substitutes known keys.
+        "name": user_obj.get("full_name") or user_obj.get("first_name") or "there",
         "title": event.get("title"),
-        "reminder_time": datetime.utcnow().strftime("%H:%M %p"),
-        "event_time": formatted_dt if not is_task else "N/A",
-        "task_deadline": formatted_dt if is_task else "N/A",
+        "reminder_time": _describe_offset(reminder),
+        # Always populated: the stock template only references {{event_time}}, so restricting it
+        # to non-task types printed "starting at N/A" on every task reminder. {{task_deadline}}
+        # stays available for templates that word it as a deadline.
+        "event_time": formatted_dt,
+        "task_deadline": formatted_dt if is_due_anchored else "N/A",
         "meeting_url": event.get("meeting_link") or "View in Dashboard",
         "description": event.get("additional_details") or "No further details."
     }
@@ -853,7 +863,7 @@ async def send_reminder_email(user_obj: dict, event: dict, reminder: dict = None
     slug = "task_reminder" if is_task else "reminder"
     return await send_notification_from_template(user_obj, slug, context, "email", event.get("notification_scope"))
 
-async def send_conflict_notification_email(user_obj: dict, event_data: dict, existing_event: dict):
+async def send_conflict_notification_email(user_obj: dict, event_data: dict, existing_event: dict, send_company_copy: bool = True):
     # Subject: Reschedule time mail due to conflict
     subject = "⚠️ Action Required: Reschedule time mail due to conflict"
     
@@ -884,9 +894,11 @@ async def send_conflict_notification_email(user_obj: dict, event_data: dict, exi
     # Send to User
     results = {"user": await send_email_notification(user_obj.get("email"), subject, rendered_body, user_id, "schedule_conflict")}
     
-    # 2. Fetch Company Email and Send Copy
+    # 2. Fetch Company Email and Send Copy.
+    # The caller passes send_company_copy=False once this save has already copied the company,
+    # so a multi-user conflict produces one company copy instead of one per affected user.
     company_id = user_obj.get("company_id")
-    if company_id:
+    if company_id and send_company_copy:
         try:
             company = await get_collection("companies").find_one({"_id": ObjectId(company_id)})
             if company and company.get("email"):
