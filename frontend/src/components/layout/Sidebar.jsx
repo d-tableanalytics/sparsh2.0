@@ -24,7 +24,10 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen }) => {
   const location = useLocation();
   const [isCollapsed, setIsCollapsed] = useState(true);
   const [isMobile, setIsMobile] = useState(false);
-  const [isTasksOpen, setIsTasksOpen] = useState(false);
+  // Expanded state per collapsible nav group, keyed by the group's base path. Was a single
+  // boolean when Task Management was the only group; HRMS is the second, so it has to be a map
+  // or the two would share one toggle.
+  const [openGroups, setOpenGroups] = useState({});
 
   useEffect(() => {
     const checkMobile = () => {
@@ -69,6 +72,16 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen }) => {
       // (not a plain role list) and a client-side user never sees it. See utils/hrmsAccess.js.
       name: 'HRMS', path: '/hrms', icon: Briefcase,
       roles: [], visibleFn: canAccessHrms,
+      submodules: [
+        { name: 'Overview', path: '/hrms', icon: LayoutDashboard },
+        { name: 'Employees', path: '/hrms/employees', icon: Users },
+        { name: 'Organization', path: '/hrms/org', icon: Building2 },
+        { name: 'Attendance', path: '/hrms/attendance', icon: CalendarDays },
+        { name: 'Leave', path: '/hrms/leave', icon: CheckSquare },
+        { name: 'Payroll', path: '/hrms/payroll', icon: PieChart },
+        { name: 'Recruitment', path: '/hrms/recruitment', icon: Briefcase },
+        { name: 'Candidates', path: '/hrms/candidates', icon: Users },
+      ],
     },
     { name: 'Reports', path: '/admin/reports', icon: BarChart3, roles: ['superadmin', 'admin'] },
     { name: 'Company Settings', path: '/settings', icon: Settings, roles: ['clientadmin'] },
@@ -97,7 +110,6 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen }) => {
   });
 
   const sidebarWidth = isMobile ? 240 : (isCollapsed ? 72 : 240);
-  const isTaskRouteActive = location.pathname.startsWith('/tasks');
 
   // External Apps Script automation launcher (staff-side only).
   const AUTOMATION_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbx5lehRzFPHb4xxgp4QffcWIil0NTq-0BQtuyP91zQ/dev';
@@ -110,10 +122,8 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen }) => {
     if (isMobile) setIsMobileOpen(false);
   };
 
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    if (isTaskRouteActive) setIsTasksOpen(true);
-  }, [isTaskRouteActive]);
+  // No effect is needed to auto-open the active group: `openGroups[path] ?? groupActive`
+  // already defaults an unvisited group to open whenever the current route sits under it.
 
   return (
     <motion.aside
@@ -158,12 +168,16 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen }) => {
       <nav className="flex-1 px-3 space-y-1 overflow-y-auto no-scrollbar">
         {filteredLinks.map((link) => {
           if (link.submodules) {
-            const groupActive = isTaskRouteActive;
+            // A group is "active" whenever the current route sits under it, and defaults to
+            // expanded in that case — so landing on /hrms/employees opens HRMS without a click.
+            const groupActive = location.pathname === link.path
+              || location.pathname.startsWith(`${link.path}/`);
+            const isGroupOpen = openGroups[link.path] ?? groupActive;
             return (
               <div key={link.path}>
                 <button
                   type="button"
-                  onClick={() => setIsTasksOpen(o => !o)}
+                  onClick={() => setOpenGroups((o) => ({ ...o, [link.path]: !isGroupOpen }))}
                   className={`
                     group w-full flex items-center gap-3 p-2.5 rounded-lg transition-colors relative
                     ${groupActive
@@ -178,7 +192,7 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen }) => {
                       <motion.span initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="text-[13px] tracking-tight font-medium flex-1 text-left">
                         {link.name}
                       </motion.span>
-                      <ChevronDown size={14} className={`transition-transform ${isTasksOpen ? 'rotate-180' : ''}`} />
+                      <ChevronDown size={14} className={`transition-transform ${isGroupOpen ? 'rotate-180' : ''}`} />
                     </>
                   )}
                   {(isCollapsed && !isMobile) && (
@@ -189,7 +203,7 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen }) => {
                 </button>
 
                 <AnimatePresence initial={false}>
-                  {isTasksOpen && (!isCollapsed || isMobile) && (
+                  {isGroupOpen && (!isCollapsed || isMobile) && (
                     <motion.div
                       initial={{ height: 0, opacity: 0 }}
                       animate={{ height: 'auto', opacity: 1 }}
@@ -200,7 +214,7 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen }) => {
                         <NavLink
                           key={sub.path}
                           to={sub.path}
-                          end={sub.path === '/tasks'}
+                          end={sub.path === link.path}
                           onClick={() => { if (isMobile) setIsMobileOpen(false); }}
                           className={({ isActive }) => `
                             group flex items-center gap-3 pl-3 pr-2.5 py-2 rounded-lg transition-colors text-[12.5px]

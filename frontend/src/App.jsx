@@ -48,6 +48,16 @@ import PrivateRoute from './components/common/PrivateRoute';
 import RequireTaskAccess from './components/common/RequireTaskAccess';
 import RequireHrmsAccess from './components/common/RequireHrmsAccess';
 import HrmsDashboard from './pages/HRMS/HrmsDashboard';
+import Employees from './pages/HRMS/Employees';
+import EmployeeProfile from './pages/HRMS/EmployeeProfile';
+import OrgStructure from './pages/HRMS/OrgStructure';
+import Attendance from './pages/HRMS/Attendance';
+import Leave from './pages/HRMS/Leave';
+import Payroll from './pages/HRMS/Payroll';
+import Requisitions from './pages/HRMS/Requisitions';
+import Candidates from './pages/HRMS/Candidates';
+import PublicApply from './pages/HRMS/PublicApply';
+import PublicAssessment from './pages/HRMS/PublicAssessment';
 import AssistantWidget from './features/assistant';
 import './index.css';
 import { useAuth } from './context/AuthContext';
@@ -82,6 +92,12 @@ const AppRoutes = () => {
       <Route path="/login" element={user ? <Navigate to="/" /> : <Login />} />
       <Route path="/forgot-password" element={<ForgotPassword />} />
 
+      {/* PUBLIC HRMS pages — deliberately OUTSIDE PrivateRoute and outside the app shell.
+          The visitor is a job applicant, not a Sparsh user, so there is no sidebar and no
+          login. The backend rate-limits, size-caps and state-gates both endpoints. */}
+      <Route path="/apply/:code" element={<PublicApply />} />
+      <Route path="/assess/:code" element={<PublicAssessment />} />
+
       <Route path="/" element={<PrivateRoute><Dashboard /></PrivateRoute>} />
       <Route path="/dashboard" element={<Navigate to="/" />} />
 
@@ -112,6 +128,20 @@ const AppRoutes = () => {
           each will pass its own `module`/`action` so a staff user without the grant is told the
           permission is missing rather than the module. See docs/HRMS_REPLICATION_ROADMAP.md */}
       <Route path="/hrms" element={<PrivateRoute><RequireHrmsAccess><HrmsDashboard /></RequireHrmsAccess></PrivateRoute>} />
+      <Route path="/hrms/employees" element={<PrivateRoute><RequireHrmsAccess module="hrms"><Employees /></RequireHrmsAccess></PrivateRoute>} />
+      <Route path="/hrms/employees/:employeeCode" element={<PrivateRoute><RequireHrmsAccess module="hrms"><EmployeeProfile /></RequireHrmsAccess></PrivateRoute>} />
+      <Route path="/hrms/org" element={<PrivateRoute><RequireHrmsAccess module="hrms"><OrgStructure /></RequireHrmsAccess></PrivateRoute>} />
+      {/* Attendance needs no module grant: punching your own attendance is the one HRMS action
+          every internal user performs. Team view and manual entry are gated inside the page. */}
+      <Route path="/hrms/attendance" element={<PrivateRoute><RequireHrmsAccess><Attendance /></RequireHrmsAccess></PrivateRoute>} />
+      {/* Leave is likewise ungated at the route: applying for your own is universal. Approving
+          and configuring types are gated inside the page and enforced by the API. */}
+      <Route path="/hrms/leave" element={<PrivateRoute><RequireHrmsAccess><Leave /></RequireHrmsAccess></PrivateRoute>} />
+      {/* Ungated at the route so an employee can reach their OWN payslip; the page shows only
+          that unless payroll.read is held, and the API enforces the same split. */}
+      <Route path="/hrms/payroll" element={<PrivateRoute><RequireHrmsAccess><Payroll /></RequireHrmsAccess></PrivateRoute>} />
+      <Route path="/hrms/recruitment" element={<PrivateRoute><RequireHrmsAccess module="recruitment"><Requisitions /></RequireHrmsAccess></PrivateRoute>} />
+      <Route path="/hrms/candidates" element={<PrivateRoute><RequireHrmsAccess module="recruitment"><Candidates /></RequireHrmsAccess></PrivateRoute>} />
       <Route path="/sessions" element={<PrivateRoute><LearnerSessions /></PrivateRoute>} />
       <Route path="/company-portal" element={<PrivateRoute><CompanyPortal /></PrivateRoute>} />
       <Route path="/my-reports" element={<PrivateRoute><MyReports /></PrivateRoute>} />
