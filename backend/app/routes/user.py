@@ -132,9 +132,13 @@ async def read_users_me(current_user: dict = Depends(get_current_active_user)):
             current_user["orm_enabled"] = bool(company.get("orm_enabled", True)) if company else True
             # TPMS is opt-in: absent flag means OFF, so an un-migrated company stays dark.
             current_user["tpms_enabled"] = bool(company.get("tpms_enabled", False)) if company else False
+            # Task Management (Delegation) is opt-in too: absent flag means OFF. Gates the
+            # Task Management sidebar module for client-side users (see utils/taskAccess.js).
+            current_user["delegation_enabled"] = bool(company.get("delegation_enabled", False)) if company else False
         except Exception:
             current_user["orm_enabled"] = True
             current_user["tpms_enabled"] = False
+            current_user["delegation_enabled"] = False
     return current_user
 
 # ─── Helper to find user in any collection ───

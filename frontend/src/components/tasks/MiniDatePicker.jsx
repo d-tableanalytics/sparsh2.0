@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { createPortal } from 'react-dom';
 import {  AnimatePresence , motion } from 'framer-motion';
 import { X, ChevronLeft, ChevronRight, Save } from 'lucide-react';
 
@@ -78,7 +79,10 @@ const MiniDatePicker = ({ isOpen, onClose, value, onApply, title = 'Select Due D
     onClose();
   };
 
-  return (
+  // Portal to <body> so the picker escapes any transformed / overflow-hidden ancestor
+  // (e.g. the framer-motion Event Architect modal), which would otherwise make this
+  // `fixed` overlay resolve relative to — and get clipped by — that modal card.
+  return createPortal(
     <AnimatePresence>
       <div className="fixed inset-0 z-[400] flex items-center justify-center p-4">
         <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={onClose} className="absolute inset-0 bg-black/50 backdrop-blur-sm" />
@@ -169,7 +173,8 @@ const MiniDatePicker = ({ isOpen, onClose, value, onApply, title = 'Select Due D
           </div>
         </motion.div>
       </div>
-    </AnimatePresence>
+    </AnimatePresence>,
+    document.body
   );
 };
 

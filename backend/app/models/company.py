@@ -29,6 +29,8 @@ class CompanyBase(BaseModel):
     orm_enabled: bool = True  # Whether the ORM module is available to this company
     # TPMS is opt-in per company: a missing flag means OFF, unlike ORM which defaults on.
     tpms_enabled: bool = False
+    # Task Management (Delegation) module — opt-in per company, gates client-side access.
+    delegation_enabled: bool = False
 
 class CompanyCreate(CompanyBase):
     pass

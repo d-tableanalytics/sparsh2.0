@@ -361,6 +361,19 @@ const CompanyDetails = () => {
     }
   };
 
+  // Task Management (Delegation) — opt-in per company; absent flag means OFF. Gates the
+  // Task Management sidebar module for this company's client-side users.
+  const handleToggleDelegation = async () => {
+    const next = !(company.delegation_enabled ?? false);
+    try {
+      await api.patch(`/companies/${companyId}/delegation-access`, { enabled: next });
+      setCompany(prev => ({ ...prev, delegation_enabled: next }));
+      showSuccess(`Task Management ${next ? 'enabled' : 'disabled'} for ${company.name}`);
+    } catch (err) {
+      showError(err.response?.data?.detail || 'Failed to update Task Management access');
+    }
+  };
+
   const handleAddUser = async (e) => {
     e.preventDefault();
     try {
@@ -484,6 +497,16 @@ const CompanyDetails = () => {
               enabled={company.tpms_enabled ?? false}
               onToggle={handleToggleTpms}
               title="Toggle whether this company can access the TPMS module"
+            />
+          )}
+          {/* Task Management (Delegation) module access. Off by default: a company stays
+              without the Task Management module until switched on here. */}
+          {isStaff && canUpdate && (
+            <ModuleToggle
+              label="Task Mgmt"
+              enabled={company.delegation_enabled ?? false}
+              onToggle={handleToggleDelegation}
+              title="Toggle whether this company can access the Task Management module"
             />
           )}
           {canUpdate && (

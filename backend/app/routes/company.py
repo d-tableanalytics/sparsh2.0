@@ -231,6 +231,34 @@ async def update_company_tpms_access(company_id: str, body: CompanyORMAccessUpda
     await log_activity(current_user, "Toggle TPMS Access", "Company", f"{'Enabled' if body.enabled else 'Disabled'} TPMS for company {company_id}")
     return {"message": f"TPMS access {'enabled' if body.enabled else 'disabled'}", "tpms_enabled": body.enabled}
 
+
+# ─── Toggle Task Management (Delegation) Module Access ───
+@router.patch("/{company_id}/delegation-access")
+async def update_company_delegation_access(company_id: str, body: CompanyDelegationAccessUpdate, current_user: dict = Depends(get_current_user)):
+    """Switch the Task Management (Delegation) module on or off for one company.
+
+    Gates client-side users' access to the Task Management module (see
+    auth_controller.is_company_delegation_enabled / utils/taskAccess.js). Opt-in: absent
+    flag means OFF. Same authorization as the ORM toggle — superadmin, or staff holding the
+    companies.update permission.
+    """
+    permissions = current_user.get("permissions", {})
+    can_update = permissions.get("companies", {}).get("update", False)
+    if current_user.get("role") != "superadmin" and not can_update:
+        raise HTTPException(status_code=403, detail="Not authorized to manage Task Management access")
+
+    companies_collection = get_collection("companies")
+    result = await companies_collection.update_one(
+        {"_id": ObjectId(company_id)},
+        {"$set": {"delegation_enabled": body.enabled, "updated_at": datetime.now(timezone.utc)}}
+    )
+
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Company not found")
+
+    await log_activity(current_user, "Toggle Task Management Access", "Company", f"{'Enabled' if body.enabled else 'Disabled'} Task Management for company {company_id}")
+    return {"message": f"Task Management access {'enabled' if body.enabled else 'disabled'}", "delegation_enabled": body.enabled}
+
 # ─── Delete Company ───
 @router.delete("/{company_id}")
 async def delete_company(company_id: str, current_user: dict = Depends(get_current_user)):

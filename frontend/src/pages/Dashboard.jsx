@@ -7,9 +7,9 @@ import {
   TrendingUp, Activity, Plus, Clock, 
   ChevronRight, ArrowUpRight, Zap
 } from 'lucide-react';
-import { 
 import { motion } from 'framer-motion';
-  AreaChart, Area, XAxis, YAxis, CartesianGrid, 
+import {
+  AreaChart, Area, XAxis, YAxis, CartesianGrid,
   Tooltip, ResponsiveContainer, BarChart, Bar,
   PieChart, Pie, Cell, Legend
 } from 'recharts';
