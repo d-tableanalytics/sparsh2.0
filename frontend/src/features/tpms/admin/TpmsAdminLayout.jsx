@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
+// eslint-disable-next-line no-unused-vars
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   LayoutDashboard, Gauge, GitBranch, Building2, AlertTriangle, ScrollText,
@@ -54,6 +55,7 @@ const TpmsAdminLayout = () => {
   }, []);
 
   // Close the mobile drawer whenever the route changes.
+  // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { setIsMobileOpen(false); }, [location.pathname]);
 
   // Derive the current module title for the header.

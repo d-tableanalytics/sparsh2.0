@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
+// eslint-disable-next-line no-unused-vars
 import { motion } from 'framer-motion';
 import {
   LayoutDashboard, Activity, ClipboardList, BarChart3, UserCircle,
@@ -41,6 +42,7 @@ const SmopsShell = () => {
     return () => window.removeEventListener('resize', check);
   }, []);
 
+  // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { setIsMobileOpen(false); }, [location.pathname]);
 
   const active = [...SMOPS_LINKS]

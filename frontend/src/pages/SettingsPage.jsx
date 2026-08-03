@@ -1,10 +1,10 @@
-import React, { useState, useEffect } from 'react';
+﻿import React, { useState, useEffect } from 'react';
 import api from '../services/api';
 import { useAuth } from '../context/AuthContext';
 import { useNotification } from '../context/NotificationContext';
 import { canAccessTaskManagement, canManageTaskSettings } from '../utils/taskAccess';
 import { ShieldCheck, Plus, Trash2, Mail, Save, ToggleLeft as ToggleOff, ToggleRight as ToggleOn, Search, Info, UserCircle2, FolderTree, Tag } from 'lucide-react';
-import { motion, AnimatePresence } from 'framer-motion';
+import { AnimatePresence } from 'framer-motion';
 import GeneralSection from '../components/settings/GeneralSection';
 import MetaListSection from '../components/settings/MetaListSection';
 import PasswordCard from '../components/settings/PasswordCard';

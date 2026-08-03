@@ -31,6 +31,7 @@ export const CompanyProvider = ({ children }) => {
   return <CompanyContext.Provider value={value}>{children}</CompanyContext.Provider>;
 };
 
+// eslint-disable-next-line react-refresh/only-export-components
 export const useCompany = () => {
   const ctx = useContext(CompanyContext);
   if (!ctx) throw new Error('useCompany must be used within a CompanyProvider');

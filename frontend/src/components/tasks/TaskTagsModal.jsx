@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
+import { AnimatePresence } from 'framer-motion';
 import { X, Plus, Save, Tag as TagIcon } from 'lucide-react';
 
 // Pill-grid variant of the shared Cancel/Apply-Changes popover shape (see PickerModal),
@@ -16,7 +16,7 @@ const TaskTagsModal = ({ isOpen, onClose, tags = [], selected = [], onApply }) =
     setPending([...selected]);
     setAddingNew(false);
     setNewTag('');
-  }, [isOpen]);
+  }, [isOpen]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (!isOpen) return null;
 

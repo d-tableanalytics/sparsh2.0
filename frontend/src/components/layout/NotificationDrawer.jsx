@@ -24,7 +24,7 @@ const NotificationDrawer = ({ isOpen, onClose, onCountChange }) => {
     if (isOpen) {
       fetchNotifications();
     }
-  }, [isOpen]);
+  }, [isOpen]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const markAsRead = async (id) => {
     try {

@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
+import { AnimatePresence } from 'framer-motion';
 import {
   Users, UserPlus, Search, Filter,
   MoreVertical, Shield, Mail, Phone,
@@ -107,7 +107,7 @@ const UserManagement = () => {
     const [showAddModal, setShowAddModal] = useState(false);
     
     const canCreate = user?.role === 'superadmin' || user?.permissions?.users?.create;
-    const canRead = user?.role === 'superadmin' || user?.permissions?.users?.read;
+    const _canRead = user?.role === 'superadmin' || user?.permissions?.users?.read;
     
     const initialStaffForm = {
         first_name: '', last_name: '', email: '', password: '',

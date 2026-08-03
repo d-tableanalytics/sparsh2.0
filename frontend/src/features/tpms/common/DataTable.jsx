@@ -49,8 +49,7 @@ const DataTable = ({ columns, rows, pageSize = 8, searchKeys, toolbar, title, su
   return (
     <div className="rounded-2xl border border-[var(--border)] bg-[var(--bg-card)] shadow-sm overflow-hidden">
       {/* Header / toolbar */}
-      {(title || toolbar || true) && (
-        <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4 border-b border-[var(--border)]">
+      <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4 border-b border-[var(--border)]">
           <div className="min-w-0">
             {title && <h3 className="text-[14px] font-extrabold tracking-tight">{title}</h3>}
             {subtitle && <p className="text-[12px] text-[var(--text-muted)] mt-0.5">{subtitle}</p>}
@@ -67,8 +66,7 @@ const DataTable = ({ columns, rows, pageSize = 8, searchKeys, toolbar, title, su
             </div>
             {toolbar}
           </div>
-        </div>
-      )}
+      </div>
 
       {/* Table */}
       <div className="overflow-x-auto no-scrollbar">

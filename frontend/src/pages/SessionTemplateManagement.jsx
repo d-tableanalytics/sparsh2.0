@@ -1,9 +1,8 @@
-import React, { useState, useEffect } from 'react';
+﻿import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import api from '../services/api';
 import Modal from '../components/common/Modal';
 import { useNotification } from '../context/NotificationContext';
-import { motion } from 'framer-motion';
 import {
   Copy, Plus, Search, Trash2, Pencil, ExternalLink,
   MessageSquare, Hash, FileText, XCircle, LayoutGrid, List

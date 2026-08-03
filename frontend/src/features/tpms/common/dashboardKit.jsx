@@ -1,5 +1,5 @@
 import React from 'react';
-import { motion } from 'framer-motion';
+
 import { TrendingUp, TrendingDown, Minus } from 'lucide-react';
 
 /* Shared entrance transition for cards/sections — subtle fade + rise. */
@@ -12,9 +12,11 @@ const RISE = { initial: { opacity: 0, y: 10 }, animate: { opacity: 1, y: 0 }, tr
    ───────────────────────────────────────────────────────────── */
 
 /** On-brand hero gradient for dashboard headers (indigo → violet). */
+// eslint-disable-next-line react-refresh/only-export-components
 export const HEADER_GRADIENT = 'linear-gradient(120deg, #4f46e5 0%, #6d28d9 55%, #7c3aed 100%)';
 
 /** Icon-chip / value tones. */
+// eslint-disable-next-line react-refresh/only-export-components
 export const TILE = {
   blue:   { bg: 'var(--accent-indigo-bg)', fg: 'var(--accent-indigo)', bd: 'var(--accent-indigo-border)' },
   green:  { bg: 'var(--accent-green-bg)',  fg: 'var(--accent-green)',  bd: 'var(--accent-green-border)' },
@@ -186,6 +188,7 @@ export const TableShell = ({ minWidth = 900, children }) => (
  * `page` auto-clamps when the source shrinks (e.g. after a filter), so a stale
  * high page never renders an empty table.
  */
+// eslint-disable-next-line react-refresh/only-export-components
 export const usePaged = (rows = [], pageSize = 10) => {
   const [page, setPage] = React.useState(1);
   const total = rows.length;

@@ -1,5 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
-import { motion } from 'framer-motion';
+﻿import React, { useState, useEffect, useCallback } from 'react';
 import {
   Building2, Users, Briefcase, GraduationCap, CalendarDays, Layers, BookOpen,
   ListTodo, CheckCircle2, Clock, Award, Percent,

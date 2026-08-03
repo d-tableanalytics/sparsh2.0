@@ -12,7 +12,6 @@ import {
   Tooltip, ResponsiveContainer, BarChart, Bar,
   PieChart, Pie, Cell, Legend
 } from 'recharts';
-import { motion } from 'framer-motion';
 
 const Dashboard = () => {
   const navigate = useNavigate();
@@ -27,7 +26,7 @@ const Dashboard = () => {
   const [mixData, setMixData] = useState([]);
   const [upcomingEvents, setUpcomingEvents] = useState([]);
   const [teamMembers, setTeamMembers] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const [_loading, setLoading] = useState(true);
 
   const fetchData = async () => {
     try {

@@ -1,8 +1,7 @@
-import React, { useState, useEffect } from 'react';
+﻿import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import api from '../services/api';
 import { useNotification } from '../context/NotificationContext';
-import { motion } from 'framer-motion';
 import {
     ArrowLeft, Calendar as CalendarIcon, Clock, Link as LinkIcon,
     Video, UserCheck, Activity, UploadCloud, 

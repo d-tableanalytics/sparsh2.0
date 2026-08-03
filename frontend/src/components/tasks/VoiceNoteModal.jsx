@@ -1,5 +1,5 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
+﻿import React, { useEffect, useRef, useState } from 'react';
+import { AnimatePresence } from 'framer-motion';
 import { X, Mic, Square, Trash2 } from 'lucide-react';
 
 const formatTime = (secs) => `${String(Math.floor(secs / 60)).padStart(2, '0')}:${String(secs % 60).padStart(2, '0')}`;

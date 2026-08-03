@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
+import { AnimatePresence } from 'framer-motion';
 import { X, Globe, Save, Trash2 } from 'lucide-react';
 
 // Paste-a-URL variant of the shared Cancel/Apply-Changes popover shape (see PickerModal),
@@ -13,7 +13,7 @@ const ReferenceLinksModal = ({ isOpen, onClose, links = [], onApply }) => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setPending([...links]);
     setUrl('');
-  }, [isOpen]);
+  }, [isOpen]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (!isOpen) return null;
 

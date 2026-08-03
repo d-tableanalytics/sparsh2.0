@@ -8,6 +8,18 @@ export const AuthProvider = ({ children }) => {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
 
+  // Standalone helper declared before useEffect so it can be called during
+  // the initial token-validation pass without a hoisting error.
+  const doLogout = () => {
+    localStorage.removeItem('token');
+    // Legacy cleanup: the Automation launcher used to stash the plaintext password here.
+    // It is no longer written, but anyone who logged in before that change still has one
+    // sitting in localStorage — this clears it on their next logout. Safe to delete once
+    // every active session has cycled.
+    localStorage.removeItem('sparsh_pwd');
+    setUser(null);
+    delete axios.defaults.headers.common['Authorization'];
+  };
 
   useEffect(() => {
     const token = localStorage.getItem('token');
@@ -29,7 +41,7 @@ export const AuthProvider = ({ children }) => {
         const decoded = jwtDecode(token);
         if (decoded.exp * 1000 < Date.now()) {
           // eslint-disable-next-line react-hooks/set-state-in-effect
-          logout();
+          doLogout();
         } else {
           setUser(decoded); // Immediate load from token
           axios.defaults.headers.common['Authorization'] = `Bearer ${token}`;
@@ -37,7 +49,7 @@ export const AuthProvider = ({ children }) => {
         }
       } catch (err) {
         // eslint-disable-next-line react-hooks/set-state-in-effect
-        logout();
+        doLogout();
       }
     }
     setLoading(false);
@@ -70,16 +82,8 @@ export const AuthProvider = ({ children }) => {
     return decoded;
   };
 
-  const logout = () => {
-    localStorage.removeItem('token');
-    // Legacy cleanup: the Automation launcher used to stash the plaintext password here.
-    // It is no longer written, but anyone who logged in before that change still has one
-    // sitting in localStorage — this clears it on their next logout. Safe to delete once
-    // every active session has cycled.
-    localStorage.removeItem('sparsh_pwd');
-    setUser(null);
-    delete axios.defaults.headers.common['Authorization'];
-  };
+  // Context-facing logout delegates to doLogout so callers get a stable reference.
+  const logout = doLogout;
 
   // Re-pull the full profile from /users/me and merge it into the current user, so edits
   // made in Settings ▸ General (name, etc.) reflect immediately in the header/avatar.

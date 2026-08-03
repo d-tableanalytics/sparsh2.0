@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
+import { AnimatePresence } from 'framer-motion';
 import api from '../services/api';
 import { useAuth } from '../context/AuthContext';
 import { 
@@ -10,7 +10,7 @@ import {
 import { Link } from 'react-router-dom';
 
 const LearnerSessions = () => {
-    const { user } = useAuth();
+    useAuth();
     const [sessions, setSessions] = useState([]);
     const [batches, setBatches] = useState([]);
     const [loading, setLoading] = useState(true);

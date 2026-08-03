@@ -3,7 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import api from '../services/api';
 import { useAuth } from '../context/AuthContext';
 import { useNotification } from '../context/NotificationContext';
-import { motion, AnimatePresence } from 'framer-motion';
+import { AnimatePresence } from 'framer-motion';
 import { 
     CheckCircle2, AlertCircle, ArrowRight, ArrowLeft, 
     Zap, Brain, Clock, ChevronRight, X, Layout, BookOpen, Send
@@ -12,7 +12,7 @@ import {
 const AssessmentPlayer = () => {
     const { sessionId, quizIndex } = useParams();
     const navigate = useNavigate();
-    const { user } = useAuth();
+    useAuth();
     const { showSuccess, showError } = useNotification();
 
     const [quiz, setQuiz] = useState(null);
@@ -37,7 +37,7 @@ const AssessmentPlayer = () => {
 
     useEffect(() => {
         fetchQuiz();
-    }, [sessionId, quizIndex]);
+    }, [sessionId, quizIndex]); // eslint-disable-line react-hooks/exhaustive-deps
 
     const fetchQuiz = async () => {
         try {
@@ -80,7 +80,7 @@ const AssessmentPlayer = () => {
         setAnswers(prev => ({ ...prev, [qIdx]: answer }));
     };
 
-    const canSubmit = quiz?.questions?.every((_, idx) => answers[idx] !== undefined) || true;
+    const _canSubmit = quiz?.questions?.every((_, idx) => answers[idx] !== undefined) || true;
 
     const handleSubmit = async () => {
         setSubmitting(true);

@@ -3,7 +3,6 @@ import { useNavigate } from 'react-router-dom';
 import api from '../services/api';
 import Modal from '../components/common/Modal';
 import { useNotification } from '../context/NotificationContext';
-import { motion } from 'framer-motion';
 import {
   Plus, Search, Layers, Calendar,
   LayoutGrid, List, ExternalLink, Clock, CheckCircle2,
@@ -30,7 +29,7 @@ const BatchManagement = () => {
   const isPowerRole = ['superadmin', 'admin', 'coach', 'staff'].includes(user?.role?.toLowerCase());
   const canCreate = isPowerRole || user?.permissions?.batches?.create;
   const canDelete = isPowerRole || user?.permissions?.batches?.delete;
-  const canUpdate = isPowerRole || user?.permissions?.batches?.update;
+  const _canUpdate = isPowerRole || user?.permissions?.batches?.update;
 
   const [form, setForm] = useState({
     name: '', product_name: '', description: '', start_date: '', target_end_date: '', gpt_projects: []

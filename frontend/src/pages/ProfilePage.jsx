@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+﻿import React, { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { useNotification } from '../context/NotificationContext';
 import api from '../services/api';
@@ -7,7 +7,6 @@ import {
   Building2, Calendar, KeyRound, ShieldCheck, PhoneCall, AlertCircle, IdCard,
   MapPin, Globe, Heart, Cake, AtSign, Hash, Users as UsersIcon,
 } from 'lucide-react';
-import { motion } from 'framer-motion';
 import NotificationSettings from '../components/settings/NotificationSettings';
 
 // Fields the self-service PATCH /users/me endpoint accepts (see backend SelfProfileUpdate).

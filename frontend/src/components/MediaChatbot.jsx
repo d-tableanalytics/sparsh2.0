@@ -1,11 +1,11 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
+import { AnimatePresence } from 'framer-motion';
 import {
   MessageSquare, X, Send, Bot, Loader2, Sparkles,
   FolderPlus, Trash2, FileText, BarChart2
 } from 'lucide-react';
 import api from '../services/api';
-import { useNotification } from '../context/NotificationContext';
+
 
 const MediaChatbot = ({
   currentFolder,
@@ -13,7 +13,6 @@ const MediaChatbot = ({
   onRefreshFiles,
   onFolderCreated
 }) => {
-  const { showSuccess, showError } = useNotification();
   const [isOpen, setIsOpen] = useState(false);
   const [message, setMessage] = useState('');
   const [history, setHistory] = useState([

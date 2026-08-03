@@ -1,5 +1,5 @@
-import React, { useEffect, useState } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
+﻿import React, { useEffect, useState } from 'react';
+import { AnimatePresence } from 'framer-motion';
 import { X, Save } from 'lucide-react';
 import { STATUS_CONFIG } from './statusConfig';
 

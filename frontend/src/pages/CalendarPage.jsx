@@ -5,7 +5,7 @@ import timeGridPlugin from '@fullcalendar/timegrid';
 import listPlugin from '@fullcalendar/list';
 import multiMonthPlugin from '@fullcalendar/multimonth';
 import interactionPlugin from '@fullcalendar/interaction';
-import { motion, AnimatePresence } from 'framer-motion';
+import { AnimatePresence } from 'framer-motion';
 import api from '../services/api';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
@@ -24,7 +24,7 @@ import ReminderModal from '../components/calendar/ReminderModal';
 import MiniDatePicker from '../components/tasks/MiniDatePicker';
 import { canAccessTaskManagement } from '../utils/taskAccess';
 
-const CustomTimePicker = ({ value, onChange, label }) => {
+const CustomTimePicker = ({ value, onChange, label: _label }) => {
     const [isOpen, setIsOpen] = useState(false);
     const containerRef = useRef(null);
     
@@ -163,7 +163,7 @@ const validateRepeat = (form) => {
 
 // The Repeat control itself. Kept as its own component (rather than inlined in the already
 // long modal) purely for readability; the markup mirrors the task form's control.
-const TodoRepeatSection = ({ form, setForm, minEndDate }) => {
+const TodoRepeatSection = ({ form, setForm, minEndDate: _minEndDate }) => {
     const [freqOpen, setFreqOpen] = useState(false);
     const [customIntervalOpen, setCustomIntervalOpen] = useState(false);
     const [customUnitOpen, setCustomUnitOpen] = useState(false);
@@ -355,6 +355,8 @@ const CalendarPage = () => {
     const calendarRef = useRef(null);
     const { user } = useAuth();
     const { showSuccess, showError } = useNotification();
+    // Show task-related stat cards only when the user has access to the Delegation module.
+    const showTaskStats = canAccessTaskManagement(user);
     const [events, setEvents] = useState([]);
     const [loading, setLoading] = useState(true);
     const [viewName, setViewName] = useState('dayGridMonth');
@@ -366,7 +368,7 @@ const CalendarPage = () => {
     const [allUsers, setAllUsers] = useState([]);
     const [statFilter, setStatFilter] = useState(null);
     const [backdateSettings, setBackdateSettings] = useState({ allow_backdate: false, exception_users: [] });
-    const [gptProjects, setGptProjects] = useState([]);
+    const [_gptProjects, setGptProjects] = useState([]);
 
     const [showSummary, setShowSummary] = useState(false);
     const [summaryDate, setSummaryDate] = useState(null);
@@ -419,7 +421,7 @@ const CalendarPage = () => {
         } catch (err) { console.error(err); }
         finally { setLoading(false); }
     };
-    useEffect(() => { fetchData(); }, [viewMode]);
+    useEffect(() => { fetchData(); }, [viewMode]); // eslint-disable-line react-hooks/exhaustive-deps
 
     const formatIST = (dateStr) => {
         if (!dateStr) return "";

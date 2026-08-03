@@ -12,7 +12,7 @@ const COLS = [
   ['lastActivity', 'Last Activity'],
 ];
 
-const CompanyTable = ({ params, expandedId, onToggle }) => {
+const CompanyTable = ({ params, expandedId: _expandedId, onToggle: _onToggle }) => {
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);

@@ -1,5 +1,5 @@
-import React, { useMemo, useRef, useState } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
+﻿import React, { useMemo, useRef, useState } from 'react';
+import { AnimatePresence } from 'framer-motion';
 import { X, Upload, FileSpreadsheet, Download, CheckCircle2, AlertTriangle, CopyX, Loader2, ArrowLeft } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { createHoliday } from '../../services/holidayApi';

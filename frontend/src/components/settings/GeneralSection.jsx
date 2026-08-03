@@ -1,5 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
-import { motion } from 'framer-motion';
+﻿import React, { useCallback, useEffect, useState } from 'react';
 import {
   Settings, User, Briefcase, Heart, MapPin, Mail, Lock, ChevronRight, ChevronDown,
   Pencil, Save, X, Loader2, Phone, PhoneCall, Calendar, Globe, Cake, AtSign,

@@ -1,5 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
-import { motion } from 'framer-motion';
+﻿import React, { useCallback, useEffect, useState } from 'react';
 import { User, Pencil, Save, X, Loader2, CheckCircle2, Briefcase } from 'lucide-react';
 import { getMyProfile, updateMyProfile } from '../../services/settingsApi';
 import { getInitials } from '../tasks/taskDisplayUtils';

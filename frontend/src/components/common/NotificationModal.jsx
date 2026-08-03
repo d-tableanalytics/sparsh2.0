@@ -1,5 +1,5 @@
-import React, { useEffect } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
+﻿import React, { useEffect } from 'react';
+import { AnimatePresence } from 'framer-motion';
 import { CheckCircle, XCircle, X } from 'lucide-react';
 import { useNotification } from '../../context/NotificationContext';
 import './NotificationModal.css';

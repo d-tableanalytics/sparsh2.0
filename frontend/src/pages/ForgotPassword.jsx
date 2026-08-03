@@ -1,13 +1,12 @@
 import React, { useState } from 'react';
 import { Mail, Lock, KeyRound, ArrowLeft, Loader2, CheckCircle2 } from 'lucide-react';
-import { useNavigate, Link } from 'react-router-dom';
-import { motion, AnimatePresence } from 'framer-motion';
+import { Link } from 'react-router-dom';
+import { AnimatePresence } from 'framer-motion';
 import api from '../services/api';
 import './Login.css'; // Reuse some login styles
 import sparshLogo from '../assets/sparshLogo.png';
 
 const ForgotPassword = () => {
-  const navigate = useNavigate();
   const [step, setStep] = useState(1); // 1: Email, 2: OTP & New Password
   const [email, setEmail] = useState('');
   const [otp, setOtp] = useState('');
@@ -15,7 +14,7 @@ const ForgotPassword = () => {
   const [confirmPassword, setConfirmPassword] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState('');
-  const [success, setSuccess] = useState('');
+  const [_success, setSuccess] = useState('');
 
   const handleRequestOtp = async (e) => {
     e.preventDefault();

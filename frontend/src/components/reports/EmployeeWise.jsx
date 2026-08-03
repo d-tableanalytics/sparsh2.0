@@ -1,5 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { motion } from 'framer-motion';
+﻿import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Search, ArrowUpDown, ChevronRight, LayoutGrid, List as ListIcon,
   Download, FileDown, FileSpreadsheet, FileText, ChevronDown, Users,
