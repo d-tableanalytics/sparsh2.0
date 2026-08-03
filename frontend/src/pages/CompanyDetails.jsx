@@ -37,39 +37,7 @@ const StatusBadge = ({ status }) => {
   );
 };
 
-/**
- * Module access switch — used by BOTH the ORM and TPMS toggles so the two are identical by
- * construction rather than by two copies of the same markup drifting apart.
- *
- * Off: neutral container, grey track, knob left.  On: green track, green state text, knob
- * right. The label stays solid in both states so the control reads the same either way.
- */
-const ModuleToggle = ({ label, enabled, onToggle, title }) => (
-  <button
-    type="button"
-    role="switch"
-    aria-checked={enabled}
-    aria-label={`${label} module ${enabled ? 'enabled' : 'disabled'} for this company`}
-    onClick={onToggle}
-    title={title}
-    className={`h-9 pl-3 pr-2.5 rounded-lg border flex items-center gap-2.5 transition-all ${
-      enabled
-        ? 'bg-[var(--accent-green-bg)] border-[var(--accent-green-border)]'
-        : 'bg-[var(--bg-card)] border-[var(--border)] hover:border-[var(--accent-green)]'
-    }`}
-  >
-    <span className="text-[12px] font-bold tracking-tight text-[var(--text-main)]">{label}</span>
-    <span className="relative inline-flex w-9 h-5 rounded-full transition-colors shrink-0"
-      style={{ background: enabled ? 'var(--accent-green)' : 'var(--border)' }}>
-      <span className="absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-all"
-        style={{ left: enabled ? '18px' : '2px' }} />
-    </span>
-    <span className="text-[10px] font-bold uppercase tracking-widest w-6 text-left"
-      style={{ color: enabled ? 'var(--accent-green)' : 'var(--text-muted)' }}>
-      {enabled ? 'On' : 'Off'}
-    </span>
-  </button>
-);
+
 
 const InfoRow = ({ icon: Icon, label, value }) => (
   <div className="flex items-start gap-3 py-2">
