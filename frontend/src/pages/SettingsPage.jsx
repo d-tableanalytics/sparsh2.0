@@ -721,6 +721,10 @@ const SettingsPage = () => {
                                                 <option value="task_in_loop_added">In Loop Person</option>
                                                 <option value="task_reminder">Task Reminder</option>
                                             </optgroup>
+                                            {/* Personal Todo — private per-user items with their own reminder template. */}
+                                            <optgroup label="Personal Todo">
+                                                <option value="todo_reminder">Todo Reminder</option>
+                                            </optgroup>
                                             {user?.role === 'superadmin' && (
                                                 <>
                                                     <optgroup label="User Management">

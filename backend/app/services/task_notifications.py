@@ -18,6 +18,7 @@ from typing import Iterable, Optional
 
 from app.services.notification_service import (
     send_notification_from_template,
+    active_user_template,
     create_in_app_notification,
     format_datetime_standard,
     to_ist,
@@ -100,9 +101,13 @@ def recipients_for_event(event: str, task: dict, extra: Optional[dict] = None) -
     if event == "deleted":
         return assignees | watchers
     if event == "created":
-        return assignees | watchers
+        # In-loop members (watchers) are NOT notified here — they receive the dedicated
+        # In Loop Person template via a separate in_loop_added trigger (see notify_task_event),
+        # never the Task Created template. Assignees only.
+        return assignees
     if event == "subtask_created":
-        return assignees | watchers | assigner
+        # Same rule as "created": watchers get the In Loop Person template, not this one.
+        return assignees | assigner
     # updated / deadline_revised / follow_up_added — everyone in the loop.
     return assigner | assignees | watchers
 
@@ -210,7 +215,27 @@ async def notify_task_event(
                 type=tone,
                 meta={"task_id": task_id, "event": event, "module": "task_management"},
             )
+            # Task & Delegation must use ONLY user-configured templates — never a built-in
+            # default. Send the email only when an Active DB template (with a body) exists for
+            # this event; otherwise send nothing. (In-app above is a separate channel and still
+            # fires.) Scope resolution mirrors send_notification_from_template: staff scope
+            # ignores company_id.
+            eff_company = None if scope == "staff" else user_obj.get("company_id")
+            if not await active_user_template(f"{slug}_email", eff_company):
+                continue
             await send_notification_from_template(user_obj, slug, context, delivery, scope)
         except Exception as e:
             # Log and keep going: one bad recipient must not silence the rest.
             logger.error(f"Task notification '{event}' failed for user {uid}: {e}")
+
+    # In-loop members are ALWAYS notified with the In Loop Person template — even when they were
+    # added at task/subtask creation. "created"/"subtask_created" notify assignees only (above);
+    # here the same task's watchers are fanned out through the dedicated in_loop_added trigger so
+    # they never receive the Task Created / Subtask Created template. One Event → One Template.
+    # (recipient_ids is None guard: an explicit-recipient call must not re-trigger this; and the
+    # recursive call is event "in_loop_added", so it can never loop back here.)
+    if event in ("created", "subtask_created") and recipient_ids is None:
+        watcher_ids = _ids(task.get("watchers")) - _ids(task.get("target_staff_id"))
+        if watcher_ids:
+            await notify_task_event("in_loop_added", task, actor,
+                                    {"new_watcher_ids": list(watcher_ids)})

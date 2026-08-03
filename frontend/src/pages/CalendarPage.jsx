@@ -18,7 +18,8 @@ import {
     Layers, Trash2, AlertCircle, Link, Check, UserPlus2,
     Edit2, CheckCircle, ArrowRightLeft, Ban, PlayCircle, MoreHorizontal,
     PlusCircle, LayoutGrid, Calendar as CalendarIcon, Briefcase, Video, Bell,
-    Eye, Lock, ClipboardList, FileText, ChevronDown, CheckCircle2, Circle
+    Eye, Lock, ClipboardList, FileText, ChevronDown, CheckCircle2, Circle,
+    ShieldCheck
 } from 'lucide-react';
 import ReminderModal from '../components/calendar/ReminderModal';
 import MiniDatePicker from '../components/tasks/MiniDatePicker';
@@ -255,11 +256,12 @@ const TodoRepeatSection = ({ form, setForm, minEndDate: _minEndDate }) => {
                             <CalendarDays size={12} />
                             {form.repeat_end_date ? new Date(form.repeat_end_date).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' }) : 'End Date'}
                         </button>
-                        <MiniDatePicker 
-                            isOpen={repeatEndPickerOpen} 
+                        <MiniDatePicker
+                            isOpen={repeatEndPickerOpen}
                             onClose={() => setRepeatEndPickerOpen(false)}
-                            value={form.repeat_end_date} 
-                            title="Repeat End Date" 
+                            value={form.repeat_end_date}
+                            title="Repeat End Date"
+                            dateOnly
                             onApply={(iso) => setForm({ ...form, repeat_end_date: iso })}
                         />
                     </>
@@ -672,11 +674,13 @@ const CalendarPage = () => {
     const openCreateModal = (type) => {
         setIsEdit(false); setCurrentEventId(null);
         if (type === 'todo') {
-            // A new todo defaults to the CURRENT date + time — that "now" is what the header
-            // badge shows and what the Start Date field reads. Start time is the creation time
-            // (there is no separate Start Time field); the user picks the Due date + time.
-            const nowIso = new Date().toISOString();
-            setEventForm({ ...initialForm, type, start: nowIso, end: nowIso, all_day: false });
+            // A todo is due at 11:59 PM on the SELECTED calendar day (the day whose Day Summary
+            // this was opened from), defaulting to today when none is selected. The time is
+            // automatic — there is no time picker; only the chosen date matters.
+            const base = summaryDate ? new Date(`${summaryDate}T00:00:00`) : new Date();
+            base.setHours(23, 59, 59, 0);
+            const iso = base.toISOString();
+            setEventForm({ ...initialForm, type, start: iso, end: iso, all_day: false });
         } else {
             setEventForm({ ...initialForm, type, start: summaryDate, end: summaryDate });
         }
@@ -1590,16 +1594,20 @@ const CalendarPage = () => {
                                     )}
                                     <div className="flex items-center gap-4 flex-wrap">
                                         {eventForm.type === 'todo' ? (
-                                            /* A todo shows only its Due — opens the shared month-grid
-                                               DATE/TIME calendar (MiniDatePicker) instead of the native
-                                               popup. The start is the creation timestamp (in the header). */
+                                            /* "Today's Todo": the due date is NOT user-selectable. Every todo is
+                                               automatically due at 11:59 PM today (IST) — set authoritatively by the
+                                               backend on create. A recurring todo then rolls to the next day at 12 AM
+                                               via the unchanged nightly engine. Shown read-only so the user knows
+                                               exactly when it's due. */
                                             <div className="flex flex-col gap-1">
                                                 <span className="text-[9px] font-black uppercase tracking-wider text-[var(--text-muted)]">Due</span>
-                                                <button type="button" onClick={() => setDueDatePickerOpen(true)}
-                                                    className="flex items-center gap-2 bg-[var(--input-bg)] px-4 py-2.5 rounded-xl border border-[var(--border)] cursor-pointer hover:border-[var(--accent-indigo)] transition-all">
-                                                    <CalendarDays size={18} className="text-[var(--accent-indigo)]" />
-                                                    <span className="text-[13px] font-black">{new Date(eventForm.end).toLocaleString(undefined, { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', hour12: true })}</span>
-                                                </button>
+                                                <div className="flex items-center gap-2 bg-[var(--input-bg)] px-4 py-2.5 rounded-xl border border-[var(--border)]">
+                                                    <Clock size={18} className="text-[var(--accent-indigo)]" />
+                                                    <div className="flex flex-col leading-tight">
+                                                        <span className="text-[13px] font-black">{new Date(eventForm.end || eventForm.start).toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' })} · 11:59 PM</span>
+                                                        <span className="text-[9px] font-bold uppercase tracking-wider text-[var(--text-muted)]">Automatic — end of the selected day (IST)</span>
+                                                    </div>
+                                                </div>
                                             </div>
                                         ) : (
                                             <>

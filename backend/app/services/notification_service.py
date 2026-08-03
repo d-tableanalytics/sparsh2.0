@@ -371,6 +371,34 @@ async def fetch_template(slug: str, company_id: str = None):
 
     return DEFAULT_TEMPLATES.get(slug)
 
+
+async def active_user_template(slug: str, company_id: str = None):
+    """The USER-CONFIGURED DB template for `slug`, or None.
+
+    Resolution mirrors fetch_template (company scope → staff scope, newest wins) but it NEVER
+    falls back to a built-in DEFAULT_TEMPLATES entry, and it treats an Inactive template or one
+    with an empty body as "no template". Used by modules that must send ONLY user-configured
+    templates — Task & Delegation and Personal Todo — so a missing / inactive / empty template
+    results in NO email (never a default). Leaves fetch_template (and every other module that
+    relies on the built-in defaults — sessions, OTP, user/company mail) completely untouched."""
+    col = get_collection("notification_templates")
+
+    async def _newest(query: dict):
+        docs = await col.find(query).to_list(50)
+        if not docs:
+            return None
+        return max(docs, key=lambda d: d.get("updated_at") or d.get("created_at") or datetime.min)
+
+    doc = None
+    if company_id:
+        doc = await _newest({"slug": slug, "company_id": str(company_id), "scope": "company"})
+    if doc is None:
+        doc = await _newest({"slug": slug, "scope": "staff"})
+
+    if not doc or not doc.get("is_active", True) or not doc.get("body"):
+        return None
+    return doc
+
 def render_template(template_body: str, context: Dict[str, Any]):
     content = template_body
     for key, value in context.items():
@@ -831,12 +859,32 @@ async def send_event_deleted_email(user_obj: dict, event_data: dict, deleted_by:
 
     return await send_notification_from_template(user_obj, "event_deleted", context, delivery_type, scope)
 
+def _describe_offset(reminder: dict) -> str:
+    """Human phrase for a reminder's offset — e.g. '5 minutes before', '1 hour after' — used
+    for the {{reminder_time}} placeholder in the reminder templates."""
+    r = reminder or {}
+    mins = int(r.get("offset_minutes") or 0)
+    after = (r.get("timing_type") or "before").lower() == "after"
+    if mins <= 0:
+        return "now"
+    if mins % 1440 == 0:
+        qty, unit = mins // 1440, "day"
+    elif mins % 60 == 0:
+        qty, unit = mins // 60, "hour"
+    else:
+        qty, unit = mins, "minute"
+    return f"{qty} {unit}{'' if qty == 1 else 's'} {'after' if after else 'before'}"
+
+
 async def send_reminder_email(user_obj: dict, event: dict, reminder: dict = None):
     # A reminder is a TASK reminder when the event is a task OR the reminder itself was
     # authored as one (parent_type == "task"). Either signal → the Task Reminder template.
     # Sessions/events (type "event", parent_type "event") keep the Session Reminder template
     # unchanged. TPMS uses a separate branch entirely, so this touches the Task module only.
     is_task = (event.get("type") == "task") or ((reminder or {}).get("parent_type") == "task")
+    # A task or todo is "due-anchored": its reminder is about a deadline/due date, so the
+    # template's {{task_deadline}} is populated; a session/event leaves it "N/A".
+    is_due_anchored = event.get("type") in ("task", "todo")
     dt_str = event.get("start", "")
     formatted_dt = format_datetime_standard(dt_str)
 
@@ -858,10 +906,24 @@ async def send_reminder_email(user_obj: dict, event: dict, reminder: dict = None
         "meeting_url": event.get("meeting_link") or "View in Dashboard",
         "description": event.get("additional_details") or "No further details."
     }
-    # A TASK reminder uses the Task Reminder template ONLY; a session/event keeps the Session
-    # Reminder template. Same context either way — only the template (and its framing) differ.
-    slug = "task_reminder" if is_task else "reminder"
-    return await send_notification_from_template(user_obj, slug, context, "email", event.get("notification_scope"))
+    # Template per type: a TASK → Task Reminder, a TODO → Todo Reminder, a session/event →
+    # Session Reminder. Each uses its own template only; no cross-over. The Todo Reminder
+    # template is authored by an admin in Settings (trigger "Todo Reminder" → todo_reminder_email).
+    if is_task:
+        slug = "task_reminder"
+    elif event.get("type") == "todo":
+        slug = "todo_reminder"
+    else:
+        slug = "reminder"
+    scope = event.get("notification_scope")
+    # Task & Delegation and Personal Todo reminders must use ONLY a user-configured template —
+    # never a built-in default. No Active DB template (with a body) → send nothing. Sessions
+    # (slug "reminder") keep their existing behavior (unrelated module).
+    if slug in ("task_reminder", "todo_reminder"):
+        eff_company = None if scope == "staff" else user_obj.get("company_id")
+        if not await active_user_template(f"{slug}_email", eff_company):
+            return {}
+    return await send_notification_from_template(user_obj, slug, context, "email", scope)
 
 async def send_conflict_notification_email(user_obj: dict, event_data: dict, existing_event: dict, send_company_copy: bool = True):
     # Subject: Reschedule time mail due to conflict
