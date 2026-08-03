@@ -262,6 +262,39 @@ TODO_TYPE = "todo"
 
 TODO_PRIVATE_MESSAGE = "Todos are private — only their owner can view or change them."
 
+# The product's canonical local zone (IST, UTC+5:30) — the same zone the nightly recurrence
+# engine uses for every day-boundary decision. A personal todo is always due at the end of its
+# day in this zone.
+IST_TZ = timezone(timedelta(hours=5, minutes=30))
+
+
+def _apply_todo_due_end_of_day(doc: dict) -> None:
+    """A personal todo is always due at 23:59:59 (IST) on its CHOSEN calendar DATE — the day the
+    user added it on (the day selected in the calendar; defaults to today when none was chosen).
+    The user never picks a TIME; only the date carries over. The instant is written to BOTH
+    `start` and `end` (todos keep start == end), so the calendar shows it on that day, the
+    reminder/recurrence anchors are the end of that day, and the nightly engine rolls a recurring
+    todo to 23:59:59 the next day (the start==end zero offset is preserved). Scope: todos only."""
+    raw = doc.get("start") or doc.get("end")
+    base_ist = None
+    if raw:
+        try:
+            s = str(raw)
+            if len(s) <= 10:  # date-only "YYYY-MM-DD" → that calendar day, in IST
+                base_ist = datetime.fromisoformat(s).replace(tzinfo=IST_TZ)
+            else:
+                dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+                base_ist = (dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)).astimezone(IST_TZ)
+        except Exception:
+            base_ist = None
+    if base_ist is None:
+        base_ist = datetime.now(IST_TZ)  # no / invalid date → default to today
+    due_utc = base_ist.replace(hour=23, minute=59, second=59, microsecond=0).astimezone(timezone.utc)
+    iso = due_utc.isoformat()
+    doc["start"] = iso
+    doc["end"] = iso
+    doc["all_day"] = False
+
 
 def _strip_todo_sharing(doc: dict) -> None:
     """Force a todo to be personal: no assignees, no watchers, no delegation of any kind.
@@ -317,6 +350,9 @@ async def create_event(event: CalendarEventCreate, background_tasks: BackgroundT
         # generic `calendar.create` bit is not required (a staff member without it must still
         # be able to jot down their own todo). Sharing fields are stripped, not trusted.
         _strip_todo_sharing(event_dict)
+        # A todo is due at 23:59:59 (IST) on the calendar day it was added for (the selected day;
+        # defaults to today). The user never picks a time — only the date carries over.
+        _apply_todo_due_end_of_day(event_dict)
     elif user_role != "superadmin":
         # Non-task calendar / session events keep the original permission model.
         # Allow Client Users (Learners) and Client Admins to create events;

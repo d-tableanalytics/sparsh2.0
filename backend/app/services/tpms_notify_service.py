@@ -340,13 +340,19 @@ async def _dispatch(event: dict, event_kind: str, heading: str,
         if not recipients:
             continue
         tpl = await get_template(activity, event_kind, side)
-        subject_tpl = (tpl or {}).get("subject") or f"[{heading}] {{{{Title}}}} – {{{{Activity}}}}"
-        body_tpl = (tpl or {}).get("body_html")
+        # Strictly respect the template's Active/Inactive status. get_template returns None when
+        # the template is Inactive OR not configured — in BOTH cases send nothing for this side:
+        # no default subject, no _default_body fallback. Only an Active template that has a body
+        # is used for delivery.
+        if not tpl or not tpl.get("body_html"):
+            continue
+        subject_tpl = tpl.get("subject") or f"[{heading}] {{{{Title}}}} – {{{{Activity}}}}"
+        body_tpl = tpl.get("body_html")
 
         for person in recipients:
             person_map = {**mapping, "Recipient_Name": person["name"]}
             subject = fill(subject_tpl, person_map)
-            html = fill(body_tpl, person_map) if body_tpl else _default_body(person_map, heading)
+            html = fill(body_tpl, person_map)
             try:
                 await send_email_notification(
                     person["email"], subject, html,

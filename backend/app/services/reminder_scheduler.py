@@ -154,6 +154,19 @@ async def check_and_trigger_reminders():
             # "no reminder configured → no reminder fires" guarantee impossible to break.
             if not reminders:
                 continue
+
+            # Personal Todo: once it is completed, its still-pending reminders must NOT fire —
+            # mark them consumed (sent) without sending, so a finished todo never nags. Todos
+            # only; tasks and sessions keep firing regardless of status (unchanged).
+            if event.get("type") == "todo" and (
+                event.get("status") == "completed" or event.get("completed_at")
+            ):
+                if any(not r.get("sent") for r in reminders):
+                    for r in reminders:
+                        r["sent"] = True
+                    await col.update_one({"_id": event["_id"]}, {"$set": {"reminders": reminders}})
+                continue
+
             event_time_str = event.get("start")
             if not event_time_str: continue
             
@@ -202,34 +215,38 @@ async def check_and_trigger_reminders():
                 await col.update_one({"_id": event["_id"]}, {"$set": {"reminders": reminders}})
 
 
-async def _send_tpms_reminder_email(user_data, event):
+async def _send_tpms_reminder_email(user_data, event) -> bool:
     """Render a TPMS activity reminder through the module's own template layer.
 
     Side is decided by which collection the recipient came from: a learner is the company
-    side, internal staff are the staff side. Falls back to the ported default body when no
-    template row is configured, exactly as every other TPMS mail kind does.
+    side, internal staff are the staff side. Strictly respects the template's Active/Inactive
+    status — if there is no Active reminder template (with a body) for this activity/side,
+    NOTHING is sent (no _default_body fallback). Returns True only when an email was sent.
     """
     from app.services.tpms_notify_service import (
         EVENT_REMINDER, SIDE_COMPANY, SIDE_STAFF,
-        build_map, fill, get_template, log_context, _default_body,
+        build_map, fill, get_template, log_context,
     )
     from app.services.notification_service import send_email_notification
 
     side = SIDE_COMPANY if user_data.get("company_id") else SIDE_STAFF
+    tpl = await get_template(event.get("activity") or "", EVENT_REMINDER, side)
+    # Inactive or not configured → send nothing (no default body).
+    if not tpl or not tpl.get("body_html"):
+        return False
     mapping = await build_map(event)
     mapping["Recipient_Name"] = (user_data.get("full_name")
                                  or " ".join(filter(None, [user_data.get("first_name"),
                                                            user_data.get("last_name")])).strip()
                                  or user_data.get("email") or "")
-    tpl = await get_template(event.get("activity") or "", EVENT_REMINDER, side)
-    subject_tpl = (tpl or {}).get("subject") or "[Reminder] {{Title}} – {{Activity}}"
-    body_tpl = (tpl or {}).get("body_html")
-    html = fill(body_tpl, mapping) if body_tpl else _default_body(mapping, "Reminder")
+    subject_tpl = tpl.get("subject") or "[Reminder] {{Title}} – {{Activity}}"
+    html = fill(tpl["body_html"], mapping)
     await send_email_notification(
         user_data.get("email"), fill(subject_tpl, mapping), html,
         user_id=str(user_data.get("_id")), slug=f"tpms_reminder_{side}",
         meta=log_context(event),
     )
+    return True
 
 
 async def trigger_reminder_notification(event, reminder):
@@ -272,13 +289,18 @@ async def trigger_reminder_notification(event, reminder):
                 # template (activity × reminder × side) so a configured body is actually
                 # applied. Anything else keeps the generic ERP reminder mail.
                 if is_tpms:
-                    await _send_tpms_reminder_email(user_data, event)
+                    # Respects Active/Inactive: returns False (nothing sent) when the reminder
+                    # template is Inactive/unconfigured. Log accurately so the Logs Report never
+                    # shows a "sent" reminder that was actually suppressed.
+                    did_send = await _send_tpms_reminder_email(user_data, event)
+                    await _log_tpms_reminder(event, reminder, user_data,
+                                             "sent" if did_send else "skipped", None)
                 else:
                     # Pass the specific reminder so the template can be chosen by its
                     # parent_type — a parent_type=="task" reminder always uses the Task
                     # Reminder template, never the Session one.
                     await send_reminder_email(user_data, event, reminder)
-                await _log_tpms_reminder(event, reminder, user_data, "sent", None)
+                    await _log_tpms_reminder(event, reminder, user_data, "sent", None)
         except Exception as e:
             logger.error(f"Error notifying user {uid} for reminder: {e}")
             await _log_tpms_reminder(event, reminder, locals().get("user_data"), "failed", str(e))
