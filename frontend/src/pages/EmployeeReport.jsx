@@ -1,6 +1,6 @@
-﻿import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useParams, useNavigate, Navigate } from 'react-router-dom';
-import { AnimatePresence } from 'framer-motion';
+import {  AnimatePresence , motion } from 'framer-motion';
 import {
   ChevronLeft, Mail, Building2, Shield, CheckCircle2, Clock, AlertTriangle,
   ListTodo, Award, Timer, X, GitBranch, CalendarDays, Layers, GraduationCap,

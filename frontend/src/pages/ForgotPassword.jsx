@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { Mail, Lock, KeyRound, ArrowLeft, Loader2, CheckCircle2 } from 'lucide-react';
 import { Link } from 'react-router-dom';
-import { AnimatePresence } from 'framer-motion';
+import {  AnimatePresence , motion } from 'framer-motion';
 import api from '../services/api';
 import './Login.css'; // Reuse some login styles
 import sparshLogo from '../assets/sparshLogo.png';

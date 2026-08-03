@@ -1,5 +1,5 @@
-﻿import React, { useCallback, useEffect, useState } from 'react';
-import { AnimatePresence } from 'framer-motion';
+import React, { useCallback, useEffect, useState } from 'react';
+import {  AnimatePresence , motion } from 'framer-motion';
 import {
   ArrowLeft, Trash2, Pencil, FileText, History, Info, Users, Layers, Plus,
   Paperclip, CheckSquare, Square, X, Tags as TagsIcon,

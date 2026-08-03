@@ -1,5 +1,5 @@
-﻿import React, { useEffect, useState, useRef } from 'react';
-import { AnimatePresence } from 'framer-motion';
+import React, { useEffect, useState, useRef } from 'react';
+import {  AnimatePresence , motion } from 'framer-motion';
 import { X, Search, Save, Plus, Check } from 'lucide-react';
 import { getInitials } from './taskDisplayUtils';
 

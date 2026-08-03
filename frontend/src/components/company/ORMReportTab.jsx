@@ -3,6 +3,7 @@ import { Calendar, CalendarRange, Layers, Calculator, FileText, Info, TrendingUp
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import api from '../../services/api';
+import { motion } from 'framer-motion';
 
 // Mirrors the scoring logic used in the ORM Designer (ORMPage.jsx).
 const calculateScore = (sub, isReverse) => {

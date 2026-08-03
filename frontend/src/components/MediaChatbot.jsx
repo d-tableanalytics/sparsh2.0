@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { AnimatePresence } from 'framer-motion';
+import {  AnimatePresence , motion } from 'framer-motion';
 import {
   MessageSquare, X, Send, Bot, Loader2, Sparkles,
   FolderPlus, Trash2, FileText, BarChart2

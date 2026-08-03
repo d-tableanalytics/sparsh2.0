@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import api from '../services/api';
 import { useNotification } from '../context/NotificationContext';
-import { AnimatePresence } from 'framer-motion';
+import {  AnimatePresence , motion } from 'framer-motion';
 import { 
     Send, Sparkles, Bot, User, ArrowLeft, 
     MessageSquare, RefreshCcw, HelpCircle, 

@@ -1,6 +1,6 @@
-﻿import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect } from 'react';
 import { NavLink, useLocation } from 'react-router-dom';
-import { AnimatePresence } from 'framer-motion';
+import {  AnimatePresence , motion } from 'framer-motion';
 import {
   LayoutDashboard, Users, Briefcase, CheckSquare,
   Settings, Building2,

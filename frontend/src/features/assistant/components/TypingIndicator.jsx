@@ -1,5 +1,6 @@
-﻿import React from 'react';
+import React from 'react';
 import { Loader2 } from 'lucide-react';
+import { motion } from 'framer-motion';
 
 /**
  * Shown while the assistant is processing. When a tool is running, surfaces its

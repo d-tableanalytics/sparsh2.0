@@ -6,7 +6,7 @@ import {
   Lock, Save, Award, ChevronRight, Check, X, ShieldAlert,
   FileDown, FileUp
 } from 'lucide-react';
-import { AnimatePresence } from 'framer-motion';
+import {  AnimatePresence , motion } from 'framer-motion';
 import * as XLSX from 'xlsx';
 
 const ORMSheet = () => {

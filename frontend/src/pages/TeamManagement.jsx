@@ -1,5 +1,5 @@
-﻿import React, { useState, useEffect } from 'react';
-import { AnimatePresence } from 'framer-motion';
+import React, { useState, useEffect } from 'react';
+import {  AnimatePresence , motion } from 'framer-motion';
 import { 
   Users, UserPlus, Search, Filter, 
   MoreVertical, Shield, Mail, Phone,

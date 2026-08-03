@@ -3,7 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import api from '../services/api';
 import Modal from '../components/common/Modal';
 import { useNotification } from '../context/NotificationContext';
-import { AnimatePresence } from 'framer-motion';
+import {  AnimatePresence , motion } from 'framer-motion';
 import {
   ArrowLeft, Layers, Package, Calendar, FileText,
   Pencil, Trash2, Save, X, CheckCircle2, PauseCircle,

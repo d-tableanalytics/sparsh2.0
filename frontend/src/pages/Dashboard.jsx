@@ -8,6 +8,7 @@ import {
   ChevronRight, ArrowUpRight, Zap
 } from 'lucide-react';
 import { 
+import { motion } from 'framer-motion';
   AreaChart, Area, XAxis, YAxis, CartesianGrid, 
   Tooltip, ResponsiveContainer, BarChart, Bar,
   PieChart, Pie, Cell, Legend

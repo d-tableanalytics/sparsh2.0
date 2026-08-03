@@ -9,6 +9,7 @@ import {
   PauseCircle, PlayCircle, Trash2, Package, Building2, X
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import { motion } from 'framer-motion';
 
 const statusConfig = {
   active: { bg: 'var(--status-active-bg)', text: 'var(--status-active-text)', border: 'var(--status-active-border)', icon: PlayCircle, label: 'Active' },

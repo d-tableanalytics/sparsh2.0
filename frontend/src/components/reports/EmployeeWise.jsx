@@ -1,10 +1,11 @@
-﻿import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Search, ArrowUpDown, ChevronRight, LayoutGrid, List as ListIcon,
   Download, FileDown, FileSpreadsheet, FileText, ChevronDown, Users,
 } from 'lucide-react';
 import { getEmployeesWide, exportEmployeesWide, downloadCsv } from '../../services/reportApi';
 import { fmtDate } from './reportPeriods';
+import { motion } from 'framer-motion';
 
 const RATING_COLOR = {
   Excellent: 'var(--accent-green)', Good: 'var(--accent-indigo)',

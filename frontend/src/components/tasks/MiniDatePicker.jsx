@@ -1,5 +1,5 @@
-﻿import React, { useEffect, useState } from 'react';
-import { AnimatePresence } from 'framer-motion';
+import React, { useEffect, useState } from 'react';
+import {  AnimatePresence , motion } from 'framer-motion';
 import { X, ChevronLeft, ChevronRight, Save } from 'lucide-react';
 
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];

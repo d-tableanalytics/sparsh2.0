@@ -1,4 +1,4 @@
-﻿import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react';
+import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import {
   ListChecks, UserPlus, Filter as FilterIcon, Search, RefreshCw, Download,
   List as ListIcon, Table2, ArrowUpDown, Trash2, RotateCcw,
@@ -19,6 +19,7 @@ import TaskFormModal from './TaskFormModal';
 import TaskDetailsModal from './TaskDetailsModal';
 import StatusReasonModal from './StatusReasonModal';
 import MiniDatePicker from './MiniDatePicker';
+import { motion } from 'framer-motion';
 
 // One row in the card/list view. Extracted so both a standalone task and a recurring
 // series' primary occurrence render identically; `groupBadge` adds the "×N / expand" control

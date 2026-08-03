@@ -1,5 +1,5 @@
-﻿import React, { useState, useEffect } from 'react';
-import { AnimatePresence } from 'framer-motion';
+import React, { useState, useEffect } from 'react';
+import {  AnimatePresence , motion } from 'framer-motion';
 import { X, Plus, Trash2, Bell, Mail, MessageSquare, Clock, CheckCircle } from 'lucide-react';
 
 // offset_minutes is what's actually persisted (see Reminder model in calendar_event.py);

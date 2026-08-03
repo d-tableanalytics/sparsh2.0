@@ -1,5 +1,5 @@
-﻿import React, { useState, useRef, useEffect } from 'react';
-import { AnimatePresence } from 'framer-motion';
+import React, { useState, useRef, useEffect } from 'react';
+import {  AnimatePresence , motion } from 'framer-motion';
 import { ChevronDown, Check, Search } from 'lucide-react';
 
 /**

@@ -1,4 +1,4 @@
-﻿import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import api from '../services/api';
 import Modal from '../components/common/Modal';
@@ -9,6 +9,7 @@ import {
 } from 'lucide-react';
 
 import { useAuth } from '../context/AuthContext';
+import { motion } from 'framer-motion';
 
 const SessionTemplateManagement = () => {
     const { user } = useAuth();

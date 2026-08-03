@@ -3,7 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import api from '../services/api';
 import { useAuth } from '../context/AuthContext';
 import { useNotification } from '../context/NotificationContext';
-import { AnimatePresence } from 'framer-motion';
+import {  AnimatePresence , motion } from 'framer-motion';
 import { 
     CheckCircle2, AlertCircle, ArrowRight, ArrowLeft, 
     Zap, Brain, Clock, ChevronRight, X, Layout, BookOpen, Send

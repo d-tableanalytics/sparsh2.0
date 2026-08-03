@@ -1,5 +1,5 @@
-﻿import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { AnimatePresence } from 'framer-motion';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import {  AnimatePresence , motion } from 'framer-motion';
 import {
   X, CalendarClock, Bell, Building2, Activity as ActivityIcon, Users2,
   UserCog, ClipboardList, RefreshCw, Save, Check, Search, ChevronDown,

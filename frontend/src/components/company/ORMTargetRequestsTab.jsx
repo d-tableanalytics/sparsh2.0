@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Inbox, Check, X, Clock, CheckCircle2, XCircle, ArrowRight, User } from 'lucide-react';
 import api from '../../services/api';
 import { useNotification } from '../../context/NotificationContext';
+import { motion } from 'framer-motion';
 
 const STATUS_META = {
   pending: { label: 'Pending', icon: Clock, cls: 'bg-[var(--accent-yellow-bg)] text-[var(--accent-yellow)] border-[var(--accent-yellow-border)]' },

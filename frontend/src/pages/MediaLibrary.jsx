@@ -1,5 +1,5 @@
-﻿import React, { useState, useEffect, useRef } from 'react';
-import { AnimatePresence } from 'framer-motion';
+import React, { useState, useEffect, useRef } from 'react';
+import {  AnimatePresence , motion } from 'framer-motion';
 import {
   UploadCloud, FileVideo, FileAudio, FileText, FileImage, File as FileIcon,
   Trash2, Download, Search, Loader2, X, Library, Folder, BarChart2,

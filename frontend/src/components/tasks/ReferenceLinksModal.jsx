@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { AnimatePresence } from 'framer-motion';
+import {  AnimatePresence , motion } from 'framer-motion';
 import { X, Globe, Save, Trash2 } from 'lucide-react';
 
 // Paste-a-URL variant of the shared Cancel/Apply-Changes popover shape (see PickerModal),

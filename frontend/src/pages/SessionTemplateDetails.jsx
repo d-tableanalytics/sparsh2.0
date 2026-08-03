@@ -1,9 +1,9 @@
-﻿import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import api from '../services/api';
 import Modal from '../components/common/Modal';
 import { useNotification } from '../context/NotificationContext';
-import { AnimatePresence } from 'framer-motion';
+import {  AnimatePresence , motion } from 'framer-motion';
 import {
   ArrowLeft, Copy, Pencil, Trash2, Plus, 
   CheckCircle2, XCircle, FileText, Target, 

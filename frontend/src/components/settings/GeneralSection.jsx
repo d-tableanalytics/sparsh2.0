@@ -1,4 +1,4 @@
-﻿import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import {
   Settings, User, Briefcase, Heart, MapPin, Mail, Lock, ChevronRight, ChevronDown,
   Pencil, Save, X, Loader2, Phone, PhoneCall, Calendar, Globe, Cake, AtSign,
@@ -10,6 +10,7 @@ import { useAuth } from '../../context/AuthContext';
 import { useNotification } from '../../context/NotificationContext';
 import { useTheme } from '../../context/ThemeContext';
 import { canAccessTaskManagement } from '../../utils/taskAccess';
+import { motion } from 'framer-motion';
 
 const DEPARTMENTS = ['HOD', 'Implementor', 'EA', 'MD', 'Other'];
 
