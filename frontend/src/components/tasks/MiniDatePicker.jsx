@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
+import { createPortal } from 'react-dom';
+import {  AnimatePresence , motion } from 'framer-motion';
 import { X, ChevronLeft, ChevronRight, Save } from 'lucide-react';
 
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
@@ -17,7 +18,10 @@ const isSameDay = (a, b) => a && b && a.getFullYear() === b.getFullYear() && a.g
 // `remarkLabel`: when set, a remark box is shown under the picker and its text is passed as the
 // 2nd argument to `onApply(iso, remark)` — used by the assigner's Reopen action, which must
 // carry both a new deadline and a mandatory reason. `remarkRequired` gates Done on it.
-const MiniDatePicker = ({ isOpen, onClose, value, onApply, title = 'Select Due Date', holidayDates = [], weeklyOffs = [], onBlocked, blockHolidays = true, disablePast = false, remarkLabel = '', remarkRequired = false }) => {
+// `dateOnly`: when true, the DATE/TIME tabs and the time input are hidden — only a date is
+// picked. Used by the Todo Repeat End Date, where the series stop is decided purely by date
+// (the time is ignored), so a time picker would only mislead.
+const MiniDatePicker = ({ isOpen, onClose, value, onApply, title = 'Select Due Date', holidayDates = [], weeklyOffs = [], onBlocked, blockHolidays = true, disablePast = false, remarkLabel = '', remarkRequired = false, dateOnly = false }) => {
   const [viewMonth, setViewMonth] = useState(0);
   const [viewYear, setViewYear] = useState(2000);
   const [selectedDate, setSelectedDate] = useState(new Date());
@@ -78,7 +82,10 @@ const MiniDatePicker = ({ isOpen, onClose, value, onApply, title = 'Select Due D
     onClose();
   };
 
-  return (
+  // Portal to <body> so the picker escapes any transformed / overflow-hidden ancestor
+  // (e.g. the framer-motion Event Architect modal), which would otherwise make this
+  // `fixed` overlay resolve relative to — and get clipped by — that modal card.
+  return createPortal(
     <AnimatePresence>
       <div className="fixed inset-0 z-[400] flex items-center justify-center p-4">
         <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={onClose} className="absolute inset-0 bg-black/50 backdrop-blur-sm" />
@@ -90,16 +97,18 @@ const MiniDatePicker = ({ isOpen, onClose, value, onApply, title = 'Select Due D
           </div>
 
           <div className="p-5">
-            <div className="flex bg-[var(--input-bg)] p-1 rounded-full mb-4">
-              {['date', 'time'].map(t => (
-                <button type="button" key={t} onClick={() => setTab(t)}
-                  className={`flex-1 py-2 rounded-full text-[10px] font-black uppercase tracking-widest transition-all ${tab === t ? 'bg-[var(--bg-card)] text-[var(--accent-indigo)] shadow-sm' : 'text-[var(--text-muted)]'}`}>
-                  {t}
-                </button>
-              ))}
-            </div>
+            {!dateOnly && (
+              <div className="flex bg-[var(--input-bg)] p-1 rounded-full mb-4">
+                {['date', 'time'].map(t => (
+                  <button type="button" key={t} onClick={() => setTab(t)}
+                    className={`flex-1 py-2 rounded-full text-[10px] font-black uppercase tracking-widest transition-all ${tab === t ? 'bg-[var(--bg-card)] text-[var(--accent-indigo)] shadow-sm' : 'text-[var(--text-muted)]'}`}>
+                    {t}
+                  </button>
+                ))}
+              </div>
+            )}
 
-            {tab === 'date' ? (
+            {(dateOnly || tab === 'date') ? (
               <>
                 <div className="flex items-center justify-between mb-4">
                   <span className="px-4 py-1.5 bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] rounded-full text-[11px] font-black uppercase tracking-widest">
@@ -169,7 +178,8 @@ const MiniDatePicker = ({ isOpen, onClose, value, onApply, title = 'Select Due D
           </div>
         </motion.div>
       </div>
-    </AnimatePresence>
+    </AnimatePresence>,
+    document.body
   );
 };
 

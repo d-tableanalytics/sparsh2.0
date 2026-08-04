@@ -1,15 +1,99 @@
 import React, { useState, useEffect } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
-import { 
-  Users, UserPlus, Search, Filter, 
+import {  AnimatePresence , motion } from 'framer-motion';
+import {
+  Users, UserPlus, Search, Filter,
   MoreVertical, Shield, Mail, Phone,
   ChevronRight, BadgeCheck, XCircle, Clock,
-  ArrowUpRight, Building2, UserCircle2
+  ArrowUpRight, Building2, UserCircle2,
+  ChevronDown, Check, Network
 } from 'lucide-react';
 import { useNotification } from '../context/NotificationContext';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import api from '../services/api';
+
+// Lightweight inline searchable select used for the Reporting Manager picker.
+// No reusable SearchableSelect exists in the repo, so this keeps markup/styling
+// consistent with the surrounding form inputs.
+const SearchableSelect = ({ options, value, onChange, placeholder = 'Select...' }) => {
+    const [open, setOpen] = useState(false);
+    const [query, setQuery] = useState('');
+    const wrapRef = React.useRef(null);
+
+    const selected = options.find(o => o.value === value);
+
+    useEffect(() => {
+        const handleClickOutside = (e) => {
+            if (wrapRef.current && !wrapRef.current.contains(e.target)) {
+                setOpen(false);
+                setQuery('');
+            }
+        };
+        document.addEventListener('mousedown', handleClickOutside);
+        return () => document.removeEventListener('mousedown', handleClickOutside);
+    }, []);
+
+    const filtered = options.filter(o => {
+        const q = query.toLowerCase();
+        return (
+            o.label.toLowerCase().includes(q) ||
+            (o.subtitle || '').toLowerCase().includes(q)
+        );
+    });
+
+    return (
+        <div className="relative" ref={wrapRef}>
+            <button
+                type="button"
+                onClick={() => setOpen(o => !o)}
+                className="w-full flex items-center justify-between gap-2 bg-[var(--input-bg)] px-4 py-2.5 rounded-xl border border-[var(--border)] text-[13px] font-bold text-left"
+            >
+                <span className={`truncate ${selected ? 'text-[var(--text-main)]' : 'text-[var(--text-muted)]'}`}>
+                    {selected ? selected.label : placeholder}
+                </span>
+                <ChevronDown size={16} className={`shrink-0 text-[var(--text-muted)] transition-transform ${open ? 'rotate-180' : ''}`} />
+            </button>
+
+            {open && (
+                <div className="absolute z-50 mt-2 w-full bg-[var(--bg-card)] border border-[var(--border)] rounded-2xl shadow-2xl overflow-hidden">
+                    <div className="p-2 border-b border-[var(--border)]">
+                        <div className="relative">
+                            <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-[var(--text-muted)]" size={14} />
+                            <input
+                                autoFocus
+                                value={query}
+                                onChange={e => setQuery(e.target.value)}
+                                placeholder="Search manager..."
+                                className="w-full pl-9 pr-3 py-2 bg-[var(--input-bg)] border border-[var(--border)] rounded-lg text-[12px] font-bold outline-none"
+                            />
+                        </div>
+                    </div>
+                    <div className="max-h-52 overflow-y-auto no-scrollbar py-1">
+                        {filtered.length === 0 && (
+                            <div className="px-4 py-3 text-[12px] font-bold text-[var(--text-muted)]">No matches</div>
+                        )}
+                        {filtered.map(o => (
+                            <button
+                                type="button"
+                                key={o.value || 'none'}
+                                onClick={() => { onChange(o.value); setOpen(false); setQuery(''); }}
+                                className="w-full flex items-center justify-between gap-2 px-4 py-2.5 text-left hover:bg-[var(--input-bg)] transition-colors"
+                            >
+                                <span className="min-w-0">
+                                    <span className="block text-[13px] font-black text-[var(--text-main)] truncate">{o.label}</span>
+                                    {o.subtitle && (
+                                        <span className="block text-[10px] font-bold text-[var(--text-muted)] uppercase tracking-wide truncate">{o.subtitle}</span>
+                                    )}
+                                </span>
+                                {o.value === value && <Check size={16} className="shrink-0 text-[var(--accent-indigo)]" />}
+                            </button>
+                        ))}
+                    </div>
+                </div>
+            )}
+        </div>
+    );
+};
 
 const UserManagement = () => {
     const navigate = useNavigate();
@@ -23,12 +107,13 @@ const UserManagement = () => {
     const [showAddModal, setShowAddModal] = useState(false);
     
     const canCreate = user?.role === 'superadmin' || user?.permissions?.users?.create;
-    const canRead = user?.role === 'superadmin' || user?.permissions?.users?.read;
+    const _canRead = user?.role === 'superadmin' || user?.permissions?.users?.read;
     
     const initialStaffForm = {
         first_name: '', last_name: '', email: '', password: '',
         mobile: '', role: 'coach', is_active: true,
         session_type: 'Both', department: 'Other',
+        reporting_manager: '',
         permissions: {
             batches: { create: false, read: true, update: false, delete: false },
             calendar: { create: false, read: true, update: false, delete: false },
@@ -39,6 +124,7 @@ const UserManagement = () => {
         }
     };
     const [staffForm, setStaffForm] = useState(initialStaffForm);
+    const [managerOptions, setManagerOptions] = useState([]);
 
 
     const fetchData = async () => {
@@ -58,6 +144,26 @@ const UserManagement = () => {
     };
 
     useEffect(() => { fetchData(); }, []);
+
+    // Fetch reporting-manager options for INTERNAL staff (no company_id => all active staff).
+    const fetchManagerOptions = async () => {
+        try {
+            const res = await api.get('/users/reporting-manager-options');
+            const opts = (res.data || []).map(m => ({
+                value: m._id,
+                label: m.full_name || m.email,
+                subtitle: [m.role, m.designation].filter(Boolean).join(' • ')
+            }));
+            setManagerOptions([{ value: '', label: '— None —', subtitle: '' }, ...opts]);
+        } catch (err) {
+            console.error("Fetch reporting-manager options error:", err);
+            setManagerOptions([{ value: '', label: '— None —', subtitle: '' }]);
+        }
+    };
+
+    useEffect(() => {
+        if (showAddModal) fetchManagerOptions();
+    }, [showAddModal]);
 
     const filteredUsers = users.filter(u => {
         const matchesSearch = (u.full_name || u.name || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
@@ -226,6 +332,18 @@ const UserManagement = () => {
                                             <option value="superadmin">SuperAdmin</option>
                                         </select>
                                     </div>
+                                </div>
+
+                                <div className="space-y-1.5">
+                                    <label className="text-[10px] font-black text-[var(--text-muted)] uppercase px-2 flex items-center gap-1.5">
+                                        <Network size={12} className="text-[var(--accent-indigo)]" /> Reporting Manager
+                                    </label>
+                                    <SearchableSelect
+                                        options={managerOptions}
+                                        value={staffForm.reporting_manager}
+                                        onChange={val => setStaffForm({ ...staffForm, reporting_manager: val })}
+                                        placeholder="— None —"
+                                    />
                                 </div>
 
                                 <div className="space-y-3 bg-[var(--bg-main)] p-6 rounded-[28px] border border-dashed border-[var(--border)]">

@@ -14,7 +14,7 @@ import {
     AlertCircle, 
     ChevronRight
 } from 'lucide-react';
-import { motion, AnimatePresence } from 'framer-motion';
+import {  AnimatePresence , motion } from 'framer-motion';
 import api from '../services/api';
 import { useAuth } from '../context/AuthContext';
 

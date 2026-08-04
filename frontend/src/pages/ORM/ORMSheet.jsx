@@ -6,11 +6,11 @@ import {
   Lock, Save, Award, ChevronRight, Check, X, ShieldAlert,
   FileDown, FileUp
 } from 'lucide-react';
-import { motion, AnimatePresence } from 'framer-motion';
+import {  AnimatePresence , motion } from 'framer-motion';
 import * as XLSX from 'xlsx';
 
 const ORMSheet = () => {
-  const { user } = useAuth();
+  useAuth();
   const [parameters, setParameters] = useState([]);
   const [selectedSub, setSelectedSub] = useState(null);
   const [selectedParamId, setSelectedParamId] = useState(null);
@@ -27,7 +27,7 @@ const ORMSheet = () => {
   const [alreadySubmitted, setAlreadySubmitted] = useState(false);
   const [submittedByMe, setSubmittedByMe] = useState(true);
   const [submittedByName, setSubmittedByName] = useState('');
-  const [submittedData, setSubmittedData] = useState(null);
+  const [_submittedData, _setSubmittedData] = useState(null);
   const [errorMsg, setErrorMsg] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
 

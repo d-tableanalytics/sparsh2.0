@@ -3,13 +3,13 @@ import { useNavigate } from 'react-router-dom';
 import api from '../services/api';
 import Modal from '../components/common/Modal';
 import { useNotification } from '../context/NotificationContext';
-import { motion } from 'framer-motion';
 import {
   Plus, Search, Layers, Calendar,
   LayoutGrid, List, ExternalLink, Clock, CheckCircle2,
   PauseCircle, PlayCircle, Trash2, Package, Building2, X
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import { motion } from 'framer-motion';
 
 const statusConfig = {
   active: { bg: 'var(--status-active-bg)', text: 'var(--status-active-text)', border: 'var(--status-active-border)', icon: PlayCircle, label: 'Active' },
@@ -30,7 +30,7 @@ const BatchManagement = () => {
   const isPowerRole = ['superadmin', 'admin', 'coach', 'staff'].includes(user?.role?.toLowerCase());
   const canCreate = isPowerRole || user?.permissions?.batches?.create;
   const canDelete = isPowerRole || user?.permissions?.batches?.delete;
-  const canUpdate = isPowerRole || user?.permissions?.batches?.update;
+  const _canUpdate = isPowerRole || user?.permissions?.batches?.update;
 
   const [form, setForm] = useState({
     name: '', product_name: '', description: '', start_date: '', target_end_date: '', gpt_projects: []

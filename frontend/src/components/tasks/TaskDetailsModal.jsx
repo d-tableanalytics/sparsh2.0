@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
+import {  AnimatePresence , motion } from 'framer-motion';
 import {
   ArrowLeft, Trash2, Pencil, FileText, History, Info, Users, Layers, Plus,
   Paperclip, CheckSquare, Square, X, Tags as TagsIcon,
@@ -107,7 +107,9 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, scope, onChanged, onEdit })
   useEffect(() => {
     if (!isOpen) return;
     fetchDetail();
-    api.get('/tasks/assignable-users').then(res => setUsers(res.data || [])).catch(() => {});
+    // `?all=true` → full directory for name resolution (must include the assigner/higher-rank
+    // users the viewer can't assign to, so they don't show as "Unknown").
+    api.get('/tasks/assignable-users?all=true').then(res => setUsers(res.data || [])).catch(() => {});
     // Categories/tags for the "Add Subtask" form.
     api.get('/task-categories').then(r => setMetaCats((r.data || []).map(c => c.name).filter(Boolean))).catch(() => {});
     api.get('/task-tags').then(r => setMetaTags((r.data || []).map(t => t.name).filter(Boolean))).catch(() => {});
@@ -161,7 +163,7 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, scope, onChanged, onEdit })
       await updateTaskStatus(taskId, status, reason, doerName, doerId);
       if (resolvingDependency) {
         showSuccess('Dependency completed — the task is back with the assignee');
-      } else if (status === 'completed' && task?.verificationRequired && !canManage) {
+      } else if (status === 'completed' && task?.verificationRequired && !canAdminister) {
         // Verification-required tasks completed by the assignee are routed to "verification"
         // by the backend — the silent refetch below reflects whatever the server decided.
         showSuccess('Verification requested — sent to the assigner');
@@ -331,7 +333,15 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, scope, onChanged, onEdit })
   const cfg = task ? (STATUS_CONFIG[task.status] || STATUS_CONFIG.pending) : null;
   // Edit/Delete are available to the creator and to admins (backend enforces the same on
   // update/delete). Assignees / in-loop users can view + change status but not edit/delete.
-  const canManage = !!task && (task.isCreator || ['superadmin', 'admin'].includes(user?.role));
+  // Company MD (backend-scoped to only their own company's tasks): the client-side equivalent
+  // of an admin, so it unlocks the same actions. A client MD's role is "clientadmin", which is
+  // deliberately NOT in the role list above — the backend decides, and sends this flag.
+  const isCompanyAdmin = !!task?.isCompanyAdmin;
+  const canManage = !!task && (task.isCreator || isCompanyAdmin || ['superadmin', 'admin'].includes(user?.role));
+  // Reporting Manager of an assignee (backend-scoped to only their reports): has the SAME task
+  // workflow as an admin on this task — drive the working status, finalize/verify, reopen,
+  // revise, edit, delete. Folded into the gating booleans below.
+  const isReportingManager = !!task?.isReportingManager;
   // Counts + progress reflect the local working copy so ticks show instantly (pre-Save).
   const checklistDone = localChecklist.filter(c => c.completed).length;
   const checklistTotal = localChecklist.length;
@@ -357,15 +367,22 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, scope, onChanged, onEdit })
   // are observers: View + Follow Up + Add Subtask only. Every workflow action (status change,
   // request verification / complete, approve / reopen, revise deadline, edit, delete) is frozen
   // for them, regardless of their role — an admin who is merely in-loop gets no more than this.
-  const isPureWatcher = !!task && isInLoop && !isAssignee && !task.isCreator;
-  // Who drives the working-status dropdown: the assignee, or the creator of a self-task.
-  const canWork = (isAssignee || isSelfTask) && !isPureWatcher;
-  // Assigner-side actions (approve/reopen a verification, revise the deadline).
-  const canAdminister = canManage && !isPureWatcher;
+  // The two exceptions are the reporting manager and the company MD, who administer the task
+  // however they came to it.
+  const isPureWatcher = !!task && isInLoop && !isAssignee && !task.isCreator
+    && !isReportingManager && !isCompanyAdmin;
+  // Who drives the working-status dropdown: the assignee, the creator of a self-task, the
+  // reporting manager, or the company MD (same workflow as an admin on this task).
+  const canWork = ((isAssignee || isSelfTask) && !isPureWatcher) || isReportingManager || isCompanyAdmin;
+  // Assigner-side actions (approve/reopen a verification, revise the deadline) — also the
+  // reporting manager and the company MD, who administer these tasks like an admin.
+  const canAdminister = (canManage && !isPureWatcher) || isReportingManager || isCompanyAdmin;
   // Editing/deleting the task definition belongs to the assigner (creator) / admins — NOT the
   // assignee (their "My Tasks" view) and NOT a pure watcher (their Subscribed view). So hide
-  // Edit + Delete for a doer who isn't also the creator, and for in-loop-only members.
-  const canEditOrDelete = canAdminister && !(isAssignee && !task?.isCreator);
+  // Edit + Delete for a doer who isn't also the creator, and for in-loop-only members. A
+  // reporting manager — and a company MD — additively get Edit/Delete on those tasks.
+  const canEditOrDelete = (canAdminister && !(isAssignee && !task?.isCreator))
+    || isReportingManager || isCompanyAdmin;
   // ─── Follow-Ups: the task's ONE communication timeline ───
   // Everything people said (follow-ups, plus the remarks left by the old chat section, folded in
   // so that history isn't orphaned) merged with the system's record of what happened (status
@@ -415,7 +432,7 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, scope, onChanged, onEdit })
   // Other"), but it isn't theirs to move until the doer resolves it — so their control is frozen.
   const isAwaitingDependency = isAssignee && !!task?.dependencyDoerId && !isDependencyDoer;
   const dependencyDoerName = userMap[task?.dependencyDoerId] || 'the dependency doer';
-  const requestingVerification = task?.verificationRequired && !canManage && !isDependencyDoer;
+  const requestingVerification = task?.verificationRequired && !canAdminister && !isDependencyDoer;
   // Dependency doer → Complete, Dependent on Other (chain it on), Revise. Nothing else.
   // Normal assignee → Accept, Dependent on Other, Blocked, Revise + the completion option.
   const workingActions = isDependencyDoer

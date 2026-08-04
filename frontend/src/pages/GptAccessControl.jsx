@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import api from '../services/api';
 import { useNotification } from '../context/NotificationContext';
-import { motion, AnimatePresence } from 'framer-motion';
+import {  AnimatePresence , motion } from 'framer-motion';
 import { 
     ShieldCheck, Search, User, Building2, 
     Trash2, Plus, ArrowLeft, Bot, 

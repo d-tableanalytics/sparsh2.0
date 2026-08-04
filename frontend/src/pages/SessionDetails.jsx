@@ -2,7 +2,6 @@ import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import api from '../services/api';
 import { useNotification } from '../context/NotificationContext';
-import { motion } from 'framer-motion';
 import {
     ArrowLeft, Calendar as CalendarIcon, Clock, Link as LinkIcon,
     Video, UserCheck, Activity, UploadCloud, 
@@ -11,6 +10,7 @@ import {
     Target, ChevronRight, X, Users2
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import { motion } from 'framer-motion';
 
 const SessionDetails = () => {
     const { sessionId } = useParams();

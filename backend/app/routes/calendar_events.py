@@ -5,6 +5,8 @@ from app.controllers.auth_controller import (
     get_current_user, has_task_access, is_client_side_user,
     TASK_ACCESS_DENIED_MESSAGE, DELEGATION_DISABLED_MESSAGE,
     get_ineligible_recipient_ids, recipient_denied_message,
+    get_rank_ineligible_assignees, ASSIGN_RANK_DENIED_MESSAGE,
+    is_company_task_admin,
 )
 from app.models.calendar_event import CalendarEventCreate, CalendarEventResponse
 from app.services.task_notifications import notify_task_event, recipients_for_event
@@ -26,8 +28,8 @@ router = APIRouter(prefix="/calendar/events", tags=["Calendar"])
 
 from app.utils.calendar_utils import (
 
-    CALENDAR_COLLECTIONS, find_user_by_id, 
-    get_target_collection_name, find_event_across_collections
+    CALENDAR_COLLECTIONS, find_user_by_id,
+    get_target_collection_name, find_event_across_collections, exclude_tpms
 )
 
 async def detect_conflicts(event_dict: dict, event_id: str = None, sessions_only: bool = False):
@@ -260,6 +262,51 @@ TODO_TYPE = "todo"
 
 TODO_PRIVATE_MESSAGE = "Todos are private — only their owner can view or change them."
 
+# The product's canonical local zone (IST, UTC+5:30) — the same zone the nightly recurrence
+# engine uses for every day-boundary decision. A personal todo is always due at the end of its
+# day in this zone.
+IST_TZ = timezone(timedelta(hours=5, minutes=30))
+
+
+def _iso_utc(dt):
+    """Serialize a datetime as a UTC-MARKED ISO string so the browser's `new Date()` parses it
+    as UTC, not local. created_at is stored via datetime.utcnow() (naive UTC); its bare
+    isoformat() carries no zone marker, so JS reads it as LOCAL and shows a time off by the UTC
+    offset (e.g. an 11:07 AM IST creation reads back as 05:37 AM). Marking it UTC fixes that."""
+    if not hasattr(dt, "isoformat"):
+        return dt
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.isoformat()
+
+
+def _apply_todo_due_end_of_day(doc: dict) -> None:
+    """A personal todo is always due at 23:59:59 (IST) on its CHOSEN calendar DATE — the day the
+    user added it on (the day selected in the calendar; defaults to today when none was chosen).
+    The user never picks a TIME; only the date carries over. The instant is written to BOTH
+    `start` and `end` (todos keep start == end), so the calendar shows it on that day, the
+    reminder/recurrence anchors are the end of that day, and the nightly engine rolls a recurring
+    todo to 23:59:59 the next day (the start==end zero offset is preserved). Scope: todos only."""
+    raw = doc.get("start") or doc.get("end")
+    base_ist = None
+    if raw:
+        try:
+            s = str(raw)
+            if len(s) <= 10:  # date-only "YYYY-MM-DD" → that calendar day, in IST
+                base_ist = datetime.fromisoformat(s).replace(tzinfo=IST_TZ)
+            else:
+                dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+                base_ist = (dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)).astimezone(IST_TZ)
+        except Exception:
+            base_ist = None
+    if base_ist is None:
+        base_ist = datetime.now(IST_TZ)  # no / invalid date → default to today
+    due_utc = base_ist.replace(hour=23, minute=59, second=59, microsecond=0).astimezone(timezone.utc)
+    iso = due_utc.isoformat()
+    doc["start"] = iso
+    doc["end"] = iso
+    doc["all_day"] = False
+
 
 def _strip_todo_sharing(doc: dict) -> None:
     """Force a todo to be personal: no assignees, no watchers, no delegation of any kind.
@@ -305,11 +352,19 @@ async def create_event(event: CalendarEventCreate, background_tasks: BackgroundT
         bad = await get_ineligible_recipient_ids(current_user, (event_dict.get("target_staff_id") or []) + (event_dict.get("watchers") or []))
         if bad:
             raise HTTPException(status_code=403, detail=recipient_denied_message(current_user))
+        # Assignment rank rule (assignees only): SMOPS can't assign up to admin; a client can't
+        # assign above their own MD>HR>HOD>Implementor rank.
+        rank_bad = await get_rank_ineligible_assignees(current_user, event_dict.get("target_staff_id") or [])
+        if rank_bad:
+            raise HTTPException(status_code=403, detail=ASSIGN_RANK_DENIED_MESSAGE)
     elif event_dict.get("type") == TODO_TYPE:
         # A todo is personal planning: every authenticated user may create their own, so the
         # generic `calendar.create` bit is not required (a staff member without it must still
         # be able to jot down their own todo). Sharing fields are stripped, not trusted.
         _strip_todo_sharing(event_dict)
+        # A todo is due at 23:59:59 (IST) on the calendar day it was added for (the selected day;
+        # defaults to today). The user never picks a time — only the date carries over.
+        _apply_todo_due_end_of_day(event_dict)
     elif user_role != "superadmin":
         # Non-task calendar / session events keep the original permission model.
         # Allow Client Users (Learners) and Client Admins to create events;
@@ -372,7 +427,12 @@ async def create_event(event: CalendarEventCreate, background_tasks: BackgroundT
     # ─── Recursive Generation Engine ───
     repeat_type = event_dict.get("repeat", "Does not repeat")
     end_date_str = event_dict.get("repeat_end_date")
-    if repeat_type != "Does not repeat" and end_date_str:
+    is_todo = event_dict.get("type") == TODO_TYPE
+    # A series needs a group id for the nightly rollover engine to pick it up. Tasks/events
+    # only get one when an end date bounds the series; a TODO does not require an end date —
+    # an open-ended personal todo (no stop date) still recurs, rolling forward one occurrence
+    # per period indefinitely (the engine treats a missing repeat_end_date as "no stop").
+    if repeat_type != "Does not repeat" and (end_date_str or is_todo):
         # Generate a unique series ID to group these occurrences
         event_dict["recurring_group_id"] = str(ObjectId())
 
@@ -500,9 +560,7 @@ async def create_event(event: CalendarEventCreate, background_tasks: BackgroundT
         else:
             background_tasks.add_task(notify_task_event, "created", event_dict, current_user)
         background_tasks.add_task(sync_task_meta, event_dict.get("category"), event_dict.get("tags"), str(current_user["_id"]))
-    elif event_dict.get("type") != TODO_TYPE:
-        # Todos never send email/WhatsApp on create — a reminder the user configured is the
-        # ONLY notification a todo can produce (fired by the reminder scheduler at its time).
+    else:
         background_tasks.add_task(notify_users_instant, event_dict, "created", creator_name)
     await log_activity(current_user, "Create Task" if is_task else "Create Event", col_name, f"{'Task' if is_task else 'Event'} created: {event_dict['title']}",
                        meta={"task_id": str(result.inserted_id), "group_id": event_dict.get("group_id")} if is_task else None)
@@ -544,6 +602,10 @@ async def update_event(event_id: str, updates: dict, background_tasks: Backgroun
             bad = await get_ineligible_recipient_ids(current_user, recipients)
             if bad:
                 raise HTTPException(status_code=403, detail=recipient_denied_message(current_user))
+        if "target_staff_id" in updates:
+            rank_bad = await get_rank_ineligible_assignees(current_user, updates.get("target_staff_id") or [])
+            if rank_bad:
+                raise HTTPException(status_code=403, detail=ASSIGN_RANK_DENIED_MESSAGE)
 
     # A todo answers to its owner alone — not to admins, not to a calendar.update grant.
     _require_todo_owner(existing, current_user)
@@ -554,8 +616,11 @@ async def update_event(event_id: str, updates: dict, background_tasks: Backgroun
     is_admin = current_user.get("role") == "superadmin"
     has_update_perm = current_user.get("permissions", {}).get("calendar", {}).get("update")
     is_creator = existing.get("user_id") == str(current_user["_id"])
+    # A client MD administers every TASK in their own company (see auth_controller). Scoped to
+    # tasks so this never widens authority over sessions/events, which the MD has no part in.
+    is_company_admin = is_task_update and is_company_task_admin(existing, current_user)
 
-    if not (is_admin or has_update_perm or is_creator):
+    if not (is_admin or has_update_perm or is_creator or is_company_admin):
         raise HTTPException(status_code=403, detail="Not authorized to edit this event.")
          
     # ─── Record Completion Timestamp ───
@@ -627,8 +692,7 @@ async def update_event(event_id: str, updates: dict, background_tasks: Backgroun
         if already_in_loop:
             background_tasks.add_task(notify_task_event, "updated", final_doc, current_user,
                                       None, list(already_in_loop))
-    elif final_doc.get("type") != TODO_TYPE:
-        # Todos never email on update (including completing one from the edit form).
+    else:
         background_tasks.add_task(notify_users_instant, final_doc, "updated", creator_name)
 
     # ─── Recurring Series Timeline Sync ───
@@ -900,22 +964,26 @@ async def add_resource_from_media(event_id: str, background_tasks: BackgroundTas
 async def delete_event(event_id: str, background_tasks: BackgroundTasks, current_user: dict = Depends(get_current_user)):
     existing, col_name = await find_event_across_collections(event_id)
     if not existing: raise HTTPException(status_code=404, detail="Event not found")
+
     is_admin = current_user.get("role") == "superadmin"
     has_delete_perm = current_user.get("permissions", {}).get("calendar", {}).get("delete")
     is_creator = existing.get("user_id") == str(current_user["_id"])
+    # A client MD administers every TASK in their own company — tasks only, so a session/event
+    # (and, via the owner check below, a todo) is unaffected.
+    is_company_admin = (existing.get("type") == "task"
+                        and is_company_task_admin(existing, current_user))
 
     # Only the owner may delete their todo — a calendar.delete grant does not reach it.
     _require_todo_owner(existing, current_user)
 
-    if not (is_admin or has_delete_perm or is_creator):
+    if not (is_admin or has_delete_perm or is_creator or is_company_admin):
          raise HTTPException(status_code=403, detail="Not authorized to delete this event")
 
     await get_collection(col_name).delete_one({"_id": ObjectId(event_id)})
     creator_name = current_user.get("full_name") or current_user.get("first_name", "System Admin")
     if existing.get("type") == "task":
         background_tasks.add_task(notify_task_event, "deleted", existing, current_user)
-    elif existing.get("type") != TODO_TYPE:
-        # Todos never email on delete.
+    else:
         background_tasks.add_task(notify_users_instant, existing, "deleted", creator_name)
     return {"message": "Deleted successfully"}
 
@@ -1031,8 +1099,9 @@ async def get_all_events(target_user_id: Optional[str] = None, view_mode: str = 
                         {"target_staff_id": {"$in": [current_uid]}}
                     ]
                 }
-            query = {"$and": [query, not_others_todo]} if query else not_others_todo
-            db_docs = await custom_col.find(query).to_list(1000)
+            # TPMS activities live in these collections too — they belong to the TPMS
+            # Calendar, not the Session Calendar. See calendar_utils.exclude_tpms.
+            db_docs = await custom_col.find(exclude_tpms(query)).to_list(1000)
         else:
             # Privacy Logic: 
             # Visible if Creator OR explicitly involved in any capacity (Attendee, Coach, Target)
@@ -1045,12 +1114,13 @@ async def get_all_events(target_user_id: Optional[str] = None, view_mode: str = 
                 {"coach_ids": {"$in": [effective_user_id]}},
                 {"target_staff_id": {"$in": [effective_user_id]}}
             ]
-            db_docs = await custom_col.find({"$and": [{"$or": involvement_clauses}, not_others_todo]}).to_list(1000)
+            db_docs = await custom_col.find(
+                exclude_tpms({"$or": involvement_clauses})).to_list(1000)
         
         for c in db_docs:
             events.append({
                 "id": str(c["_id"]), "title": c["title"], "type": c["type"], "start": c["start"], "end": c.get("end"), "allDay": c.get("all_day", False),
-                "extendedProps": { **{k: v for k, v in c.items() if k not in ["_id", "created_at", "updated_at"]}, "id": str(c["_id"]), "isCreator": c.get("user_id") == current_uid, "isAssigned": current_uid in (c.get("target_staff_id") or []) or current_uid in (c.get("assigned_member_ids") or []), "canEdit": role == "superadmin" or c.get("user_id") == current_uid, "source_col": col_name, "creator_is_staff": c.get("user_id") in staff_id_set }
+                "extendedProps": { **{k: v for k, v in c.items() if k not in ["_id", "created_at", "updated_at"]}, "id": str(c["_id"]), "created_at": _iso_utc(c.get("created_at")), "isCreator": c.get("user_id") == current_uid, "isAssigned": current_uid in (c.get("target_staff_id") or []) or current_uid in (c.get("assigned_member_ids") or []), "canEdit": role == "superadmin" or c.get("user_id") == current_uid, "source_col": col_name, "creator_is_staff": c.get("user_id") in staff_id_set }
             })
     return events
 
@@ -1229,7 +1299,7 @@ Structure your response clearly. Use markdown.
 async def complete_event(event_id: str, background_tasks: BackgroundTasks, current_user: dict = Depends(get_current_user)):
     event, col_name = await find_event_across_collections(event_id)
     if not event: raise HTTPException(status_code=404, detail="Event not found")
-    
+
     is_admin = current_user.get("role") == "superadmin"
     has_update_perm = current_user.get("permissions", {}).get("calendar", {}).get("update")
     is_creator = event.get("user_id") == str(current_user["_id"])

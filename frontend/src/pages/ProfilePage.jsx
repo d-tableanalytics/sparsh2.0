@@ -7,8 +7,8 @@ import {
   Building2, Calendar, KeyRound, ShieldCheck, PhoneCall, AlertCircle, IdCard,
   MapPin, Globe, Heart, Cake, AtSign, Hash, Users as UsersIcon,
 } from 'lucide-react';
-import { motion } from 'framer-motion';
 import NotificationSettings from '../components/settings/NotificationSettings';
+import { motion } from 'framer-motion';
 
 // Fields the self-service PATCH /users/me endpoint accepts (see backend SelfProfileUpdate).
 // Everything NOT in here is rendered read-only / disabled (no backend support yet).
@@ -121,7 +121,19 @@ const ProfilePage = () => {
   const [pwd, setPwd] = useState({ current: '', next: '', confirm: '' });
   const [changingPwd, setChangingPwd] = useState(false);
 
+  // Reporting manager is stored as a user _id; resolve it to a display name via the
+  // manager-options endpoint (scope by company_id for client users, omit for internal staff).
+  const [managers, setManagers] = useState([]);
+
   useEffect(() => { if (user) setForm(hydrate(user)); }, [user]);
+
+  useEffect(() => {
+    if (!user) return;
+    const params = user.company_id ? { company_id: user.company_id } : {};
+    api.get('/users/reporting-manager-options', { params })
+      .then((res) => setManagers(Array.isArray(res.data) ? res.data : []))
+      .catch(() => setManagers([]));
+  }, [user]);
 
   const setField = (k, v) => setForm((f) => ({ ...f, [k]: v }));
   const cancelEdit = () => { setForm(hydrate(user)); setEditing(null); };
@@ -173,6 +185,8 @@ const ProfilePage = () => {
   const permissions = user.permissions && typeof user.permissions === 'object' ? user.permissions : null;
   const isEditingGeneral = editing === 'general';
   const isEditingPro = editing === 'professional';
+  const reportingManagerName =
+    (user.reporting_manager && managers.find((m) => m._id === user.reporting_manager)?.full_name) || '—';
 
   return (
     <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} className="max-w-6xl mx-auto grid grid-cols-1 lg:grid-cols-3 gap-6 pb-10">
@@ -228,7 +242,7 @@ const ProfilePage = () => {
             <Field icon={Shield} label="Role" value={user.role} editable={false} />
             <Field icon={IdCard} label="Designation" value={isEditingPro ? form.designation : user.designation} editing={isEditingPro} onChange={(v) => setField('designation', v)} />
             <Field icon={Briefcase} label="Department" value={isEditingPro ? form.department : user.department} editing={isEditingPro} onChange={(v) => setField('department', v)} />
-            <Field icon={UsersIcon} label="Reporting Manager" value={isEditingPro ? form.reporting_manager : user.reporting_manager} editing={isEditingPro} onChange={(v) => setField('reporting_manager', v)} />
+            <Field icon={UsersIcon} label="Reporting Manager" value={reportingManagerName} editable={false} />
             <Field icon={Calendar} label="Joining Date" kind="date" value={isEditingPro ? form.joining_date : (user.joining_date ? String(user.joining_date).slice(0, 10) : '')} editing={isEditingPro} onChange={(v) => setField('joining_date', v)} />
             <Field icon={MapPin} label="Office Location" value={user.office_location} editable={false} />
             <Field icon={Hash} label="Employee Code" value={user.employee_code} editable={false} />

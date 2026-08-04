@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { motion } from 'framer-motion';
 import { Calendar, CalendarRange, Layers, Calculator, FileText, Info, TrendingUp, TrendingDown } from 'lucide-react';
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import api from '../../services/api';
+import { motion } from 'framer-motion';
 
 // Mirrors the scoring logic used in the ORM Designer (ORMPage.jsx).
 const calculateScore = (sub, isReverse) => {
@@ -155,7 +155,7 @@ const ORMReportTab = ({ companyId, companyName }) => {
     };
     run();
     return () => { cancelled = true; };
-  }, [viewMode, selectedMonth, selectedQuarter, companyId]);
+  }, [viewMode, selectedMonth, selectedQuarter, companyId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const { rows, grandWeight, grandScore } = useMemo(() => buildMatrix(parameters), [parameters]);
 

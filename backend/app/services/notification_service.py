@@ -12,6 +12,15 @@ import asyncio
 
 logger = logging.getLogger(__name__)
 
+# ─────────────────────────────────────────────────────────────────────────────
+# GLOBAL notification switch (currently ENABLED — all non-TPMS modules notify normally).
+# When set to False it becomes a kill-switch: NO template-based notification (email or
+# WhatsApp) is sent for ANY module, since everything funnels through
+# send_notification_from_template() below. Left ON so other ERP modules (calendar, tasks,
+# ORM…) remain unchanged; TPMS is silenced separately via TPMS_NOTIFICATIONS_ENABLED.
+# Flip to False for a full ERP-wide blackout (requires a backend restart to take effect).
+NOTIFICATIONS_ENABLED = True
+
 SESSION_HTML_TEMPLATE = """<!DOCTYPE html>
 <html>
 <head>
@@ -169,6 +178,51 @@ OTP_HTML_TEMPLATE = """<!DOCTYPE html>
 </body>
 </html>"""
 
+TASK_REMINDER_HTML_TEMPLATE = """<!DOCTYPE html>
+<html>
+<head>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; color: #1f2430; line-height: 1.6; margin: 0; padding: 0; background-color: #f4f5fb; }
+        .container { max-width: 600px; margin: 24px auto; background: #ffffff; border: 1px solid #e6e8f0; border-radius: 14px; overflow: hidden; box-shadow: 0 6px 20px rgba(79,70,229,0.08); }
+        .header { background: linear-gradient(120deg, #4f46e5 0%, #6d28d9 100%); color: #ffffff; padding: 28px 24px; text-align: center; }
+        .header .bell { font-size: 26px; line-height: 1; }
+        .header h1 { margin: 8px 0 0; font-size: 22px; font-weight: 800; letter-spacing: .3px; }
+        .content { padding: 28px 26px; }
+        .task-title { font-size: 18px; font-weight: 800; color: #111827; margin: 0 0 6px; }
+        .lede { color: #4b5563; font-size: 14px; margin: 0 0 20px; }
+        .deadline { background: #fef2f2; border: 1px solid #fecaca; border-radius: 10px; padding: 14px 16px; margin: 0 0 18px; }
+        .deadline .label { font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: .6px; color: #b91c1c; }
+        .deadline .value { font-size: 15px; font-weight: 800; color: #991b1b; margin-top: 2px; }
+        .desc { background: #f8f9fc; border: 1px solid #eef0f6; border-radius: 10px; padding: 14px 16px; font-size: 14px; color: #374151; }
+        .desc .label { font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: .6px; color: #6b7280; display: block; margin-bottom: 4px; }
+        .foot-note { margin-top: 22px; color: #6b7280; font-size: 13px; }
+        .footer { padding: 18px; text-align: center; background: #0f172a; color: #cbd5e1; font-size: 12px; font-weight: 700; letter-spacing: .4px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div class="bell">&#128276;</div>
+            <h1>Task Reminder</h1>
+        </div>
+        <div class="content">
+            <p class="task-title">{{title}}</p>
+            <p class="lede">This is a reminder about your task. Please review it and keep it on track.</p>
+            <div class="deadline">
+                <div class="label">&#9200; Task Deadline</div>
+                <div class="value">{{task_deadline}}</div>
+            </div>
+            <div class="desc">
+                <span class="label">Description</span>
+                {{description}}
+            </div>
+            <p class="foot-note">Open Sparsh to view and update this task.</p>
+        </div>
+        <div class="footer">Sparsh Magic LLP</div>
+    </div>
+</body>
+</html>"""
+
 DEFAULT_TEMPLATES = {
     "user_creation_email": {
         "subject": "Welcome to Sparsh 2.0 - Your Account Details",
@@ -177,6 +231,72 @@ DEFAULT_TEMPLATES = {
     "task_created_email": {
         "subject": "New Task Assigned: {{task_name}}",
         "body": "Hello {{assigned_user}},\n\nA new task '{{task_name}}' has been assigned to you by {{assigned_by}}.\n\nDeadline: {{deadline}}\nPriority: {{critical_level}}\nDescription: {{description}}\n\nRegards,\nSparsh Notifications"
+    },
+    # Reminder for a TASK (type == "task"). Distinct from the Session Reminder ("reminder_email",
+    # DB-configured) so a task never renders the session-styled mail. Used by send_reminder_email.
+    "task_reminder_email": {
+        "subject": "⏰ Task Reminder: {{title}}",
+        "body": TASK_REMINDER_HTML_TEMPLATE
+    },
+    # ─── Task Management (Delegation) module ───
+    # Separate triggers from the Calendar's. task_created/updated/deleted are the
+    # pre-existing slugs (they only ever fired for delegation tasks); the rest are new.
+    # See app/services/task_notifications.py for the recipients and context of each.
+    "task_updated_email": {
+        "subject": "Task Updated: {{task_name}}",
+        "body": "Hello {{name}},\n\nThe task '{{task_name}}' was updated by {{actor_name}}.\n\nDeadline: {{deadline}}\nPriority: {{critical_level}}\nStatus: {{task_status}}\n\nRegards,\nSparsh Notifications"
+    },
+    "task_deleted_email": {
+        "subject": "Task Deleted: {{task_name}}",
+        "body": "Hello {{name}},\n\nThe task '{{task_name}}' has been deleted by {{actor_name}}.\n\nRegards,\nSparsh Notifications"
+    },
+    "task_assigned_email": {
+        "subject": "Task Assigned: {{task_name}}",
+        "body": "Hello {{name}},\n\n{{actor_name}} has assigned you the task '{{task_name}}'.\n\nDeadline: {{deadline}}\nPriority: {{critical_level}}\nDescription: {{description}}\n\nRegards,\nSparsh Notifications"
+    },
+    "task_accepted_email": {
+        "subject": "Task Accepted: {{task_name}}",
+        "body": "Hello {{name}},\n\n{{actor_name}} has accepted the task '{{task_name}}'.\n\nDeadline: {{deadline}}\n\nRegards,\nSparsh Notifications"
+    },
+    "task_completed_email": {
+        "subject": "Task Completed: {{task_name}}",
+        "body": "Hello {{name}},\n\n{{actor_name}} has marked the task '{{task_name}}' as completed.\n\nRegards,\nSparsh Notifications"
+    },
+    "task_reopened_email": {
+        "subject": "Task Reopened: {{task_name}}",
+        "body": "Hello {{name}},\n\n{{actor_name}} has reopened the task '{{task_name}}'. It needs further work.\n\nReason: {{reason}}\nDeadline: {{deadline}}\n\nRegards,\nSparsh Notifications"
+    },
+    "task_verification_requested_email": {
+        "subject": "Verification Requested: {{task_name}}",
+        "body": "Hello {{name}},\n\n{{actor_name}} has submitted the task '{{task_name}}' for your verification.\n\nPlease review it and either approve the completion or reopen the task.\n\nRegards,\nSparsh Notifications"
+    },
+    "task_verification_approved_email": {
+        "subject": "Verification Approved: {{task_name}}",
+        "body": "Hello {{name}},\n\n{{actor_name}} has verified and approved your completion of the task '{{task_name}}'.\n\nRegards,\nSparsh Notifications"
+    },
+    "task_deadline_revised_email": {
+        "subject": "Deadline Revised: {{task_name}}",
+        "body": "Hello {{name}},\n\n{{actor_name}} has revised the deadline for the task '{{task_name}}'.\n\nPrevious deadline: {{old_deadline}}\nNew deadline: {{new_deadline}}\nReason: {{reason}}\n\nRegards,\nSparsh Notifications"
+    },
+    "task_blocked_email": {
+        "subject": "Task Blocked: {{task_name}}",
+        "body": "Hello {{name}},\n\n{{actor_name}} has marked the task '{{task_name}}' as Blocked.\n\nReason: {{reason}}\n\nRegards,\nSparsh Notifications"
+    },
+    "task_dependent_on_other_email": {
+        "subject": "Task Dependent on Other: {{task_name}}",
+        "body": "Hello {{name}},\n\n{{actor_name}} has marked the task '{{task_name}}' as Dependent on Other, waiting on {{doer_name}}.\n\nReason: {{reason}}\nDeadline: {{deadline}}\n\nRegards,\nSparsh Notifications"
+    },
+    "task_follow_up_added_email": {
+        "subject": "Follow-up on: {{task_name}}",
+        "body": "Hello {{name}},\n\n{{actor_name}} has raised a follow-up on the task '{{task_name}}'.\n\nRemark: {{remark}}\nDeadline: {{deadline}}\n\nRegards,\nSparsh Notifications"
+    },
+    "task_subtask_created_email": {
+        "subject": "Subtask Created: {{task_name}}",
+        "body": "Hello {{name}},\n\n{{actor_name}} has created the subtask '{{task_name}}' under '{{parent_task}}'.\n\nDeadline: {{deadline}}\nPriority: {{critical_level}}\n\nRegards,\nSparsh Notifications"
+    },
+    "task_in_loop_added_email": {
+        "subject": "You're now in the loop on: {{task_name}}",
+        "body": "Hello {{name}},\n\n{{actor_name}} has added you to keep track of the task '{{task_name}}'.\n\nDeadline: {{deadline}}\nPriority: {{critical_level}}\n\nRegards,\nSparsh Notifications"
     },
     "event_created_email": {
         "subject": "Session Scheduled: {{event_title}}",
@@ -213,19 +333,32 @@ async def fetch_template(slug: str, company_id: str = None):
     be used and, if an admin has deactivated it (is_active == False), we return
     None so the caller skips sending entirely — an inactive template must never
     fall through to a lower-precedence template or the hardcoded default.
-    Missing `is_active` is treated as active so legacy docs keep working."""
+    Missing `is_active` is treated as active so legacy docs keep working.
+
+    Duplicates: the collection can hold several docs for the same (slug, scope, company)
+    — POST /settings/templates used to insert blindly, so hitting "New Override" twice for
+    one trigger left two copies. find_one() returned them in natural (insertion) order, which
+    meant a stale *deactivated* copy could shadow a newer active one and silently kill the
+    send. Resolution is therefore explicitly newest-first: the most recently touched doc is
+    the admin's latest intent. create_template now upserts, so new duplicates can't appear."""
     col = get_collection("notification_templates")
+
+    async def _newest(query: dict):
+        docs = await col.find(query).to_list(50)
+        if not docs:
+            return None
+        return max(docs, key=lambda d: d.get("updated_at") or d.get("created_at") or datetime.min)
 
     doc = None
     if company_id:
-        doc = await col.find_one({
+        doc = await _newest({
             "slug": slug,
             "company_id": str(company_id),
             "scope": "company",
         })
 
     if doc is None:
-        doc = await col.find_one({
+        doc = await _newest({
             "slug": slug,
             "scope": "staff",
         })
@@ -237,6 +370,34 @@ async def fetch_template(slug: str, company_id: str = None):
         return doc
 
     return DEFAULT_TEMPLATES.get(slug)
+
+
+async def active_user_template(slug: str, company_id: str = None):
+    """The USER-CONFIGURED DB template for `slug`, or None.
+
+    Resolution mirrors fetch_template (company scope → staff scope, newest wins) but it NEVER
+    falls back to a built-in DEFAULT_TEMPLATES entry, and it treats an Inactive template or one
+    with an empty body as "no template". Used by modules that must send ONLY user-configured
+    templates — Task & Delegation and Personal Todo — so a missing / inactive / empty template
+    results in NO email (never a default). Leaves fetch_template (and every other module that
+    relies on the built-in defaults — sessions, OTP, user/company mail) completely untouched."""
+    col = get_collection("notification_templates")
+
+    async def _newest(query: dict):
+        docs = await col.find(query).to_list(50)
+        if not docs:
+            return None
+        return max(docs, key=lambda d: d.get("updated_at") or d.get("created_at") or datetime.min)
+
+    doc = None
+    if company_id:
+        doc = await _newest({"slug": slug, "company_id": str(company_id), "scope": "company"})
+    if doc is None:
+        doc = await _newest({"slug": slug, "scope": "staff"})
+
+    if not doc or not doc.get("is_active", True) or not doc.get("body"):
+        return None
+    return doc
 
 def render_template(template_body: str, context: Dict[str, Any]):
     content = template_body
@@ -261,7 +422,10 @@ async def create_in_app_notification(user_id: str, title: str, message: str, typ
         logger.error(f"Failed to create in-app notification: {e}")
 
 
-async def log_notification(user_id: str, contact: str, channel: str, slug: str, content: str, status: str, error: str = None):
+async def log_notification(user_id: str, contact: str, channel: str, slug: str, content: str, status: str, error: str = None, meta: dict = None):
+    """`meta` is optional context merged onto the log row. TPMS uses it to record which
+    activity a send belonged to, so the Logs Report can show Activity/Company alongside the
+    delivery result without a second lookup. Reserved keys are never overwritten."""
     try:
         log_entry = {
             "user_id": str(user_id) if user_id else "system",
@@ -273,33 +437,42 @@ async def log_notification(user_id: str, contact: str, channel: str, slug: str, 
             "error_message": error,
             "sent_at": datetime.utcnow()
         }
+        for k, v in (meta or {}).items():
+            if k not in log_entry and v not in (None, ""):
+                log_entry[k] = v
         col = get_collection("notifications")
         await col.insert_one(log_entry)
     except Exception as e:
         logger.error(f"Failed to log notification: {e}")
 
-async def send_email_notification(to_email: str, subject: str, message: str, user_id: str = None, slug: str = "manual"):
+async def send_email_notification(to_email: str, subject: str, message: str, user_id: str = None, slug: str = "manual", cc: list = None, meta: dict = None):
+    """`cc` and `meta` are optional and default to None, so existing callers are unaffected.
+    `cc` exists for the TPMS escalation ladder, which addresses owners/HODs directly and
+    copies SMOps; `meta` records which activity a send belonged to, for the Logs Report."""
     if not settings.SMTP_USERNAME or not settings.SMTP_PASSWORD:
         logger.warning("SMTP credentials not configured")
         return False
-    
+
     try:
+        cc_list = [c for c in (cc or []) if c and c != to_email]
         msg = MIMEMultipart()
         msg['From'] = settings.SMTP_USERNAME
         msg['To'] = to_email
+        if cc_list:
+            msg['Cc'] = ", ".join(cc_list)
         msg['Subject'] = subject
         msg.attach(MIMEText(message, 'html'))
-        
+
         server = smtplib.SMTP(settings.SMTP_SERVER, settings.SMTP_PORT)
         server.starttls()
         server.login(settings.SMTP_USERNAME, settings.SMTP_PASSWORD)
-        server.send_message(msg)
+        server.send_message(msg, to_addrs=[to_email] + cc_list)
         server.quit()
-        await log_notification(user_id, to_email, "email", slug, message, "sent")
+        await log_notification(user_id, to_email, "email", slug, message, "sent", meta=meta)
         return True
     except Exception as e:
         logger.error(f"Failed to send email: {e}")
-        await log_notification(user_id, to_email, "email", slug, message, "failed", str(e))
+        await log_notification(user_id, to_email, "email", slug, message, "failed", str(e), meta=meta)
         return False
 
 # ─── Meta WhatsApp Cloud API helpers ───
@@ -405,11 +578,15 @@ async def send_whatsapp_template(phone: str, template_name: str, language: str, 
         return False
 
 async def send_notification_from_template(user_obj: dict, template_slug: str, context: Dict[str, Any], delivery_type: str = "both", scope_override: str = None):
+    # GLOBAL kill-switch: suppress every template-based notification (email + WhatsApp) while off.
+    if not NOTIFICATIONS_ENABLED:
+        logger.info(f"[NOTIFY-OFF] Suppressed '{template_slug}' notification — global switch is off")
+        return {}
     company_id = user_obj.get("company_id")
-    
+
     # If scope is explicitly staff, ignore the company ID to fetch staff templates
     effective_company_id = None if scope_override == "staff" else company_id
-    
+
     email_t = await fetch_template(f"{template_slug}_email", effective_company_id)
     whatsapp_t = await fetch_template(f"{template_slug}_whatsapp", effective_company_id)
     
@@ -418,16 +595,10 @@ async def send_notification_from_template(user_obj: dict, template_slug: str, co
     phone = user_obj.get("mobile")
     results = {}
 
-    print(f"[DEBUG-NOTIFY] Slug: {template_slug}, ScopeOverride: {scope_override}, EffectiveCompany: {effective_company_id}")
-    print(f"[DEBUG-NOTIFY] Email Found: {bool(email_t)}, WhatsApp Found: {bool(whatsapp_t)}, Target Email: {email}")
-
     if delivery_type in ["email", "both"] and email and email_t:
         rendered_body = render_template(email_t["body"], context)
         rendered_subject = render_template(email_t.get("subject", "Notification"), context)
         results["email"] = await send_email_notification(email, rendered_subject, rendered_body, user_id, email_t.get("slug", f"{template_slug}_email"))
-        print(f"[DEBUG-NOTIFY] Email send attempt result: {results.get('email')}")
-    elif delivery_type in ["email", "both"]:
-        print(f"[DEBUG-NOTIFY] Email skip: target={email}, template={bool(email_t)}")
 
     if delivery_type in ["whatsapp", "both"] and phone and whatsapp_t:
         wa_slug = whatsapp_t.get("slug", f"{template_slug}_whatsapp")
@@ -435,12 +606,10 @@ async def send_notification_from_template(user_obj: dict, template_slug: str, co
         if meta_name:
             # Business-initiated → must use a Meta-approved template with positional params.
             params = [str(context.get(k, "")) for k in whatsapp_t.get("meta_params", [])]
-            print(f"[DEBUG-NOTIFY] WhatsApp template='{meta_name}' lang={whatsapp_t.get('meta_lang', 'en')} params={params} -> {phone}")
             results["whatsapp"] = await send_whatsapp_template(
                 phone, meta_name, whatsapp_t.get("meta_lang", "en"), params, user_id, wa_slug)
         else:
             # Fallback: free-form text (only delivered within the 24h window).
-            print(f"[DEBUG-NOTIFY] WhatsApp free-text fallback (no meta_template_name set) -> {phone}")
             rendered_body = render_template(whatsapp_t["body"], context)
             results["whatsapp"] = await send_whatsapp_notification(phone, rendered_body, user_id, wa_slug)
         print(f"[DEBUG-NOTIFY] WhatsApp send result: {results.get('whatsapp')}")
@@ -690,20 +859,71 @@ async def send_event_deleted_email(user_obj: dict, event_data: dict, deleted_by:
 
     return await send_notification_from_template(user_obj, "event_deleted", context, delivery_type, scope)
 
-async def send_reminder_email(user_obj: dict, event: dict):
-    is_task = event.get("type") == "task"
+def _describe_offset(reminder: dict) -> str:
+    """Human phrase for a reminder's offset — e.g. '5 minutes before', '1 hour after' — used
+    for the {{reminder_time}} placeholder in the reminder templates."""
+    r = reminder or {}
+    mins = int(r.get("offset_minutes") or 0)
+    after = (r.get("timing_type") or "before").lower() == "after"
+    if mins <= 0:
+        return "now"
+    if mins % 1440 == 0:
+        qty, unit = mins // 1440, "day"
+    elif mins % 60 == 0:
+        qty, unit = mins // 60, "hour"
+    else:
+        qty, unit = mins, "minute"
+    return f"{qty} {unit}{'' if qty == 1 else 's'} {'after' if after else 'before'}"
+
+
+async def send_reminder_email(user_obj: dict, event: dict, reminder: dict = None):
+    # A reminder is a TASK reminder when the event is a task OR the reminder itself was
+    # authored as one (parent_type == "task"). Either signal → the Task Reminder template.
+    # Sessions/events (type "event", parent_type "event") keep the Session Reminder template
+    # unchanged. TPMS uses a separate branch entirely, so this touches the Task module only.
+    is_task = (event.get("type") == "task") or ((reminder or {}).get("parent_type") == "task")
+    # A task or todo is "due-anchored": its reminder is about a deadline/due date, so the
+    # template's {{task_deadline}} is populated; a session/event leaves it "N/A".
+    is_due_anchored = event.get("type") in ("task", "todo")
     dt_str = event.get("start", "")
     formatted_dt = format_datetime_standard(dt_str)
-    
+
+    # The channel the user chose in the Reminder modal. Reminders saved before this was wired
+    # through have no type here, so fall back to email rather than sending nothing.
+    delivery_type = (reminder or {}).get("reminder_type") or "email"
+
     context = {
+        # The stock reminder template greets "Hello {{name}}" — without this the placeholder
+        # was left in the message verbatim, since render_template only substitutes known keys.
+        "name": user_obj.get("full_name") or user_obj.get("first_name") or "there",
         "title": event.get("title"),
-        "reminder_time": datetime.utcnow().strftime("%H:%M %p"),
-        "event_time": formatted_dt if not is_task else "N/A",
-        "task_deadline": formatted_dt if is_task else "N/A",
+        "reminder_time": _describe_offset(reminder),
+        # Always populated: the stock template only references {{event_time}}, so restricting it
+        # to non-task types printed "starting at N/A" on every task reminder. {{task_deadline}}
+        # stays available for templates that word it as a deadline.
+        "event_time": formatted_dt,
+        "task_deadline": formatted_dt if is_due_anchored else "N/A",
         "meeting_url": event.get("meeting_link") or "View in Dashboard",
         "description": event.get("additional_details") or "No further details."
     }
-    return await send_notification_from_template(user_obj, "reminder", context, "email", event.get("notification_scope"))
+    # Template per type: a TASK → Task Reminder, a TODO → Todo Reminder, a session/event →
+    # Session Reminder. Each uses its own template only; no cross-over. The Todo Reminder
+    # template is authored by an admin in Settings (trigger "Todo Reminder" → todo_reminder_email).
+    if is_task:
+        slug = "task_reminder"
+    elif event.get("type") == "todo":
+        slug = "todo_reminder"
+    else:
+        slug = "reminder"
+    scope = event.get("notification_scope")
+    # Task & Delegation and Personal Todo reminders must use ONLY a user-configured template —
+    # never a built-in default. No Active DB template (with a body) → send nothing. Sessions
+    # (slug "reminder") keep their existing behavior (unrelated module).
+    if slug in ("task_reminder", "todo_reminder"):
+        eff_company = None if scope == "staff" else user_obj.get("company_id")
+        if not await active_user_template(f"{slug}_email", eff_company):
+            return {}
+    return await send_notification_from_template(user_obj, slug, context, "email", scope)
 
 async def send_conflict_notification_email(user_obj: dict, event_data: dict, existing_event: dict, send_company_copy: bool = True):
     # Subject: Reschedule time mail due to conflict

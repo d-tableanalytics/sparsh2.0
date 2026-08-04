@@ -119,6 +119,39 @@ input, textarea, select {
   font-family: inherit;
 }
 
+/* Native controls — <select> popups, scrollbars, date pickers — are painted by the browser,
+   not by the page. Declaring the scheme keeps them in step with the app theme rather than
+   the OS setting. `data-theme` lives on <html>, so this pairs with the token blocks above. */
+:root { color-scheme: light; }
+[data-theme='dark'] { color-scheme: dark; }
+
+/* Option lists are painted by the browser, and Chrome propagates only the select's
+   BACKGROUND onto them — the text colour falls back to a UA default that can land white.
+   Against the light background it inherits, that renders the entries invisible: the list
+   looks blank except the selected row, which the UA paints with its own highlight.
+   So the colour has to be stated explicitly.
+
+   This must use the SAME token pair the selects themselves use, because Chrome on Windows
+   also paints the CLOSED control from the selected option — with a mismatched pair (e.g. a
+   select hard-coded `bg-white` while this says `--text-main`) the closed control washes out
+   in dark mode. Every select in the app now pairs a token background with `--text-main`, so
+   whichever element the browser paints from, the contrast holds in both themes. Keep it that
+   way: a select with a fixed background will reintroduce the washout. */
+select option {
+  background-color: var(--bg-card);
+  color: var(--text-main);
+}
+
+/* The UA paints the selected row with a solid blue system highlight, which is the only
+   colour in an otherwise plain list. Neutralise it to a subtle token tint so the open list
+   reads the same as the closed control: plain text, no colour. The inset box-shadow is
+   needed because Chrome draws that highlight over `background-color`. */
+select option:checked {
+  background-color: var(--input-bg);
+  box-shadow: 0 0 0 100px var(--input-bg) inset;
+  color: var(--text-main);
+}
+
 h1, h2, h3, h4 {
   font-family: 'Inter', sans-serif;
   font-weight: 800;

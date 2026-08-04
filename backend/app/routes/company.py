@@ -8,6 +8,7 @@ from app.controllers.auth_controller import get_current_user, get_password_hash
 from app.services.notification_service import send_notification_from_template, send_company_registration_email
 from bson import ObjectId
 from app.services.activity_log_service import log_activity
+from app.utils.tpms_access import TOGGLE_ROLES as TPMS_TOGGLE_ROLES
 from datetime import datetime, timezone
 from pydantic import BaseModel
 import io
@@ -206,14 +207,45 @@ async def update_company_orm_access(company_id: str, body: CompanyORMAccessUpdat
     await log_activity(current_user, "Toggle ORM Access", "Company", f"{'Enabled' if body.enabled else 'Disabled'} ORM for company {company_id}")
     return {"message": f"ORM access {'enabled' if body.enabled else 'disabled'}", "orm_enabled": body.enabled}
 
-# ─── Toggle Task & Delegation Module Access ───
-# Same shape as the ORM toggle above, but deliberately Sparsh-admin-only: a Company Admin
-# must never be able to grant their own company a module. `companies.update` alone is not
-# enough here (it is for ORM) — the role itself has to be superadmin/admin.
+
+@router.patch("/{company_id}/tpms-access")
+async def update_company_tpms_access(company_id: str, body: CompanyORMAccessUpdate, current_user: dict = Depends(get_current_user)):
+    """Switch the TPMS module on or off for one company.
+
+    Restricted to Admin / Super Admin by ROLE — deliberately stricter than the ORM toggle,
+    which also accepts a `companies.update` permission grant. TPMS is off until switched on,
+    so this is the only way a company ever gains access.
+    """
+    if (current_user.get("role") or "").lower() not in TPMS_TOGGLE_ROLES:
+        raise HTTPException(status_code=403, detail="Only Admin / Super Admin can manage TPMS access")
+
+    companies_collection = get_collection("companies")
+    result = await companies_collection.update_one(
+        {"_id": ObjectId(company_id)},
+        {"$set": {"tpms_enabled": body.enabled, "updated_at": datetime.now(timezone.utc)}}
+    )
+
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Company not found")
+
+    await log_activity(current_user, "Toggle TPMS Access", "Company", f"{'Enabled' if body.enabled else 'Disabled'} TPMS for company {company_id}")
+    return {"message": f"TPMS access {'enabled' if body.enabled else 'disabled'}", "tpms_enabled": body.enabled}
+
+
+# ─── Toggle Task Management (Delegation) Module Access ───
 @router.patch("/{company_id}/delegation-access")
 async def update_company_delegation_access(company_id: str, body: CompanyDelegationAccessUpdate, current_user: dict = Depends(get_current_user)):
-    if current_user.get("role") not in ["superadmin", "admin"]:
-        raise HTTPException(status_code=403, detail="Only Sparsh Super Admin / Admin can manage Delegation access")
+    """Switch the Task Management (Delegation) module on or off for one company.
+
+    Gates client-side users' access to the Task Management module (see
+    auth_controller.is_company_delegation_enabled / utils/taskAccess.js). Opt-in: absent
+    flag means OFF. Same authorization as the ORM toggle — superadmin, or staff holding the
+    companies.update permission.
+    """
+    permissions = current_user.get("permissions", {})
+    can_update = permissions.get("companies", {}).get("update", False)
+    if current_user.get("role") != "superadmin" and not can_update:
+        raise HTTPException(status_code=403, detail="Not authorized to manage Task Management access")
 
     companies_collection = get_collection("companies")
     result = await companies_collection.update_one(
@@ -224,8 +256,8 @@ async def update_company_delegation_access(company_id: str, body: CompanyDelegat
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Company not found")
 
-    await log_activity(current_user, "Toggle Delegation Access", "Company", f"{'Enabled' if body.enabled else 'Disabled'} Delegation for company {company_id}")
-    return {"message": f"Delegation access {'enabled' if body.enabled else 'disabled'}", "delegation_enabled": body.enabled}
+    await log_activity(current_user, "Toggle Task Management Access", "Company", f"{'Enabled' if body.enabled else 'Disabled'} Task Management for company {company_id}")
+    return {"message": f"Task Management access {'enabled' if body.enabled else 'disabled'}", "delegation_enabled": body.enabled}
 
 # ─── Delete Company ───
 @router.delete("/{company_id}")
@@ -513,8 +545,10 @@ async def get_company_training_path(company_id: str, current_user: dict = Depend
             # 3. Get Sessions
             q["sessions"] = []
             for col_name in session_cols:
-                # Query sessions for this quarter
-                query = {"quarter_id": q["id"]}
+                # Query sessions for this quarter. TPMS activities share these collections
+                # but are not sessions — they belong to the TPMS Calendar only.
+                from app.utils.calendar_utils import exclude_tpms
+                query = exclude_tpms({"quarter_id": q["id"]})
                 sessions = await get_collection(col_name).find(query).to_list(1000)
                 
                 for s in sessions:

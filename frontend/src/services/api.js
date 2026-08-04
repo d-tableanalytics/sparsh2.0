@@ -31,9 +31,15 @@ api.interceptors.response.use(
   (response) => response,
   (error) => {
     if (error.response?.status === 403) {
-      // Dispatch a custom event for global notification
-      const event = new CustomEvent('app-error', { 
-        detail: { message: "You do not have permission", status: 403 } 
+      // Prefer the server's own reason. A 403 is often actionable ("TPMS is not enabled for
+      // this company…") and the generic string hid that, leaving the user with a failed
+      // action and no explanation.
+      const detail = error.response?.data?.detail;
+      const event = new CustomEvent('app-error', {
+        detail: {
+          message: typeof detail === 'string' && detail.trim() ? detail : 'You do not have permission',
+          status: 403,
+        },
       });
       window.dispatchEvent(event);
     }

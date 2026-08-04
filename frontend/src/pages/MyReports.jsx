@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
+import {  AnimatePresence , motion } from 'framer-motion';
 import { 
     Activity, BookOpen, CheckCircle2, Trophy, 
     Calendar, Clock, ChevronRight, Filter,
@@ -9,7 +9,7 @@ import api from '../services/api';
 import { useAuth } from '../context/AuthContext';
 
 const MyReports = () => {
-    const { user } = useAuth();
+    useAuth();
     const [loading, setLoading] = useState(true);
     const [data, setData] = useState(null);
     const [activeTab, setActiveTab] = useState('overview'); // overview, assessments, activities

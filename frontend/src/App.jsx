@@ -1,5 +1,5 @@
 import React, { lazy, Suspense } from 'react';
-import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
+import { BrowserRouter as Router, Routes, Route, Navigate, Outlet } from 'react-router-dom';
 import { AuthProvider } from './context/AuthContext';
 import { ThemeProvider } from './context/ThemeContext';
 import { NotificationProvider } from './context/NotificationContext';
@@ -46,21 +46,36 @@ import DeletedTasks from './pages/DeletedTasks';
 import ForgotPassword from './pages/ForgotPassword';
 import PrivateRoute from './components/common/PrivateRoute';
 import RequireTaskAccess from './components/common/RequireTaskAccess';
-import RequireHrmsAccess from './components/common/RequireHrmsAccess';
-import HrmsDashboard from './pages/HRMS/HrmsDashboard';
-import Employees from './pages/HRMS/Employees';
-import EmployeeProfile from './pages/HRMS/EmployeeProfile';
-import OrgStructure from './pages/HRMS/OrgStructure';
-import Attendance from './pages/HRMS/Attendance';
-import Leave from './pages/HRMS/Leave';
-import Payroll from './pages/HRMS/Payroll';
-import HrmsSettings from './pages/HRMS/HrmsSettings';
-import Requisitions from './pages/HRMS/Requisitions';
-import Candidates from './pages/HRMS/Candidates';
-import PublicApply from './pages/HRMS/PublicApply';
-import PublicAssessment from './pages/HRMS/PublicAssessment';
-import PublicOffer from './pages/HRMS/PublicOffer';
-import PublicOnboarding from './pages/HRMS/PublicOnboarding';
+import ModulePlaceholder from './features/tpms/common/ModulePlaceholder';
+import AdminView from './features/tpms/admin/pages/AdminView';
+import OmSmopsView from './features/tpms/admin/pages/OmSmopsView';
+import ImplementationTracker from './features/tpms/admin/pages/ImplementationTracker';
+import ClientView from './features/tpms/admin/pages/ClientView';
+import Escalations from './features/tpms/admin/pages/Escalations';
+import LogsReport from './features/tpms/admin/pages/LogsReport';
+import HodView from './features/tpms/admin/pages/HodView';
+import EmployeeTasks from './features/tpms/admin/pages/EmployeeTasks';
+import ActivityManagement from './features/tpms/admin/pages/ActivityManagement';
+import DepartmentManagement from './features/tpms/admin/pages/DepartmentManagement';
+import ClientActivityCalendar from './features/tpms/admin/pages/ClientActivityCalendar';
+import MailTemplateAdmin from './features/tpms/admin/pages/MailTemplateAdmin';
+import ReminderRuleAdmin from './features/tpms/admin/pages/ReminderRuleAdmin';
+import FormQuestionAdmin from './features/tpms/admin/pages/FormQuestionAdmin';
+import ReviewReport from './features/tpms/common/ReviewReport';
+import ImplementationFeedback from './features/tpms/admin/pages/forms/ImplementationFeedback';
+import Ownership from './features/tpms/admin/pages/forms/Ownership';
+import Culture from './features/tpms/admin/pages/forms/Culture';
+import Accountability from './features/tpms/admin/pages/forms/Accountability';
+import { CompanyProvider } from './features/tpms/smops/CompanyContext';
+import SmopsDashboard from './features/tpms/smops/pages/SmopsDashboard';
+import HodActivity from './features/tpms/smops/pages/HodActivity';
+import SmopsEmployeeTask from './features/tpms/smops/pages/SmopsEmployeeTask';
+import TpmsGate, { RequireTpms } from './features/tpms/TpmsGate';
+import TpmsCalendar from './features/tpms/calendar/TpmsCalendar';
+import ClientFormsHome from './features/tpms/client/ClientFormsHome';
+import ClientRatingForm from './features/tpms/client/ClientRatingForm';
+import ClientFeedbackForm from './features/tpms/client/ClientFeedbackForm';
+import ClientDashboard from './features/tpms/client/ClientDashboard';
 import AssistantWidget from './features/assistant';
 import './index.css';
 import { useAuth } from './context/AuthContext';
@@ -84,6 +99,14 @@ const OrmGuard = ({ children }) => {
     return <Navigate to="/" />;
   }
   return children;
+};
+
+// The /tpms/smops Dashboard is shared: client-side users get the real ClientDashboard
+// (their own company's Success-Measure scorecard); internal users keep the SMOPS view.
+const TpmsDashboardIndex = () => {
+  const { user } = useAuth();
+  const isClient = ['clientadmin', 'clientuser'].includes(user?.role);
+  return isClient ? <ClientDashboard /> : <SmopsDashboard />;
 };
 
 const AppRoutes = () => {
@@ -167,6 +190,63 @@ const AppRoutes = () => {
       <Route path="/admin/reports" element={<PrivateRoute><ReportsDashboard /></PrivateRoute>} />
       <Route path="/admin/reports/employee/:userId" element={<PrivateRoute><EmployeeReport /></PrivateRoute>} />
       <Route path="/admin/reports/:doerId" element={<PrivateRoute><DoerReportDetails /></PrivateRoute>} />
+      {/* ===================  TPMS  ===================
+          Dynamic entry: /tpms auto-routes by role (admin → admin panel,
+          everyone else → SMOPS). Panels are role-guarded via RequireTpms. */}
+      <Route path="/tpms" element={<PrivateRoute><TpmsGate /></PrivateRoute>} />
+
+      {/* TPMS ▸ ADMIN PANEL (superadmin / admin only) — rendered inside the main app
+          layout; navigation is driven by the main Sidebar's TPMS dropdown. */}
+      <Route path="/tpms/admin" element={<PrivateRoute><RequireTpms admin><Outlet /></RequireTpms></PrivateRoute>}>
+        <Route index                 element={<AdminView />} />
+        <Route path="om"             element={<OmSmopsView />} />
+        <Route path="implementation" element={<ImplementationTracker />} />
+        <Route path="clients"        element={<ClientView />} />
+        <Route path="escalations"    element={<Escalations />} />
+        <Route path="logs"           element={<LogsReport />} />
+        <Route path="hod"            element={<HodView />} />
+        <Route path="employee-tasks" element={<EmployeeTasks />} />
+        <Route path="calendar"       element={<TpmsCalendar />} />
+        <Route path="client-calendar" element={<ClientActivityCalendar />} />
+        <Route path="activities"     element={<ActivityManagement />} />
+        <Route path="departments"    element={<DepartmentManagement />} />
+        <Route path="mail-templates" element={<MailTemplateAdmin />} />
+        <Route path="reminder-rules" element={<ReminderRuleAdmin />} />
+        <Route path="form-questions" element={<FormQuestionAdmin />} />
+        {/* Forms sub-module: Implementation Feedback / Ownership / Culture / Accountability */}
+        <Route path="forms" element={<Outlet />}>
+          <Route index element={<Navigate to="implementation-feedback" replace />} />
+          <Route path="implementation-feedback" element={<ImplementationFeedback />} />
+          <Route path="ownership"                element={<Ownership />} />
+          <Route path="culture"                  element={<Culture />} />
+          <Route path="accountability"           element={<Accountability />} />
+        </Route>
+        <Route path="reviews"        element={<ReviewReport />} />
+      </Route>
+
+      {/* TPMS ▸ SMOPS PANEL (any internal user) — rendered inside the main app layout.
+          CompanyProvider supplies the shared company selection the SMOPS pages consume. */}
+      <Route path="/tpms/smops" element={<PrivateRoute><RequireTpms><CompanyProvider><Outlet /></CompanyProvider></RequireTpms></PrivateRoute>}>
+        <Route index                element={<TpmsDashboardIndex />} />
+        {/* Calendar is shared by every TPMS audience — internal SMOPS users and
+            client-side doers alike; the page itself gates the lifecycle actions by role. */}
+        <Route path="calendar"      element={<TpmsCalendar />} />
+        <Route path="hod-activity"  element={<HodActivity />} />
+        <Route path="tasks"         element={<SmopsEmployeeTask />} />
+        <Route path="reviews"       element={<ReviewReport title="Review Report" subtitle="Detailed evaluation and feedback for your companies." />} />
+      </Route>
+
+      {/* TPMS ▸ CLIENT FORMS PANEL (client-side users) — rendered inside the main app layout.
+          Each client fills their own forms; HODs additionally rate their team. Available to
+          every client company by default; guarded via RequireTpms client. */}
+      <Route path="/tpms/forms" element={<PrivateRoute><RequireTpms><Outlet /></RequireTpms></PrivateRoute>}>
+        <Route index                          element={<ClientFormsHome />} />
+        <Route path="accountability"          element={<ClientRatingForm formType="accountability" />} />
+        <Route path="ownership"               element={<ClientRatingForm formType="ownership" />} />
+        <Route path="culture"                 element={<ClientRatingForm formType="culture" />} />
+        <Route path="implementation-feedback" element={<ClientFeedbackForm formType="implementation_feedback" />} />
+      </Route>
+
       <Route path="/admin/settings" element={<Navigate to="/settings" />} />
       <Route path="/settings" element={<PrivateRoute><SettingsPage /></PrivateRoute>} />
       <Route path="/profile" element={<PrivateRoute><ProfilePage /></PrivateRoute>} />

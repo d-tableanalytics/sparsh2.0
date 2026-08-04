@@ -8,11 +8,62 @@ from app.controllers.auth_controller import (
 from app.db.mongodb import get_collection
 from bson import ObjectId
 from datetime import datetime
-from pydantic import BaseModel
+from pydantic import BaseModel, EmailStr
 from app.services.notification_service import send_user_updated_email, send_access_control_email
 from app.services.activity_log_service import log_activity
 
 router = APIRouter(prefix="/users", tags=["Users"])
+
+
+# ─── Reporting-Manager dropdown options ───
+# Selectable managers for the User Create/Edit form, scoped to the SAME environment as the user
+# being created/edited: pass `company_id` for a client company's users, omit it for internal
+# staff. `exclude` drops the user being edited so they can't be their own manager. Defined
+# before the /{user_id} routes so the static path wins.
+@router.get("/reporting-manager-options")
+async def reporting_manager_options(
+    company_id: Optional[str] = None,
+    exclude: Optional[str] = None,
+    current_user: dict = Depends(get_current_user),
+):
+    from app.controllers.auth_controller import is_client_side_user
+    perms = current_user.get("permissions", {})
+    privileged = (current_user.get("role") in ("superadmin", "admin")
+                  or perms.get("users", {}).get("read", False))
+    if privileged:
+        # User-manager: may build the list for any environment/company (the create/edit form
+        # passes company_id for a client company, or omits it for internal staff).
+        if company_id:
+            coll, query = "learners", {"company_id": str(company_id), "is_active": {"$ne": False}}
+        else:
+            coll, query = "staff", {"is_active": {"$ne": False}}
+    else:
+        # Any authenticated user may resolve names within their OWN environment/company only
+        # (used to display their own reporting manager on the profile page).
+        if is_client_side_user(current_user):
+            cid = current_user.get("company_id")
+            if not cid:
+                return []
+            coll, query = "learners", {"company_id": str(cid), "is_active": {"$ne": False}}
+        else:
+            coll, query = "staff", {"is_active": {"$ne": False}}
+    out = []
+    for u in await get_collection(coll).find(query).to_list(2000):
+        uid = str(u["_id"])
+        if exclude and uid == str(exclude):
+            continue
+        out.append({
+            "_id": uid,
+            "full_name": (u.get("full_name")
+                          or f"{u.get('first_name', '')} {u.get('last_name', '')}".strip()
+                          or u.get("email")),
+            "email": u.get("email"),
+            "role": u.get("role"),
+            "designation": u.get("designation"),
+        })
+    out.sort(key=lambda x: (x["full_name"] or "").lower())
+    return out
+
 
 # ─── List Users (Combined) ───
 @router.get("")
@@ -43,11 +94,13 @@ class UserEditRequest(BaseModel):
     first_name: Optional[str] = None
     last_name: Optional[str] = None
     full_name: Optional[str] = None
+    email: Optional[EmailStr] = None
     mobile: Optional[str] = None
     role: Optional[str] = None
     session_type: Optional[str] = None
     designation: Optional[str] = None
     department: Optional[str] = None
+    reporting_manager: Optional[str] = None  # admin Edit form must be able to save this
     permissions: Optional[dict] = None
 
 class UserStatusUpdate(BaseModel):
@@ -77,9 +130,14 @@ async def read_users_me(current_user: dict = Depends(get_current_active_user)):
         try:
             company = await get_collection("companies").find_one({"_id": ObjectId(company_id)})
             current_user["orm_enabled"] = bool(company.get("orm_enabled", True)) if company else True
+            # TPMS is opt-in: absent flag means OFF, so an un-migrated company stays dark.
+            current_user["tpms_enabled"] = bool(company.get("tpms_enabled", False)) if company else False
+            # Task Management (Delegation) is opt-in too: absent flag means OFF. Gates the
+            # Task Management sidebar module for client-side users (see utils/taskAccess.js).
             current_user["delegation_enabled"] = bool(company.get("delegation_enabled", False)) if company else False
         except Exception:
             current_user["orm_enabled"] = True
+            current_user["tpms_enabled"] = False
             current_user["delegation_enabled"] = False
     return current_user
 
@@ -191,7 +249,20 @@ async def update_user(user_id: str, updates: UserEditRequest, background_tasks: 
         ln_str = ln if ln else ""
         
         update_data["full_name"] = f"{fn_str} {ln_str}".strip()
-    
+
+    # ─── Email doubles as the login identity (auth resolves it across staff + learners),
+    # so normalize it and reject a value already taken by another account ───
+    if "email" in update_data:
+        new_email = str(update_data["email"]).lower().strip()
+        if new_email != user.get("email"):
+            for col in ("staff", "learners"):
+                clash = await get_collection(col).find_one(
+                    {"email": new_email, "_id": {"$ne": ObjectId(user_id)}}
+                )
+                if clash:
+                    raise HTTPException(status_code=409, detail="That email is already in use by another account")
+        update_data["email"] = new_email
+
     # ─── Check for Role/Access Change ───
     old_role = user.get("role")
     new_role = update_data.get("role")

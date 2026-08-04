@@ -3,13 +3,13 @@ import { useNavigate } from 'react-router-dom';
 import api from '../services/api';
 import Modal from '../components/common/Modal';
 import { useNotification } from '../context/NotificationContext';
-import { motion } from 'framer-motion';
 import {
   Copy, Plus, Search, Trash2, Pencil, ExternalLink,
   MessageSquare, Hash, FileText, XCircle, LayoutGrid, List
 } from 'lucide-react';
 
 import { useAuth } from '../context/AuthContext';
+import { motion } from 'framer-motion';
 
 const SessionTemplateManagement = () => {
     const { user } = useAuth();

@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { AnimatePresence, motion } from 'framer-motion';
+import {  AnimatePresence , motion } from 'framer-motion';
 import { MessageCircle, X } from 'lucide-react';
 import { useAuth } from '../../../context/AuthContext';
 import ChatWindow from './ChatWindow';

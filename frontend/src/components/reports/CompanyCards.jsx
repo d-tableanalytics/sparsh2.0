@@ -1,10 +1,10 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { motion } from 'framer-motion';
 import {
   Building2, Users, ClipboardList, CheckCircle2, Clock, AlertTriangle, Percent,
   Award, CalendarDays, ChevronRight, FileDown, Search,
 } from 'lucide-react';
 import { getCompanies, getCompanyEmployees, downloadCsv } from '../../services/reportApi';
+import { motion } from 'framer-motion';
 
 const Stat = ({ icon: Icon, label, value, color }) => (
   <div className="flex items-center gap-2">

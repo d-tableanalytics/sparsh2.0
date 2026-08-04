@@ -43,15 +43,7 @@ class UserBase(BaseModel):
         "companies": {"create": False, "read": True, "update": False, "delete": False},
         "logs": {"create": False, "read": True, "update": False, "delete": False},
         "templates": {"create": False, "read": True, "update": False, "delete": False},
-        # ─── HRMS ───
-        # hrms        — employee master, org structure, exit documentation
-        # recruitment — requisitions, JDs, postings, candidates, interviews, offers, onboarding
-        # attendance  — team attendance + manual entry (a user's OWN punch needs no grant)
-        # payroll     — run payroll and read everyone's payslips (own payslip needs no grant)
-        "hrms": {"create": False, "read": False, "update": False, "delete": False},
-        "recruitment": {"create": False, "read": False, "update": False, "delete": False},
-        "attendance": {"create": False, "read": False, "update": False, "delete": False},
-        "payroll": {"create": False, "read": False, "update": False, "delete": False},
+        "forms": {"create": False, "read": True, "update": False, "delete": False}
     }
 
 class UserCreate(UserBase):
@@ -61,7 +53,7 @@ class UserResponse(UserBase):
     id: str = Field(alias="_id")
     created_at: datetime = Field(default_factory=datetime.utcnow)
     orm_enabled: Optional[bool] = True  # Company-level ORM module access
-    delegation_enabled: Optional[bool] = False  # Company-level Task & Delegation module access
+    tpms_enabled: Optional[bool] = False  # Company-level TPMS module access (opt-in)
 
     class Config:
         populate_by_name = True

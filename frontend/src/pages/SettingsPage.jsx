@@ -4,7 +4,7 @@ import { useAuth } from '../context/AuthContext';
 import { useNotification } from '../context/NotificationContext';
 import { canAccessTaskManagement, canManageTaskSettings } from '../utils/taskAccess';
 import { ShieldCheck, Plus, Trash2, Mail, Save, ToggleLeft as ToggleOff, ToggleRight as ToggleOn, Search, Info, UserCircle2, FolderTree, Tag } from 'lucide-react';
-import { motion, AnimatePresence } from 'framer-motion';
+import {  AnimatePresence , motion } from 'framer-motion';
 import GeneralSection from '../components/settings/GeneralSection';
 import MetaListSection from '../components/settings/MetaListSection';
 import PasswordCard from '../components/settings/PasswordCard';
@@ -60,7 +60,11 @@ const SettingsPage = () => {
     const [section, setSection] = useState('general');
 
     const templateVariables = {
-        task: ['task_name', 'topic', 'task_category', 'critical_level', 'assigned_user', 'assigned_by', 'deadline', 'date', 'day', 'time', 'description', 'task_status', 'session_type'],
+        // Task Management (Delegation). The first row is shared by every task trigger; the
+        // second is event-specific and renders empty on triggers that don't carry it
+        // (e.g. {{remark}} is only populated by Follow-up Added).
+        task: ['task_name', 'topic', 'task_category', 'critical_level', 'assigned_user', 'assigned_by', 'actor_name', 'deadline', 'date', 'day', 'time', 'description', 'task_status', 'name',
+               'reason', 'doer_name', 'remark', 'old_deadline', 'new_deadline', 'parent_task', 'loop_person'],
         event_staff: ['session_type', 'topic', 'date', 'day', 'time', 'meeting_link', 'description', 'batch_name', 'quarter', 'event_title', 'event_datetime'],
         event_learner: ['event_title', 'date', 'day', 'time', 'meeting_link', 'description', 'event_datetime'],
         user: ['name', 'email', 'new_role', 'updated_by', 'login_url', 'password'],
@@ -73,6 +77,9 @@ const SettingsPage = () => {
 
     const getVarsForTemplate = (slug) => {
         const isClient = user?.role?.toLowerCase().includes('client');
+        // Task Reminder uses the reminder variables (title/task_deadline/…), NOT the
+        // delegation-task ones — check it before the generic 'task' branch below.
+        if (slug.includes('task_reminder')) return templateVariables.reminder_staff;
         if (slug.includes('task')) return templateVariables.task;
         if (slug.includes('event') || slug.includes('session_complete')) {
             return isClient ? templateVariables.event_learner : templateVariables.event_staff;
@@ -685,15 +692,38 @@ const SettingsPage = () => {
                                     <div className="space-y-1">
                                         <label className="text-[9px] font-black text-gray-400 uppercase tracking-widest px-1">Trigger Event</label>
                                         <select value={newTemplateForm.slug} onChange={e => setNewTemplateForm({...newTemplateForm, slug: e.target.value})} className="w-full bg-gray-50 border border-gray-100 p-3 rounded-xl font-bold text-[12px] outline-none">
-                                            <optgroup label="Sessions & Tasks">
-                                                <option value="task_created">Task Created</option>
-                                                <option value="task_updated">Task Updated</option>
-                                                <option value="task_deleted">Task Deleted</option>
+                                            {/* Calendar module. Tasks are NOT here: a type=="task" doc belongs
+                                                to the Task Management module below and fires only its triggers. */}
+                                            <optgroup label="Sessions">
                                                 <option value="event_created">Session Scheduled</option>
                                                 <option value="event_updated">Session Rescheduled</option>
                                                 <option value="event_deleted">Session Cancelled</option>
                                                 <option value="session_complete">Session Completed</option>
                                                 <option value="reminder">Session Reminder</option>
+                                            </optgroup>
+                                            {/* Task Management (Delegation) module — independent triggers,
+                                                same Email/WhatsApp engine. See backend task_notifications.py. */}
+                                            <optgroup label="Task Management">
+                                                <option value="task_created">Task Created</option>
+                                                <option value="task_assigned">Task Assigned</option>
+                                                <option value="task_updated">Task Updated</option>
+                                                <option value="task_deleted">Task Deleted</option>
+                                                <option value="task_accepted">Task Accepted</option>
+                                                <option value="task_completed">Task Completed</option>
+                                                <option value="task_reopened">Task Reopened</option>
+                                                <option value="task_verification_requested">Verification Requested</option>
+                                                <option value="task_verification_approved">Verification Approved</option>
+                                                <option value="task_deadline_revised">Deadline Revised</option>
+                                                <option value="task_blocked">Task Blocked</option>
+                                                <option value="task_dependent_on_other">Dependent on Other</option>
+                                                <option value="task_follow_up_added">Follow-up Added</option>
+                                                <option value="task_subtask_created">Subtask Created</option>
+                                                <option value="task_in_loop_added">In Loop Person</option>
+                                                <option value="task_reminder">Task Reminder</option>
+                                            </optgroup>
+                                            {/* Personal Todo — private per-user items with their own reminder template. */}
+                                            <optgroup label="Personal Todo">
+                                                <option value="todo_reminder">Todo Reminder</option>
                                             </optgroup>
                                             {user?.role === 'superadmin' && (
                                                 <>

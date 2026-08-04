@@ -5,14 +5,14 @@ import api from '../services/api';
 import { 
   Users, Building2, Calendar, Target, 
   TrendingUp, Activity, Plus, Clock, 
-  ChevronRight, ArrowUpRight, Zap 
+  ChevronRight, ArrowUpRight, Zap
 } from 'lucide-react';
-import { 
-  AreaChart, Area, XAxis, YAxis, CartesianGrid, 
+import { motion } from 'framer-motion';
+import {
+  AreaChart, Area, XAxis, YAxis, CartesianGrid,
   Tooltip, ResponsiveContainer, BarChart, Bar,
   PieChart, Pie, Cell, Legend
 } from 'recharts';
-import { motion } from 'framer-motion';
 
 const Dashboard = () => {
   const navigate = useNavigate();
@@ -27,7 +27,7 @@ const Dashboard = () => {
   const [mixData, setMixData] = useState([]);
   const [upcomingEvents, setUpcomingEvents] = useState([]);
   const [teamMembers, setTeamMembers] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const [_loading, setLoading] = useState(true);
 
   const fetchData = async () => {
     try {
@@ -88,9 +88,6 @@ const Dashboard = () => {
         <div>
           <h1 className="text-3xl font-black text-[var(--text-main)] tracking-tight">Executive Overview</h1>
           <p className="text-[14px] text-[var(--text-muted)] font-bold">Welcome back, {user?.full_name}. Here is your organizational pulse.</p>
-        </div>
-        <div className="flex items-center gap-3">
-            {/* Action buttons removed as per request */}
         </div>
       </div>
 

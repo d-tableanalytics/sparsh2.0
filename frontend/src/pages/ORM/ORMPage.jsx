@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
+import {  AnimatePresence , motion } from 'framer-motion';
 import {
   Plus, Trash2, Save, ChevronDown, ChevronRight,
   Target, BarChart3, PieChart, Info, AlertCircle, CheckCircle2,

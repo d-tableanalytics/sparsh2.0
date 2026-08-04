@@ -4,7 +4,7 @@ import api from '../services/api';
 import Button from '../components/common/Button';
 import Modal from '../components/common/Modal';
 import { useNotification } from '../context/NotificationContext';
-import { motion, AnimatePresence } from 'framer-motion';
+import {  AnimatePresence , motion } from 'framer-motion';
 import { 
   Plus, Building2, Globe, Users, Mail, User, 
   MapPin, Hash, Briefcase, Phone,

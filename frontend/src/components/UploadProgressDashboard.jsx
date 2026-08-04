@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
+import {  AnimatePresence , motion } from 'framer-motion';
 import { 
   UploadCloud, CheckCircle2, AlertCircle, XCircle, Play, Pause, 
   Trash2, X, ChevronUp, ChevronDown 

@@ -1,10 +1,10 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { motion } from 'framer-motion';
 import {
   Building2, Users, Briefcase, GraduationCap, CalendarDays, Layers, BookOpen,
   ListTodo, CheckCircle2, Clock, Award, Percent,
 } from 'lucide-react';
 import { getEnterpriseOverview } from '../../services/reportApi';
+import { motion } from 'framer-motion';
 
 const Kpi = ({ label, value, icon: Icon, delay }) => (
   <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay }}

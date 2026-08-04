@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
+import React, { createContext, useContext, useState, useEffect, useRef } from 'react';
 import api from '../services/api';
 import { useNotification } from './NotificationContext';
 
@@ -144,7 +144,7 @@ const removeFromDB = async (id) => {
 
 export const UploadProvider = ({ children }) => {
   const [queue, setQueue] = useState([]);
-  const { showSuccess, showError } = useNotification();
+  const { showError } = useNotification();
   const activeProcessing = useRef(new Set());
   const abortControllers = useRef(new Map());
 
@@ -167,7 +167,7 @@ export const UploadProvider = ({ children }) => {
   // Effect to process queue automatically
   useEffect(() => {
     processQueue();
-  }, [queue]);
+  }, [queue]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const processQueue = () => {
     const uploadingCount = activeProcessing.current.size;

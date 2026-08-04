@@ -5,7 +5,7 @@ import timeGridPlugin from '@fullcalendar/timegrid';
 import listPlugin from '@fullcalendar/list';
 import multiMonthPlugin from '@fullcalendar/multimonth';
 import interactionPlugin from '@fullcalendar/interaction';
-import { motion, AnimatePresence } from 'framer-motion';
+import {  AnimatePresence , motion } from 'framer-motion';
 import api from '../services/api';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
@@ -18,13 +18,14 @@ import {
     Layers, Trash2, AlertCircle, Link, Check, UserPlus2,
     Edit2, CheckCircle, ArrowRightLeft, Ban, PlayCircle, MoreHorizontal,
     PlusCircle, LayoutGrid, Calendar as CalendarIcon, Briefcase, Video, Bell,
-    Eye, Lock, ClipboardList, FileText, ChevronDown, CheckCircle2, Circle
+    Eye, Lock, ClipboardList, FileText, ChevronDown, CheckCircle2, Circle,
+    ShieldCheck
 } from 'lucide-react';
 import ReminderModal from '../components/calendar/ReminderModal';
 import MiniDatePicker from '../components/tasks/MiniDatePicker';
 import { canAccessTaskManagement } from '../utils/taskAccess';
 
-const CustomTimePicker = ({ value, onChange, label }) => {
+const CustomTimePicker = ({ value, onChange, label: _label }) => {
     const [isOpen, setIsOpen] = useState(false);
     const containerRef = useRef(null);
     
@@ -163,7 +164,7 @@ const validateRepeat = (form) => {
 
 // The Repeat control itself. Kept as its own component (rather than inlined in the already
 // long modal) purely for readability; the markup mirrors the task form's control.
-const TodoRepeatSection = ({ form, setForm, minEndDate }) => {
+const TodoRepeatSection = ({ form, setForm, minEndDate: _minEndDate }) => {
     const [freqOpen, setFreqOpen] = useState(false);
     const [customIntervalOpen, setCustomIntervalOpen] = useState(false);
     const [customUnitOpen, setCustomUnitOpen] = useState(false);
@@ -228,7 +229,7 @@ const TodoRepeatSection = ({ form, setForm, minEndDate }) => {
                 {isRepeating && (
                     <>
                         <div className="relative" onClick={e => e.stopPropagation()}>
-                            <button type="button" onClick={() => setFreqOpen(o => !o)}
+                            <button type="button" onClick={() => { setFreqOpen(o => !o); setCustomIntervalOpen(false); setCustomUnitOpen(false); }}
                                 className="flex items-center gap-1.5 px-3 py-1.5 bg-[var(--bg-card)] border border-[var(--border)] rounded-full text-[10px] font-black uppercase tracking-wider text-[var(--text-main)]">
                                 {REPEAT_OPTIONS.find(o => o.value === form.repeat)?.label || 'Daily'}
                                 <ChevronDown size={12} className={`transition-transform ${freqOpen ? 'rotate-180' : ''}`} />
@@ -255,11 +256,12 @@ const TodoRepeatSection = ({ form, setForm, minEndDate }) => {
                             <CalendarDays size={12} />
                             {form.repeat_end_date ? new Date(form.repeat_end_date).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' }) : 'End Date'}
                         </button>
-                        <MiniDatePicker 
-                            isOpen={repeatEndPickerOpen} 
+                        <MiniDatePicker
+                            isOpen={repeatEndPickerOpen}
                             onClose={() => setRepeatEndPickerOpen(false)}
-                            value={form.repeat_end_date} 
-                            title="Repeat End Date" 
+                            value={form.repeat_end_date}
+                            title="Repeat End Date"
+                            dateOnly
                             onApply={(iso) => setForm({ ...form, repeat_end_date: iso })}
                         />
                     </>
@@ -355,6 +357,8 @@ const CalendarPage = () => {
     const calendarRef = useRef(null);
     const { user } = useAuth();
     const { showSuccess, showError } = useNotification();
+    // Show task-related stat cards only when the user has access to the Delegation module.
+    const showTaskStats = canAccessTaskManagement(user);
     const [events, setEvents] = useState([]);
     const [loading, setLoading] = useState(true);
     const [viewName, setViewName] = useState('dayGridMonth');
@@ -366,7 +370,7 @@ const CalendarPage = () => {
     const [allUsers, setAllUsers] = useState([]);
     const [statFilter, setStatFilter] = useState(null);
     const [backdateSettings, setBackdateSettings] = useState({ allow_backdate: false, exception_users: [] });
-    const [gptProjects, setGptProjects] = useState([]);
+    const [_gptProjects, setGptProjects] = useState([]);
 
     const [showSummary, setShowSummary] = useState(false);
     const [summaryDate, setSummaryDate] = useState(null);
@@ -382,6 +386,7 @@ const CalendarPage = () => {
     const [isEdit, setIsEdit] = useState(false);
     const [currentEventId, setCurrentEventId] = useState(null);
     const [showReminderModal, setShowReminderModal] = useState(false);
+    const [dueDatePickerOpen, setDueDatePickerOpen] = useState(false); // todo Due date/time calendar
 
     const initialForm = {
         title: '', type: 'event', start: '', end: '', all_day: true,
@@ -391,7 +396,7 @@ const CalendarPage = () => {
         additional_details: '', category: 'General', repeat: 'Does not repeat',
         repeat_end_date: '', repeat_interval: 1, repeat_data: { ...EMPTY_REPEAT_DATA },
         assigned_to: 'myself', target_staff_id: [],
-        reminders: [], status_remark: '', gpt_projects: []
+        reminders: [], status_remark: '', gpt_projects: [], created_at: null
     };
 
     const navigate = useNavigate();
@@ -412,27 +417,13 @@ const CalendarPage = () => {
                 api.get(usersEndpoint), api.get('/settings/backdate-control'),
                 api.get('/gpt/projects')
             ]);
-            setEvents(evRes.data.map(e => {
-                const evType = e.extendedProps?.type || e.type;
-                // Tasks have no user-facing "start" of their own (that field is only the
-                // recurrence-series start, defaulted to creation time — see TaskFormModal);
-                // the date the user actually picked is the due date (`end`, "Set Deadline").
-                // Anchor the calendar's day-cell placement to that instead, so a task shows
-                // up under the day it's due, not the day it happened to be created.
-                const displayStart = (evType === 'task' && e.end) ? e.end : e.start;
-                return {
-                    id: e.id, title: e.title, start: displayStart, end: e.end,
-                    backgroundColor: 'transparent', borderColor: 'transparent',
-                    textColor: 'var(--text-main)', allDay: e.allDay,
-                    extendedProps: { ...e.extendedProps, id: e.id, dotColor: getRescheduleColor(e.extendedProps?.status || e.status, e.extendedProps?.type || e.type, e.color, e.extendedProps?.isCreator) }
-                };
-            }));
+            setEvents(mapApiEvents(evRes.data));
             setBatches(bRes.data); setQuarters(qRes.data); setTemplates(tRes.data); setAllUsers(uRes.data);
             setBackdateSettings(sRes.data); setGptProjects(gRes.data);
         } catch (err) { console.error(err); }
         finally { setLoading(false); }
     };
-    useEffect(() => { fetchData(); }, [viewMode]);
+    useEffect(() => { fetchData(); }, [viewMode]); // eslint-disable-line react-hooks/exhaustive-deps
 
     const formatIST = (dateStr) => {
         if (!dateStr) return "";
@@ -474,6 +465,20 @@ const CalendarPage = () => {
             weekday: 'long', day: 'numeric', month: 'long', year: 'numeric',
             ...(allDay ? {} : { hour: '2-digit', minute: '2-digit', hour12: true }),
         });
+    };
+
+    // Creation timestamp for the Personal Todo header — e.g. "Tue, Aug 03, 2026 at 09:48 PM".
+    // Rendered in the user's OWN local timezone (exactly like the Due date above), so the date
+    // shown always equals the calendar date the todo was actually created on. Forcing a fixed
+    // zone (Asia/Kolkata) rolled a late-evening creation to the NEXT day for anyone whose clock
+    // isn't IST — that was the off-by-one. Captured when the modal opens and then frozen.
+    const formatCreatedLocal = (iso) => {
+        if (!iso) return "";
+        const d = new Date(iso);
+        if (isNaN(d.getTime())) return "";
+        const datePart = d.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: '2-digit', year: 'numeric' });
+        const timePart = d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', hour12: true });
+        return `${datePart} at ${timePart}`;
     };
 
     const formatTodoShort = (dateStr, allDay) => {
@@ -533,11 +538,55 @@ const CalendarPage = () => {
         }
     };
 
-    // Whether the Task & Delegation module is available to this user. Internal Sparsh users
-    // always have it; a company user only while their company's Delegation toggle is ON
-    // (Company Details ▸ Delegation On/Off). Same gate the module itself and the sidebar use,
-    // so a client whose Delegation is disabled never sees Task KPIs here either.
-    const showTaskStats = canAccessTaskManagement(user);
+    // ─── Day-cell key: the ONE place that decides which day an entry belongs to ───
+    //
+    // Everything on this page (the grid, the Day Summary, the stats, the post-action refresh)
+    // must agree, and must agree with FullCalendar — which runs at timeZone:'local' and places
+    // each entry in its LOCAL day cell.
+    //
+    // The bug this replaces: the Day Summary compared the RAW STORED STRING's date part
+    // (`e.start.split('T')[0]`), which is the UTC date. For anything stored as a Z timestamp
+    // whose UTC date differs from its local date, that is a different day than the grid drew it
+    // on — e.g. a task due 2026-05-13T19:30:00Z is 14 May in IST: drawn on the 14th, but listed
+    // under the 13th. Hence "click a date, see another date's tasks".
+    //
+    // Three stored shapes exist in the DB and each needs its own rule:
+    //   'YYYY-MM-DD'            (date-only, all-day)  -> already a day key; DO NOT feed to Date(),
+    //                                                    JS reads it as UTC midnight and can slide
+    //                                                    it a day in negative-offset zones.
+    //   '...Z' / '...+00:00'    (instant)             -> convert to the local day.
+    const dayKey = (value) => {
+        if (!value) return "";
+        if (typeof value === 'string' && !value.includes('T')) return value.slice(0, 10);
+        const d = new Date(value);
+        if (isNaN(d.getTime())) return "";
+        return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    };
+
+    // A task's `start` is only its creation / recurrence anchor — the date the user actually
+    // picked is the due date (`end`, "Set Deadline"). Anchor tasks to that, so a task lands on
+    // the day it is DUE. Sessions keep their own start.
+    const anchorOf = (e) => {
+        const evType = e.extendedProps?.type || e.type;
+        return (evType === 'task' && e.end) ? e.end : e.start;
+    };
+
+    // Shape the API payload for FullCalendar. Shared by the initial load AND the post-action
+    // refresh, so both agree on the anchor — previously the refresh re-keyed tasks on their
+    // creation date and they jumped days after a complete/delete.
+    const mapApiEvents = (rows) => (rows || []).map(e => ({
+        id: e.id, title: e.title, start: anchorOf(e), end: e.end, allDay: e.allDay,
+        backgroundColor: 'transparent', borderColor: 'transparent', textColor: 'var(--text-main)',
+        extendedProps: {
+            ...e.extendedProps, id: e.id,
+            dotColor: getRescheduleColor(e.extendedProps?.status || e.status, e.extendedProps?.type || e.type, e.color, e.extendedProps?.isCreator)
+        }
+    }));
+
+    // Entries drawn on `key`'s cell. Batches/quarters are backdrop markers, not day entries.
+    const eventsOnDay = (key, list) => (list || []).filter(e =>
+        dayKey(e.start) === key && !['batch', 'quarter'].includes(e.extendedProps?.type || e.type)
+    );
 
     // ─── Stats Calculation ───
     const currentMonthStats = useMemo(() => {
@@ -545,8 +594,10 @@ const CalendarPage = () => {
         const currentMonth = currentViewDate.getMonth();
 
         const data = events.filter(e => {
-            const d = new Date(e.start);
-            return d.getFullYear() === currentYear && d.getMonth() === currentMonth;
+            const key = dayKey(e.start);
+            if (!key) return false;
+            const [y, m] = key.split('-');
+            return Number(y) === currentYear && Number(m) - 1 === currentMonth;
         });
 
         const getCount = (type, status) => {
@@ -624,41 +675,28 @@ const CalendarPage = () => {
     }, [events, activeFilter]);
 
     // ─── Summary Logic ───
-    const handleDateSelect = (info) => {
-        const selectedDate = info.startStr.split('T')[0];
-        const eventsForDay = events.filter(e => {
-            const d = new Date(e.start);
-            if (isNaN(d.getTime())) return false;
-            const eStart = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-            return eStart === selectedDate && !['batch', 'quarter'].includes(e.extendedProps?.type || e.type);
-        });
-
-
-
-        setSummaryDate(selectedDate);
-        setDayEvents(eventsForDay);
+    // Reads `filteredEvents` — what the grid is actually drawing — so with a stat card active
+    // the summary can't list entries that aren't on screen.
+    const openDaySummary = (key) => {
+        setSummaryDate(key);
+        setDayEvents(eventsOnDay(key, filteredEvents));
         setShowSummary(true);
     };
 
-    // "YYYY-MM-DD" -> a real local timestamp anchored at noon that day.
-    //
-    // A bare date string is parsed by JS as UTC midnight, so every later
-    // `new Date(start).setHours(...).toISOString()` round-trip works off UTC midnight instead
-    // of the local day — which is what made a todo picked for 11 July save/display as 10 July.
-    // Seeding an actual local timestamp removes the ambiguity, and noon is the safe anchor:
-    // no real timezone offset can push midday across a date boundary, so the day the user
-    // picks is the day that gets stored, shown and reminded on.
-    const localNoonFromDateKey = (dateKey) => {
-        const [y, m, d] = (dateKey || '').split('-').map(Number);
-        const dt = (y && m && d) ? new Date(y, m - 1, d, 12, 0, 0, 0) : new Date(new Date().setHours(12, 0, 0, 0));
-        return dt.toISOString();
-    };
+    const handleDateSelect = (info) => openDaySummary(info.startStr.split('T')[0]);
 
     const openCreateModal = (type) => {
         setIsEdit(false); setCurrentEventId(null);
         if (type === 'todo') {
-            const anchored = localNoonFromDateKey(summaryDate);
-            setEventForm({ ...initialForm, type, start: anchored, end: anchored });
+            // A todo is due at 11:59 PM on the SELECTED calendar day (the day whose Day Summary
+            // this was opened from), defaulting to today when none is selected. The time is
+            // automatic — there is no time picker; only the chosen date matters.
+            const base = summaryDate ? new Date(`${summaryDate}T00:00:00`) : new Date();
+            base.setHours(23, 59, 59, 0);
+            const iso = base.toISOString();
+            // Freeze the moment the todo modal opens — shown as the "Created" timestamp in the
+            // header. This is independent of the Due date/time and never changes afterwards.
+            setEventForm({ ...initialForm, type, start: iso, end: iso, all_day: false, created_at: new Date().toISOString() });
         } else {
             setEventForm({ ...initialForm, type, start: summaryDate, end: summaryDate });
         }
@@ -667,12 +705,12 @@ const CalendarPage = () => {
 
     const openEditModal = (ev) => {
         const props = ev.extendedProps;
-        setIsEdit(true); 
+        setIsEdit(true);
         setCurrentEventId(ev.id || ev._id);
         const startRaw = ev.start; const endRaw = ev.end || ev.start;
         setEventForm({
             ...initialForm, title: ev.title, type: props.type, start: startRaw, end: endRaw,
-            all_day: ev.allDay, session_type: props.session_type, priority: props.priority || 'Normal',
+            all_day: props.type === 'todo' ? false : ev.allDay, session_type: props.session_type, priority: props.priority || 'Normal',
             session_template_id: props.session_template_id, batch_id: props.batch_id,
             quarter_id: props.quarter_id, assigned_departments: props.assigned_departments || [],
             assigned_member_ids: props.assigned_member_ids || [], coach_ids: props.coach_ids || [],
@@ -688,8 +726,10 @@ const CalendarPage = () => {
             reminders: props.reminders || [],
             status_remark: props.status_remark || '',
             gpt_projects: props.gpt_projects || [],
+            completed_at: props.completed_at || null,
             isCreator: props.isCreator,
-            isAssigned: props.isAssigned
+            isAssigned: props.isAssigned,
+            created_at: props.created_at || null
         });
 
         setShowModal(true);
@@ -715,17 +755,12 @@ const CalendarPage = () => {
             fetchData();
             // If in summary modal, refresh current day list
             if (showSummary) {
-                const res = await api.get('/calendar/events'); // Fast refresh for summary
-                const eventsForDay = res.data
-                    .filter(e => {
-                        const d = new Date(e.start);
-                        const eStart = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-                        return eStart === summaryDate && !['batch', 'quarter'].includes(e.type);
-                    })
-                    .map(e => ({
-                        id: e.id, title: e.title, start: e.start, end: e.end, extendedProps: { ...e.extendedProps, id: e.id }
-                    }));
-                setDayEvents(eventsForDay);
+                // Fast refresh for the open summary. Goes through the SAME mapper + day-key as
+                // the grid — it used to re-key on the raw `start` (a task's creation date), so a
+                // task due on the 15th but created on the 13th jumped to the 13th after a
+                // complete/delete.
+                const res = await api.get(`/calendar/events?view_mode=${viewMode}`);
+                setDayEvents(eventsOnDay(summaryDate, mapApiEvents(res.data)));
             }
         } catch (err) { console.error(err); showError("Communication Failure: The session architect could not be reached."); }
     };
@@ -772,8 +807,14 @@ const CalendarPage = () => {
             if (isEdit) await api.patch(`/calendar/events/${currentEventId}`, eventForm);
             else await api.post('/calendar/events', eventForm);
             showSuccess(isTodo ? (isEdit ? 'Todo updated' : 'Todo created') : (isEdit ? 'Event updated' : 'Event scheduled successfully'));
-            fetchData(); setShowModal(false); setShowSummary(false); 
-        } catch (err) { showError('Failed to save event'); console.error(err); }
+            fetchData(); setShowModal(false); setShowSummary(false);
+        } catch (err) {
+            // Surface the backend's real reason (e.g. a past-date block) instead of a generic
+            // message, so the user knows what to fix rather than seeing "Failed to save".
+            const detail = err.response?.data?.detail;
+            showError(typeof detail === 'string' && detail ? detail : (isTodo ? 'Failed to save todo' : 'Failed to save event'));
+            console.error(err);
+        }
     };
 
     const role = user?.role?.toLowerCase();
@@ -882,7 +923,7 @@ const CalendarPage = () => {
                         <span className="flex items-center gap-1 opacity-60"> <Clock size={11} /> {type === 'todo' ? 'Due:' : 'Deadline:'} </span>
                         {/* Todos render in the user's own timezone so the card matches the date
                             they picked; sessions/tasks keep the existing IST rendering. */}
-                        <span className="text-[var(--text-main)]">{type === 'todo' ? formatTodoShort(ev.start, ev.allDay ?? ev.extendedProps?.all_day) : formatShortIST(ev.start)}</span>
+                        <span className="text-[var(--text-main)]">{type === 'todo' ? formatTodoShort(ev.end || ev.start, ev.allDay ?? ev.extendedProps?.all_day) : formatShortIST(ev.start)}</span>
                     </div>
                     {ev.extendedProps.completed_at && (
                         <div className="flex items-center justify-between text-emerald-600 bg-emerald-500/5 px-2 py-0.5 rounded-md">
@@ -907,8 +948,8 @@ const CalendarPage = () => {
                                 {s === 'completed' ? <Check size={12} /> : <CheckCircle size={12} />} {s === 'completed' ? 'Done' : 'Complete'}
                             </button>
                         )}
-                        <button onClick={() => openEditModal(ev)} className="p-1.5 bg-[var(--bg-main)] border border-[var(--border)] text-[var(--text-muted)] hover:text-[var(--accent-indigo)] hover:bg-indigo-500/10 rounded-lg transition-all"> 
-                            { ((canUpdate || ev.extendedProps.isCreator) && !(isStaff && type === 'event' && s === 'completed')) ? <Edit2 size={12} /> : <Eye size={12} /> } 
+                        <button onClick={() => openEditModal(ev)} className="p-1.5 bg-[var(--bg-main)] border border-[var(--border)] text-[var(--text-muted)] hover:text-[var(--accent-indigo)] hover:bg-indigo-500/10 rounded-lg transition-all">
+                            { ((canUpdate || ev.extendedProps.isCreator) && !(isStaff && type === 'event' && s === 'completed')) ? <Edit2 size={12} /> : <Eye size={12} /> }
                         </button>
                     </div>
                     {(canDelete || ev.extendedProps.isCreator) && (
@@ -1062,11 +1103,8 @@ const CalendarPage = () => {
                     initialView="dayGridMonth" headerToolbar={false} events={filteredEvents} height="auto" selectable={true}
                     datesSet={(arg) => setCurrentViewDate(arg.view.currentStart)}
 
-                    select={handleDateSelect} eventClick={(info) => {
-                        const eStart = info.event.startStr.split('T')[0];
-                        const eventsForDay = events.filter(e => e.start.split('T')[0] === eStart && !['batch', 'quarter'].includes(e.extendedProps.type));
-                        setSummaryDate(eStart); setDayEvents(eventsForDay); setShowSummary(true);
-                    }}
+                    select={handleDateSelect}
+                    eventClick={(info) => openDaySummary(dayKey(info.event.startStr))}
                     dayMaxEvents={3} eventContent={(info) => {
                         const s = info.event.extendedProps.status;
                         const type = info.event.extendedProps.type;
@@ -1114,7 +1152,10 @@ const CalendarPage = () => {
                                     <div>
                                         <h2 className="text-lg font-black text-[var(--text-main)] tracking-tight">Day Summary</h2>
                                         <p className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-wider">
-                                            {new Date(summaryDate).toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}
+                                            {/* "T00:00:00" forces a LOCAL parse. new Date("2026-07-14") is UTC
+                                                midnight and would print the 13th in a negative-offset zone —
+                                                i.e. a header contradicting the cell the user just clicked. */}
+                                            {summaryDate && new Date(summaryDate + "T00:00:00").toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}
                                             {(summaryDate && new Date(summaryDate + "T23:59:59") < new Date()) && <span className="ml-2 text-red-500">[PAST]</span>}
                                         </p>
                                     </div>
@@ -1206,7 +1247,7 @@ const CalendarPage = () => {
                                             <Lock size={10} /> Read-Only Access
                                         </div>
                                     )}
-                                    <button onClick={() => setShowModal(false)} className="p-2 text-[var(--text-muted)] hover:bg-gray-800 rounded-full transition-all"> <X size={20} /> </button>
+                                    <button onClick={() => setShowModal(false)} className="p-2 text-[var(--text-muted)] hover:text-[var(--text-main)] rounded-full transition-all"> <X size={20} /> </button>
                                 </div>
                             </div>
 
@@ -1278,7 +1319,9 @@ const CalendarPage = () => {
                                         <div className="flex items-center gap-1.5 px-2 py-1 bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] text-[9px] font-black uppercase tracking-widest rounded-lg">
                                             <Clock size={12} />
                                             {eventForm.type === 'todo'
-                                                ? formatTodoDateTime(eventForm.start, eventForm.all_day)
+                                                ? (eventForm.created_at
+                                                    ? `Created: ${formatCreatedLocal(eventForm.created_at)}`
+                                                    : formatTodoDateTime(eventForm.start, eventForm.all_day))
                                                 : `IST • ${formatIST(eventForm.start)}`}
                                         </div>
                                         {isEdit && (
@@ -1565,47 +1608,68 @@ const CalendarPage = () => {
                                 <div className="space-y-4">
                                     {eventForm.type === 'todo' && (
                                         <label className="text-[9px] font-black text-[var(--text-muted)] uppercase tracking-wider flex items-center gap-1.5">
-                                            <CalendarDays size={12} /> Due Date
+                                            <CalendarDays size={12} /> Due Date / Time
                                         </label>
                                     )}
                                     <div className="flex items-center gap-4 flex-wrap">
-                                        <div className="flex items-center gap-2 bg-[var(--input-bg)] px-4 py-2.5 rounded-xl border border-[var(--border)] relative cursor-pointer hover:border-[var(--accent-indigo)] transition-all">
-                                            <CalendarDays size={18} className="text-[var(--accent-indigo)]" />
-                                            <span className="text-[13px] font-black">{new Date(eventForm.start).toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' })}</span>
-                                            <input type="date" className="absolute inset-0 opacity-0 cursor-pointer" 
-                                                   value={getLocalDatePart(eventForm.start)}
-                                                   onChange={(e) => {
-                                                       const newStart = updateDateTimePart(eventForm.start, e.target.value, true);
-                                                       const newEnd = updateDateTimePart(eventForm.end, e.target.value, true);
-                                                       setEventForm({...eventForm, start: newStart, end: newEnd});
-                                                   }} />
-                                        </div>
-                                        <label className="flex items-center gap-3 cursor-pointer bg-[var(--input-bg)] border border-[var(--border)] px-4 py-2.5 rounded-xl shadow-inner group">
-                                            <input type="checkbox" checked={eventForm.all_day} onChange={e => setEventForm({ ...eventForm, all_day: e.target.checked })} className="w-4 h-4 accent-[var(--accent-indigo)]" />
-                                            <span className="text-[11px] font-black uppercase text-[var(--text-muted)] group-hover:text-[var(--accent-indigo)] transition-colors">Full Day Block</span>
-                                        </label>
-                                        {!eventForm.all_day && (
-                                            <div className="flex items-center gap-2 bg-[var(--accent-indigo-bg)] p-1 rounded-xl border border-[var(--border)] shadow-inner">
-                                                <CustomTimePicker 
-                                                    value={new Date(eventForm.start).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })}
-                                                    onChange={(newTime) => {
-                                                        const [hours, minutes] = newTime.split(':');
-                                                        const newDate = new Date(eventForm.start);
-                                                        newDate.setHours(parseInt(hours), parseInt(minutes));
-                                                        setEventForm({ ...eventForm, start: newDate.toISOString() });
-                                                    }}
-                                                />
-                                                <ArrowRightLeft size={10} className="text-[var(--accent-indigo)] opacity-40" />
-                                                <CustomTimePicker 
-                                                    value={new Date(eventForm.end).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })}
-                                                    onChange={(newTime) => {
-                                                        const [hours, minutes] = newTime.split(':');
-                                                        const newDate = new Date(eventForm.end);
-                                                        newDate.setHours(parseInt(hours), parseInt(minutes));
-                                                        setEventForm({ ...eventForm, end: newDate.toISOString() });
-                                                    }}
-                                                />
+                                        {eventForm.type === 'todo' ? (
+                                            /* "Today's Todo": the due date is NOT user-selectable. Every todo is
+                                               automatically due at 11:59 PM today (IST) — set authoritatively by the
+                                               backend on create. A recurring todo then rolls to the next day at 12 AM
+                                               via the unchanged nightly engine. Shown read-only so the user knows
+                                               exactly when it's due. */
+                                            <div className="flex flex-col gap-1">
+                                                <span className="text-[9px] font-black uppercase tracking-wider text-[var(--text-muted)]">Due</span>
+                                                <div className="flex items-center gap-2 bg-[var(--input-bg)] px-4 py-2.5 rounded-xl border border-[var(--border)]">
+                                                    <Clock size={18} className="text-[var(--accent-indigo)]" />
+                                                    <div className="flex flex-col leading-tight">
+                                                        <span className="text-[13px] font-black">{new Date(eventForm.end || eventForm.start).toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' })} · 11:59 PM</span>
+                                                        <span className="text-[9px] font-bold uppercase tracking-wider text-[var(--text-muted)]">Automatic — end of the selected day (IST)</span>
+                                                    </div>
+                                                </div>
                                             </div>
+                                        ) : (
+                                            <>
+                                                <div className="flex items-center gap-2 bg-[var(--input-bg)] px-4 py-2.5 rounded-xl border border-[var(--border)] relative cursor-pointer hover:border-[var(--accent-indigo)] transition-all">
+                                                    <CalendarDays size={18} className="text-[var(--accent-indigo)]" />
+                                                    <span className="text-[13px] font-black">{new Date(eventForm.start).toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' })}</span>
+                                                    <input type="date" className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                                                           value={getLocalDatePart(eventForm.start)}
+                                                           onClick={(e) => { try { e.currentTarget.showPicker(); } catch { /* click still focuses */ } }}
+                                                           onChange={(e) => {
+                                                               const newStart = updateDateTimePart(eventForm.start, e.target.value, true);
+                                                               const newEnd = updateDateTimePart(eventForm.end, e.target.value, true);
+                                                               setEventForm({...eventForm, start: newStart, end: newEnd});
+                                                           }} />
+                                                </div>
+                                                <label className="flex items-center gap-3 cursor-pointer bg-[var(--input-bg)] border border-[var(--border)] px-4 py-2.5 rounded-xl shadow-inner group">
+                                                    <input type="checkbox" checked={eventForm.all_day} onChange={e => setEventForm({ ...eventForm, all_day: e.target.checked })} className="w-4 h-4 accent-[var(--accent-indigo)]" />
+                                                    <span className="text-[11px] font-black uppercase text-[var(--text-muted)] group-hover:text-[var(--accent-indigo)] transition-colors">Full Day Block</span>
+                                                </label>
+                                                {!eventForm.all_day && (
+                                                    <div className="flex items-center gap-2 bg-[var(--accent-indigo-bg)] p-1 rounded-xl border border-[var(--border)] shadow-inner">
+                                                        <CustomTimePicker
+                                                            value={new Date(eventForm.start).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })}
+                                                            onChange={(newTime) => {
+                                                                const [hours, minutes] = newTime.split(':');
+                                                                const newDate = new Date(eventForm.start);
+                                                                newDate.setHours(parseInt(hours), parseInt(minutes));
+                                                                setEventForm({ ...eventForm, start: newDate.toISOString() });
+                                                            }}
+                                                        />
+                                                        <ArrowRightLeft size={10} className="text-[var(--accent-indigo)] opacity-40" />
+                                                        <CustomTimePicker
+                                                            value={new Date(eventForm.end).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })}
+                                                            onChange={(newTime) => {
+                                                                const [hours, minutes] = newTime.split(':');
+                                                                const newDate = new Date(eventForm.end);
+                                                                newDate.setHours(parseInt(hours), parseInt(minutes));
+                                                                setEventForm({ ...eventForm, end: newDate.toISOString() });
+                                                            }}
+                                                        />
+                                                    </div>
+                                                )}
+                                            </>
                                         )}
                                     </div>
 
@@ -1669,8 +1733,24 @@ const CalendarPage = () => {
                                 onApply={(reminders) => setEventForm({ ...eventForm, reminders })}
                             />
 
+                            {/* Todo Due date/time — the shared month-grid DATE/TIME calendar. */}
+                            <MiniDatePicker
+                                isOpen={dueDatePickerOpen}
+                                onClose={() => setDueDatePickerOpen(false)}
+                                value={eventForm.end}
+                                title="Select Due Date"
+                                onApply={(iso) => setEventForm(f => ({ ...f, end: iso }))}
+                            />
+
                             {!(isEdit && !isStaff && !eventForm.isCreator) && eventForm.status !== 'completed' && (
-                                <div className="p-5 border-t border-[var(--border)] flex justify-end items-center bg-[var(--table-header-bg)]">
+                                <div className="p-5 border-t border-[var(--border)] flex justify-between items-center bg-[var(--table-header-bg)]">
+                                    <div className="flex items-center gap-3">
+                                        <ShieldCheck size={20} className="text-[var(--accent-indigo)] opacity-30" />
+                                        <div className="space-y-0">
+                                            <p className="text-[9px] font-black text-[var(--text-muted)] uppercase tracking-widest leading-tight">Digital Authorization</p>
+                                            <p className="text-[10px] font-bold text-gray-400 italic leading-tight">Changes sync to calendars instantly.</p>
+                                        </div>
+                                    </div>
                                     <button onClick={handleSave}
                                         disabled={isEdit && !(user.role === 'superadmin' || user.role === 'admin' || eventForm.isCreator)}
                                         className={`bg-[var(--btn-primary)] text-white px-10 py-3 rounded-xl text-[12px] font-black shadow-xl shadow-indigo-500/30 hover:scale-[1.02] active:scale-[0.98] transition-all tracking-[0.1em] uppercase ${isEdit && !(user.role === 'superadmin' || user.role === 'admin' || eventForm.isCreator) ? 'opacity-20 cursor-not-allowed grayscale' : ''}`}>
@@ -1678,6 +1758,7 @@ const CalendarPage = () => {
                                     </button>
                                 </div>
                             )}
+
                         </motion.div>
                     </div>
                 )}

@@ -1,5 +1,4 @@
 import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react';
-import { motion } from 'framer-motion';
 import {
   ListChecks, UserPlus, Filter as FilterIcon, Search, RefreshCw, Download,
   List as ListIcon, Table2, ArrowUpDown, Trash2, RotateCcw,
@@ -7,7 +6,7 @@ import {
 } from 'lucide-react';
 import api from '../../services/api';
 import { getTasks, softDeleteTask, restoreTask, updateTaskStatus, reviseTaskDeadline } from '../../services/taskApi';
-import { getTaskCategories, getTaskTags } from '../../services/taskMetaApi';
+import { getTaskCategories, getTaskTags, uniqueNames } from '../../services/taskMetaApi';
 import { openTaskEventStream } from '../../services/taskEventsApi';
 import { getHolidays } from '../../services/holidayApi';
 import { useAuth } from '../../context/AuthContext';
@@ -20,6 +19,7 @@ import TaskFormModal from './TaskFormModal';
 import TaskDetailsModal from './TaskDetailsModal';
 import StatusReasonModal from './StatusReasonModal';
 import MiniDatePicker from './MiniDatePicker';
+import { motion } from 'framer-motion';
 
 // One row in the card/list view. Extracted so both a standalone task and a recurring
 // series' primary occurrence render identically; `groupBadge` adds the "×N / expand" control
@@ -216,15 +216,17 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
   const fetchTaxonomy = useCallback(async () => {
     try {
       const [catRes, tagRes] = await Promise.all([getTaskCategories(), getTaskTags()]);
-      setCategories((catRes.data || []).map(c => c.name));
-      setTagOptions((tagRes.data || []).map(t => t.name));
+      // See uniqueNames — blank/duplicate names would become repeated React keys.
+      setCategories(uniqueNames(catRes.data));
+      setTagOptions(uniqueNames(tagRes.data));
     } catch {
       // Non-fatal: task list/creation still works, just without a live options list.
     }
   }, []);
 
   useEffect(() => {
-    api.get('/tasks/assignable-users').then(res => setUsers(res.data || [])).catch(() => {});
+    // Name-resolution map — full directory so every participant renders (not just assignable users).
+    api.get('/tasks/assignable-users?all=true').then(res => setUsers(res.data || [])).catch(() => {});
     // Holidays block dates in the Reopen picker.
     getHolidays().then(res => setHolidayDates((res.data || []).map(h => h.holiday_date).filter(Boolean))).catch(() => setHolidayDates([]));
   }, []);
@@ -642,7 +644,9 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
                       {scope === 'deleted' ? (
                         <span className="px-3 py-1.5 rounded-lg text-[10px] font-black border" style={{ background: cfg.bg, color: cfg.color, borderColor: cfg.border }}>{cfg.label}</span>
                       ) : (() => {
-                        const rowIsAssigner = task.isCreator || isAdmin;
+                        // A reporting manager is a verifier for their reports' tasks — treat them
+                        // like the assigner so they see Complete / Approve, not "Request for Verification".
+                        const rowIsAssigner = task.isCreator || isAdmin || task.isReportingManager;
                         const rowIsDoerSide = scope === 'my' && !rowIsAssigner;
                         // In-Loop observer, or an assignee waiting on a dependency doer: frozen.
                         const rowFrozenReason = frozenReason(task);
@@ -707,7 +711,7 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
             const rowProps = (task, { indent = false } = {}) => ({
               task, scope, userMap, indent,
               statusPending: completing.has(task.id),
-              isAssigner: task.isCreator || isAdmin,
+              isAssigner: task.isCreator || isAdmin || task.isReportingManager,
               frozenReason: frozenReason(task),
               isDependencyDoer: isDependencyDoer(task),
               checked: selected.has(task.id),

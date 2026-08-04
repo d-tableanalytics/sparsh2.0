@@ -105,7 +105,7 @@ const CompanyModal = ({ company, params, onClose }) => {
 
   // Reset to the default tab each time a different company is opened.
   // eslint-disable-next-line react-hooks/set-state-in-effect
-  useEffect(() => { if (company) setTab('employee'); }, [company?.id]);
+  useEffect(() => { if (company) setTab('employee'); }, [company?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <Modal isOpen={!!company} onClose={onClose} wide title={`Report · ${company?.name || ''}`}>
