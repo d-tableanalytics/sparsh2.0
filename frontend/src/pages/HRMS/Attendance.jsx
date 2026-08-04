@@ -2,13 +2,11 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   CalendarCheck, LogIn, LogOut, Users, Clock, MapPin, Camera, Loader2,
   AlertTriangle, ChevronLeft, ChevronRight, ShieldCheck, Pencil, Timer,
-  X, ImageOff,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useNotification } from '../../context/NotificationContext';
 import {
   getAttendance, punchAttendance, getTeamAttendance, addManualAttendance,
-  getAttendanceSelfie,
 } from '../../services/hrmsApi';
 import { hasHrmsPermission } from '../../utils/hrmsAccess';
 import { Avatar, StatTile, Field } from '../../components/hrms/hrmsUi';
@@ -47,29 +45,6 @@ const shiftMonth = (period, delta) => {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
 };
 
-// Punch selfies are stored as PRIVATE S3 keys, never a public URL. Each chip fetches its own
-// short-lived signed URL only when clicked, so opening a month view never fans out a request
-// per photo. A segment with no key (manual entries, selfie-off policy) renders nothing.
-const SelfieChips = ({ segments, onOpen }) => {
-  const shots = [];
-  (segments || []).forEach((s) => {
-    if (s?.inSelfie) shots.push({ key: s.inSelfie, label: `In · ${hhmm(s.in)}` });
-    if (s?.outSelfie) shots.push({ key: s.outSelfie, label: `Out · ${hhmm(s.out)}` });
-  });
-  if (!shots.length) return null;
-  return (
-    <>
-      {shots.map((shot, i) => (
-        <button key={`${shot.key}-${i}`} type="button" onClick={() => onOpen(shot.key, shot.label)}
-          title={`View selfie (${shot.label})`}
-          className="inline-flex items-center justify-center w-6 h-6 rounded-md border border-[var(--border)] text-[var(--text-muted)] hover:text-[var(--accent-indigo)] hover:border-[var(--accent-indigo)] transition-colors">
-          <Camera size={12} />
-        </button>
-      ))}
-    </>
-  );
-};
-
 const Attendance = () => {
   const { user } = useAuth();
   const { showSuccess, showError } = useNotification();
@@ -99,21 +74,6 @@ const Attendance = () => {
   const [manualFor, setManualFor] = useState(null);
   const [manual, setManual] = useState({ punch_in: '09:00', punch_out: '', note: '' });
   const [savingManual, setSavingManual] = useState(false);
-
-  // Selfie lightbox — { loading, url, label } or null.
-  const [selfieView, setSelfieView] = useState(null);
-
-  const openSelfie = async (key, label) => {
-    if (!key) return;
-    setSelfieView({ loading: true, url: '', label });
-    try {
-      const res = await getAttendanceSelfie(key);
-      setSelfieView({ loading: false, url: res.data?.url || '', label });
-    } catch {
-      // A dead/expired key shows the graceful "unavailable" state rather than erroring the page.
-      setSelfieView({ loading: false, url: '', label });
-    }
-  };
 
   const loadMine = useCallback(async () => {
     setLoadingMine(true);
@@ -356,10 +316,7 @@ const Attendance = () => {
                         {d.open ? <span style={{ color: 'var(--accent-green)' }}>Still in</span> : hhmm(d.lastOut)}
                       </td>
                       <td className="px-4 py-3 text-[12.5px] font-semibold text-[var(--text-muted)]">
-                        <span className="flex items-center gap-1.5 flex-wrap">
-                          <span style={{ fontVariantNumeric: 'tabular-nums' }}>{(d.segments || []).length}</span>
-                          <SelfieChips segments={d.segments} onOpen={openSelfie} />
-                        </span>
+                        {(d.segments || []).length}
                       </td>
                       <td className="px-4 py-3 text-[12.5px] font-black text-[var(--text-main)]"
                         style={{ fontVariantNumeric: 'tabular-nums' }}>{hours(d.workedMinutes)}</td>
@@ -460,16 +417,13 @@ const Attendance = () => {
                         style={{ fontVariantNumeric: 'tabular-nums' }}>
                         {r.present ? hours(r.attendance.workedMinutes) : '—'}
                       </td>
-                      <td className="px-4 py-3">
-                        <div className="flex items-center justify-end gap-1.5">
-                          <SelfieChips segments={r.attendance?.segments} onOpen={openSelfie} />
-                          {canEnterManual && (
-                            <button onClick={() => setManualFor(r)}
-                              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--border)] text-[10px] font-black uppercase tracking-widest text-[var(--text-muted)] hover:text-[var(--accent-indigo)] hover:border-[var(--accent-indigo)] transition-colors">
-                              <Pencil size={11} /> Record
-                            </button>
-                          )}
-                        </div>
+                      <td className="px-4 py-3 text-right">
+                        {canEnterManual && (
+                          <button onClick={() => setManualFor(r)}
+                            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--border)] text-[10px] font-black uppercase tracking-widest text-[var(--text-muted)] hover:text-[var(--accent-indigo)] hover:border-[var(--accent-indigo)] transition-colors">
+                            <Pencil size={11} /> Record
+                          </button>
+                        )}
                       </td>
                     </tr>
                   ))}
@@ -523,45 +477,6 @@ const Attendance = () => {
                   {savingManual && <Loader2 size={13} className="animate-spin" />} Record
                 </button>
               </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Selfie viewer — lazily loads the signed URL for the chip that was clicked. */}
-      {selfieView && (
-        <div className="fixed inset-0 z-[350] flex items-center justify-center p-4">
-          <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={() => setSelfieView(null)} />
-          <div className="relative w-full max-w-sm rounded-[24px] bg-[var(--bg-card)] border border-[var(--border)] shadow-2xl overflow-hidden">
-            <div className="px-5 py-4 border-b border-[var(--border)] bg-[var(--table-header-bg)] flex items-center justify-between gap-3">
-              <div className="min-w-0">
-                <h2 className="text-[14px] font-black tracking-tight text-[var(--text-main)]">
-                  Punch selfie
-                </h2>
-                {selfieView.label && (
-                  <p className="text-[11.5px] font-bold text-[var(--text-muted)] mt-0.5 truncate">
-                    {selfieView.label}
-                  </p>
-                )}
-              </div>
-              <button onClick={() => setSelfieView(null)} aria-label="Close"
-                className="p-1.5 rounded-lg border border-[var(--border)] text-[var(--text-muted)] hover:text-[var(--text-main)] transition-colors shrink-0">
-                <X size={15} />
-              </button>
-            </div>
-            <div className="p-5 flex items-center justify-center min-h-[240px]">
-              {selfieView.loading && (
-                <Loader2 size={22} className="animate-spin text-[var(--text-muted)]" />
-              )}
-              {!selfieView.loading && selfieView.url && (
-                <img src={selfieView.url} alt="Punch selfie"
-                  className="max-h-[60vh] w-auto rounded-xl border border-[var(--border)] object-contain" />
-              )}
-              {!selfieView.loading && !selfieView.url && (
-                <span className="flex flex-col items-center gap-2 text-[12px] font-bold text-[var(--text-muted)]">
-                  <ImageOff size={20} /> Selfie unavailable
-                </span>
-              )}
             </div>
           </div>
         </div>

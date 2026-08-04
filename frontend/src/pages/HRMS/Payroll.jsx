@@ -1,12 +1,12 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import {
   Wallet, Play, Lock, Loader2, AlertTriangle, ChevronLeft, ChevronRight,
-  FileText, Users, TrendingDown, ShieldCheck, X, Info, History, Printer,
+  FileText, Users, TrendingDown, ShieldCheck, X, Info,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useNotification } from '../../context/NotificationContext';
 import {
-  getPayroll, runPayroll, lockPayroll, getMyPayslip, getPayrollRuns,
+  getPayroll, runPayroll, lockPayroll, getMyPayslip,
 } from '../../services/hrmsApi';
 import { hasHrmsPermission } from '../../utils/hrmsAccess';
 import { StatTile } from '../../components/hrms/hrmsUi';
@@ -43,22 +43,6 @@ const Payroll = () => {
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
   const [detail, setDetail] = useState(null);
-  const [runs, setRuns] = useState([]);
-  const [historyOpen, setHistoryOpen] = useState(false);
-
-  // Past runs power the history panel. Non-critical: a failure here must never block the main
-  // month view, so it is swallowed rather than surfaced as an error.
-  const loadRuns = useCallback(async () => {
-    if (!canRead) return;
-    try {
-      const res = await getPayrollRuns();
-      setRuns(res.data ?? []);
-    } catch {
-      setRuns([]);
-    }
-  }, [canRead]);
-
-  useEffect(() => { loadRuns(); }, [loadRuns]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -92,7 +76,6 @@ const Payroll = () => {
       const res = await runPayroll({ year, month });
       showSuccess(`Computed ${res.data.payslips.length} payslip(s)`);
       load();
-      loadRuns();
     } catch (err) {
       showError(err.response?.data?.detail || 'Payroll run failed');
     } finally {
@@ -106,7 +89,6 @@ const Payroll = () => {
       await lockPayroll({ year, month });
       showSuccess(`${monthLabel(year, month)} locked`);
       load();
-      loadRuns();
     } catch (err) {
       showError(err.response?.data?.detail || 'Failed to lock');
     } finally {
@@ -169,7 +151,7 @@ const Payroll = () => {
             <span className="text-[13px] font-bold">Loading…</span>
           </div>
         ) : mySlip?.payslip ? (
-          <PayslipCard slip={mySlip.payslip} period={monthLabel(year, month)} />
+          <PayslipCard slip={mySlip.payslip} />
         ) : (
           <div className="p-8 rounded-2xl bg-[var(--bg-card)] border border-dashed border-[var(--border)] text-center">
             <FileText size={26} className="mx-auto text-[var(--text-muted)] opacity-50 mb-2" />
@@ -219,13 +201,6 @@ const Payroll = () => {
                 Computed by {run.computedBy}
                 {isLocked && run.lockedBy ? ` · locked by ${run.lockedBy}` : ''}
               </span>
-            )}
-
-            {runs.length > 0 && (
-              <button onClick={() => setHistoryOpen(true)}
-                className="ml-auto flex items-center gap-2 px-4 py-2 rounded-xl border border-[var(--border)] text-[11px] font-black uppercase tracking-widest text-[var(--text-muted)] hover:text-[var(--text-main)] transition-colors">
-                <History size={14} /> Run history
-              </button>
             )}
           </div>
 
@@ -341,74 +316,7 @@ const Payroll = () => {
               </button>
             </div>
             <div className="p-5">
-              <PayslipCard slip={detail} period={monthLabel(year, month)} embedded />
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Run history — clicking a period loads it into the main view via the month state. */}
-      {historyOpen && (
-        <div className="fixed inset-0 z-[350] flex items-center justify-center p-4">
-          <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={() => setHistoryOpen(false)} />
-          <div className="relative w-full max-w-xl max-h-[88vh] overflow-y-auto rounded-[24px] bg-[var(--bg-card)] border border-[var(--border)] shadow-2xl">
-            <div className="sticky top-0 flex items-center justify-between px-5 py-4 border-b border-[var(--border)] bg-[var(--table-header-bg)]">
-              <div className="flex items-center gap-2.5">
-                <History size={16} className="text-[var(--accent-indigo)]" />
-                <div>
-                  <h2 className="text-[14px] font-black tracking-tight text-[var(--text-main)]">Run history</h2>
-                  <p className="text-[11px] font-bold text-[var(--text-muted)]">
-                    {runs.length} past run{runs.length === 1 ? '' : 's'}
-                  </p>
-                </div>
-              </div>
-              <button onClick={() => setHistoryOpen(false)}
-                className="p-1.5 rounded-lg text-[var(--text-muted)] hover:bg-[var(--table-hover)] transition-colors">
-                <X size={18} />
-              </button>
-            </div>
-            <div className="p-3 flex flex-col gap-2">
-              {runs.map((r) => {
-                const locked = r.status === 'locked';
-                const t = r.totals ?? {};
-                const active = r.year === year && r.month === month;
-                return (
-                  <button key={r.id ?? `${r.year}-${r.month}`}
-                    onClick={() => { setYear(r.year); setMonth(r.month); setHistoryOpen(false); }}
-                    className="w-full text-left px-4 py-3 rounded-xl border transition-colors hover:bg-[var(--table-hover)]"
-                    style={{ borderColor: active ? 'var(--accent-indigo)' : 'var(--border)' }}>
-                    <div className="flex items-center justify-between gap-3">
-                      <div className="flex items-center gap-2.5">
-                        <span className="text-[12.5px] font-black text-[var(--text-main)]">
-                          {monthLabel(r.year, r.month)}
-                        </span>
-                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[9px] font-black uppercase tracking-widest border"
-                          style={locked
-                            ? { color: 'var(--status-active-text)', backgroundColor: 'var(--status-active-bg)', borderColor: 'var(--status-active-border)' }
-                            : { color: 'var(--accent-yellow)', backgroundColor: 'var(--accent-yellow-bg)', borderColor: 'var(--accent-yellow-border)' }}>
-                          {locked ? <><Lock size={9} /> Locked</> : 'Draft'}
-                        </span>
-                      </div>
-                      <ChevronRight size={14} className="text-[var(--text-muted)] shrink-0" />
-                    </div>
-                    <div className="mt-2 grid grid-cols-3 gap-2">
-                      {[
-                        ['Headcount', t.headcount ?? 0],
-                        ['Gross', money(t.gross)],
-                        ['Net', money(t.net)],
-                      ].map(([label, value]) => (
-                        <div key={label}>
-                          <div className="text-[12px] font-black text-[var(--text-main)]"
-                            style={{ fontVariantNumeric: 'tabular-nums' }}>{value}</div>
-                          <div className="text-[9px] font-black uppercase tracking-widest text-[var(--text-muted)] mt-0.5">
-                            {label}
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </button>
-                );
-              })}
+              <PayslipCard slip={detail} embedded />
             </div>
           </div>
         </div>
@@ -431,119 +339,8 @@ const Line = ({ label, value, tone, bold }) => (
   </div>
 );
 
-// Escape untrusted strings (names, notes) before they land in the print window's HTML.
-const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => (
-  { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
-));
-
-// Print/download via a dedicated, self-contained window — no library, no global print CSS that
-// could bleed into the rest of the app. Returns false if the browser blocked the pop-up.
-const printPayslip = (slip, period) => {
-  const win = window.open('', '_blank', 'width=800,height=1000');
-  if (!win) return false;
-
-  const earnings = [
-    ['Monthly salary', money(slip.monthlySalary)],
-    [`Earned (${slip.payableDays} payable days)`, money(slip.earnedSalary)],
-    [`Overtime (${slip.overtimeHours}h)`, money(slip.overtimeAmount)],
-  ];
-  const deductions = [
-    ['Professional tax', money(slip.professionalTax)],
-    ['Late entry fine', money(slip.lateEntryFine)],
-    ['Late hours', money(slip.lateHourDeduction)],
-    ['Unauthorized absence', money(slip.unauthorizedLeavePenalty)],
-  ];
-  const stats = [
-    ['Working days', slip.workingDays],
-    ['Paid leave', slip.paidLeaves],
-    ['Unpaid leave', slip.unpaidLeaves],
-    ['Paid Sundays', slip.paidSundays],
-  ];
-  const notes = slip.notes ?? [];
-
-  const rows = (items, tone) => items.map(([l, v]) =>
-    `<tr><td>${esc(l)}</td><td class="num"${tone ? ` style="color:${tone}"` : ''}>${esc(v)}</td></tr>`
-  ).join('');
-
-  win.document.write(`<!doctype html><html><head><meta charset="utf-8">
-<title>Payslip — ${esc(slip.fullName || '')} — ${esc(period || '')}</title>
-<style>
-  *{box-sizing:border-box}
-  body{font-family:-apple-system,'Segoe UI',Roboto,Arial,sans-serif;color:#1a1a2e;margin:0;padding:32px}
-  .head{display:flex;justify-content:space-between;align-items:flex-start;gap:24px;border-bottom:2px solid #e5e7eb;padding-bottom:16px;margin-bottom:20px}
-  .title{font-size:20px;font-weight:800}
-  .sub{font-size:12px;color:#6b7280;margin-top:2px}
-  .period{font-size:13px;font-weight:700;text-align:right;white-space:nowrap}
-  .cols{display:flex;gap:32px}
-  .col{flex:1;min-width:0}
-  h3{font-size:11px;text-transform:uppercase;letter-spacing:.14em;color:#6b7280;margin:0 0 8px}
-  table{width:100%;border-collapse:collapse}
-  td{font-size:13px;padding:6px 0;border-bottom:1px solid #eee}
-  td.num{text-align:right;font-variant-numeric:tabular-nums}
-  tr.total td{font-weight:800;border-bottom:none;border-top:2px solid #e5e7eb}
-  .net{display:flex;justify-content:space-between;align-items:center;margin-top:20px;padding:16px;border-radius:10px;background:#eef2ff;color:#4338ca}
-  .net .lbl{font-size:12px;font-weight:800;text-transform:uppercase;letter-spacing:.1em}
-  .net .val{font-size:20px;font-weight:800;font-variant-numeric:tabular-nums}
-  .stats{display:flex;gap:12px;margin-top:20px}
-  .stat{flex:1;border:1px solid #e5e7eb;border-radius:8px;padding:10px}
-  .stat .v{font-size:16px;font-weight:800;font-variant-numeric:tabular-nums}
-  .stat .l{font-size:9px;text-transform:uppercase;letter-spacing:.1em;color:#6b7280;margin-top:2px}
-  .notes{margin-top:20px;padding-top:12px;border-top:1px solid #eee;list-style:none;padding-left:0}
-  .notes li{font-size:12px;color:#4b5563;margin-bottom:4px}
-  @media print{body{padding:0}}
-</style></head><body>
-  <div class="head">
-    <div>
-      <div class="title">${esc(slip.fullName || 'Payslip')}</div>
-      <div class="sub">${esc(slip.employeeCode || '')}${slip.department ? ' · ' + esc(slip.department) : ''}</div>
-    </div>
-    <div class="period">Payslip<br>${esc(period || '')}</div>
-  </div>
-  <div class="cols">
-    <div class="col">
-      <h3>Earnings</h3>
-      <table>${rows(earnings)}<tr class="total"><td>Total earnings</td><td class="num">${esc(money(slip.totalEarnings))}</td></tr></table>
-    </div>
-    <div class="col">
-      <h3>Deductions</h3>
-      <table>${rows(deductions, '#dc2626')}<tr class="total"><td>Total deductions</td><td class="num" style="color:#dc2626">${esc(money(slip.totalDeductions))}</td></tr></table>
-    </div>
-  </div>
-  <div class="net"><span class="lbl">Net payable</span><span class="val">${esc(money(slip.netSalary))}</span></div>
-  <div class="stats">${stats.map(([l, v]) => `<div class="stat"><div class="v">${esc(v)}</div><div class="l">${esc(l)}</div></div>`).join('')}</div>
-  ${notes.length ? `<ul class="notes">${notes.map((n) => `<li>${esc(n)}</li>`).join('')}</ul>` : ''}
-</body></html>`);
-  win.document.close();
-  win.focus();
-  win.onafterprint = () => win.close();
-  // A short delay lets the fresh document lay out before the print dialog opens.
-  setTimeout(() => { try { win.print(); } catch (e) { /* dialog may be dismissed */ } }, 250);
-  return true;
-};
-
-const PayslipCard = ({ slip, period, embedded }) => {
-  const { showError } = useNotification();
-  const handlePrint = () => {
-    if (!printPayslip(slip, period)) {
-      showError('Allow pop-ups for this site to print the payslip.');
-    }
-  };
-  return (
+const PayslipCard = ({ slip, embedded }) => (
   <div className={embedded ? '' : 'p-5 rounded-2xl bg-[var(--bg-card)] border border-[var(--border)] shadow-sm'}>
-    <div className={`flex items-center ${embedded ? 'justify-end' : 'justify-between'} gap-3 mb-4`}>
-      {!embedded && (
-        <div className="min-w-0">
-          <h3 className="text-[13px] font-black text-[var(--text-main)] truncate">{slip.fullName}</h3>
-          <p className="text-[11px] font-bold text-[var(--text-muted)]">
-            {slip.employeeCode}{period ? ` · ${period}` : ''}
-          </p>
-        </div>
-      )}
-      <button onClick={handlePrint}
-        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--border)] text-[10px] font-black uppercase tracking-widest text-[var(--text-muted)] hover:text-[var(--accent-indigo)] hover:border-[var(--accent-indigo)] transition-colors shrink-0">
-        <Printer size={11} /> Print payslip
-      </button>
-    </div>
     <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6">
       <div>
         <h3 className="text-[10px] font-black uppercase tracking-[0.18em] text-[var(--text-muted)] mb-1">
@@ -604,7 +401,6 @@ const PayslipCard = ({ slip, period, embedded }) => {
       </ul>
     )}
   </div>
-  );
-};
+);
 
 export default Payroll;

@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import {
-  Building2, Briefcase, MapPin, Plus, Loader2, AlertTriangle, Power, Check, X, Pencil,
+  Building2, Briefcase, MapPin, Plus, Loader2, AlertTriangle, Power, Check, X,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useNotification } from '../../context/NotificationContext';
@@ -26,58 +26,6 @@ const KINDS = [
 
 const LOCATION_TYPES = ['Office', 'Factory', 'Warehouse', 'Branch', 'Remote'];
 
-// The kind-specific inputs, shared by the add form and the inline edit form so both offer
-// exactly the same set of fields and can never drift apart.
-const OrgFields = ({ kind, values, onChange, autoFocus }) => (
-  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3.5">
-    <Field label="Name" required>
-      <input className={inputCls} value={values.name} autoFocus={autoFocus}
-        onChange={(e) => onChange({ ...values, name: e.target.value })} />
-    </Field>
-
-    {kind === 'department' && (
-      <>
-        <Field label="Code">
-          <input className={inputCls} value={values.code}
-            onChange={(e) => onChange({ ...values, code: e.target.value })} />
-        </Field>
-        <Field label="Head">
-          <input className={inputCls} value={values.head}
-            onChange={(e) => onChange({ ...values, head: e.target.value })} />
-        </Field>
-      </>
-    )}
-
-    {kind === 'designation' && (
-      <>
-        <Field label="Department">
-          <input className={inputCls} value={values.department}
-            onChange={(e) => onChange({ ...values, department: e.target.value })} />
-        </Field>
-        <Field label="Grade">
-          <input className={inputCls} value={values.grade}
-            onChange={(e) => onChange({ ...values, grade: e.target.value })} />
-        </Field>
-      </>
-    )}
-
-    {kind === 'location' && (
-      <>
-        <Field label="Type">
-          <select className={`${inputCls} cursor-pointer`} value={values.type}
-            onChange={(e) => onChange({ ...values, type: e.target.value })}>
-            {LOCATION_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
-          </select>
-        </Field>
-        <Field label="City">
-          <input className={inputCls} value={values.city}
-            onChange={(e) => onChange({ ...values, city: e.target.value })} />
-        </Field>
-      </>
-    )}
-  </div>
-);
-
 const OrgStructure = () => {
   const { user } = useAuth();
   const { showSuccess, showError } = useNotification();
@@ -94,12 +42,6 @@ const OrgStructure = () => {
   const [adding, setAdding] = useState(false);
   const [draft, setDraft] = useState({ name: '', code: '', head: '', department: '', grade: '', type: 'Office', city: '', state: '' });
   const [saving, setSaving] = useState(false);
-
-  // Inline field edit — one row at a time. editDraft is seeded from the row's own values so
-  // fields the form doesn't surface (state, description) survive a save unchanged.
-  const [editingId, setEditingId] = useState(null);
-  const [editDraft, setEditDraft] = useState(null);
-  const [savingEdit, setSavingEdit] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -145,34 +87,6 @@ const OrgStructure = () => {
     }
   };
 
-  const startEdit = (row) => {
-    setAdding(false);
-    setEditingId(row.id);
-    setEditDraft({
-      name: row.name || '', code: row.code || '', head: row.head || '',
-      department: row.department || '', grade: row.grade || '',
-      type: row.type || 'Office', city: row.city || '', state: row.state || '',
-      description: row.description || '',
-    });
-  };
-
-  const cancelEdit = () => { setEditingId(null); setEditDraft(null); };
-
-  const saveEdit = async (row) => {
-    if (!editDraft.name.trim()) { showError('Name is required'); return; }
-    setSavingEdit(true);
-    try {
-      await updateOrgMaster(row.id, { ...editDraft, name: editDraft.name.trim() });
-      showSuccess(`${row.name} updated`);
-      cancelEdit();
-      load();
-    } catch (err) {
-      showError(err.response?.data?.detail || 'Failed to update entry');
-    } finally {
-      setSavingEdit(false);
-    }
-  };
-
   const current = KINDS.find((k) => k.key === kind) || KINDS[0];
 
   return (
@@ -193,7 +107,7 @@ const OrgStructure = () => {
           </div>
         </div>
         {canCreate && !adding && (
-          <button onClick={() => { cancelEdit(); setAdding(true); }}
+          <button onClick={() => setAdding(true)}
             className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-[var(--btn-primary)] text-white text-[12px] font-black uppercase tracking-widest shadow-md hover:opacity-90 active:scale-[0.98] transition-all">
             <Plus size={15} /> Add {current.singular}
           </button>
@@ -203,7 +117,7 @@ const OrgStructure = () => {
       {/* Kind tabs */}
       <div className="flex items-center gap-1.5 flex-wrap">
         {KINDS.map((k) => (
-          <button key={k.key} onClick={() => { setKind(k.key); setAdding(false); resetDraft(); cancelEdit(); }}
+          <button key={k.key} onClick={() => { setKind(k.key); setAdding(false); resetDraft(); }}
             className={`flex items-center gap-2 px-4 py-2 rounded-xl text-[11px] font-black uppercase tracking-widest transition-colors border ${
               kind === k.key
                 ? 'bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] border-[var(--accent-indigo-border)]'
@@ -228,7 +142,53 @@ const OrgStructure = () => {
           <h3 className="text-[10px] font-black uppercase tracking-[0.18em] text-[var(--text-muted)]">
             New {current.singular}
           </h3>
-          <OrgFields kind={kind} values={draft} onChange={setDraft} autoFocus />
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3.5">
+            <Field label="Name" required>
+              <input className={inputCls} value={draft.name} autoFocus
+                onChange={(e) => setDraft({ ...draft, name: e.target.value })} />
+            </Field>
+
+            {kind === 'department' && (
+              <>
+                <Field label="Code">
+                  <input className={inputCls} value={draft.code}
+                    onChange={(e) => setDraft({ ...draft, code: e.target.value })} />
+                </Field>
+                <Field label="Head">
+                  <input className={inputCls} value={draft.head}
+                    onChange={(e) => setDraft({ ...draft, head: e.target.value })} />
+                </Field>
+              </>
+            )}
+
+            {kind === 'designation' && (
+              <>
+                <Field label="Department">
+                  <input className={inputCls} value={draft.department}
+                    onChange={(e) => setDraft({ ...draft, department: e.target.value })} />
+                </Field>
+                <Field label="Grade">
+                  <input className={inputCls} value={draft.grade}
+                    onChange={(e) => setDraft({ ...draft, grade: e.target.value })} />
+                </Field>
+              </>
+            )}
+
+            {kind === 'location' && (
+              <>
+                <Field label="Type">
+                  <select className={`${inputCls} cursor-pointer`} value={draft.type}
+                    onChange={(e) => setDraft({ ...draft, type: e.target.value })}>
+                    {LOCATION_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
+                  </select>
+                </Field>
+                <Field label="City">
+                  <input className={inputCls} value={draft.city}
+                    onChange={(e) => setDraft({ ...draft, city: e.target.value })} />
+                </Field>
+              </>
+            )}
+          </div>
           <div className="flex items-center justify-end gap-2">
             <button onClick={() => { setAdding(false); resetDraft(); }}
               className="px-4 py-2 rounded-xl border border-[var(--border)] text-[11px] font-black uppercase tracking-widest text-[var(--text-muted)]">
@@ -284,66 +244,31 @@ const OrgStructure = () => {
               )}
 
               {!loading && rows.map((r) => (
-                <React.Fragment key={r.id}>
-                  <tr className="border-b border-[var(--border)] last:border-0 hover:bg-[var(--table-hover)] transition-colors">
-                    <td className="px-4 py-3 text-[13px] font-black text-[var(--text-main)]">{r.name}</td>
-                    <td className="px-4 py-3 text-[12px] font-semibold text-[var(--text-muted)]">
-                      {[r.code, r.head, r.department, r.grade, r.type, r.city, r.state]
-                        .filter(Boolean).join(' · ') || '—'}
-                    </td>
-                    <td className="px-4 py-3">
-                      <span className="inline-block px-2 py-0.5 rounded-md text-[9px] font-black uppercase tracking-widest border"
-                        style={r.active
-                          ? { color: 'var(--status-active-text)', backgroundColor: 'var(--status-active-bg)', borderColor: 'var(--status-active-border)' }
-                          : { color: 'var(--text-muted)', backgroundColor: 'var(--input-bg)', borderColor: 'var(--border)' }}>
-                        {r.active ? 'Active' : 'Retired'}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3 text-right">
-                      {canUpdate && (
-                        <div className="inline-flex items-center gap-1.5">
-                          <button onClick={() => (editingId === r.id ? cancelEdit() : startEdit(r))}
-                            title="Edit"
-                            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-[10px] font-black uppercase tracking-widest transition-colors ${
-                              editingId === r.id
-                                ? 'border-[var(--accent-indigo)] text-[var(--accent-indigo)]'
-                                : 'border-[var(--border)] text-[var(--text-muted)] hover:text-[var(--accent-indigo)] hover:border-[var(--accent-indigo)]'
-                            }`}>
-                            <Pencil size={12} /> Edit
-                          </button>
-                          <button onClick={() => toggleActive(r)}
-                            title={r.active ? 'Retire' : 'Restore'}
-                            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--border)] text-[10px] font-black uppercase tracking-widest text-[var(--text-muted)] hover:text-[var(--text-main)] transition-colors">
-                            {r.active ? <><Power size={12} /> Retire</> : <><Check size={12} /> Restore</>}
-                          </button>
-                        </div>
-                      )}
-                    </td>
-                  </tr>
-
-                  {editingId === r.id && editDraft && (
-                    <tr className="border-b border-[var(--border)] last:border-0 bg-[var(--table-hover)]">
-                      <td colSpan={4} className="px-4 py-4">
-                        <div className="flex flex-col gap-3.5">
-                          <h3 className="text-[10px] font-black uppercase tracking-[0.18em] text-[var(--text-muted)]">
-                            Edit {current.singular}
-                          </h3>
-                          <OrgFields kind={kind} values={editDraft} onChange={setEditDraft} />
-                          <div className="flex items-center justify-end gap-2">
-                            <button onClick={cancelEdit}
-                              className="px-4 py-2 rounded-xl border border-[var(--border)] text-[11px] font-black uppercase tracking-widest text-[var(--text-muted)]">
-                              Cancel
-                            </button>
-                            <button onClick={() => saveEdit(r)} disabled={savingEdit}
-                              className="flex items-center gap-2 px-5 py-2 rounded-xl bg-[var(--btn-primary)] text-white text-[11px] font-black uppercase tracking-widest disabled:opacity-50">
-                              {savingEdit && <Loader2 size={13} className="animate-spin" />} Save
-                            </button>
-                          </div>
-                        </div>
-                      </td>
-                    </tr>
-                  )}
-                </React.Fragment>
+                <tr key={r.id}
+                  className="border-b border-[var(--border)] last:border-0 hover:bg-[var(--table-hover)] transition-colors">
+                  <td className="px-4 py-3 text-[13px] font-black text-[var(--text-main)]">{r.name}</td>
+                  <td className="px-4 py-3 text-[12px] font-semibold text-[var(--text-muted)]">
+                    {[r.code, r.head, r.department, r.grade, r.type, r.city, r.state]
+                      .filter(Boolean).join(' · ') || '—'}
+                  </td>
+                  <td className="px-4 py-3">
+                    <span className="inline-block px-2 py-0.5 rounded-md text-[9px] font-black uppercase tracking-widest border"
+                      style={r.active
+                        ? { color: 'var(--status-active-text)', backgroundColor: 'var(--status-active-bg)', borderColor: 'var(--status-active-border)' }
+                        : { color: 'var(--text-muted)', backgroundColor: 'var(--input-bg)', borderColor: 'var(--border)' }}>
+                      {r.active ? 'Active' : 'Retired'}
+                    </span>
+                  </td>
+                  <td className="px-4 py-3 text-right">
+                    {canUpdate && (
+                      <button onClick={() => toggleActive(r)}
+                        title={r.active ? 'Retire' : 'Restore'}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--border)] text-[10px] font-black uppercase tracking-widest text-[var(--text-muted)] hover:text-[var(--text-main)] transition-colors">
+                        {r.active ? <><Power size={12} /> Retire</> : <><Check size={12} /> Restore</>}
+                      </button>
+                    )}
+                  </td>
+                </tr>
               ))}
             </tbody>
           </table>

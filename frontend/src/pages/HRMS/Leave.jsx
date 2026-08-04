@@ -1,13 +1,12 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import {
   ShieldCheck, Plus, Inbox, CalendarRange, Loader2, AlertTriangle,
-  Check, X, Ban, Clock, SlidersHorizontal,
+  Check, X, Ban, Clock,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useNotification } from '../../context/NotificationContext';
 import {
   getLeaves, applyLeave, decideLeave, cancelLeave, getLeaveBalance, getLeaveSettings,
-  adjustLeaveBalance,
 } from '../../services/hrmsApi';
 import { hasHrmsPermission } from '../../utils/hrmsAccess';
 import { Field } from '../../components/hrms/hrmsUi';
@@ -44,8 +43,6 @@ const Leave = () => {
   const { showSuccess, showError } = useNotification();
 
   const canApprove = hasHrmsPermission(user, 'attendance', 'read');
-  // The same grant that decides leave (attendance.update) also lets HR override a balance.
-  const canAdjust = hasHrmsPermission(user, 'attendance', 'update');
 
   const [tab, setTab] = useState('mine');
   const [settings, setSettings] = useState(null);
@@ -59,14 +56,6 @@ const Leave = () => {
   const [form, setForm] = useState(EMPTY_FORM);
   const [saving, setSaving] = useState(false);
   const [deciding, setDeciding] = useState(null);
-
-  // HR balance override.
-  const [adjustOpen, setAdjustOpen] = useState(false);
-  const [adjustForm, setAdjustForm] = useState({
-    user_id: '', leave_type: '', year: String(new Date().getFullYear()), entitled: '', used: '',
-  });
-  const [savingAdjust, setSavingAdjust] = useState(false);
-  const [adjustResult, setAdjustResult] = useState(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -96,10 +85,7 @@ const Leave = () => {
       .then((r) => {
         setSettings(r.data);
         const first = (r.data.types || []).find((t) => t.active);
-        if (first) {
-          setForm((f) => ({ ...f, leave_type: f.leave_type || first.code }));
-          setAdjustForm((f) => ({ ...f, leave_type: f.leave_type || first.code }));
-        }
+        if (first) setForm((f) => ({ ...f, leave_type: f.leave_type || first.code }));
       })
       .catch(() => {});
   }, []);
@@ -151,33 +137,6 @@ const Leave = () => {
     }
   };
 
-  const submitAdjust = async () => {
-    if (!adjustForm.user_id.trim()) { showError('Enter a user id'); return; }
-    if (!adjustForm.leave_type) { showError('Choose a leave type'); return; }
-    const hasEntitled = adjustForm.entitled !== '';
-    const hasUsed = adjustForm.used !== '';
-    if (!hasEntitled && !hasUsed) { showError('Enter entitled and/or used'); return; }
-    setSavingAdjust(true);
-    try {
-      const payload = {
-        user_id: adjustForm.user_id.trim(),
-        leave_type: adjustForm.leave_type,
-        year: Number(adjustForm.year) || new Date().getFullYear(),
-      };
-      if (hasEntitled) payload.entitled = Number(adjustForm.entitled);
-      if (hasUsed) payload.used = Number(adjustForm.used);
-      const res = await adjustLeaveBalance(payload);
-      setAdjustResult(res.data?.balances || []);
-      showSuccess('Leave balance updated');
-      // If the target is the current user, their balance cards reflect the change too.
-      load();
-    } catch (err) {
-      showError(err.response?.data?.detail || 'Failed to adjust balance');
-    } finally {
-      setSavingAdjust(false);
-    }
-  };
-
   const TABS = [
     { key: 'mine', label: 'My leave', icon: CalendarRange },
     ...(canApprove ? [{ key: 'pending', label: `Approvals${pending.length ? ` (${pending.length})` : ''}`, icon: Inbox }] : []),
@@ -200,18 +159,10 @@ const Leave = () => {
             </p>
           </div>
         </div>
-        <div className="flex items-center gap-2">
-          {canAdjust && (
-            <button onClick={() => { setAdjustResult(null); setAdjustOpen(true); }}
-              className="flex items-center gap-2 px-4 py-2.5 rounded-xl border border-[var(--border)] text-[var(--text-muted)] text-[12px] font-black uppercase tracking-widest hover:text-[var(--text-main)] transition-colors">
-              <SlidersHorizontal size={15} /> Adjust balance
-            </button>
-          )}
-          <button onClick={() => setShowApply((v) => !v)}
-            className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-[var(--btn-primary)] text-white text-[12px] font-black uppercase tracking-widest shadow-md hover:opacity-90 active:scale-[0.98] transition-all">
-            <Plus size={15} /> Apply for leave
-          </button>
-        </div>
+        <button onClick={() => setShowApply((v) => !v)}
+          className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-[var(--btn-primary)] text-white text-[12px] font-black uppercase tracking-widest shadow-md hover:opacity-90 active:scale-[0.98] transition-all">
+          <Plus size={15} /> Apply for leave
+        </button>
       </div>
 
       {/* Balances */}
@@ -453,89 +404,6 @@ const Leave = () => {
         Requests route to your reporting manager. Balance is consumed only when a paid request is
         approved, and returned if it is later withdrawn.
       </p>
-
-      {/* HR balance override — attendance.update only. Sets entitlement / used-days directly. */}
-      {adjustOpen && canAdjust && (
-        <div className="fixed inset-0 z-[350] flex items-center justify-center p-4">
-          <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={() => setAdjustOpen(false)} />
-          <div className="relative w-full max-w-md rounded-[24px] bg-[var(--bg-card)] border border-[var(--border)] shadow-2xl overflow-hidden">
-            <div className="px-5 py-4 border-b border-[var(--border)] bg-[var(--table-header-bg)]">
-              <h2 className="text-[14px] font-black tracking-tight text-[var(--text-main)]">
-                Adjust leave balance
-              </h2>
-              <p className="text-[11.5px] font-bold text-[var(--text-muted)] mt-0.5">
-                HR override — sets the entitlement and used-days directly, not as a delta.
-              </p>
-            </div>
-            <div className="p-5 flex flex-col gap-3.5">
-              <Field label="User ID" required>
-                <input className={inputCls} value={adjustForm.user_id}
-                  placeholder="Staff login id"
-                  onChange={(e) => setAdjustForm({ ...adjustForm, user_id: e.target.value })} />
-              </Field>
-              <div className="grid grid-cols-2 gap-3.5">
-                <Field label="Leave type" required>
-                  <select className={`${inputCls} cursor-pointer`} value={adjustForm.leave_type}
-                    onChange={(e) => setAdjustForm({ ...adjustForm, leave_type: e.target.value })}>
-                    {activeTypes.map((t) => (
-                      <option key={t.code} value={t.code}>
-                        {t.name}{t.paid ? '' : ' (unpaid)'}
-                      </option>
-                    ))}
-                  </select>
-                </Field>
-                <Field label="Year" required>
-                  <input type="number" className={inputCls} value={adjustForm.year}
-                    onChange={(e) => setAdjustForm({ ...adjustForm, year: e.target.value })} />
-                </Field>
-              </div>
-              <div className="grid grid-cols-2 gap-3.5">
-                <Field label="Entitled">
-                  <input type="number" step="0.5" min="0" className={inputCls} value={adjustForm.entitled}
-                    placeholder="Leave blank to keep"
-                    onChange={(e) => setAdjustForm({ ...adjustForm, entitled: e.target.value })} />
-                </Field>
-                <Field label="Used">
-                  <input type="number" step="0.5" min="0" className={inputCls} value={adjustForm.used}
-                    placeholder="Leave blank to keep"
-                    onChange={(e) => setAdjustForm({ ...adjustForm, used: e.target.value })} />
-                </Field>
-              </div>
-              <p className="text-[11px] font-medium text-[var(--text-muted)]">
-                Provide entitled and/or used. Blank fields are left unchanged.
-              </p>
-
-              {adjustResult && (
-                <div className="rounded-xl border border-[var(--border)] bg-[var(--input-bg)] p-3 flex flex-col gap-1.5">
-                  <span className="text-[10px] font-black uppercase tracking-widest text-[var(--text-muted)]">
-                    Updated balances
-                  </span>
-                  {adjustResult.map((b) => (
-                    <div key={b.leaveType} className="flex items-center justify-between text-[12px]">
-                      <span className="font-bold text-[var(--text-main)]">{b.name}</span>
-                      <span className="font-semibold text-[var(--text-muted)]"
-                        style={{ fontVariantNumeric: 'tabular-nums' }}>
-                        {b.paid ? `${b.remaining} / ${b.entitled} · used ${b.used}` : '∞'}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              <div className="flex items-center justify-end gap-2.5 pt-1">
-                <button onClick={() => setAdjustOpen(false)}
-                  className="px-4 py-2 rounded-xl border border-[var(--border)] text-[11px] font-black uppercase tracking-widest text-[var(--text-muted)]">
-                  Close
-                </button>
-                <button onClick={submitAdjust} disabled={savingAdjust}
-                  className="flex items-center gap-2 px-5 py-2 rounded-xl bg-[var(--btn-primary)] text-white text-[11px] font-black uppercase tracking-widest disabled:opacity-50">
-                  {savingAdjust && <Loader2 size={13} className="animate-spin" />} Apply
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 };

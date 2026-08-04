@@ -8,7 +8,7 @@ import {
 import { useAuth } from '../../context/AuthContext';
 import { useNotification } from '../../context/NotificationContext';
 import {
-  getEmployee, getEmployeeEvents, addEmployeeEvent, getHrmsOptions, getHrmsStaffOptions,
+  getEmployee, getEmployeeEvents, addEmployeeEvent, getHrmsOptions,
 } from '../../services/hrmsApi';
 import { hasHrmsPermission } from '../../utils/hrmsAccess';
 import { StatusBadge, Avatar, Field } from '../../components/hrms/hrmsUi';
@@ -74,7 +74,6 @@ const EmployeeProfile = () => {
   const [employee, setEmployee] = useState(null);
   const [events, setEvents] = useState([]);
   const [options, setOptions] = useState(null);
-  const [staff, setStaff] = useState([]);
   const [tab, setTab] = useState('personal');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -108,8 +107,6 @@ const EmployeeProfile = () => {
 
   useEffect(() => {
     getHrmsOptions().then((r) => setOptions(r.data)).catch(() => {});
-    // Staff list resolves the reporting-manager / linked-account ids to names for display.
-    getHrmsStaffOptions().then((r) => setStaff(r.data || [])).catch(() => {});
   }, []);
 
   const submitNote = async () => {
@@ -156,14 +153,6 @@ const EmployeeProfile = () => {
   }
 
   const e = employee;
-
-  // Reporting manager / linked account are stored as a staff id; resolve to a name for display,
-  // falling back to the raw id if that staff isn't in the (active-only) options list.
-  const staffName = (id) => {
-    if (!id) return '';
-    const s = staff.find((x) => x._id === id);
-    return s ? s.full_name : id;
-  };
 
   return (
     <div className="p-6 sm:p-8 flex flex-col gap-5">
@@ -268,12 +257,10 @@ const EmployeeProfile = () => {
               <Row label="Location" value={e.location} />
               <Row label="Grade" value={e.grade} />
               <Row label="Employment type" value={e.employmentType} />
-              <Row label="Reporting manager" value={staffName(e.reportingManager)} />
             </div>
             <div>
               <Row label="Work mode" value={e.workMode} />
               <Row label="Status" value={e.status} />
-              <Row label="Linked account" value={staffName(e.userId)} />
               <Row label="Date of joining" value={fmtDate(e.dateOfJoining)} />
               <Row label="Probation ends" value={fmtDate(e.probationEndDate)} />
               <Row label="Confirmation date" value={fmtDate(e.confirmationDate)} />

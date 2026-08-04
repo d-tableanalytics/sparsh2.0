@@ -145,7 +145,7 @@ async def hrms_access(current_user: dict = Depends(get_current_user)):
     nav that simply wants to know whether to show the HRMS group. This answers that question
     for ANY authenticated user without raising.
     """
-    return {"has_access": await has_hrms_access(current_user)}
+    return {"has_access": has_hrms_access(current_user)}
 
 
 @router.get("/staff-options")
