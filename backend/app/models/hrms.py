@@ -32,13 +32,15 @@ COL_JDS            = "hrms_jds"
 COL_POSTINGS       = "hrms_postings"
 COL_CANDIDATES     = "hrms_candidates"       # assessments/interviews/offers/onboarding embedded
 COL_EXIT_DOCUMENTS = "hrms_exit_documents"
+COL_DOCUMENTS      = "hrms_documents"        # employee + candidate document library
+COL_LINKS          = "hrms_links"            # registry/tracking for every public link issued
 
 HRMS_COLLECTIONS = [
     COL_EMPLOYEES, COL_EMPLOYEE_EVENTS, COL_ORG_MASTERS,
     COL_ATTENDANCE, COL_LEAVES, COL_LEAVE_BALANCES,
     COL_PAYROLL_RUNS, COL_PAYSLIPS,
     COL_REQUISITIONS, COL_JDS, COL_POSTINGS, COL_CANDIDATES,
-    COL_EXIT_DOCUMENTS,
+    COL_EXIT_DOCUMENTS, COL_DOCUMENTS, COL_LINKS,
 ]
 
 # Reused from the existing app rather than duplicated — see docs/HRMS_REPLICATION_ROADMAP.md §6.
@@ -53,6 +55,7 @@ HRMS_COLLECTIONS = [
 SEQ_EMPLOYEE    = "hrms_employee"      # EMP-YYYY-NNNN
 SEQ_REQUISITION = "hrms_requisition"   # HR-REQ-YYYY-NNN
 SEQ_CANDIDATE   = "hrms_candidate"     # CAN-YYYY-NNNN
+SEQ_DOCUMENT    = "hrms_document"      # DOC-YYYY-NNNN
 
 
 # ─── Permission modules ─────────────────────────────────────────────────────────
@@ -91,6 +94,10 @@ class OrgMasterCreate(BaseModel):
     city: Optional[str] = ""
     state: Optional[str] = ""
     description: Optional[str] = ""
+    # Designation only: approved headcount for this role. A requisition that would push the
+    # active headcount past this escalates through the HOD before MD. 0/absent means no
+    # sanction is on record, which is treated as unsanctioned.
+    sanctioned_count: Optional[int] = 0
 
 
 class OrgMasterUpdate(BaseModel):
@@ -103,6 +110,7 @@ class OrgMasterUpdate(BaseModel):
     city: Optional[str] = None
     state: Optional[str] = None
     description: Optional[str] = None
+    sanctioned_count: Optional[int] = None
     active: Optional[bool] = None
 
 
@@ -379,21 +387,29 @@ class LeaveDecision(BaseModel):
 
 
 # ─── Recruitment (Phase 5) ──────────────────────────────────────────────────────
-# A hiring requisition walks ONE approval chain:
-#     Pending HR Review → Pending MD Approval → Approved | Rejected
-# The job description is authored WITH the requisition and co-approved — there is no separate
-# JD approval to chase, which is how the reference project ended up with an approve endpoint
-# its own UI never calls.
+# A hiring requisition walks ONE approval chain, whose length depends on whether the vacancy
+# is within sanctioned headcount:
+#     within sanction:  Pending HR Review → Pending MD Approval → Approved | Rejected
+#     over sanction:    Pending HR Review → Pending HOD Approval → Pending MD Approval → …
+# MD approval is compulsory on BOTH paths — the HOD step is inserted before it, never instead
+# of it. The job description is authored WITH the requisition and co-approved; there is no
+# separate JD approval to chase, which is how the reference project ended up with an approve
+# endpoint its own UI never calls.
 REQ_PENDING_HR = "Pending HR Review"
+REQ_PENDING_HOD = "Pending HOD Approval"
 REQ_PENDING_MD = "Pending MD Approval"
 REQ_APPROVED   = "Approved"
 REQ_REJECTED   = "Rejected"
-REQ_APPROVAL_STATES = [REQ_PENDING_HR, REQ_PENDING_MD, REQ_APPROVED, REQ_REJECTED]
+REQ_APPROVAL_STATES = [REQ_PENDING_HR, REQ_PENDING_HOD, REQ_PENDING_MD,
+                       REQ_APPROVED, REQ_REJECTED]
 
 # Legal transitions. Anything not listed is refused, so a requisition can never jump the chain
-# or be re-approved after the fact.
+# or be re-approved after the fact. Pending HR Review lists BOTH onward states because which
+# one applies is decided per requisition by `next_state` from its sanction position — listing
+# them here keeps `can_transition` a pure statement of what is structurally legal.
 REQ_TRANSITIONS = {
-    REQ_PENDING_HR: [REQ_PENDING_MD, REQ_REJECTED],
+    REQ_PENDING_HR: [REQ_PENDING_HOD, REQ_PENDING_MD, REQ_REJECTED],
+    REQ_PENDING_HOD: [REQ_PENDING_MD, REQ_REJECTED],
     REQ_PENDING_MD: [REQ_APPROVED, REQ_REJECTED],
     REQ_APPROVED: [],
     REQ_REJECTED: [REQ_PENDING_HR],      # a rejected requisition may be revised and resubmitted
@@ -408,6 +424,23 @@ REQ_CANCELLED = "Cancelled"
 REQ_CLOSING_STATES = [REQ_OPEN, REQ_HIRED, REQ_CLOSED, REQ_HOLD, REQ_CANCELLED]
 
 URGENCY_LEVELS = ["High", "Medium", "Low"]
+
+# Why the vacancy exists. A replacement fills a seat the sanctioned headcount already contains,
+# so it never escalates; a new position adds to headcount and may.
+VACANCY_REPLACEMENT = "Replacement"
+VACANCY_NEW = "New position"
+VACANCY_TYPES = [VACANCY_REPLACEMENT, VACANCY_NEW]
+
+
+class BudgetApproval(BaseModel):
+    """One side of the two-sided budget check on a requisition.
+
+    Management sanctions a figure and the HOD approves one. When they disagree — or either is
+    still missing when the requisition is advanced — stakeholders are notified rather than the
+    requisition being silently blocked, which is what the review document asks for.
+    """
+    amount: Optional[float] = None
+    remarks: Optional[str] = ""
 
 
 class JobDescription(BaseModel):
@@ -436,6 +469,19 @@ class RequisitionCreate(BaseModel):
     urgency_level: Optional[str] = "Medium"
     required_date: Optional[str] = None       # ISO "YYYY-MM-DD"
     assignee: Optional[str] = ""              # who the role reports to / who asked for it
+    # Which client this vacancy is being filled FOR. Optional: an absent client means the
+    # requisition is one of Sparsh's own internal hires, which is how every requisition raised
+    # before this field existed reads. The name is denormalised alongside the id so list
+    # endpoints need no join, exactly as department/designation already are on postings.
+    client_company_id: Optional[str] = None
+    client_company_name: Optional[str] = ""
+    # ─── Manpower requisition (review doc, page 2) ───
+    # Replacement vs new position, and the sanction position at the moment of raising. The
+    # sanctioned/actual figures are computed server-side, never accepted from the client.
+    vacancy_type: Optional[str] = VACANCY_NEW
+    replacement_for: Optional[str] = ""        # employee code / name being replaced
+    budget_sanctioned_by_management: Optional[BudgetApproval] = None
+    budget_approved_by_hod: Optional[BudgetApproval] = None
     jd: Optional[JobDescription] = None
 
 
@@ -452,6 +498,12 @@ class RequisitionUpdate(BaseModel):
     urgency_level: Optional[str] = None
     required_date: Optional[str] = None
     assignee: Optional[str] = None
+    client_company_id: Optional[str] = None
+    client_company_name: Optional[str] = None
+    vacancy_type: Optional[str] = None
+    replacement_for: Optional[str] = None
+    budget_sanctioned_by_management: Optional[BudgetApproval] = None
+    budget_approved_by_hod: Optional[BudgetApproval] = None
     jd: Optional[JobDescription] = None
 
 
@@ -480,20 +532,39 @@ POSTING_STATES = [POSTING_OPEN, POSTING_PAUSED, POSTING_CLOSED]
 # reference spreads this across several boolean-ish columns and they disagree.
 STAGE_APPLIED     = "Applied"
 STAGE_SHORTLISTED = "Shortlisted"
+# Sparsh recruits on behalf of client companies, so a CV goes out to the client and comes back
+# with the client's own verdict. Kept as pipeline STAGES rather than parallel booleans, so
+# `stage` stays the single source of truth the module was designed around — and so the funnel
+# counts the review document asks for ("CVs shared with client", "client-side rejections",
+# "client-side shortlisted") fall straight out of a group-by.
+STAGE_SHARED_CLIENT      = "Shared with Client"
+STAGE_CLIENT_SHORTLISTED = "Client Shortlisted"
+STAGE_CLIENT_REJECTED    = "Client Rejected"
 STAGE_ASSESSMENT  = "Assessment"
 STAGE_INTERVIEW   = "Interview"
 STAGE_OFFER       = "Offer"
+STAGE_APPOINTMENT = "Appointment Letter Sent"
 STAGE_HIRED       = "Hired"
 STAGE_REJECTED    = "Rejected"
 CANDIDATE_STAGES = [
-    STAGE_APPLIED, STAGE_SHORTLISTED, STAGE_ASSESSMENT,
-    STAGE_INTERVIEW, STAGE_OFFER, STAGE_HIRED, STAGE_REJECTED,
+    STAGE_APPLIED, STAGE_SHORTLISTED,
+    STAGE_SHARED_CLIENT, STAGE_CLIENT_SHORTLISTED,
+    STAGE_ASSESSMENT, STAGE_INTERVIEW, STAGE_OFFER, STAGE_APPOINTMENT, STAGE_HIRED,
+    STAGE_CLIENT_REJECTED, STAGE_REJECTED,
 ]
-# Rejection is reachable from anywhere; everything else moves forward only.
+# Rejection is reachable from anywhere; everything else moves forward only. Note `can_advance`
+# compares positions rather than requiring the very next one, so inserting stages here does
+# not invalidate candidates already past them — Shortlisted → Assessment and Offer → Hired both
+# stay legal, which is what keeps internal (non-client) hiring working unchanged.
 CANDIDATE_FORWARD = [
-    STAGE_APPLIED, STAGE_SHORTLISTED, STAGE_ASSESSMENT,
-    STAGE_INTERVIEW, STAGE_OFFER, STAGE_HIRED,
+    STAGE_APPLIED, STAGE_SHORTLISTED,
+    STAGE_SHARED_CLIENT, STAGE_CLIENT_SHORTLISTED,
+    STAGE_ASSESSMENT, STAGE_INTERVIEW, STAGE_OFFER, STAGE_APPOINTMENT, STAGE_HIRED,
 ]
+# Both rejection kinds are terminal and reachable from anywhere. Client Rejected is tracked
+# separately from Rejected because the review document counts them separately: a client turning
+# a CV down is a different signal from Sparsh screening it out.
+REJECTION_STAGES = [STAGE_REJECTED, STAGE_CLIENT_REJECTED]
 
 ASSESSMENT_SENT      = "Sent"
 ASSESSMENT_OPENED    = "Opened"
@@ -531,6 +602,12 @@ class PublicApplication(BaseModel):
     expected_ctc: Optional[str] = ""
     notice_period: Optional[str] = ""
     cover_note: Optional[str] = ""
+    # Referral, captured on the application form itself. All optional and free-text: this is an
+    # unauthenticated endpoint, and a referral that fails validation should never cost someone
+    # their application.
+    referred_by: Optional[str] = ""
+    referral_source: Optional[str] = ""
+    referral_employee_code: Optional[str] = ""
     resume: Optional[str] = None           # base64; size-capped server-side
 
 
@@ -546,6 +623,9 @@ class CandidateCreate(BaseModel):
     expected_ctc: Optional[str] = ""
     notice_period: Optional[str] = ""
     source: Optional[str] = "Direct"
+    referred_by: Optional[str] = ""
+    referral_source: Optional[str] = ""
+    referral_employee_code: Optional[str] = ""
 
 
 class ScreenDecision(BaseModel):
@@ -606,6 +686,37 @@ ONB_SUBMITTED = "Submitted"
 ONB_VERIFIED  = "Verified"
 ONB_CONVERTED = "Converted"
 ONB_STATES = [ONB_INVITED, ONB_SUBMITTED, ONB_VERIFIED, ONB_CONVERTED]
+
+# ─── Appointment letter ─────────────────────────────────────────────────────────
+# Sits between the accepted offer and joining, and answers the question the review document
+# asks: has the letter been generated, shared, is it pending, has the candidate acknowledged?
+# Modelled as ONE embedded sub-document with its own access code, exactly like `onboarding` —
+# a candidate has at most one appointment letter in play.
+APPT_PENDING      = "Pending"
+APPT_GENERATED    = "Generated"
+APPT_SENT         = "Sent"
+APPT_ACKNOWLEDGED = "Acknowledged"
+APPT_STATES = [APPT_PENDING, APPT_GENERATED, APPT_SENT, APPT_ACKNOWLEDGED]
+# Forward-only, mirroring the candidate pipeline's own rule.
+APPT_FORWARD = [APPT_PENDING, APPT_GENERATED, APPT_SENT, APPT_ACKNOWLEDGED]
+
+
+class AppointmentLetterCreate(BaseModel):
+    """HR generating the letter for a candidate who has accepted their offer."""
+    designation: Optional[str] = ""
+    department: Optional[str] = ""
+    annual_ctc: Optional[float] = None
+    joining_date: Optional[str] = None        # ISO "YYYY-MM-DD"; defaults to the offer's
+    location: Optional[str] = ""
+    reporting_to: Optional[str] = ""
+    terms: Optional[str] = ""
+    valid_till: Optional[str] = None          # after this the acknowledgement link stops
+
+
+class AppointmentAcknowledgement(BaseModel):
+    """What the candidate sends back from the public acknowledgement link."""
+    acknowledged: bool = True
+    note: Optional[str] = ""
 
 
 class OfferCreate(BaseModel):
@@ -669,6 +780,87 @@ class ConvertToEmployee(BaseModel):
     """
     user_id: Optional[str] = None
     date_of_joining: Optional[str] = None    # defaults to the offer's joining date
+
+
+# ─── Documentation ──────────────────────────────────────────────────────────────
+# One library for every employee- and candidate-related document, with per-document status so
+# HR can see at a glance what is collected, what is outstanding and what has expired.
+#
+# Files live on S3 under a gated prefix (the same arrangement resumes and punch selfies already
+# use); only the key is stored here, and reads are served as short-lived signed URLs.
+DOC_OWNER_EMPLOYEE  = "employee"
+DOC_OWNER_CANDIDATE = "candidate"
+DOC_OWNER_TYPES = [DOC_OWNER_EMPLOYEE, DOC_OWNER_CANDIDATE]
+
+DOC_PENDING  = "Pending"       # required, not yet supplied
+DOC_UPLOADED = "Uploaded"      # supplied, awaiting HR check
+DOC_VERIFIED = "Verified"
+DOC_REJECTED = "Rejected"      # supplied but not acceptable — needs replacing
+DOC_EXPIRED  = "Expired"
+DOC_STATUSES = [DOC_PENDING, DOC_UPLOADED, DOC_VERIFIED, DOC_REJECTED, DOC_EXPIRED]
+
+# Starting vocabulary. Free-text is still accepted so HR is never blocked by a missing type;
+# these drive the picker and keep the common cases spelled consistently.
+DOC_TYPES = [
+    "Aadhaar", "PAN", "Passport", "Driving licence",
+    "Educational certificate", "Experience letter", "Relieving letter", "Payslip",
+    "Offer letter", "Appointment letter", "Resume", "Photograph",
+    "Bank proof", "Address proof", "Medical certificate", "Other",
+]
+
+
+class DocumentCreate(BaseModel):
+    """Register a document. The file itself is optional at this point: HR can declare a
+    required document as Pending and attach the file when it arrives."""
+    owner_type: str                            # employee | candidate
+    owner_id: str                              # employee_code | candidate uk
+    doc_type: str
+    title: Optional[str] = ""
+    remarks: Optional[str] = ""
+    expires_on: Optional[str] = None           # ISO date; drives the Expired status
+    file: Optional[str] = None                 # base64 data URL; size-capped server-side
+
+
+class DocumentUpdate(BaseModel):
+    doc_type: Optional[str] = None
+    title: Optional[str] = None
+    status: Optional[str] = None
+    remarks: Optional[str] = None
+    expires_on: Optional[str] = None
+    file: Optional[str] = None                 # replacing the file supersedes the version
+
+
+# ─── Public link registry ───────────────────────────────────────────────────────
+# Every public link the HRMS issues — job posting, assessment, offer, appointment letter,
+# onboarding — gets a registry row so HR can find it again and see whether it has been opened.
+#
+# The registry does NOT store the code. Codes stay where they already live (embedded on the
+# posting or candidate) so there is exactly one copy of each secret; this collection holds the
+# pointer plus the tracking. Revealing a code reads it from its real home and writes an audit
+# entry here — which is what lets "accessible whenever required" coexist with the rule that no
+# list endpoint ever returns a code.
+LINK_POSTING     = "posting"
+LINK_ASSESSMENT  = "assessment"
+LINK_OFFER       = "offer"
+LINK_APPOINTMENT = "appointment"
+LINK_ONBOARDING  = "onboarding"
+LINK_TYPES = [LINK_POSTING, LINK_ASSESSMENT, LINK_OFFER, LINK_APPOINTMENT, LINK_ONBOARDING]
+
+# Public path each type resolves to, so the UI builds a URL without hardcoding routes and the
+# two can never drift. Kept next to the types for that reason.
+LINK_PATHS = {
+    LINK_POSTING:     "/apply",
+    LINK_ASSESSMENT:  "/assess",
+    LINK_OFFER:       "/offer",
+    LINK_APPOINTMENT: "/appointment",
+    LINK_ONBOARDING:  "/onboarding",
+}
+
+LINK_ACTIVE  = "Active"
+LINK_USED    = "Used"        # the candidate completed whatever it was for
+LINK_EXPIRED = "Expired"
+LINK_REVOKED = "Revoked"
+LINK_STATUSES = [LINK_ACTIVE, LINK_USED, LINK_EXPIRED, LINK_REVOKED]
 
 
 # ─── Payroll (Phase 4) ──────────────────────────────────────────────────────────

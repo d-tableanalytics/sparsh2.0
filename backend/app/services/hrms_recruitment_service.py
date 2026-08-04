@@ -22,9 +22,10 @@ from typing import Optional
 
 from app.db.mongodb import get_collection
 from app.models.hrms import (
-    COL_REQUISITIONS, COL_JDS, SEQ_REQUISITION,
-    REQ_PENDING_HR, REQ_PENDING_MD, REQ_APPROVED, REQ_REJECTED, REQ_TRANSITIONS,
-    REQ_OPEN, REQ_CLOSING_STATES, URGENCY_LEVELS,
+    COL_REQUISITIONS, COL_JDS, COL_ORG_MASTERS, COL_EMPLOYEES, SEQ_REQUISITION,
+    REQ_PENDING_HR, REQ_PENDING_HOD, REQ_PENDING_MD, REQ_APPROVED, REQ_REJECTED,
+    REQ_TRANSITIONS, REQ_OPEN, REQ_CLOSING_STATES, URGENCY_LEVELS,
+    ORG_KIND_DESIGNATION, ORG_KIND_DEPARTMENT, EXITED_STATUSES, VACANCY_TYPES, VACANCY_NEW,
 )
 from app.utils.counters import next_code
 
@@ -40,19 +41,167 @@ async def generate_jd_no() -> str:
     return await next_code(SEQ_REQUISITION, "JD", width=3)
 
 
+async def resolve_client(company_id: Optional[str]) -> tuple:
+    """(client_company_id, client_company_name) for a requisition.
+
+    Returns ("", "") for a blank id — an unset client is legitimate and means the vacancy is
+    one of Sparsh's own internal hires. A non-blank id that matches no company is an error
+    rather than a silent downgrade to internal, because that would quietly misfile the
+    requisition and skew the client-wise analytics it feeds.
+    """
+    cid = (company_id or "").strip()
+    if not cid:
+        return "", ""
+    from bson import ObjectId
+    try:
+        company = await get_collection("companies").find_one({"_id": ObjectId(cid)}, {"name": 1})
+    except Exception:
+        raise ValueError("Invalid client company")
+    if not company:
+        raise ValueError("Client company not found")
+    return cid, company.get("name") or ""
+
+
 def can_transition(current: str, target: str) -> bool:
     return target in REQ_TRANSITIONS.get(current, [])
 
 
-def next_state(current: str, action: str) -> str:
+async def compute_sanction(department: str, designation: str, vacancy: int) -> dict:
+    """Sanction vs actual for a role, as of now.
+
+    `sanctioned` is the approved headcount recorded on the designation org master; `actual` is
+    how many non-exited employees currently hold that department/designation pair. A request
+    that would push actual past sanctioned is over-sanction and escalates via the HOD.
+
+    No sanction on record (0/absent) counts as over-sanction: the review document wants an
+    unsanctioned vacancy escalated, and "nobody has recorded a sanction" is the clearest case
+    of unsanctioned there is.
+    """
+    dept = (department or "").strip()
+    desig = (designation or "").strip()
+
+    master = await get_collection(COL_ORG_MASTERS).find_one({
+        "kind": ORG_KIND_DESIGNATION, "name": desig, "active": True,
+    })
+    sanctioned = int((master or {}).get("sanctioned_count") or 0)
+
+    actual = await get_collection(COL_EMPLOYEES).count_documents({
+        "designation": desig,
+        "department": dept,
+        "status": {"$nin": EXITED_STATUSES},
+    })
+
+    requested = max(int(vacancy or 1), 1)
+    return {
+        "sanctioned_headcount": sanctioned,
+        "actual_headcount": actual,
+        "over_sanction": (actual + requested) > sanctioned,
+    }
+
+
+def budget_mismatch(req: dict) -> Optional[str]:
+    """Why the budget needs attention, or None when the two sides agree.
+
+    Returned as human copy because it goes straight into the notification body and onto the
+    requisition for the UI to show.
+    """
+    mgmt = (req.get("budget_sanctioned_by_management") or {}).get("amount")
+    hod = (req.get("budget_approved_by_hod") or {}).get("amount")
+
+    missing = [label for label, val in
+               (("Management sanction", mgmt), ("HOD approval", hod)) if val is None]
+    if missing:
+        return f"{' and '.join(missing)} still pending."
+    if float(mgmt) != float(hod):
+        return (f"Budget mismatch: management sanctioned {mgmt:,.0f} "
+                f"but HOD approved {hod:,.0f}.")
+    return None
+
+
+async def notify_budget_issue(req: dict, issue: str, actor: dict) -> None:
+    """Tell the stakeholders a requisition's budget needs attention.
+
+    Recipients are the raiser, the department's HOD and the MD tier — the three parties the
+    review document names. Best-effort by design: a notification failure must never stop a
+    requisition from moving, so everything here is caught and logged.
+
+    In-app always fires; email only when an Active template exists for the slug, matching the
+    rule task_notifications already follows so this module can't spam a workspace that has not
+    configured one.
+    """
+    try:
+        from app.services.notification_service import (
+            create_in_app_notification, send_notification_from_template, active_user_template,
+        )
+        # calendar_utils' version, not routes/user.py's — that one returns a (user, collection)
+        # tuple, and this is the same helper task_notifications uses.
+        from app.utils.calendar_utils import find_user_by_id
+
+        request_no = req.get("request_no") or ""
+        targets = set()
+        if req.get("created_by"):
+            targets.add(str(req["created_by"]))
+
+        # The HOD is the head recorded on the department org master.
+        dept = await get_collection(COL_ORG_MASTERS).find_one({
+            "kind": ORG_KIND_DEPARTMENT, "name": req.get("department"), "active": True,
+        })
+        if (dept or {}).get("head"):
+            targets.add(str(dept["head"]))
+
+        # MD tier — the same admin roles _can_md_approve recognises.
+        async for u in get_collection("staff").find(
+                {"role": {"$in": ["superadmin", "admin"]}, "is_active": {"$ne": False}},
+                {"_id": 1}):
+            targets.add(str(u["_id"]))
+
+        targets.discard(str(actor.get("_id") or ""))    # no need to tell the person who acted
+
+        context = {
+            "request_no": request_no,
+            "designation": req.get("designation") or "",
+            "department": req.get("department") or "",
+            "issue": issue,
+            "actor_name": actor.get("full_name") or actor.get("email") or "",
+        }
+        for uid in targets:
+            try:
+                await create_in_app_notification(
+                    user_id=uid,
+                    title="Requisition budget needs attention",
+                    message=f"{request_no}: {issue}",
+                    type="warning",
+                    meta={"request_no": request_no, "module": "hrms_recruitment"},
+                )
+                user_obj = await find_user_by_id(uid)
+                if not user_obj:
+                    continue
+                if not await active_user_template("hrms_budget_issue_email", None):
+                    continue
+                await send_notification_from_template(
+                    user_obj, "hrms_budget_issue", context, "email", "staff")
+            except Exception as e:
+                logger.warning("Budget notification to %s failed: %s", uid, e)
+    except Exception as e:
+        logger.error("Budget notification for %s failed: %s", req.get("request_no"), e)
+
+
+def next_state(current: str, action: str, req: Optional[dict] = None) -> str:
     """Which state an action moves to from here. Raises if the move is illegal.
 
     Actions rather than raw states, so the client says what it is *doing* ("approve this") and
-    the server decides what that means at this point in the chain.
+    the server decides what that means at this point in the chain — including whether HR review
+    hands off to the HOD or straight to the MD, which depends on the sanction position stored
+    on the requisition rather than on anything the client sends.
     """
     if action == "advance":
-        # HR review moves it to MD; MD approval finalises it.
-        target = REQ_PENDING_MD if current == REQ_PENDING_HR else REQ_APPROVED
+        if current == REQ_PENDING_HR:
+            # Over-sanction inserts the HOD step; MD still follows either way.
+            target = REQ_PENDING_HOD if (req or {}).get("over_sanction") else REQ_PENDING_MD
+        elif current == REQ_PENDING_HOD:
+            target = REQ_PENDING_MD
+        else:
+            target = REQ_APPROVED
     elif action == "reject":
         target = REQ_REJECTED
     elif action == "resubmit":
@@ -66,8 +215,11 @@ def next_state(current: str, action: str) -> str:
 
 
 def step_label(from_state: str, to_state: str) -> str:
+    if to_state == REQ_PENDING_HOD:
+        return "HR reviewed — escalated to HOD (over sanctioned headcount)"
     if to_state == REQ_PENDING_MD:
-        return "HR reviewed — sent for MD approval"
+        return ("HOD approved — sent for MD approval" if from_state == REQ_PENDING_HOD
+                else "HR reviewed — sent for MD approval")
     if to_state == REQ_APPROVED:
         return "Approved by MD"
     if to_state == REQ_REJECTED:
@@ -94,6 +246,9 @@ def validate_requisition(payload: dict) -> None:
     urgency = payload.get("urgency_level")
     if urgency and urgency not in URGENCY_LEVELS:
         raise ValueError(f"urgency_level must be one of {URGENCY_LEVELS}")
+    vtype = payload.get("vacancy_type")
+    if vtype and vtype not in VACANCY_TYPES:
+        raise ValueError(f"vacancy_type must be one of {VACANCY_TYPES}")
 
 
 def build_step(from_state: str, to_state: str, actor: dict, remarks: str = "") -> dict:
@@ -112,16 +267,24 @@ async def apply_decision(req: dict, action: str, actor: dict, remarks: str = "",
                          salary_change: str = "") -> dict:
     """Move a requisition one step and record it. Returns the fields to $set."""
     current = req.get("approval_status") or REQ_PENDING_HR
-    target = next_state(current, action)     # raises on an illegal move
+    target = next_state(current, action, req)     # raises on an illegal move
 
+    now = datetime.now(timezone.utc)
     updates = {
         "approval_status": target,
-        "updated_at": datetime.now(timezone.utc),
+        "updated_at": now,
     }
-    if target == REQ_PENDING_MD:
+    # Pending MD Approval is reachable from two places now, so who just acted depends on where
+    # the requisition came FROM, not only on where it is going.
+    if current == REQ_PENDING_HOD and target == REQ_PENDING_MD:
+        updates["hod_approved_by"] = str(actor.get("_id"))
+        updates["hod_approved_by_name"] = actor.get("full_name") or actor.get("email")
+        updates["hod_approved_at"] = now
+        updates["hod_remarks"] = remarks or ""
+    elif target in (REQ_PENDING_HOD, REQ_PENDING_MD):
         updates["hr_reviewed_by"] = str(actor.get("_id"))
         updates["hr_reviewed_by_name"] = actor.get("full_name") or actor.get("email")
-        updates["hr_reviewed_at"] = datetime.now(timezone.utc)
+        updates["hr_reviewed_at"] = now
         updates["hr_remarks"] = remarks or ""
     elif target == REQ_APPROVED:
         updates["approved_by"] = str(actor.get("_id"))
@@ -216,6 +379,25 @@ def serialize_requisition(doc: dict, jd: Optional[dict] = None) -> dict:
         "urgencyLevel": doc.get("urgency_level") or "Medium",
         "requiredDate": doc.get("required_date"),
         "assignee": doc.get("assignee") or "",
+
+        # Absent on every requisition raised before client linkage existed — those are
+        # Sparsh's own internal hires and the UI renders them as such.
+        "clientCompanyId": doc.get("client_company_id") or "",
+        "clientCompanyName": doc.get("client_company_name") or "",
+
+        # Manpower requisition: why the seat exists and where it sits against sanction.
+        "vacancyType": doc.get("vacancy_type") or VACANCY_NEW,
+        "replacementFor": doc.get("replacement_for") or "",
+        "sanctionedHeadcount": int(doc.get("sanctioned_headcount") or 0),
+        "actualHeadcount": int(doc.get("actual_headcount") or 0),
+        "overSanction": bool(doc.get("over_sanction")),
+        "budgetSanctionedByManagement": doc.get("budget_sanctioned_by_management") or None,
+        "budgetApprovedByHod": doc.get("budget_approved_by_hod") or None,
+        # Recomputed on read so an edited budget reflects immediately, rather than showing a
+        # stale verdict stored at raise time.
+        "budgetIssue": budget_mismatch(doc) or "",
+        "hodApprovedBy": doc.get("hod_approved_by_name") or "",
+        "hodRemarks": doc.get("hod_remarks") or "",
 
         "approvalStatus": doc.get("approval_status") or REQ_PENDING_HR,
         "closingStatus": doc.get("closing_status") or REQ_OPEN,

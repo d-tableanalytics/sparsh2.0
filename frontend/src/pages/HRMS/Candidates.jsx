@@ -2,12 +2,14 @@ import React, { useCallback, useEffect, useState } from 'react';
 import {
   UserPlus, Users, Search, X, Loader2, AlertTriangle, Link2, Copy, Check,
   Send, CalendarPlus, ChevronRight, Megaphone, Plus, ClipboardList, History,
+  FileSignature,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useNotification } from '../../context/NotificationContext';
 import {
   getCandidates, createCandidate, screenCandidates, sendAssessment, scheduleInterview,
   evaluateInterview, getPostings, createPosting, updatePosting, getRequisitions,
+  generateAppointmentLetter, sendAppointmentLetter,
 } from '../../services/hrmsApi';
 import { hasHrmsPermission } from '../../utils/hrmsAccess';
 import { StatTile, Field } from '../../components/hrms/hrmsUi';
@@ -26,8 +28,12 @@ const STAGE_TONE = {
   Shortlisted: 'var(--accent-yellow)',
   Assessment:  'var(--accent-orange)',
   Interview:   'var(--badge-type-text)',
+  'Shared with Client':   'var(--accent-orange)',
+  'Client Shortlisted':   'var(--badge-type-text)',
   Offer:       'var(--accent-green)',
+  'Appointment Letter Sent': 'var(--accent-green)',
   Hired:       'var(--status-active-text)',
+  'Client Rejected':      'var(--accent-red)',
   Rejected:    'var(--accent-red)',
 };
 
@@ -41,6 +47,7 @@ const StageChip = ({ stage }) => (
 const EMPTY_CANDIDATE = {
   request_no: '', full_name: '', email: '', phone: '', current_company: '',
   experience_years: '', current_ctc: '', expected_ctc: '', notice_period: '', source: 'Direct',
+  referred_by: '', referral_source: '', referral_employee_code: '',
 };
 
 const Candidates = () => {
@@ -176,6 +183,38 @@ const Candidates = () => {
       load();
     } catch (err) {
       showError(err.response?.data?.detail || 'Failed to create assessment');
+    } finally {
+      setBusy('');
+    }
+  };
+
+  // Appointment letter. Generating returns the acknowledgement code once — same one-time
+  // reveal the assessment link uses, so it is surfaced through the same panel.
+  const issueAppointment = async (c) => {
+    setBusy('appointment');
+    try {
+      const res = await generateAppointmentLetter(c.uk, {});
+      setIssuedLink({
+        name: c.fullName,
+        url: `${window.location.origin}/appointment/${res.data.appointment.accessCode}`,
+      });
+      setCopied(false);
+      load();
+    } catch (err) {
+      showError(err.response?.data?.detail || 'Failed to generate appointment letter');
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const shareAppointment = async (c) => {
+    setBusy('appointment-send');
+    try {
+      await sendAppointmentLetter(c.uk);
+      showSuccess('Appointment letter marked as sent');
+      load();
+    } catch (err) {
+      showError(err.response?.data?.detail || 'Failed to send appointment letter');
     } finally {
       setBusy('');
     }
@@ -329,7 +368,8 @@ const Candidates = () => {
               <span className="text-[11px] font-black uppercase tracking-widest text-[var(--accent-indigo)]">
                 {selected.size} selected
               </span>
-              {['Shortlisted', 'Assessment', 'Interview', 'Offer', 'Hired', 'Rejected'].map((s) => (
+              {['Shortlisted', 'Shared with Client', 'Client Shortlisted', 'Assessment', 'Interview',
+                'Offer', 'Appointment Letter Sent', 'Hired', 'Client Rejected', 'Rejected'].map((s) => (
                 <button key={s} onClick={() => move(s)} disabled={!!busy}
                   className="px-3 py-1.5 rounded-lg border border-[var(--border)] bg-[var(--bg-card)] text-[10px] font-black uppercase tracking-widest disabled:opacity-50 transition-colors"
                   style={{ color: STAGE_TONE[s] }}>
@@ -584,6 +624,24 @@ const Candidates = () => {
                 <input className={inputCls} value={form.expected_ctc}
                   onChange={(e) => setForm({ ...form, expected_ctc: e.target.value })} />
               </Field>
+              {/* Referral — the same three fields the public application captures, so a
+                  walk-in referral records identically to one that came through the link. */}
+              <Field label="Referred by">
+                <input className={inputCls} value={form.referred_by}
+                  onChange={(e) => setForm({ ...form, referred_by: e.target.value })} />
+              </Field>
+              <Field label="Referral source">
+                <select className={inputCls} value={form.referral_source}
+                  onChange={(e) => setForm({ ...form, referral_source: e.target.value })}>
+                  <option value="">Not a referral</option>
+                  {['Employee', 'Friend / family', 'Consultant', 'Job portal', 'Social media', 'Other']
+                    .map((s) => <option key={s} value={s}>{s}</option>)}
+                </select>
+              </Field>
+              <Field label="Employee name / ID">
+                <input className={inputCls} value={form.referral_employee_code}
+                  onChange={(e) => setForm({ ...form, referral_employee_code: e.target.value })} />
+              </Field>
             </div>
             <div className="flex items-center justify-end gap-2.5 px-6 py-4 border-t border-[var(--border)] bg-[var(--table-header-bg)]">
               <button onClick={() => setShowAdd(false)}
@@ -652,7 +710,38 @@ const Candidates = () => {
                       className="flex items-center gap-2 px-4 py-2 rounded-xl border border-[var(--border)] text-[11px] font-black uppercase tracking-widest text-[var(--text-muted)] hover:text-[var(--accent-indigo)] hover:border-[var(--accent-indigo)] disabled:opacity-50 transition-colors">
                       <CalendarPlus size={13} /> Schedule interview
                     </button>
+                    {/* Appointment letter. The server refuses this without an accepted offer,
+                        so the button is offered and the guard reported rather than duplicating
+                        the offer-state rule here. */}
+                    <button onClick={() => issueAppointment(detail)} disabled={!!busy}
+                      className="flex items-center gap-2 px-4 py-2 rounded-xl border border-[var(--border)] text-[11px] font-black uppercase tracking-widest text-[var(--text-muted)] hover:text-[var(--accent-indigo)] hover:border-[var(--accent-indigo)] disabled:opacity-50 transition-colors">
+                      <FileSignature size={13} />
+                      {detail.appointmentLetter ? 'Regenerate letter' : 'Generate letter'}
+                    </button>
+                    {detail.appointmentLetter?.status === 'Generated' && (
+                      <button onClick={() => shareAppointment(detail)} disabled={!!busy}
+                        className="flex items-center gap-2 px-4 py-2 rounded-xl text-white text-[11px] font-black uppercase tracking-widest disabled:opacity-50"
+                        style={{ backgroundColor: 'var(--btn-primary)' }}>
+                        <Send size={13} /> Mark letter sent
+                      </button>
+                    )}
                   </div>
+
+                  {detail.appointmentLetter && (
+                    <div className="px-3.5 py-2.5 rounded-xl bg-[var(--input-bg)] border border-[var(--border)] flex flex-wrap items-center gap-x-4 gap-y-1">
+                      <span className="text-[9.5px] font-black uppercase tracking-widest text-[var(--text-muted)]">
+                        Appointment letter
+                      </span>
+                      <span className="text-[12px] font-bold text-[var(--text-main)]">
+                        {detail.appointmentLetter.status}
+                      </span>
+                      {detail.appointmentLetter.acknowledgedAt && (
+                        <span className="text-[11.5px] font-semibold" style={{ color: 'var(--status-active-text)' }}>
+                          Acknowledged {fmtDate(detail.appointmentLetter.acknowledgedAt)}
+                        </span>
+                      )}
+                    </div>
+                  )}
 
                   {scheduling?.uk === detail.uk && (
                     <div className="p-3.5 rounded-xl bg-[var(--input-bg)] border border-[var(--border)] flex flex-col gap-3">

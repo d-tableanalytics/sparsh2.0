@@ -23,13 +23,14 @@ from typing import Optional
 from app.db.mongodb import get_collection
 from app.models.hrms import (
     COL_CANDIDATES, COL_POSTINGS, COL_REQUISITIONS, SEQ_CANDIDATE,
-    STAGE_APPLIED, STAGE_REJECTED, CANDIDATE_STAGES, CANDIDATE_FORWARD,
+    STAGE_APPLIED, STAGE_REJECTED, CANDIDATE_STAGES, CANDIDATE_FORWARD, REJECTION_STAGES,
     POSTING_OPEN, POSTING_STATES,
     ASSESSMENT_SENT, ASSESSMENT_OPENED, ASSESSMENT_SUBMITTED, ASSESSMENT_REVIEWED,
     INTERVIEW_SCHEDULED, INTERVIEW_DONE, INTERVIEW_CANCELLED,
     REQ_APPROVED,
     OFFER_DRAFT, OFFER_SENT, OFFER_ACCEPTED, OFFER_DECLINED, OFFER_WITHDRAWN, OFFER_FINAL,
     ONB_INVITED, ONB_SUBMITTED, ONB_VERIFIED, ONB_CONVERTED,
+    APPT_PENDING, APPT_GENERATED, APPT_SENT, APPT_ACKNOWLEDGED,
 )
 from app.utils.counters import next_code
 from app.utils.public_guard import public_token
@@ -84,6 +85,10 @@ async def create_posting(request_no: str, platform: str, notes: str,
         "request_no": request_no,
         "designation": req.get("designation") or "",
         "department": req.get("department") or "",
+        # Inherited from the requisition so a candidate can be attributed to a client without
+        # joining back through the requisition on every analytics query.
+        "client_company_id": req.get("client_company_id") or "",
+        "client_company_name": req.get("client_company_name") or "",
         "platform": (platform or "").strip() or "Careers page",
         "notes": notes or "",
         "status": POSTING_OPEN,
@@ -123,6 +128,8 @@ def serialize_posting(doc: dict, include_code: bool = True) -> dict:
         "requestNo": doc.get("request_no"),
         "designation": doc.get("designation") or "",
         "department": doc.get("department") or "",
+        "clientCompanyId": doc.get("client_company_id") or "",
+        "clientCompanyName": doc.get("client_company_name") or "",
         "platform": doc.get("platform") or "",
         "notes": doc.get("notes") or "",
         "status": doc.get("status") or POSTING_OPEN,
@@ -152,12 +159,15 @@ def can_advance(current: str, target: str) -> bool:
 
     Stops a candidate silently moving back to an earlier stage, which would make the funnel
     counts meaningless.
+
+    Both rejection kinds behave identically: reachable from any live stage, terminal once set.
+    A client rejection is still a rejection — reopen by re-applying, not by quietly reversing it.
     """
     if target not in CANDIDATE_STAGES:
         return False
-    if target == STAGE_REJECTED:
-        return current != STAGE_REJECTED
-    if current == STAGE_REJECTED:
+    if target in REJECTION_STAGES:
+        return current not in REJECTION_STAGES
+    if current in REJECTION_STAGES:
         return False        # reopen by re-applying, not by quietly un-rejecting
     if current not in CANDIDATE_FORWARD or target not in CANDIDATE_FORWARD:
         return False
@@ -232,6 +242,8 @@ def serialize_candidate(doc: dict, include_codes: bool = False,
         "requestNo": doc.get("request_no") or "",
         "designation": doc.get("designation") or "",
         "department": doc.get("department") or "",
+        "clientCompanyId": doc.get("client_company_id") or "",
+        "clientCompanyName": doc.get("client_company_name") or "",
         "fullName": doc.get("full_name") or "",
         "email": doc.get("email") or "",
         "phone": doc.get("phone") or "",
@@ -244,12 +256,17 @@ def serialize_candidate(doc: dict, include_codes: bool = False,
         "resumeKey": doc.get("resume_key") or "",
         "source": doc.get("source") or "",
         "platform": doc.get("platform") or "",
+        "referredBy": doc.get("referred_by") or "",
+        "referralSource": doc.get("referral_source") or "",
+        "referralEmployeeCode": doc.get("referral_employee_code") or "",
         "stage": doc.get("stage") or STAGE_APPLIED,
         "rejectionReason": doc.get("rejection_reason") or "",
         "assessments": assessments,
         "interviews": interviews,
         # Offer access codes are never listed, for the same reason as assessment codes.
         "offers": [serialize_offer(o) for o in (doc.get("offers") or [])],
+        # Access code withheld here for the same reason as offers and assessments.
+        "appointmentLetter": serialize_appointment(doc),
         "onboarding": serialize_onboarding(doc, include_kyc),
         "journey": [
             {"from": j.get("from"), "to": j.get("to"), "actorName": j.get("actor_name") or "",
@@ -286,6 +303,63 @@ def active_offer(doc: dict) -> Optional[dict]:
     """The offer currently in play — the most recent one not withdrawn."""
     live = [o for o in (doc.get("offers") or []) if o.get("status") != OFFER_WITHDRAWN]
     return live[-1] if live else None
+
+
+async def find_candidate_by_appointment_code(code: str) -> Optional[dict]:
+    if not code:
+        return None
+    return await get_collection(COL_CANDIDATES).find_one({"appointment_letter.access_code": code})
+
+
+def appointment_link_state(appt: Optional[dict]) -> tuple:
+    """(usable, reason) for the public acknowledgement link.
+
+    Same shape as `offer_link_state` so both public pages report a dead link identically.
+    """
+    if not appt:
+        return False, "This link is not valid."
+    if appt.get("status") == APPT_ACKNOWLEDGED:
+        return False, "You have already acknowledged this appointment letter."
+    if appt.get("status") not in (APPT_SENT, APPT_GENERATED):
+        return False, "This appointment letter is not ready yet."
+    valid_till = appt.get("valid_till")
+    if valid_till:
+        try:
+            if date.fromisoformat(str(valid_till)[:10]) < date.today():
+                return False, "This appointment letter has expired."
+        except ValueError:
+            pass
+    return True, ""
+
+
+def serialize_appointment(doc: dict, include_code: bool = False) -> Optional[dict]:
+    """The appointment letter for an internal reader.
+
+    `include_code` follows the same rule as offers and assessments: the access code is returned
+    once, to the HR user who generated it, and never from a list endpoint.
+    """
+    appt = doc.get("appointment_letter")
+    if not appt:
+        return None
+    out = {
+        "status": appt.get("status") or APPT_PENDING,
+        "designation": appt.get("designation") or "",
+        "department": appt.get("department") or "",
+        "annualCtc": appt.get("annual_ctc"),
+        "joiningDate": appt.get("joining_date"),
+        "location": appt.get("location") or "",
+        "reportingTo": appt.get("reporting_to") or "",
+        "terms": appt.get("terms") or "",
+        "validTill": appt.get("valid_till"),
+        "generatedAt": appt.get("generated_at"),
+        "sentAt": appt.get("sent_at"),
+        "acknowledgedAt": appt.get("acknowledged_at"),
+        "acknowledgementNote": appt.get("acknowledgement_note") or "",
+        "generatedBy": appt.get("generated_by_name") or "",
+    }
+    if include_code:
+        out["accessCode"] = appt.get("access_code")
+    return out
 
 
 async def find_candidate_by_onboarding_code(code: str) -> Optional[dict]:

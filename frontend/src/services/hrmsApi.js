@@ -22,6 +22,10 @@ export const getHrmsOptions = () => api.get('/hrms/options');
 // Internal staff logins — source for the employee 'linked account' + 'reporting manager' pickers.
 export const getHrmsStaffOptions = () => api.get('/hrms/staff-options');
 
+// Client companies a requisition can be raised for — id + name only. Its own endpoint so a
+// recruiter gets the dropdown without needing the `companies` module.
+export const getHrmsClientOptions = () => api.get('/hrms/client-options');
+
 // Org structure master data. `kind` = department | designation | location.
 export const getOrgMasters = (params) => api.get('/hrms/org', { params });
 export const createOrgMaster = (payload) => api.post('/hrms/org', payload);
@@ -145,6 +149,53 @@ export const withdrawOffer = (uk, offerId) => api.post(`/hrms/candidates/${uk}/o
 export const inviteOnboarding = (uk, payload) => api.post(`/hrms/candidates/${uk}/onboarding`, payload);
 export const verifyOnboarding = (uk, payload) => api.post(`/hrms/candidates/${uk}/onboarding/verify`, payload);
 export const convertCandidate = (uk, payload) => api.post(`/hrms/candidates/${uk}/onboarding/convert`, payload);
+
+// ─── Public link registry ───
+// Every public link issued (posting / assessment / offer / appointment / onboarding) with its
+// open-tracking. This list NEVER contains codes.
+export const getLinks = (params) => api.get('/hrms/links', { params });
+
+// The one endpoint that returns a code, one link at a time. Needs the update grant and writes
+// an audit entry before handing it over — which is what makes "accessible whenever required"
+// safe to offer.
+export const revealLink = (id) => api.post(`/hrms/links/${id}/reveal`);
+
+export const revokeLink = (id) => api.post(`/hrms/links/${id}/revoke`);
+
+// ─── Recruitment analytics ───
+// Client-wise funnel + position-wise CV status. Every filter optional; no client means all
+// clients plus Sparsh's own internal hiring.
+export const getRecruitmentAnalytics = (params) =>
+  api.get('/hrms/recruitment/analytics', { params });
+
+// ─── Documentation ───
+// One library for employee AND candidate documents. Permission follows the owner server-side:
+// employee documents need the `hrms` grant, candidate documents the `recruitment` one.
+export const getDocuments = (params) => api.get('/hrms/documents', { params });
+
+// Registering without a file records the document as Pending — that is how a required-but-
+// missing document is tracked.
+export const createDocument = (payload) => api.post('/hrms/documents', payload);
+
+// Supplying a file supersedes the previous one (version up, old key kept on history).
+export const updateDocument = (id, updates) => api.patch(`/hrms/documents/${id}`, updates);
+
+// Short-lived signed URL — the object is never public.
+export const getDocumentUrl = (id) => api.get(`/hrms/documents/${id}/download`);
+
+// ─── Appointment letter ───
+// Generate returns { appointment: { accessCode, … } } ONCE — the code is the candidate's
+// acknowledgement link and appears in no list/read response, like offers and assessments.
+export const generateAppointmentLetter = (uk, payload) =>
+  api.post(`/hrms/candidates/${uk}/appointment`, payload);
+
+// Marks the letter shared and moves the candidate to the Appointment Letter Sent stage.
+export const sendAppointmentLetter = (uk) => api.post(`/hrms/candidates/${uk}/appointment/send`);
+
+// Public (unauthenticated) appointment acknowledgement page.
+export const getPublicAppointment = (code) => api.get(`/hrms/public/appointment/${code}`);
+export const acknowledgePublicAppointment = (code, payload) =>
+  api.post(`/hrms/public/appointment/${code}/acknowledge`, payload);
 
 // Public (unauthenticated) offer + onboarding pages.
 export const getPublicOffer = (code) => api.get(`/hrms/public/offers/${code}`);

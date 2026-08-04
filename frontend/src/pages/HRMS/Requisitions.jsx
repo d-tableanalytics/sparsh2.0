@@ -7,14 +7,17 @@ import { useAuth } from '../../context/AuthContext';
 import { useNotification } from '../../context/NotificationContext';
 import {
   getRequisitions, createRequisition, updateRequisition,
-  decideRequisition, closeRequisition, getHrmsOptions,
+  decideRequisition, closeRequisition, getHrmsOptions, getHrmsClientOptions,
 } from '../../services/hrmsApi';
 import { hasHrmsPermission } from '../../utils/hrmsAccess';
 import { StatTile, Field } from '../../components/hrms/hrmsUi';
 import { inputCls, fmtDate, fmtDateTime } from '../../components/hrms/hrmsStyles';
 
-// HRMS ▸ Recruitment. A requisition walks one approval chain:
-//     Pending HR Review → Pending MD Approval → Approved | Rejected
+// HRMS ▸ Recruitment. A requisition walks one approval chain, whose length depends on whether
+// the vacancy sits inside sanctioned headcount:
+//     within sanction: Pending HR Review → Pending MD Approval → Approved | Rejected
+//     over sanction:   Pending HR Review → Pending HOD Approval → Pending MD Approval → …
+// MD approval is compulsory on both paths — the HOD step is inserted before it, never instead.
 //
 // The buttons say what the person is DOING ("send for approval", "approve"), and the server
 // derives the resulting state from where the requisition currently is — so the UI can't skip a
@@ -22,8 +25,9 @@ import { inputCls, fmtDate, fmtDateTime } from '../../components/hrms/hrmsStyles
 // there is no separate JD approval to chase.
 
 const APPROVAL_TONE = {
-  'Pending HR Review':   { text: 'var(--accent-indigo)', bg: 'var(--accent-indigo-bg)', border: 'var(--accent-indigo-border)', Icon: ShieldCheck, short: 'HR review' },
-  'Pending MD Approval': { text: 'var(--accent-yellow)', bg: 'var(--accent-yellow-bg)', border: 'var(--accent-yellow-border)', Icon: Clock, short: 'MD approval' },
+  'Pending HR Review':    { text: 'var(--accent-indigo)', bg: 'var(--accent-indigo-bg)', border: 'var(--accent-indigo-border)', Icon: ShieldCheck, short: 'HR review' },
+  'Pending HOD Approval': { text: 'var(--accent-orange)', bg: 'var(--accent-orange-bg)', border: 'var(--accent-orange-border)', Icon: AlertTriangle, short: 'HOD approval' },
+  'Pending MD Approval':  { text: 'var(--accent-yellow)', bg: 'var(--accent-yellow-bg)', border: 'var(--accent-yellow-border)', Icon: Clock, short: 'MD approval' },
   Approved:              { text: 'var(--status-active-text)', bg: 'var(--status-active-bg)', border: 'var(--status-active-border)', Icon: CheckCircle2, short: 'Approved' },
   Rejected:              { text: 'var(--accent-red)', bg: 'var(--accent-red-bg)', border: 'var(--accent-red-border)', Icon: XCircle, short: 'Rejected' },
 };
@@ -50,7 +54,10 @@ const ApprovalBadge = ({ status }) => {
 const EMPTY = {
   department: '', designation: '', vacancy: 1, experience_required: '', offering_ctc: '',
   qualification: '', essential_skills: '', gender_preferred: 'Any', work_location: '',
-  urgency_level: 'Medium', required_date: '', assignee: '',
+  urgency_level: 'Medium', required_date: '', assignee: '', client_company_id: '',
+  vacancy_type: 'New position', replacement_for: '',
+  budget_sanctioned_by_management: { amount: '', remarks: '' },
+  budget_approved_by_hod: { amount: '', remarks: '' },
   jd: { title: '', responsibilities: '', skills: '', qualifications: '', experience: '', ctc: '', location: '', benefits: '', employment_type: 'Full-time' },
 };
 
@@ -63,6 +70,7 @@ const Requisitions = () => {
 
   const [data, setData] = useState(null);
   const [options, setOptions] = useState(null);
+  const [clients, setClients] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [search, setSearch] = useState('');
@@ -102,6 +110,9 @@ const Requisitions = () => {
 
   useEffect(() => { load(); }, [load]);
   useEffect(() => { getHrmsOptions().then((r) => setOptions(r.data)).catch(() => {}); }, []);
+  // Client list is a separate call: it comes from the companies collection, not the org masters
+  // that /hrms/options serves. A recruiter without the grant simply gets no options.
+  useEffect(() => { getHrmsClientOptions().then((r) => setClients(r.data || [])).catch(() => {}); }, []);
 
   const rows = data?.requisitions ?? [];
   const stats = data?.stats ?? {};
@@ -116,6 +127,17 @@ const Requisitions = () => {
       qualification: r.qualification, essential_skills: r.essentialSkills,
       gender_preferred: r.genderPreferred, work_location: r.workLocation,
       urgency_level: r.urgencyLevel, required_date: r.requiredDate || '', assignee: r.assignee,
+      client_company_id: r.clientCompanyId || '',
+      vacancy_type: r.vacancyType || 'New position',
+      replacement_for: r.replacementFor || '',
+      budget_sanctioned_by_management: {
+        amount: r.budgetSanctionedByManagement?.amount ?? '',
+        remarks: r.budgetSanctionedByManagement?.remarks || '',
+      },
+      budget_approved_by_hod: {
+        amount: r.budgetApprovedByHod?.amount ?? '',
+        remarks: r.budgetApprovedByHod?.remarks || '',
+      },
       jd: {
         title: r.jd?.title || '', responsibilities: r.jd?.responsibilities || '',
         skills: r.jd?.skills || '', qualifications: r.jd?.qualifications || '',
@@ -133,12 +155,23 @@ const Requisitions = () => {
       return;
     }
     setSaving(true);
+    // An empty budget box means "not recorded yet", which the server reads as null and reports
+    // as pending — not as zero, which would look like a real sanction of nothing.
+    const money = (b) => {
+      const amount = String(b?.amount ?? '').trim();
+      return { amount: amount === '' ? null : Number(amount), remarks: b?.remarks || '' };
+    };
+    const payload = {
+      ...form,
+      budget_sanctioned_by_management: money(form.budget_sanctioned_by_management),
+      budget_approved_by_hod: money(form.budget_approved_by_hod),
+    };
     try {
       if (editing) {
-        await updateRequisition(editing.requestNo, form);
+        await updateRequisition(editing.requestNo, payload);
         showSuccess(`${editing.requestNo} updated`);
       } else {
-        const res = await createRequisition(form);
+        const res = await createRequisition(payload);
         showSuccess(`Requisition ${res.data.requestNo} raised`);
       }
       setShowForm(false);
@@ -211,9 +244,10 @@ const Requisitions = () => {
       </div>
 
       {/* KPIs */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+      <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
         <StatTile icon={FileText} label="Total" value={stats.total ?? 0} loading={loading} />
         <StatTile icon={ShieldCheck} label="Awaiting HR" value={stats.pendingHr ?? 0} loading={loading} />
+        <StatTile icon={AlertTriangle} label="Awaiting HOD" value={stats.pendingHod ?? 0} loading={loading} />
         <StatTile icon={Clock} label="Awaiting MD" value={stats.pendingMd ?? 0} loading={loading} />
         <StatTile icon={CheckCircle2} label="Approved" value={stats.approved ?? 0} loading={loading} />
       </div>
@@ -251,7 +285,7 @@ const Requisitions = () => {
           <table className="w-full" style={{ minWidth: 900 }}>
             <thead>
               <tr className="bg-[var(--table-header-bg)] border-b border-[var(--border)]">
-                {['Requisition', 'Department', 'Vacancy', 'Needed by', 'Stage', 'Vacancy status', ''].map((h, i) => (
+                {['Requisition', 'Department', 'Client', 'Vacancy', 'Needed by', 'Stage', 'Vacancy status', ''].map((h, i) => (
                   <th key={i} className="text-left px-4 py-3 text-[10px] font-black uppercase tracking-widest text-[var(--text-muted)]">
                     {h}
                   </th>
@@ -260,14 +294,14 @@ const Requisitions = () => {
             </thead>
             <tbody>
               {loading && (
-                <tr><td colSpan={7} className="px-4 py-12 text-center">
+                <tr><td colSpan={8} className="px-4 py-12 text-center">
                   <span className="inline-flex items-center gap-2 text-[13px] font-bold text-[var(--text-muted)]">
                     <Loader2 size={16} className="animate-spin" /> Loading…
                   </span>
                 </td></tr>
               )}
               {!loading && rows.length === 0 && (
-                <tr><td colSpan={7} className="px-4 py-12 text-center">
+                <tr><td colSpan={8} className="px-4 py-12 text-center">
                   <p className="text-[13px] font-bold text-[var(--text-main)]">No requisitions.</p>
                   <p className="text-[12px] font-medium text-[var(--text-muted)] mt-1">
                     {canCreate ? 'Raise one to start hiring.' : 'Nothing raised yet.'}
@@ -283,6 +317,9 @@ const Requisitions = () => {
                       style={{ fontVariantNumeric: 'tabular-nums' }}>{r.requestNo}</div>
                   </td>
                   <td className="px-4 py-3 text-[12px] font-semibold text-[var(--text-muted)]">{r.department}</td>
+                  <td className="px-4 py-3 text-[12px] font-semibold text-[var(--text-muted)]">
+                    {r.clientCompanyName || <span className="opacity-50">Internal</span>}
+                  </td>
                   <td className="px-4 py-3 text-[12px] font-black text-[var(--text-main)]"
                     style={{ fontVariantNumeric: 'tabular-nums' }}>{r.vacancy}</td>
                   <td className="px-4 py-3 text-[12px] font-semibold text-[var(--text-muted)]">
@@ -345,6 +382,29 @@ const Requisitions = () => {
                   <input type="number" min="1" className={inputCls} value={form.vacancy}
                     onChange={(e) => setForm({ ...form, vacancy: Number(e.target.value) || 1 })} />
                 </Field>
+                {/* Blank = a Sparsh internal hire, which is what every requisition raised
+                    before client linkage existed reads as. */}
+                <Field label="Hiring for client">
+                  <select className={inputCls} value={form.client_company_id}
+                    onChange={(e) => setForm({ ...form, client_company_id: e.target.value })}>
+                    <option value="">Sparsh (internal hire)</option>
+                    {clients.map((c) => <option key={c._id} value={c._id}>{c.name}</option>)}
+                  </select>
+                </Field>
+                <Field label="Vacancy type">
+                  <select className={inputCls} value={form.vacancy_type}
+                    onChange={(e) => setForm({ ...form, vacancy_type: e.target.value })}>
+                    <option value="New position">New position</option>
+                    <option value="Replacement">Replacement</option>
+                  </select>
+                </Field>
+                {form.vacancy_type === 'Replacement' && (
+                  <Field label="Replacing">
+                    <input className={inputCls} placeholder="Employee code or name"
+                      value={form.replacement_for}
+                      onChange={(e) => setForm({ ...form, replacement_for: e.target.value })} />
+                  </Field>
+                )}
                 <Field label="Experience required">
                   <input className={inputCls} placeholder="e.g. 2-4 years" value={form.experience_required}
                     onChange={(e) => setForm({ ...form, experience_required: e.target.value })} />
@@ -375,6 +435,35 @@ const Requisitions = () => {
                     onChange={(e) => setForm({ ...form, assignee: e.target.value })} />
                 </Field>
               </div>
+
+              {/* Budget approval. Both sides are optional at raise time — leaving one blank
+                  records it as pending and notifies the stakeholders, rather than blocking. */}
+              <h3 className="text-[10px] font-black uppercase tracking-[0.18em] text-[var(--text-muted)] mt-5">
+                Budget approval
+              </h3>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+                <Field label="Sanctioned by management">
+                  <input type="number" min="0" className={inputCls} placeholder="Amount"
+                    value={form.budget_sanctioned_by_management.amount}
+                    onChange={(e) => setForm({
+                      ...form,
+                      budget_sanctioned_by_management: {
+                        ...form.budget_sanctioned_by_management, amount: e.target.value,
+                      },
+                    })} />
+                </Field>
+                <Field label="Approved by HOD">
+                  <input type="number" min="0" className={inputCls} placeholder="Amount"
+                    value={form.budget_approved_by_hod.amount}
+                    onChange={(e) => setForm({
+                      ...form,
+                      budget_approved_by_hod: {
+                        ...form.budget_approved_by_hod, amount: e.target.value,
+                      },
+                    })} />
+                </Field>
+              </div>
+
               <Field label="Essential skills">
                 <textarea rows={2} className={`${inputCls} resize-y`} value={form.essential_skills}
                   onChange={(e) => setForm({ ...form, essential_skills: e.target.value })} />
@@ -500,8 +589,60 @@ const Requisitions = () => {
                 </div>
               )}
 
+              {/* Sanction position + budget. Shown for every requisition so the reason a
+                  requisition escalated is visible next to the decision that acts on it. */}
+              <div className="p-4 rounded-xl bg-[var(--input-bg)] border border-[var(--border)] flex flex-col gap-3">
+                <div className="flex items-center gap-2">
+                  <Flag size={13} className="text-[var(--accent-indigo)]" />
+                  <span className="text-[10px] font-black uppercase tracking-widest text-[var(--text-muted)]">
+                    Sanction &amp; budget
+                  </span>
+                </div>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                  {[
+                    ['Vacancy type', detail.vacancyType],
+                    ['Sanctioned', detail.sanctionedHeadcount],
+                    ['Actual', detail.actualHeadcount],
+                    ['Replacing', detail.replacementFor || '—'],
+                  ].map(([label, value]) => (
+                    <div key={label}>
+                      <div className="text-[9px] font-black uppercase tracking-widest text-[var(--text-muted)]">{label}</div>
+                      <div className="text-[12.5px] font-bold text-[var(--text-main)]">{value ?? '—'}</div>
+                    </div>
+                  ))}
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <div className="text-[9px] font-black uppercase tracking-widest text-[var(--text-muted)]">Mgmt sanctioned</div>
+                    <div className="text-[12.5px] font-bold text-[var(--text-main)]">
+                      {detail.budgetSanctionedByManagement?.amount ?? '—'}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-[9px] font-black uppercase tracking-widest text-[var(--text-muted)]">HOD approved</div>
+                    <div className="text-[12.5px] font-bold text-[var(--text-main)]">
+                      {detail.budgetApprovedByHod?.amount ?? '—'}
+                    </div>
+                  </div>
+                </div>
+                {detail.overSanction && (
+                  <div className="flex items-start gap-2 text-[11.5px] font-bold"
+                    style={{ color: 'var(--accent-orange)' }}>
+                    <AlertTriangle size={13} className="mt-0.5 shrink-0" />
+                    Over sanctioned headcount — needs HOD approval before MD.
+                  </div>
+                )}
+                {detail.budgetIssue && (
+                  <div className="flex items-start gap-2 text-[11.5px] font-bold"
+                    style={{ color: 'var(--accent-red)' }}>
+                    <AlertTriangle size={13} className="mt-0.5 shrink-0" />
+                    {detail.budgetIssue}
+                  </div>
+                )}
+              </div>
+
               {/* Approval actions — only what is legal from the current state. */}
-              {(canReview || canApproveMd) && ['Pending HR Review', 'Pending MD Approval', 'Rejected'].includes(detail.approvalStatus) && (
+              {(canReview || canApproveMd) && ['Pending HR Review', 'Pending HOD Approval', 'Pending MD Approval', 'Rejected'].includes(detail.approvalStatus) && (
                 <div className="p-4 rounded-xl border border-dashed border-[var(--border)] flex flex-col gap-3">
                   <span className="text-[10px] font-black uppercase tracking-[0.18em] text-[var(--text-muted)]">
                     {detail.approvalStatus === 'Rejected' ? 'Revise' : 'Decision'}
@@ -519,7 +660,16 @@ const Requisitions = () => {
                       <button onClick={() => decide(detail, 'advance')} disabled={!!busy}
                         className="flex items-center gap-2 px-4 py-2 rounded-xl text-white text-[11px] font-black uppercase tracking-widest disabled:opacity-50"
                         style={{ backgroundColor: 'var(--btn-primary)' }}>
-                        <Check size={13} /> Send for MD approval
+                        {/* Label follows where the server will actually route it, so the
+                            reviewer isn't told "MD" and then sees it land with the HOD. */}
+                        <Check size={13} /> {detail.overSanction ? 'Escalate to HOD' : 'Send for MD approval'}
+                      </button>
+                    )}
+                    {detail.approvalStatus === 'Pending HOD Approval' && (canReview || canApproveMd) && (
+                      <button onClick={() => decide(detail, 'advance')} disabled={!!busy}
+                        className="flex items-center gap-2 px-4 py-2 rounded-xl text-white text-[11px] font-black uppercase tracking-widest disabled:opacity-50"
+                        style={{ backgroundColor: 'var(--accent-orange)' }}>
+                        <Check size={13} /> HOD approve — send to MD
                       </button>
                     )}
                     {detail.approvalStatus === 'Pending MD Approval' && canApproveMd && (

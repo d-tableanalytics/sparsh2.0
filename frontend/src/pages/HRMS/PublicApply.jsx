@@ -28,7 +28,8 @@ const PublicApply = () => {
   const [form, setForm] = useState({
     full_name: '', email: '', phone: '', current_company: '',
     experience_years: '', current_ctc: '', expected_ctc: '', notice_period: '',
-    cover_note: '', resume: null,
+    cover_note: '', referred_by: '', referral_source: '', referral_employee_code: '',
+    resume: null,
   });
 
   const load = useCallback(async () => {
@@ -218,6 +219,27 @@ const PublicApply = () => {
             <Field label="Expected CTC">
               <input className={inputCls} value={form.expected_ctc}
                 onChange={(e) => setForm({ ...form, expected_ctc: e.target.value })} />
+            </Field>
+          </div>
+
+          {/* Referral — all optional. Someone applying cold leaves this untouched. */}
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            <Field label="Referred by">
+              <input className={inputCls} placeholder="Who referred you?" value={form.referred_by}
+                onChange={(e) => setForm({ ...form, referred_by: e.target.value })} />
+            </Field>
+            <Field label="Referral source">
+              <select className={inputCls} value={form.referral_source}
+                onChange={(e) => setForm({ ...form, referral_source: e.target.value })}>
+                <option value="">Not a referral</option>
+                {['Employee', 'Friend / family', 'Consultant', 'Job portal', 'Social media', 'Other']
+                  .map((s) => <option key={s} value={s}>{s}</option>)}
+              </select>
+            </Field>
+            <Field label="Employee name / ID">
+              <input className={inputCls} placeholder="If referred by an employee"
+                value={form.referral_employee_code}
+                onChange={(e) => setForm({ ...form, referral_employee_code: e.target.value })} />
             </Field>
           </div>
 

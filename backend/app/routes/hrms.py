@@ -44,8 +44,8 @@ from app.models.hrms import (
     COL_PAYROLL_RUNS, COL_PAYSLIPS, SETTING_PAYROLL,
     PayrollRunRequest, PayrollConfigUpdate,
     COL_REQUISITIONS, COL_JDS,
-    REQ_PENDING_HR, REQ_PENDING_MD, REQ_APPROVED, REQ_REJECTED,
-    REQ_OPEN, REQ_CLOSING_STATES, URGENCY_LEVELS,
+    REQ_PENDING_HR, REQ_PENDING_HOD, REQ_PENDING_MD, REQ_APPROVED, REQ_REJECTED,
+    REQ_OPEN, REQ_CLOSING_STATES, URGENCY_LEVELS, VACANCY_TYPES,
     RequisitionCreate, RequisitionUpdate, RequisitionDecision, RequisitionClose,
     COL_POSTINGS, COL_CANDIDATES, POSTING_STATES,
     STAGE_APPLIED, STAGE_ASSESSMENT, STAGE_INTERVIEW, STAGE_REJECTED, CANDIDATE_STAGES,
@@ -59,6 +59,22 @@ from app.models.hrms import (
     ONB_INVITED, ONB_SUBMITTED, ONB_VERIFIED, ONB_CONVERTED,
     OfferCreate, OfferDecision, OnboardingInvite, OnboardingSubmission,
     OnboardingVerify, ConvertToEmployee,
+    STAGE_APPOINTMENT, APPT_PENDING, APPT_GENERATED, APPT_SENT, APPT_ACKNOWLEDGED,
+    AppointmentLetterCreate, AppointmentAcknowledgement,
+    COL_DOCUMENTS, DOC_OWNER_EMPLOYEE, DOC_OWNER_CANDIDATE, DOC_TYPES, DOC_STATUSES,
+    DOC_PENDING, DOC_UPLOADED, DOC_VERIFIED,
+    DocumentCreate, DocumentUpdate,
+    COL_LINKS, LINK_TYPES, LINK_STATUSES, LINK_PATHS, LINK_REVOKED,
+    LINK_POSTING, LINK_ASSESSMENT, LINK_OFFER, LINK_APPOINTMENT, LINK_ONBOARDING,
+)
+from app.services.hrms_document_service import (
+    generate_document_no, validate_document, store_document, serialize_document,
+    signed_download_url, resolve_owner_name, document_stats,
+)
+from app.services.hrms_analytics_service import recruitment_analytics, requisition_options
+from app.services.hrms_link_service import (
+    register_link, track_open, mark_used, serialize_link, resolve_code, record_reveal,
+    effective_status as link_effective_status,
 )
 from app.services.hrms_attendance_service import (
     get_attendance_settings, validate_settings, serialize_day,
@@ -75,7 +91,8 @@ from app.services.hrms_payroll_service import (
 )
 from app.services.hrms_recruitment_service import (
     generate_request_no, validate_requisition, apply_decision, build_step,
-    upsert_jd, get_jd, serialize_requisition, serialize_jd,
+    upsert_jd, get_jd, serialize_requisition, serialize_jd, resolve_client,
+    compute_sanction, budget_mismatch, notify_budget_issue,
 )
 from app.services.hrms_candidate_service import (
     generate_candidate_uk, validate_applicant, store_resume,
@@ -84,9 +101,10 @@ from app.services.hrms_candidate_service import (
     find_candidate_by_assessment_code, find_assessment,
     find_candidate_by_offer_code, find_offer, active_offer, offer_link_state,
     find_candidate_by_onboarding_code,
+    find_candidate_by_appointment_code, appointment_link_state, serialize_appointment,
 )
 from app.utils.public_guard import (
-    rate_limit, decode_upload, public_token, safe_public_error,
+    rate_limit, decode_upload, public_token, safe_public_error, ALLOWED_UPLOAD_TYPES,
 )
 from app.services.activity_log_service import log_activity
 from app.services.hrms_employee_service import (
@@ -168,6 +186,23 @@ async def hrms_staff_options(current_user: dict = Depends(require_hrms_access)):
             "role": u.get("role"),
         })
     out.sort(key=lambda x: (x["full_name"] or "").lower())
+    return out
+
+
+@router.get("/client-options")
+async def hrms_client_options(current_user: dict = Depends(require_hrms_access)):
+    """Client companies a requisition can be raised for — id and name only.
+
+    Deliberately its own endpoint rather than reusing /api/companies: an HRMS recruiter needs
+    the dropdown without being granted the `companies` module, and this returns nothing but
+    what the picker renders.
+    """
+    _require(current_user, "recruitment", "read")
+    out = []
+    async for c in get_collection("companies").find(
+            {"is_active": {"$ne": False}}, {"name": 1}):
+        out.append({"_id": str(c["_id"]), "name": c.get("name") or ""})
+    out.sort(key=lambda x: (x["name"] or "").lower())
     return out
 
 
@@ -1017,10 +1052,26 @@ def _can_md_approve(user: dict) -> bool:
         user, "recruitment", "delete")
 
 
+async def _can_hod_approve(user: dict, department: str) -> bool:
+    """HOD approval on an over-sanction requisition.
+
+    The head recorded on the department org master, or the admin tier. Admins are included
+    deliberately: without them a department whose head is unset would deadlock every
+    over-sanction requisition with no way to clear it.
+    """
+    if _can_md_approve(user):
+        return True
+    dept = await get_collection(COL_ORG_MASTERS).find_one({
+        "kind": ORG_KIND_DEPARTMENT, "name": department, "active": True,
+    })
+    return bool(dept and str(dept.get("head") or "") == str(user.get("_id")))
+
+
 @router.get("/requisitions")
 async def list_requisitions(
     approval_status: Optional[str] = Query(None),
     closing_status: Optional[str] = Query(None),
+    client_company_id: Optional[str] = Query(None),
     search: Optional[str] = Query(None),
     current_user: dict = Depends(require_hrms_access),
 ):
@@ -1030,6 +1081,8 @@ async def list_requisitions(
         query["approval_status"] = approval_status
     if closing_status:
         query["closing_status"] = closing_status
+    if client_company_id:
+        query["client_company_id"] = client_company_id
     if search:
         rx = {"$regex": re.escape(search.strip()), "$options": "i"}
         query["$or"] = [{"designation": rx}, {"department": rx}, {"request_no": rx}]
@@ -1047,6 +1100,7 @@ async def list_requisitions(
         "stats": {
             "total": sum(counts.values()),
             "pendingHr": counts.get(REQ_PENDING_HR, 0),
+            "pendingHod": counts.get(REQ_PENDING_HOD, 0),
             "pendingMd": counts.get(REQ_PENDING_MD, 0),
             "approved": counts.get(REQ_APPROVED, 0),
             "rejected": counts.get(REQ_REJECTED, 0),
@@ -1064,13 +1118,22 @@ async def create_requisition(body: RequisitionCreate,
     jd = payload.pop("jd", None)
     try:
         validate_requisition(payload)
+        # Resolve against the companies collection rather than trusting the posted name, so a
+        # renamed company can't leave stale labels scattered across requisitions.
+        payload["client_company_id"], payload["client_company_name"] = await resolve_client(
+            payload.get("client_company_id"))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
     now = datetime.now(timezone.utc)
     request_no = await generate_request_no()
+    # Sanction position is computed server-side and stored, so the approval chain and the
+    # audit trail both reflect the headcount as it stood when the requisition was raised.
+    sanction = await compute_sanction(payload.get("department"), payload.get("designation"),
+                                      payload.get("vacancy"))
     doc = {
         **payload,
+        **sanction,
         "request_no": request_no,
         "approval_status": REQ_PENDING_HR,
         "closing_status": REQ_OPEN,
@@ -1091,6 +1154,11 @@ async def create_requisition(body: RequisitionCreate,
 
     await log_activity(current_user, "Create Requisition", COL_REQUISITIONS,
                        f"Requisition {request_no}: {payload.get('designation')}")
+    # Flag a budget problem at raise time so it is chased in parallel with HR review rather
+    # than surfacing only when someone tries to advance it.
+    issue = budget_mismatch(doc)
+    if issue:
+        await notify_budget_issue(doc, issue, current_user)
     saved = await get_collection(COL_REQUISITIONS).find_one({"request_no": request_no})
     return serialize_requisition(saved, await get_jd(request_no))
 
@@ -1122,8 +1190,19 @@ async def update_requisition(request_no: str, body: RequisitionUpdate,
     if updates:
         try:
             validate_requisition({**doc, **updates})
+            # Only re-resolve when the client actually changed; "" is a deliberate clear back
+            # to an internal hire, which model_dump's None-filter above would otherwise drop.
+            if "client_company_id" in updates:
+                updates["client_company_id"], updates["client_company_name"] = \
+                    await resolve_client(updates.get("client_company_id"))
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
+        # Any of these three changes where the requisition sits against sanction, which decides
+        # whether the HOD step applies — so recompute rather than let a stale verdict stand.
+        if {"department", "designation", "vacancy"} & updates.keys():
+            merged = {**doc, **updates}
+            updates.update(await compute_sanction(
+                merged.get("department"), merged.get("designation"), merged.get("vacancy")))
         updates["updated_at"] = datetime.now(timezone.utc)
         await get_collection(COL_REQUISITIONS).update_one(
             {"request_no": request_no}, {"$set": updates})
@@ -1137,6 +1216,9 @@ async def update_requisition(request_no: str, body: RequisitionUpdate,
     await log_activity(current_user, "Update Requisition", COL_REQUISITIONS,
                        f"Requisition {request_no} updated")
     saved = await get_collection(COL_REQUISITIONS).find_one({"request_no": request_no})
+    issue = budget_mismatch(saved)
+    if issue:
+        await notify_budget_issue(saved, issue, current_user)
     return serialize_requisition(saved, await get_jd(request_no))
 
 
@@ -1153,11 +1235,18 @@ async def decide_requisition(request_no: str, body: RequisitionDecision,
         raise HTTPException(status_code=404, detail="Requisition not found")
 
     current = doc.get("approval_status") or REQ_PENDING_HR
-    # MD approval is the admin tier's; HR review and resubmission need the update grant.
+    # MD approval is the admin tier's; the HOD step is the department head's; HR review and
+    # resubmission need the update grant.
     if current == REQ_PENDING_MD and body.action == "advance":
         if not _can_md_approve(current_user):
             raise HTTPException(status_code=403,
                                 detail="Only an admin can give MD approval.")
+    elif current == REQ_PENDING_HOD and body.action == "advance":
+        if not await _can_hod_approve(current_user, doc.get("department")):
+            raise HTTPException(
+                status_code=403,
+                detail="Only the department HOD or an admin can approve an over-sanction "
+                       "requisition.")
     else:
         _require(current_user, "recruitment", "update")
 
@@ -1179,6 +1268,13 @@ async def decide_requisition(request_no: str, body: RequisitionDecision,
 
     await log_activity(current_user, "Decide Requisition", COL_REQUISITIONS,
                        f"Requisition {request_no}: {outcome['step']['label']}")
+
+    # Advancing with the budget still unresolved doesn't block the chain — the document asks
+    # for a trigger message to the stakeholders, not a hard stop.
+    if body.action == "advance":
+        issue = budget_mismatch(doc)
+        if issue:
+            await notify_budget_issue(doc, issue, current_user)
     saved = await get_collection(COL_REQUISITIONS).find_one({"request_no": request_no})
     return serialize_requisition(saved, await get_jd(request_no))
 
@@ -1232,6 +1328,11 @@ async def add_posting(body: PostingCreate, current_user: dict = Depends(require_
         raise HTTPException(status_code=400, detail=str(e))
     await log_activity(current_user, "Create Job Posting", COL_POSTINGS,
                        f"{doc['designation']} posted to {doc['platform']}")
+    await register_link(LINK_POSTING, code=doc["public_code"],
+                        owner_ref=str(doc.get("_id") or ""),
+                        request_no=doc.get("request_no") or "",
+                        label=f"{doc.get('designation')} · {doc.get('platform')}",
+                        expires_on=doc.get("expires_on"), actor=current_user)
     return serialize_posting(doc)
 
 
@@ -1269,6 +1370,7 @@ async def public_posting(code: str, request: Request):
         # confirm which codes exist.
         raise HTTPException(status_code=404, detail=reason or "This link is not valid.")
     jd = await get_jd(posting.get("request_no"))
+    await track_open(code)
     return serialize_public_posting({**posting, "_jd": serialize_jd(jd)})
 
 
@@ -1312,6 +1414,9 @@ async def public_apply(code: str, body: PublicApplication, request: Request):
         "request_no": posting.get("request_no"),
         "designation": posting.get("designation"),
         "department": posting.get("department"),
+        # Carried from the posting, which carried it from the requisition.
+        "client_company_id": posting.get("client_company_id") or "",
+        "client_company_name": posting.get("client_company_name") or "",
         "platform": posting.get("platform"),
         "source": "Public link",
         "resume_key": resume_key,
@@ -1335,6 +1440,7 @@ async def public_apply(code: str, body: PublicApplication, request: Request):
 async def list_candidates(
     stage: Optional[str] = Query(None),
     request_no: Optional[str] = Query(None),
+    client_company_id: Optional[str] = Query(None),
     search: Optional[str] = Query(None),
     current_user: dict = Depends(require_hrms_access),
 ):
@@ -1344,6 +1450,8 @@ async def list_candidates(
         query["stage"] = stage
     if request_no:
         query["request_no"] = request_no
+    if client_company_id:
+        query["client_company_id"] = client_company_id
     if search:
         rx = {"$regex": re.escape(search.strip()), "$options": "i"}
         query["$or"] = [{"full_name": rx}, {"email": rx}, {"uk": rx}, {"current_company": rx}]
@@ -1381,19 +1489,22 @@ async def add_candidate(body: CandidateCreate, current_user: dict = Depends(requ
         raise HTTPException(status_code=409,
                             detail="That candidate has already been added for this role.")
 
-    designation = department = ""
+    designation = department = client_id = client_name = ""
     if payload.get("request_no"):
         req = await get_collection(COL_REQUISITIONS).find_one(
             {"request_no": payload["request_no"]})
         if req:
             designation = req.get("designation") or ""
             department = req.get("department") or ""
+            client_id = req.get("client_company_id") or ""
+            client_name = req.get("client_company_name") or ""
 
     now = datetime.now(timezone.utc)
     uk = await generate_candidate_uk()
     doc = {
         **payload, "uk": uk, "email": email,
         "designation": designation, "department": department,
+        "client_company_id": client_id, "client_company_name": client_name,
         "stage": STAGE_APPLIED, "assessments": [], "interviews": [], "journey": [],
         "created_by": str(current_user["_id"]),
         "created_at": now, "updated_at": now,
@@ -1499,6 +1610,11 @@ async def send_assessment(uk: str, body: AssessmentSend,
 
     await log_activity(current_user, "Send Assessment", COL_CANDIDATES,
                        f"Assessment sent to candidate {uk}")
+    await register_link(LINK_ASSESSMENT, code=assessment["access_code"], candidate_uk=uk,
+                        candidate_name=doc.get("full_name") or "",
+                        request_no=doc.get("request_no") or "",
+                        label=assessment.get("title") or "Assessment",
+                        expires_on=assessment.get("due_on"), actor=current_user)
     return {"assessmentId": assessment["id"], "accessCode": assessment["access_code"]}
 
 
@@ -1550,6 +1666,7 @@ async def public_assessment(code: str, request: Request):
             {"$set": {"assessments.$.status": ASSESSMENT_OPENED,
                       "assessments.$.opened_at": datetime.now(timezone.utc)}})
 
+    await track_open(code)
     return {
         "candidateName": doc.get("full_name") or "",
         "title": assessment.get("title") or "",
@@ -1582,6 +1699,7 @@ async def public_submit_assessment(code: str, body: AssessmentSubmission, reques
             "assessments.$.submitted_at": datetime.now(timezone.utc),
             "updated_at": datetime.now(timezone.utc),
         }})
+    await mark_used(code)
     return {"message": "Thank you. Your assessment has been submitted."}
 
 
@@ -1727,6 +1845,11 @@ async def create_offer(uk: str, body: OfferCreate,
     await col.update_one({"_id": doc["_id"]}, push)
 
     await log_activity(current_user, "Send Offer", COL_CANDIDATES, f"Offer sent to candidate {uk}")
+    await register_link(LINK_OFFER, code=offer["access_code"], candidate_uk=uk,
+                        candidate_name=doc.get("full_name") or "",
+                        request_no=doc.get("request_no") or "",
+                        label=offer.get("designation") or "Offer",
+                        expires_on=offer.get("valid_till"), actor=current_user)
     return {"offerId": offer["id"], "accessCode": offer["access_code"]}
 
 
@@ -1756,6 +1879,155 @@ async def withdraw_offer(uk: str, offer_id: str,
                                include_kyc=_can_read_kyc(current_user))
 
 
+# ─── Appointment letter ─────────────────────────────────────────────────────────
+@router.post("/candidates/{uk}/appointment")
+async def generate_appointment_letter(uk: str, body: AppointmentLetterCreate,
+                                      current_user: dict = Depends(require_hrms_access)):
+    """Generate the appointment letter for a candidate who accepted their offer.
+
+    Returns the access code ONCE, like offers and assessments — it is the candidate's
+    acknowledgement link and appears in no list or read response afterwards.
+    """
+    _require(current_user, "recruitment", "update")
+    col = get_collection(COL_CANDIDATES)
+    doc = await col.find_one({"uk": uk})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Candidate not found")
+
+    # An appointment letter only makes sense once an offer has actually been accepted.
+    accepted = next((o for o in (doc.get("offers") or [])
+                     if o.get("status") == OFFER_ACCEPTED), None)
+    if not accepted:
+        raise HTTPException(
+            status_code=409,
+            detail="An appointment letter needs an accepted offer.")
+
+    existing = doc.get("appointment_letter") or {}
+    if existing.get("status") == APPT_ACKNOWLEDGED:
+        raise HTTPException(status_code=409,
+                            detail="This candidate has already acknowledged their letter.")
+
+    now = datetime.now(timezone.utc)
+    payload = body.model_dump()
+    appt = {
+        "status": APPT_GENERATED,
+        # Fall back to the accepted offer's terms so HR isn't retyping what was agreed.
+        "designation": payload.get("designation") or accepted.get("designation") or "",
+        "department": payload.get("department") or accepted.get("department") or "",
+        "annual_ctc": payload.get("annual_ctc") if payload.get("annual_ctc") is not None
+                      else accepted.get("annual_ctc"),
+        "joining_date": payload.get("joining_date") or accepted.get("joining_date"),
+        "location": payload.get("location") or accepted.get("location") or "",
+        "reporting_to": payload.get("reporting_to") or "",
+        "terms": payload.get("terms") or "",
+        "valid_till": payload.get("valid_till"),
+        # Regenerating issues a fresh code, which invalidates any link already circulating.
+        "access_code": public_token(),
+        "generated_at": now,
+        "generated_by": str(current_user["_id"]),
+        "generated_by_name": current_user.get("full_name") or current_user.get("email"),
+        "sent_at": None,
+        "acknowledged_at": None,
+    }
+    await col.update_one({"_id": doc["_id"]},
+                         {"$set": {"appointment_letter": appt, "updated_at": now}})
+    await log_activity(current_user, "Generate Appointment Letter", COL_CANDIDATES,
+                       f"Appointment letter generated for {uk}")
+    await register_link(LINK_APPOINTMENT, code=appt["access_code"], candidate_uk=uk,
+                        candidate_name=doc.get("full_name") or "",
+                        request_no=doc.get("request_no") or "",
+                        label=appt.get("designation") or "Appointment letter",
+                        expires_on=appt.get("valid_till"), actor=current_user)
+    return {"appointment": serialize_appointment({"appointment_letter": appt},
+                                                 include_code=True)}
+
+
+@router.post("/candidates/{uk}/appointment/send")
+async def send_appointment_letter(uk: str, current_user: dict = Depends(require_hrms_access)):
+    """Mark the generated letter as shared with the candidate."""
+    _require(current_user, "recruitment", "update")
+    col = get_collection(COL_CANDIDATES)
+    doc = await col.find_one({"uk": uk})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Candidate not found")
+
+    appt = doc.get("appointment_letter") or {}
+    if not appt:
+        raise HTTPException(status_code=409, detail="Generate the letter first.")
+    if appt.get("status") == APPT_ACKNOWLEDGED:
+        raise HTTPException(status_code=409, detail="Already acknowledged.")
+
+    now = datetime.now(timezone.utc)
+    updates = {
+        "appointment_letter.status": APPT_SENT,
+        "appointment_letter.sent_at": now,
+        "updated_at": now,
+    }
+    # Sending moves the candidate to the matching pipeline stage, so the funnel reflects it.
+    if can_advance(doc.get("stage") or STAGE_APPLIED, STAGE_APPOINTMENT):
+        updates["stage"] = STAGE_APPOINTMENT
+
+    await col.update_one({"_id": doc["_id"]}, {"$set": updates, "$push": {
+        "journey": journey_entry(doc.get("stage") or STAGE_APPLIED, STAGE_APPOINTMENT,
+                                 current_user, "Appointment letter sent"),
+    }})
+    await log_activity(current_user, "Send Appointment Letter", COL_CANDIDATES,
+                       f"Appointment letter sent to {uk}")
+    return serialize_candidate(await col.find_one({"_id": doc["_id"]}),
+                               include_kyc=_can_read_kyc(current_user))
+
+
+# ─── PUBLIC: appointment letter ─────────────────────────────────────────────────
+@router.get("/public/appointment/{code}")
+async def public_appointment(code: str, request: Request):
+    """The appointment letter, for the candidate holding the link."""
+    rate_limit(request, "assess")
+    doc = await find_candidate_by_appointment_code(code)
+    appt = (doc or {}).get("appointment_letter")
+    usable, reason = appointment_link_state(appt)
+    if not usable:
+        status = 409 if appt and appt.get("status") == APPT_ACKNOWLEDGED else 404
+        raise HTTPException(status_code=status, detail=reason)
+
+    await track_open(code)
+    return {
+        "candidateName": doc.get("full_name") or "",
+        "designation": appt.get("designation") or "",
+        "department": appt.get("department") or "",
+        "annualCtc": appt.get("annual_ctc"),
+        "joiningDate": appt.get("joining_date"),
+        "location": appt.get("location") or "",
+        "reportingTo": appt.get("reporting_to") or "",
+        "terms": appt.get("terms") or "",
+        "validTill": appt.get("valid_till"),
+    }
+
+
+@router.post("/public/appointment/{code}/acknowledge")
+async def public_appointment_acknowledge(code: str, body: AppointmentAcknowledgement,
+                                         request: Request):
+    """Candidate acknowledges receipt. State-gated so the link cannot be replayed."""
+    rate_limit(request, "assess")
+    doc = await find_candidate_by_appointment_code(code)
+    appt = (doc or {}).get("appointment_letter")
+    usable, reason = appointment_link_state(appt)
+    if not usable:
+        status = 409 if appt and appt.get("status") == APPT_ACKNOWLEDGED else 404
+        raise HTTPException(status_code=status, detail=reason)
+
+    now = datetime.now(timezone.utc)
+    await get_collection(COL_CANDIDATES).update_one(
+        {"_id": doc["_id"], "appointment_letter.access_code": code},
+        {"$set": {
+            "appointment_letter.status": APPT_ACKNOWLEDGED,
+            "appointment_letter.acknowledged_at": now,
+            "appointment_letter.acknowledgement_note": (body.note or "").strip(),
+            "updated_at": now,
+        }})
+    await mark_used(code)
+    return {"message": "Thank you. Your acknowledgement has been recorded."}
+
+
 # ─── PUBLIC: offer ──────────────────────────────────────────────────────────────
 @router.get("/public/offers/{code}")
 async def public_offer(code: str, request: Request):
@@ -1770,6 +2042,7 @@ async def public_offer(code: str, request: Request):
         status = 409 if offer and offer.get("status") in OFFER_FINAL else 404
         raise HTTPException(status_code=status, detail=reason)
 
+    await track_open(code)
     return {
         "candidateName": doc.get("full_name") or "",
         "designation": offer.get("designation") or "",
@@ -1810,6 +2083,7 @@ async def public_offer_respond(code: str, body: OfferDecision, request: Request)
 
     await get_collection(COL_CANDIDATES).update_one(
         {"_id": doc["_id"], "offers.access_code": code}, {"$set": updates})
+    await mark_used(code)
 
     return {"message": "Thank you. Your response has been recorded."
             if body.accept else "Thank you for letting us know."}
@@ -1849,6 +2123,11 @@ async def invite_onboarding(uk: str, body: OnboardingInvite,
                                    "updated_at": datetime.now(timezone.utc)}})
     await log_activity(current_user, "Invite Onboarding", COL_CANDIDATES,
                        f"Onboarding invited for candidate {uk}")
+    await register_link(LINK_ONBOARDING, code=onboarding["access_code"], candidate_uk=uk,
+                        candidate_name=doc.get("full_name") or "",
+                        request_no=doc.get("request_no") or "",
+                        label="Onboarding / KYC",
+                        expires_on=onboarding.get("due_on"), actor=current_user)
     return {"accessCode": onboarding["access_code"]}
 
 
@@ -1995,6 +2274,7 @@ async def public_onboarding(code: str, request: Request):
         raise HTTPException(status_code=409,
                             detail="Your details have been received and confirmed.")
 
+    await track_open(code)
     return {
         "candidateName": doc.get("full_name") or "",
         "message": onb.get("message") or "",
@@ -2028,4 +2308,327 @@ async def public_onboarding_submit(code: str, body: OnboardingSubmission, reques
 
     await get_collection(COL_CANDIDATES).update_one(
         {"_id": doc["_id"], "onboarding.access_code": code}, {"$set": updates})
+    await mark_used(code)
     return {"message": "Thank you. Your details have been submitted."}
+
+
+# ─── Public link registry ───────────────────────────────────────────────────────
+@router.get("/links")
+async def list_links(
+    link_type: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    search: Optional[str] = Query(None),
+    current_user: dict = Depends(require_hrms_access),
+):
+    """Every public link issued, with its tracking. Never returns codes."""
+    _require(current_user, "recruitment", "read")
+    query = {}
+    if link_type:
+        query["link_type"] = link_type
+    if search:
+        rx = {"$regex": re.escape(search.strip()), "$options": "i"}
+        query["$or"] = [{"candidate_name": rx}, {"candidate_uk": rx},
+                        {"request_no": rx}, {"label": rx}]
+
+    docs = await get_collection(COL_LINKS).find(query).sort(
+        [("created_at", -1)]).to_list(2000)
+    rows = [serialize_link(d) for d in docs]
+    # Expired is derived from the date, so filter after serialising.
+    if status:
+        rows = [r for r in rows if r["status"] == status]
+
+    counts = {}
+    for r in rows:
+        counts[r["status"]] = counts.get(r["status"], 0) + 1
+
+    return {
+        "links": rows,
+        "stats": {"total": len(rows), **counts},
+        "linkTypes": LINK_TYPES,
+        "statuses": LINK_STATUSES,
+        "paths": LINK_PATHS,
+    }
+
+
+@router.post("/links/{link_id}/reveal")
+async def reveal_link(link_id: str, current_user: dict = Depends(require_hrms_access)):
+    """Return one link's code, and record who asked.
+
+    This is the deliberate exception to "no endpoint returns a code": it is a single link at a
+    time, it needs the update grant rather than mere read, and every reveal is written to the
+    link's audit trail BEFORE the code is handed over. The blanket ban stays in force for every
+    list and read endpoint, which is where the original vulnerability lived.
+    """
+    _require(current_user, "recruitment", "update")
+    try:
+        doc = await get_collection(COL_LINKS).find_one({"_id": ObjectId(link_id)})
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid link id")
+    if not doc:
+        raise HTTPException(status_code=404, detail="Link not found")
+    if link_effective_status(doc) == LINK_REVOKED:
+        raise HTTPException(status_code=409, detail="This link has been revoked.")
+
+    code = await resolve_code(doc)
+    if not code:
+        raise HTTPException(
+            status_code=404,
+            detail="This link no longer exists — it may have been regenerated.")
+
+    # Audit first: if this write fails the code is not handed over.
+    await record_reveal(doc, current_user)
+    await log_activity(current_user, "Reveal Link", COL_LINKS,
+                       f"{doc.get('link_type')} link revealed for {doc.get('candidate_uk') or doc.get('request_no')}")
+    return {"code": code, "path": LINK_PATHS.get(doc.get("link_type"), "")}
+
+
+@router.post("/links/{link_id}/revoke")
+async def revoke_link(link_id: str, current_user: dict = Depends(require_hrms_access)):
+    """Kill a link in the registry.
+
+    Registry-level only: it stops the link being revealed and marks it dead for reporting. The
+    underlying code is invalidated by regenerating whatever issued it, which is the operation
+    that actually rotates the secret.
+    """
+    _require(current_user, "recruitment", "update")
+    try:
+        doc = await get_collection(COL_LINKS).find_one({"_id": ObjectId(link_id)})
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid link id")
+    if not doc:
+        raise HTTPException(status_code=404, detail="Link not found")
+
+    now = datetime.now(timezone.utc)
+    await get_collection(COL_LINKS).update_one(
+        {"_id": doc["_id"]},
+        {"$set": {"status": LINK_REVOKED, "revoked_at": now, "updated_at": now,
+                  "revoked_by_name": current_user.get("full_name") or current_user.get("email")}})
+    await log_activity(current_user, "Revoke Link", COL_LINKS,
+                       f"{doc.get('link_type')} link revoked")
+    return serialize_link(await get_collection(COL_LINKS).find_one({"_id": doc["_id"]}))
+
+
+# ─── Recruitment analytics ──────────────────────────────────────────────────────
+@router.get("/recruitment/analytics")
+async def recruitment_analytics_report(
+    client_company_id: Optional[str] = Query(None),
+    request_no: Optional[str] = Query(None),
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+    current_user: dict = Depends(require_hrms_access),
+):
+    """Client-wise recruitment funnel and position-wise CV status.
+
+    Filters are all optional: no client means every client plus Sparsh's internal hiring, which
+    is the "all clients" view of the dashboard.
+    """
+    _require(current_user, "recruitment", "read")
+    report = await recruitment_analytics(client_company_id, request_no, date_from, date_to)
+    report["requisitions"] = await requisition_options(client_company_id)
+    return report
+
+
+# ─── Documentation ──────────────────────────────────────────────────────────────
+# Employee and candidate documents in one library. Permission follows the owner: employee
+# documents need the `hrms` grant, candidate documents the `recruitment` one, because the two
+# are read by different people and a recruiter has no business in employee personnel files.
+
+# Scans arrive as images as often as PDFs, so the document allow-list is wider than the CV one.
+# SVG stays out deliberately — see decode_upload's docstring on stored XSS.
+DOCUMENT_UPLOAD_TYPES = {
+    **ALLOWED_UPLOAD_TYPES,
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+}
+
+
+def _require_doc_access(user: dict, owner_type: str, action: str) -> None:
+    module = "hrms" if owner_type == DOC_OWNER_EMPLOYEE else "recruitment"
+    _require(user, module, action)
+
+
+@router.get("/documents")
+async def list_documents(
+    owner_type: Optional[str] = Query(None),
+    owner_id: Optional[str] = Query(None),
+    doc_type: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    search: Optional[str] = Query(None),
+    current_user: dict = Depends(require_hrms_access),
+):
+    """The document library, filtered.
+
+    A reader holding only one of the two grants sees only that side of the library rather than
+    being refused outright — a recruiter can work with candidate documents without the employee
+    grant.
+    """
+    can_employee = has_hrms_permission(current_user, "hrms", "read")
+    can_candidate = has_hrms_permission(current_user, "recruitment", "read")
+    if not (can_employee or can_candidate):
+        raise HTTPException(status_code=403,
+                            detail="You do not have permission to view documents.")
+
+    visible = ([DOC_OWNER_EMPLOYEE] if can_employee else []) + \
+              ([DOC_OWNER_CANDIDATE] if can_candidate else [])
+    query = {"owner_type": {"$in": visible}}
+    if owner_type:
+        if owner_type not in visible:
+            raise HTTPException(status_code=403,
+                                detail="You do not have permission for those documents.")
+        query["owner_type"] = owner_type
+    if owner_id:
+        query["owner_id"] = owner_id
+    if doc_type:
+        query["doc_type"] = doc_type
+    if search:
+        rx = {"$regex": re.escape(search.strip()), "$options": "i"}
+        query["$or"] = [{"title": rx}, {"doc_type": rx}, {"owner_name": rx},
+                        {"document_no": rx}, {"owner_id": rx}]
+
+    docs = await get_collection(COL_DOCUMENTS).find(query).sort(
+        [("created_at", -1)]).to_list(2000)
+    rows = [serialize_document(d) for d in docs]
+    # Status is derived (Expired comes from the date), so filter after serialising.
+    if status:
+        rows = [r for r in rows if r["status"] == status]
+
+    return {
+        "documents": rows,
+        "stats": await document_stats(query),
+        "docTypes": DOC_TYPES,
+        "statuses": DOC_STATUSES,
+    }
+
+
+@router.post("/documents")
+async def create_document(body: DocumentCreate,
+                          current_user: dict = Depends(require_hrms_access)):
+    """Register a document, with or without its file.
+
+    Registering without a file records it as Pending, which is how a required-but-missing
+    document is tracked — the review document's "document-wise status tracking".
+    """
+    payload = body.model_dump()
+    file_data = payload.pop("file", None)
+    try:
+        validate_document(payload)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    _require_doc_access(current_user, payload["owner_type"], "create")
+
+    upload = decode_upload(file_data, DOCUMENT_UPLOAD_TYPES)
+    now = datetime.now(timezone.utc)
+    document_no = await generate_document_no()
+    version = 1 if upload else 0
+    s3_key = store_document(upload["blob"], upload["extension"], upload["content_type"],
+                            document_no, version) if upload else ""
+
+    doc = {
+        **payload,
+        "document_no": document_no,
+        "owner_name": await resolve_owner_name(payload["owner_type"], payload["owner_id"]),
+        "status": DOC_UPLOADED if s3_key else DOC_PENDING,
+        "version": version,
+        "s3_key": s3_key,
+        "file_name": f"{payload['doc_type']}{upload['extension']}" if upload else "",
+        "history": [],
+        "uploaded_by": str(current_user["_id"]) if s3_key else "",
+        "uploaded_by_name": (current_user.get("full_name")
+                             or current_user.get("email")) if s3_key else "",
+        "uploaded_at": now if s3_key else None,
+        "created_by": str(current_user["_id"]),
+        "created_at": now,
+        "updated_at": now,
+    }
+    await get_collection(COL_DOCUMENTS).insert_one(doc)
+    await log_activity(current_user, "Add Document", COL_DOCUMENTS,
+                       f"{document_no}: {payload['doc_type']} for {payload['owner_id']}")
+    return serialize_document(doc)
+
+
+@router.patch("/documents/{document_id}")
+async def update_document(document_id: str, body: DocumentUpdate,
+                          current_user: dict = Depends(require_hrms_access)):
+    """Update a document's metadata, status, or file.
+
+    Supplying a file supersedes the previous one: the version goes up and the old key is kept
+    on `history`, so replacing the wrong scan stays recoverable.
+    """
+    col = get_collection(COL_DOCUMENTS)
+    try:
+        doc = await col.find_one({"_id": ObjectId(document_id)})
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid document id")
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+    _require_doc_access(current_user, doc.get("owner_type"), "update")
+
+    payload = {k: v for k, v in body.model_dump().items() if v is not None}
+    file_data = payload.pop("file", None)
+    if payload.get("status") and payload["status"] not in DOC_STATUSES:
+        raise HTTPException(status_code=400, detail=f"status must be one of {DOC_STATUSES}")
+
+    now = datetime.now(timezone.utc)
+    updates = {**payload, "updated_at": now}
+    push = {}
+
+    upload = decode_upload(file_data, DOCUMENT_UPLOAD_TYPES)
+    if upload:
+        version = int(doc.get("version") or 0) + 1
+        key = store_document(upload["blob"], upload["extension"], upload["content_type"],
+                             doc.get("document_no") or document_id, version)
+        if not key:
+            raise HTTPException(status_code=502, detail="The file could not be stored.")
+        if doc.get("s3_key"):
+            push["history"] = {
+                "version": doc.get("version"), "s3_key": doc.get("s3_key"),
+                "file_name": doc.get("file_name") or "", "replaced_at": now,
+            }
+        updates.update({
+            "s3_key": key,
+            "version": version,
+            "file_name": f"{doc.get('doc_type') or 'document'}{upload['extension']}",
+            "uploaded_by": str(current_user["_id"]),
+            "uploaded_by_name": current_user.get("full_name") or current_user.get("email"),
+            "uploaded_at": now,
+        })
+        # A replacement supersedes any earlier verdict — the new file has not been checked yet,
+        # unless this same call explicitly sets a status.
+        if payload.get("status") is None:
+            updates["status"] = DOC_UPLOADED
+
+    if updates.get("status") == DOC_VERIFIED:
+        updates["verified_by"] = str(current_user["_id"])
+        updates["verified_by_name"] = current_user.get("full_name") or current_user.get("email")
+        updates["verified_at"] = now
+
+    mongo_update = {"$set": updates}
+    if push:
+        mongo_update["$push"] = push
+    await col.update_one({"_id": doc["_id"]}, mongo_update)
+
+    await log_activity(current_user, "Update Document", COL_DOCUMENTS,
+                       f"{doc.get('document_no')} updated")
+    return serialize_document(await col.find_one({"_id": doc["_id"]}))
+
+
+@router.get("/documents/{document_id}/download")
+async def download_document(document_id: str,
+                            current_user: dict = Depends(require_hrms_access)):
+    """A short-lived signed URL for one document.
+
+    Mirrors the attendance-selfie route: the object is never public and the URL expires, so a
+    link that leaks is not a permanent grant.
+    """
+    try:
+        doc = await get_collection(COL_DOCUMENTS).find_one({"_id": ObjectId(document_id)})
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid document id")
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+    _require_doc_access(current_user, doc.get("owner_type"), "read")
+
+    url = signed_download_url(doc)
+    if not url:
+        raise HTTPException(status_code=404, detail="No file has been uploaded yet.")
+    return {"url": url, "fileName": doc.get("file_name") or ""}

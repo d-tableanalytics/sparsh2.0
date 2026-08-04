@@ -23,7 +23,7 @@ from app.models.hrms import (
     COL_ATTENDANCE, COL_LEAVES, COL_LEAVE_BALANCES,
     COL_PAYROLL_RUNS, COL_PAYSLIPS,
     COL_REQUISITIONS, COL_JDS, COL_POSTINGS, COL_CANDIDATES,
-    COL_EXIT_DOCUMENTS,
+    COL_EXIT_DOCUMENTS, COL_DOCUMENTS, COL_LINKS,
 )
 
 logger = logging.getLogger(__name__)
@@ -65,6 +65,10 @@ INDEX_PLAN = [
 
     (COL_REQUISITIONS, [("request_no", ASCENDING)], {"unique": True, "name": "uq_requisition_no"}),
     (COL_REQUISITIONS, [("closing_status", ASCENDING)], {"name": "ix_requisition_status"}),
+    # Client-wise recruitment reporting filters on this; sparse because an internal Sparsh
+    # hire legitimately has no client.
+    (COL_REQUISITIONS, [("client_company_id", ASCENDING)],
+     {"name": "ix_requisition_client", "sparse": True}),
 
     (COL_JDS, [("jd_no", ASCENDING)], {"unique": True, "name": "uq_jd_no"}),
     (COL_POSTINGS, [("public_code", ASCENDING)], {"unique": True, "name": "uq_posting_code"}),
@@ -72,8 +76,27 @@ INDEX_PLAN = [
     (COL_CANDIDATES, [("uk", ASCENDING)], {"unique": True, "name": "uq_candidate_uk"}),
     (COL_CANDIDATES, [("stage", ASCENDING)], {"name": "ix_candidate_stage"}),
     (COL_CANDIDATES, [("request_no", ASCENDING)], {"name": "ix_candidate_requisition"}),
+    # Backs the client-wise recruitment analytics aggregation, which groups by client and
+    # filters on the application date.
+    (COL_CANDIDATES, [("client_company_id", ASCENDING), ("created_at", DESCENDING)],
+     {"name": "ix_candidate_client_date", "sparse": True}),
 
     (COL_EXIT_DOCUMENTS, [("employee_code", ASCENDING)], {"name": "ix_exit_docs_employee"}),
+
+    # Document library: the two ways it is read — everything for one person, and the whole
+    # library newest-first.
+    (COL_DOCUMENTS, [("owner_type", ASCENDING), ("owner_id", ASCENDING)],
+     {"name": "ix_documents_owner"}),
+    (COL_DOCUMENTS, [("document_no", ASCENDING)],
+     {"unique": True, "name": "uq_document_no"}),
+    (COL_DOCUMENTS, [("created_at", DESCENDING)], {"name": "ix_documents_created"}),
+
+    # Link registry: code_ref is how every tracking write finds its row, so it carries the
+    # load and must be unique — one registry row per issued link.
+    (COL_LINKS, [("code_ref", ASCENDING)], {"unique": True, "name": "uq_link_code_ref"}),
+    (COL_LINKS, [("link_type", ASCENDING), ("created_at", DESCENDING)],
+     {"name": "ix_links_type_created"}),
+    (COL_LINKS, [("candidate_uk", ASCENDING)], {"name": "ix_links_candidate"}),
 ]
 
 

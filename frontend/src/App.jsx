@@ -46,6 +46,25 @@ import DeletedTasks from './pages/DeletedTasks';
 import ForgotPassword from './pages/ForgotPassword';
 import PrivateRoute from './components/common/PrivateRoute';
 import RequireTaskAccess from './components/common/RequireTaskAccess';
+import RequireHrmsAccess from './components/common/RequireHrmsAccess';
+import HrmsDashboard from './pages/HRMS/HrmsDashboard';
+import Employees from './pages/HRMS/Employees';
+import EmployeeProfile from './pages/HRMS/EmployeeProfile';
+import OrgStructure from './pages/HRMS/OrgStructure';
+import Attendance from './pages/HRMS/Attendance';
+import Leave from './pages/HRMS/Leave';
+import Payroll from './pages/HRMS/Payroll';
+import Documentation from './pages/HRMS/Documentation';
+import RecruitmentAnalytics from './pages/HRMS/RecruitmentAnalytics';
+import LinksRegistry from './pages/HRMS/LinksRegistry';
+import HrmsSettings from './pages/HRMS/HrmsSettings';
+import Requisitions from './pages/HRMS/Requisitions';
+import Candidates from './pages/HRMS/Candidates';
+import PublicApply from './pages/HRMS/PublicApply';
+import PublicAssessment from './pages/HRMS/PublicAssessment';
+import PublicOffer from './pages/HRMS/PublicOffer';
+import PublicAppointment from './pages/HRMS/PublicAppointment';
+import PublicOnboarding from './pages/HRMS/PublicOnboarding';
 import ModulePlaceholder from './features/tpms/common/ModulePlaceholder';
 import AdminView from './features/tpms/admin/pages/AdminView';
 import OmSmopsView from './features/tpms/admin/pages/OmSmopsView';
@@ -124,6 +143,7 @@ const AppRoutes = () => {
       <Route path="/apply/:code" element={<PublicApply />} />
       <Route path="/assess/:code" element={<PublicAssessment />} />
       <Route path="/offer/:code" element={<PublicOffer />} />
+      <Route path="/appointment/:code" element={<PublicAppointment />} />
       <Route path="/onboarding/:code" element={<PublicOnboarding />} />
 
       <Route path="/" element={<PrivateRoute><Dashboard /></PrivateRoute>} />
@@ -170,6 +190,11 @@ const AppRoutes = () => {
       <Route path="/hrms/payroll" element={<PrivateRoute><RequireHrmsAccess><Payroll /></RequireHrmsAccess></PrivateRoute>} />
       {/* Settings spans payroll + attendance + leave; ungated at the route (like the sections it
           configures) and each tab's Save is gated by its own permission inside the page. */}
+      {/* Documentation spans employees and candidates; the module gate is enough here because
+          the server picks the right permission per document from its owner type. */}
+      <Route path="/hrms/documents" element={<PrivateRoute><RequireHrmsAccess><Documentation /></RequireHrmsAccess></PrivateRoute>} />
+      <Route path="/hrms/analytics" element={<PrivateRoute><RequireHrmsAccess module="recruitment"><RecruitmentAnalytics /></RequireHrmsAccess></PrivateRoute>} />
+      <Route path="/hrms/links" element={<PrivateRoute><RequireHrmsAccess module="recruitment"><LinksRegistry /></RequireHrmsAccess></PrivateRoute>} />
       <Route path="/hrms/settings" element={<PrivateRoute><RequireHrmsAccess><HrmsSettings /></RequireHrmsAccess></PrivateRoute>} />
       <Route path="/hrms/recruitment" element={<PrivateRoute><RequireHrmsAccess module="recruitment"><Requisitions /></RequireHrmsAccess></PrivateRoute>} />
       <Route path="/hrms/candidates" element={<PrivateRoute><RequireHrmsAccess module="recruitment"><Candidates /></RequireHrmsAccess></PrivateRoute>} />

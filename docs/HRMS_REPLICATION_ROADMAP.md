@@ -551,3 +551,55 @@ Rough, for sequencing rather than commitment.
 | 9 Insight | M | M | **M** |
 
 Phases 1 and 6 dominate. Phases 0 and 8 are small enough to bundle with a neighbour.
+
+---
+
+## 12. Link generation — how the public links work
+
+The HRMS issues five kinds of public link. Each one lets an unauthenticated person do exactly
+one thing, and nothing else.
+
+| Link | Issued when | Public route | Spent when |
+|---|---|---|---|
+| Job posting | A requisition is published to a platform | `/apply/:code` | Never — many people apply through one posting |
+| Assessment | HR sends a written assessment | `/assess/:code` | The candidate submits answers |
+| Offer | HR sends an offer | `/offer/:code` | The candidate accepts or declines |
+| Appointment letter | HR generates the letter | `/appointment/:code` | The candidate acknowledges |
+| Onboarding / KYC | HR invites a joiner | `/onboarding/:code` | The joiner submits their details |
+
+### How a code is generated
+
+`public_guard.public_token()` — `secrets.token_urlsafe(16)`, so 128 bits of cryptographic
+randomness. Codes are never sequential, never derived from a candidate id, and never guessable
+from a neighbouring one.
+
+The code is stored on the document it belongs to: `public_code` on the posting, `access_code`
+inside the relevant `assessments` / `offers` / `appointment_letter` / `onboarding` sub-document
+on the candidate. That is the single copy.
+
+### Where they are tracked
+
+Issuing a link also writes a row to `hrms_links` (see `services/hrms_link_service.py`). That row
+is a **pointer plus tracking**, not a second copy of the secret — it records the type, who
+created it, expiry, open count, first/last open, whether it has been spent, and the reveal audit
+trail. Every public GET calls `track_open`; every completing POST calls `mark_used`. Both are
+best-effort: tracking must never stop a candidate opening their own offer.
+
+### How HR gets a link back
+
+Codes are deliberately **not** returned by any list or read endpoint. That rule exists because
+the reference project returned every candidate's access code to any logged-in user, which its
+own audit rated critical.
+
+To retrieve one, HRMS ▸ Links offers a per-link **Reveal**, which:
+
+1. requires the `recruitment.update` grant (not merely read),
+2. re-reads the code from the document that actually holds it, so a regenerated link can never
+   be revealed as its stale predecessor,
+3. writes the reveal to the link's audit trail **before** returning the code — if that write
+   fails, the code is not handed over,
+4. returns exactly one code, for one link.
+
+Revoking marks the registry row dead so it can no longer be revealed. To rotate the secret
+itself, regenerate whatever issued it — generating a new appointment letter, for example, mints
+a fresh code and supersedes the old link.
