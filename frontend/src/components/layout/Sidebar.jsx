@@ -17,7 +17,10 @@ import logo2 from '../../assets/Sparsh Magic  Logo PNG2.png';
 import logo3 from '../../assets/Sparsh Magic white  Logo PNG3.png';
 import { useTheme } from '../../context/ThemeContext';
 
-const Sidebar = ({ isMobileOpen, setIsMobileOpen }) => {
+// `onWidthChange` lets the page layout reserve exactly as much room as the sidebar currently
+// occupies. Without it the rail reserved a fixed 72px while the sidebar expanded to 240px on
+// hover, so the expanded panel sat on top of the page content (see PrivateRoute).
+const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
   const { user, logout } = useAuth();
   const { theme } = useTheme();
   const location = useLocation();
@@ -162,6 +165,12 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen }) => {
   });
 
   const sidebarWidth = isMobile ? 240 : (isCollapsed ? 72 : 240);
+
+  // Report the rail width the layout should reserve. On mobile the sidebar is an off-canvas
+  // overlay with its own backdrop, so it reserves nothing.
+  useEffect(() => {
+    onWidthChange?.(isMobile ? 0 : sidebarWidth);
+  }, [sidebarWidth, isMobile, onWidthChange]);
 
   // Auto-expand whichever dropdown group owns the current route.
   useEffect(() => {

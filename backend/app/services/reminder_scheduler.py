@@ -167,9 +167,14 @@ async def check_and_trigger_reminders():
                     await col.update_one({"_id": event["_id"]}, {"$set": {"reminders": reminders}})
                 continue
 
-            event_time_str = event.get("start")
+            # A task's/todo's offset is measured from its DUE date (`end`), an event's from
+            # when it starts (`start`) — see get_reminder_anchor. Reading `start` directly here
+            # meant a task's "1 hour before" resolved against its recurrence anchor, which is
+            # normally already in the past, so the reminder fired on the next 60s tick instead
+            # of an hour before the deadline.
+            event_time_str = get_reminder_anchor(event)
             if not event_time_str: continue
-            
+
             try:
                 # Robust ISO parsing
                 clean_time = event_time_str.replace("Z", "+00:00").replace(" ", "T")

@@ -97,7 +97,7 @@ const SmopsEmployeeTask = () => {
     <div className="space-y-5">
       <DashboardHero icon={Users} title="Company Employees — Task Activity" highlight={data?.company || 'All Companies'} subtitle="Per-employee task completion & scoring">
         {canPickCompany && <HeaderSelect value={companyId} onChange={setCompanyId} options={companyOpts} />}
-        <HeaderSelect value={period} onChange={setPeriod} options={periodOpts} />
+        <HeaderSelect value={period} onChange={setPeriod} options={periodOpts} searchable={false} />
         <HeaderSelect value={member} onChange={setMember} options={memberOpts} />
         <HeaderSelect value={designation} onChange={setDesignation} options={designationOpts} />
         <HeaderSelect value={scheduledBy} onChange={setScheduledBy} options={scheduledByOpts} />

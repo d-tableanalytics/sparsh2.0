@@ -194,7 +194,7 @@ const ClientDashboard = () => {
           </div>
           {/* Shared hero select — the rest of the TPMS headers use this; this page was the
               only one hand-rolling its own, which is how it drifted out of theme. */}
-          <HeaderSelect value={month} onChange={setMonth} options={months} />
+          <HeaderSelect value={month} onChange={setMonth} options={months} searchable={false} />
         </div>
       </div>
 

@@ -18,6 +18,7 @@ import { useNotification } from '../../context/NotificationContext';
 import { STATUS_CONFIG, REASON_REQUIRED_STATUSES } from './statusConfig';
 import { getInitials, formatFrequencyLabel, formatDate, formatDateTime } from './taskDisplayUtils';
 import TaskFormModal from './TaskFormModal';
+import { describeReminder } from '../calendar/ReminderModal';
 import MiniDatePicker from './MiniDatePicker';
 import StatusReasonModal from './StatusReasonModal';
 import AttachmentItem from './AttachmentItem';
@@ -682,6 +683,33 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, scope, onChanged, onEdit })
                             <TagsIcon size={10} /> {tag}
                           </span>
                         ))}
+                      </div>
+                    ) : (
+                      <p className="text-[12px] font-bold text-[var(--text-main)]">—</p>
+                    )}
+                  </div>
+                  {/* Reminders — read-only. Saved by the task form onto the event doc; the
+                      detail response now carries them back (tasks.py _serialize_task_detail).
+                      Described via describeReminder so this reads identically to the editor. */}
+                  <div>
+                    <p className="text-[9px] font-black text-[var(--text-muted)] uppercase mb-1.5">Reminders</p>
+                    {(task.reminders || []).length > 0 ? (
+                      <div className="flex flex-col gap-1.5">
+                        {task.reminders.map((r, i) => {
+                          const { when, channel } = describeReminder(r);
+                          return (
+                            <div key={r.id || i}
+                              className="flex items-center gap-2 px-2.5 py-1.5 rounded-xl bg-[var(--bg-card)] border border-[var(--border)]">
+                              <Bell size={12} className="text-[var(--accent-indigo)] shrink-0" />
+                              <span className="text-[11px] font-bold text-[var(--text-main)]">{when}</span>
+                              <span className="text-[10px] font-semibold text-[var(--text-muted)]">· {channel}</span>
+                              {r.sent && (
+                                <span className="ml-auto text-[9px] font-black uppercase tracking-wider"
+                                  style={{ color: 'var(--status-active-text)' }}>Sent</span>
+                              )}
+                            </div>
+                          );
+                        })}
                       </div>
                     ) : (
                       <p className="text-[12px] font-bold text-[var(--text-main)]">—</p>

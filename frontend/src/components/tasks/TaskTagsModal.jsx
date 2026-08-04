@@ -20,7 +20,11 @@ const TaskTagsModal = ({ isOpen, onClose, tags = [], selected = [], onApply }) =
 
   if (!isOpen) return null;
 
-  const allTags = Array.from(new Set([...tags, ...selected]));
+  // `pending` has to be part of this list, not just `tags` + `selected`: a tag the user has
+  // just typed exists ONLY in pending, so leaving it out meant the new tag was added to the
+  // selection but never rendered — it looked like nothing happened, and it could not be
+  // deselected. It is still persisted on Apply (see TaskFormModal.handleTagsApply).
+  const allTags = Array.from(new Set([...tags, ...selected, ...pending]));
 
   const toggle = (tag) => {
     setPending(p => (p.includes(tag) ? p.filter(t => t !== tag) : [...p, tag]));
@@ -29,7 +33,12 @@ const TaskTagsModal = ({ isOpen, onClose, tags = [], selected = [], onApply }) =
   const handleAddNew = () => {
     const name = newTag.trim();
     if (!name) return;
-    toggle(name);
+    // Match the backend's case-insensitive get-or-create (task_meta.ensure_name), so typing
+    // "Urgent" when "urgent" exists selects the existing tag instead of creating a near-
+    // duplicate that the server would collapse anyway.
+    const existing = allTags.find(t => t.toLowerCase() === name.toLowerCase());
+    const canonical = existing || name;
+    if (!pending.includes(canonical)) toggle(canonical);
     setNewTag('');
     setAddingNew(false);
   };

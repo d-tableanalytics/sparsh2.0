@@ -3,6 +3,8 @@ import React from 'react';
 import { TrendingUp, TrendingDown, Minus } from 'lucide-react';
 import { motion } from 'framer-motion';
 
+import { StyledSelect } from '../../../components/common/StyledSelect';
+
 /* Shared entrance transition for cards/sections — subtle fade + rise. */
 const RISE = { initial: { opacity: 0, y: 10 }, animate: { opacity: 1, y: 0 }, transition: { duration: 0.28, ease: [0.4, 0, 0.2, 1] } };
 
@@ -139,34 +141,24 @@ export const Td = ({ children, align, className = '' }) => (
   <td className={`px-4 py-3.5 text-[12.5px] ${align === 'right' ? 'text-right' : align === 'center' ? 'text-center' : 'text-left'} ${className}`}>{children}</td>
 );
 
-/** White pill <select> for the gradient hero header. */
-/**
- * Options accept either plain strings (`['All OMs', 'A. Nair']`) or `{id, name}`
- * objects, so a select can submit an id while displaying a label. Mixing is fine —
- * pages backed by the API pass objects, static ones keep passing strings.
- */
-const normaliseOptions = (options = []) =>
-  options.map((o) => (typeof o === 'object' && o !== null
-    ? { value: String(o.id ?? o.value ?? ''), label: String(o.name ?? o.label ?? o.id ?? '') }
-    : { value: String(o), label: String(o) }));
+/* The dropdown itself lives in components/common/StyledSelect.jsx — Task & Delegation uses
+   the same control, so it cannot live inside a TPMS feature folder. HeaderSelect and
+   FilterSelect stay here as the TPMS-flavoured pills around it.
 
-/* Theme tokens rather than a hard-coded white pill: the option list inherits the select's
-   colours, so a fixed `bg-white` + dark text renders unreadable entries once the browser
-   paints the popup in the dark scheme. --bg-card is white in light mode (unchanged look on
-   the gradient hero) and card-navy in dark, and both stay legible against --text-main. */
-export const HeaderSelect = ({ value, onChange, options }) => (
-  <select value={value} onChange={(e) => onChange(e.target.value)}
-    className="px-3 py-2 rounded-lg bg-[var(--bg-card)] text-[var(--text-main)] text-[12.5px] font-bold outline-none border border-[var(--border)] shadow-sm hover:opacity-90 transition-opacity cursor-pointer">
-    {normaliseOptions(options).map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-  </select>
+   Options accept either plain strings (`['All OMs', 'A. Nair']`) or `{id, name}` objects, so
+   a select can submit an id while displaying a label. Mixing is fine — pages backed by the
+   API pass objects, static ones keep passing strings. */
+
+/** White pill for the gradient hero header. */
+export const HeaderSelect = (props) => (
+  <StyledSelect {...props}
+    className="min-w-0 max-w-full flex items-center justify-between gap-2 px-3 py-2 rounded-lg bg-[var(--bg-card)] text-[var(--text-main)] text-[12.5px] font-bold outline-none border border-[var(--border)] shadow-sm hover:opacity-90 transition-opacity cursor-pointer" />
 );
 
-/** Plain pill <select> for in-card filter rows. */
-export const FilterSelect = ({ value, onChange, options }) => (
-  <select value={value} onChange={(e) => onChange(e.target.value)}
-    className="px-3 py-2 rounded-lg bg-[var(--input-bg)] border border-[var(--input-border)] text-[12.5px] font-bold outline-none focus:border-[var(--accent-indigo)] cursor-pointer">
-    {normaliseOptions(options).map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-  </select>
+/** Plain pill for in-card filter rows. */
+export const FilterSelect = (props) => (
+  <StyledSelect {...props}
+    className="min-w-0 max-w-full flex items-center justify-between gap-2 px-3 py-2 rounded-lg bg-[var(--input-bg)] border border-[var(--input-border)] text-[var(--text-main)] text-[12.5px] font-bold outline-none focus:border-[var(--accent-indigo)] cursor-pointer" />
 );
 
 /** Reusable table shell so every table shares the same header/zebra/hover styling. */

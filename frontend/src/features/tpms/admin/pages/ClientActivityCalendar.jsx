@@ -342,7 +342,7 @@ const ClientActivityCalendar = () => {
       <div className="rounded-2xl border border-[var(--border)] bg-[var(--bg-card)] shadow-sm overflow-hidden">
         {/* ── Filter row ── */}
         <div className="flex flex-wrap items-center gap-2.5 px-4 py-3 border-b border-[var(--border)]">
-          <FilterSelect value={periodValue} onChange={onPeriodChange} options={periodOptions} />
+          <FilterSelect value={periodValue} onChange={onPeriodChange} options={periodOptions} searchable={false} />
           <FilterSelect value={fCompany} onChange={setFCompany}
             options={[{ id: '', name: mastersLoading ? 'Loading clients…' : 'All Clients' }, ...companyOptions]} />
           <FilterSelect value={fHod} onChange={setFHod}

@@ -138,7 +138,7 @@ const EmployeeTasks = () => {
       {/* Hero */}
       <DashboardHero icon={Users} title="Company Employees — Task Activity" subtitle="Per-employee task completion & scoring">
         {canPick && <HeaderSelect value={company} onChange={setCompany} options={companyOpts} />}
-        <HeaderSelect value={period} onChange={setPeriod} options={months} />
+        <HeaderSelect value={period} onChange={setPeriod} options={months} searchable={false} />
         <HeaderSelect value={member} onChange={setMember} options={memberOpts} />
         <HeaderSelect value={designation} onChange={setDesignation} options={designationOpts} />
         <HeaderSelect value={scheduledBy} onChange={setScheduledBy} options={scheduledByOpts} />

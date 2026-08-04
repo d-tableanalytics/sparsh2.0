@@ -20,6 +20,7 @@ import TaskDetailsModal from './TaskDetailsModal';
 import StatusReasonModal from './StatusReasonModal';
 import MiniDatePicker from './MiniDatePicker';
 import { motion } from 'framer-motion';
+import { SelectField } from '../common/StyledSelect';
 
 // One row in the card/list view. Extracted so both a standalone task and a recurring
 // series' primary occurrence render identically; `groupBadge` adds the "×N / expand" control
@@ -522,10 +523,8 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
               </button>
             </div>
 
-            <select value={sortKey} onChange={e => setSortKey(e.target.value)}
-              className="px-3 py-2.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-xl text-[12px] font-bold outline-none">
-              {SORT_OPTIONS.map(o => <option key={o.key} value={o.key}>{o.label}</option>)}
-            </select>
+            <SelectField value={sortKey} onChange={setSortKey}
+              options={SORT_OPTIONS.map(o => ({ id: o.key, name: o.label }))} />
             <button onClick={() => setSortDir(d => (d === 'asc' ? 'desc' : 'asc'))} title="Toggle sort direction"
               className="p-2.5 rounded-xl bg-[var(--input-bg)] border border-[var(--border)] text-[var(--text-muted)] hover:text-[var(--text-main)] transition-all">
               <ArrowUpDown size={15} />
@@ -534,26 +533,16 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
 
           {filtersOpen && (
             <div className="flex flex-wrap items-center gap-3 bg-[var(--bg-card)] border border-[var(--border)] rounded-2xl p-4">
-              <select value={assignedTo} onChange={e => setAssignedTo(e.target.value)}
-                className="px-3 py-2.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-xl text-[12px] font-bold outline-none">
-                <option value="">Assigned To</option>
-                {users.map(u => <option key={u._id} value={u._id}>{u.full_name || u.email}</option>)}
-              </select>
-              <select value={category} onChange={e => setCategory(e.target.value)}
-                className="px-3 py-2.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-xl text-[12px] font-bold outline-none">
-                <option value="">Category</option>
-                {categories.map(c => <option key={c} value={c}>{c}</option>)}
-              </select>
-              <select value={tag} onChange={e => setTag(e.target.value)}
-                className="px-3 py-2.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-xl text-[12px] font-bold outline-none">
-                <option value="">Tag</option>
-                {tagOptions.map(t => <option key={t} value={t}>{t}</option>)}
-              </select>
-              <select value={frequency} onChange={e => setFrequency(e.target.value)}
-                className="px-3 py-2.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-xl text-[12px] font-bold outline-none">
-                <option value="">Frequency</option>
-                {['Does not repeat', 'Daily', 'Weekly', 'Monthly', 'Yearly'].map(f => <option key={f} value={f}>{f}</option>)}
-              </select>
+              <SelectField value={assignedTo} onChange={setAssignedTo}
+                options={[{ id: '', name: 'Assigned To' },
+                          ...users.map(u => ({ id: u._id, name: u.full_name || u.email }))]} />
+              <SelectField value={category} onChange={setCategory}
+                options={[{ id: '', name: 'Category' }, ...categories.map(c => ({ id: c, name: c }))]} />
+              <SelectField value={tag} onChange={setTag}
+                options={[{ id: '', name: 'Tag' }, ...tagOptions.map(t => ({ id: t, name: t }))]} />
+              <SelectField value={frequency} onChange={setFrequency}
+                options={[{ id: '', name: 'Frequency' },
+                          ...['Does not repeat', 'Daily', 'Weekly', 'Monthly', 'Yearly'].map(f => ({ id: f, name: f }))]} />
               {hasActiveFilters && (
                 <button onClick={clearFilters} className="flex items-center gap-1.5 px-4 py-2.5 rounded-xl text-[11px] font-black uppercase tracking-widest text-[var(--text-muted)] border border-[var(--border)] hover:bg-[var(--input-bg)]">
                   <X size={13} /> Clear

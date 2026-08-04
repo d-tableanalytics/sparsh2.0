@@ -208,7 +208,7 @@ const HodView = () => {
           <PresetChip active={!range && period === thisMonth} onClick={() => { setRange(null); setPeriod(thisMonth); }}>This Month</PresetChip>
           <PresetChip active={!range && period === lastMonth} onClick={() => { setRange(null); setPeriod(lastMonth); }}>Last Month</PresetChip>
           <PresetChip active={!!range} onClick={() => setRange(quarter)}>This Quarter</PresetChip>
-          <HeaderSelect value={period} onChange={(v) => { setRange(null); setPeriod(v); }} options={months} />
+          <HeaderSelect value={period} onChange={(v) => { setRange(null); setPeriod(v); }} options={months} searchable={false} />
         </div>
         <HeroButton icon={RefreshCw} onClick={load}>Refresh</HeroButton>
       </DashboardHero>

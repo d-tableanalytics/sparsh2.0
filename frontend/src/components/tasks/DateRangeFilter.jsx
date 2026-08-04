@@ -1,4 +1,5 @@
 import React from 'react';
+import { SelectField } from '../common/StyledSelect';
 
 // Matches the `period` values accepted by GET /api/tasks/dashboard (backend/app/routes/tasks.py::_period_to_range)
 // eslint-disable-next-line react-refresh/only-export-components
@@ -18,10 +19,8 @@ const DateRangeFilter = ({ period, onPeriodChange, startDate, endDate, onCustomC
   if (variant === 'dropdown') {
     return (
       <div className="flex items-center gap-2">
-        <select value={period} onChange={e => onPeriodChange(e.target.value)}
-          className="px-3 py-2.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-xl text-[12px] font-bold outline-none">
-          {PERIODS.map(p => <option key={p.key} value={p.key}>{p.label}</option>)}
-        </select>
+        <SelectField value={period} onChange={onPeriodChange} searchable={false}
+          options={PERIODS.map(p => ({ id: p.key, name: p.label }))} />
         {period === 'custom' && (
           <>
             <input type="date" value={startDate} onChange={e => onCustomChange('startDate', e.target.value)}

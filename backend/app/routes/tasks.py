@@ -370,6 +370,10 @@ def _serialize_task_detail(doc: dict, current_user_id: str) -> dict:
         "deadlineHistory": doc.get("deadline_history") or [],
         "followUps": doc.get("follow_ups") or [],
         "followUpCount": len(doc.get("follow_ups") or []),
+        # Reminders are written by the task form (POST /calendar/events stores them on the
+        # event doc) but the detail response never carried them back, so the View screen had
+        # nothing to render. Read-side only — the write path is unchanged.
+        "reminders": doc.get("reminders") or [],
     })
     return base
 
@@ -580,8 +584,22 @@ async def list_tasks(
     startDate: Optional[str] = None,
     endDate: Optional[str] = None,
     groupId: Optional[str] = None,
+    skip: int = Query(0, ge=0),
+    limit: Optional[int] = Query(None, ge=1, le=200),
     current_user: dict = Depends(require_task_access),
 ):
+    """Tasks for a scope.
+
+    Pagination is OPT-IN via `limit`, and that is deliberate rather than a half-migration:
+    the dashboard's chart panels aggregate over the whole result set (totals, donuts, the
+    monthly report), so forcing a page on them would silently make every chart wrong. Callers
+    that render a LIST pass skip/limit and get `{tasks, total}`; callers that AGGREGATE omit
+    limit and get the plain array they always got.
+
+    The slice happens after the merge/sort rather than in the query because `_fetch_tasks`
+    unions several collections and orders the combined result in Python — a per-collection
+    skip/limit would page each one independently and interleave them wrongly.
+    """
     start_iso, end_iso = _period_to_range(period, startDate, endDate)
     docs = await _fetch_tasks(current_user, scope, category, tag, frequency, assignedTo, search, start_iso, end_iso, groupId)
     user_id = str(current_user["_id"])
@@ -590,7 +608,17 @@ async def list_tasks(
     report_ids = set(await _direct_report_ids(current_user))
     # Resolved once for the same reason as report_ids — the rows only need a string compare.
     admin_company_id = company_admin_company_id(current_user)
-    return [_serialize_task(d, user_id, report_ids, admin_company_id) for d in docs]
+
+    if limit is None:
+        return [_serialize_task(d, user_id, report_ids, admin_company_id) for d in docs]
+
+    total = len(docs)
+    # Serialize only the page — the expensive per-row work is skipped for everything else.
+    page = docs[skip:skip + limit]
+    return {
+        "tasks": [_serialize_task(d, user_id, report_ids, admin_company_id) for d in page],
+        "total": total,
+    }
 
 
 # Actions written to `activity_logs` that represent task lifecycle events (see log_activity
