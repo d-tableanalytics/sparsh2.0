@@ -396,7 +396,7 @@ const CalendarPage = () => {
         additional_details: '', category: 'General', repeat: 'Does not repeat',
         repeat_end_date: '', repeat_interval: 1, repeat_data: { ...EMPTY_REPEAT_DATA },
         assigned_to: 'myself', target_staff_id: [],
-        reminders: [], status_remark: '', gpt_projects: []
+        reminders: [], status_remark: '', gpt_projects: [], created_at: null
     };
 
     const navigate = useNavigate();
@@ -465,6 +465,20 @@ const CalendarPage = () => {
             weekday: 'long', day: 'numeric', month: 'long', year: 'numeric',
             ...(allDay ? {} : { hour: '2-digit', minute: '2-digit', hour12: true }),
         });
+    };
+
+    // Creation timestamp for the Personal Todo header — e.g. "Tue, Aug 03, 2026 at 09:48 PM".
+    // Rendered in the user's OWN local timezone (exactly like the Due date above), so the date
+    // shown always equals the calendar date the todo was actually created on. Forcing a fixed
+    // zone (Asia/Kolkata) rolled a late-evening creation to the NEXT day for anyone whose clock
+    // isn't IST — that was the off-by-one. Captured when the modal opens and then frozen.
+    const formatCreatedLocal = (iso) => {
+        if (!iso) return "";
+        const d = new Date(iso);
+        if (isNaN(d.getTime())) return "";
+        const datePart = d.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: '2-digit', year: 'numeric' });
+        const timePart = d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', hour12: true });
+        return `${datePart} at ${timePart}`;
     };
 
     const formatTodoShort = (dateStr, allDay) => {
@@ -680,7 +694,9 @@ const CalendarPage = () => {
             const base = summaryDate ? new Date(`${summaryDate}T00:00:00`) : new Date();
             base.setHours(23, 59, 59, 0);
             const iso = base.toISOString();
-            setEventForm({ ...initialForm, type, start: iso, end: iso, all_day: false });
+            // Freeze the moment the todo modal opens — shown as the "Created" timestamp in the
+            // header. This is independent of the Due date/time and never changes afterwards.
+            setEventForm({ ...initialForm, type, start: iso, end: iso, all_day: false, created_at: new Date().toISOString() });
         } else {
             setEventForm({ ...initialForm, type, start: summaryDate, end: summaryDate });
         }
@@ -712,7 +728,8 @@ const CalendarPage = () => {
             gpt_projects: props.gpt_projects || [],
             completed_at: props.completed_at || null,
             isCreator: props.isCreator,
-            isAssigned: props.isAssigned
+            isAssigned: props.isAssigned,
+            created_at: props.created_at || null
         });
 
         setShowModal(true);
@@ -1230,7 +1247,7 @@ const CalendarPage = () => {
                                             <Lock size={10} /> Read-Only Access
                                         </div>
                                     )}
-                                    <button onClick={() => setShowModal(false)} className="p-2 text-[var(--text-muted)] hover:bg-gray-800 rounded-full transition-all"> <X size={20} /> </button>
+                                    <button onClick={() => setShowModal(false)} className="p-2 text-[var(--text-muted)] hover:text-[var(--text-main)] rounded-full transition-all"> <X size={20} /> </button>
                                 </div>
                             </div>
 
@@ -1302,7 +1319,9 @@ const CalendarPage = () => {
                                         <div className="flex items-center gap-1.5 px-2 py-1 bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] text-[9px] font-black uppercase tracking-widest rounded-lg">
                                             <Clock size={12} />
                                             {eventForm.type === 'todo'
-                                                ? formatTodoDateTime(eventForm.start, eventForm.all_day)
+                                                ? (eventForm.created_at
+                                                    ? `Created: ${formatCreatedLocal(eventForm.created_at)}`
+                                                    : formatTodoDateTime(eventForm.start, eventForm.all_day))
                                                 : `IST • ${formatIST(eventForm.start)}`}
                                         </div>
                                         {isEdit && (

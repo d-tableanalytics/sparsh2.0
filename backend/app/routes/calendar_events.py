@@ -268,6 +268,18 @@ TODO_PRIVATE_MESSAGE = "Todos are private — only their owner can view or chang
 IST_TZ = timezone(timedelta(hours=5, minutes=30))
 
 
+def _iso_utc(dt):
+    """Serialize a datetime as a UTC-MARKED ISO string so the browser's `new Date()` parses it
+    as UTC, not local. created_at is stored via datetime.utcnow() (naive UTC); its bare
+    isoformat() carries no zone marker, so JS reads it as LOCAL and shows a time off by the UTC
+    offset (e.g. an 11:07 AM IST creation reads back as 05:37 AM). Marking it UTC fixes that."""
+    if not hasattr(dt, "isoformat"):
+        return dt
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.isoformat()
+
+
 def _apply_todo_due_end_of_day(doc: dict) -> None:
     """A personal todo is always due at 23:59:59 (IST) on its CHOSEN calendar DATE — the day the
     user added it on (the day selected in the calendar; defaults to today when none was chosen).
@@ -1108,7 +1120,7 @@ async def get_all_events(target_user_id: Optional[str] = None, view_mode: str = 
         for c in db_docs:
             events.append({
                 "id": str(c["_id"]), "title": c["title"], "type": c["type"], "start": c["start"], "end": c.get("end"), "allDay": c.get("all_day", False),
-                "extendedProps": { **{k: v for k, v in c.items() if k not in ["_id", "created_at", "updated_at"]}, "id": str(c["_id"]), "isCreator": c.get("user_id") == current_uid, "isAssigned": current_uid in (c.get("target_staff_id") or []) or current_uid in (c.get("assigned_member_ids") or []), "canEdit": role == "superadmin" or c.get("user_id") == current_uid, "source_col": col_name, "creator_is_staff": c.get("user_id") in staff_id_set }
+                "extendedProps": { **{k: v for k, v in c.items() if k not in ["_id", "created_at", "updated_at"]}, "id": str(c["_id"]), "created_at": _iso_utc(c.get("created_at")), "isCreator": c.get("user_id") == current_uid, "isAssigned": current_uid in (c.get("target_staff_id") or []) or current_uid in (c.get("assigned_member_ids") or []), "canEdit": role == "superadmin" or c.get("user_id") == current_uid, "source_col": col_name, "creator_is_staff": c.get("user_id") in staff_id_set }
             })
     return events
 
