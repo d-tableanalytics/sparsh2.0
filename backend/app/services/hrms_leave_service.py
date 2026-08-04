@@ -169,6 +169,24 @@ async def adjust_balance(user_id: str, year: int, leave_type: str, delta: float)
     )
 
 
+async def set_balance(user_id: str, year: int, leave_type: str,
+                      entitled: Optional[float] = None, used: Optional[float] = None) -> None:
+    """HR override of a person's entitlement and/or used-days for a leave type (e.g. carry-in,
+    correction). `$set` (absolute), unlike adjust_balance's relative `$inc`."""
+    sets = {"updated_at": datetime.now(timezone.utc)}
+    if entitled is not None:
+        sets["entitled"] = float(entitled)
+    if used is not None:
+        sets["used"] = max(0.0, float(used))
+    await get_collection(COL_LEAVE_BALANCES).update_one(
+        {"user_id": user_id, "year": year, "leave_type": leave_type},
+        {"$set": sets,
+         "$setOnInsert": {"user_id": user_id, "year": year, "leave_type": leave_type,
+                          "created_at": datetime.now(timezone.utc)}},
+        upsert=True,
+    )
+
+
 # ─── Overlap ────────────────────────────────────────────────────────────────────
 async def find_overlap(user_id: str, start: date, end: date,
                        exclude_id: Optional[str] = None) -> Optional[dict]:

@@ -1,7 +1,7 @@
-// Mirrors the backend gate (auth_controller.has_hrms_access): the HRMS manages Sparsh's OWN
-// workforce, so it is internal-staff-only. Unlike Task & Delegation there is no per-company
-// toggle and no client-side path in at all — a clientadmin/clientuser never sees it, by design,
-// so employee records, payroll and KYC stay inside Sparsh.
+// Mirrors the backend gate (auth_controller.has_hrms_access): internal Sparsh staff always have
+// the HRMS; a client company user gets it only while their company's HRMS toggle is ON
+// (`hrms_enabled`, surfaced on the user via /users/me) — the same opt-in per-company pattern as
+// Task & Delegation. Defaults OFF, so a client never sees it until a Sparsh admin enables it.
 const INTERNAL_ROLES = new Set(['superadmin', 'admin', 'coach', 'staff']);
 const CLIENT_ROLES = new Set(['clientadmin', 'clientuser']);
 
@@ -15,7 +15,7 @@ export const isClientSideUser = (user) => {
 export const canAccessHrms = (user) => {
   if (!user) return false;
   if (user.role === 'superadmin') return true;
-  if (isClientSideUser(user)) return false;
+  if (isClientSideUser(user)) return user.hrms_enabled === true;
   if (user.tag === 'staff') return true;
   return INTERNAL_ROLES.has(user.role);
 };

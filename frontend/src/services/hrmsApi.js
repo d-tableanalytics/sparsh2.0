@@ -19,6 +19,9 @@ export const getHrmsAccess = () => api.get('/hrms/access');
 // never drift from what the API accepts.
 export const getHrmsOptions = () => api.get('/hrms/options');
 
+// Internal staff logins — source for the employee 'linked account' + 'reporting manager' pickers.
+export const getHrmsStaffOptions = () => api.get('/hrms/staff-options');
+
 // Org structure master data. `kind` = department | designation | location.
 export const getOrgMasters = (params) => api.get('/hrms/org', { params });
 export const createOrgMaster = (payload) => api.post('/hrms/org', payload);
@@ -42,6 +45,9 @@ export const updateAttendanceSettings = (updates) => api.put('/hrms/attendance/s
 // A month for one person — your own unless a user_id is passed (which needs attendance.read).
 export const getAttendance = (params) => api.get('/hrms/attendance', { params });
 
+// A short-lived signed URL for a punch selfie (S3 key stored on the segment).
+export const getAttendanceSelfie = (key) => api.get('/hrms/attendance/selfie', { params: { key } });
+
 // One toggle for in AND out: the server decides which, from the day's open segment.
 export const punchAttendance = (payload) => api.post('/hrms/attendance/punch', payload);
 
@@ -59,6 +65,9 @@ export const updateLeaveSettings = (updates) => api.put('/hrms/leaves/settings',
 
 // Entitlement / used / remaining per type.
 export const getLeaveBalance = (params) => api.get('/hrms/leaves/balance', { params });
+
+// HR override of a person's entitlement/used for a leave type. { user_id, leave_type, year?, entitled?, used? }
+export const adjustLeaveBalance = (payload) => api.patch('/hrms/leaves/balance', payload);
 
 // scope: 'mine' (default) | 'pending' (approvals inbox) | 'all'
 export const getLeaves = (params) => api.get('/hrms/leaves', { params });
@@ -124,3 +133,21 @@ export const getPublicPosting = (code) => api.get(`/hrms/public/postings/${code}
 export const submitApplication = (code, payload) => api.post(`/hrms/public/postings/${code}/apply`, payload);
 export const getPublicAssessment = (code) => api.get(`/hrms/public/assessments/${code}`);
 export const submitAssessment = (code, payload) => api.post(`/hrms/public/assessments/${code}/submit`, payload);
+
+// ─── Offers & onboarding (Phase 7) ───
+// Create/withdraw an offer. Create returns { offerId, accessCode } ONCE (like assessments) —
+// the code is the candidate's public offer link and appears in no list/read response.
+export const createOffer = (uk, payload) => api.post(`/hrms/candidates/${uk}/offers`, payload);
+export const withdrawOffer = (uk, offerId) => api.post(`/hrms/candidates/${uk}/offers/${offerId}/withdraw`);
+
+// Onboarding: invite (returns { accessCode }), HR verify the submitted KYC, then convert to an
+// employee record (idempotent — converting twice returns the same employee).
+export const inviteOnboarding = (uk, payload) => api.post(`/hrms/candidates/${uk}/onboarding`, payload);
+export const verifyOnboarding = (uk, payload) => api.post(`/hrms/candidates/${uk}/onboarding/verify`, payload);
+export const convertCandidate = (uk, payload) => api.post(`/hrms/candidates/${uk}/onboarding/convert`, payload);
+
+// Public (unauthenticated) offer + onboarding pages.
+export const getPublicOffer = (code) => api.get(`/hrms/public/offers/${code}`);
+export const respondPublicOffer = (code, payload) => api.post(`/hrms/public/offers/${code}/respond`, payload);
+export const getPublicOnboarding = (code) => api.get(`/hrms/public/onboarding/${code}`);
+export const submitPublicOnboarding = (code, payload) => api.post(`/hrms/public/onboarding/${code}/submit`, payload);

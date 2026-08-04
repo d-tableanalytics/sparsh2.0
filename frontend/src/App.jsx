@@ -54,10 +54,13 @@ import OrgStructure from './pages/HRMS/OrgStructure';
 import Attendance from './pages/HRMS/Attendance';
 import Leave from './pages/HRMS/Leave';
 import Payroll from './pages/HRMS/Payroll';
+import HrmsSettings from './pages/HRMS/HrmsSettings';
 import Requisitions from './pages/HRMS/Requisitions';
 import Candidates from './pages/HRMS/Candidates';
 import PublicApply from './pages/HRMS/PublicApply';
 import PublicAssessment from './pages/HRMS/PublicAssessment';
+import PublicOffer from './pages/HRMS/PublicOffer';
+import PublicOnboarding from './pages/HRMS/PublicOnboarding';
 import AssistantWidget from './features/assistant';
 import './index.css';
 import { useAuth } from './context/AuthContext';
@@ -97,6 +100,8 @@ const AppRoutes = () => {
           login. The backend rate-limits, size-caps and state-gates both endpoints. */}
       <Route path="/apply/:code" element={<PublicApply />} />
       <Route path="/assess/:code" element={<PublicAssessment />} />
+      <Route path="/offer/:code" element={<PublicOffer />} />
+      <Route path="/onboarding/:code" element={<PublicOnboarding />} />
 
       <Route path="/" element={<PrivateRoute><Dashboard /></PrivateRoute>} />
       <Route path="/dashboard" element={<Navigate to="/" />} />
@@ -140,6 +145,9 @@ const AppRoutes = () => {
       {/* Ungated at the route so an employee can reach their OWN payslip; the page shows only
           that unless payroll.read is held, and the API enforces the same split. */}
       <Route path="/hrms/payroll" element={<PrivateRoute><RequireHrmsAccess><Payroll /></RequireHrmsAccess></PrivateRoute>} />
+      {/* Settings spans payroll + attendance + leave; ungated at the route (like the sections it
+          configures) and each tab's Save is gated by its own permission inside the page. */}
+      <Route path="/hrms/settings" element={<PrivateRoute><RequireHrmsAccess><HrmsSettings /></RequireHrmsAccess></PrivateRoute>} />
       <Route path="/hrms/recruitment" element={<PrivateRoute><RequireHrmsAccess module="recruitment"><Requisitions /></RequireHrmsAccess></PrivateRoute>} />
       <Route path="/hrms/candidates" element={<PrivateRoute><RequireHrmsAccess module="recruitment"><Candidates /></RequireHrmsAccess></PrivateRoute>} />
       <Route path="/sessions" element={<PrivateRoute><LearnerSessions /></PrivateRoute>} />

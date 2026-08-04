@@ -157,24 +157,47 @@ async def require_task_access(current_user: dict = Depends(get_current_user)):
     )
 
 
-# ─── HRMS access gate (internal-Sparsh-only) ───
-# The HRMS manages Sparsh's OWN workforce, so — unlike the calendar or ORM — there is no
-# per-company toggle and no client-side path into it at all. `is_internal_user` is the whole
-# rule: staff-collection users (superadmin/admin/coach/staff). A client company user can never
-# reach it, by design, so employee records, payroll and KYC stay inside Sparsh.
+# ─── HRMS access gate ───
+# Internal Sparsh staff (superadmin/admin/coach/staff) always have the HRMS. A CLIENT company
+# user gets it only while their company's HRMS toggle is ON (`hrms_enabled` on the company) —
+# the same opt-in per-company pattern as Task & Delegation. It defaults OFF, so a client can
+# never reach it until a Sparsh admin explicitly enables it. The tasks.access_task_management
+# override does NOT grant HRMS.
 HRMS_ACCESS_DENIED_MESSAGE = "The HRMS is only available to Sparsh internal staff."
+HRMS_DISABLED_MESSAGE = (
+    "The HRMS module is not enabled for your company. Please contact your administrator."
+)
 
 
-def has_hrms_access(user: dict) -> bool:
-    """Whether `user` may use the HRMS at all. Internal staff only — see above."""
-    return is_internal_user(user)
+async def is_company_hrms_enabled(company_id) -> bool:
+    """Whether the HRMS module is switched on for a client company. Same pattern as
+    is_company_delegation_enabled: a MISSING flag means OFF (opt-in per company)."""
+    if not company_id:
+        return False
+    from bson import ObjectId
+    try:
+        company = await get_collection("companies").find_one({"_id": ObjectId(company_id)})
+    except Exception:
+        return False
+    if not company:
+        return False
+    return bool(company.get("hrms_enabled", False))
+
+
+async def has_hrms_access(user: dict) -> bool:
+    """Internal Sparsh staff always; a client company user only while their company's HRMS
+    toggle is ON. The tasks.access_task_management override does NOT grant HRMS."""
+    if not is_client_side_user(user):
+        return is_internal_user(user)
+    return await is_company_hrms_enabled(user.get("company_id"))
 
 
 async def require_hrms_access(current_user: dict = Depends(get_current_user)):
-    """Dependency that 403s any non-internal user. Returns the user, so an endpoint can swap
-    `Depends(get_current_user)` -> `Depends(require_hrms_access)` and still receive it."""
-    if not has_hrms_access(current_user):
-        raise HTTPException(status_code=403, detail=HRMS_ACCESS_DENIED_MESSAGE)
+    """Dependency that 403s anyone without HRMS access. Returns the user, so an endpoint can
+    swap `Depends(get_current_user)` -> `Depends(require_hrms_access)` and still receive it."""
+    if not await has_hrms_access(current_user):
+        detail = HRMS_DISABLED_MESSAGE if is_client_side_user(current_user) else HRMS_ACCESS_DENIED_MESSAGE
+        raise HTTPException(status_code=403, detail=detail)
     return current_user
 
 

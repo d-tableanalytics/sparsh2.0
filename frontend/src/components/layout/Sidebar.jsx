@@ -81,6 +81,7 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen }) => {
         { name: 'Payroll', path: '/hrms/payroll', icon: PieChart },
         { name: 'Recruitment', path: '/hrms/recruitment', icon: Briefcase },
         { name: 'Candidates', path: '/hrms/candidates', icon: Users },
+        { name: 'Settings', path: '/hrms/settings', icon: Settings },
       ],
     },
     { name: 'Reports', path: '/admin/reports', icon: BarChart3, roles: ['superadmin', 'admin'] },

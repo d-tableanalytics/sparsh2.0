@@ -66,7 +66,7 @@ from app.services.hrms_attendance_service import (
 )
 from app.services.hrms_leave_service import (
     get_leave_settings, validate_leave_types, find_leave_type, parse_date,
-    count_leave_days, get_balance, all_balances, adjust_balance,
+    count_leave_days, get_balance, all_balances, adjust_balance, set_balance,
     find_overlap, resolve_approver, serialize_leave,
 )
 from app.services.hrms_payroll_service import (
@@ -124,13 +124,16 @@ async def hrms_meta(current_user: dict = Depends(require_hrms_access)):
         }
         for module in HRMS_PERMISSION_MODULES
     }
+    # The caller's own employee record, matched by their staff login id, so self-service screens
+    # (my attendance / my payslip / my profile) can resolve "me" without a second call.
+    me_emp = await get_collection(COL_EMPLOYEES).find_one(
+        {"user_id": str(current_user["_id"])}, {"employee_code": 1})
     return HrmsAccessResponse(
         has_access=True,
         permissions=resolved,
         is_superadmin=is_super,
         modules=HRMS_PERMISSION_MODULES,
-        # Populated in Phase 1, once employee records exist and the caller can be matched to one.
-        employee_code=None,
+        employee_code=(me_emp or {}).get("employee_code"),
     )
 
 
@@ -142,7 +145,30 @@ async def hrms_access(current_user: dict = Depends(get_current_user)):
     nav that simply wants to know whether to show the HRMS group. This answers that question
     for ANY authenticated user without raising.
     """
-    return {"has_access": has_hrms_access(current_user)}
+    return {"has_access": await has_hrms_access(current_user)}
+
+
+@router.get("/staff-options")
+async def hrms_staff_options(current_user: dict = Depends(require_hrms_access)):
+    """Internal Sparsh staff logins — the source for the employee 'linked account' and
+    'reporting manager' pickers (both reference a staff id)."""
+    _require(current_user, "hrms", "read")
+    out = []
+    async for u in get_collection("staff").find(
+            {"is_active": {"$ne": False}},
+            {"full_name": 1, "first_name": 1, "last_name": 1, "email": 1,
+             "designation": 1, "role": 1}):
+        out.append({
+            "_id": str(u["_id"]),
+            "full_name": (u.get("full_name")
+                          or f"{u.get('first_name', '')} {u.get('last_name', '')}".strip()
+                          or u.get("email")),
+            "email": u.get("email"),
+            "designation": u.get("designation"),
+            "role": u.get("role"),
+        })
+    out.sort(key=lambda x: (x["full_name"] or "").lower())
+    return out
 
 
 @router.get("/options")
@@ -592,6 +618,19 @@ async def team_attendance(
     }
 
 
+@router.get("/attendance/selfie")
+async def attendance_selfie(key: str = Query(...),
+                            current_user: dict = Depends(require_hrms_access)):
+    """A short-lived signed URL for a punch selfie (S3 key stored on the segment). The raw
+    image is never public — HR fetches a fresh signed URL to view it. Key is validated to the
+    attendance prefix so this can't be used to sign arbitrary objects."""
+    _require(current_user, "attendance", "read")
+    if not str(key).startswith("hrms/attendance/"):
+        raise HTTPException(status_code=400, detail="Not an attendance selfie key")
+    from app.services.s3_service import get_signed_url
+    return {"url": get_signed_url(key)}
+
+
 # ─── Leave ──────────────────────────────────────────────────────────────────────
 # Applying for your own leave needs no grant. `attendance.read` sees others' requests,
 # `attendance.update` decides them — the same pair that governs attendance, since in practice
@@ -640,6 +679,30 @@ async def read_leave_balance(
     yr = year or int(ist_date_str()[:4])
     return {"userId": target, "year": yr,
             "balances": await all_balances(target, yr, settings)}
+
+
+@router.patch("/leaves/balance")
+async def adjust_leave_balance(body: dict, current_user: dict = Depends(require_hrms_access)):
+    """HR override of a person's entitlement / used-days for a leave type (carry-in, correction).
+    Absolute set, not a delta. Needs the same grant that decides leave."""
+    _require(current_user, "attendance", "update")
+    user_id = str(body.get("user_id") or "").strip()
+    leave_type = str(body.get("leave_type") or "").strip().lower()
+    if not user_id or not leave_type:
+        raise HTTPException(status_code=400, detail="user_id and leave_type are required")
+    yr = int(body.get("year") or int(ist_date_str()[:4]))
+    entitled = body.get("entitled")
+    used = body.get("used")
+    if entitled is None and used is None:
+        raise HTTPException(status_code=400, detail="Provide entitled and/or used")
+    await set_balance(user_id, yr, leave_type,
+                      entitled=None if entitled is None else float(entitled),
+                      used=None if used is None else float(used))
+    await log_activity(current_user, "Adjust Leave Balance", COL_LEAVES,
+                       f"Balance set for {user_id}/{leave_type} {yr}")
+    settings = await get_leave_settings()
+    return {"userId": user_id, "year": yr,
+            "balances": await all_balances(user_id, yr, settings)}
 
 
 @router.get("/leaves")

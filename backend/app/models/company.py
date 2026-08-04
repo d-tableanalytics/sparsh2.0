@@ -27,6 +27,9 @@ class CompanyBase(BaseModel):
     # Whether the Task & Delegation module is available to this company. Defaults to OFF:
     # Delegation was internal-only before this toggle, so access is opt-in per company.
     delegation_enabled: bool = False
+    # Whether the HRMS module is available to this company. Same opt-in pattern as Delegation —
+    # defaults OFF, enabled per company by a Sparsh admin.
+    hrms_enabled: bool = False
 
 class CompanyCreate(CompanyBase):
     pass

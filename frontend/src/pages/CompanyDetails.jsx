@@ -289,6 +289,19 @@ const CompanyDetails = () => {
     }
   };
 
+  // HRMS module access — same opt-in shape as the Delegation toggle above (defaults OFF,
+  // Sparsh-admin-only endpoint).
+  const handleToggleHrms = async () => {
+    const next = !(company.hrms_enabled ?? false);
+    try {
+      await api.patch(`/companies/${companyId}/hrms-access`, { enabled: next });
+      setCompany(prev => ({ ...prev, hrms_enabled: next }));
+      showSuccess(`HRMS ${next ? 'enabled' : 'disabled'} for ${company.name}`);
+    } catch (err) {
+      showError(err.response?.data?.detail || 'Failed to update HRMS access');
+    }
+  };
+
   const handleAddUser = async (e) => {
     e.preventDefault();
     try {
@@ -408,6 +421,14 @@ const CompanyDetails = () => {
               enabled={company.delegation_enabled ?? false}
               onToggle={handleToggleDelegation}
               title="Toggle whether this company can access the Task & Delegation module"
+            />
+          )}
+          {isStaff && canUpdate && (
+            <ModuleToggle
+              label="HRMS"
+              enabled={company.hrms_enabled ?? false}
+              onToggle={handleToggleHrms}
+              title="Toggle whether this company can access the HRMS module"
             />
           )}
           {canUpdate && (

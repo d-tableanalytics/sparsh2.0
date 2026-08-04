@@ -1,13 +1,17 @@
 import React, { useCallback, useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
   UserPlus, Users, Search, X, Loader2, AlertTriangle, Link2, Copy, Check,
   Send, CalendarPlus, ChevronRight, Megaphone, Plus, ClipboardList, History,
+  Award, Mail, UserCheck, Ban, ShieldCheck,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useNotification } from '../../context/NotificationContext';
 import {
   getCandidates, createCandidate, screenCandidates, sendAssessment, scheduleInterview,
   evaluateInterview, getPostings, createPosting, updatePosting, getRequisitions,
+  reviewAssessment, createOffer, withdrawOffer, inviteOnboarding, verifyOnboarding,
+  convertCandidate,
 } from '../../services/hrmsApi';
 import { hasHrmsPermission } from '../../utils/hrmsAccess';
 import { StatTile, Field } from '../../components/hrms/hrmsUi';
@@ -43,12 +47,32 @@ const EMPTY_CANDIDATE = {
   experience_years: '', current_ctc: '', expected_ctc: '', notice_period: '', source: 'Direct',
 };
 
+const EMPTY_OFFER = {
+  designation: '', department: '', annual_ctc: '', joining_date: '', location: '',
+  employment_type: 'Full-time', probation_months: 6, notes: '', valid_till: '',
+};
+
+// An offer stops being "live" once the candidate has answered or HR pulled it back.
+const OFFER_FINAL = ['Accepted', 'Declined', 'Withdrawn'];
+
+const OFFER_TONE = {
+  Sent:      'var(--accent-orange)',
+  Accepted:  'var(--accent-green)',
+  Declined:  'var(--accent-red)',
+  Withdrawn: 'var(--text-muted)',
+  Draft:     'var(--text-muted)',
+};
+
 const Candidates = () => {
   const { user } = useAuth();
   const { showSuccess, showError } = useNotification();
+  const navigate = useNavigate();
 
   const canCreate = hasHrmsPermission(user, 'recruitment', 'create');
   const canUpdate = hasHrmsPermission(user, 'recruitment', 'update');
+  // Converting a hire into an employee writes to the core HR module, so it needs hrms.create on
+  // top of the recruitment grant — the backend enforces this and 403s otherwise.
+  const canConvert = hasHrmsPermission(user, 'hrms', 'create');
 
   const [tab, setTab] = useState('pipeline');
   const [data, setData] = useState(null);
@@ -78,6 +102,18 @@ const Candidates = () => {
   const [interviewForm, setInterviewForm] = useState({
     round_name: 'Round 1', scheduled_at: '', mode: 'In person', duration_minutes: 45,
   });
+
+  // Offer & onboarding controls, inline on the candidate detail panel (Phase 7).
+  // Assessment review is per-assessment, so its form state is keyed by assessment id.
+  const [reviewForm, setReviewForm] = useState({});
+  const [showOfferForm, setShowOfferForm] = useState(false);
+  const [offerForm, setOfferForm] = useState(EMPTY_OFFER);
+  const [showOnbForm, setShowOnbForm] = useState(false);
+  const [onbForm, setOnbForm] = useState({ message: '', due_on: '' });
+  const [showVerify, setShowVerify] = useState(false);
+  const [verifyRemarks, setVerifyRemarks] = useState('');
+  const [showConvert, setShowConvert] = useState(false);
+  const [convertForm, setConvertForm] = useState({ user_id: '', date_of_joining: '' });
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -112,9 +148,30 @@ const Candidates = () => {
 
   useEffect(() => { if (tab === 'postings') loadPostings(); }, [tab, loadPostings]);
 
+  // Opening (or switching) a candidate resets the inline Phase-7 forms, so one candidate's
+  // half-filled offer / onboarding never bleeds onto the next.
+  useEffect(() => {
+    setShowOfferForm(false);
+    setOfferForm(EMPTY_OFFER);
+    setShowOnbForm(false);
+    setOnbForm({ message: '', due_on: '' });
+    setShowVerify(false);
+    setVerifyRemarks('');
+    setShowConvert(false);
+    setConvertForm({ user_id: '', date_of_joining: '' });
+    setReviewForm({});
+  }, [detail?.uk]);
+
   const candidates = data?.candidates ?? [];
   const counts = data?.counts ?? {};
   const stages = data?.stages ?? [];
+
+  // Offer / onboarding state for the open candidate. `pendingOffer` is the one live (non-final)
+  // offer; `acceptedOffer` gates the whole onboarding block.
+  const detailOffers = detail?.offers ?? [];
+  const pendingOffer = detailOffers.find((o) => !OFFER_FINAL.includes(o.status)) || null;
+  const acceptedOffer = detailOffers.find((o) => o.status === 'Accepted') || null;
+  const onboarding = detail?.onboarding || null;
 
   const toggle = (id) => setSelected((s) => {
     const next = new Set(s);
@@ -169,7 +226,7 @@ const Candidates = () => {
         questions: ['Tell us about a project you are proud of.'],
       });
       setIssuedLink({
-        name: c.fullName,
+        title: `Assessment link for ${c.fullName}`,
         url: `${window.location.origin}/assess/${res.data.accessCode}`,
       });
       setCopied(false);
@@ -205,6 +262,123 @@ const Candidates = () => {
       load();
     } catch (err) {
       showError(err.response?.data?.detail || 'Failed to record the scorecard');
+    } finally {
+      setBusy('');
+    }
+  };
+
+  // ── Phase 7: assessment review, offers, onboarding, conversion ──
+  const submitReview = async (c, a) => {
+    const f = reviewForm[a.id] || {};
+    if (f.score === undefined || f.score === '') { showError('Enter a score'); return; }
+    setBusy(`review-${a.id}`);
+    try {
+      await reviewAssessment(c.uk, a.id, {
+        score: Number(f.score),
+        passed: !!f.passed,
+        remarks: f.remarks || '',
+      });
+      showSuccess('Assessment reviewed');
+      load();
+    } catch (err) {
+      showError(err.response?.data?.detail || 'Failed to review assessment');
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const openOfferForm = (c) => {
+    // Default the role from the candidate / its requisition so HR rarely retypes it.
+    setOfferForm({ ...EMPTY_OFFER, designation: c.designation || '', department: c.department || '' });
+    setShowOfferForm(true);
+  };
+
+  const submitOffer = async (c) => {
+    if (!offerForm.designation.trim()) { showError('Designation is required'); return; }
+    if (!(Number(offerForm.annual_ctc) > 0)) { showError('Annual CTC must be greater than zero'); return; }
+    setBusy('offer');
+    try {
+      const res = await createOffer(c.uk, {
+        ...offerForm,
+        annual_ctc: Number(offerForm.annual_ctc),
+        probation_months: offerForm.probation_months === '' ? null : Number(offerForm.probation_months),
+      });
+      // The offer link is a candidate access code — surfaced once, exactly like assessments.
+      setIssuedLink({
+        title: `Offer link for ${c.fullName}`,
+        url: `${window.location.origin}/offer/${res.data.accessCode}`,
+      });
+      setCopied(false);
+      setShowOfferForm(false);
+      setOfferForm(EMPTY_OFFER);
+      load();
+    } catch (err) {
+      showError(err.response?.data?.detail || 'Failed to create offer');
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const revokeOffer = async (c, offerId) => {
+    setBusy(`withdraw-${offerId}`);
+    try {
+      await withdrawOffer(c.uk, offerId);
+      showSuccess('Offer withdrawn');
+      load();
+    } catch (err) {
+      showError(err.response?.data?.detail || 'Failed to withdraw offer');
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const sendOnboardingInvite = async (c) => {
+    setBusy('onb-invite');
+    try {
+      const res = await inviteOnboarding(c.uk, onbForm);
+      setIssuedLink({
+        title: `Onboarding link for ${c.fullName}`,
+        url: `${window.location.origin}/onboarding/${res.data.accessCode}`,
+      });
+      setCopied(false);
+      setShowOnbForm(false);
+      setOnbForm({ message: '', due_on: '' });
+      load();
+    } catch (err) {
+      showError(err.response?.data?.detail || 'Failed to invite onboarding');
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const submitVerify = async (c) => {
+    setBusy('verify');
+    try {
+      await verifyOnboarding(c.uk, { remarks: verifyRemarks });
+      showSuccess('Onboarding verified');
+      setShowVerify(false);
+      setVerifyRemarks('');
+      load();
+    } catch (err) {
+      showError(err.response?.data?.detail || 'Failed to verify onboarding');
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const submitConvert = async (c) => {
+    setBusy('convert');
+    try {
+      const res = await convertCandidate(c.uk, {
+        user_id: convertForm.user_id.trim() || undefined,
+        date_of_joining: convertForm.date_of_joining || undefined,
+      });
+      showSuccess(`Employee ${res.data.employeeCode} created`);
+      setShowConvert(false);
+      setConvertForm({ user_id: '', date_of_joining: '' });
+      load();
+    } catch (err) {
+      showError(err.response?.data?.detail || 'Failed to convert candidate');
     } finally {
       setBusy('');
     }
@@ -524,7 +698,7 @@ const Candidates = () => {
           <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={() => setIssuedLink(null)} />
           <div className="relative w-full max-w-md rounded-[24px] bg-[var(--bg-card)] border border-[var(--border)] shadow-2xl p-6 flex flex-col gap-3">
             <h2 className="text-[15px] font-black tracking-tight text-[var(--text-main)]">
-              Assessment link for {issuedLink.name}
+              {issuedLink.title}
             </h2>
             <p className="text-[12px] font-medium text-[var(--text-muted)]">
               Copy this now and send it to the candidate. For their privacy it is shown only
@@ -692,21 +866,78 @@ const Candidates = () => {
                   <h3 className="text-[10px] font-black uppercase tracking-[0.18em] text-[var(--text-muted)] mb-2">
                     Assessments
                   </h3>
-                  {detail.assessments.map((a) => (
-                    <div key={a.id} className="p-3 rounded-xl bg-[var(--input-bg)] border border-[var(--border)] mb-2">
-                      <div className="flex items-center justify-between">
-                        <span className="text-[12px] font-black text-[var(--text-main)]">{a.title}</span>
-                        <span className="text-[10px] font-black uppercase tracking-widest text-[var(--text-muted)]">
-                          {a.status}
-                        </span>
+                  {detail.assessments.map((a) => {
+                    const rf = reviewForm[a.id] || {};
+                    return (
+                      <div key={a.id} className="p-3 rounded-xl bg-[var(--input-bg)] border border-[var(--border)] mb-2">
+                        <div className="flex items-center justify-between">
+                          <span className="text-[12px] font-black text-[var(--text-main)]">{a.title}</span>
+                          <span className="text-[10px] font-black uppercase tracking-widest"
+                            style={{ color: a.status === 'Reviewed' ? 'var(--accent-green)' : 'var(--text-muted)' }}>
+                            {a.status}
+                          </span>
+                        </div>
+                        {a.submittedAt && (
+                          <p className="text-[11px] font-medium text-[var(--text-muted)] mt-1">
+                            Submitted {fmtDateTime(a.submittedAt)}
+                          </p>
+                        )}
+
+                        {/* The candidate's submitted answers, paired with their questions. */}
+                        {a.answers?.length > 0 && (
+                          <div className="mt-2.5 flex flex-col gap-2">
+                            {(a.questions?.length ? a.questions : a.answers).map((q, idx) => (
+                              <div key={idx} className="rounded-lg bg-[var(--bg-card)] border border-[var(--border)] px-3 py-2">
+                                <div className="text-[10.5px] font-black text-[var(--text-muted)]">
+                                  {a.questions?.length ? `Q${idx + 1}. ${q}` : `Answer ${idx + 1}`}
+                                </div>
+                                <div className="text-[12px] font-semibold text-[var(--text-main)] mt-0.5 whitespace-pre-wrap">
+                                  {a.answers[idx] || '—'}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+
+                        {/* Once reviewed, the outcome is read-only. */}
+                        {a.status === 'Reviewed' && (
+                          <p className="text-[11px] font-bold mt-2"
+                            style={{ color: a.passed ? 'var(--accent-green)' : 'var(--accent-red)' }}>
+                            Score {a.score ?? '—'} · {a.passed ? 'Passed' : 'Not passed'}
+                            {a.remarks ? ` — ${a.remarks}` : ''}
+                          </p>
+                        )}
+
+                        {/* A submitted assessment is scored inline by HR. */}
+                        {canUpdate && a.status === 'Submitted' && (
+                          <div className="mt-2.5 pt-2.5 border-t border-[var(--border)] flex flex-col gap-2.5">
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                              <Field label="Score">
+                                <input type="number" className={inputCls} value={rf.score ?? ''}
+                                  onChange={(e) => setReviewForm({ ...reviewForm, [a.id]: { ...rf, score: e.target.value } })} />
+                              </Field>
+                              <label className="flex items-end gap-2 pb-2.5">
+                                <input type="checkbox" checked={!!rf.passed}
+                                  onChange={(e) => setReviewForm({ ...reviewForm, [a.id]: { ...rf, passed: e.target.checked } })}
+                                  className="w-4 h-4 accent-[var(--accent-green)]" />
+                                <span className="text-[12px] font-bold text-[var(--text-main)]">Passed</span>
+                              </label>
+                            </div>
+                            <Field label="Remarks">
+                              <input className={inputCls} value={rf.remarks || ''}
+                                onChange={(e) => setReviewForm({ ...reviewForm, [a.id]: { ...rf, remarks: e.target.value } })} />
+                            </Field>
+                            <div className="flex justify-end">
+                              <button onClick={() => submitReview(detail, a)} disabled={!!busy}
+                                className="flex items-center gap-2 px-5 py-2 rounded-xl bg-[var(--btn-primary)] text-white text-[11px] font-black uppercase tracking-widest disabled:opacity-50">
+                                {busy === `review-${a.id}` && <Loader2 size={13} className="animate-spin" />} Save review
+                              </button>
+                            </div>
+                          </div>
+                        )}
                       </div>
-                      {a.submittedAt && (
-                        <p className="text-[11px] font-medium text-[var(--text-muted)] mt-1">
-                          Submitted {fmtDateTime(a.submittedAt)}
-                        </p>
-                      )}
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
 
@@ -750,6 +981,268 @@ const Candidates = () => {
                       )}
                     </div>
                   ))}
+                </div>
+              )}
+
+              {/* ── Offer (Phase 7) ── */}
+              <div>
+                <h3 className="text-[10px] font-black uppercase tracking-[0.18em] text-[var(--text-muted)] mb-2">
+                  Offer
+                </h3>
+
+                {detailOffers.length === 0 && !showOfferForm && (
+                  <p className="text-[11.5px] font-medium text-[var(--text-muted)] mb-2">No offer yet.</p>
+                )}
+
+                {detailOffers.map((o) => (
+                  <div key={o.id} className="p-3 rounded-xl bg-[var(--input-bg)] border border-[var(--border)] mb-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[12px] font-black text-[var(--text-main)]">
+                        {o.designation || '—'}{o.department ? ` · ${o.department}` : ''}
+                      </span>
+                      <span className="text-[10px] font-black uppercase tracking-widest"
+                        style={{ color: OFFER_TONE[o.status] || 'var(--text-muted)' }}>
+                        {o.status}
+                      </span>
+                    </div>
+                    <p className="text-[11px] font-medium text-[var(--text-muted)] mt-1">
+                      {o.annualCtc ? `CTC ${o.annualCtc.toLocaleString()}` : 'CTC —'}
+                      {o.joiningDate ? ` · joins ${fmtDate(o.joiningDate)}` : ''}
+                      {o.location ? ` · ${o.location}` : ''}
+                      {o.validTill ? ` · valid till ${fmtDate(o.validTill)}` : ''}
+                    </p>
+                    {o.candidateNote && (
+                      <p className="text-[11px] font-medium text-[var(--text-muted)] mt-1">“{o.candidateNote}”</p>
+                    )}
+                    {canUpdate && !OFFER_FINAL.includes(o.status) && (
+                      <button onClick={() => revokeOffer(detail, o.id)} disabled={!!busy}
+                        className="inline-flex items-center gap-1.5 mt-2 px-3 py-1.5 rounded-lg border border-[var(--border)] bg-[var(--bg-card)] text-[9px] font-black uppercase tracking-widest disabled:opacity-50 transition-colors"
+                        style={{ color: 'var(--accent-red)' }}>
+                        {busy === `withdraw-${o.id}` ? <Loader2 size={11} className="animate-spin" /> : <Ban size={11} />} Withdraw
+                      </button>
+                    )}
+                  </div>
+                ))}
+
+                {canUpdate && !pendingOffer && !acceptedOffer && detail.stage !== 'Rejected' && (
+                  showOfferForm ? (
+                    <div className="p-3.5 rounded-xl bg-[var(--input-bg)] border border-[var(--border)] flex flex-col gap-3">
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <Field label="Designation" required>
+                          <input className={inputCls} value={offerForm.designation}
+                            onChange={(e) => setOfferForm({ ...offerForm, designation: e.target.value })} />
+                        </Field>
+                        <Field label="Department">
+                          <input className={inputCls} value={offerForm.department}
+                            onChange={(e) => setOfferForm({ ...offerForm, department: e.target.value })} />
+                        </Field>
+                        <Field label="Annual CTC" required>
+                          <input type="number" className={inputCls} value={offerForm.annual_ctc}
+                            onChange={(e) => setOfferForm({ ...offerForm, annual_ctc: e.target.value })} />
+                        </Field>
+                        <Field label="Joining date">
+                          <input type="date" className={inputCls} value={offerForm.joining_date}
+                            onChange={(e) => setOfferForm({ ...offerForm, joining_date: e.target.value })} />
+                        </Field>
+                        <Field label="Location">
+                          <input className={inputCls} value={offerForm.location}
+                            onChange={(e) => setOfferForm({ ...offerForm, location: e.target.value })} />
+                        </Field>
+                        <Field label="Employment type">
+                          <select className={`${inputCls} cursor-pointer`} value={offerForm.employment_type}
+                            onChange={(e) => setOfferForm({ ...offerForm, employment_type: e.target.value })}>
+                            {['Full-time', 'Part-time', 'Contract', 'Internship'].map((t) => <option key={t} value={t}>{t}</option>)}
+                          </select>
+                        </Field>
+                        <Field label="Probation (months)">
+                          <input type="number" className={inputCls} value={offerForm.probation_months}
+                            onChange={(e) => setOfferForm({ ...offerForm, probation_months: e.target.value })} />
+                        </Field>
+                        <Field label="Valid till">
+                          <input type="date" className={inputCls} value={offerForm.valid_till}
+                            onChange={(e) => setOfferForm({ ...offerForm, valid_till: e.target.value })} />
+                        </Field>
+                        <Field label="Notes" className="sm:col-span-2">
+                          <input className={inputCls} value={offerForm.notes}
+                            onChange={(e) => setOfferForm({ ...offerForm, notes: e.target.value })} />
+                        </Field>
+                      </div>
+                      <div className="flex items-center justify-end gap-2">
+                        <button onClick={() => { setShowOfferForm(false); setOfferForm(EMPTY_OFFER); }}
+                          className="px-4 py-2 rounded-xl border border-[var(--border)] text-[11px] font-black uppercase tracking-widest text-[var(--text-muted)]">
+                          Cancel
+                        </button>
+                        <button onClick={() => submitOffer(detail)} disabled={!!busy}
+                          className="flex items-center gap-2 px-5 py-2 rounded-xl bg-[var(--btn-primary)] text-white text-[11px] font-black uppercase tracking-widest disabled:opacity-50">
+                          {busy === 'offer' && <Loader2 size={13} className="animate-spin" />} Send offer
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <button onClick={() => openOfferForm(detail)} disabled={!!busy}
+                      className="flex items-center gap-2 px-4 py-2 rounded-xl border border-[var(--border)] text-[11px] font-black uppercase tracking-widest text-[var(--text-muted)] hover:text-[var(--accent-indigo)] hover:border-[var(--accent-indigo)] disabled:opacity-50 transition-colors">
+                      <Award size={13} /> Send offer
+                    </button>
+                  )
+                )}
+              </div>
+
+              {/* ── Onboarding (Phase 7) — opens once an offer is accepted ── */}
+              {acceptedOffer && (
+                <div>
+                  <h3 className="text-[10px] font-black uppercase tracking-[0.18em] text-[var(--text-muted)] mb-2">
+                    Onboarding
+                  </h3>
+
+                  {!onboarding && (
+                    canUpdate ? (
+                      showOnbForm ? (
+                        <div className="p-3.5 rounded-xl bg-[var(--input-bg)] border border-[var(--border)] flex flex-col gap-3">
+                          <Field label="Message to candidate">
+                            <input className={inputCls} value={onbForm.message}
+                              placeholder="A short note shown on the onboarding form…"
+                              onChange={(e) => setOnbForm({ ...onbForm, message: e.target.value })} />
+                          </Field>
+                          <Field label="Due on">
+                            <input type="date" className={inputCls} value={onbForm.due_on}
+                              onChange={(e) => setOnbForm({ ...onbForm, due_on: e.target.value })} />
+                          </Field>
+                          <div className="flex items-center justify-end gap-2">
+                            <button onClick={() => { setShowOnbForm(false); setOnbForm({ message: '', due_on: '' }); }}
+                              className="px-4 py-2 rounded-xl border border-[var(--border)] text-[11px] font-black uppercase tracking-widest text-[var(--text-muted)]">
+                              Cancel
+                            </button>
+                            <button onClick={() => sendOnboardingInvite(detail)} disabled={!!busy}
+                              className="flex items-center gap-2 px-5 py-2 rounded-xl bg-[var(--btn-primary)] text-white text-[11px] font-black uppercase tracking-widest disabled:opacity-50">
+                              {busy === 'onb-invite' && <Loader2 size={13} className="animate-spin" />} Invite
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <button onClick={() => setShowOnbForm(true)} disabled={!!busy}
+                          className="flex items-center gap-2 px-4 py-2 rounded-xl border border-[var(--border)] text-[11px] font-black uppercase tracking-widest text-[var(--text-muted)] hover:text-[var(--accent-indigo)] hover:border-[var(--accent-indigo)] disabled:opacity-50 transition-colors">
+                          <Mail size={13} /> Invite onboarding
+                        </button>
+                      )
+                    ) : (
+                      <p className="text-[11.5px] font-medium text-[var(--text-muted)]">Not started.</p>
+                    )
+                  )}
+
+                  {onboarding && (
+                    <div className="p-3 rounded-xl bg-[var(--input-bg)] border border-[var(--border)]">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-[12px] font-black text-[var(--text-main)]">KYC & details</span>
+                        <span className="text-[10px] font-black uppercase tracking-widest"
+                          style={{ color: ['Verified', 'Converted'].includes(onboarding.status) ? 'var(--accent-green)' : 'var(--text-muted)' }}>
+                          {onboarding.status}
+                        </span>
+                      </div>
+                      <p className="text-[11px] font-medium text-[var(--text-muted)] mt-1">
+                        {onboarding.invitedAt ? `Invited ${fmtDateTime(onboarding.invitedAt)}` : ''}
+                        {onboarding.dueOn ? ` · due ${fmtDate(onboarding.dueOn)}` : ''}
+                        {onboarding.submittedAt ? ` · submitted ${fmtDateTime(onboarding.submittedAt)}` : ''}
+                      </p>
+
+                      {onboarding.status !== 'Invited' && (
+                        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5 mt-2.5">
+                          {[
+                            ['Personal email', onboarding.personalEmail],
+                            ['Phone', onboarding.phone],
+                            ['Date of birth', onboarding.dateOfBirth && fmtDate(onboarding.dateOfBirth)],
+                            ['Gender', onboarding.gender],
+                            ['Emergency', onboarding.emergencyName],
+                            ['Emergency phone', onboarding.emergencyPhone],
+                          ].filter(([, v]) => v).map(([l, v]) => (
+                            <div key={l}>
+                              <div className="text-[9.5px] font-black uppercase tracking-widest text-[var(--text-muted)]">{l}</div>
+                              <div className="text-[12px] font-bold text-[var(--text-main)]">{v}</div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                      {onboarding.verifiedBy && (
+                        <p className="text-[11px] font-medium text-[var(--text-muted)] mt-2">
+                          Verified by {onboarding.verifiedBy}{onboarding.remarks ? ` — ${onboarding.remarks}` : ''}
+                        </p>
+                      )}
+
+                      {/* Verify a submitted KYC. */}
+                      {canUpdate && onboarding.status === 'Submitted' && (
+                        showVerify ? (
+                          <div className="mt-2.5 pt-2.5 border-t border-[var(--border)] flex flex-col gap-2.5">
+                            <Field label="Remarks">
+                              <input className={inputCls} value={verifyRemarks}
+                                onChange={(e) => setVerifyRemarks(e.target.value)} />
+                            </Field>
+                            <div className="flex items-center justify-end gap-2">
+                              <button onClick={() => { setShowVerify(false); setVerifyRemarks(''); }}
+                                className="px-4 py-2 rounded-xl border border-[var(--border)] text-[11px] font-black uppercase tracking-widest text-[var(--text-muted)]">
+                                Cancel
+                              </button>
+                              <button onClick={() => submitVerify(detail)} disabled={!!busy}
+                                className="flex items-center gap-2 px-5 py-2 rounded-xl bg-[var(--btn-primary)] text-white text-[11px] font-black uppercase tracking-widest disabled:opacity-50">
+                                {busy === 'verify' && <Loader2 size={13} className="animate-spin" />} Verify
+                              </button>
+                            </div>
+                          </div>
+                        ) : (
+                          <button onClick={() => setShowVerify(true)} disabled={!!busy}
+                            className="inline-flex items-center gap-2 mt-2.5 px-4 py-2 rounded-xl border border-[var(--border)] text-[11px] font-black uppercase tracking-widest text-[var(--text-muted)] hover:text-[var(--accent-green)] hover:border-[var(--accent-green)] disabled:opacity-50 transition-colors">
+                            <ShieldCheck size={13} /> Verify
+                          </button>
+                        )
+                      )}
+
+                      {/* Convert a verified onboarding into an employee record. */}
+                      {canConvert && onboarding.status === 'Verified' && (
+                        showConvert ? (
+                          <div className="mt-2.5 pt-2.5 border-t border-[var(--border)] flex flex-col gap-2.5">
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                              <Field label="Staff login (optional)">
+                                <input className={inputCls} value={convertForm.user_id}
+                                  placeholder="Staff account id to link"
+                                  onChange={(e) => setConvertForm({ ...convertForm, user_id: e.target.value })} />
+                              </Field>
+                              <Field label="Date of joining (optional)">
+                                <input type="date" className={inputCls} value={convertForm.date_of_joining}
+                                  onChange={(e) => setConvertForm({ ...convertForm, date_of_joining: e.target.value })} />
+                              </Field>
+                            </div>
+                            <div className="flex items-center justify-end gap-2">
+                              <button onClick={() => { setShowConvert(false); setConvertForm({ user_id: '', date_of_joining: '' }); }}
+                                className="px-4 py-2 rounded-xl border border-[var(--border)] text-[11px] font-black uppercase tracking-widest text-[var(--text-muted)]">
+                                Cancel
+                              </button>
+                              <button onClick={() => submitConvert(detail)} disabled={!!busy}
+                                className="flex items-center gap-2 px-5 py-2 rounded-xl bg-[var(--btn-primary)] text-white text-[11px] font-black uppercase tracking-widest disabled:opacity-50">
+                                {busy === 'convert' && <Loader2 size={13} className="animate-spin" />} Create employee
+                              </button>
+                            </div>
+                          </div>
+                        ) : (
+                          <button onClick={() => setShowConvert(true)} disabled={!!busy}
+                            className="inline-flex items-center gap-2 mt-2.5 px-4 py-2 rounded-xl border border-[var(--border)] text-[11px] font-black uppercase tracking-widest text-[var(--text-muted)] hover:text-[var(--accent-green)] hover:border-[var(--accent-green)] disabled:opacity-50 transition-colors">
+                            <UserCheck size={13} /> Convert to employee
+                          </button>
+                        )
+                      )}
+
+                      {/* Converted — the handoff is done; jump to the new employee. */}
+                      {onboarding.status === 'Converted' && onboarding.employeeCode && (
+                        <div className="mt-2.5 pt-2.5 border-t border-[var(--border)] flex items-center justify-between gap-2">
+                          <span className="text-[11.5px] font-bold" style={{ color: 'var(--accent-green)' }}>
+                            Employee {onboarding.employeeCode}
+                          </span>
+                          <button onClick={() => navigate(`/hrms/employees/${onboarding.employeeCode}`)}
+                            className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-[var(--btn-primary)] text-white text-[11px] font-black uppercase tracking-widest">
+                            <UserCheck size={13} /> View employee
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
               )}
 

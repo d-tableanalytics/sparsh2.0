@@ -27,6 +27,9 @@ class CompanyORMAccessUpdate(BaseModel):
 class CompanyDelegationAccessUpdate(BaseModel):
     enabled: bool
 
+class CompanyHrmsAccessUpdate(BaseModel):
+    enabled: bool
+
 class CompanyEditRequest(BaseModel):
     name: Optional[str] = None
     domain: Optional[str] = None
@@ -226,6 +229,27 @@ async def update_company_delegation_access(company_id: str, body: CompanyDelegat
 
     await log_activity(current_user, "Toggle Delegation Access", "Company", f"{'Enabled' if body.enabled else 'Disabled'} Delegation for company {company_id}")
     return {"message": f"Delegation access {'enabled' if body.enabled else 'disabled'}", "delegation_enabled": body.enabled}
+
+
+# ─── Toggle HRMS Module Access ───
+# Identical shape to the Delegation toggle above, and likewise Sparsh-admin-only: a Company
+# Admin must never grant their own company a module.
+@router.patch("/{company_id}/hrms-access")
+async def update_company_hrms_access(company_id: str, body: CompanyHrmsAccessUpdate, current_user: dict = Depends(get_current_user)):
+    if current_user.get("role") not in ["superadmin", "admin"]:
+        raise HTTPException(status_code=403, detail="Only Sparsh Super Admin / Admin can manage HRMS access")
+
+    companies_collection = get_collection("companies")
+    result = await companies_collection.update_one(
+        {"_id": ObjectId(company_id)},
+        {"$set": {"hrms_enabled": body.enabled, "updated_at": datetime.now(timezone.utc)}}
+    )
+
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Company not found")
+
+    await log_activity(current_user, "Toggle HRMS Access", "Company", f"{'Enabled' if body.enabled else 'Disabled'} HRMS for company {company_id}")
+    return {"message": f"HRMS access {'enabled' if body.enabled else 'disabled'}", "hrms_enabled": body.enabled}
 
 # ─── Delete Company ───
 @router.delete("/{company_id}")
