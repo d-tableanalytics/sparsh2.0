@@ -3,7 +3,7 @@ from app.db.mongodb import get_collection
 from app.controllers.auth_controller import get_current_user
 from app.models.system_settings import SystemSettings, SystemSettingsUpdate
 from app.models.notification import NotificationTemplate
-from app.services.notification_service import TASK_REMINDER_HTML_TEMPLATE
+from app.services.notification_service import UPCOMING_REMINDER_HTML_TEMPLATE
 from datetime import datetime
 from bson import ObjectId
 from typing import List, Optional
@@ -237,14 +237,21 @@ TEMPLATE_SEEDS = [
      "Upcoming: {{title}} in {{reminder_time}}",
      "Hello {{name}},\n\nThis is a friendly reminder for '{{title}}' starting at {{event_time}}.\nLink: {{meeting_url}}",
      "Reminder: '{{title}}' starts at {{event_time}}. Link: {{meeting_url}}"),
-    # A TASK reminder — kept SEPARATE from the Session Reminder so a task never renders the
-    # session-styled mail. send_reminder_email() routes type=="task" events to this slug.
-    # Same rich HTML as the DEFAULT_TEMPLATES fallback, so the email is identical whether it
-    # resolves from this seeded DB copy or the built-in default.
-    ("task_reminder", "Task Reminder",
-     "⏰ Task Reminder: {{title}}",
-     TASK_REMINDER_HTML_TEMPLATE,
+    # ─── Upcoming reminders (scheduler-only) ───
+    # Fired ONLY by the reminder scheduler when a task's/todo's reminder time arrives — never
+    # on create or update, which use task_created / task_assigned / task_updated instead.
+    # Kept SEPARATE from the Session Reminder so a task never renders the session-styled mail.
+    # These seeds are the ONLY source of content for the two upcoming slugs — there is no
+    # DEFAULT_TEMPLATES fallback for them (see notification_service), so if an admin deletes or
+    # deactivates one, the reminder sends nothing rather than a body nobody configured.
+    ("upcoming_task_reminder", "Upcoming Task Reminder",
+     "⏰ Upcoming Task Reminder: {{title}}",
+     UPCOMING_REMINDER_HTML_TEMPLATE,
      "Reminder: your task '{{title}}' is due {{task_deadline}}."),
+    ("upcoming_todo_reminder", "Upcoming Todo Reminder",
+     "⏰ Upcoming Todo Reminder: {{title}}",
+     UPCOMING_REMINDER_HTML_TEMPLATE,
+     "Reminder: your todo '{{title}}' is due {{task_deadline}}."),
 
     # ─── Task Management (Delegation) ───
     ("task_created", "Task Created",

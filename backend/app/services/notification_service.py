@@ -178,7 +178,9 @@ OTP_HTML_TEMPLATE = """<!DOCTYPE html>
 </body>
 </html>"""
 
-TASK_REMINDER_HTML_TEMPLATE = """<!DOCTYPE html>
+# Shared body for both Upcoming Reminder templates (task + todo). Renamed from
+# TASK_REMINDER_HTML_TEMPLATE when the reminder slugs moved to the `upcoming_` prefix.
+UPCOMING_REMINDER_HTML_TEMPLATE = """<!DOCTYPE html>
 <html>
 <head>
     <style>
@@ -232,12 +234,12 @@ DEFAULT_TEMPLATES = {
         "subject": "New Task Assigned: {{task_name}}",
         "body": "Hello {{assigned_user}},\n\nA new task '{{task_name}}' has been assigned to you by {{assigned_by}}.\n\nDeadline: {{deadline}}\nPriority: {{critical_level}}\nDescription: {{description}}\n\nRegards,\nSparsh Notifications"
     },
-    # Reminder for a TASK (type == "task"). Distinct from the Session Reminder ("reminder_email",
-    # DB-configured) so a task never renders the session-styled mail. Used by send_reminder_email.
-    "task_reminder_email": {
-        "subject": "⏰ Task Reminder: {{title}}",
-        "body": TASK_REMINDER_HTML_TEMPLATE
-    },
+    # NOTE: there is deliberately NO default entry for upcoming_task_reminder_email or
+    # upcoming_todo_reminder_email. fetch_template() falls back to this dict when no DB doc
+    # resolves, which would have let an upcoming reminder render a built-in body nobody
+    # configured. Those two slugs must resolve ONLY to the admin's template in
+    # Settings ▸ Notifications — no template means no email. The seeded copies in
+    # routes/settings.py (TEMPLATE_SEEDS) supply the starting content instead.
     # ─── Task Management (Delegation) module ───
     # Separate triggers from the Calendar's. task_created/updated/deleted are the
     # pre-existing slugs (they only ever fired for delegation tasks); the rest are new.
@@ -885,7 +887,13 @@ async def send_reminder_email(user_obj: dict, event: dict, reminder: dict = None
     # A task or todo is "due-anchored": its reminder is about a deadline/due date, so the
     # template's {{task_deadline}} is populated; a session/event leaves it "N/A".
     is_due_anchored = event.get("type") in ("task", "todo")
-    dt_str = event.get("start", "")
+    # The SAME anchor the scheduler timed this reminder against — a task's/todo's due date
+    # (`end`), a session's/event's `start`. Reading `start` here regardless meant the mail
+    # fired correctly on the due date but printed the task's start as its deadline.
+    # Imported inside the function because reminder_scheduler imports send_reminder_email from
+    # this module, so a module-level import back would be circular.
+    from app.services.reminder_scheduler import get_reminder_anchor
+    dt_str = get_reminder_anchor(event) or ""
     formatted_dt = format_datetime_standard(dt_str)
 
     # The channel the user chose in the Reminder modal. Reminders saved before this was wired
@@ -906,20 +914,24 @@ async def send_reminder_email(user_obj: dict, event: dict, reminder: dict = None
         "meeting_url": event.get("meeting_link") or "View in Dashboard",
         "description": event.get("additional_details") or "No further details."
     }
-    # Template per type: a TASK → Task Reminder, a TODO → Todo Reminder, a session/event →
-    # Session Reminder. Each uses its own template only; no cross-over. The Todo Reminder
-    # template is authored by an admin in Settings (trigger "Todo Reminder" → todo_reminder_email).
+    # Template per type: a TASK → Upcoming Task Reminder, a TODO → Upcoming Todo Reminder, a
+    # session/event → Session Reminder. Each uses its own template only; no cross-over.
+    #
+    # The "upcoming_" prefix is deliberate and load-bearing: these slugs are reachable ONLY
+    # from the scheduler when a reminder's time arrives. The names make that impossible to
+    # confuse with the task_created / task_assigned / task_updated templates, which fire on
+    # save and are a completely separate flow (see services/task_notifications.py).
     if is_task:
-        slug = "task_reminder"
+        slug = "upcoming_task_reminder"
     elif event.get("type") == "todo":
-        slug = "todo_reminder"
+        slug = "upcoming_todo_reminder"
     else:
         slug = "reminder"
     scope = event.get("notification_scope")
     # Task & Delegation and Personal Todo reminders must use ONLY a user-configured template —
     # never a built-in default. No Active DB template (with a body) → send nothing. Sessions
     # (slug "reminder") keep their existing behavior (unrelated module).
-    if slug in ("task_reminder", "todo_reminder"):
+    if slug in ("upcoming_task_reminder", "upcoming_todo_reminder"):
         eff_company = None if scope == "staff" else user_obj.get("company_id")
         if not await active_user_template(f"{slug}_email", eff_company):
             return {}
