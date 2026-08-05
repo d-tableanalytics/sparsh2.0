@@ -12,7 +12,6 @@ import {
 import { useAuth } from '../../context/AuthContext';
 import { canAccessTaskManagement } from '../../utils/taskAccess';
 import { canAccessTpms } from '../../features/tpms/access';
-import { canAccessHrms } from '../../utils/hrmsAccess';
 
 import logo1 from '../../assets/Sparsh Magic  Logo PNG1.png';
 import logo2 from '../../assets/Sparsh Magic  Logo PNG2.png';
@@ -136,26 +135,6 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen }) => {
       name: 'TPMS', path: '/tpms', icon: LayoutGrid,
       roles: [], visibleFn: canAccessTpms,
       submodules: tpmsSubmodules,
-    },
-    {
-      // HRMS — Sparsh's own workforce. Internal-staff-only, so it is gated by a predicate
-      // (not a plain role list) and a client-side user never sees it. See utils/hrmsAccess.js.
-      name: 'HRMS', path: '/hrms', icon: Briefcase,
-      roles: [], visibleFn: canAccessHrms,
-      submodules: [
-        { name: 'Overview', path: '/hrms', icon: LayoutDashboard, end: true },
-        { name: 'Employees', path: '/hrms/employees', icon: Users },
-        { name: 'Organization', path: '/hrms/org', icon: Building2 },
-        { name: 'Attendance', path: '/hrms/attendance', icon: CalendarDays },
-        { name: 'Leave', path: '/hrms/leave', icon: CheckSquare },
-        { name: 'Payroll', path: '/hrms/payroll', icon: PieChart },
-        { name: 'Recruitment', path: '/hrms/recruitment', icon: Briefcase },
-        { name: 'Candidates', path: '/hrms/candidates', icon: Users },
-        { name: 'Recruitment Analytics', path: '/hrms/analytics', icon: BarChart3 },
-        { name: 'Links', path: '/hrms/links', icon: ExternalLink },
-        { name: 'Documentation', path: '/hrms/documents', icon: ClipboardList },
-        { name: 'Settings', path: '/hrms/settings', icon: Settings },
-      ],
     },
     { name: 'Reports', path: '/admin/reports', icon: BarChart3, roles: ['superadmin', 'admin'] },
     { name: 'Company Settings', path: '/settings', icon: Settings, roles: ['clientadmin'] },

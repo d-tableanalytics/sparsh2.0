@@ -46,25 +46,6 @@ import DeletedTasks from './pages/DeletedTasks';
 import ForgotPassword from './pages/ForgotPassword';
 import PrivateRoute from './components/common/PrivateRoute';
 import RequireTaskAccess from './components/common/RequireTaskAccess';
-import RequireHrmsAccess from './components/common/RequireHrmsAccess';
-import HrmsDashboard from './pages/HRMS/HrmsDashboard';
-import Employees from './pages/HRMS/Employees';
-import EmployeeProfile from './pages/HRMS/EmployeeProfile';
-import OrgStructure from './pages/HRMS/OrgStructure';
-import Attendance from './pages/HRMS/Attendance';
-import Leave from './pages/HRMS/Leave';
-import Payroll from './pages/HRMS/Payroll';
-import Documentation from './pages/HRMS/Documentation';
-import RecruitmentAnalytics from './pages/HRMS/RecruitmentAnalytics';
-import LinksRegistry from './pages/HRMS/LinksRegistry';
-import HrmsSettings from './pages/HRMS/HrmsSettings';
-import Requisitions from './pages/HRMS/Requisitions';
-import Candidates from './pages/HRMS/Candidates';
-import PublicApply from './pages/HRMS/PublicApply';
-import PublicAssessment from './pages/HRMS/PublicAssessment';
-import PublicOffer from './pages/HRMS/PublicOffer';
-import PublicAppointment from './pages/HRMS/PublicAppointment';
-import PublicOnboarding from './pages/HRMS/PublicOnboarding';
 import ModulePlaceholder from './features/tpms/common/ModulePlaceholder';
 import AdminView from './features/tpms/admin/pages/AdminView';
 import OmSmopsView from './features/tpms/admin/pages/OmSmopsView';
@@ -137,15 +118,6 @@ const AppRoutes = () => {
       <Route path="/login" element={user ? <Navigate to="/" /> : <Login />} />
       <Route path="/forgot-password" element={<ForgotPassword />} />
 
-      {/* PUBLIC HRMS pages — deliberately OUTSIDE PrivateRoute and outside the app shell.
-          The visitor is a job applicant, not a Sparsh user, so there is no sidebar and no
-          login. The backend rate-limits, size-caps and state-gates both endpoints. */}
-      <Route path="/apply/:code" element={<PublicApply />} />
-      <Route path="/assess/:code" element={<PublicAssessment />} />
-      <Route path="/offer/:code" element={<PublicOffer />} />
-      <Route path="/appointment/:code" element={<PublicAppointment />} />
-      <Route path="/onboarding/:code" element={<PublicOnboarding />} />
-
       <Route path="/" element={<PrivateRoute><Dashboard /></PrivateRoute>} />
       <Route path="/dashboard" element={<Navigate to="/" />} />
 
@@ -171,33 +143,6 @@ const AppRoutes = () => {
       <Route path="/tasks/activity" element={<PrivateRoute><RequireTaskAccess><TaskActivity /></RequireTaskAccess></PrivateRoute>} />
       <Route path="/tasks/holiday" element={<PrivateRoute><RequireTaskAccess><Holiday /></RequireTaskAccess></PrivateRoute>} />
       <Route path="/tasks/deleted" element={<PrivateRoute><RequireTaskAccess><DeletedTasks /></RequireTaskAccess></PrivateRoute>} />
-
-      {/* HRMS Module — internal-Sparsh-only (RequireHrmsAccess). Sections are added per phase;
-          each will pass its own `module`/`action` so a staff user without the grant is told the
-          permission is missing rather than the module. See docs/HRMS_REPLICATION_ROADMAP.md */}
-      <Route path="/hrms" element={<PrivateRoute><RequireHrmsAccess><HrmsDashboard /></RequireHrmsAccess></PrivateRoute>} />
-      <Route path="/hrms/employees" element={<PrivateRoute><RequireHrmsAccess module="hrms"><Employees /></RequireHrmsAccess></PrivateRoute>} />
-      <Route path="/hrms/employees/:employeeCode" element={<PrivateRoute><RequireHrmsAccess module="hrms"><EmployeeProfile /></RequireHrmsAccess></PrivateRoute>} />
-      <Route path="/hrms/org" element={<PrivateRoute><RequireHrmsAccess module="hrms"><OrgStructure /></RequireHrmsAccess></PrivateRoute>} />
-      {/* Attendance needs no module grant: punching your own attendance is the one HRMS action
-          every internal user performs. Team view and manual entry are gated inside the page. */}
-      <Route path="/hrms/attendance" element={<PrivateRoute><RequireHrmsAccess><Attendance /></RequireHrmsAccess></PrivateRoute>} />
-      {/* Leave is likewise ungated at the route: applying for your own is universal. Approving
-          and configuring types are gated inside the page and enforced by the API. */}
-      <Route path="/hrms/leave" element={<PrivateRoute><RequireHrmsAccess><Leave /></RequireHrmsAccess></PrivateRoute>} />
-      {/* Ungated at the route so an employee can reach their OWN payslip; the page shows only
-          that unless payroll.read is held, and the API enforces the same split. */}
-      <Route path="/hrms/payroll" element={<PrivateRoute><RequireHrmsAccess><Payroll /></RequireHrmsAccess></PrivateRoute>} />
-      {/* Settings spans payroll + attendance + leave; ungated at the route (like the sections it
-          configures) and each tab's Save is gated by its own permission inside the page. */}
-      {/* Documentation spans employees and candidates; the module gate is enough here because
-          the server picks the right permission per document from its owner type. */}
-      <Route path="/hrms/documents" element={<PrivateRoute><RequireHrmsAccess><Documentation /></RequireHrmsAccess></PrivateRoute>} />
-      <Route path="/hrms/analytics" element={<PrivateRoute><RequireHrmsAccess module="recruitment"><RecruitmentAnalytics /></RequireHrmsAccess></PrivateRoute>} />
-      <Route path="/hrms/links" element={<PrivateRoute><RequireHrmsAccess module="recruitment"><LinksRegistry /></RequireHrmsAccess></PrivateRoute>} />
-      <Route path="/hrms/settings" element={<PrivateRoute><RequireHrmsAccess><HrmsSettings /></RequireHrmsAccess></PrivateRoute>} />
-      <Route path="/hrms/recruitment" element={<PrivateRoute><RequireHrmsAccess module="recruitment"><Requisitions /></RequireHrmsAccess></PrivateRoute>} />
-      <Route path="/hrms/candidates" element={<PrivateRoute><RequireHrmsAccess module="recruitment"><Candidates /></RequireHrmsAccess></PrivateRoute>} />
       <Route path="/sessions" element={<PrivateRoute><LearnerSessions /></PrivateRoute>} />
       <Route path="/company-portal" element={<PrivateRoute><CompanyPortal /></PrivateRoute>} />
       <Route path="/my-reports" element={<PrivateRoute><MyReports /></PrivateRoute>} />
