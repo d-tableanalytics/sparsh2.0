@@ -12,6 +12,17 @@ const inferUnit = (mins) => {
     return 'Minutes';
 };
 
+// Exported so read-only views (e.g. the task View screen) describe a reminder exactly the way
+// this editor does, instead of re-deriving the unit and drifting from it.
+export const describeReminder = (r) => {
+    const unit = r?.offset_unit || inferUnit(r?.offset_minutes);
+    const amount = Math.round((r?.offset_minutes || 0) / UNIT_MINUTES[unit]);
+    const when = `${amount} ${amount === 1 ? unit.replace(/s$/, '') : unit} ${r?.timing_type || 'before'}`;
+    const channel = r?.reminder_type === 'both' ? 'Email + WhatsApp'
+        : r?.reminder_type === 'whatsapp' ? 'WhatsApp' : 'Email';
+    return { when, channel };
+};
+
 const ReminderModal = ({ isOpen, onClose, reminders, onApply }) => {
     const [localReminders, setLocalReminders] = useState([]);
 

@@ -14,6 +14,18 @@ from app.models.tpms import TPMS_EVENT_KIND, TPMS_NOTIFICATIONS_ENABLED
 # is marked sent and skipped — see the note at the send site in check_and_trigger_reminders.
 TPMS_REMINDER_MAX_AGE_HOURS = 48
 
+# How long after its trigger time a task/todo reminder is still worth sending.
+#
+# The recurring engine backfills every missed occurrence after downtime, each with its
+# reminders re-armed (sent=False) and a due date already in the past — so every one of them
+# qualifies to fire on the very next 60s tick. Without this window, a week of downtime meant a
+# week of reminders delivered at once, for deadlines that had already passed.
+#
+# Anything still inside the window fires normally, so a reminder the scheduler was merely a
+# few minutes late for is never lost. Older ones are consumed silently (marked sent, not
+# delivered) — the deadline has passed and the task itself already shows as overdue.
+REMINDER_MAX_AGE_HOURS = 12
+
 # ── Spec §16 trigger schedule ─────────────────────────────────────────────────
 # The source installed one time-driven trigger per job. There is a single loop here, so the
 # clock times are enforced by gating on the hour and remembering the last run.
@@ -167,9 +179,14 @@ async def check_and_trigger_reminders():
                     await col.update_one({"_id": event["_id"]}, {"$set": {"reminders": reminders}})
                 continue
 
-            event_time_str = event.get("start")
+            # A task's/todo's offset is measured from its DUE date (`end`), an event's from
+            # when it starts (`start`) — see get_reminder_anchor. Reading `start` directly here
+            # meant a task's "1 hour before" resolved against its recurrence anchor, which is
+            # normally already in the past, so the reminder fired on the next 60s tick instead
+            # of an hour before the deadline.
+            event_time_str = get_reminder_anchor(event)
             if not event_time_str: continue
-            
+
             try:
                 # Robust ISO parsing
                 clean_time = event_time_str.replace("Z", "+00:00").replace(" ", "T")
@@ -199,11 +216,17 @@ async def check_and_trigger_reminders():
                     # to every doer and coach. Recent ones still fire normally.
                     # Scoped to TPMS: other modules have been sending all along and have no
                     # backlog, so their behaviour is unchanged.
-                    stale = (is_tpms_event
-                             and (now - trigger_time) > timedelta(hours=TPMS_REMINDER_MAX_AGE_HOURS))
+                    # Tasks/todos get the same treatment, on a tighter window: the recurring
+                    # engine backfills missed occurrences with their reminders re-armed and
+                    # their due dates already past, so without this a downtime backlog was
+                    # delivered in one burst. See REMINDER_MAX_AGE_HOURS.
+                    max_age = (TPMS_REMINDER_MAX_AGE_HOURS if is_tpms_event
+                               else REMINDER_MAX_AGE_HOURS)
+                    stale = (now - trigger_time) > timedelta(hours=max_age)
                     if stale:
                         logger.info(
-                            f"TPMS reminder skipped as stale ({trigger_time.isoformat()}) "
+                            f"Reminder skipped as stale ({trigger_time.isoformat()}, "
+                            f"{'tpms' if is_tpms_event else event.get('type')}) "
                             f"for event {event.get('_id')}"
                         )
                     else:

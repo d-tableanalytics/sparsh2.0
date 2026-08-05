@@ -75,7 +75,7 @@ const OmSmopsView = () => {
       <DashboardHero icon={Briefcase} title="OM Dashboard" highlight={highlight} subtitle="SMOps operational performance across clients">
         <HeaderSelect value={om} onChange={setOm} options={omOpts} />
         <HeaderSelect value={client} onChange={setClient} options={clientOpts} />
-        <HeaderSelect value={period} onChange={setPeriod} options={periodOpts} />
+        <HeaderSelect value={period} onChange={setPeriod} options={periodOpts} searchable={false} />
         <HeroButton icon={RefreshCw} onClick={load}>Refresh</HeroButton>
       </DashboardHero>
 

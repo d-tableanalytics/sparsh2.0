@@ -22,6 +22,7 @@ from app.services.event_sync_service import sync_event_to_collection
 from app.routes.task_meta import sync_task_meta
 from app.services import task_events
 from bson import ObjectId
+import calendar
 from datetime import datetime, timedelta, timezone
 
 router = APIRouter(prefix="/calendar/events", tags=["Calendar"])
@@ -203,31 +204,90 @@ async def notify_users_instant(event_dict: dict, action: str, creator_name: str)
         except Exception as e:
             print(f"Conflict Notification Error: {e}")
 
-def _next_occurrence(curr_dt, repeat_type, interval, repeat_data=None):
-    """Advance curr_dt by one recurrence step, or return None if repeat_type is unrecognized."""
+def _days_in_month(year, month):
+    return calendar.monthrange(year, month)[1]
+
+
+def _month_step(curr_dt, months, repeat_data, anchor_day):
+    """The next month-based occurrence after `curr_dt`, `months` ahead.
+
+    Day-of-month is resolved in priority order:
+      1. repeat_data.lastDay      — always the final day of the target month
+      2. repeat_data.monthlyDates — the user's chosen date(s); the next one after curr_dt in
+         the SAME month if there is one, otherwise the first in the target month
+      3. anchor_day               — the series' intended day, carried forward so a month that
+         is too short cannot permanently pull the series down (Jan 31 → Feb 28 → Mar 31)
+      4. curr_dt.day              — legacy fallback
+
+    The old code clamped every month to `min(day, 28)`, which silently moved any series on the
+    29th-31st to the 28th forever. Clamping is now to the target month's real length.
+    """
+    data = repeat_data or {}
+    dates = sorted({int(d) for d in (data.get("monthlyDates") or []) if str(d).isdigit()})
+
+    # Multiple dates in one month: the next occurrence may still be inside the current month.
+    if dates and months == 1:
+        later = [d for d in dates if d > curr_dt.day]
+        if later:
+            day = min(later[0], _days_in_month(curr_dt.year, curr_dt.month))
+            return curr_dt.replace(day=day)
+
+    total = curr_dt.month - 1 + months
+    year = curr_dt.year + total // 12
+    month = total % 12 + 1
+    last = _days_in_month(year, month)
+
+    if data.get("lastDay"):
+        day = last
+    elif dates:
+        day = min(dates[0], last)
+    else:
+        day = min(anchor_day or curr_dt.day, last)
+    return curr_dt.replace(year=year, month=month, day=day)
+
+
+def _next_occurrence(curr_dt, repeat_type, interval, repeat_data=None, anchor_day=None):
+    """Advance curr_dt by one recurrence step, or return None if repeat_type is unrecognized.
+
+    `anchor_day` is the series' intended day-of-month, passed by the recurring engine so a
+    short month cannot drift the series permanently. Omitted by other callers, in which case
+    behaviour is unchanged from before.
+    """
     if repeat_type == "Daily":
         return curr_dt + timedelta(days=1)
     if "Weekly" in repeat_type:
+        # Specific weekdays (Mon/Wed/Fri) when the form supplied them — the next selected day
+        # after curr, which may be later in the SAME week. Falls back to a plain 7-day step
+        # when no weekdays were chosen, which is the previous behaviour.
+        wanted = sorted({int(d) % 7 for d in ((repeat_data or {}).get("weekdays") or [])
+                         if str(d).lstrip("-").isdigit()})
+        if wanted:
+            for ahead in range(1, 8):
+                cand = curr_dt + timedelta(days=ahead)
+                if cand.weekday() in wanted:
+                    return cand
         return curr_dt + timedelta(weeks=1)
     if repeat_type == "Monthly":
-        month = curr_dt.month + 1; year = curr_dt.year + (month - 1) // 12; month = (month - 1) % 12 + 1; day = min(curr_dt.day, 28)
-        return curr_dt.replace(year=year, month=month, day=day)
+        return _month_step(curr_dt, 1, repeat_data, anchor_day)
     if repeat_type == "Annually":
-        return curr_dt.replace(year=curr_dt.year + 1)
+        year = curr_dt.year + 1
+        # 29 Feb only exists in a leap year. replace() raised ValueError here, and because the
+        # recurring engine does not catch it the exception aborted the WHOLE nightly run for
+        # every series, not just this one. Clamp to the target year's month length instead —
+        # via anchor_day, so a 29 Feb series returns to the 29th at the next leap year rather
+        # than settling on the 28th forever.
+        day = min(anchor_day or curr_dt.day, _days_in_month(year, curr_dt.month))
+        return curr_dt.replace(year=year, day=day)
     if repeat_type == "periodic":
         return curr_dt + timedelta(days=interval)
     if repeat_type == "Custom":
         unit = (repeat_data or {}).get("customUnit", "Months")
         if unit == "Weeks":
             return curr_dt + timedelta(weeks=interval)
-        # "Months" picks specific date(s) of the month (repeat_data.monthlyDates/lastDay,
-        # same field Monthly uses) so it steps by month like Monthly does, just with a
-        # custom N-month interval instead of a fixed 1.
-        total_months = curr_dt.month - 1 + interval
-        year = curr_dt.year + total_months // 12
-        month = total_months % 12 + 1
-        day = min(curr_dt.day, 28)
-        return curr_dt.replace(year=year, month=month, day=day)
+        if unit == "Days":
+            return curr_dt + timedelta(days=interval)
+        # "Months" steps by month like Monthly does, just with a custom N-month interval.
+        return _month_step(curr_dt, max(int(interval or 1), 1), repeat_data, anchor_day)
     return None
 
 @router.post("/validate-conflict")

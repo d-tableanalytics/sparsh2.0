@@ -72,13 +72,24 @@ const SettingsPage = () => {
         attendance: ['user_name', 'event_title', 'event_time'],
         reminder_learner: ['event_title', 'date', 'day', 'time', 'meeting_link', 'description', 'event_datetime'],
         reminder_staff: ['title', 'reminder_time', 'event_time', 'task_deadline', 'meeting_url', 'description'],
+        // Upcoming Task/Todo Reminder — exactly the keys send_reminder_email() puts in the
+        // context, including `name`, which the reminder_staff list above omits even though the
+        // backend has always supplied it.
+        upcoming_reminder: ['name', 'title', 'task_deadline', 'reminder_time', 'event_time', 'meeting_url', 'description'],
         general: ['name', 'email', 'role', 'login_url']
     };
 
     const getVarsForTemplate = (slug) => {
         const isClient = user?.role?.toLowerCase().includes('client');
-        // Task Reminder uses the reminder variables (title/task_deadline/…), NOT the
-        // delegation-task ones — check it before the generic 'task' branch below.
+        // Upcoming reminders first: both slugs must resolve to the reminder variables, and
+        // `upcoming_todo_reminder` would otherwise fall through to the generic 'reminder'
+        // branch, which hands a client-role admin the session variables the reminder context
+        // never supplies.
+        if (slug.includes('upcoming_task_reminder') || slug.includes('upcoming_todo_reminder')) {
+            return templateVariables.upcoming_reminder;
+        }
+        // Legacy Task Reminder slug — kept resolving so an existing template row can still be
+        // opened and read after the move to the `upcoming_` slugs.
         if (slug.includes('task_reminder')) return templateVariables.reminder_staff;
         if (slug.includes('task')) return templateVariables.task;
         if (slug.includes('event') || slug.includes('session_complete')) {
@@ -719,11 +730,14 @@ const SettingsPage = () => {
                                                 <option value="task_follow_up_added">Follow-up Added</option>
                                                 <option value="task_subtask_created">Subtask Created</option>
                                                 <option value="task_in_loop_added">In Loop Person</option>
-                                                <option value="task_reminder">Task Reminder</option>
                                             </optgroup>
-                                            {/* Personal Todo — private per-user items with their own reminder template. */}
-                                            <optgroup label="Personal Todo">
-                                                <option value="todo_reminder">Todo Reminder</option>
+                                            {/* Upcoming reminders — fired ONLY by the scheduler when a
+                                                reminder's time arrives, never on create/update. Grouped
+                                                separately so they are not mistaken for the task lifecycle
+                                                templates above. */}
+                                            <optgroup label="Upcoming Reminders">
+                                                <option value="upcoming_task_reminder">Upcoming Task Reminder</option>
+                                                <option value="upcoming_todo_reminder">Upcoming Todo Reminder</option>
                                             </optgroup>
                                             {user?.role === 'superadmin' && (
                                                 <>

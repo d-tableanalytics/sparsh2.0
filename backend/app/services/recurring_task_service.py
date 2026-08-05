@@ -138,11 +138,27 @@ async def generate_due_recurring_tasks():
             curr = _parse(head.get("recurrence_anchor") or head.get("start"))
             if not curr:
                 continue
+            # The series' intended day-of-month, carried forward on every occurrence. Without
+            # it a month too short to hold the date would pull the series down permanently
+            # (Jan 31 → Feb 28 → Mar 28 → …). `recurrence_day` is stamped on each generated
+            # occurrence below; the first occurrence predates it, so fall back to its own start
+            # day — which is the day the user actually picked and was never clamped.
+            anchor_day = head.get("recurrence_day")
+            if not anchor_day:
+                first = _parse(head.get("start"))
+                anchor_day = first.day if first else None
 
             guard = 0
             while guard < 400:
                 guard += 1
-                nxt = _next_occurrence(curr, repeat_type, interval, head.get("repeat_data"))
+                try:
+                    nxt = _next_occurrence(curr, repeat_type, interval,
+                                           head.get("repeat_data"), anchor_day)
+                except Exception as e:
+                    # One malformed series must not abort the nightly run for every other
+                    # series — the outer handler would have swallowed the whole job.
+                    logger.error(f"Recurrence step failed for series {gid} ({repeat_type}): {e}")
+                    break
                 if nxt is None:
                     break
                 if nxt.tzinfo is None:
@@ -186,6 +202,10 @@ async def generate_due_recurring_tasks():
                     # occurrence was shifted onto a working day — see the comment where `curr`
                     # is initialised. Keeps a one-off shift from drifting the series.
                     new_task["recurrence_anchor"] = nxt.isoformat()
+                    # Propagate the intended day-of-month so the series can always climb back
+                    # to it after a short month.
+                    if anchor_day:
+                        new_task["recurrence_day"] = anchor_day
                     oe, os = _parse(head.get("end")), _parse(head.get("start"))
                     if oe and os:
                         new_task["end"] = (target + (oe - os)).isoformat()

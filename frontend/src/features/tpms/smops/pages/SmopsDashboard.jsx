@@ -82,7 +82,7 @@ const SmopsDashboard = () => {
     <div className="space-y-5">
       <DashboardHero icon={Briefcase} title="OM Dashboard" highlight={highlight} subtitle="Your operational performance across assigned companies">
         <HeaderSelect value={client} onChange={setClient} options={clientOpts} />
-        <HeaderSelect value={period} onChange={setPeriod} options={periodOpts} />
+        <HeaderSelect value={period} onChange={setPeriod} options={periodOpts} searchable={false} />
         <HeaderSelect value={schedBy} onChange={setSchedBy} options={SCHEDULED_BY_OPTIONS} />
         <HeroButton icon={RefreshCw} onClick={load}>Refresh</HeroButton>
       </DashboardHero>

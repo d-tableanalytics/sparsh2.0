@@ -185,7 +185,7 @@ const AdminView = () => {
       {/* Hero header */}
       <DashboardHero icon={LayoutDashboard} title="Admin Dashboard"
         subtitle={`Operational command centre${user?.full_name ? ` · ${user.full_name}` : ''}`}>
-        <HeaderSelect value={period} onChange={setPeriod} options={months} />
+        <HeaderSelect value={period} onChange={setPeriod} options={months} searchable={false} />
         <HeaderSelect value={om} onChange={setOm} options={omOpts} />
         <HeaderSelect value={client} onChange={setClient} options={clientOpts} />
         <HeroButton icon={RefreshCw} onClick={reload}>Refresh</HeroButton>

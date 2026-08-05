@@ -6,6 +6,7 @@ import { getTaskCategories, getTaskTags, uniqueNames } from '../services/taskMet
 import { openTaskEventStream } from '../services/taskEventsApi';
 import { useAuth } from '../context/AuthContext';
 import { useNotification } from '../context/NotificationContext';
+import { SelectField } from '../components/common/StyledSelect';
 import DateRangeFilter from '../components/tasks/DateRangeFilter';
 import TaskFormModal from '../components/tasks/TaskFormModal';
 import StatusSummaryCards from '../components/tasks/StatusSummaryCards';
@@ -371,26 +372,18 @@ const TaskDashboard = () => {
           <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search tasks..."
             className="w-full pl-10 pr-4 py-2.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-xl text-[12px] font-bold outline-none focus:border-[var(--accent-indigo)]" />
         </div>
-        <select value={filters.assignedTo} onChange={e => setFilters({ ...filters, assignedTo: e.target.value })}
-          className="px-3 py-2.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-xl text-[12px] font-bold outline-none">
-          <option value="">Assigned To</option>
-          {users.map(u => <option key={u._id} value={u._id}>{u.full_name || u.email}</option>)}
-        </select>
-        <select value={filters.category} onChange={e => setFilters({ ...filters, category: e.target.value })}
-          className="px-3 py-2.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-xl text-[12px] font-bold outline-none">
-          <option value="">Category</option>
-          {categories.map(c => <option key={c} value={c}>{c}</option>)}
-        </select>
-        <select value={filters.tag} onChange={e => setFilters({ ...filters, tag: e.target.value })}
-          className="px-3 py-2.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-xl text-[12px] font-bold outline-none">
-          <option value="">Tag</option>
-          {tags.map(t => <option key={t} value={t}>{t}</option>)}
-        </select>
-        <select value={filters.frequency} onChange={e => setFilters({ ...filters, frequency: e.target.value })}
-          className="px-3 py-2.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-xl text-[12px] font-bold outline-none">
-          <option value="">Frequency</option>
-          {['Does not repeat', 'Daily', 'Weekly', 'Monthly', 'Yearly'].map(f => <option key={f} value={f}>{f}</option>)}
-        </select>
+        {/* The leading `{ id: '', name: … }` entry is the old `<option value="">` placeholder:
+            it is what shows while the filter is unset, and picking it clears the filter. */}
+        <SelectField value={filters.assignedTo} onChange={v => setFilters({ ...filters, assignedTo: v })}
+          options={[{ id: '', name: 'Assigned To' },
+                    ...users.map(u => ({ id: u._id, name: u.full_name || u.email }))]} />
+        <SelectField value={filters.category} onChange={v => setFilters({ ...filters, category: v })}
+          options={[{ id: '', name: 'Category' }, ...categories.map(c => ({ id: c, name: c }))]} />
+        <SelectField value={filters.tag} onChange={v => setFilters({ ...filters, tag: v })}
+          options={[{ id: '', name: 'Tag' }, ...tags.map(t => ({ id: t, name: t }))]} />
+        <SelectField value={filters.frequency} onChange={v => setFilters({ ...filters, frequency: v })}
+          options={[{ id: '', name: 'Frequency' },
+                    ...['Does not repeat', 'Daily', 'Weekly', 'Monthly', 'Yearly'].map(f => ({ id: f, name: f }))]} />
         {(search || filters.assignedTo || filters.category || filters.tag || filters.frequency || activeCardKey) && (
           <button onClick={clearFilters}
             className="ml-auto px-4 py-2.5 rounded-xl text-[11px] font-black uppercase tracking-widest text-[var(--text-muted)] border border-[var(--border)] hover:bg-[var(--input-bg)]">

@@ -299,7 +299,7 @@ const ImplementationTracker = () => {
     <div className="space-y-5">
       {/* Hero */}
       <DashboardHero icon={GitBranch} title="Implementation Tracker" highlight={selectedName} subtitle="Deployment scoring across success measures">
-        <HeaderSelect value={period} onChange={setPeriod} options={periods} />
+        <HeaderSelect value={period} onChange={setPeriod} options={periods} searchable={false} />
         {/* Picking an OM narrows the client list, so drop a now-possibly-invalid client. */}
         {canPickCompany && <HeaderSelect value={om} onChange={(v) => { setOm(v); setCompany(''); }} options={omOpts} />}
         {canPickCompany && <HeaderSelect value={company} onChange={setCompany} options={companyOpts} />}

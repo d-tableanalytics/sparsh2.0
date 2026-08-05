@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import {  AnimatePresence , motion } from 'framer-motion';
 import { X, Save } from 'lucide-react';
 import { STATUS_CONFIG } from './statusConfig';
+import { SelectField } from '../common/StyledSelect';
 
 // Collects the Reason a status change requires before it can be saved (backend enforces the
 // same). "Dependent on Other" additionally needs a Doer Name — the task is reassigned to that
@@ -46,11 +47,9 @@ const StatusReasonModal = ({ isOpen, status, users = [], onClose, onSubmit, savi
             {needsDoer && (
               <div>
                 <label className="text-[9px] font-black text-[var(--text-muted)] uppercase tracking-widest">Doer Name *</label>
-                <select value={doerId} onChange={e => setDoerId(e.target.value)}
-                  className="mt-1 w-full px-3 py-2 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-lg text-[12px] font-bold outline-none focus:border-[var(--accent-indigo)]">
-                  <option value="">Select a doer...</option>
-                  {users.map(u => <option key={u._id} value={u._id}>{u.full_name || u.email}</option>)}
-                </select>
+                <SelectField value={doerId} onChange={setDoerId} className="mt-1 w-full"
+                  options={[{ id: '', name: 'Select a doer...' },
+                            ...users.map(u => ({ id: u._id, name: u.full_name || u.email }))]} />
               </div>
             )}
             <div>

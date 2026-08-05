@@ -7,6 +7,7 @@ import { useNotification } from '../context/NotificationContext';
 import DateRangeFilter from '../components/tasks/DateRangeFilter';
 import { getInitials } from '../components/tasks/taskDisplayUtils';
 import { metaFor, extractStatusChange, formatDateTime } from '../components/tasks/activityDisplayUtils';
+import { SelectField } from '../components/common/StyledSelect';
 
 const ADMIN_ROLES = ['superadmin', 'admin', 'coach', 'staff'];
 const PAGE_SIZE = 30;
@@ -125,11 +126,9 @@ const TaskActivity = () => {
           onCustomChange={(field, value) => (field === 'startDate' ? setStartDate(value) : setEndDate(value))} />
 
         {isAdmin && (
-          <select value={updatedBy} onChange={e => setUpdatedBy(e.target.value)}
-            className="px-3 py-2.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-xl text-[12px] font-bold outline-none">
-            <option value="">Updated By</option>
-            {users.map(u => <option key={u._id} value={u._id}>{u.full_name || u.email}</option>)}
-          </select>
+          <SelectField value={updatedBy} onChange={setUpdatedBy}
+            options={[{ id: '', name: 'Updated By' },
+                      ...users.map(u => ({ id: u._id, name: u.full_name || u.email }))]} />
         )}
 
         <div className="relative flex-1 min-w-[180px]">

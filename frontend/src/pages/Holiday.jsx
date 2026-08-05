@@ -6,6 +6,7 @@ import { useAuth } from '../context/AuthContext';
 import { useNotification } from '../context/NotificationContext';
 import HolidayFormModal from '../components/holiday/HolidayFormModal';
 import HolidayImportModal from '../components/holiday/HolidayImportModal';
+import { SelectField } from '../components/common/StyledSelect';
 
 // Holiday module is restricted to Super Admin / Admin only (view + manage).
 const MANAGE_ROLES = ['superadmin', 'admin'];
@@ -128,11 +129,8 @@ const Holiday = () => {
           <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search holidays..."
             className="w-full pl-10 pr-4 py-2.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-xl text-[12px] font-bold outline-none focus:border-[var(--accent-indigo)]" />
         </div>
-        <select value={typeFilter} onChange={e => setTypeFilter(e.target.value)}
-          className="px-3 py-2.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-xl text-[12px] font-bold outline-none">
-          <option value="">All Types</option>
-          {HOLIDAY_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
-        </select>
+        <SelectField value={typeFilter} onChange={setTypeFilter}
+          options={[{ id: '', name: 'All Types' }, ...HOLIDAY_TYPES.map(t => ({ id: t, name: t }))]} />
         {(search || typeFilter) && (
           <button onClick={() => { setSearch(''); setTypeFilter(''); }}
             className="px-4 py-2.5 rounded-xl text-[11px] font-black uppercase tracking-widest text-[var(--text-muted)] border border-[var(--border)] hover:bg-[var(--input-bg)]">
