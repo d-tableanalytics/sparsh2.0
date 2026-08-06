@@ -135,10 +135,14 @@ async def read_users_me(current_user: dict = Depends(get_current_active_user)):
             # Task Management (Delegation) is opt-in too: absent flag means OFF. Gates the
             # Task Management sidebar module for client-side users (see utils/taskAccess.js).
             current_user["delegation_enabled"] = bool(company.get("delegation_enabled", False)) if company else False
+            # HRMS is opt-in too: absent flag means OFF. Gates the HRMS sidebar module and
+            # every HRMS route for client-side users (see utils/hrms_access.py).
+            current_user["hrms_enabled"] = bool(company.get("hrms_enabled", False)) if company else False
         except Exception:
             current_user["orm_enabled"] = True
             current_user["tpms_enabled"] = False
             current_user["delegation_enabled"] = False
+            current_user["hrms_enabled"] = False
     return current_user
 
 # ─── Helper to find user in any collection ───

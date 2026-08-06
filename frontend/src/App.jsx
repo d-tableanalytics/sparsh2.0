@@ -71,6 +71,31 @@ import SmopsDashboard from './features/tpms/smops/pages/SmopsDashboard';
 import HodActivity from './features/tpms/smops/pages/HodActivity';
 import SmopsEmployeeTask from './features/tpms/smops/pages/SmopsEmployeeTask';
 import TpmsGate, { RequireTpms } from './features/tpms/TpmsGate';
+import HrmsGate, { RequireHrms } from './features/hrms/HrmsGate';
+import HrmsHome from './features/hrms/HrmsHome';
+import EmployeeDirectory from './features/hrms/people/EmployeeDirectory';
+import EmployeeProfile from './features/hrms/people/EmployeeProfile';
+import MasterManager from './features/hrms/people/MasterManager';
+import RequisitionList from './features/hrms/recruitment/RequisitionList';
+import JdLibrary from './features/hrms/recruitment/JdLibrary';
+import PostingList from './features/hrms/recruitment/PostingList';
+import CandidatePipeline from './features/hrms/recruitment/CandidatePipeline';
+import ScreeningBoard from './features/hrms/recruitment/ScreeningBoard';
+import AssessmentBoard from './features/hrms/recruitment/AssessmentBoard';
+import InterviewBoard from './features/hrms/recruitment/InterviewBoard';
+import OfferBoard from './features/hrms/recruitment/OfferBoard';
+import OnboardingBoard from './features/hrms/recruitment/OnboardingBoard';
+// Eagerly imported, unlike ReportsDashboard below. These pages share almost every
+// dependency with the other (eager) HRMS routes and use NO chart library, so lazy-loading
+// them bought ~15 kB of deferral while forcing the bundler to re-draw its shared-chunk
+// boundaries -- which moved ~111 kB of existing code INTO the main chunk. Measured, see
+// PHASE_10_REPORT section 7.
+import RecruitmentDashboard from './features/hrms/analytics/RecruitmentDashboard';
+import RecruitmentReports from './features/hrms/analytics/RecruitmentReports';
+import ApplyPage from './pages/hrms/public/ApplyPage';
+import AssessPage from './pages/hrms/public/AssessPage';
+import OfferPage from './pages/hrms/public/OfferPage';
+import OnboardPage from './pages/hrms/public/OnboardPage';
 import TpmsCalendar from './features/tpms/calendar/TpmsCalendar';
 import ClientFormsHome from './features/tpms/client/ClientFormsHome';
 import ClientRatingForm from './features/tpms/client/ClientRatingForm';
@@ -117,6 +142,15 @@ const AppRoutes = () => {
     <Routes>
       <Route path="/login" element={user ? <Navigate to="/" /> : <Login />} />
       <Route path="/forgot-password" element={<ForgotPassword />} />
+
+      {/* ===========  PUBLIC HRMS (NO AUTHENTICATION)  ===========
+          Candidate-facing. Mounted OUTSIDE PrivateRoute deliberately — wrapping these would
+          redirect every applicant to /login. They render their own standalone chrome: an
+          applicant is not a user of this ERP and must never see its navigation or modules. */}
+      <Route path="/apply/:code" element={<ApplyPage />} />
+      <Route path="/assess/:code" element={<AssessPage />} />
+      <Route path="/offer/:code" element={<OfferPage />} />
+      <Route path="/onboard/:code" element={<OnboardPage />} />
 
       <Route path="/" element={<PrivateRoute><Dashboard /></PrivateRoute>} />
       <Route path="/dashboard" element={<Navigate to="/" />} />
@@ -215,6 +249,33 @@ const AppRoutes = () => {
         <Route path="ownership"               element={<ClientRatingForm formType="ownership" />} />
         <Route path="culture"                 element={<ClientRatingForm formType="culture" />} />
         <Route path="implementation-feedback" element={<ClientFeedbackForm formType="implementation_feedback" />} />
+      </Route>
+
+      {/* ===================  HRMS  ===================
+          Opt-in per company. `/hrms/entry` is the dynamic gate (role-routing lands in a
+          later phase); the panel routes are guarded by RequireHrms, which also supplies
+          the module's capability context to everything inside. */}
+      <Route path="/hrms/entry" element={<PrivateRoute><HrmsGate /></PrivateRoute>} />
+      <Route path="/hrms" element={<PrivateRoute><RequireHrms><Outlet /></RequireHrms></PrivateRoute>}>
+        <Route index element={<HrmsHome />} />
+        {/* People — employee master, departments and designations (Phase 2). */}
+        <Route path="employees"          element={<EmployeeDirectory />} />
+        <Route path="employees/:userId"  element={<EmployeeProfile />} />
+        <Route path="departments"        element={<MasterManager kind="department" />} />
+        <Route path="designations"       element={<MasterManager kind="designation" />} />
+        {/* Recruitment — requisitions + their co-approved job descriptions (Phase 3). */}
+        <Route path="requisitions"       element={<RequisitionList />} />
+        <Route path="jd"                 element={<JdLibrary />} />
+        <Route path="postings"           element={<PostingList />} />
+        {/* Pipeline — candidates, triage and the audit-trail journey (Phase 5). */}
+        <Route path="candidates"         element={<CandidatePipeline />} />
+        <Route path="screening"          element={<ScreeningBoard />} />
+        <Route path="assessments"        element={<AssessmentBoard />} />
+        <Route path="interviews"         element={<InterviewBoard />} />
+        <Route path="offers"             element={<OfferBoard />} />
+        <Route path="onboarding"         element={<OnboardingBoard />} />
+        <Route path="dashboard"          element={<RecruitmentDashboard />} />
+        <Route path="reports"            element={<RecruitmentReports />} />
       </Route>
 
       <Route path="/admin/settings" element={<Navigate to="/settings" />} />

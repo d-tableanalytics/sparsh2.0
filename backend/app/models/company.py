@@ -31,6 +31,8 @@ class CompanyBase(BaseModel):
     tpms_enabled: bool = False
     # Task Management (Delegation) module — opt-in per company, gates client-side access.
     delegation_enabled: bool = False
+    # HRMS module — opt-in per company (a missing flag means OFF, like TPMS/Delegation).
+    hrms_enabled: bool = False
 
 class CompanyCreate(CompanyBase):
     pass

@@ -9,6 +9,11 @@ from app.services.notification_service import send_notification_from_template, s
 from bson import ObjectId
 from app.services.activity_log_service import log_activity
 from app.utils.tpms_access import TOGGLE_ROLES as TPMS_TOGGLE_ROLES
+from app.models.hrms import (
+    AUDIT_MODULE_DISABLED, AUDIT_MODULE_ENABLED, ENTITY_COMPANY,
+    TOGGLE_ROLES as HRMS_TOGGLE_ROLES,
+)
+from app.services.hrms_audit_service import audit as hrms_audit
 from datetime import datetime, timezone
 from pydantic import BaseModel
 import io
@@ -26,6 +31,9 @@ class CompanyORMAccessUpdate(BaseModel):
     enabled: bool
 
 class CompanyDelegationAccessUpdate(BaseModel):
+    enabled: bool
+
+class CompanyHrmsAccessUpdate(BaseModel):
     enabled: bool
 
 class CompanyEditRequest(BaseModel):
@@ -258,6 +266,42 @@ async def update_company_delegation_access(company_id: str, body: CompanyDelegat
 
     await log_activity(current_user, "Toggle Task Management Access", "Company", f"{'Enabled' if body.enabled else 'Disabled'} Task Management for company {company_id}")
     return {"message": f"Task Management access {'enabled' if body.enabled else 'disabled'}", "delegation_enabled": body.enabled}
+
+
+# ─── Toggle HRMS Module Access ───
+@router.patch("/{company_id}/hrms-access")
+async def update_company_hrms_access(company_id: str, body: CompanyHrmsAccessUpdate, current_user: dict = Depends(get_current_user)):
+    """Switch the HRMS module on or off for one company.
+
+    Restricted to Admin / Super Admin by ROLE, matching the TPMS toggle rather than the
+    ORM one: HRMS holds payroll and personal data, so access is granted deliberately by
+    Sparsh staff and never via a delegated `companies.update` grant. Opt-in — a company
+    stays dark until this is switched on (see utils/hrms_access.is_hrms_enabled).
+    """
+    if (current_user.get("role") or "").lower() not in HRMS_TOGGLE_ROLES:
+        raise HTTPException(status_code=403, detail="Only Admin / Super Admin can manage HRMS access")
+
+    companies_collection = get_collection("companies")
+    result = await companies_collection.update_one(
+        {"_id": ObjectId(company_id)},
+        {"$set": {"hrms_enabled": body.enabled, "updated_at": datetime.now(timezone.utc)}}
+    )
+
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Company not found")
+
+    await log_activity(current_user, "Toggle HRMS Access", "Company", f"{'Enabled' if body.enabled else 'Disabled'} HRMS for company {company_id}")
+    # Mirrored into the HRMS audit trail so the module's own log is self-contained — the
+    # Phase 15 audit API should not have to join against the ERP-wide activity log.
+    await hrms_audit(
+        current_user,
+        AUDIT_MODULE_ENABLED if body.enabled else AUDIT_MODULE_DISABLED,
+        ENTITY_COMPANY,
+        entity_id=company_id,
+        detail=f"HRMS {'enabled' if body.enabled else 'disabled'}",
+        company_id=company_id,
+    )
+    return {"message": f"HRMS access {'enabled' if body.enabled else 'disabled'}", "hrms_enabled": body.enabled}
 
 # ─── Delete Company ───
 @router.delete("/{company_id}")

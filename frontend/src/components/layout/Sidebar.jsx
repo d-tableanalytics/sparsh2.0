@@ -6,11 +6,12 @@ import {
   Settings, Building2,
   PieChart, MessageSquare, LogOut, Layers, Copy, Calendar, Sparkles, PlayCircle, Target, BarChart3, Library, X,
   Forward, Bell, Trash2, ChevronDown, Activity, CalendarDays, Database, LayoutGrid,
-  Gauge, GitBranch, AlertTriangle, UserCog, ListChecks, ScrollText, UserCircle, ClipboardList, ClipboardCheck
+  Gauge, GitBranch, AlertTriangle, UserCog, ListChecks, ScrollText, UserCircle, ClipboardList, ClipboardCheck, Megaphone, UserPlus
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { canAccessTaskManagement } from '../../utils/taskAccess';
 import { canAccessTpms } from '../../features/tpms/access';
+import { canAccessHrms } from '../../features/hrms/access';
 
 import logo1 from '../../assets/Sparsh Magic  Logo PNG1.png';
 import logo2 from '../../assets/Sparsh Magic  Logo PNG2.png';
@@ -102,6 +103,33 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
         { name: 'Review Report', path: '/tpms/smops/reviews', icon: BarChart3 },
       ];
 
+  // HRMS submodules. The masters (Departments / Designations) are only meaningful to users
+  // who can administer them, so they are hidden from an Implementor-level client user —
+  // the API would refuse those screens anyway (see utils/hrms_access.ROLE_CAPABILITIES).
+  const isHrmsAdminUser = ['superadmin', 'admin', 'clientadmin'].includes(user?.role)
+    || ['MD', 'HR'].includes((user?.governance_role || '').trim().toUpperCase());
+  const hrmsSubmodules = [
+    { name: 'Overview', path: '/hrms', icon: LayoutDashboard, end: true },
+    { name: 'Employees', path: '/hrms/employees', icon: Users },
+    // Requisitions are visible to everyone: any HRMS user may raise one, and whoever raises
+    // one becomes its hiring manager (the module's documented design intent).
+    { name: 'Hiring Requisitions', path: '/hrms/requisitions', icon: ClipboardList },
+    { name: 'Job Descriptions', path: '/hrms/jd', icon: ScrollText },
+    { name: 'Job Postings', path: '/hrms/postings', icon: Megaphone },
+    { name: 'Candidates', path: '/hrms/candidates', icon: UserCircle },
+    { name: 'Screening', path: '/hrms/screening', icon: ClipboardCheck },
+    { name: 'Assessments', path: '/hrms/assessments', icon: ListChecks },
+    { name: 'Interviews', path: '/hrms/interviews', icon: CalendarDays },
+    { name: 'Offers', path: '/hrms/offers', icon: ScrollText },
+    { name: 'Onboarding', path: '/hrms/onboarding', icon: UserPlus },
+    { name: 'Dashboard', path: '/hrms/dashboard', icon: BarChart3 },
+    { name: 'Reports', path: '/hrms/reports', icon: PieChart },
+    ...(isHrmsAdminUser ? [
+      { name: 'Departments', path: '/hrms/departments', icon: Building2 },
+      { name: 'Designations', path: '/hrms/designations', icon: Briefcase },
+    ] : []),
+  ];
+
   const links = [
     { name: 'Dashboard', path: '/', icon: LayoutDashboard, roles: ['superadmin', 'admin', 'clientadmin', 'clientuser', 'coach', 'staff'] },
     { name: 'Companies', path: '/companies', icon: Building2, roles: ['superadmin'], permissionKey: 'companies' },
@@ -137,6 +165,14 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
       name: 'TPMS', path: '/tpms', icon: LayoutGrid,
       roles: [], visibleFn: canAccessTpms,
       submodules: tpmsSubmodules,
+    },
+    {
+      // HRMS — opt-in per company (like TPMS). Visibility is governed by canAccessHrms
+      // rather than a role list: internal Sparsh staff always, client-side users only
+      // while their company's HRMS toggle is ON. See features/hrms/access.js.
+      name: 'HRMS', path: '/hrms', icon: UserCog,
+      roles: [], visibleFn: canAccessHrms,
+      submodules: hrmsSubmodules,
     },
     { name: 'Reports', path: '/admin/reports', icon: BarChart3, roles: ['superadmin', 'admin'] },
     { name: 'Company Settings', path: '/settings', icon: Settings, roles: ['clientadmin'] },
