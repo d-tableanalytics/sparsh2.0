@@ -1,15 +1,23 @@
 """
-Recurring task engine — nightly rollover.
+Recurring task engine — nightly rollover, plus the shared occurrence builder.
 
 Recurring TASKS (repeat = Daily / Weekly / Monthly / Annually / Custom …) are created as a
-single first occurrence at creation time (see calendar_events.create_event). This job, run
-once per day at/after midnight by the reminder scheduler, creates the NEXT occurrence for
-each active series whose date has arrived — catching up any missed days — so there is exactly
-one task per period, never a bulk dump of duplicates.
+single first occurrence at creation time (see calendar_events.create_event). The nightly job
+below, run once per day at/after midnight by the reminder scheduler, creates the NEXT
+occurrence for each active series whose date has arrived — catching up any missed days — so
+there is exactly one task per period, never a bulk dump of duplicates.
 
-Personal TODOS repeat through this same engine, by the same rules (Calendar ▸ Personal Todo ▸
-Frequency uses the delegation Repeat control), so the two never drift apart. Recurring
-sessions/events keep their own bulk-generation behaviour.
+Personal TODOS do NOT roll forward nightly. A repeating todo is generated in full at creation
+time, every occurrence up to its Repeat End Date at once (see build_series_occurrences and
+calendar_events.create_event), so the whole series is visible on the calendar the moment it is
+saved. The cadence stepping and anti-drift anchors are shared with the nightly engine — both go
+through _next_occurrence and _fresh_occurrence.
+
+Where a todo deliberately differs from a task is OFF-DAYS: a todo that falls on a holiday or a
+weekly off is skipped outright, never shifted onto another day, whatever its cadence. A task
+shifts instead, because the work is still owed to someone. See drops_off_days.
+
+Recurring sessions/events keep their own bulk-generation behaviour in calendar_events.
 """
 from datetime import datetime, timezone, timedelta
 import logging
@@ -21,10 +29,17 @@ logger = logging.getLogger(__name__)
 
 TASK_COLLECTIONS = CALENDAR_COLLECTIONS + ["calendar_events"]
 
-# Document types this engine rolls forward. Todos ride along with tasks so a repeating todo
-# gets exactly the delegation feature's behaviour — same cadences, same holiday / weekly-off
-# handling, same one-occurrence-per-period rule.
-RECURRING_TYPES = ["task", "todo"]
+# Document types the NIGHTLY job rolls forward. Tasks only: a repeating todo is generated in
+# full at creation time instead (build_series_occurrences), so rolling it nightly here would
+# only re-walk a series that already exists.
+RECURRING_TYPES = ["task"]
+
+# Ceilings for a single up-front series build. Occurrences is the number of documents written;
+# steps is the number of cadence hops taken to find them (higher, because off-days are stepped
+# over without producing a document). Both exist purely so an absurd end date — or a malformed
+# cadence that never advances — cannot write an unbounded number of rows.
+MAX_SERIES_OCCURRENCES = 365
+MAX_SERIES_STEPS = 800
 
 # The product runs on Indian Standard Time (UTC+5:30). Every "which day is it / has this
 # occurrence's day arrived" decision below is made in IST, so the next occurrence is created
@@ -60,6 +75,26 @@ def _steps_by_single_day(repeat_type, interval) -> bool:
     return repeat_type == "Daily" or (repeat_type == "periodic" and (interval or 1) == 1)
 
 
+def drops_off_days(doc_type, repeat_type, interval) -> bool:
+    """Whether an occurrence landing on an off-day is DROPPED (no todo/task that day at all)
+    rather than shifted forward onto the next working day.
+
+    TODOS always drop. A personal todo is a note-to-self for a specific day; if that day is a
+    holiday or a weekly off there is nobody working, so the todo simply does not exist for that
+    period — it is not moved onto a day the user never chose. This holds for every cadence: a
+    monthly-15th todo whose 15th is a holiday produces nothing that month, and resumes on the
+    15th of the next.
+
+    TASKS keep the delegation rule, which depends on the cadence: a daily-style task drops the
+    day (the next day is its own occurrence, so shifting would collide with it), while a
+    weekly/monthly/annual/custom task shifts, because dropping would lose the whole period of
+    work — a task is owed to someone else and still has to be done.
+    """
+    if doc_type == "todo":
+        return True
+    return _steps_by_single_day(repeat_type, interval)
+
+
 def _shift_to_working_day(dt, holiday_dates, max_shift=14):
     """Move forward from an off-day to the next holiday-free, non-weekly-off day."""
     shifted = dt
@@ -80,7 +115,7 @@ def _parse(v):
         return None
 
 
-async def _load_holiday_dates() -> set:
+async def load_holiday_dates() -> set:
     """All active holiday dates as a set of ISO 'YYYY-MM-DD' strings.
 
     Same master source (collection "holidays") the Holiday module and the task
@@ -90,6 +125,136 @@ async def _load_holiday_dates() -> set:
     col = get_collection("holidays")
     docs = await col.find({"status": {"$ne": "inactive"}}, {"holiday_date": 1}).to_list(5000)
     return {d.get("holiday_date") for d in docs if d.get("holiday_date")}
+
+
+def _series_anchor_day(head: dict):
+    """The series' intended day-of-month, carried forward on every occurrence. Without it a
+    month too short to hold the date would pull the series down permanently (Jan 31 → Feb 28 →
+    Mar 28 → …). `recurrence_day` is stamped on each generated occurrence; the FIRST occurrence
+    predates it, so fall back to its own start day — the day the user actually picked, which
+    was never clamped."""
+    day = head.get("recurrence_day")
+    if day:
+        return day
+    first = _parse(head.get("start"))
+    return first.day if first else None
+
+
+def _fresh_occurrence(head: dict, target, natural, anchor_day) -> dict:
+    """A new occurrence cloned from `head`, due on `target`.
+
+    `natural` is the UNSHIFTED date this occurrence was computed for; it is stored as
+    `recurrence_anchor` so the next period is always measured from the cadence's own date even
+    when this one was pushed off a holiday / weekly off. Without it a single shift would drag
+    the rest of the series forward permanently.
+
+    A fresh occurrence must not inherit the previous period's work: the checklist comes back
+    unticked and remarks / attachments / status history / completion start empty, with the
+    reminders re-armed for the new date.
+    """
+    doc = {k: v for k, v in head.items() if k not in ("_id", "id")}
+    doc["start"] = target.isoformat()
+    doc["recurrence_anchor"] = natural.isoformat()
+    if anchor_day:
+        doc["recurrence_day"] = anchor_day
+    # Preserve the original start→end offset (zero for a todo, which keeps start == end).
+    orig_end, orig_start = _parse(head.get("end")), _parse(head.get("start"))
+    if orig_end and orig_start:
+        doc["end"] = (target + (orig_end - orig_start)).isoformat()
+    doc["created_at"] = datetime.utcnow()
+    doc["updated_at"] = None
+    if head.get("type") == "task":
+        # Delegation workflow state — a todo has no workflow, only status.
+        doc["workflow_status"] = "in_progress"  # new occurrences start In Progress
+    doc["status"] = "schedule"
+    doc["completed_at"] = None
+    doc["completed_by"] = None
+    doc["deleted_at"] = None
+    if head.get("checklist"):
+        doc["checklist"] = [{**c, "completed": False} for c in head["checklist"]]
+    doc["remarks"] = []
+    doc["attachments"] = []
+    doc["status_history"] = []
+    if head.get("reminders"):
+        doc["reminders"] = [{**r, "sent": False} for r in head["reminders"]]
+    return doc
+
+
+async def build_series_occurrences(head: dict, end_dt, holiday_dates=None, taken_dates=None):
+    """Every occurrence AFTER `head`, up to and including `end_dt` — the whole series at once.
+
+    This is the up-front counterpart to the nightly rollover: same cadence steps, same
+    anti-drift anchors, same per-occurrence reset, and the same off-day policy (drops_off_days —
+    a todo skips holidays and weekly offs entirely). Used to generate a repeating personal todo
+    in full the moment it is saved, and to extend a series when its Repeat End Date is pushed
+    out.
+
+    `head` is the first occurrence (it is NOT included in the result). `taken_dates` is a set of
+    ISO 'YYYY-MM-DD' strings already occupied by this series, so an extension can never
+    duplicate a date that exists.
+
+    Returns (occurrences, truncated) — `truncated` is True when MAX_SERIES_OCCURRENCES capped
+    the build, so the caller can tell the user the series was cut short rather than silently
+    delivering fewer dates than they asked for.
+    """
+    # Lazy import avoids any import-order coupling with the calendar_events route module.
+    from app.routes.calendar_events import _next_occurrence
+
+    repeat_type = head.get("repeat")
+    curr = _parse(head.get("recurrence_anchor") or head.get("start"))
+    if not curr or not end_dt or not repeat_type or repeat_type in (None, "", "Does not repeat"):
+        return [], False
+
+    if holiday_dates is None:
+        holiday_dates = await load_holiday_dates()
+
+    interval = head.get("repeat_interval", 1) or 1
+    anchor_day = _series_anchor_day(head)
+
+    # The head's own date is occupied — a shifted occurrence must never collide with it.
+    seen = set(taken_dates or ())
+    head_start = _parse(head.get("start"))
+    if head_start:
+        seen.add(_ist_date(head_start).isoformat())
+
+    occurrences, truncated = [], False
+    for _ in range(MAX_SERIES_STEPS):
+        try:
+            nxt = _next_occurrence(curr, repeat_type, interval, head.get("repeat_data"), anchor_day)
+        except Exception as e:
+            logger.error(f"Recurrence step failed while building series ({repeat_type}): {e}")
+            break
+        if nxt is None:
+            break
+        if nxt.tzinfo is None:
+            nxt = nxt.replace(tzinfo=timezone.utc)
+        if _ist_date(nxt) > _ist_date(end_dt):
+            break
+
+        # Off-day handling, shared with the nightly engine — see drops_off_days. For a todo
+        # that means: a holiday or weekly off produces NO occurrence at all, whatever the
+        # cadence. The series just resumes at its next natural date.
+        target = nxt
+        if _is_off_day(nxt, holiday_dates):
+            if drops_off_days(head.get("type"), repeat_type, interval):
+                curr = nxt
+                continue
+            shifted = _shift_to_working_day(nxt, holiday_dates)
+            if shifted is None or _ist_date(shifted) > _ist_date(end_dt):
+                curr = nxt
+                continue
+            target = shifted
+
+        day = _ist_date(target).isoformat()
+        if day not in seen:
+            seen.add(day)
+            occurrences.append(_fresh_occurrence(head, target, nxt, anchor_day))
+            if len(occurrences) >= MAX_SERIES_OCCURRENCES:
+                truncated = True
+                break
+        curr = nxt
+
+    return occurrences, truncated
 
 
 async def generate_due_recurring_tasks():
@@ -104,7 +269,7 @@ async def generate_due_recurring_tasks():
     shifted_occurrences = 0
 
     # Repeat tasks must not trigger on holidays — load the holiday set once for this run.
-    holiday_dates = await _load_holiday_dates()
+    holiday_dates = await load_holiday_dates()
 
     for col_name in TASK_COLLECTIONS:
         col = get_collection(col_name)
@@ -138,15 +303,7 @@ async def generate_due_recurring_tasks():
             curr = _parse(head.get("recurrence_anchor") or head.get("start"))
             if not curr:
                 continue
-            # The series' intended day-of-month, carried forward on every occurrence. Without
-            # it a month too short to hold the date would pull the series down permanently
-            # (Jan 31 → Feb 28 → Mar 28 → …). `recurrence_day` is stamped on each generated
-            # occurrence below; the first occurrence predates it, so fall back to its own start
-            # day — which is the day the user actually picked and was never clamped.
-            anchor_day = head.get("recurrence_day")
-            if not anchor_day:
-                first = _parse(head.get("start"))
-                anchor_day = first.day if first else None
+            anchor_day = _series_anchor_day(head)
 
             guard = 0
             while guard < 400:
@@ -167,8 +324,8 @@ async def generate_due_recurring_tasks():
                     break
                 if _ist_date(nxt) > today:
                     break  # future occurrence — created at 12 AM IST on its own day
-                # An off-day (holiday or weekly off) must never hold a task. How we handle it
-                # depends on the cadence:
+                # An off-day (holiday or weekly off) must never hold a task — drop it or shift
+                # it forward per drops_off_days:
                 #   • Daily-style (1-day step): drop that day — the next day is its own
                 #     occurrence, so shifting would collide with it. e.g. a daily 1–10 Aug task
                 #     with 3 & 7 Aug holidays generates every day except 3 & 7 Aug.
@@ -177,7 +334,7 @@ async def generate_due_recurring_tasks():
                 #     task whose 15th is a Sunday generates on Mon the 16th instead.
                 target = nxt
                 if _is_off_day(nxt, holiday_dates):
-                    if _steps_by_single_day(repeat_type, interval):
+                    if drops_off_days(head.get("type"), repeat_type, interval):
                         if _ist_date(nxt).isoformat() in holiday_dates:
                             skipped_holidays += 1
                         else:
@@ -196,39 +353,9 @@ async def generate_due_recurring_tasks():
                 day_prefix = target.date().isoformat()
                 exists = await col.find_one({"recurring_group_id": gid, "start": {"$regex": f"^{day_prefix}"}})
                 if not exists:
-                    new_task = {k: v for k, v in head.items() if k != "_id"}
-                    new_task["start"] = target.isoformat()
-                    # Anchor for the NEXT period is always the natural date, even when this
-                    # occurrence was shifted onto a working day — see the comment where `curr`
-                    # is initialised. Keeps a one-off shift from drifting the series.
-                    new_task["recurrence_anchor"] = nxt.isoformat()
-                    # Propagate the intended day-of-month so the series can always climb back
-                    # to it after a short month.
-                    if anchor_day:
-                        new_task["recurrence_day"] = anchor_day
-                    oe, os = _parse(head.get("end")), _parse(head.get("start"))
-                    if oe and os:
-                        new_task["end"] = (target + (oe - os)).isoformat()
-                    new_task["created_at"] = datetime.utcnow()
-                    new_task["updated_at"] = None
-                    if head.get("type") == "task":
-                        # Delegation workflow state — a todo has no workflow, only status.
-                        new_task["workflow_status"] = "in_progress"  # new occurrences start In Progress
-                    new_task["status"] = "schedule"
-                    new_task["completed_at"] = None
-                    new_task["completed_by"] = None
-                    new_task["deleted_at"] = None
-                    # A fresh occurrence must not inherit the previous period's activity: start
-                    # with an unticked checklist and empty remark/attachment/status history.
-                    if head.get("checklist"):
-                        new_task["checklist"] = [{**c, "completed": False} for c in head["checklist"]]
-                    new_task["remarks"] = []
-                    new_task["attachments"] = []
-                    new_task["status_history"] = []
-                    # Fresh reminders for the new occurrence's date.
-                    if head.get("reminders"):
-                        new_task["reminders"] = [{**r, "sent": False} for r in head["reminders"]]
-                    await col.insert_one(new_task)
+                    # Same builder the up-front series generator uses, so a rolled-forward
+                    # occurrence and a bulk-generated one are byte-for-byte the same shape.
+                    await col.insert_one(_fresh_occurrence(head, target, nxt, anchor_day))
                     created += 1
                 curr = nxt
 

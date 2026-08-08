@@ -717,6 +717,12 @@ const SettingsPage = () => {
                                             <optgroup label="Task Management">
                                                 <option value="task_created">Task Created</option>
                                                 <option value="task_assigned">Task Assigned</option>
+                                                {/* Goes to the ASSIGNER, not the assignee — a receipt
+                                                    sent alongside Task Assigned above, never instead
+                                                    of it. Own placeholders: assigner_name,
+                                                    assignee_name, task_name, priority, due_date,
+                                                    assigned_date, company_name. */}
+                                                <option value="task_assignment_confirmation">Task Assignment Confirmation (Assigner)</option>
                                                 <option value="task_updated">Task Updated</option>
                                                 <option value="task_deleted">Task Deleted</option>
                                                 <option value="task_accepted">Task Accepted</option>

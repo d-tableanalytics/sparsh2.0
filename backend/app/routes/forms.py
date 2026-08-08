@@ -1005,3 +1005,127 @@ async def client_dashboard(
             "target_score_pct": 100,
         },
     }
+
+
+# ─────────────────────────────────────────────────────────────
+# Assigned-form access by token (TPMS ▸ mailed form links)
+#
+# These sit on the AUTHENTICATED router deliberately: the recipient signs in first, and the
+# token then selects which form to render. Two independent checks must both pass —
+#
+#   1. the token must resolve to a live assignment (not unknown, expired or already submitted);
+#   2. the signed-in user must BE that assignment's respondent.
+#
+# So a forwarded link is useless to anyone else: they can authenticate as themselves and still
+# be refused, because the assignment names someone other than them. Conversely the token alone
+# grants nothing without a session. Neither the form, the period, the company nor the
+# respondent can be named by the client — all four come from the stored assignment.
+# ─────────────────────────────────────────────────────────────
+async def _assignment_for(token: str, current_user: dict, *, must_be_open: bool) -> dict:
+    """Resolve `token` for `current_user`, or raise the reason it cannot be used.
+
+    Expired / already-submitted links get their own status codes so the page can explain what
+    happened rather than showing a generic failure — the two mean very different things to the
+    person holding the link.
+    """
+    from app.services.tpms_form_link_service import (
+        resolve_token, effective_status, STATUS_EXPIRED, STATUS_SUBMITTED,
+    )
+    doc = await resolve_token(token)
+    if not doc:
+        raise HTTPException(status_code=404, detail="This form link is not valid.")
+
+    # Identity gate: the link is tied to one person, and being logged in is not enough.
+    if str(doc.get("respondent_id")) != _self_id(current_user):
+        raise HTTPException(
+            status_code=403,
+            detail="This form was assigned to a different user. Please sign in with the account the link was sent to.",
+        )
+
+    if must_be_open:
+        state = effective_status(doc)
+        if state == STATUS_SUBMITTED:
+            raise HTTPException(status_code=409, detail="This form has already been submitted.")
+        if state == STATUS_EXPIRED:
+            raise HTTPException(status_code=410, detail="This form link has expired.")
+    return doc
+
+
+@router.get("/assigned/{token}")
+async def assigned_form(token: str, current_user: dict = Depends(get_current_user)):
+    """The one form this token was issued for, ready to render. Marks it Opened on first view.
+
+    Returns exactly ONE form definition — the client cannot ask for another, which is what
+    removes any need for a form picker.
+    """
+    from app.services.tpms_form_link_service import (
+        effective_status, mark_opened, STATUS_EXPIRED, STATUS_SUBMITTED,
+    )
+    doc = await _assignment_for(token, current_user, must_be_open=False)
+
+    state = effective_status(doc)
+    head = {
+        "state": state,
+        "form_type": doc.get("form_type"),
+        "form_title": doc.get("form_title"),
+        "period": doc.get("period"),
+        "company_name": doc.get("company_name"),
+        "respondent_name": doc.get("respondent_name"),
+        "submitted_at": doc.get("submitted_at"),
+        "expires_at": doc.get("expires_at"),
+    }
+    # A closed link returns the reason and nothing else — no questions, no roster.
+    if state in (STATUS_SUBMITTED, STATUS_EXPIRED):
+        return head
+
+    await mark_opened(doc)
+
+    form_type = doc["form_type"]
+    definition = await _effective_definition(form_type, _require_form_type(form_type))
+    payload = {**head, "state": "open", "definition": definition}
+
+    # A rating matrix needs the people being rated; the Yes/No checklist does not.
+    if definition.get("kind") == KIND_RATING_MATRIX:
+        base = {"company_id": str(doc.get("company_id")), "is_active": {"$ne": False}}
+        hod_id = str(doc.get("respondent_id"))
+        team = await get_collection("learners").find(
+            {**base, "reporting_manager": hod_id}).to_list(1000)
+        # Same fallback the authenticated members endpoint uses: until reporting lines are
+        # mapped an HOD has no team, so the company roster keeps the form usable.
+        pool = team or (
+            (await get_collection("staff").find(base).to_list(1000))
+            + (await get_collection("learners").find(base).to_list(1000)))
+        members = []
+        for u in pool:
+            uid = str(u["_id"])
+            if uid == hod_id:
+                continue  # an HOD never rates themselves
+            members.append({
+                "member_id": uid,
+                "employee_id": u.get("employee_id") or u.get("emp_id") or u.get("emp_code"),
+                "member_name": _user_display_name(u),
+                "designation": u.get("designation"),
+                "department": u.get("department"),
+            })
+        members.sort(key=lambda m: (m.get("member_name") or "").lower())
+        payload["members"] = members
+        payload["scoped_to_team"] = bool(team)
+
+    return payload
+
+
+@router.post("/assigned/{token}/submitted")
+async def mark_assigned_form_submitted(token: str, current_user: dict = Depends(get_current_user)):
+    """Flag this token's assignment as completed.
+
+    The form itself is filled and saved through the ordinary authenticated endpoints — the
+    restored React forms post to /forms/{form_type}/ratings and /feedback exactly as they always
+    have, so there is only ONE submission path and no duplicated validation or scoring. This
+    endpoint records nothing about the answers; it only closes the assignment so TPMS ▸ Form Mail
+    Logs can show Submitted and the link stops accepting further visits.
+    """
+    from app.services.tpms_form_link_service import mark_submitted
+
+    doc = await _assignment_for(token, current_user, must_be_open=True)
+    await mark_submitted(doc)
+    return {"ok": True}

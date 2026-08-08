@@ -123,8 +123,19 @@ async def notify_users_instant(event_dict: dict, action: str, creator_name: str)
     business module with its own triggers, templates and recipients — see
     services/task_notifications.py, which the task call sites below invoke directly. Bailing
     out here is what guarantees a task can never fire a Calendar template.
+
+    Personal TODOS are excluded for a different reason: they are private by design — never
+    assignable, never delegated, no attendees. There is simply nobody to tell. Without this
+    guard the recipient set below still resolved to exactly one address, the todo's OWN owner
+    (user_id is always added), so deleting a private note mailed its author a session
+    CANCELLATION notice — and creating or editing one sent "session created"/"session updated".
+    Excluding them here covers the create, update and delete call sites in one place, matching
+    the early return complete_event already does.
+
+    This does NOT touch todo reminders: those are a separate, intended channel fired by the
+    reminder scheduler off the todo's own `reminders` list.
     """
-    if event_dict.get("type") == "task":
+    if event_dict.get("type") in ("task", TODO_TYPE):
         return
 
     user_ids = set()
@@ -322,6 +333,18 @@ TODO_TYPE = "todo"
 
 TODO_PRIVATE_MESSAGE = "Todos are private — only their owner can view or change them."
 
+# A todo's lifecycle statuses. "schedule" is the stored value the UI labels "Pending"; a todo
+# whose due date/time has passed untouched is swept to "overdue" every minute by the reminder
+# scheduler (see services/todo_status_service.py). "completed" is set by the complete endpoint.
+TODO_PENDING_STATUS = "schedule"
+TODO_OVERDUE_STATUS = "overdue"
+
+# Fields that describe ONE occurrence rather than the series it belongs to. When an edit is
+# carried onto newly generated occurrences, these must be dropped: they are the dates, identity
+# and progress of the single document the user happened to open.
+PER_OCCURRENCE_FIELDS = ("_id", "id", "start", "end", "recurrence_anchor", "recurrence_day",
+                         "status", "completed_at", "completed_by", "updated_at")
+
 # The product's canonical local zone (IST, UTC+5:30) — the same zone the nightly recurrence
 # engine uses for every day-boundary decision. A personal todo is always due at the end of its
 # day in this zone.
@@ -340,13 +363,27 @@ def _iso_utc(dt):
     return dt.isoformat()
 
 
+# A todo with no chosen time is due at the very end of its day, in IST. This is the value that
+# means "no due time was picked" everywhere — the form leaves its time field blank for it, and
+# the edit form reads it back as blank.
+TODO_END_OF_DAY = (23, 59, 59)
+
+
 def _apply_todo_due_end_of_day(doc: dict) -> None:
-    """A personal todo is always due at 23:59:59 (IST) on its CHOSEN calendar DATE — the day the
-    user added it on (the day selected in the calendar; defaults to today when none was chosen).
-    The user never picks a TIME; only the date carries over. The instant is written to BOTH
-    `start` and `end` (todos keep start == end), so the calendar shows it on that day, the
-    reminder/recurrence anchors are the end of that day, and the nightly engine rolls a recurring
-    todo to 23:59:59 the next day (the start==end zero offset is preserved). Scope: todos only."""
+    """Resolve a personal todo's due INSTANT on its chosen calendar DATE, in IST.
+
+    The date behaves exactly as before: whatever day the user selected (defaulting to today).
+    What is new is the TIME:
+
+      • `all_day` truthy, or no usable time on the payload → 23:59:59 IST, the long-standing
+        default. Existing todos, and any todo saved without picking a time, are unaffected.
+      • otherwise → the time the user picked is kept, interpreted on that same IST date.
+
+    The instant is written to BOTH `start` and `end` (todos keep start == end), so the calendar
+    still places it on that day, the reminder anchor is the due moment, and a recurring todo
+    rolls forward preserving its time-of-day (the zero start→end offset is what carries it).
+    Scope: todos only.
+    """
     raw = doc.get("start") or doc.get("end")
     base_ist = None
     if raw:
@@ -361,11 +398,50 @@ def _apply_todo_due_end_of_day(doc: dict) -> None:
             base_ist = None
     if base_ist is None:
         base_ist = datetime.now(IST_TZ)  # no / invalid date → default to today
-    due_utc = base_ist.replace(hour=23, minute=59, second=59, microsecond=0).astimezone(timezone.utc)
+
+    # `all_day` is the form's "no due time picked" signal — an existing field, so this needs no
+    # new one. A date-only payload has no time to honour either.
+    date_only = bool(raw) and len(str(raw)) <= 10
+    if doc.get("all_day") or date_only:
+        hour, minute, second = TODO_END_OF_DAY
+    else:
+        hour, minute, second = base_ist.hour, base_ist.minute, base_ist.second
+
+    due_utc = base_ist.replace(hour=hour, minute=minute, second=second,
+                               microsecond=0).astimezone(timezone.utc)
     iso = due_utc.isoformat()
     doc["start"] = iso
     doc["end"] = iso
+    # Stored false as it always has been, so nothing downstream (calendar rendering, reminder
+    # anchoring, the Overdue sweep) sees a change in shape. Whether a time was chosen is read
+    # back from the instant itself: 23:59:59 IST means "none".
     doc["all_day"] = False
+
+
+def _series_end_cutoff(value):
+    """A Repeat End Date as the LAST INSTANT that date may hold an occurrence — 23:59:59.999 IST
+    on the chosen day, returned in UTC.
+
+    Everything about recurrence is decided on IST calendar days, and a todo is due at 23:59:59
+    IST, so the raw stored value cannot be used as a boundary directly: the date picker sends
+    midday UTC ("2026-08-20T06:30:00Z") and a date-only value parses to midnight, both of which
+    fall BEFORE the last occurrence of their own day and would silently drop it. Normalising to
+    the end of the IST day makes "up to and including the date I picked" mean exactly that.
+    """
+    if not value:
+        return None
+    try:
+        raw = str(value).replace("Z", "+00:00")
+        if len(raw) <= 10:  # date-only "YYYY-MM-DD" → that calendar day, in IST
+            dt = datetime.fromisoformat(raw).replace(tzinfo=IST_TZ)
+        else:
+            dt = datetime.fromisoformat(raw)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+    except Exception:
+        return None
+    end_of_day_ist = dt.astimezone(IST_TZ).replace(hour=23, minute=59, second=59, microsecond=999999)
+    return end_of_day_ist.astimezone(timezone.utc)
 
 
 def _strip_todo_sharing(doc: dict) -> None:
@@ -377,6 +453,23 @@ def _strip_todo_sharing(doc: dict) -> None:
     doc["coach_ids"] = []
     doc["assigned_departments"] = []
     doc["watchers"] = []
+
+
+def _label_todo_reminders(doc: dict) -> None:
+    """Stamp every reminder on a todo with parent_type "todo".
+
+    The Reminder modal is shared with sessions and tasks and defaults a new reminder to
+    "event", so a todo's reminders were being stored mislabelled. Nothing routes a todo by this
+    field any more — send_reminder_email picks its template from the DOCUMENT type, precisely so
+    a stray label cannot reach a Task template — but storing the truth keeps the data honest for
+    anything that reads it later. Applied on create AND update, like _strip_todo_sharing, so a
+    hand-crafted payload cannot relabel them.
+    """
+    reminders = doc.get("reminders")
+    if isinstance(reminders, list):
+        doc["reminders"] = [
+            {**r, "parent_type": TODO_TYPE} if isinstance(r, dict) else r for r in reminders
+        ]
 
 
 def _require_todo_owner(doc: dict, current_user: dict) -> None:
@@ -422,6 +515,7 @@ async def create_event(event: CalendarEventCreate, background_tasks: BackgroundT
         # generic `calendar.create` bit is not required (a staff member without it must still
         # be able to jot down their own todo). Sharing fields are stripped, not trusted.
         _strip_todo_sharing(event_dict)
+        _label_todo_reminders(event_dict)
         # A todo is due at 23:59:59 (IST) on the calendar day it was added for (the selected day;
         # defaults to today). The user never picks a time — only the date carries over.
         _apply_todo_due_end_of_day(event_dict)
@@ -488,21 +582,53 @@ async def create_event(event: CalendarEventCreate, background_tasks: BackgroundT
     repeat_type = event_dict.get("repeat", "Does not repeat")
     end_date_str = event_dict.get("repeat_end_date")
     is_todo = event_dict.get("type") == TODO_TYPE
-    # A series needs a group id for the nightly rollover engine to pick it up. Tasks/events
-    # only get one when an end date bounds the series; a TODO does not require an end date —
-    # an open-ended personal todo (no stop date) still recurs, rolling forward one occurrence
-    # per period indefinitely (the engine treats a missing repeat_end_date as "no stop").
-    if repeat_type != "Does not repeat" and (end_date_str or is_todo):
-        # Generate a unique series ID to group these occurrences
+    is_repeating = repeat_type != "Does not repeat"
+
+    # A repeating TODO is generated in full, up to its Repeat End Date, so that date is what
+    # bounds the series and is therefore required. (It was optional while todos rolled forward
+    # one day at a time forever — "generate every occurrence up to no end date" has no meaning.)
+    if is_todo and is_repeating and not end_date_str:
+        raise HTTPException(
+            status_code=400,
+            detail="Select a Repeat End Date — a repeating todo is generated up to that date.",
+        )
+
+    # A series needs a group id to tie its occurrences together: the nightly task rollover, the
+    # series edit rules and the end-date timeline sync below all key off it.
+    if is_repeating and end_date_str:
         event_dict["recurring_group_id"] = str(ObjectId())
 
-    # Recurring TASKS and TODOS create only the FIRST occurrence here; a nightly job rolls the
-    # series forward one occurrence at a time (see recurring_task_service.generate_due_recurring_tasks),
-    # so we never bulk-create duplicates. A repeating todo deliberately uses the task engine
-    # rather than the bulk generator below, so both behave identically: one occurrence per
-    # period, created on its own day, never landing on a holiday or weekly off.
-    # Sessions/events keep the original bulk-generation below.
-    if repeat_type != "Does not repeat" and end_date_str and event_dict.get("type") not in ("task", TODO_TYPE):
+    # ─── Recurring Todos: the whole series, up front ───
+    # Every occurrence up to the Repeat End Date is written the moment the todo is saved, so the
+    # user sees the full series on the calendar immediately instead of one new todo appearing at
+    # 12:00 AM each day. Dates come from the SAME builder the nightly task engine uses, so a
+    # repeating todo still lands exactly where a repeating task would: same cadences, holidays
+    # and weekly offs dropped (daily) or shifted (weekly/monthly/…), same month-end anti-drift.
+    if is_todo and is_repeating and end_date_str:
+        try:
+            from app.services.recurring_task_service import build_series_occurrences
+            series_end = _series_end_cutoff(end_date_str)
+            occurrences, truncated = await build_series_occurrences(event_dict, series_end)
+            docs = [event_dict] + occurrences
+            insert_res = await col.insert_many(docs)
+            ids = [str(_id) for _id in insert_res.inserted_ids]
+            await log_activity(current_user, "Create Recurring", col_name,
+                               f"Generated {len(ids)} todos for {event_dict['title']}")
+            # No notification: a todo is private and has no attendees by design.
+            message = f"Created {len(ids)} todos"
+            if truncated:
+                message += " (series capped — shorten the Repeat End Date for the remaining dates)"
+            return {"id": ids[0], "ids": ids, "count": len(ids), "message": message}
+        except HTTPException:
+            raise
+        except Exception as e:
+            print(f"TODO SERIES GENERATION FAILURE: {e}")
+            # Fall through to the single-document insert below, so the todo itself is never lost.
+
+    # Recurring TASKS create only the FIRST occurrence here; a nightly job rolls the series
+    # forward one occurrence at a time (see recurring_task_service.generate_due_recurring_tasks),
+    # so we never bulk-create duplicates. Sessions/events keep the original bulk generation below.
+    if is_repeating and end_date_str and event_dict.get("type") not in ("task", TODO_TYPE):
         try:
             # Standardize Start Date
             raw_start = event_dict["start"].replace("Z", "+00:00")
@@ -671,6 +797,7 @@ async def update_event(event_id: str, updates: dict, background_tasks: Backgroun
     _require_todo_owner(existing, current_user)
     if existing.get("type") == TODO_TYPE:
         _strip_todo_sharing(updates)
+        _label_todo_reminders(updates)
         updates.pop("type", None)  # a todo can never be converted into a shared event/task
 
     is_admin = current_user.get("role") == "superadmin"
@@ -687,6 +814,18 @@ async def update_event(event_id: str, updates: dict, background_tasks: Backgroun
     if updates.get("status") == "completed" and existing.get("status") != "completed":
         updates["completed_at"] = datetime.now(timezone.utc)
     elif updates.get("status") == "schedule":
+        updates["completed_at"] = None
+
+    # ─── A todo's status follows its due date on every edit ───
+    # Pending vs Overdue is never the user's choice, it is a fact about the deadline — so it is
+    # RECOMPUTED here rather than taken from the payload: a due date moved into the future puts a
+    # missed todo back to Pending, one already past makes it Overdue immediately instead of on
+    # the next sweep. Recomputing also matters because the edit form posts back whatever status
+    # it loaded, so an overdue todo would otherwise send "overdue" straight back and stick there.
+    # Completed is left alone — it is finished business, not a deadline question.
+    if existing.get("type") == TODO_TYPE and updates.get("status", existing.get("status")) != "completed":
+        from app.services.todo_status_service import is_todo_overdue
+        updates["status"] = TODO_OVERDUE_STATUS if is_todo_overdue({**existing, **updates}) else TODO_PENDING_STATUS
         updates["completed_at"] = None
 
     updates["updated_at"] = datetime.now(timezone.utc)
@@ -769,14 +908,45 @@ async def update_event(event_id: str, updates: dict, background_tasks: Backgroun
                 new_end_dt = datetime.fromisoformat(new_raw_end)
                 if new_end_dt.tzinfo is None: new_end_dt = new_end_dt.replace(tzinfo=timezone.utc)
 
-                # 1. DELETE: Future occurrences past the new end date
+                # 1. DELETE: Future occurrences past the new end date.
+                # A todo is due at 23:59:59 IST, which is LATER in the day than the raw stored
+                # end value (midday UTC from the picker) — so its boundary has to be the end of
+                # the chosen IST day, or shortening a series would also delete the occurrence
+                # falling on the very date the user just chose as the end.
+                is_todo_series = existing.get("type") == TODO_TYPE
+                cutoff_dt = (_series_end_cutoff(new_end_str) or new_end_dt) if is_todo_series else new_end_dt
                 await get_collection(new_col_name).delete_many({
                     "recurring_group_id": gid,
-                    "start": {"$gt": new_end_dt.isoformat()}
+                    "start": {"$gt": cutoff_dt.isoformat()}
                 })
 
-                # 2. GENERATE: If expanded, create new ones
-                if old_end_str:
+                # 2a. TODOS: rebuild forward from whatever occurrence is now last in the series,
+                # through the shared builder — so an extended todo series keeps the holiday /
+                # weekly-off and anti-drift rules its original dates were generated under. The
+                # naive walk below would ignore them and put todos on Sundays and holidays.
+                if is_todo_series:
+                    from app.services.recurring_task_service import (
+                        build_series_occurrences, MAX_SERIES_OCCURRENCES,
+                    )
+                    remaining = await get_collection(new_col_name).find(
+                        {"recurring_group_id": gid}).to_list(MAX_SERIES_OCCURRENCES + 1)
+                    if remaining:
+                        # Walk on from the LAST surviving occurrence. The edit's own content
+                        # (title, details, cadence) carries onto the new dates, but its
+                        # per-occurrence fields must not: `updates` holds the start/end of
+                        # whichever occurrence the user happened to open, and letting that
+                        # through would restart the series from that date instead of the last.
+                        head = max(remaining, key=lambda d: d.get("start") or "")
+                        series_head = {**head, **{k: v for k, v in updates.items()
+                                                  if k not in PER_OCCURRENCE_FIELDS}}
+                        taken = {(d.get("start") or "")[:10] for d in remaining}
+                        occurrences, _ = await build_series_occurrences(
+                            series_head, cutoff_dt, taken_dates=taken)
+                        if occurrences:
+                            await get_collection(new_col_name).insert_many(occurrences)
+
+                # 2b. GENERATE: If expanded, create new ones
+                elif old_end_str:
                     old_raw_end = old_end_str.replace("Z", "+00:00")
                     if len(old_raw_end) <= 10: old_raw_end += "T23:59:59+00:00"
                     current_end_dt = datetime.fromisoformat(old_raw_end)
