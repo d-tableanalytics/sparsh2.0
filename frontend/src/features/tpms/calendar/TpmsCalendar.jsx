@@ -1,7 +1,8 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   CalendarDays, Plus, RefreshCw, Inbox, X, Clock, Building2, Tag, Users2,
   UserCog, CheckCircle2, Paperclip, Upload, FileText, RotateCcw, Trash2, Pencil, Pin,
+  Download, FileSpreadsheet, AlertTriangle,
 } from 'lucide-react';
 import { DashboardHero, HeroButton, KpiTile, FilterSelect } from '../common/dashboardKit';
 import ScheduleCalendarModal from '../../../components/calendar/ScheduleCalendarModal';
@@ -11,6 +12,7 @@ import {
   getSchedules, getActivities, deleteSchedule, markLearnerDone, confirmCompletion,
   requestReschedule, getRescheduleRequests, decideRescheduleRequest,
   getScheduleUploads, uploadScheduleFile,
+  exportTpms, importTpms, saveExportedWorkbook,
 } from '../../../services/tpmsApi';
 
 /* ─────────────────────────────────────────────────────────────
@@ -203,10 +205,23 @@ const TpmsCalendar = () => {
 
   const [openDay, setOpenDay] = useState(null);
   const [showModal, setShowModal] = useState(false);
+  // The day an empty cell was clicked on, pre-filled into the Schedule modal's Plan Date.
+  // Cleared whenever the modal closes and by the header Schedule button, so that one still
+  // opens a blank form.
+  const [scheduleDate, setScheduleDate] = useState('');
   const [editEvent, setEditEvent] = useState(null);   // event being edited (null = create)
   const [requests, setRequests] = useState([]);
   const [showRequests, setShowRequests] = useState(false);
   const [rr, setRr] = useState(null);        // reschedule-request form target
+
+  // ── Bulk export / import ──
+  // The file input is hidden and driven by the Import button: a styled <label> would work too,
+  // but a ref lets the input be RESET after every pick, so choosing the same file twice in a
+  // row still fires onChange (the browser suppresses it otherwise).
+  const fileRef = useRef(null);
+  const [exporting, setExporting] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [report, setReport] = useState(null);   // import result, shown in a dialog
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -233,6 +248,45 @@ const TpmsCalendar = () => {
   useEffect(() => {
     getActivities().then(({ data }) => setActivities(data.activities || [])).catch(() => {});
   }, []);
+
+  // Download the whole of TPMS as one workbook. The Schedules sheet is the fillable one:
+  // add rows with a blank "Schedule ID", then bring the file back through Import.
+  const handleExport = useCallback(async () => {
+    if (exporting) return;
+    setExporting(true);
+    try {
+      const res = await exportTpms();
+      saveExportedWorkbook(res);
+      const rows = res.headers?.['x-tpms-export-rows'];
+      showSuccess(`Exported${rows ? ` ${rows} rows` : ''} — fill the Schedules sheet, then Import.`);
+    } catch (e) {
+      // An error response to a blob request arrives as a Blob, not JSON, so the usual
+      // e.response.data.detail is unreadable without decoding it first.
+      let detail = 'Export failed';
+      try { detail = JSON.parse(await e.response?.data?.text?.() || '{}').detail || detail; } catch { /* keep default */ }
+      showError(detail);
+    } finally {
+      setExporting(false);
+    }
+  }, [exporting, showError, showSuccess]);
+
+  const handleImport = useCallback(async (event) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';                 // let the same file be picked again later
+    if (!file || importing) return;
+    setImporting(true);
+    try {
+      const { data } = await importTpms(file);
+      setReport(data);
+      const created = data?.schedules?.created || 0;
+      if (created) showSuccess(`${created} activity${created === 1 ? '' : 's'} scheduled from the workbook.`);
+      await load();                          // new activities should appear without a refresh
+    } catch (e) {
+      showError(e.response?.data?.detail || 'Import failed');
+    } finally {
+      setImporting(false);
+    }
+  }, [importing, load, showError, showSuccess]);
 
   // Recurrence lives on activity_meta.recurrence (preferred) or a flat recurrence
   // field; may be absent on older/sparse events.
@@ -330,7 +384,24 @@ const TpmsCalendar = () => {
           </HeroButton>
         )}
         <HeroButton icon={RefreshCw} onClick={load}>Refresh</HeroButton>
-        <HeroButton icon={Plus} onClick={() => setShowModal(true)}>Schedule</HeroButton>
+        {/* Bulk load. Admin-only to match the backend, which refuses both endpoints for any
+            other role — showing the buttons to someone who can only get a 403 is worse than
+            not showing them. Export first: the workbook it produces IS the import template. */}
+        {isAdmin && (
+          <>
+            <HeroButton icon={Download} onClick={handleExport}>
+              {exporting ? 'Exporting…' : 'Export'}
+            </HeroButton>
+            <HeroButton icon={FileSpreadsheet} onClick={() => fileRef.current?.click()}>
+              {importing ? 'Importing…' : 'Import'}
+            </HeroButton>
+            <input ref={fileRef} type="file" accept=".xlsx,.xlsm" className="hidden"
+              onChange={handleImport} />
+          </>
+        )}
+        {/* Clears any day carried over from a cell click, so the header button keeps opening a
+            blank form with no date pre-selected. */}
+        <HeroButton icon={Plus} onClick={() => { setScheduleDate(''); setShowModal(true); }}>Schedule</HeroButton>
       </DashboardHero>
 
       <div className="grid grid-cols-3 xl:grid-cols-6 gap-3">
@@ -377,9 +448,17 @@ const TpmsCalendar = () => {
             const ds = ymd(year, month, day);
             const evs = byDate[ds] || [];
             const isToday = ds === todayStr;
+            // A day that already has activities keeps its existing behaviour — the drawer
+            // listing them, from which each one opens its own details/edit view. An EMPTY day
+            // opens the Schedule modal pre-filled with that date.
             return (
-              <button key={ds} onClick={() => evs.length && setOpenDay(ds)}
-                className={`bg-[var(--bg-card)] min-h-[104px] p-1.5 text-left align-top hover:bg-[var(--table-hover)] transition-colors ${evs.length ? 'cursor-pointer' : 'cursor-default'}`}>
+              <button key={ds} title={evs.length ? undefined : `Schedule an activity on ${ds}`}
+                onClick={() => {
+                  if (evs.length) { setOpenDay(ds); return; }
+                  setScheduleDate(ds);
+                  setShowModal(true);
+                }}
+                className="bg-[var(--bg-card)] min-h-[104px] p-1.5 text-left align-top hover:bg-[var(--table-hover)] transition-colors cursor-pointer">
                 <div className={`text-[11.5px] font-black mb-1 ${isToday
                   ? 'inline-flex items-center justify-center w-6 h-6 rounded-full bg-[var(--accent-indigo)] text-white'
                   : 'text-[var(--text-muted)]'}`}>{day}</div>
@@ -525,12 +604,76 @@ const TpmsCalendar = () => {
         </Overlay>
       )}
 
+      {/* ── Import result ──
+          Shown after every import, success or not. A bulk load that silently half-worked is
+          the worst outcome, so per-row failures are listed with their sheet line number rather
+          than collapsed into a single toast. */}
+      {report && (
+        <Overlay onClose={() => setReport(null)} title="Import Complete" narrow>
+          <div className="grid grid-cols-3 gap-2 mb-4">
+            {[
+              { label: 'Scheduled', value: report.schedules?.created || 0, tone: 'var(--accent-green)' },
+              { label: 'Skipped',   value: report.schedules?.skipped || 0, tone: 'var(--text-muted)' },
+              { label: 'Failed',    value: report.schedules?.failed || 0,  tone: 'var(--accent-red)' },
+            ].map((s) => (
+              <div key={s.label} className="rounded-xl border border-[var(--border)] px-3 py-2.5 text-center">
+                <div className="text-[19px] font-black tabular-nums" style={{ color: s.tone }}>{s.value}</div>
+                <div className="text-[10.5px] font-black uppercase tracking-wide text-[var(--text-muted)]">{s.label}</div>
+              </div>
+            ))}
+          </div>
+
+          {!!report.schedules?.events && (
+            <p className="text-[11.5px] font-semibold text-[var(--text-muted)] mb-3">
+              {report.schedules.events} calendar occurrence{report.schedules.events === 1 ? '' : 's'} created
+              (recurrence expanded). Reminders, schedule mails and form links were sent exactly as
+              they are for an activity scheduled by hand.
+            </p>
+          )}
+
+          {!!report.schedules?.errors?.length && (
+            <div className="rounded-xl border border-[var(--accent-red-border)] bg-[var(--accent-red-bg)] p-3 mb-3">
+              <div className="flex items-center gap-1.5 text-[11.5px] font-black text-[var(--accent-red)] mb-1.5">
+                <AlertTriangle size={13} /> Rows that could not be scheduled
+              </div>
+              <ul className="space-y-1">
+                {report.schedules.errors.map((msg) => (
+                  <li key={msg} className="text-[11.5px] font-semibold text-[var(--text-main)]">{msg}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {(() => {
+            const restored = Object.entries(report.collections || {})
+              .filter(([, c]) => c.inserted > 0);
+            return restored.length ? (
+              <div className="rounded-xl border border-[var(--border)] p-3">
+                <div className="text-[11px] font-black uppercase tracking-wide text-[var(--text-muted)] mb-1.5">
+                  Other sheets restored
+                </div>
+                {restored.map(([name, c]) => (
+                  <div key={name} className="flex justify-between text-[11.5px] font-semibold text-[var(--text-main)]">
+                    <span>{name}</span><span className="tabular-nums">+{c.inserted}</span>
+                  </div>
+                ))}
+              </div>
+            ) : null;
+          })()}
+
+          <div className="flex justify-end mt-4">
+            <Btn onClick={() => setReport(null)}>Done</Btn>
+          </div>
+        </Overlay>
+      )}
+
       <ScheduleCalendarModal
         mode="tpms"
         event={editEvent}
+        initialDate={scheduleDate}
         isOpen={showModal || !!editEvent}
-        onClose={() => { setShowModal(false); setEditEvent(null); }}
-        onSaved={() => { load(); setShowModal(false); setEditEvent(null); }}
+        onClose={() => { setShowModal(false); setEditEvent(null); setScheduleDate(''); }}
+        onSaved={() => { load(); setShowModal(false); setEditEvent(null); setScheduleDate(''); }}
       />
     </div>
   );

@@ -108,6 +108,36 @@ export const getEscalationDashboard = (params) =>
 export const getLogsReport = (params) => api.get('/tpms/reports/logs', { params });
 export const getReviewReports = (params) => api.get('/tpms/reports/reviews', { params });
 
+// ── Bulk export / import (admin only) ──
+// The workbook is one sheet per TPMS collection, led by a fillable `Schedules` sheet. Add rows
+// there leaving "Schedule ID" blank, re-import, and each becomes a real scheduled activity.
+// `responseType: 'blob'` matters — without it axios parses the .xlsx bytes as text and the
+// saved file is corrupt.
+export const exportTpms = () => api.get('/tpms/export', { responseType: 'blob' });
+
+export const importTpms = (file) => {
+  const form = new FormData();
+  form.append('file', file);
+  return api.post('/tpms/import', form, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  });
+};
+
+// Save an exported blob to disk, preferring the filename the backend set in
+// Content-Disposition so the timestamp it stamped is what the user sees.
+export const saveExportedWorkbook = (response, fallback = 'tpms-export.xlsx') => {
+  const disposition = response.headers?.['content-disposition'] || '';
+  const match = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(disposition);
+  const url = URL.createObjectURL(new Blob([response.data]));
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = match ? decodeURIComponent(match[1]) : fallback;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+};
+
 /** Current month as the canonical 'YYYY-MM' the backend expects. */
 export const currentPeriod = () => {
   const d = new Date();

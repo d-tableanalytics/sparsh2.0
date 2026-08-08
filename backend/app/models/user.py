@@ -50,6 +50,13 @@ class UserResponse(UserBase):
     created_at: datetime = Field(default_factory=datetime.utcnow)
     orm_enabled: Optional[bool] = True  # Company-level ORM module access
     tpms_enabled: Optional[bool] = False  # Company-level TPMS module access (opt-in)
+    # Company-level Task & Delegation access (opt-in). MUST be declared here: GET /users/me is
+    # served through this response_model, and FastAPI drops any field the model does not
+    # declare. Without it the value routes/user.py sets from the company record was silently
+    # stripped from the payload, so `user.delegation_enabled` was undefined on the client and
+    # utils/taskAccess.canAccessTaskManagement hid the module for every company user however
+    # the company toggle was set.
+    delegation_enabled: Optional[bool] = False
 
     class Config:
         populate_by_name = True

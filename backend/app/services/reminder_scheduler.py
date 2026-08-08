@@ -68,6 +68,16 @@ async def start_reminder_scheduler():
         try:
             await check_and_trigger_reminders()
 
+            # Every tick: move personal todos whose due date/time has passed from Pending to
+            # Overdue. Runs at the 60s cadence rather than with the daily job below so the
+            # status flips within a minute of the deadline, not at the next midnight. Isolated
+            # so a sweep failure can never stop the reminders the rest of the ERP depends on.
+            try:
+                from app.services.todo_status_service import mark_overdue_todos
+                await mark_overdue_todos()
+            except Exception as e:
+                logger.error(f"Error marking overdue todos: {e}")
+
             # Once per day (first tick after midnight, and at startup), roll recurring
             # task series forward — creating each day's/week's/month's next occurrence.
             # The day boundary is IST (UTC+5:30), so the next occurrence is created at

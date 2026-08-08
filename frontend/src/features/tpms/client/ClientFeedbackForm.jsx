@@ -31,7 +31,11 @@ const periodFromParam = (raw) => {
   return v;
 };
 
-const ClientFeedbackForm = ({ formType, icon }) => {
+// `lockedPeriod` / `onSubmitted` are supplied when this form is opened from a mailed
+// assignment link (/f/<token>): the period comes from the assignment rather than a query
+// param, and the callback lets the caller mark that assignment submitted. Both are
+// optional — rendered any other way the component behaves exactly as before.
+const ClientFeedbackForm = ({ formType, icon, lockedPeriod = '', onSubmitted }) => {
   const { showSuccess, showError } = useNotification();
   const { user } = useAuth();
   const [searchParams] = useSearchParams();
@@ -45,7 +49,7 @@ const ClientFeedbackForm = ({ formType, icon }) => {
   // Pre-fill the period from a deep-link: `period` ("My Forms") or `MID` (the CID/EID/MID
   // params a notification link carries, spec §11). Falls back to the current month.
   const [period, setPeriod] = useState(
-    () => periodFromParam(searchParams.get('period') || searchParams.get('MID')) || defaultPeriod());
+    () => lockedPeriod || periodFromParam(searchParams.get('period') || searchParams.get('MID')) || defaultPeriod());
 
   const [saved, setSaved] = useState({});      // { question_id: {checked, remark, question} } (locked)
   const [draft, setDraft] = useState({});      // { question_id: {checked, remark} } (editable)
@@ -119,6 +123,8 @@ const ClientFeedbackForm = ({ formType, icon }) => {
         answers,
       });
       showSuccess(res.data?.message || 'Feedback recorded');
+      // Tell the assignment link (if this was opened from one) that it is done.
+      onSubmitted?.();
       await refreshSaved();
     } catch (err) {
       showError(err.response?.data?.detail || 'Failed to submit feedback');
@@ -170,6 +176,7 @@ const ClientFeedbackForm = ({ formType, icon }) => {
           <div>
             <label className="block text-[11px] font-bold uppercase tracking-widest text-[var(--text-muted)] mb-1.5">Month / Period</label>
             <input type="text" value={period} onChange={(e) => setPeriod(e.target.value)} placeholder="e.g. jul26"
+              readOnly={!!lockedPeriod} disabled={!!lockedPeriod}
               className="w-full px-3 py-2 rounded-lg bg-[var(--input-bg)] border border-[var(--input-border)] text-[13px] font-medium outline-none focus:border-[var(--accent-indigo)]" />
           </div>
           <div className="flex items-end">

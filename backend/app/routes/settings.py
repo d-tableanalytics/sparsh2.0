@@ -262,6 +262,14 @@ TEMPLATE_SEEDS = [
      "Task Assigned: {{task_name}}",
      "Hello {{name}},\n\n{{actor_name}} has assigned you the task '{{task_name}}'.\n\nDeadline: {{deadline}}\nPriority: {{critical_level}}\nDescription: {{description}}\n\nRegards,\nSparsh Notifications",
      "Hello {{name}}, {{actor_name}} has assigned you the task '{{task_name}}'. Deadline: {{deadline}}."),
+    # The ASSIGNER's receipt, sent alongside (never instead of) the Task Assigned mail the
+    # assignee gets. Its own recipient and its own placeholder set — {{assigner_name}},
+    # {{assignee_name}}, {{task_name}}, {{priority}}, {{due_date}}, {{assigned_date}},
+    # {{company_name}} — see task_notifications.notify_assigner_confirmation.
+    ("task_assignment_confirmation", "Task Assignment Confirmation (Assigner)",
+     "Assignment Confirmed: {{task_name}}",
+     "Hello {{assigner_name}},\n\nYour task '{{task_name}}' has been assigned successfully.\n\nAssigned To: {{assignee_name}}\nPriority: {{priority}}\nDue Date: {{due_date}}\nAssigned On: {{assigned_date}}\nCompany: {{company_name}}\n\nThis is your confirmation as the assigner. {{assignee_name}} has been notified separately.\n\nRegards,\nSparsh Notifications",
+     "Hello {{assigner_name}}, '{{task_name}}' has been assigned to {{assignee_name}}. Due {{due_date}} (Priority: {{priority}})."),
     ("task_updated", "Task Updated",
      "Task Updated: {{task_name}}",
      "Hello {{name}},\n\nThe task '{{task_name}}' was updated by {{actor_name}}.\n\nDeadline: {{deadline}}\nPriority: {{critical_level}}\nStatus: {{task_status}}\n\nRegards,\nSparsh Notifications",

@@ -879,11 +879,19 @@ def _describe_offset(reminder: dict) -> str:
 
 
 async def send_reminder_email(user_obj: dict, event: dict, reminder: dict = None):
+    # A personal TODO is decided FIRST, and by the document type alone — never by the reminder's
+    # label. The Reminder modal is shared across sessions, tasks and todos and stamps a
+    # `parent_type` on everything it creates (defaulting to "event"), so a todo carrying a
+    # reminder labelled "task" would otherwise satisfy is_task below and silently send the TASK
+    # Reminder template. A todo must never fall back to a Task or Session template, so its own
+    # type wins outright.
+    is_todo = event.get("type") == "todo"
     # A reminder is a TASK reminder when the event is a task OR the reminder itself was
     # authored as one (parent_type == "task"). Either signal → the Task Reminder template.
     # Sessions/events (type "event", parent_type "event") keep the Session Reminder template
     # unchanged. TPMS uses a separate branch entirely, so this touches the Task module only.
-    is_task = (event.get("type") == "task") or ((reminder or {}).get("parent_type") == "task")
+    is_task = not is_todo and (
+        (event.get("type") == "task") or ((reminder or {}).get("parent_type") == "task"))
     # A task or todo is "due-anchored": its reminder is about a deadline/due date, so the
     # template's {{task_deadline}} is populated; a session/event leaves it "N/A".
     is_due_anchored = event.get("type") in ("task", "todo")
@@ -921,10 +929,10 @@ async def send_reminder_email(user_obj: dict, event: dict, reminder: dict = None
     # from the scheduler when a reminder's time arrives. The names make that impossible to
     # confuse with the task_created / task_assigned / task_updated templates, which fire on
     # save and are a completely separate flow (see services/task_notifications.py).
-    if is_task:
-        slug = "upcoming_task_reminder"
-    elif event.get("type") == "todo":
+    if is_todo:
         slug = "upcoming_todo_reminder"
+    elif is_task:
+        slug = "upcoming_task_reminder"
     else:
         slug = "reminder"
     scope = event.get("notification_scope")

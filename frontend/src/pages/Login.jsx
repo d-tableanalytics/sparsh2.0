@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { useNavigate, Link } from 'react-router-dom';
+import { useNavigate, useLocation, Link } from 'react-router-dom';
 import { Mail, Lock, Eye, EyeOff } from 'lucide-react';
 import './Login.css';
 
@@ -11,6 +11,7 @@ import sparshLogo from '../assets/sparshLogo.png';
 const Login = () => {
   const { login, user } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
 
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -18,11 +19,19 @@ const Login = () => {
   const [error, setError] = useState('');
   const [isLoading, setIsLoading] = useState(false);
 
+  // Return the user to whatever they were trying to reach before being sent here (set by
+  // PrivateRoute), so a mailed deep link such as an assigned TPMS form survives the login step.
+  // Anyone arriving at /login directly has no `from` and still lands on the dashboard, so this
+  // changes nothing for the ordinary sign-in path.
+  const redirectTo = location.state?.from?.pathname
+    ? `${location.state.from.pathname}${location.state.from.search || ''}`
+    : '/';
+
   useEffect(() => {
     if (user) {
-      navigate('/');
+      navigate(redirectTo, { replace: true });
     }
-  }, [user, navigate]);
+  }, [user, navigate, redirectTo]);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
