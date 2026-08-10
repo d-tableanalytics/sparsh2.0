@@ -309,6 +309,11 @@ const TaskFormModal = ({ isOpen, onClose, onSaved, task = null, categories = [],
     if (form.repeat !== 'Does not repeat') {
       if (!form.start) return 'Start Date is required when Repeat is enabled';
       if (!form.repeat) return 'Frequency is required when Repeat is enabled';
+      // Required, and load-bearing: the backend only ties a series together (and the nightly
+      // engine only picks it up) when an end date is present. Without one the task saved
+      // silently as a one-off — it looked repeating and never repeated. The API rejects this
+      // too; checking here just saves the round trip.
+      if (!form.repeat_end_date) return 'End Date is required when Repeat is enabled';
       if (form.repeat === 'Monthly' && !form.repeat_data.lastDay && form.repeat_data.monthlyDates.length === 0) {
         return 'Select at least one date (or Last Day) for a Monthly repeat';
       }
@@ -655,9 +660,11 @@ const TaskFormModal = ({ isOpen, onClose, onSaved, task = null, categories = [],
                       <CalendarClock size={12} /> {form.start ? formatDate(form.start) : 'Start Date *'}
                     </button>
 
+                    {/* Required, and styled like Start Date so the asterisk is not the only
+                        cue that it must be filled in. */}
                     <button type="button" onClick={() => setRepeatEndPickerOpen(true)}
-                      className="flex items-center gap-1.5 px-3 py-1.5 bg-[var(--bg-card)] border border-[var(--border)] rounded-full text-[10px] font-black text-[var(--text-muted)]">
-                      <CalendarClock size={12} /> {form.repeat_end_date ? formatDate(form.repeat_end_date) : 'End Date'}
+                      className={`flex items-center gap-1.5 px-3 py-1.5 bg-[var(--bg-card)] border rounded-full text-[10px] font-black uppercase tracking-wider ${form.repeat_end_date ? 'border-[var(--accent-indigo)] text-[var(--accent-indigo)]' : 'border-[var(--border)] text-[var(--text-muted)]'}`}>
+                      <CalendarClock size={12} /> {form.repeat_end_date ? formatDate(form.repeat_end_date) : 'End Date *'}
                     </button>
                   </>
                 )}
