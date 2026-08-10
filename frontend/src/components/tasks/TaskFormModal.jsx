@@ -856,15 +856,19 @@ const TaskFormModal = ({ isOpen, onClose, onSaved, task = null, categories = [],
       <MiniDatePicker isOpen={deadlinePickerOpen} onClose={() => setDeadlinePickerOpen(false)}
         value={form.end} title="Select Due Date" onApply={(iso) => setForm(f => ({ ...f, end: iso }))}
         holidayDates={holidayDates} weeklyOffs={WEEKLY_OFFS} onBlocked={showError} disablePast />
+      {/* Repeat Start Date is a DATE, not a moment: a series starts on a day. `dateOnly`
+          hides the time tab so the picker cannot imply otherwise. (The stored ISO keeps a
+          midday anchor — deliberately, since a midnight local time would read as the
+          PREVIOUS day once converted to UTC.) */}
       <MiniDatePicker isOpen={startDatePickerOpen} onClose={() => setStartDatePickerOpen(false)}
         value={form.start} title="Repeat Start Date" onApply={(iso) => setForm(f => ({ ...f, start: iso }))}
-        holidayDates={holidayDates} weeklyOffs={WEEKLY_OFFS} onBlocked={showError} />
+        holidayDates={holidayDates} weeklyOffs={WEEKLY_OFFS} onBlocked={showError} dateOnly />
       {/* Repeat End Date: holidays are marked (indicator + label) but still selectable —
           the end date is only the series boundary; the recurring engine skips holiday
           occurrences within the range. */}
       <MiniDatePicker isOpen={repeatEndPickerOpen} onClose={() => setRepeatEndPickerOpen(false)}
         value={form.repeat_end_date} title="Repeat End Date" onApply={(iso) => setForm(f => ({ ...f, repeat_end_date: iso }))}
-        holidayDates={holidayDates} weeklyOffs={WEEKLY_OFFS} onBlocked={showError} />
+        holidayDates={holidayDates} weeklyOffs={WEEKLY_OFFS} onBlocked={showError} dateOnly />
       <ReminderModal isOpen={reminderModalOpen} onClose={() => setReminderModalOpen(false)}
         reminders={form.reminders} onApply={(reminders) => setForm(f => ({ ...f, reminders: reminders.map(r => ({ ...r, parent_type: 'task' })) }))} />
       <TaskTagsModal
