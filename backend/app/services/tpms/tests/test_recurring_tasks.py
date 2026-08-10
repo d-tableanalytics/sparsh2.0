@@ -1,7 +1,7 @@
 """Recurring-task verification harness.
 
-Covers the 19 required checks: a genuinely fresh occurrence, the Daily deadline landing on its
-own date, Weekly/Monthly deadlines left alone, mandatory Repeat End Date, Yearly recurrence,
+Covers the 19 required checks: a genuinely fresh occurrence, the user's assigned deadline
+surviving every occurrence untouched, mandatory Repeat End Date, Yearly recurrence,
 date-driven generation, the shared series-extension path, and IST-consistent de-duplication.
 
 House convention: self-contained, no pytest, fakes, ASCII output, exit 1 on failure.
@@ -11,6 +11,7 @@ Run:  python -m app.services.tpms.tests.test_recurring_tasks   (from backend/)
 from __future__ import annotations
 
 import asyncio
+import inspect
 from datetime import datetime, timedelta, timezone
 
 results: list[bool] = []
@@ -95,6 +96,8 @@ async def main() -> None:
           all(c["completed_at"] is None for c in nxt["checklist"]))
     check("   checklist ITEMS themselves are kept (title and id survive)",
           [c["title"] for c in nxt["checklist"]] == ["Collect updates", "Circulate notes"])
+    check("   the new checklist carries only its items - no date, time or deadline of its own",
+          all(set(c) == {"id", "title", "completed", "completed_at"} for c in nxt["checklist"]))
     check("3. completion_attachments are NOT copied", nxt["completion_attachments"] == [])
     check("4. the assigner's attachments ARE preserved",
           nxt["attachments"] == [{"id": "a1", "name": "template.docx"}])
@@ -121,44 +124,44 @@ async def main() -> None:
           nxt.get("evidence_required") is True and not nxt.get("completion_attachments"))
 
     # =================================================================
-    section("8-9. Daily deadline lands on the occurrence's own date")
+    section("8-9. The deadline the user assigned NEVER changes")
     # =================================================================
+    assigned_end = head_task()["end"]
     for day in (11, 12, 13):
         occ = occurrence_on(day)
-        start, end = datetime.fromisoformat(occ["start"]), datetime.fromisoformat(occ["end"])
-        check(f"8. {day} Aug keeps the 9 AM start",
+        start = datetime.fromisoformat(occ["start"])
+        check(f"8. {day} Aug gets its own start date, at the 9 AM the user chose",
               (start.day, start.hour, start.minute) == (day, 9, 0))
-        check(f"9. {day} Aug is due 6 PM the SAME day",
-              (end.day, end.hour, end.minute) == (day, 18, 0))
+        check(f"9. {day} Aug carries the assigned deadline verbatim",
+              occ["end"] == assigned_end)
 
-    section("The multi-day gap is no longer inherited")
+    section("No cadence recomputes the deadline")
     wide = head_task(end="2026-08-30T18:00:00+05:30")   # created 10 Aug, due 30 Aug
     occ = occurrence_on(11, head=wide)
-    end = datetime.fromisoformat(occ["end"])
-    check("a 20-day gap does NOT carry forward", (end.month, end.day) == (8, 11))
-    check("and the chosen 6 PM deadline time is kept", (end.hour, end.minute) == (18, 0))
+    check("a 30 Aug deadline is still 30 Aug on the 11 Aug occurrence",
+          occ["end"] == "2026-08-30T18:00:00+05:30")
 
-    section("An overnight daily window stays coherent")
+    section("The deadline is not derived from the start either")
     night = head_task(start="2026-08-10T21:00:00+05:30", end="2026-08-11T06:00:00+05:30")
     target = datetime(2026, 8, 11, 21, 0, tzinfo=IST)
     occ = R._fresh_occurrence(night, target, target, None)
-    s, e = datetime.fromisoformat(occ["start"]), datetime.fromisoformat(occ["end"])
-    check("end is after start, not inverted", e > s)
-    check("and lands 6 AM the next morning", (e.day, e.hour) == (12, 6))
+    check("an overnight window keeps the exact assigned deadline",
+          occ["end"] == "2026-08-11T06:00:00+05:30")
+
+    check("the deadline is never computed anywhere in the engine",
+          "_occurrence_end" not in inspect.getsource(R)
+          and 'doc["end"]' not in inspect.getsource(R._fresh_occurrence))
 
     # =================================================================
-    section("10. Weekly / Monthly deadline behaviour is unchanged")
+    section("10. Every cadence keeps the assigned deadline untouched")
     # =================================================================
     for cadence, days in (("Weekly", 7), ("Monthly", 31), ("Custom", 3), ("periodic", 2)):
         head = head_task(repeat=cadence, start="2026-08-10T09:00:00+05:30",
                          end="2026-08-13T18:00:00+05:30")     # a multi-day window
-        original_gap = (datetime.fromisoformat(head["end"])
-                        - datetime.fromisoformat(head["start"]))
         target = datetime(2026, 8, 10, 9, 0, tzinfo=IST) + timedelta(days=days)
         occ = R._fresh_occurrence(head, target, target, None)
-        gap = datetime.fromisoformat(occ["end"]) - datetime.fromisoformat(occ["start"])
-        check(f"10. {cadence} preserves its original window exactly ({original_gap})",
-              gap == original_gap)
+        check(f"10. {cadence} leaves the deadline exactly as assigned",
+              occ["end"] == head["end"])
 
     # =================================================================
     section("12-14. Yearly recurrence")
@@ -197,7 +200,6 @@ async def main() -> None:
     # =================================================================
     section("15. Generation is date-driven, not completion-driven")
     # =================================================================
-    import inspect
     gen_src = inspect.getsource(R.generate_due_recurring_tasks)
     for token in ("workflow_status", "completed_at", "completed_by"):
         check(f"15. the engine never reads `{token}` when deciding to generate",
@@ -235,8 +237,8 @@ async def main() -> None:
           all(b["remarks"] == [] and b["dependency_stack"] == [] for b in built))
     check("16. extended occurrences keep the assigner's attachments",
           all(b["attachments"] == [{"id": "a1", "name": "template.docx"}] for b in built))
-    check("16. extended Daily occurrences are due the same day",
-          all(b["end"][:10] == b["start"][:10] for b in built))
+    check("16. extended occurrences keep the assigned deadline untouched",
+          all(b["end"] == head_task()["end"] for b in built))
     check("   nothing was truncated", truncated is False)
 
     section("17. Duplicate generation does not duplicate occurrences")

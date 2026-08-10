@@ -187,29 +187,6 @@ _RESET_LISTS = (
 )
 
 
-def _occurrence_end(head: dict, target, orig_start, orig_end):
-    """The deadline for the occurrence starting at `target`.
-
-    DAILY series get the deadline on their OWN date, keeping the end time the user chose. The
-    previous rule preserved the original `end - start` gap, so a daily task created on 10 Aug
-    with a 30 Aug deadline gave every occurrence a 20-day window (11 Aug → 31 Aug, and so on)
-    instead of being due the same day.
-
-    Every other cadence keeps the original offset unchanged: a weekly or monthly task may
-    legitimately span several days, and nothing here should decide otherwise.
-    """
-    if (head.get("repeat") or "") != "Daily":
-        return target + (orig_end - orig_start)
-
-    end = target.replace(hour=orig_end.hour, minute=orig_end.minute,
-                         second=orig_end.second, microsecond=orig_end.microsecond)
-    # An overnight window (starts 9 PM, due 6 AM) would otherwise produce an end BEFORE its
-    # start. Carry it to the next day so the row stays coherent rather than inverted.
-    if end < target:
-        end += timedelta(days=1)
-    return end
-
-
 def _fresh_occurrence(head: dict, target, natural, anchor_day) -> dict:
     """A new occurrence cloned from `head`, due on `target`.
 
@@ -223,7 +200,8 @@ def _fresh_occurrence(head: dict, target, natural, anchor_day) -> dict:
     what stops the two disagreeing about what "fresh" means.
 
     What a new occurrence keeps: the task itself (title, description, assignees, cadence,
-    checklist ITEMS, reminders) and the assigner's reference `attachments`.
+    checklist ITEMS, reminders), the assigner's reference `attachments`, and the DEADLINE
+    (`end`) exactly as the user assigned it.
     What it does not keep: anything recording what happened last period — ticks, completion
     timestamps, evidence, remarks, follow-ups, history, and any delegation the previous
     occurrence went through.
@@ -234,9 +212,13 @@ def _fresh_occurrence(head: dict, target, natural, anchor_day) -> dict:
     if anchor_day:
         doc["recurrence_day"] = anchor_day
 
-    orig_end, orig_start = _parse(head.get("end")), _parse(head.get("start"))
-    if orig_end and orig_start:
-        doc["end"] = _occurrence_end(head, target, orig_start, orig_end).isoformat()
+    # `end` — the deadline — is carried over UNTOUCHED by the clone above, deliberately. The
+    # deadline belongs to the task as the assigner set it, not to the period, so it is never
+    # recomputed here for any cadence: every occurrence of a series is due at exactly the
+    # moment the user chose. (This used to move a Daily occurrence's deadline onto its own
+    # date, and slide every other cadence forward by the original start-to-deadline gap.)
+    # The only thing that changes a deadline is an explicit revision by the assigner —
+    # routes/tasks.py revise_task_deadline, which stamps `deadline_history`.
 
     doc["created_at"] = datetime.utcnow()
     doc["updated_at"] = None
