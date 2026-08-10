@@ -50,14 +50,26 @@ class UserResponse(UserBase):
     created_at: datetime = Field(default_factory=datetime.utcnow)
     orm_enabled: Optional[bool] = True  # Company-level ORM module access
     tpms_enabled: Optional[bool] = False  # Company-level TPMS module access (opt-in)
+    # Company-level Task & Delegation access (opt-in). MUST be declared here: GET /users/me is
+    # served through this response_model, and FastAPI drops any field the model does not
+    # declare. Without it the value routes/user.py sets from the company record was silently
+    # stripped from the payload, so `user.delegation_enabled` was undefined on the client and
+    # utils/taskAccess.canAccessTaskManagement hid the module for every company user however
+    # the company toggle was set.
+    delegation_enabled: Optional[bool] = False
+
     hrms_enabled: Optional[bool] = False  # Company-level HRMS module access (opt-in)
 
     # The client-side governance ladder (MD > HR > HOD > IMPLEMENTOR) that
     # auth_controller.client_rank already uses server-side. Declared here so it survives
     # response_model serialisation and reaches the client — HRMS maps it to an HRMS role
     # in features/hrms/access.js, and it must agree with the server's utils/hrms_access.py.
-    # NOTE: response_model strips any field not declared on this class (Pydantic v2 drops
-    # extras), which is why every flag the frontend gates on has to be listed here.
+    #
+    # Every module flag the frontend gates on has to be listed on this class. The same
+    # omission has now bitten twice: once as the original `delegation_enabled` bug above,
+    # and once when these two HRMS lines were dropped — which left `hrmsAccessState()`
+    # permanently 'unknown' and degraded every client user to the EMPLOYEE role. The
+    # regression guard in test_phase1_foundation.py asserts all of them stay declared.
     governance_role: Optional[str] = None
 
     class Config:

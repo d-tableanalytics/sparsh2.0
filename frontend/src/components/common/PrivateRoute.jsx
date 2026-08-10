@@ -1,12 +1,13 @@
 import React, { useCallback, useState } from 'react';
 import { motion } from 'framer-motion';
-import { Navigate } from 'react-router-dom';
+import { Navigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
 import Sidebar from '../layout/Sidebar';
 import Navbar from '../layout/Navbar';
 
 const PrivateRoute = ({ children, hideLayout = false }) => {
   const { user } = useAuth();
+  const location = useLocation();
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
   // Width the fixed sidebar currently occupies, reported by the sidebar itself. The rail below
   // tracks it so an expanded sidebar PUSHES the page instead of covering it.
@@ -16,7 +17,11 @@ const PrivateRoute = ({ children, hideLayout = false }) => {
   const handleWidthChange = useCallback((w) => setRailWidth(w), []);
 
   if (!user) {
-    return <Navigate to="/login" />;
+    // Carry where they were heading so Login can send them back there. Without this a mailed
+    // deep link (e.g. an assigned TPMS form at /f/<token>) is lost at the login redirect and
+    // the user lands on the dashboard with no way to find the form. `replace` keeps the
+    // unauthenticated URL out of history.
+    return <Navigate to="/login" state={{ from: location }} replace />;
   }
 
   if (hideLayout) {

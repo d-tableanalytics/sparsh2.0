@@ -745,7 +745,18 @@ S1, plus: existing `/admin/reports` (ERP Reports) unaffected; recharts bundle si
 S2, plus: bundle-size delta recorded; no shared chart component modified.
 
 ### Completion Checklist
-- [ ] 13 S4 steps · [ ] figures reconciled against hand-counted fixtures · [ ] cross-company isolation proven · [ ] performance target met · [ ] `PHASE_10_REPORT.md` · [ ] tag `hrms-phase-10`
+- [x] 13 S4 steps · [x] figures reconciled against hand-counted fixtures · [x] cross-company isolation proven · [ ] performance target met (indexes in place; not benchmarked at 10k) · [x] `PHASE_10_REPORT.md` · [ ] tag `hrms-phase-10`
+
+> **✅ DELIVERED** — see [PHASE_10_REPORT.md](hrms/PHASE_10_REPORT.md). 1876/1876 checks across 21 suites.
+>
+> **Three deviations from this plan, all deliberate and all explained in the report:**
+> 1. **CSS bars, not recharts.** The funnel is eight horizontal bars with server-computed percentages; recharts adds no interaction worth ~100 kB. Bundle delta came in at **+1.9 kB**. With no chart library there is nothing to lazy-load, so the pages are imported eagerly like every other HRMS screen.
+> 2. **Exports render server-side, and do NOT reuse `routes/reports.py`.** Rows here are already role-scoped and paginated, so rebuilding a file in the browser would ship rows the API withheld. But importing that module's private `_export_*` helpers would couple HRMS to a file outside its scope — ~40 lines are duplicated deliberately.
+> 3. **`report.export` is a third capability**, separate from `report.read`. A hiring manager gets the tables and not the download.
+>
+> **Effective rank** is implemented as declared (`STAGE_RANK` + evidence floors), with two refinements: a **Draft** offer confers no rank, and `Offer Declined` still ranks at the offer stage.
+>
+> ⚠️ **Carried forward:** Phase 9's `uniq_user` sparse-index fix was found NOT to have applied in production (Atlas raises error 86, the code matched only 85). Fixed and tested here, but **not yet run against the live database** — see PHASE_10_REPORT §3 Finding #1.
 
 ---
 

@@ -44,27 +44,19 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
   // panel a user lands on: superadmin/admin → Admin panel, every other internal → SMOPS.
   const isTpmsAdminUser = ['superadmin', 'admin'].includes(user?.role);
   const isTpmsClientUser = ['clientadmin', 'clientuser'].includes(user?.role);
-  const isHodUser = (user?.department || '').trim().toLowerCase() === 'hod';
   // Client-side users share the SMOPS submodules (Dashboard, HOD Activity, Employee Task,
-  // Review Report, My Profile) plus a Forms group. HOD-only forms (team ratings) are hidden
-  // for non-HOD users; everyone gets Culture + Implementation Feedback.
+  // Review Report, My Profile).
+  //
+  // There is deliberately NO Forms group here any more. A form is not something a user browses
+  // to: when a form-scored activity is scheduled, each respondent is mailed their own unique,
+  // expiring link and fills it on a public page (/f/<token>) without signing in. Delivery and
+  // completion are tracked in TPMS ▸ Form Mail Logs.
   const tpmsClientForms = [
     { name: 'Dashboard', path: '/tpms/smops', icon: LayoutDashboard, end: true },
     { name: 'Calendar', path: '/tpms/smops/calendar', icon: CalendarDays },
     { name: 'HOD Activity', path: '/tpms/smops/hod-activity', icon: Activity },
     { name: 'Employee Task', path: '/tpms/smops/tasks', icon: ClipboardList },
     { name: 'Review Report', path: '/tpms/smops/reviews', icon: BarChart3 },
-    {
-      name: 'Forms', path: '/tpms/forms', icon: ClipboardCheck,
-      children: [
-        ...(isHodUser ? [
-          { name: 'Accountability', path: '/tpms/forms/accountability', icon: ClipboardCheck },
-          { name: 'Ownership', path: '/tpms/forms/ownership', icon: UserCog },
-        ] : []),
-        { name: 'Culture', path: '/tpms/forms/culture', icon: Sparkles },
-        { name: 'Implementation Feedback', path: '/tpms/forms/implementation-feedback', icon: ClipboardList },
-      ],
-    },
   ];
   const tpmsSubmodules = isTpmsClientUser
     ? tpmsClientForms
@@ -83,15 +75,6 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
         { name: 'Mail Templates', path: '/tpms/admin/mail-templates', icon: ScrollText },
         { name: 'Reminder Rules', path: '/tpms/admin/reminder-rules', icon: AlertTriangle },
         { name: 'Form Questions', path: '/tpms/admin/form-questions', icon: ClipboardCheck },
-        {
-          name: 'Forms', path: '/tpms/admin/forms', icon: ClipboardList,
-          children: [
-            { name: 'Implementation Feedback', path: '/tpms/admin/forms/implementation-feedback', icon: ClipboardList },
-            { name: 'Ownership', path: '/tpms/admin/forms/ownership', icon: UserCog },
-            { name: 'Culture', path: '/tpms/admin/forms/culture', icon: Sparkles },
-            { name: 'Accountability', path: '/tpms/admin/forms/accountability', icon: ClipboardCheck },
-          ],
-        },
         { name: 'Logs Report', path: '/tpms/admin/logs', icon: ScrollText },
         { name: 'Review Report', path: '/tpms/admin/reviews', icon: BarChart3 },
       ]

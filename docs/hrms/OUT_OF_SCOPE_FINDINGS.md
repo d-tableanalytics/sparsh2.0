@@ -210,3 +210,19 @@ justification in [PHASE_1_REPORT.md](PHASE_1_REPORT.md) §2.
 > Implementor) and purely additive — every other module ignores unknown fields, and no
 > existing behaviour changes. But it does alter a **shared** response model, so if you would
 > rather HRMS resolved the ladder some other way, say so and I will rework it inside HRMS.
+
+---
+
+## Status update — Phase 10 (2026-08-10)
+
+**OOS-001 (`delegation_enabled` stripped from `/users/me`) — RESOLVED, outside this work.**
+A `delegation_enabled` declaration was added to `UserResponse` by an edit outside the HRMS
+scope. No action was needed from HRMS and none was taken.
+
+However, that same edit **removed** the two HRMS declarations (`hrms_enabled`,
+`governance_role`) that Phase 1 had added to the same class, which silently locked every
+client user out of HRMS. Phase 1's regression guard caught it during Phase 10's S2 run; the
+lines were restored alongside `delegation_enabled` (all three coexist) and the guard now
+asserts all four module flags stay declared. See PHASE_10_REPORT §3 Finding #2.
+
+**No new out-of-scope findings in Phases 9 or 10.** The register stands at OOS-001…005.

@@ -220,8 +220,13 @@ h1, h2, h3, h4 {
   margin: 1px 4px !important;
 }
 
+/* Floor for a month-grid day cell. 140px was tall enough to leave a large empty band under
+   quiet days — a week with one or two entries still reserved a full 140px per cell. 104px fits
+   the date number plus the three entries dayMaxEvents allows and the "+N more" link, and since
+   this is a MINIMUM a busy day still grows past it. Matches the TPMS calendar's own
+   min-h-[104px] cells, so the two calendars read at the same density. */
 .fc .fc-daygrid-day-frame {
-  min-height: 140px !important;
+  min-height: 104px !important;
 }
 
 .fc .fc-daygrid-event {

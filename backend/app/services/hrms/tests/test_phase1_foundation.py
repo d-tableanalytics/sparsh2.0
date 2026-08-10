@@ -394,6 +394,12 @@ async def main() -> None:
     # gates on must be declared or it silently never reaches the client.
     check("hrms_enabled survives /users/me serialisation", "hrms_enabled" in declared)
     check("governance_role survives /users/me serialisation", "governance_role" in declared)
+    # Every module flag on this response model, asserted together. Phase 10 found the two
+    # HRMS lines had been removed by an unrelated edit, which silently locked every client
+    # user out of the module -- exactly the failure this guard exists to catch. Listing the
+    # other modules' flags too means the next such edit fails here rather than in the field.
+    for flag in ("orm_enabled", "tpms_enabled", "delegation_enabled", "hrms_enabled"):
+        check(f"module flag `{flag}` is declared on UserResponse", flag in declared)
     check("tpms_enabled still declared", "tpms_enabled" in declared)
     check("orm_enabled still declared", "orm_enabled" in declared)
 

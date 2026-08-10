@@ -107,9 +107,15 @@ const CustomTimePicker = ({ value, onChange, label: _label }) => {
 // ─── Todo recurrence ───
 // Frequency options, the repeat_data shape, the controls and the validation below are taken
 // from the Task & Delegation "Repeat" control (components/tasks/TaskFormModal.jsx) unchanged,
-// so a repeating todo and a repeating task are the same thing on the wire and are rolled
-// forward by the same backend engine (recurring_task_service.generate_due_recurring_tasks):
-// one occurrence per period, created on its own day, skipping holidays and weekly offs.
+// so a repeating todo and a repeating task are the same thing on the wire.
+//
+// The two differ in two ways. WHEN the occurrences appear: a repeating TASK is created one
+// occurrence at a time by a nightly job, while a repeating TODO is generated in FULL on save —
+// every date up to the Repeat End Date at once (backend:
+// recurring_task_service.build_series_occurrences), so the whole series is on the calendar
+// immediately. That is also why the End Date is REQUIRED here — there is no "generate up to no
+// end date". And HOLIDAYS: a todo landing on a holiday or a weekly off is skipped, with no todo
+// created for that day at all — unlike a task, it is never moved onto the next working day.
 // "periodic" is the stored value behind the "Periodically" label; "Yearly" is reference-only
 // (the engine matches "Annually"), exactly as it is for tasks today.
 const REPEAT_OPTIONS = [
@@ -156,7 +162,10 @@ const validateRepeat = (form) => {
     if (form.repeat === 'Custom' && (data.customUnit || 'Months') === 'Months' && !data.lastDay && !(data.monthlyDates || []).length) {
         return 'Select at least one date (or Last Day) for a Custom repeat';
     }
-    if (form.repeat_end_date && new Date(form.repeat_end_date) < new Date(form.start)) {
+    // The whole series is generated up front, bounded by this date — so it is required, not
+    // optional as it was while a todo rolled forward one day at a time forever.
+    if (!form.repeat_end_date) return 'Select a Repeat End Date — the series is generated up to that date';
+    if (new Date(form.repeat_end_date) < new Date(form.start)) {
         return 'End Date cannot be before Start Date';
     }
     return null;
@@ -251,10 +260,13 @@ const TodoRepeatSection = ({ form, setForm, minEndDate: _minEndDate }) => {
                             `start` is a recurrence anchor distinct from its deadline. A todo's
                             due date IS its start, so the series simply runs from the Due Date
                             picked above — only the end of the series is collected here. */}
+                        {/* Required: the series is generated in full up to this date, so an
+                            unset End Date has nothing to generate against. Flagged in red until
+                            it is picked rather than only failing on save. */}
                         <button type="button" onClick={() => setRepeatEndPickerOpen(true)}
-                            className="relative flex items-center gap-1.5 px-3 py-1.5 bg-[var(--bg-card)] border border-[var(--border)] rounded-full text-[10px] font-black uppercase tracking-wider text-[var(--text-muted)] cursor-pointer hover:border-[var(--accent-indigo)]">
+                            className={`relative flex items-center gap-1.5 px-3 py-1.5 bg-[var(--bg-card)] border rounded-full text-[10px] font-black uppercase tracking-wider cursor-pointer hover:border-[var(--accent-indigo)] ${form.repeat_end_date ? 'border-[var(--border)] text-[var(--text-muted)]' : 'border-rose-300 text-rose-500'}`}>
                             <CalendarDays size={12} />
-                            {form.repeat_end_date ? new Date(form.repeat_end_date).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' }) : 'End Date'}
+                            {form.repeat_end_date ? new Date(form.repeat_end_date).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' }) : 'End Date *'}
                         </button>
                         <MiniDatePicker
                             isOpen={repeatEndPickerOpen}
@@ -492,6 +504,52 @@ const CalendarPage = () => {
     };
 
 
+    // ─── Todo due TIME ───
+    // A todo's due date AND time are both interpreted in IST by the backend
+    // (_apply_todo_due_end_of_day), so these read and write IST wall-clock explicitly rather
+    // than in the browser's zone — otherwise a user outside IST would pick 10:00 and store a
+    // different hour. 23:59:59 is the "no time chosen" value: it is what a todo has always been
+    // due at, so an existing todo reads back as blank and keeps behaving exactly as before.
+    const IST_OFFSET_MIN = 330;
+    const toIstWallClock = (dateStr) => {
+        const d = new Date(dateStr);
+        if (isNaN(d.getTime())) return null;
+        // Shift so the Date's LOCAL getters read as IST clock fields.
+        return new Date(d.getTime() + (d.getTimezoneOffset() + IST_OFFSET_MIN) * 60000);
+    };
+
+    /** "HH:MM" for the time input, or "" when the todo has no chosen time (end of day). */
+    const todoDueTimeValue = (dateStr) => {
+        const ist = toIstWallClock(dateStr);
+        if (!ist) return "";
+        if (ist.getHours() === 23 && ist.getMinutes() === 59) return "";
+        return `${String(ist.getHours()).padStart(2, '0')}:${String(ist.getMinutes()).padStart(2, '0')}`;
+    };
+
+    /** Human summary of a todo's due moment, all in IST — the single source of truth for the
+     *  Due card, so the date, the time and the caption can never disagree. */
+    const todoDueSummary = (dateStr) => {
+        const hhmm = todoDueTimeValue(dateStr);
+        const d = new Date(dateStr);
+        const valid = !isNaN(d.getTime());
+        return {
+            hasTime: !!hhmm,
+            dateLabel: valid
+                ? d.toLocaleDateString(undefined, { timeZone: 'Asia/Kolkata', weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' })
+                : '—',
+            timeLabel: valid
+                ? d.toLocaleTimeString(undefined, { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: true })
+                : '—',
+        };
+    };
+
+    /** The same calendar day as `dateStr`, at "HH:MM" IST, as a UTC ISO string. */
+    const withTodoDueTime = (dateStr, hhmm) => {
+        const ist = toIstWallClock(dateStr) || toIstWallClock(new Date().toISOString());
+        const ymdIst = `${ist.getFullYear()}-${String(ist.getMonth() + 1).padStart(2, '0')}-${String(ist.getDate()).padStart(2, '0')}`;
+        return new Date(`${ymdIst}T${hhmm}:00+05:30`).toISOString();
+    };
+
     const getLocalDatePart = (dateStr) => {
         if (!dateStr) return "";
         const d = new Date(dateStr);
@@ -527,7 +585,10 @@ const CalendarPage = () => {
         if (status === 'reschedule') return '#f59e0b'; // Amber/Orange
         if (status === 'completed') return '#10b981'; // Emerald
         if (status === 'canceled') return '#ef4444'; // Red
-        
+        // A todo whose due date/time passed while still pending — set by the backend sweep, not
+        // by the user. Red overrides the module's violet: a missed todo must not read as normal.
+        if (status === 'overdue') return '#e11d48'; // Rose
+
         // Todos are always the creator's own (private), so they get one fixed colour.
         if (type === 'todo') return '#8b5cf6'; // Violet
 
@@ -571,17 +632,44 @@ const CalendarPage = () => {
         return (evType === 'task' && e.end) ? e.end : e.start;
     };
 
+    const isTodoRow = (e) => (e.extendedProps?.type || e.type) === 'todo';
+
+    // A todo's REAL stored due instant, read straight off the document. The grid entry a todo is
+    // published with is an all-day date (see mapApiEvents), so anything that displays or edits a
+    // todo's due date/time must come through here instead of the top-level start/end.
+    const todoDueRaw = (e) => e.extendedProps?.end || e.extendedProps?.start || e.end || e.start;
+
     // Shape the API payload for FullCalendar. Shared by the initial load AND the post-action
     // refresh, so both agree on the anchor — previously the refresh re-keyed tasks on their
     // creation date and they jumped days after a complete/delete.
-    const mapApiEvents = (rows) => (rows || []).map(e => ({
-        id: e.id, title: e.title, start: anchorOf(e), end: e.end, allDay: e.allDay,
-        backgroundColor: 'transparent', borderColor: 'transparent', textColor: 'var(--text-main)',
-        extendedProps: {
-            ...e.extendedProps, id: e.id,
-            dotColor: getRescheduleColor(e.extendedProps?.status || e.status, e.extendedProps?.type || e.type, e.color, e.extendedProps?.isCreator)
-        }
-    }));
+    //
+    // ─── Todos are single-day entries, always ───
+    // A todo carries no meaningful time: the form never offers one, and the backend pins every
+    // todo to 23:59:59 IST on its date. Publishing that instant as a TIMED event made a todo
+    // occupy TWO cells — with start == end FullCalendar treats the end as absent and applies its
+    // default one-hour duration, which from 23:59:59 crosses midnight, so a todo due on the 5th
+    // also painted the 6th. (In the Week/Day views the same event drew a full-height block down
+    // the whole day.)
+    //
+    // So a todo is published as an ALL-DAY entry on its own local date with no end at all. That
+    // is unconditional — it cannot span regardless of what time the document carries — and it
+    // renders as a single chip in every view: the month cell, the all-day row of Week/Day, and
+    // Year. Nothing else changes shape: tasks, sessions and events keep their exact previous
+    // start/end/allDay, so genuine multi-day rendering is untouched.
+    const mapApiEvents = (rows) => (rows || []).map(e => {
+        const todo = isTodoRow(e);
+        return {
+            id: e.id, title: e.title,
+            start: todo ? dayKey(anchorOf(e)) : anchorOf(e),
+            end: todo ? undefined : e.end,
+            allDay: todo ? true : e.allDay,
+            backgroundColor: 'transparent', borderColor: 'transparent', textColor: 'var(--text-main)',
+            extendedProps: {
+                ...e.extendedProps, id: e.id,
+                dotColor: getRescheduleColor(e.extendedProps?.status || e.status, e.extendedProps?.type || e.type, e.color, e.extendedProps?.isCreator)
+            }
+        };
+    });
 
     // Entries drawn on `key`'s cell. Batches/quarters are backdrop markers, not day entries.
     const eventsOnDay = (key, list) => (list || []).filter(e =>
@@ -605,6 +693,9 @@ const CalendarPage = () => {
                 const eType = e.extendedProps?.type || e.type;
                 const eStatus = e.extendedProps?.status || e.status || "schedule";
                 if (type && eType !== type) return false;
+                // "pending" is the label for the stored value "schedule". A todo past its due
+                // date carries "overdue" instead, so it drops out of Pending automatically and
+                // is counted by its own card — no overlap between the two.
                 if (status === 'pending') return eStatus === 'schedule';
                 if (status && eStatus !== status) return false;
                 return true;
@@ -644,6 +735,9 @@ const CalendarPage = () => {
                 cards: [
                     { id: 'td_total', label: 'Total Todos', count: getCount('todo', null), color: 'violet', icon: <ClipboardList size={14} />, filter: { type: 'todo', status: null } },
                     { id: 'td_com', label: 'Completed Todos', count: getCount('todo', 'completed'), color: 'emerald', icon: <CheckCircle size={14} />, filter: { type: 'todo', status: 'completed' } },
+                    // Overdue is its own stored status, so it is NOT double-counted in Pending
+                    // below (which matches "schedule" only) — Total = Pending + Overdue + Completed.
+                    { id: 'td_over', label: 'Overdue Todos', count: getCount('todo', 'overdue'), color: 'rose', icon: <AlertCircle size={14} />, filter: { type: 'todo', status: 'overdue' } },
                     // Amber, not violet: violet is the Todo module's own colour and is already
                     // carried by the Total card, so a violet Pending card read as a duplicate.
                     // Amber also matches "Pending" in the Sessions group.
@@ -696,7 +790,7 @@ const CalendarPage = () => {
             const iso = base.toISOString();
             // Freeze the moment the todo modal opens — shown as the "Created" timestamp in the
             // header. This is independent of the Due date/time and never changes afterwards.
-            setEventForm({ ...initialForm, type, start: iso, end: iso, all_day: false, created_at: new Date().toISOString() });
+            setEventForm({ ...initialForm, type, start: iso, end: iso, all_day: true, created_at: new Date().toISOString() });
         } else {
             setEventForm({ ...initialForm, type, start: summaryDate, end: summaryDate });
         }
@@ -707,10 +801,16 @@ const CalendarPage = () => {
         const props = ev.extendedProps;
         setIsEdit(true);
         setCurrentEventId(ev.id || ev._id);
-        const startRaw = ev.start; const endRaw = ev.end || ev.start;
+        // A todo's grid entry is an all-day DATE (see mapApiEvents), so its real instants have to
+        // come off extendedProps. Saving the grid value would write a date-only string into
+        // start/end and destroy the todo's 11:59 PM IST due time — which the reminder anchor and
+        // the Overdue sweep both measure against.
+        const isTodoEvent = props.type === 'todo';
+        const startRaw = isTodoEvent ? (props.start || props.end) : ev.start;
+        const endRaw = isTodoEvent ? (props.end || props.start) : (ev.end || ev.start);
         setEventForm({
             ...initialForm, title: ev.title, type: props.type, start: startRaw, end: endRaw,
-            all_day: props.type === 'todo' ? false : ev.allDay, session_type: props.session_type, priority: props.priority || 'Normal',
+            all_day: props.type === 'todo' ? !todoDueTimeValue(props.end || props.start) : ev.allDay, session_type: props.session_type, priority: props.priority || 'Normal',
             session_template_id: props.session_template_id, batch_id: props.batch_id,
             quarter_id: props.quarter_id, assigned_departments: props.assigned_departments || [],
             assigned_member_ids: props.assigned_member_ids || [], coach_ids: props.coach_ids || [],
@@ -891,6 +991,10 @@ const CalendarPage = () => {
             completed: <span className="px-2 py-0.5 bg-emerald-100 text-emerald-700 rounded-md text-[8px] font-black uppercase tracking-widest border border-emerald-200">Completed</span>,
             reschedule: <span className="px-2 py-0.5 bg-amber-100 text-amber-700 rounded-md text-[8px] font-black uppercase tracking-widest border border-amber-200">Rescheduled</span>,
             canceled: <span className="px-2 py-0.5 bg-rose-100 text-rose-700 rounded-md text-[8px] font-black uppercase tracking-widest border border-rose-200">Canceled</span>,
+            // Todos only: the due date/time passed with the todo still pending. Written by the
+            // backend sweep (todo_status_service), so it is a real stored status, not a
+            // render-time guess — the counts and filters below read the same value.
+            overdue: <span className="px-2 py-0.5 bg-rose-100 text-rose-700 rounded-md text-[8px] font-black uppercase tracking-widest border border-rose-200 flex items-center gap-1"><AlertCircle size={8} /> Overdue</span>,
             schedule: <span className="px-2 py-0.5 bg-indigo-50 text-indigo-600 rounded-md text-[8px] font-black uppercase tracking-widest border border-indigo-100">Scheduled</span>
         };
 
@@ -923,7 +1027,9 @@ const CalendarPage = () => {
                         <span className="flex items-center gap-1 opacity-60"> <Clock size={11} /> {type === 'todo' ? 'Due:' : 'Deadline:'} </span>
                         {/* Todos render in the user's own timezone so the card matches the date
                             they picked; sessions/tasks keep the existing IST rendering. */}
-                        <span className="text-[var(--text-main)]">{type === 'todo' ? formatTodoShort(ev.end || ev.start, ev.allDay ?? ev.extendedProps?.all_day) : formatShortIST(ev.start)}</span>
+                        {/* The todo's own stored instant, not its all-day grid date — the grid
+                            entry carries no time, so reading it here would drop the 11:59 PM. */}
+                        <span className="text-[var(--text-main)]">{type === 'todo' ? formatTodoShort(todoDueRaw(ev), ev.extendedProps?.all_day) : formatShortIST(ev.start)}</span>
                     </div>
                     {ev.extendedProps.completed_at && (
                         <div className="flex items-center justify-between text-emerald-600 bg-emerald-500/5 px-2 py-0.5 rounded-md">
@@ -1613,21 +1719,62 @@ const CalendarPage = () => {
                                     )}
                                     <div className="flex items-center gap-4 flex-wrap">
                                         {eventForm.type === 'todo' ? (
-                                            /* "Today's Todo": the due date is NOT user-selectable. Every todo is
-                                               automatically due at 11:59 PM today (IST) — set authoritatively by the
-                                               backend on create. A recurring todo then rolls to the next day at 12 AM
-                                               via the unchanged nightly engine. Shown read-only so the user knows
-                                               exactly when it's due. */
-                                            <div className="flex flex-col gap-1">
-                                                <span className="text-[9px] font-black uppercase tracking-wider text-[var(--text-muted)]">Due</span>
-                                                <div className="flex items-center gap-2 bg-[var(--input-bg)] px-4 py-2.5 rounded-xl border border-[var(--border)]">
+                                            /* The due DATE is unchanged: still the day the todo was added for,
+                                               set authoritatively by the backend. The TIME is now optional and
+                                               the user's to pick — leave it blank and the todo stays due at
+                                               11:59 PM (IST), exactly as every todo has been until now. */
+                                            (() => {
+                                              const due = eventForm.end || eventForm.start;
+                                              const { hasTime, dateLabel, timeLabel } = todoDueSummary(due);
+                                              return (
+                                                <div className="flex flex-col gap-1">
+                                                  <span className="text-[9px] font-black uppercase tracking-wider text-[var(--text-muted)]">Due</span>
+                                                  <div className="flex items-center gap-2 bg-[var(--input-bg)] px-4 py-2.5 rounded-xl border border-[var(--border)]">
                                                     <Clock size={18} className="text-[var(--accent-indigo)]" />
                                                     <div className="flex flex-col leading-tight">
-                                                        <span className="text-[13px] font-black">{new Date(eventForm.end || eventForm.start).toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' })} · 11:59 PM</span>
-                                                        <span className="text-[9px] font-bold uppercase tracking-wider text-[var(--text-muted)]">Automatic — end of the selected day (IST)</span>
+                                                      <span className="text-[13px] font-black flex items-center gap-1.5">
+                                                        {/* Date stays plain, read-only text — nothing about it invites a
+                                                            click, so the one interactive thing in the row is unambiguous. */}
+                                                        <span className="text-[var(--text-main)]">{dateLabel}</span>
+                                                        <span className="text-[var(--text-muted)] font-bold">·</span>
+                                                        {/* The time IS the picker: a transparent <input type="time"> sits
+                                                            over the label, so clicking it opens the native picker and the
+                                                            chosen value replaces the text in place — the same overlay
+                                                            pattern the session date field below uses. It is styled as a
+                                                            standing chip (tinted, dashed outline, chevron) rather than
+                                                            relying on hover, so the affordance is visible before the user
+                                                            moves the mouse — which is what was missing. */}
+                                                        <span title="Click to change the due time"
+                                                          className="relative inline-flex items-center gap-1 px-2 py-0.5 rounded-lg cursor-pointer
+                                                            bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)]
+                                                            border border-dashed border-[var(--accent-indigo-border)]
+                                                            hover:border-solid hover:shadow-sm transition-all">
+                                                          {timeLabel}
+                                                          <ChevronDown size={12} className="opacity-70" />
+                                                          <input type="time" aria-label="Due time"
+                                                            value={todoDueTimeValue(due)}
+                                                            onClick={(e) => { try { e.currentTarget.showPicker(); } catch { /* click still focuses */ } }}
+                                                            onChange={(e) => {
+                                                                const hhmm = e.target.value;
+                                                                // Cleared → back to 11:59 PM, the end-of-day default.
+                                                                // `all_day` is the backend's "no time picked" signal.
+                                                                const iso = withTodoDueTime(due, hhmm || '23:59');
+                                                                setEventForm(f => ({ ...f, start: iso, end: iso, all_day: !hhmm }));
+                                                            }}
+                                                            className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" />
+                                                        </span>
+                                                      </span>
+                                                      <span className="text-[9px] font-bold uppercase tracking-wider text-[var(--accent-indigo)]">
+                                                        Click the time to change
+                                                        <span className="text-[var(--text-muted)] normal-case font-bold">
+                                                          {hasTime ? ' — selected time (IST)' : ' — end of the selected day (IST)'}
+                                                        </span>
+                                                      </span>
                                                     </div>
+                                                  </div>
                                                 </div>
-                                            </div>
+                                              );
+                                            })()
                                         ) : (
                                             <>
                                                 <div className="flex items-center gap-2 bg-[var(--input-bg)] px-4 py-2.5 rounded-xl border border-[var(--border)] relative cursor-pointer hover:border-[var(--accent-indigo)] transition-all">
@@ -1675,10 +1822,10 @@ const CalendarPage = () => {
 
                                     {/* ─── Frequency (todo only) ───
                                         The Task & Delegation Repeat control, reused as-is: same
-                                        options, same repeat_data, same validation, and the same
-                                        nightly rollover engine on the backend. A todo's due date
-                                        doubles as the series start, so the control sits directly
-                                        under it. */}
+                                        options, same repeat_data, same validation. The whole
+                                        series is generated on save, up to the (required) End
+                                        Date. A todo's due date doubles as the series start, so
+                                        the control sits directly under it. */}
                                     {eventForm.type === 'todo' && (
                                         <div className="space-y-3 pt-2">
                                             <label className="text-[9px] font-black text-[var(--text-muted)] uppercase tracking-wider flex items-center gap-1.5">
@@ -1726,11 +1873,20 @@ const CalendarPage = () => {
                                 )}
                             </div>
 
+                            {/* ReminderModal is shared by sessions, tasks and todos and defaults every
+                                new reminder to parent_type "event" ("set correctly on save"), which
+                                this call site never did — so a todo's reminders were stored labelled
+                                as event reminders. Stamp the form's own type instead. The backend
+                                picks a reminder template from the DOCUMENT type, so this label never
+                                selects the template; it just keeps the stored data truthful. */}
                             <ReminderModal
                                 isOpen={showReminderModal}
                                 onClose={() => setShowReminderModal(false)}
                                 reminders={eventForm.reminders}
-                                onApply={(reminders) => setEventForm({ ...eventForm, reminders })}
+                                onApply={(reminders) => setEventForm({
+                                    ...eventForm,
+                                    reminders: reminders.map(r => ({ ...r, parent_type: eventForm.type })),
+                                })}
                             />
 
                             {/* Todo Due date/time — the shared month-grid DATE/TIME calendar. */}

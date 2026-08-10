@@ -4,7 +4,10 @@ from datetime import datetime
 
 class Reminder(BaseModel):
     id: str = Field(default_factory=lambda: str(datetime.utcnow().timestamp()))
-    parent_type: str # task | event
+    # task | event | todo. Descriptive only — it records what the reminder was authored on, and
+    # is NOT what picks the reminder email template: send_reminder_email keys a todo off the
+    # DOCUMENT type so a mislabelled reminder can never reach the Task template.
+    parent_type: str
     reminder_type: str # email | whatsapp | both
     timing_type: str # before | after
     offset_minutes: int

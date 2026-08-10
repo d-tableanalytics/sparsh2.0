@@ -21,6 +21,8 @@ and tpms_lifecycle_service.py for the ported rules.
 """
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from typing import Optional
+import io
+import logging
 
 from app.controllers.auth_controller import get_current_user
 from app.db.mongodb import get_collection
@@ -56,6 +58,8 @@ async def _tpms_company_gate(current_user: dict = Depends(get_current_user)) -> 
     from app.utils.tpms_access import ensure_tpms_enabled
     await ensure_tpms_enabled(current_user)
 
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/tpms", tags=["TPMS"], dependencies=[Depends(_tpms_company_gate)])
 
@@ -871,3 +875,72 @@ async def success_measures_sync(
     if (current_user.get("role") or "").lower() not in STAFF_ROLES:
         raise HTTPException(status_code=403, detail="Admin only")
     return await run_score_daily(period)
+
+
+# GET /form-mail-logs used to live here, backing the TPMS ▸ Form Mail Logs admin page. Both were
+# removed. The rows it read still exist and are still maintained — tpms_form_assignments is what
+# makes each mailed link resolvable, single-use and expiring — they simply have no viewer. The
+# delivery outcome of a form mail is still recorded in the `notifications` collection like every
+# other send, so the Logs Report remains the place to check whether a mail went out.
+
+
+# ─────────────────────────────────────────────────────────────
+# TPMS ▸ Export / Import (Calendar toolbar)
+#
+# Admin-only. The workbook is a full TPMS backup: it contains live form-link tokens and
+# respondent email addresses, so it must never be reachable by a client-side user.
+# ─────────────────────────────────────────────────────────────
+@router.get("/export")
+async def export_tpms(current_user: dict = Depends(get_current_user)):
+    """Download the whole of TPMS as one .xlsx workbook, a sheet per collection."""
+    from fastapi.responses import StreamingResponse
+    from app.services.tpms_backup_service import export_workbook
+
+    if (current_user.get("role") or "").lower() not in STAFF_ROLES:
+        raise HTTPException(status_code=403, detail="Only an admin may export TPMS data.")
+
+    content, counts = await export_workbook()
+    stamp = datetime.utcnow().strftime("%Y-%m-%d")
+    return StreamingResponse(
+        io.BytesIO(content),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="tpms-export-{stamp}.xlsx"',
+                 # Row counts travel in a header so the UI can report what was exported without
+                 # having to parse the workbook it just downloaded.
+                 "X-Tpms-Export-Rows": str(sum(counts.values())),
+                 "Access-Control-Expose-Headers": "Content-Disposition, X-Tpms-Export-Rows"},
+    )
+
+
+@router.post("/import")
+async def import_tpms(file: UploadFile = File(...),
+                      current_user: dict = Depends(get_current_user)):
+    """Load an exported workbook back in. Two paths, by sheet:
+
+    • `Schedules` — a row with a BLANK Schedule ID is replayed through create_schedule, exactly
+      as if it had been entered in the Schedule modal: recurrence expanded, reminders attached,
+      tracker rows written, schedule mail sent and per-assignee form links minted. Rows that
+      already carry an ID are skipped, so re-importing the file you exported creates nothing.
+    • every other sheet — add-only; a row whose _id already exists is skipped.
+
+    Non-destructive by design: nothing is updated and nothing is deleted, so re-running an
+    import is harmless and a stale file cannot roll back live data.
+    """
+    from app.services.tpms_backup_service import import_workbook
+
+    if (current_user.get("role") or "").lower() not in STAFF_ROLES:
+        raise HTTPException(status_code=403, detail="Only an admin may import TPMS data.")
+    if not (file.filename or "").lower().endswith((".xlsx", ".xlsm")):
+        raise HTTPException(status_code=400, detail="Please upload the .xlsx workbook produced by Export.")
+
+    try:
+        # The importer schedules AS the caller — create_schedule needs a real user for its
+        # write-scoping check and for the "scheduled by" dimension it stamps on each occurrence.
+        report = await import_workbook(await file.read(), current_user)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"TPMS import failed: {e}")
+        raise HTTPException(status_code=400, detail=f"Could not read that workbook: {e}")
+
+    return report

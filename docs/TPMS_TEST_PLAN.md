@@ -323,7 +323,7 @@ After the above, confirm nothing bled across:
 | 12.1 | Main Calendar page (`/calendar`) | TPMS activities do **not** appear as sessions/tasks; stats unchanged |
 | 12.2 | Create a normal session and a normal task from `/calendar` | The schedule modal in default `mode="erp"` still posts to `/calendar/events` |
 | 12.3 | Task & Delegation module | Task list, recurrence and reminders unaffected |
-| 12.4 | Personal Todo + its Frequency control | Repeating todos still roll forward — they share `recurring_task_service` with tasks |
+| 12.4 | Personal Todo + its Frequency control | Saving a repeating todo generates its whole series at once, up to the (required) Repeat End Date — same dates a task would get, via `recurring_task_service.build_series_occurrences` |
 | 12.5 | Backend log during all of the above | No `TPMS … failed` line ever stops the reminder loop; each sweep is individually try/except'd |
 | 12.6 | LMS batches | `batch_id` on calendar events still means the LMS batch; TPMS uses `tpms_batch_id` |
 

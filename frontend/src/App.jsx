@@ -62,10 +62,6 @@ import MailTemplateAdmin from './features/tpms/admin/pages/MailTemplateAdmin';
 import ReminderRuleAdmin from './features/tpms/admin/pages/ReminderRuleAdmin';
 import FormQuestionAdmin from './features/tpms/admin/pages/FormQuestionAdmin';
 import ReviewReport from './features/tpms/common/ReviewReport';
-import ImplementationFeedback from './features/tpms/admin/pages/forms/ImplementationFeedback';
-import Ownership from './features/tpms/admin/pages/forms/Ownership';
-import Culture from './features/tpms/admin/pages/forms/Culture';
-import Accountability from './features/tpms/admin/pages/forms/Accountability';
 import { CompanyProvider } from './features/tpms/smops/CompanyContext';
 import SmopsDashboard from './features/tpms/smops/pages/SmopsDashboard';
 import HodActivity from './features/tpms/smops/pages/HodActivity';
@@ -97,9 +93,7 @@ import AssessPage from './pages/hrms/public/AssessPage';
 import OfferPage from './pages/hrms/public/OfferPage';
 import OnboardPage from './pages/hrms/public/OnboardPage';
 import TpmsCalendar from './features/tpms/calendar/TpmsCalendar';
-import ClientFormsHome from './features/tpms/client/ClientFormsHome';
-import ClientRatingForm from './features/tpms/client/ClientRatingForm';
-import ClientFeedbackForm from './features/tpms/client/ClientFeedbackForm';
+import AssignedFormPage from './features/tpms/forms/AssignedFormPage';
 import ClientDashboard from './features/tpms/client/ClientDashboard';
 import AssistantWidget from './features/assistant';
 import './index.css';
@@ -140,7 +134,18 @@ const AppRoutes = () => {
   return (
     <Suspense fallback={<RouteFallback />}>
     <Routes>
-      <Route path="/login" element={user ? <Navigate to="/" /> : <Login />} />
+      {/* Login owns the post-auth redirect. It must NOT be short-circuited with a Navigate to
+          "/" here: the moment auth succeeds this element would re-render and send the user to
+          the dashboard, discarding the deep link PrivateRoute stored (e.g. an assigned form at
+          /f/<token>). Login redirects an already-signed-in visitor itself, so the behaviour for
+          an ordinary /login visit is unchanged. */}
+      <Route path="/login" element={<Login />} />
+
+      {/* TPMS assigned form. Authenticated like every other page: an unauthenticated visitor is
+          sent to /login and returned here afterwards (PrivateRoute stores the URL, Login reads
+          it back). The token selects WHICH of the four forms renders — the backend also checks
+          the signed-in user is the assignment's respondent, so a forwarded link opens nothing. */}
+      <Route path="/f/:token" element={<PrivateRoute><AssignedFormPage /></PrivateRoute>} />
       <Route path="/forgot-password" element={<ForgotPassword />} />
 
       {/* ===========  PUBLIC HRMS (NO AUTHENTICATION)  ===========
@@ -217,14 +222,6 @@ const AppRoutes = () => {
         <Route path="mail-templates" element={<MailTemplateAdmin />} />
         <Route path="reminder-rules" element={<ReminderRuleAdmin />} />
         <Route path="form-questions" element={<FormQuestionAdmin />} />
-        {/* Forms sub-module: Implementation Feedback / Ownership / Culture / Accountability */}
-        <Route path="forms" element={<Outlet />}>
-          <Route index element={<Navigate to="implementation-feedback" replace />} />
-          <Route path="implementation-feedback" element={<ImplementationFeedback />} />
-          <Route path="ownership"                element={<Ownership />} />
-          <Route path="culture"                  element={<Culture />} />
-          <Route path="accountability"           element={<Accountability />} />
-        </Route>
         <Route path="reviews"        element={<ReviewReport />} />
       </Route>
 
@@ -240,16 +237,6 @@ const AppRoutes = () => {
         <Route path="reviews"       element={<ReviewReport title="Review Report" subtitle="Detailed evaluation and feedback for your companies." />} />
       </Route>
 
-      {/* TPMS ▸ CLIENT FORMS PANEL (client-side users) — rendered inside the main app layout.
-          Each client fills their own forms; HODs additionally rate their team. Available to
-          every client company by default; guarded via RequireTpms client. */}
-      <Route path="/tpms/forms" element={<PrivateRoute><RequireTpms><Outlet /></RequireTpms></PrivateRoute>}>
-        <Route index                          element={<ClientFormsHome />} />
-        <Route path="accountability"          element={<ClientRatingForm formType="accountability" />} />
-        <Route path="ownership"               element={<ClientRatingForm formType="ownership" />} />
-        <Route path="culture"                 element={<ClientRatingForm formType="culture" />} />
-        <Route path="implementation-feedback" element={<ClientFeedbackForm formType="implementation_feedback" />} />
-      </Route>
 
       {/* ===================  HRMS  ===================
           Opt-in per company. `/hrms/entry` is the dynamic gate (role-routing lands in a

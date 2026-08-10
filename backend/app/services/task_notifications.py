@@ -112,6 +112,93 @@ def recipients_for_event(event: str, task: dict, extra: Optional[dict] = None) -
     return assigner | assignees | watchers
 
 
+# ─── Assigner confirmation ───
+# The assigner's own "your assignment went out" receipt. Deliberately NOT a member of
+# TASK_EVENT_SLUGS: it is not a lifecycle event anyone can raise by name, it is a SECOND mail
+# that rides along with an assignment and is addressed to the one person every other trigger
+# deliberately excludes — the actor. Keeping it out of that map also means recipients_for_event,
+# the in-app fan-out and every existing template are untouched by it.
+ASSIGNER_CONFIRMATION_SLUG = "task_assignment_confirmation"
+
+# The lifecycle events that mean "a user just assigned this task to somebody": a task created
+# with assignees, assignees added to an existing task, and a subtask created with assignees.
+ASSIGNMENT_EVENTS = ("created", "assigned", "subtask_created")
+
+
+async def _company_name(company_id) -> str:
+    """Display name for {{company_name}}. Empty string when there is no company (internal
+    Sparsh staff) or the lookup fails — a missing name must never break an assignment mail."""
+    if not company_id:
+        return ""
+    try:
+        from bson import ObjectId
+        from app.db.mongodb import get_collection
+        doc = await get_collection("companies").find_one({"_id": ObjectId(str(company_id))})
+        return (doc or {}).get("name") or ""
+    except Exception:
+        return ""
+
+
+async def notify_assigner_confirmation(task: dict, actor: dict, assignee_ids, scope: str = "staff") -> None:
+    """Confirm to the ASSIGNER that their task assignment was sent.
+
+    Entirely separate from the assignee's Task Assigned / Task Created mail: its own template,
+    its own single recipient (the actor, whom notify_task_event strips from every other
+    trigger), its own placeholders. It is additive — by the time this runs the assignee
+    notification has already gone out, and nothing here can suppress or alter it.
+
+    Email only. The assigner already knows they made the assignment, so this is a receipt, not
+    an alert worth a WhatsApp message.
+
+    Silent when the template is missing or Inactive, exactly like every other Task & Delegation
+    trigger — this module never falls back to a built-in body.
+    """
+    try:
+        assignee_ids = [str(a) for a in (assignee_ids or []) if a]
+        if not actor.get("email") or not assignee_ids:
+            return
+
+        eff_company = None if scope == "staff" else actor.get("company_id")
+        if not await active_user_template(f"{ASSIGNER_CONFIRMATION_SLUG}_email", eff_company):
+            return
+
+        names = []
+        for uid in assignee_ids:
+            u = await find_user_by_id(uid)
+            if u:
+                names.append(u.get("full_name") or u.get("first_name") or u.get("email") or "a team member")
+        if not names:
+            return
+
+        assigner_name = actor.get("full_name") or actor.get("first_name") or actor.get("email")
+        deadline = task.get("end") or task.get("start")
+        priority = task.get("priority") or "Normal"
+        due_date = format_datetime_standard(deadline)
+
+        context = {
+            # ─── The documented placeholders for this template ───
+            "assigner_name": assigner_name,
+            "assignee_name": ", ".join(names),
+            "task_name": task.get("title") or "Untitled Task",
+            "priority": priority,
+            "due_date": due_date,
+            "assigned_date": format_datetime_standard(datetime.now(timezone.utc).isoformat()),
+            "company_name": await _company_name(task.get("company_id") or actor.get("company_id")),
+            # Aliases, so a body copied from one of the existing task templates still renders
+            # rather than printing raw {{placeholders}} (render_template leaves unknown keys as-is).
+            "name": assigner_name,
+            "actor_name": assigner_name,
+            "deadline": due_date,
+            "critical_level": priority,
+            "description": task.get("description") or task.get("additional_details") or "No description provided.",
+        }
+        await send_notification_from_template(actor, ASSIGNER_CONFIRMATION_SLUG, context, "email", scope)
+    except Exception as e:
+        # Never raise into the caller — a receipt failing must not affect the assignment itself
+        # or the assignee's notification.
+        logger.error(f"Assigner confirmation failed for task '{task.get('title')}': {e}")
+
+
 def _build_context(event: str, task: dict, actor_name: str, extra: Optional[dict], user_obj: dict) -> dict:
     """Placeholders available to Task Management templates.
 
@@ -180,6 +267,15 @@ async def notify_task_event(
     mutation that triggered it. Intended to be awaited from a BackgroundTask or directly
     after the DB write.
     """
+    # A personal TODO can never enter the Task pipeline. Todos share the calendar_event document
+    # shape and live in the same collections, so a doc reaching here is not self-evidently a
+    # task; every call site is already gated on type == "task", but making the exclusion
+    # structural means no future caller can wire a private, self-owned todo into an assignment,
+    # completion or deletion mail. (Mirrors calendar_events.TODO_TYPE — kept as a literal so
+    # this service takes no dependency on the route module.)
+    if task.get("type") == "todo":
+        return
+
     slug = TASK_EVENT_SLUGS.get(event)
     if not slug:
         logger.warning(f"notify_task_event: unknown event '{event}'")
@@ -239,3 +335,14 @@ async def notify_task_event(
         if watcher_ids:
             await notify_task_event("in_loop_added", task, actor,
                                     {"new_watcher_ids": list(watcher_ids)})
+
+    # ─── The assigner's own confirmation copy ───
+    # Sent IN ADDITION to the assignee notification above, never instead of it, and only on the
+    # events that actually constitute assigning work to someone. `targets` is exactly the set of
+    # people who were just assigned and notified, so the receipt names the right people and is
+    # skipped entirely when an assignment reached nobody (e.g. assigning only to yourself — the
+    # actor is stripped above and the function returns before here).
+    # The `recipient_ids is None` guard mirrors the in-loop chain: an explicit-recipient call is
+    # a targeted re-send to people already on the task, not a fresh assignment.
+    if event in ASSIGNMENT_EVENTS and recipient_ids is None:
+        await notify_assigner_confirmation(task, actor, sorted(targets), scope)

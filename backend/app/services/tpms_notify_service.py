@@ -80,40 +80,160 @@ FORM_NO_CID = {
 
 
 def _form_link(event: dict) -> str:
-    """In-app deep link for form-scored activities (spec §11 "HOD Form Links").
+    """Fallback value for {{Form_Link}} when no per-recipient link applies.
 
-    Carries CID / EID / MID (Company / Employee / Month) so the form opens already scoped
-    instead of dropping the recipient on a blank month — unless the form sets `noCid`, in
-    which case the company parameter is omitted. `period` is emitted alongside MID because
-    the ERP form components read that name; same value, both spellings, so the link works
-    from mail and from the in-app "My Forms" list alike.
-    Absolute when FRONTEND_URL is set, else relative. Empty for non-form activities.
+    The in-app Forms UI this used to deep-link into has been removed: a form is now opened
+    only through a unique, per-assignee token URL, which cannot be derived from the event alone
+    (it is bound to one respondent). `_dispatch` therefore overrides {{Form_Link}} for each
+    company-side recipient with THEIR link — see `_recipient_form_links`. This function is what
+    remains for anyone the override cannot resolve a link for, and it returns an empty string
+    rather than a URL that would 404.
+    """
+    return ""
+
+
+async def _recipient_form_links(event: dict, actor: Optional[dict] = None) -> Dict[str, List[dict]]:
+    """respondent_id → the form links that person owes, for a form-scored activity.
+
+    Creating the assignments here is deliberate: it puts link generation on exactly the same
+    path as the mail that carries it, so a link can never be minted without a delivery attempt
+    being logged, and the schedule mail keeps its existing template, trigger and recipients —
+    only the VALUE of {{Form_Link}} changes, from a shared in-app URL to a per-person token URL.
+
+    A list, not a single link: one activity can carry two forms (Accountability & Ownership
+    maps to both), and each is a separate assignment with its own link, so the recipient must
+    receive both to be able to complete their work.
+
+    Returns ({}, {}) for every non-form activity, which leaves the rest of the TPMS calendar
+    exactly as it was.
+
+    The second return value is the respondents themselves, in _recipients() shape. It exists
+    because the two audiences are NOT the same set: the schedule mail goes to the activity's
+    assigned members (the doers), while a form is owed by its audience — HODs for the rating
+    forms, the MD for the feedback checklist. When the assigned doer is not an HOD/MD the link
+    is issued to someone who was never a recipient, so the mail that went out carried no link
+    and the person who owed the form got nothing at all. _dispatch unions them in.
     """
     try:
-        from app.models.forms import ACTIVITY_FORM_MAP
-        forms = ACTIVITY_FORM_MAP.get(event.get("activity") or "")
-    except Exception:
-        forms = None
-    if not forms:
-        return ""
+        from app.services.tpms_form_link_service import assignments_for_event
+        rows = await assignments_for_event(event, actor)
+    except Exception as e:
+        logger.error(f"TPMS form link generation failed for '{event.get('activity')}': {e}")
+        return {}, {}
+    links: Dict[str, List[dict]] = {}
+    respondents: Dict[str, dict] = {}
+    for row in rows:
+        if not row.get("link"):
+            continue
+        rid = str(row.get("respondent_id"))
+        links.setdefault(rid, []).append({
+            "link": row["link"],
+            "title": row.get("form_title") or row.get("form_type") or "Form",
+        })
+        if row.get("respondent_email"):
+            respondents.setdefault(rid, {
+                "id": rid,
+                "email": row["respondent_email"],
+                "name": row.get("respondent_name") or "",
+                "phone": "",
+            })
+    return links, respondents
 
-    from urllib.parse import urlencode
-    form_type = forms[0]
-    members = event.get("assigned_member_ids") or []
-    params = {
-        "CID": "" if FORM_NO_CID.get(form_type) else str(event.get("company_id") or ""),
-        "EID": str(members[0]) if members else "",
-        "MID": str(event.get("start") or "")[:7],   # YYYY-MM
-    }
-    params = {k: v for k, v in params.items() if v}
-    if params.get("MID"):
-        params["period"] = params["MID"]
 
-    path = f"/tpms/forms/{form_type.replace('_', '-')}"
-    if params:
-        path = f"{path}?{urlencode(params)}"
-    base = os.getenv("FRONTEND_URL", "").rstrip("/")
-    return (base + path) if base else path
+# ─────────────────────────────────────────────────────────────
+# Form links in TPMS mail — staged rollout
+#
+# STAGE 1 (current): a TPMS scheduled mail must carry NO form link of any kind. Three separate
+# sources have to be covered, only one of which lives in this repo:
+#   • a legacy Google Form / forms.gle URL hardcoded into an admin's stored template body
+#     (tpms_mail_templates lives in the database, so it cannot be fixed in code);
+#   • a link to the removed in-app Forms UI (/tpms/forms/...);
+#   • the code-generated /f/<token> link this service injects.
+# Assignments and their tokens are STILL created and logged, so TPMS ▸ Form Mail Logs keeps
+# working and stage 2 has its links ready — they are simply not put into the mail.
+#
+# STAGE 2: flip SEND_FORM_LINKS to True. The generated /f/<token> link is injected and delivered
+# again; the Google / legacy patterns stay stripped permanently.
+#
+# Stored templates are never rewritten — the scrub runs on the RENDERED copy at send time, so an
+# admin's template is left exactly as they authored it and the change is reversible.
+# ─────────────────────────────────────────────────────────────
+SEND_FORM_LINKS = True
+
+# Never mailed, at any stage.
+_FORBIDDEN_LINK_PATTERNS = (
+    "forms.gle",
+    "docs.google.com/forms",
+    "google.com/forms",
+    "/tpms/forms",          # the removed in-app Forms UI
+)
+
+_ANCHOR_RE = re.compile(r"<a(?:\s[^>]*)?>.*?</a>", re.IGNORECASE | re.DOTALL)
+_HREF_RE = re.compile(r"""href\s*=\s*["']([^"']*)["']""", re.IGNORECASE)
+
+
+def _is_form_link(url: str) -> bool:
+    """Whether an anchor's href is a form link that must not go out."""
+    u = (url or "").strip().lower()
+    # An empty href is what {{Form_Link}} leaves behind once it resolves to nothing — a dead
+    # "fill the form" button. TPMS mail has no other placeholder that can render empty into an
+    # href (see build_map), so this removes the broken control, not the text around it.
+    if not u:
+        return True
+    if any(pattern in u for pattern in _FORBIDDEN_LINK_PATTERNS):
+        return True
+    # Our own generated link, while stage 1 stands.
+    return not SEND_FORM_LINKS and "/f/" in u
+
+
+def _strip_form_links(html: str) -> str:
+    """Remove every form link from a RENDERED mail body."""
+    def drop_form_anchors(match):
+        anchor_html = match.group(0)
+        href = _HREF_RE.search(anchor_html)
+        return "" if _is_form_link(href.group(1) if href else "") else anchor_html
+
+    body = _ANCHOR_RE.sub(drop_form_anchors, html or "")
+    # Bare URLs pasted into a body as plain text, which no anchor rule would catch.
+    for pattern in _FORBIDDEN_LINK_PATTERNS:
+        body = re.sub(r"https?://\S*" + re.escape(pattern) + r"\S*", "", body, flags=re.IGNORECASE)
+    return body
+
+
+def _link_block(entries: List[dict]) -> str:
+    """A minimal HTML block listing form links, appended to a rendered mail body.
+
+    This is NOT a template and does not touch the template system: admins keep authoring the
+    schedule mail exactly as before. It is the guarantee that the recipient can actually reach
+    their form — a template that never referenced {{Form_Link}} would otherwise deliver no link
+    at all, and an activity with two forms would deliver only the first.
+    """
+    rows = "".join(
+        f'<p style="margin:6px 0"><a href="{e["link"]}" '
+        f'style="color:#4f46e5;font-weight:700">{e["title"]}</a></p>'
+        for e in entries
+    )
+    return (
+        '<div style="margin-top:18px;padding:14px 16px;border:1px solid #e5e7eb;'
+        'border-radius:10px;background:#fafafa">'
+        '<p style="margin:0 0 8px;font-weight:700;font-size:13px">Your form link'
+        f'{"s" if len(entries) > 1 else ""}</p>{rows}'
+        '<p style="margin:8px 0 0;font-size:11px;color:#6b7280">'
+        'This link is personal to you and can be submitted once.</p></div>'
+    )
+
+
+def _ensure_links_delivered(html: str, entries: List[dict]) -> str:
+    """Append any form link the rendered body does not already contain.
+
+    A template that uses {{Form_Link}} already carries the primary link, so nothing is appended
+    for it and the mail looks exactly as the admin designed it. Anything missing — because the
+    template has no placeholder, or because this activity has a second form — is added below,
+    so "the assignee receives the email with their unique link" cannot depend on how the
+    template happens to be written.
+    """
+    missing = [e for e in entries if e["link"] not in html]
+    return html + _link_block(missing) if missing else html
 
 
 async def build_map(event: dict, extra: Optional[dict] = None) -> Dict[str, str]:
@@ -321,6 +441,29 @@ async def send_whatsapp(event: dict, event_kind: str, side: str) -> dict:
     return {"sent": sent, "failed": failed, "skipped": 0}
 
 
+async def _record_form_link_delivery(event: dict, person: dict, status: str,
+                                     error: Optional[str]) -> None:
+    """Stamp the delivery outcome onto every form assignment this recipient holds for the
+    period, so TPMS ▸ Form Mail Logs shows whether the link actually reached them. Failures here
+    are swallowed: the mail already went out (or already failed) and the log must never be the
+    thing that breaks scheduling."""
+    try:
+        from app.services.tpms_form_link_service import (
+            ASSIGNMENT_COLLECTION, mark_email_result,
+        )
+        period = str(event.get("start") or "")[:7]
+        rows = await get_collection(ASSIGNMENT_COLLECTION).find({
+            "company_id": str(event.get("company_id") or ""),
+            "period": period,
+            "respondent_id": str(person.get("id") or ""),
+            "activity": event.get("activity") or "",
+        }).to_list(20)
+        for row in rows:
+            await mark_email_result(row["_id"], status, error)
+    except Exception as e:
+        logger.error(f"TPMS form link delivery log failed: {e}")
+
+
 async def _dispatch(event: dict, event_kind: str, heading: str,
                     extra: Optional[dict] = None) -> dict:
     """Resolve a template per side, fill it and send. Never raises — a mail failure must
@@ -334,6 +477,23 @@ async def _dispatch(event: dict, event_kind: str, heading: str,
     people = await _recipients(event)
     activity = event.get("activity") or ""
     sent = failed = 0
+
+    # Per-recipient form links. Generated only when this activity is form-scored, and only on
+    # the schedule mail — a reminder or cancellation must not mint fresh links, and the existing
+    # reminder / reschedule / cancel / completed flows are untouched by this.
+    form_links: Dict[str, List[dict]] = {}
+    form_respondents: Dict[str, dict] = {}
+    if event_kind == EVENT_SCHEDULE:
+        form_links, form_respondents = await _recipient_form_links(event, (extra or {}).get("actor"))
+        # A respondent who owes a form but was not on the activity's assignee list would
+        # otherwise never be mailed, while the doer who WAS mailed got a body with no link —
+        # the link and the mail went to different people. Add them to the company side so each
+        # person receives the mail carrying THEIR OWN link. Links are personal, so this only
+        # ever adds the person the link belongs to; nobody sees anyone else's.
+        if form_respondents:
+            company = people.get(SIDE_COMPANY) or []
+            known = {str(p.get("id") or "") for p in company}
+            people[SIDE_COMPANY] = company + [r for rid, r in form_respondents.items() if rid not in known]
 
     for side in (SIDE_STAFF, SIDE_COMPANY):
         recipients = people.get(side) or []
@@ -351,8 +511,19 @@ async def _dispatch(event: dict, event_kind: str, heading: str,
 
         for person in recipients:
             person_map = {**mapping, "Recipient_Name": person["name"]}
+            # This recipient's own secure form links, when they are one of the form's
+            # respondents. Staff-side recipients and non-form activities keep the empty default.
+            my_links = form_links.get(str(person.get("id") or "")) or []
+            if my_links and SEND_FORM_LINKS:
+                person_map["Form_Link"] = my_links[0]["link"]
             subject = fill(subject_tpl, person_map)
             html = fill(body_tpl, person_map)
+            if my_links and SEND_FORM_LINKS:
+                html = _ensure_links_delivered(html, my_links)
+            # Stage 1 guarantee: whatever the stored template contained — a legacy Google Form
+            # URL, an old /tpms/forms deep link, or a now-empty {{Form_Link}} button — no form
+            # link leaves in this mail.
+            html = _strip_form_links(html)
             try:
                 await send_email_notification(
                     person["email"], subject, html,
@@ -360,9 +531,13 @@ async def _dispatch(event: dict, event_kind: str, heading: str,
                     meta=log_context(event),
                 )
                 sent += 1
+                if my_links and SEND_FORM_LINKS:
+                    await _record_form_link_delivery(event, person, "sent", None)
             except Exception as e:
                 failed += 1
                 logger.error(f"TPMS {event_kind} mail to {person['email']} failed: {e}")
+                if my_links and SEND_FORM_LINKS:
+                    await _record_form_link_delivery(event, person, "failed", str(e))
 
     return {"sent": sent, "failed": failed}
 

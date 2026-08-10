@@ -201,7 +201,10 @@ const SearchableMultiSelect = ({ options, selectedIds, onToggle, placeholder, di
  *   recurrence set, keeps doers and staff in separate fields, and runs the
  *   once-per-month conflict check before saving.
  */
-const ScheduleCalendarModal = ({ isOpen, onClose, onSaved, mode = 'erp', event = null }) => {
+// `initialDate` ("YYYY-MM-DD") seeds the Plan Date when the modal is opened for a NEW activity
+// — used by the TPMS calendar so clicking an empty day opens this form already set to that day.
+// Ignored in edit mode, where the date comes from the event being edited.
+const ScheduleCalendarModal = ({ isOpen, onClose, onSaved, mode = 'erp', event = null, initialDate = '' }) => {
   const isTpms = mode === 'tpms';
   // Edit mode is TPMS-only: an `event` turns the create modal into an edit-in-place
   // form. Left null (or in ERP mode) the modal behaves exactly as before.
@@ -247,6 +250,9 @@ const ScheduleCalendarModal = ({ isOpen, onClose, onSaved, mode = 'erp', event =
     } else {
       base = emptyForm();
       if (isClient && user?.company_id) base.companyId = String(user.company_id);
+      // Pre-fill the day the user clicked. Only the date is seeded — everything else stays
+      // blank, so this is the same create form, just opened on the right day.
+      if (initialDate) base.planDate = initialDate;
     }
     setForm(base);
     setCompanyUsers([]);
@@ -273,7 +279,7 @@ const ScheduleCalendarModal = ({ isOpen, onClose, onSaved, mode = 'erp', event =
       }
     })();
     return () => { alive = false; };
-  }, [isOpen, isClient, user, showError, isTpms, event]);
+  }, [isOpen, isClient, user, showError, isTpms, event, initialDate]);
 
   // Load the selected company's users (the doer pool).
   //
