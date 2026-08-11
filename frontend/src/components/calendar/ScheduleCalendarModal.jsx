@@ -9,6 +9,7 @@ import {
   checkScheduleConflict as checkTpmsConflict,
   createSchedule as createTpmsSchedule,
   updateSchedule as updateTpmsSchedule,
+  uploadScheduleFile,
 } from '../../services/tpmsApi';
 import { useAuth } from '../../context/AuthContext';
 import { useNotification } from '../../context/NotificationContext';
@@ -60,10 +61,9 @@ const RECURRENCE = [
   { label: 'Yearly',   repeat: 'Annually' },
 ];
 
-// TPMS uses its own recurrence set — the backend generator implements exactly these four
-// (One-time / Monthly / Weekly / Periodically-by-weekday). "Daily" and "Yearly" have no
-// TPMS equivalent, and "Periodically" has no ERP-calendar equivalent.
-const TPMS_RECURRENCE = ['One-time', 'Weekly', 'Monthly', 'Periodically'];
+// TPMS uses its own recurrence set — the backend generator (tpms_schedule_service.
+// build_occurrences) implements One-time / Daily / Weekly / Monthly / Periodically-by-weekday.
+const TPMS_RECURRENCE = ['One-time', 'Daily', 'Weekly', 'Monthly', 'Periodically'];
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
 const emptyForm = () => ({
@@ -204,7 +204,7 @@ const SearchableMultiSelect = ({ options, selectedIds, onToggle, placeholder, di
 // `initialDate` ("YYYY-MM-DD") seeds the Plan Date when the modal is opened for a NEW activity
 // — used by the TPMS calendar so clicking an empty day opens this form already set to that day.
 // Ignored in edit mode, where the date comes from the event being edited.
-const ScheduleCalendarModal = ({ isOpen, onClose, onSaved, mode = 'erp', event = null, initialDate = '' }) => {
+const ScheduleCalendarModal = ({ isOpen, onClose, onSaved, mode = 'erp', event = null, initialDate = '', activities = [], departments = [] }) => {
   const isTpms = mode === 'tpms';
   // Edit mode is TPMS-only: an `event` turns the create modal into an edit-in-place
   // form. Left null (or in ERP mode) the modal behaves exactly as before.
@@ -215,7 +215,23 @@ const ScheduleCalendarModal = ({ isOpen, onClose, onSaved, mode = 'erp', event =
   // Client-side users schedule only for their OWN company and don't assign internal staff.
   const isClient = ['clientadmin', 'clientuser'].includes(user?.role);
 
+  // Prefer the live admin-managed masters passed in from the TPMS calendar; fall back to the
+  // built-in lists so standalone/ERP use still works and an empty fetch never blanks the
+  // pickers. Admin-added activities and custom departments now appear when scheduling.
+  const activityOptions = (activities && activities.length)
+    ? activities.map((a) => (typeof a === 'string' ? a : a.name)).filter(Boolean)
+    : ACTIVITIES;
+  const deptOptions = (departments && departments.length)
+    ? departments.filter((d) => typeof d === 'string' || d.active !== false)
+        .map((d) => (typeof d === 'string' ? d : d.name)).filter(Boolean)
+    : DEPARTMENTS;
+
   const [form, setForm] = useState(emptyForm());
+  const [uploadFile, setUploadFile] = useState(null);
+  const selectedActivityMeta = (activities || []).find((a) => (typeof a === 'string' ? a : a.name) === form.activity);
+  const uploadRequired = !!(selectedActivityMeta && typeof selectedActivityMeta === 'object' && selectedActivityMeta.upload_required);
+  useEffect(() => { setUploadFile(null); }, [isOpen, form.activity]);
+
   const [companyName, setCompanyName] = useState('');
   const [companies, setCompanies] = useState([]);
   const [staff, setStaff] = useState([]);
@@ -364,13 +380,21 @@ const ScheduleCalendarModal = ({ isOpen, onClose, onSaved, mode = 'erp', event =
     member_ids: form.doerIds,
     staff_ids: form.staffIds,
     comment: form.comment,
-    reminders: (form.reminders || []).map((r) => ({
-      channel: r.reminder_type === 'whatsapp' ? 'WhatsApp' : r.reminder_type === 'both' ? 'Both' : 'Email',
-      type: 'offset',
-      dir: r.timing_type || 'before',
-      value: Math.max(1, Math.round((r.offset_minutes || 0) / 60)),
-      unit: 'HRS',
-    })),
+    reminders: (form.reminders || []).map((r) => {
+      // Preserve the user's granularity: pick the coarsest unit that divides evenly, so a
+      // 30-minute reminder stays 30 MINS instead of rounding up to a whole hour.
+      const mins = Math.max(1, r.offset_minutes || 0);
+      const [value, unit] = mins % 1440 === 0 ? [mins / 1440, 'DAYS']
+        : mins % 60 === 0 ? [mins / 60, 'HRS']
+        : [mins, 'MINS'];
+      return {
+        channel: r.reminder_type === 'whatsapp' ? 'WhatsApp' : r.reminder_type === 'both' ? 'Both' : 'Email',
+        type: 'offset',
+        dir: r.timing_type || 'before',
+        value,
+        unit,
+      };
+    }),
   });
 
   const saveTpms = async (payload) => {
@@ -378,11 +402,21 @@ const ScheduleCalendarModal = ({ isOpen, onClose, onSaved, mode = 'erp', event =
     try {
       if (isEditing) {
         await updateTpmsSchedule(event.id, payload);
+        if (uploadRequired && uploadFile) {
+          try { await uploadScheduleFile(event.id, uploadFile); }
+          catch { showError('Activity updated, but the file upload failed — attach it from the activity card.'); }
+        }
         showSuccess('Activity updated.');
       } else {
-        await createTpmsSchedule(payload);
+        const res = await createTpmsSchedule(payload);
+        const eventIds = res?.data?.event_ids || [];
+        if (uploadRequired && uploadFile && eventIds.length) {
+          try { await uploadScheduleFile(eventIds[0], uploadFile); }
+          catch { showError('Activity scheduled, but the file upload failed — attach it from the activity card.'); }
+        }
         showSuccess('Activity scheduled — reminders and mails are on their way.');
       }
+      setUploadFile(null);
       onSaved?.();
       onClose();
     } catch (err) {
@@ -514,7 +548,7 @@ const ScheduleCalendarModal = ({ isOpen, onClose, onSaved, mode = 'erp', event =
               <div>
                 <Label req><ActivityIcon size={11} className="inline mr-1" />Activity</Label>
                 <SearchableSelect
-                  options={ACTIVITIES.map((a) => ({ id: a, label: a }))}
+                  options={activityOptions.map((a) => ({ id: a, label: a }))}
                   value={form.activity}
                   onChange={(a) => set({ activity: a, ...(form.title.trim() ? {} : { title: a }) })}
                   placeholder="— Select —"
@@ -603,7 +637,7 @@ const ScheduleCalendarModal = ({ isOpen, onClose, onSaved, mode = 'erp', event =
             <div>
               <Label req><Users2 size={11} className="inline mr-1" />Departments (multi-select)</Label>
               <div className="flex flex-wrap gap-2">
-                {DEPARTMENTS.map((d) => {
+                {deptOptions.map((d) => {
                   const on = form.departments.includes(d);
                   return (
                     <button key={d} type="button" onClick={() => toggleDept(d)} disabled={!form.companyId}
@@ -618,20 +652,50 @@ const ScheduleCalendarModal = ({ isOpen, onClose, onSaved, mode = 'erp', event =
             {/* Company Assigners (doers) */}
             <div>
               <Label>Company Assigners (doers) (multi-select)</Label>
-              <SearchableMultiSelect
-                disabled={!form.companyId}
-                placeholder={!form.companyId ? 'Select company & departments' : (loadingUsers ? 'Loading…' : 'Search doers…')}
-                options={doerPool.map((u) => ({ id: uid(u), label: `${displayName(u)}${govRole(u) ? ` · ${govRole(u)}` : ''}` }))}
-                selectedIds={form.doerIds}
-                onToggle={toggleDoer}
-                accent="violet"
-              />
+              <div className="max-h-56 overflow-y-auto rounded-xl border border-gray-200 divide-y divide-gray-100">
+                {!form.companyId ? (
+                  <div className="px-3 py-3 text-[12px] text-gray-400">Select a company &amp; departments first.</div>
+                ) : loadingUsers ? (
+                  <div className="px-3 py-3 text-[12px] text-gray-400">Loading…</div>
+                ) : doerPool.length === 0 ? (
+                  <div className="px-3 py-3 text-[12px] text-gray-400">No doers for the selected departments.</div>
+                ) : (
+                  doerPool.map((u) => {
+                    const id = uid(u);
+                    const on = form.doerIds.includes(id);
+                    return (
+                      <label key={id} className="flex items-center gap-2.5 px-3 py-2 cursor-pointer hover:bg-gray-50">
+                        <input type="checkbox" checked={on} onChange={() => toggleDoer(id)}
+                          className="w-4 h-4 accent-indigo-600 cursor-pointer" />
+                        <span className="text-[13px] text-gray-700">
+                          {displayName(u)}{govRole(u) ? <span className="text-gray-400"> — {govRole(u)}</span> : null}
+                        </span>
+                      </label>
+                    );
+                  })
+                )}
+              </div>
             </div>
 
             <div>
               <Label>Comment</Label>
               <textarea rows={3} value={form.comment} onChange={(e) => set({ comment: e.target.value })} placeholder="Optional notes…" className={`${field} resize-y`} />
             </div>
+
+            {/* Proof upload — only for activities flagged upload_required in Activity Management. */}
+            {uploadRequired && (
+              <div className="p-4 rounded-2xl border border-dashed border-indigo-200 bg-indigo-50/40">
+                <div className="flex items-center gap-2 mb-2">
+                  <span className="text-[10px] font-black uppercase text-indigo-600 tracking-widest">📎 Upload for {form.activity}</span>
+                  <span className="text-[9px] font-black px-1.5 py-0.5 rounded bg-orange-50 text-orange-500 uppercase tracking-wide">Required</span>
+                </div>
+                <input type="file" onChange={(e) => setUploadFile(e.target.files?.[0] || null)}
+                  className="block w-full text-[12px] text-gray-600 file:mr-3 file:px-3 file:py-1.5 file:rounded-lg file:border-0 file:bg-indigo-600 file:text-white file:text-[11px] file:font-black file:cursor-pointer file:hover:brightness-110" />
+                <p className="text-[10px] text-gray-400 font-medium mt-2">
+                  {isEditing ? 'Attaches to this activity on save.' : 'Attaches to the first occurrence on save.'} You can also upload later from the activity card. Max&nbsp;25&nbsp;MB.
+                </p>
+              </div>
+            )}
 
             {/* Reminders */}
             <div className="p-4 rounded-2xl border border-dashed border-orange-200 bg-orange-50/40">

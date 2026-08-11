@@ -32,10 +32,13 @@ export const updateReminderRule = (id, payload) => api.patch(`/tpms/reminder-rul
 export const getMailTemplates = (activity) =>
   api.get('/tpms/mail-templates', { params: { activity: activity || undefined } });
 export const upsertMailTemplate = (payload) => api.post('/tpms/mail-templates', payload);
-// WhatsApp templates are listed read-only — authoring stays out of this screen; the Active
-// switch is what this endpoint exists for.
 export const getWhatsappTemplates = (activity) =>
   api.get('/tpms/whatsapp-templates', { params: { activity: activity || undefined } });
+export const upsertWhatsappTemplate = (payload) => api.post('/tpms/whatsapp-templates', payload);
+// The data fields a WhatsApp template's positional params can map to.
+export const getWhatsappVariables = () => api.get('/tpms/whatsapp-variables');
+// Smoke-test send of one WhatsApp template to a phone number.
+export const testWhatsappTemplate = (payload) => api.post('/tpms/whatsapp-templates/test', payload);
 /** Activate / deactivate one template. `channel` is 'mail' or 'whatsapp'. Admin only —
  *  writes just the flag, never the subject/body, so content cannot change by toggling. */
 export const setTemplateStatus = (channel, id, active) =>

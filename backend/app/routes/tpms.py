@@ -404,12 +404,7 @@ async def list_whatsapp_templates(
     activity: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user),
 ):
-    """WhatsApp templates (activity × side × event). Admin only.
-
-    Read-only listing so the Active switch has something to act on — WhatsApp template
-    AUTHORING is unchanged and still out of scope here; rows are configured directly against
-    the Meta-approved template names.
-    """
+    """WhatsApp templates (activity × side × event). Admin only."""
     if (current_user.get("role") or "").lower() not in STAFF_ROLES:
         raise HTTPException(status_code=403, detail="Admin only")
     query = {}
@@ -418,6 +413,82 @@ async def list_whatsapp_templates(
     docs = await get_collection(COLL_WHATSAPP_TEMPLATES).find(query).to_list(500)
     docs.sort(key=lambda d: (d.get("activity") or "", d.get("event") or "", d.get("side") or ""))
     return {"templates": [_serialize(d) for d in docs]}
+
+
+@router.post("/whatsapp-templates")
+async def upsert_whatsapp_template(payload: dict, current_user: dict = Depends(get_current_user)):
+    """Create/update a WhatsApp template, keyed (activity, side, event). Admin only.
+
+    Stores the Meta-approved template name, its language code, and the ordered `variables`
+    list — each entry is a data field (a build_map key) that fills the template's {{1}}, {{2}},
+    … body parameters in order. See GET /whatsapp-variables for the fields you can map."""
+    if (current_user.get("role") or "").lower() not in STAFF_ROLES:
+        raise HTTPException(status_code=403, detail="Only Admin / Super Admin can manage templates.")
+    activity = str(payload.get("activity") or "").strip()
+    side = str(payload.get("side") or "").strip().lower()
+    event = str(payload.get("event") or "").strip().lower()
+    meta_name = str(payload.get("meta_template_name") or payload.get("name") or "").strip()
+    if not (activity and side in {"staff", "company"} and event and meta_name):
+        raise HTTPException(status_code=400,
+                            detail="activity, side (staff|company), event and meta_template_name are required")
+    variables = payload.get("variables") or []
+    if not isinstance(variables, list):
+        raise HTTPException(status_code=400, detail="variables must be a list of field names")
+    variables = [str(v).strip() for v in variables if str(v).strip()]
+    doc = {
+        "activity": activity, "side": side, "event": event,
+        "meta_template_name": meta_name, "name": meta_name,
+        "language": (str(payload.get("language") or "en").strip() or "en"),
+        "variables": variables,
+        "active": bool(payload.get("active", True)),
+        "source": "admin_edit", "updated_at": datetime.utcnow(),
+    }
+    await get_collection(COLL_WHATSAPP_TEMPLATES).update_one(
+        {"activity": activity, "side": side, "event": event}, {"$set": doc}, upsert=True)
+    return {"ok": True}
+
+
+# The data fields a WhatsApp template's {{1}}, {{2}}, … parameters can map to. These are exactly
+# the keys build_map produces, so a mapped field is guaranteed to resolve at send time.
+_WHATSAPP_VARIABLE_FIELDS = [
+    "Title", "Activity", "Company_Name", "Event_Date", "Event_Time",
+    "Status", "Departments", "Comment", "Recipient_Name",
+    "Form_Link", "Form_Link_2", "Form_Links",
+]
+
+
+@router.get("/whatsapp-variables")
+async def whatsapp_variable_catalog(current_user: dict = Depends(get_current_user)):
+    """Fields available to map to a WhatsApp template's positional parameters. Admin only."""
+    if (current_user.get("role") or "").lower() not in STAFF_ROLES:
+        raise HTTPException(status_code=403, detail="Admin only")
+    return {"fields": _WHATSAPP_VARIABLE_FIELDS}
+
+
+@router.post("/whatsapp-templates/test")
+async def test_whatsapp_template(payload: dict, current_user: dict = Depends(get_current_user)):
+    """Send a smoke-test of one WhatsApp template to a phone number. Admin only. Each mapped
+    variable is filled with a visible [Field] placeholder so the layout can be eyeballed."""
+    if (current_user.get("role") or "").lower() not in STAFF_ROLES:
+        raise HTTPException(status_code=403, detail="Admin only")
+    phone = str(payload.get("phone") or "").strip()
+    template_id = str(payload.get("template_id") or "").strip()
+    if not phone or not template_id:
+        raise HTTPException(status_code=400, detail="phone and template_id are required")
+    try:
+        tpl = await get_collection(COLL_WHATSAPP_TEMPLATES).find_one({"_id": ObjectId(template_id)})
+    except (InvalidId, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid template id")
+    if not tpl:
+        raise HTTPException(status_code=404, detail="Template not found")
+    from app.services.tpms_notify_service import normalize_phone
+    from app.services.notification_service import send_whatsapp_template
+    params = [f"[{v}]" for v in (tpl.get("variables") or [])]
+    ok = await send_whatsapp_template(
+        normalize_phone(phone),
+        tpl.get("meta_template_name") or tpl.get("name"),
+        tpl.get("language") or "en", params, slug="tpms_whatsapp_test")
+    return {"ok": bool(ok)}
 
 
 # Both channels resolve their template with an `active: {"$ne": False}` filter at send time
@@ -871,10 +942,24 @@ async def success_measures_sync(
     period: Optional[str] = Query(None, description="'YYYY-MM'; defaults to this month"),
     current_user: dict = Depends(get_current_user),
 ):
-    """Seed + recompute on demand. The same pair also runs daily in the scheduler."""
+    """One-click recalculate of everything the dashboards read — the ERP equivalent of running
+    the Apps Script syncAutoFeed + seedSuccessMeasures + syncSuccessMeasures triggers together.
+    Also runs daily in the scheduler."""
     if (current_user.get("role") or "").lower() not in STAFF_ROLES:
         raise HTTPException(status_code=403, detail="Admin only")
-    return await run_score_daily(period)
+    from app.services.tpms_escalation_service import sync_auto_feed
+    auto = await sync_auto_feed()            # create/close Action_Items + refresh Escalations
+    scores = await run_score_daily(period)   # seed + recompute Success_Measures
+    return {"ok": True, "auto_feed": auto, "scores": scores}
+
+
+@router.post("/success-measures/dedupe")
+async def success_measures_dedupe(current_user: dict = Depends(get_current_user)):
+    """Collapse duplicate success-measure rows to the latest per key. Admin-only, one-off."""
+    if (current_user.get("role") or "").lower() not in STAFF_ROLES:
+        raise HTTPException(status_code=403, detail="Admin only")
+    from app.services.tpms_score_service import dedupe_success_measures
+    return await dedupe_success_measures()
 
 
 # GET /form-mail-logs used to live here, backing the TPMS ▸ Form Mail Logs admin page. Both were

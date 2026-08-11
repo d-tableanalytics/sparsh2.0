@@ -9,7 +9,7 @@ import {
 } from '../../common/dashboardKit';
 import {
   getMailTemplates, upsertMailTemplate, getActivities,
-  getWhatsappTemplates, setTemplateStatus,
+  getWhatsappTemplates, upsertWhatsappTemplate, getWhatsappVariables, setTemplateStatus,
 } from '../../../../services/tpmsApi';
 import { useAuth } from '../../../../context/AuthContext';
 import { isTpmsAdmin } from '../../access';
@@ -29,7 +29,11 @@ import { isTpmsAdmin } from '../../access';
 const MotionDiv = motion.div;
 
 const SIDE_OPTIONS = ['staff', 'company'];
-const EVENT_OPTIONS = ['schedule', 'reminder', 'reschedule', 'cancel', 'completed'];
+const EVENT_OPTIONS = ['schedule', 'reminder', 'reschedule', 'cancel', 'completed', 'form_summary', 'form_scorecard'];
+
+// Variables available to the two post-submission form emails (event = form_summary / form_scorecard).
+const FORM_SUMMARY_VARS = ['Recipient_Name', 'HOD_Name', 'Company_Name', 'Month', 'Form_Type', 'Submitted_On', 'Total_Ratings', 'Response_Table'];
+const FORM_SCORECARD_VARS = ['Recipient_Name', 'Employee_Name', 'Company_Name', 'Month', 'Form_Type', 'Average_Rating', 'Total_Questions', 'Score_Table'];
 
 const errMsg = (e, fallback) => e?.response?.data?.detail || fallback;
 
@@ -40,6 +44,10 @@ const EMPTY_FORM = {
   event: 'schedule',
   subject: '',
   body_html: '',
+  // WhatsApp-only fields (ignored when authoring an email template):
+  meta_template_name: '',
+  language: 'en',
+  variables: [],
   active: true,
 };
 
@@ -177,6 +185,9 @@ const seedForm = (editing) => (editing
     event: EVENT_OPTIONS.includes(editing.event) ? editing.event : 'schedule',
     subject: editing.subject || '',
     body_html: editing.body_html || '',
+    meta_template_name: editing.meta_template_name || editing.name || '',
+    language: editing.language || 'en',
+    variables: Array.isArray(editing.variables) ? editing.variables : [],
     active: editing.active !== false,
   }
   : EMPTY_FORM);
@@ -186,25 +197,46 @@ const seedForm = (editing) => (editing
  * Mounted only while open (via a keyed parent), so state seeds cleanly from
  * props on mount — no effect-driven syncing needed.
  */
-const TemplateModal = ({ editing, activityOptions, onClose, onSubmit }) => {
+const TemplateModal = ({ editing, activityOptions, channel = 'mail', variableFields = [], onClose, onSubmit }) => {
   const [form, setForm] = useState(() => seedForm(editing));
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState('');
 
   const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
+  const isWa = channel === 'whatsapp';
+  // The two post-submission form emails expose their own variable set (Response_Table, etc.).
+  const isForm = form.event === 'form_summary' || form.event === 'form_scorecard';
+  const paletteVars = form.event === 'form_summary' ? FORM_SUMMARY_VARS
+    : form.event === 'form_scorecard' ? FORM_SCORECARD_VARS
+    : variableFields;
+  const addVar = () => set('variables', [...(form.variables || []), '']);
+  const setVar = (i, v) => set('variables', (form.variables || []).map((x, j) => (j === i ? v : x)));
+  const delVar = (i) => set('variables', (form.variables || []).filter((_, j) => j !== i));
+
+  // Insert a {{placeholder}} into the email body at the cursor.
+  const insertBodyVar = (v) => {
+    const token = `{{${v}}}`;
+    const ta = document.getElementById('mail-body');
+    if (!ta) { set('body_html', (form.body_html || '') + token); return; }
+    const start = ta.selectionStart ?? (form.body_html || '').length;
+    const end = ta.selectionEnd ?? start;
+    set('body_html', (form.body_html || '').slice(0, start) + token + (form.body_html || '').slice(end));
+    requestAnimationFrame(() => { ta.focus(); const p = start + token.length; ta.setSelectionRange(p, p); });
+  };
 
   const submit = async (e) => {
     e.preventDefault();
-    if (!form.subject.trim()) { setErr('Subject is required.'); return; }
+    if (isWa && !form.meta_template_name.trim()) { setErr('Meta template name is required.'); return; }
+    if (!isWa && !form.subject.trim()) { setErr('Subject is required.'); return; }
     setSaving(true);
     setErr('');
     try {
-      await onSubmit({
-        ...form,
-        activity: form.activity.trim() || '*',
-        subject: form.subject.trim(),
-        body_html: form.body_html,
-      });
+      const base = { ...form, activity: form.activity.trim() || '*' };
+      await onSubmit(isWa
+        ? { ...base, meta_template_name: form.meta_template_name.trim(),
+            language: (form.language || 'en').trim() || 'en',
+            variables: (form.variables || []).filter(Boolean) }
+        : { ...base, subject: form.subject.trim(), body_html: form.body_html });
     } catch (ex) {
       setErr(errMsg(ex, 'Failed to save template. Please try again.'));
       setSaving(false);
@@ -249,16 +281,94 @@ const TemplateModal = ({ editing, activityOptions, onClose, onSubmit }) => {
             </Field>
           </div>
 
-          <Field label="Subject" required>
-            <input type="text" value={form.subject} onChange={(e) => set('subject', e.target.value)}
-              placeholder="e.g. [Reminder] {Activity} due in 2 days | {Client}" className={inputCls} autoFocus />
-          </Field>
+          {!isWa && (
+            <>
+              <Field label="Subject" required>
+                <input type="text" value={form.subject} onChange={(e) => set('subject', e.target.value)}
+                  placeholder="e.g. [Reminder] {{Activity}} due in 2 days | {{Company_Name}}" className={inputCls} autoFocus />
+              </Field>
 
-          <Field label="Body (HTML)">
-            <textarea value={form.body_html} onChange={(e) => set('body_html', e.target.value)}
-              placeholder="<p>Hello {Name}, …</p>" rows={7}
-              className={`${inputCls} font-mono text-[12px] leading-relaxed resize-y`} />
-          </Field>
+              <Field label="Body (HTML)">
+                <textarea id="mail-body" value={form.body_html} onChange={(e) => set('body_html', e.target.value)}
+                  placeholder="<p>Hello {{Recipient_Name}}, …</p>  — use {{double-brace}} placeholders" rows={7}
+                  className={`${inputCls} font-mono text-[12px] leading-relaxed resize-y`} />
+              </Field>
+
+              <div>
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="text-[11px] font-black text-[var(--text-muted)] uppercase tracking-wide">Insert a variable</label>
+                  <span className="text-[11px] text-[var(--text-muted)]">click to add at the cursor</span>
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {paletteVars.map((v) => (
+                    <button key={v} type="button" onClick={() => insertBodyVar(v)}
+                      className={`font-mono text-[11px] px-2 py-1 rounded-md border transition-colors ${(v === 'Form_Link' || v === 'Response_Table' || v === 'Score_Table')
+                        ? 'border-[var(--accent-indigo-border)] bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] font-bold'
+                        : 'border-[var(--border)] bg-[var(--input-bg)] text-[var(--text-main)] hover:border-[var(--accent-indigo)]'}`}>
+                      {`{{${v}}}`}
+                    </button>
+                  ))}
+                </div>
+                {isForm ? (
+                  <p className="text-[11.5px] text-[var(--text-muted)] mt-2 leading-relaxed">
+                    This mail is sent <b>after a form is submitted</b>.
+                    {form.event === 'form_summary'
+                      ? <> Use <b style={{ color: 'var(--accent-indigo)' }}>{'{{Response_Table}}'}</b> for the full ratings grid (HOD/MD summary).</>
+                      : <> Use <b style={{ color: 'var(--accent-indigo)' }}>{'{{Score_Table}}'}</b> and <b style={{ color: 'var(--accent-indigo)' }}>{'{{Average_Rating}}'}</b> for the employee's scorecard.</>}
+                    &nbsp;Leave the body empty to use the built-in default layout.
+                  </p>
+                ) : (
+                  <p className="text-[11.5px] text-[var(--text-muted)] mt-2 leading-relaxed">
+                    <b style={{ color: 'var(--accent-indigo)' }}>{'{{Form_Link}}'}</b> = the recipient's own unique,
+                    single-use link (valid for that month only). For a <b>two-form</b> activity like
+                    Accountability&nbsp;&amp;&nbsp;Ownership, use <b style={{ color: 'var(--accent-indigo)' }}>{'{{Form_Link_2}}'}</b>
+                    for the second form, or <b style={{ color: 'var(--accent-indigo)' }}>{'{{Form_Links}}'}</b> to drop a
+                    ready-made block of <em>all</em> the recipient's links at once. Put these in the <b>schedule</b> email.
+                  </p>
+                )}
+              </div>
+            </>
+          )}
+
+          {isWa && (
+            <>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                <div className="sm:col-span-2">
+                  <Field label="Meta Template Name" required>
+                    <input type="text" value={form.meta_template_name}
+                      onChange={(e) => set('meta_template_name', e.target.value)}
+                      placeholder="e.g. tpms_schedule_staff" className={`${inputCls} font-mono`} autoFocus />
+                  </Field>
+                </div>
+                <Field label="Language">
+                  <input type="text" value={form.language}
+                    onChange={(e) => set('language', e.target.value)} placeholder="en" className={inputCls} />
+                </Field>
+              </div>
+
+              <div>
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="text-[11px] font-black text-[var(--text-muted)] uppercase tracking-wide">Body Parameters (order = {'{{1}}, {{2}}…'})</label>
+                  <button type="button" onClick={addVar} className="text-[11px] font-bold text-[var(--accent-indigo)] hover:underline">+ Add Parameter</button>
+                </div>
+                {(form.variables || []).length === 0 && (
+                  <p className="text-[11px] text-[var(--text-muted)] italic">No parameters mapped — add one per {'{{n}}'} in your Meta-approved template.</p>
+                )}
+                <div className="space-y-2">
+                  {(form.variables || []).map((v, i) => (
+                    <div key={i} className="flex items-center gap-2">
+                      <span className="text-[11px] font-black text-[var(--accent-indigo)] w-9 shrink-0 font-mono">{`{{${i + 1}}}`}</span>
+                      <select value={v} onChange={(e) => setVar(i, e.target.value)} className={`${inputCls} flex-1`}>
+                        <option value="">— select field —</option>
+                        {variableFields.map((f) => <option key={f} value={f}>{f}</option>)}
+                      </select>
+                      <button type="button" onClick={() => delVar(i)} className="text-[var(--text-muted)] hover:text-[var(--accent-red)] p-1"><X size={15} /></button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </>
+          )}
 
           <Field label="Active">
             <button type="button" onClick={() => set('active', !form.active)}
@@ -314,6 +424,8 @@ const MailTemplateAdmin = () => {
   // The row awaiting confirmation before its status flips. null = no dialog open.
   const [confirmTarget, setConfirmTarget] = useState(null);
   const [statusSaving, setStatusSaving] = useState(false);
+  // Fields a WhatsApp template's positional params can map to (loaded once, on demand).
+  const [variableFields, setVariableFields] = useState([]);
 
   const channelLabel = channel === 'whatsapp' ? 'WhatsApp' : 'Email';
 
@@ -377,11 +489,19 @@ const MailTemplateAdmin = () => {
   const openEdit = (row) => { setEditing(row); setModalOpen(true); };
 
   const handleSubmit = async (payload) => {
-    await upsertMailTemplate(payload);
+    await (channel === 'whatsapp' ? upsertWhatsappTemplate(payload) : upsertMailTemplate(payload));
     setModalOpen(false);
     setEditing(null);
     await load();
   };
+
+  // Available {{placeholders}} for both channels — powers the email insert palette and the
+  // WhatsApp parameter dropdowns. Loaded once for any admin.
+  useEffect(() => {
+    if (admin && variableFields.length === 0) {
+      getWhatsappVariables().then(({ data }) => setVariableFields(data.fields || [])).catch(() => {});
+    }
+  }, [admin, variableFields.length]);
 
   if (!admin) {
     return (
@@ -415,8 +535,7 @@ const MailTemplateAdmin = () => {
           ))}
         </div>
         <HeaderSelect value={filter} onChange={setFilter} options={filterOptions} />
-        {/* Authoring is Email-only; WhatsApp rows are configured against Meta-approved names. */}
-        {channel === 'mail' && <HeroButton icon={Plus} onClick={openAdd}>Add Template</HeroButton>}
+        <HeroButton icon={Plus} onClick={openAdd}>Add Template</HeroButton>
         <HeroButton icon={RefreshCw} onClick={load}>Refresh</HeroButton>
       </DashboardHero>
 
@@ -450,7 +569,7 @@ const MailTemplateAdmin = () => {
             <thead>
               <tr className="bg-[var(--table-header-bg)] border-b border-[var(--border)]">
                 <Th>Activity</Th><Th align="center">Side</Th><Th align="center">Event</Th>
-                <Th>Subject</Th><Th align="center">Active</Th><Th align="right">Actions</Th>
+                <Th>{channel === 'whatsapp' ? 'Meta Template' : 'Subject'}</Th><Th align="center">Active</Th><Th align="right">Actions</Th>
               </tr>
             </thead>
             <tbody>
@@ -462,7 +581,7 @@ const MailTemplateAdmin = () => {
                     <Td className="font-bold whitespace-nowrap">{t.activity || '*'}</Td>
                     <Td align="center"><Pill label={t.side || '—'} tone={SIDE_TONE[t.side] || 'muted'} /></Td>
                     <Td align="center"><Pill label={t.event || '—'} tone="indigo" /></Td>
-                    <Td className="font-medium max-w-[360px] truncate" title={t.subject || ''}>{t.subject || '—'}</Td>
+                    <Td className="font-medium max-w-[360px] truncate" title={(channel === 'whatsapp' ? (t.meta_template_name || t.name) : t.subject) || ''}>{(channel === 'whatsapp' ? (t.meta_template_name || t.name) : t.subject) || '—'}</Td>
                     <Td align="center">
                       <div className="flex justify-center">
                         <StatusToggle
@@ -494,6 +613,8 @@ const MailTemplateAdmin = () => {
             key={editing?._id || 'new'}
             editing={editing}
             activityOptions={formActivityOptions}
+            channel={channel}
+            variableFields={variableFields}
             onClose={() => { setModalOpen(false); setEditing(null); }}
             onSubmit={handleSubmit}
           />

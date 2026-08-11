@@ -100,9 +100,11 @@ const Escalations = () => {
 
   const kpis = [
     { value: cards.active_count ?? 0,   label: 'Active Escalations', sub: 'Need OM action',   tone: cards.active_count ? 'red' : 'plain', icon: AlertTriangle },
-    { value: l1Count,                   label: 'Level 1 (HOD)',      sub: 'First-line escalation', tone: l1Count ? 'yellow' : 'plain', icon: ArrowUpCircle },
-    { value: (cards.l2 ?? 0) + (cards.l3 ?? 0), label: 'Critical (L2+)', sub: 'HR / MD involved', tone: (cards.l2 || cards.l3) ? 'red' : 'plain', icon: Flame },
+    { value: cards.l1 ?? l1Count,       label: 'Level 1 (HOD)',      sub: 'First-line',       tone: (cards.l1 ?? l1Count) ? 'yellow' : 'plain', icon: ArrowUpCircle },
+    { value: cards.l2 ?? 0,             label: 'Level 2 (HR)',       sub: 'HR involved',      tone: (cards.l2 ?? 0) ? 'yellow' : 'plain', icon: Flame },
+    { value: cards.l3 ?? 0,             label: 'Level 3 (MD)',       sub: 'MD involved',      tone: (cards.l3 ?? 0) ? 'red' : 'plain',    icon: Flame },
     { value: cards.avg_overdue ?? 0,    label: 'Avg Days Overdue',   sub: 'Across active',    tone: 'yellow',                             icon: Timer },
+    { value: cards.avg_resolution ?? 0, label: 'Avg Resolution',     sub: 'Days to resolve',  tone: 'blue',                               icon: Timer },
     { value: cards.resolved_month ?? 0, label: 'Resolved',           sub: 'This month',       tone: 'green',                              icon: CheckCircle2 },
   ];
 
