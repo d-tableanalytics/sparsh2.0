@@ -69,6 +69,7 @@ import SmopsEmployeeTask from './features/tpms/smops/pages/SmopsEmployeeTask';
 import TpmsGate, { RequireTpms } from './features/tpms/TpmsGate';
 import HrmsGate, { RequireHrms } from './features/hrms/HrmsGate';
 import HrmsHome from './features/hrms/HrmsHome';
+import HrmsWorkspace from './features/hrms/HrmsWorkspace';
 import EmployeeDirectory from './features/hrms/people/EmployeeDirectory';
 import EmployeeProfile from './features/hrms/people/EmployeeProfile';
 import MasterManager from './features/hrms/people/MasterManager';
@@ -92,6 +93,14 @@ import ApplyPage from './pages/hrms/public/ApplyPage';
 import AssessPage from './pages/hrms/public/AssessPage';
 import OfferPage from './pages/hrms/public/OfferPage';
 import OnboardPage from './pages/hrms/public/OnboardPage';
+// ── Phase 11-R — recruitment review enhancements ──
+import LinkManager from './features/hrms/links/LinkManager';
+import DocumentCenter from './features/hrms/documents/DocumentCenter';
+import DocumentTypeManager from './features/hrms/documents/DocumentTypeManager';
+import AppointmentBoard from './features/hrms/recruitment/AppointmentBoard';
+import ClientManager from './features/hrms/clients/ClientManager';
+import SanctionedStrength from './features/hrms/people/SanctionedStrength';
+import AppointmentPage from './pages/hrms/public/AppointmentPage';
 import TpmsCalendar from './features/tpms/calendar/TpmsCalendar';
 import AssignedFormPage from './features/tpms/forms/AssignedFormPage';
 import ClientDashboard from './features/tpms/client/ClientDashboard';
@@ -156,6 +165,9 @@ const AppRoutes = () => {
       <Route path="/assess/:code" element={<AssessPage />} />
       <Route path="/offer/:code" element={<OfferPage />} />
       <Route path="/onboard/:code" element={<OnboardPage />} />
+      {/* Phase 11-R: the appointment letter a candidate acknowledges. Same anonymous
+          treatment as the four above — an applicant is not a user of this ERP. */}
+      <Route path="/appointment/:code" element={<AppointmentPage />} />
 
       <Route path="/" element={<PrivateRoute><Dashboard /></PrivateRoute>} />
       <Route path="/dashboard" element={<Navigate to="/" />} />
@@ -243,7 +255,7 @@ const AppRoutes = () => {
           later phase); the panel routes are guarded by RequireHrms, which also supplies
           the module's capability context to everything inside. */}
       <Route path="/hrms/entry" element={<PrivateRoute><HrmsGate /></PrivateRoute>} />
-      <Route path="/hrms" element={<PrivateRoute><RequireHrms><Outlet /></RequireHrms></PrivateRoute>}>
+      <Route path="/hrms" element={<PrivateRoute><RequireHrms><HrmsWorkspace /></RequireHrms></PrivateRoute>}>
         <Route index element={<HrmsHome />} />
         {/* People — employee master, departments and designations (Phase 2). */}
         <Route path="employees"          element={<EmployeeDirectory />} />
@@ -263,6 +275,13 @@ const AppRoutes = () => {
         <Route path="onboarding"         element={<OnboardingBoard />} />
         <Route path="dashboard"          element={<RecruitmentDashboard />} />
         <Route path="reports"            element={<RecruitmentReports />} />
+        {/* Phase 11-R — recruitment review enhancements (Items 1-4, 7). */}
+        <Route path="links"              element={<LinkManager />} />
+        <Route path="documents"          element={<DocumentCenter />} />
+        <Route path="document-types"     element={<DocumentTypeManager />} />
+        <Route path="appointments"       element={<AppointmentBoard />} />
+        <Route path="clients"            element={<ClientManager />} />
+        <Route path="sanctioned-strength" element={<SanctionedStrength />} />
       </Route>
 
       <Route path="/admin/settings" element={<Navigate to="/settings" />} />

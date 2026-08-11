@@ -266,6 +266,14 @@ async def start_onboarding(actor: dict, company_id: str, payload: dict) -> dict:
     }
     await get_collection(COLL_ONBOARDING).insert_one(dict(doc))
 
+    # Phase 11-R, Item 1: register the pre-onboarding link. Fire-and-forget by contract.
+    from app.models.hrms import LinkKind
+    from app.services.hrms_link_service import register_link
+    await register_link(
+        company_id=company_id, kind=LinkKind.ONBOARDING, code=doc["access_code"],
+        target_type="onboarding", target_id=onb_no, actor=actor,
+        candidate_name=doc.get("candidate_name"), request_no=doc.get("request_no"))
+
     await _advance_candidate(actor, company_id, uk, AppStatus.PRE_ONBOARDING)
     await audit(actor, AUDIT_ONBOARD_STARTED, ENTITY_ONBOARDING, onb_no,
                 doc["candidate_name"], company_id)

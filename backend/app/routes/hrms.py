@@ -32,6 +32,13 @@ from app.models.hrms import (
     JobDescriptionUpdate, PostingIn, PostingUpdate,
     RequisitionAction, RequisitionClose, RequisitionIn, RequisitionUpdate, ScreenIn,
 )
+# ── Phase 11-R — recruitment review enhancements ──
+from app.models.hrms import (
+    AppointmentCancelIn, AppointmentIn, AppointmentSendIn, AppointmentUpdate,
+    ClientIn, ClientResponseIn, ClientUpdate,
+    DocumentIn, DocumentStatusIn, DocumentTypeIn, DocumentTypeUpdate, DocumentUpdate,
+    LinkRevokeIn, SanctionedStrengthIn, SanctionedStrengthUpdate,
+)
 from app.services import hrms_analytics_service as analytics
 from app.services import hrms_employee_service as employees
 from app.services import hrms_masters_service as masters
@@ -42,6 +49,12 @@ from app.services import hrms_offer_service as offers
 from app.services import hrms_onboarding_service as onboarding
 from app.services import hrms_posting_service as postings
 from app.services import hrms_requisition_service as requisitions
+# ── Phase 11-R ──
+from app.services import hrms_appointment_service as appointments
+from app.services import hrms_client_service as clients
+from app.services import hrms_document_service as documents
+from app.services import hrms_link_service as links
+from app.services import hrms_sanction_service as sanctions
 from app.services.hrms_audit_service import read_audit
 from app.utils.hrms_access import (
     NO_ACCESS_MESSAGE, can, capabilities_for, ensure_hrms_enabled, hrms_role,
@@ -1151,6 +1164,9 @@ async def link_employee_user(
 async def analytics_dashboard(
     date_from: Optional[str] = Query(None),
     date_to: Optional[str] = Query(None),
+    # Phase 11-R, Item 4: optional client filter. Absent -> the existing company-wide
+    # behaviour, unchanged, plus a per-client comparison table in the payload.
+    client_id: Optional[str] = Query(None),
     company_id: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user),
 ):
@@ -1163,13 +1179,14 @@ async def analytics_dashboard(
     _require(current_user, Cap.ANALYTICS_READ)
     return await analytics.dashboard(
         current_user, _company(current_user, company_id),
-        date_from=date_from, date_to=date_to)
+        date_from=date_from, date_to=date_to, client_id=client_id)
 
 
 @router.get("/analytics/funnel")
 async def analytics_funnel(
     date_from: Optional[str] = Query(None),
     date_to: Optional[str] = Query(None),
+    client_id: Optional[str] = Query(None),
     company_id: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user),
 ):
@@ -1178,7 +1195,7 @@ async def analytics_funnel(
     _require(current_user, Cap.ANALYTICS_READ)
     return await analytics.funnel(
         current_user, _company(current_user, company_id),
-        date_from=date_from, date_to=date_to)
+        date_from=date_from, date_to=date_to, client_id=client_id)
 
 
 @router.get("/analytics/breakdown")
@@ -1186,6 +1203,7 @@ async def analytics_breakdown(
     by: BreakdownBy = Query(BreakdownBy.SOURCE),
     date_from: Optional[str] = Query(None),
     date_to: Optional[str] = Query(None),
+    client_id: Optional[str] = Query(None),
     company_id: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user),
 ):
@@ -1193,7 +1211,7 @@ async def analytics_breakdown(
     _require(current_user, Cap.ANALYTICS_READ)
     return await analytics.breakdown(
         current_user, _company(current_user, company_id), by.value,
-        date_from=date_from, date_to=date_to)
+        date_from=date_from, date_to=date_to, client_id=client_id)
 
 
 @router.get("/reports/{entity}")
@@ -1204,6 +1222,7 @@ async def hrms_report(
     search: Optional[str] = Query(None),
     date_from: Optional[str] = Query(None),
     date_to: Optional[str] = Query(None),
+    client_id: Optional[str] = Query(None),
     company_id: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user),
 ):
@@ -1212,7 +1231,7 @@ async def hrms_report(
     return await analytics.report(
         current_user, _company(current_user, company_id), entity.value,
         page=page, page_size=page_size, search=search,
-        date_from=date_from, date_to=date_to)
+        date_from=date_from, date_to=date_to, client_id=client_id)
 
 
 @router.get("/reports/{entity}/export")
@@ -1222,6 +1241,7 @@ async def hrms_report_export(
     search: Optional[str] = Query(None),
     date_from: Optional[str] = Query(None),
     date_to: Optional[str] = Query(None),
+    client_id: Optional[str] = Query(None),
     company_id: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user),
 ):
@@ -1237,7 +1257,7 @@ async def hrms_report_export(
     _require(current_user, Cap.REPORT_EXPORT)
     payload = await analytics.export_rows(
         current_user, _company(current_user, company_id), entity.value,
-        search=search, date_from=date_from, date_to=date_to)
+        search=search, date_from=date_from, date_to=date_to, client_id=client_id)
 
     if fmt == ExportFormat.XLSX:
         body = analytics.render_xlsx(payload)
@@ -1259,3 +1279,545 @@ async def hrms_report_export(
             "X-Export-Total": str(payload["total"]),
         },
     )
+
+
+# =============================================================================
+# Phase 11-R — recruitment review enhancements
+# =============================================================================
+# Seven items, appended as one block so the phase's whole API surface is readable in one
+# place. Every endpoint follows the existing conventions without exception:
+#   * `_require(user, Cap.X)` and nothing else decides permission,
+#   * `_company(user, company_id)` pins the tenant (a client-side caller's company_id
+#     query param is IGNORED, not honoured),
+#   * static paths are declared BEFORE their `{param}` siblings so they win the match.
+# No pre-existing route above is modified except by the addition of an OPTIONAL `client_id`
+# query parameter on the analytics/report endpoints, which defaults to None and therefore
+# leaves their existing behaviour byte-identical.
+
+# ─────────────────────────────────────────────────────────────
+# Item 1 — the public-link registry
+# ─────────────────────────────────────────────────────────────
+@router.get("/links")
+async def list_hrms_links(
+    kind: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    search: Optional[str] = Query(None),
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+    limit: int = Query(200, ge=1, le=500),
+    skip: int = Query(0, ge=0),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Every public link this company has issued, with its open count and live status.
+
+    Status is COMPUTED per row (an expired link reads Expired without a nightly job), so
+    the `status` filter is applied after projection — see hrms_link_service.list_links.
+    A hiring manager sees links for their own requisitions only.
+    """
+    _require(current_user, Cap.LINK_READ)
+    return await links.list_links(
+        current_user, _company(current_user, company_id),
+        kind=kind, status=status, search=search,
+        date_from=date_from, date_to=date_to, limit=limit, skip=skip)
+
+
+@router.get("/links/{link_id}")
+async def get_hrms_link(
+    link_id: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """One link plus its open history (count, first sighting, last sighting)."""
+    _require(current_user, Cap.LINK_READ)
+    return await links.get_link(current_user, _company(current_user, company_id), link_id)
+
+
+@router.post("/links/{link_id}/revoke")
+async def revoke_hrms_link(
+    link_id: str,
+    body: LinkRevokeIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Kill a live link. The public handlers refuse it from the next request onward —
+    revocation here is ENFORCED by `assert_link_live`, not merely displayed."""
+    _require(current_user, Cap.LINK_MANAGE)
+    return await links.revoke(
+        current_user, _company(current_user, company_id), link_id, body.reason)
+
+
+@router.post("/links/{link_id}/reissue")
+async def reissue_hrms_link(
+    link_id: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Mint a fresh credential for the same record and revoke the old one.
+
+    Delegates to the owning service so the new code is one that service knows about.
+    An `apply` link cannot be reissued — its code is printed on published job ads.
+    """
+    _require(current_user, Cap.LINK_MANAGE)
+    return await links.reissue(current_user, _company(current_user, company_id), link_id)
+
+
+# ─────────────────────────────────────────────────────────────
+# Item 2 — documentation
+# ─────────────────────────────────────────────────────────────
+@router.get("/document-types")
+async def list_hrms_document_types(
+    include_inactive: bool = Query(False),
+    applies_to: Optional[str] = Query(None),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """The company's document-type master. Seeds a sensible default set on first read."""
+    _require(current_user, Cap.DOCUMENT_READ)
+    return {"document_types": await documents.list_document_types(
+        _company(current_user, company_id),
+        include_inactive=include_inactive, applies_to=applies_to)}
+
+
+@router.post("/document-types", status_code=201)
+async def create_hrms_document_type(
+    body: DocumentTypeIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.DOCUMENT_WRITE)
+    return await documents.create_document_type(
+        current_user, _company(current_user, company_id), body.model_dump())
+
+
+@router.patch("/document-types/{type_id}")
+async def update_hrms_document_type(
+    type_id: str,
+    body: DocumentTypeUpdate,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.DOCUMENT_WRITE)
+    return await documents.update_document_type(
+        current_user, _company(current_user, company_id), type_id,
+        body.model_dump(exclude_unset=True))
+
+
+@router.delete("/document-types/{type_id}")
+async def delete_hrms_document_type(
+    type_id: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Blocked while any document still references the type — deactivate instead."""
+    _require(current_user, Cap.DOCUMENT_WRITE)
+    return await documents.delete_document_type(
+        current_user, _company(current_user, company_id), type_id)
+
+
+@router.get("/documents")
+async def list_hrms_documents(
+    owner_type: Optional[str] = Query(None),
+    owner_id: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    type_id: Optional[str] = Query(None),
+    search: Optional[str] = Query(None),
+    expiring_soon: bool = Query(False),
+    limit: int = Query(200, ge=1, le=500),
+    skip: int = Query(0, ge=0),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """The document register. Expiry is computed per row, so the `status` filter runs
+    after projection."""
+    _require(current_user, Cap.DOCUMENT_READ)
+    return await documents.list_documents(
+        current_user, _company(current_user, company_id),
+        owner_type=owner_type, owner_id=owner_id, status=status, type_id=type_id,
+        search=search, expiring_soon=expiring_soon, limit=limit, skip=skip)
+
+
+@router.get("/documents/checklist")
+async def hrms_document_checklist(
+    owner_type: str = Query(...),
+    owner_id: str = Query(...),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Every applicable type for this person, with its status or `Pending`, plus the
+    read-only view over files already attached elsewhere (resume, KYC scans).
+
+    Declared before /documents/{doc_no} so the static path wins.
+    """
+    _require(current_user, Cap.DOCUMENT_READ)
+    return await documents.checklist(
+        current_user, _company(current_user, company_id), owner_type, owner_id)
+
+
+@router.post("/documents", status_code=201)
+async def upload_hrms_document(
+    body: DocumentIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Upload a document, or a new version of one (supply `doc_no` for a version)."""
+    _require(current_user, Cap.DOCUMENT_WRITE)
+    return await documents.upload_document(
+        current_user, _company(current_user, company_id), body.model_dump())
+
+
+@router.get("/documents/{doc_no}")
+async def get_hrms_document(
+    doc_no: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.DOCUMENT_READ)
+    return await documents.get_document(
+        current_user, _company(current_user, company_id), doc_no)
+
+
+@router.patch("/documents/{doc_no}")
+async def update_hrms_document(
+    doc_no: str,
+    body: DocumentUpdate,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Metadata only. The file is immutable — replacing it means adding a version."""
+    _require(current_user, Cap.DOCUMENT_WRITE)
+    return await documents.update_document(
+        current_user, _company(current_user, company_id), doc_no,
+        body.model_dump(exclude_unset=True))
+
+
+@router.post("/documents/{doc_no}/status")
+async def set_hrms_document_status(
+    doc_no: str,
+    body: DocumentStatusIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Verify, reject or move a document to Under Review.
+
+    Its own capability, separate from `document.write`: collecting paperwork and ATTESTING
+    to it are different acts, and Sparsh support staff deliberately hold the first and not
+    the second — the same boundary that keeps REQUISITION_REVIEW_HR off the INTERNAL list.
+    """
+    _require(current_user, Cap.DOCUMENT_VERIFY)
+    return await documents.set_status(
+        current_user, _company(current_user, company_id), doc_no, body.model_dump())
+
+
+@router.get("/documents/{doc_no}/url")
+async def hrms_document_url(
+    doc_no: str,
+    version: Optional[int] = Query(None),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """A short-lived signed URL, minted per request. Never stored — see the service."""
+    _require(current_user, Cap.DOCUMENT_READ)
+    return await documents.signed_url(
+        current_user, _company(current_user, company_id), doc_no, version)
+
+
+@router.delete("/documents/{doc_no}")
+async def delete_hrms_document(
+    doc_no: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Remove a register row. A VERIFIED document is refused — reject it instead."""
+    _require(current_user, Cap.DOCUMENT_WRITE)
+    return await documents.delete_document(
+        current_user, _company(current_user, company_id), doc_no)
+
+
+# ─────────────────────────────────────────────────────────────
+# Item 3 — appointment letters
+# ─────────────────────────────────────────────────────────────
+@router.get("/appointments")
+async def list_hrms_appointments(
+    status: Optional[str] = Query(None),
+    uk: Optional[str] = Query(None),
+    search: Optional[str] = Query(None),
+    limit: int = Query(200, ge=1, le=500),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Appointment letters + KPI tiles. `ctc` is omitted without `employee.salary.read`,
+    the same boundary Phase 8 draws for offers."""
+    _require(current_user, Cap.APPOINTMENT_READ)
+    return await appointments.list_appointments(
+        current_user, _company(current_user, company_id),
+        status=status, uk=uk, search=search, limit=limit)
+
+
+@router.get("/appointments/eligible")
+async def appointable_candidates(
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Candidates who have accepted an offer and have no live letter yet.
+    Declared before /appointments/{no} so the static path wins."""
+    _require(current_user, Cap.APPOINTMENT_READ)
+    return {"candidates": await appointments.eligible_candidates(
+        current_user, _company(current_user, company_id))}
+
+
+@router.post("/appointments", status_code=201)
+async def create_hrms_appointment(
+    body: AppointmentIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Draft an appointment letter, defaulting every term from the accepted offer."""
+    _require(current_user, Cap.APPOINTMENT_WRITE)
+    return await appointments.create_appointment(
+        current_user, _company(current_user, company_id), body.model_dump())
+
+
+@router.get("/appointments/{appointment_no}")
+async def get_hrms_appointment(
+    appointment_no: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.APPOINTMENT_READ)
+    return await appointments.get_appointment(
+        current_user, _company(current_user, company_id), appointment_no)
+
+
+@router.patch("/appointments/{appointment_no}")
+async def update_hrms_appointment(
+    appointment_no: str,
+    body: AppointmentUpdate,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Edit a GENERATED letter. Refused once sent — the candidate is reading it."""
+    _require(current_user, Cap.APPOINTMENT_WRITE)
+    return await appointments.update_appointment(
+        current_user, _company(current_user, company_id), appointment_no,
+        body.model_dump(exclude_unset=True))
+
+
+@router.post("/appointments/{appointment_no}/send")
+async def send_hrms_appointment(
+    appointment_no: str,
+    body: AppointmentSendIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Issue the letter.
+
+    Its own capability, separate from `appointment.write`: authoring a letter and COMMITTING
+    the company to employing somebody are different acts — exactly the split Phase 8 draws
+    between OFFER_WRITE and OFFER_SEND.
+    """
+    _require(current_user, Cap.APPOINTMENT_SEND)
+    return await appointments.send_appointment(
+        current_user, _company(current_user, company_id), appointment_no,
+        body.model_dump())
+
+
+@router.post("/appointments/{appointment_no}/cancel")
+async def cancel_hrms_appointment(
+    appointment_no: str,
+    body: AppointmentCancelIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Withdraw a letter and revoke its public link. An ACKNOWLEDGED letter is refused."""
+    _require(current_user, Cap.APPOINTMENT_SEND)
+    return await appointments.cancel_appointment(
+        current_user, _company(current_user, company_id), appointment_no,
+        body.model_dump())
+
+
+# ─────────────────────────────────────────────────────────────
+# Item 4 — the client master + client sharing
+# ─────────────────────────────────────────────────────────────
+@router.get("/clients")
+async def list_hrms_clients(
+    include_inactive: bool = Query(False),
+    search: Optional[str] = Query(None),
+    with_stats: bool = Query(False),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """The client master — who vacancies are being filled FOR.
+
+    NOTE: a client is NOT a tenant. `company_id` remains the only security boundary;
+    `client_id` is a reporting dimension inside one tenant (see hrms_client_service).
+    """
+    _require(current_user, Cap.CLIENT_READ)
+    return await clients.list_clients(
+        current_user, _company(current_user, company_id),
+        include_inactive=include_inactive, search=search, with_stats=with_stats)
+
+
+@router.post("/clients", status_code=201)
+async def create_hrms_client(
+    body: ClientIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.CLIENT_WRITE)
+    return await clients.create_client(
+        current_user, _company(current_user, company_id), body.model_dump())
+
+
+@router.get("/clients/{client_id}")
+async def get_hrms_client(
+    client_id: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.CLIENT_READ)
+    scoped = _company(current_user, company_id)
+    doc = await clients.get_client(scoped, client_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Client not found.")
+    doc["summary"] = await clients.client_summary(scoped, client_id)
+    return doc
+
+
+@router.patch("/clients/{client_id}")
+async def update_hrms_client(
+    client_id: str,
+    body: ClientUpdate,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.CLIENT_WRITE)
+    return await clients.update_client(
+        current_user, _company(current_user, company_id), client_id,
+        body.model_dump(exclude_unset=True))
+
+
+@router.delete("/clients/{client_id}")
+async def delete_hrms_client(
+    client_id: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Blocked while any requisition names the client — deactivate instead."""
+    _require(current_user, Cap.CLIENT_WRITE)
+    return await clients.delete_client(
+        current_user, _company(current_user, company_id), client_id)
+
+
+@router.post("/candidates/client-response")
+async def record_client_response(
+    body: ClientResponseIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Record the hiring client's verdict on a shared CV.
+
+    Gated on `candidate.screen` rather than a new capability: this IS a screening decision,
+    made by the client and entered on their behalf. A separate capability would let somebody
+    hold one without the other for no coherent reason.
+    """
+    _require(current_user, Cap.CANDIDATE_SCREEN)
+    return await candidates.record_client_response(
+        current_user, _company(current_user, company_id), body.model_dump())
+
+
+@router.get("/analytics/positions")
+async def analytics_positions(
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+    client_id: Optional[str] = Query(None),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """The position-wise CV status matrix: one row per requisition, one column per stage.
+
+    Same `_scope`, same SCAN_CAP and the same window validation as every other analytics
+    endpoint. Read-only.
+    """
+    _require(current_user, Cap.ANALYTICS_READ)
+    return await analytics.positions(
+        current_user, _company(current_user, company_id),
+        date_from=date_from, date_to=date_to, client_id=client_id)
+
+
+# ─────────────────────────────────────────────────────────────
+# Item 7 — sanctioned strength
+# ─────────────────────────────────────────────────────────────
+@router.get("/sanctioned-strength")
+async def list_sanctioned_strength(
+    department_id: Optional[str] = Query(None),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Every sanctioned figure, each with its LIVE actual headcount and availability.
+
+    `actual` is counted from employee profiles on every read and never stored — a stored
+    figure would be wrong the moment somebody resigned, which is exactly when it is asked.
+    """
+    _require(current_user, Cap.SANCTION_READ)
+    return await sanctions.list_sanctions(
+        _company(current_user, company_id), department_id=department_id)
+
+
+@router.get("/sanctioned-strength/position")
+async def sanctioned_position(
+    department_id: str = Query(...),
+    designation_id: str = Query(...),
+    requested: int = Query(0, ge=0),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """The live sanctioned/actual/available readout for one position.
+
+    Read by the requisition form on every change, so the raiser is told BEFORE they submit
+    that the request will be escalated. Declared before /{sanction_id} so the static path
+    wins.
+    """
+    _require(current_user, Cap.SANCTION_READ)
+    return await sanctions.position_status(
+        _company(current_user, company_id), department_id, designation_id,
+        requested=requested)
+
+
+@router.post("/sanctioned-strength", status_code=201)
+async def set_sanctioned_strength(
+    body: SanctionedStrengthIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Create or replace the sanctioned figure for a position (an upsert — one figure per
+    position is the rule, enforced by a unique index)."""
+    _require(current_user, Cap.SANCTION_WRITE)
+    return await sanctions.set_sanction(
+        current_user, _company(current_user, company_id), body.model_dump())
+
+
+@router.patch("/sanctioned-strength/{sanction_id}")
+async def update_sanctioned_strength(
+    sanction_id: str,
+    body: SanctionedStrengthUpdate,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.SANCTION_WRITE)
+    return await sanctions.update_sanction(
+        current_user, _company(current_user, company_id), sanction_id,
+        body.model_dump(exclude_unset=True))
+
+
+@router.delete("/sanctioned-strength/{sanction_id}")
+async def delete_sanctioned_strength(
+    sanction_id: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Remove a sanctioned figure. The position then has none, which means every future
+    requisition for it is routed for escalation — the response says so explicitly."""
+    _require(current_user, Cap.SANCTION_WRITE)
+    return await sanctions.delete_sanction(
+        current_user, _company(current_user, company_id), sanction_id)

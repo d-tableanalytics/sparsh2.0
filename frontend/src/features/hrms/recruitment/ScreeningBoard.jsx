@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ClipboardCheck, Search, X, AlertTriangle, CheckCircle2, PauseCircle, XCircle, Forward,
-  Eye, Copy as CopyIcon,
+  Eye, Copy as CopyIcon, Share2,
 } from 'lucide-react';
 import { useNotification } from '../../../context/NotificationContext';
 import { useHrms } from '../HrmsContext';
@@ -35,6 +35,15 @@ const ACTIONS = [
   { key: 'hold',      label: 'Hold',      icon: PauseCircle },
   { key: 'duplicate', label: 'Duplicate', icon: CopyIcon },
   { key: 'forward',   label: 'Forward',   icon: Forward,  needsRecipient: true },
+  // ── Phase 11-R, Item 4 ── distinct from Forward on purpose. Forward assigns an INTERNAL
+  // owner and moves nobody; this sends the CV OUT to the hiring client for their verdict,
+  // and opens a client-share record the dashboard reports on.
+  {
+    key: 'share_with_client',
+    label: 'Share with client',
+    icon: Share2,
+    needsClientContact: true,
+  },
   { key: 'reject',    label: 'Reject',    icon: XCircle,  needsRemark: true },
 ];
 
@@ -51,6 +60,9 @@ const ScreeningBoard = () => {
   const [modal, setModal] = useState(null);      // {action, needsRemark, needsRecipient}
   const [remarks, setRemarks] = useState('');
   const [recipient, setRecipient] = useState('');
+  // Phase 11-R, Item 4 — free text, not a user reference: the client contact is a person at
+  // another organisation, not an ERP account.
+  const [clientContact, setClientContact] = useState('');
   const [people, setPeople] = useState([]);
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState(null);
@@ -112,8 +124,9 @@ const ScreeningBoard = () => {
     const def = ACTIONS.find((a) => a.key === action);
     setRemarks('');
     setRecipient('');
+    setClientContact('');
     setResult(null);
-    if (def.needsRemark || def.needsRecipient) setModal(def);
+    if (def.needsRemark || def.needsRecipient || def.needsClientContact) setModal(def);
     else run(action);
   };
 
@@ -303,6 +316,25 @@ const ScreeningBoard = () => {
               </div>
             ) : (
               <div className="p-5 space-y-3">
+                {modal.needsClientContact && (
+                  <div>
+                    <label htmlFor="s-client" className="block text-[11px] font-bold uppercase tracking-widest text-[var(--text-muted)] mb-1.5">
+                      Client contact (optional)
+                    </label>
+                    <input
+                      id="s-client"
+                      value={clientContact}
+                      onChange={(e) => setClientContact(e.target.value)}
+                      placeholder="Who at the client is reviewing this?"
+                      className="w-full h-9 px-3 rounded-lg border border-[var(--border)] bg-[var(--input-bg)] text-[13px] text-[var(--text-main)]"
+                    />
+                    <p className="mt-1 text-[11px] text-[var(--text-muted)]">
+                      These candidates move to &ldquo;Shared with Client&rdquo; and start
+                      waiting for a verdict. Record the client&rsquo;s answer from the
+                      candidate pipeline once it arrives.
+                    </p>
+                  </div>
+                )}
                 {modal.needsRecipient && (
                   <div>
                     <label htmlFor="s-to" className="block text-[11px] font-bold uppercase tracking-widest text-[var(--text-muted)] mb-1.5">
@@ -340,6 +372,7 @@ const ScreeningBoard = () => {
                     onClick={() => run(modal.key, {
                       remarks: remarks.trim() || null,
                       forward_to_id: recipient || null,
+                      client_contact: clientContact.trim() || null,
                     })}
                     className="h-9 px-4 rounded-lg bg-[var(--accent-indigo)] text-white text-[12px] font-bold disabled:opacity-50">
                     {busy ? 'Working…' : `Confirm ${modal.label.toLowerCase()}`}

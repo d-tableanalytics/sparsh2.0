@@ -39,6 +39,12 @@ from app.models.hrms import (
     COLL_REQUISITIONS, ENTITY_JD, ENTITY_REQUISITION, JdStatus, REQ_AUDIT_ACTIONS,
     REQ_TRANSITIONS, ReqApproval, ReqClosing, is_iso_date,
 )
+# ── Phase 11-R additions (Items 4, 6, 7) ──
+from app.models.hrms import (
+    AUDIT_REQ_ESCALATED, MAX_ESCALATION_LEVELS, REQ_CONDITIONAL_REMARK_REASONS,
+    REQ_CONDITIONAL_REMARKS, REQ_ESCALATION_ROUTING, BudgetStatus, Cap, EscalationStatus,
+    RequisitionType, budget_delta, budget_status,
+)
 from app.services.hrms_audit_service import audit
 from app.services.hrms_id_service import next_business_id
 from app.services.hrms_notify_service import notify_hrms_role, notify_user
@@ -47,7 +53,11 @@ from app.utils.hrms_access import can
 # Statuses in which a requisition's details may still be edited. Once MD has approved it,
 # the terms are what the approver signed off on -- changing them afterwards would make the
 # approval meaningless.
-EDITABLE_STATUSES = {ReqApproval.PENDING_HR.value, ReqApproval.PENDING_MD.value}
+#
+# Phase 11-R adds PENDING_ESCALATION: a requisition still working its way up the reporting
+# chain has not been finally approved by anyone, so the same editing logic applies to it.
+EDITABLE_STATUSES = {ReqApproval.PENDING_HR.value, ReqApproval.PENDING_MD.value,
+                     ReqApproval.PENDING_ESCALATION.value}
 
 
 def _oid(value: str, label: str) -> ObjectId:
@@ -60,6 +70,18 @@ def _oid(value: str, label: str) -> ObjectId:
 def _out(doc: dict) -> dict:
     doc = dict(doc)
     doc.pop("_id", None)
+    # ── Phase 11-R, Item 6 ── budget_status is DERIVED on every read, never stored, so a
+    # corrected figure is reflected immediately and no flag can go stale. Documents written
+    # before this phase have neither figure and read "Not Set", which is the truth.
+    doc["budget_status"] = budget_status(doc)
+    doc["budget_delta"] = budget_delta(doc)
+    # Defaults for pre-phase documents, so every consumer sees a consistent shape without
+    # each one re-deriving `doc.get("x") or default`.
+    doc.setdefault("requisition_type", RequisitionType.NEW_POSITION.value)
+    doc.setdefault("escalation_chain", [])
+    doc.setdefault("sanction_snapshot", None)
+    doc.setdefault("client_id", None)
+    doc.setdefault("client_name", None)
     return doc
 
 
@@ -149,7 +171,136 @@ async def _validate_requisition(payload: dict, company_id: str, *, partial: bool
         out["assignee_name"] = (assignee.get("full_name")
                                 or f"{assignee.get('first_name') or ''} {assignee.get('last_name') or ''}".strip()
                                 or assignee.get("email"))
+
+    # ── Phase 11-R, Item 4: the client this vacancy is being filled for ──
+    if "client_id" in payload:
+        if payload["client_id"]:
+            from app.services.hrms_client_service import require_client
+            client = await require_client(company_id, str(payload["client_id"]))
+            out["client_id"] = str(payload["client_id"])
+            out["client_name"] = client.get("name")
+        else:
+            # Explicitly cleared -- an in-house requisition has no client.
+            out["client_id"] = None
+            out["client_name"] = None
+
+    out.update(_validate_budget(payload))
+    out.update(await _validate_replacement(payload, company_id))
     return out
+
+
+def _validate_budget(payload: dict) -> dict:
+    """Item 6 — the two budget figures, their references and their dates.
+
+    Nothing here computes `budget_status`: it is derived on every read (models.budget_status)
+    so a later correction can never leave a stale flag behind. This only checks that the
+    numbers ARE numbers and the dates ARE dates.
+    """
+    out = {}
+    for field, label in (("budget_sanctioned_amount", "Sanctioned budget"),
+                         ("budget_hod_amount", "HOD-approved budget")):
+        if field in payload:
+            if payload[field] is None:
+                out[field] = None
+                continue
+            try:
+                amount = float(payload[field])
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=422, detail=f"{label} must be a number.")
+            if amount < 0:
+                raise HTTPException(status_code=422, detail=f"{label} cannot be negative.")
+            if amount > 1_000_000_000:
+                raise HTTPException(status_code=422, detail=f"{label} is implausibly large.")
+            out[field] = amount
+
+    for field, label in (("budget_sanctioned_on", "Sanction date"),
+                         ("budget_hod_on", "HOD approval date")):
+        if field in payload:
+            value = payload[field]
+            if value and not is_iso_date(value):
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"{label} must be a valid date in YYYY-MM-DD format.")
+            out[field] = value or None
+
+    for field, limit in (("budget_sanctioned_by", 60), ("budget_hod_by", 60),
+                         ("budget_sanctioned_ref", 200), ("budget_remarks", 2000)):
+        if field in payload:
+            value = (payload[field] or "")
+            out[field] = str(value).strip()[:limit] or None
+    return out
+
+
+async def _validate_replacement(payload: dict, company_id: str) -> dict:
+    """Item 7 — replacement vs a genuinely new position.
+
+    A Replacement REQUIRES the person being replaced and a reason. Without both, the
+    distinction is a label nobody can act on: "replacement" that names nobody cannot be
+    checked against the leaver, and the sanctioned-strength arithmetic depends on knowing
+    a seat is being vacated rather than added.
+    """
+    out = {}
+    if "requisition_type" in payload and payload["requisition_type"] is not None:
+        value = getattr(payload["requisition_type"], "value", payload["requisition_type"])
+        if value not in {t.value for t in RequisitionType}:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Requisition type must be one of: "
+                       f"{', '.join(t.value for t in RequisitionType)}.")
+        out["requisition_type"] = value
+
+    if "replacement_reason" in payload:
+        out["replacement_reason"] = (payload["replacement_reason"] or "").strip()[:2000] or None
+    if "last_working_day" in payload:
+        value = payload["last_working_day"]
+        if value and not is_iso_date(value):
+            raise HTTPException(
+                status_code=422,
+                detail="Last working day must be a valid date in YYYY-MM-DD format.")
+        out["last_working_day"] = value or None
+
+    if "replacement_for_user_id" in payload:
+        user_id = payload["replacement_for_user_id"]
+        if user_id:
+            # Same tenant check the assignee and forward_to_id references get: part of the
+            # query, so a user from another company simply is not found.
+            person = await get_collection("learners").find_one(
+                {"_id": _oid(user_id, "employee"), "company_id": str(company_id)},
+                {"full_name": 1, "first_name": 1, "last_name": 1, "email": 1})
+            if not person:
+                raise HTTPException(
+                    status_code=422,
+                    detail="The person being replaced must be a user of this company.")
+            out["replacement_for_user_id"] = str(user_id)
+            out["replacement_for_name"] = (
+                person.get("full_name")
+                or f"{person.get('first_name') or ''} {person.get('last_name') or ''}".strip()
+                or person.get("email"))
+        else:
+            out["replacement_for_user_id"] = None
+            out["replacement_for_name"] = None
+    elif payload.get("replacement_for_name"):
+        out["replacement_for_name"] = str(payload["replacement_for_name"]).strip()[:140]
+    return out
+
+
+def _assert_replacement_complete(merged: dict) -> None:
+    """The cross-field rule, checked against the MERGED result.
+
+    Applied after an edit as well as on create, so an update cannot empty out the fields
+    that made a Replacement valid when it was raised -- the same discipline _validate_jd
+    applies to a JD's mandatory content.
+    """
+    if merged.get("requisition_type") != RequisitionType.REPLACEMENT.value:
+        return
+    if not merged.get("replacement_for_user_id") and not merged.get("replacement_for_name"):
+        raise HTTPException(
+            status_code=422,
+            detail="Name the employee being replaced, or switch this to a new position.")
+    if not merged.get("replacement_reason"):
+        raise HTTPException(
+            status_code=422,
+            detail="Give the reason for the replacement (resignation, transfer, and so on).")
 
 
 def _validate_jd(jd: dict, *, partial: bool = False) -> dict:
@@ -285,6 +436,8 @@ async def create_requisition(actor: dict, company_id: str, payload: dict) -> dic
             label = required.replace("_id", "").replace("_", " ").capitalize()
             raise HTTPException(status_code=422, detail=f"{label} is required.")
     clean.setdefault("vacancy", 1)
+    clean.setdefault("requisition_type", RequisitionType.NEW_POSITION.value)
+    _assert_replacement_complete(clean)
 
     jd_clean = _validate_jd(jd_payload, partial=False)
     jd_clean.setdefault("title", clean.get("designation_name"))
@@ -312,8 +465,26 @@ async def create_requisition(actor: dict, company_id: str, payload: dict) -> dic
         "created_by": actor_id, "created_by_name": actor_name, "created_at": now,
         "hr_reviewed_by": None, "hr_reviewed_at": None, "hr_remarks": None,
         "approved_by": None, "approved_at": None, "md_remarks": None, "salary_change": None,
+        # ── Phase 11-R, Item 7 ── the escalation ladder starts empty; it is BUILT when HR
+        # forwards an over-sanction requisition, from the reporting chain as it stands then.
+        "escalation_chain": [],
+        "escalation_level": 0,
+        "sanction_snapshot": None,
         **clean,
     }
+
+    # Item 7: evaluate the sanctioned-strength position AT RAISE TIME and store the figures,
+    # so the raiser and the first approver see the same numbers. `exclude_self=False`
+    # because this requisition does not exist yet and cannot be double-counted.
+    from app.services import hrms_sanction_service as sanctions
+    try:
+        req_doc["sanction_snapshot"] = await sanctions.snapshot_for(
+            company_id, req_doc, exclude_self=False)
+    except Exception as e:
+        # A snapshot is context for the approver, not a precondition for raising. Failing
+        # the whole requisition because a headcount count errored would be the wrong trade;
+        # the snapshot is re-evaluated at every approval step anyway.
+        print(f"[WARN] HRMS sanction snapshot failed for {request_no}: {e}")
 
     jds = get_collection(COLL_JOB_DESCRIPTIONS)
     await jds.insert_one(dict(jd_doc))
@@ -358,7 +529,107 @@ async def create_requisition(actor: dict, company_id: str, payload: dict) -> dic
              "Your MD has been notified."),
             kind="warning", link=link)
 
+    # ── Phase 11-R, Item 6 ── budget mismatch / pending notifications.
+    await _notify_budget_state(actor, company_id, request_no, req_doc, actor_id)
+
+    # ── Phase 11-R, Item 7 ── warn the raiser and the MD when the position is
+    # over-sanction, at raise time rather than at approval. Being told after HR has already
+    # reviewed it is being told too late to reconsider.
+    snapshot = req_doc.get("sanction_snapshot") or {}
+    if snapshot.get("is_over_sanction"):
+        figures = _sanction_sentence(snapshot)
+        await notify_user(
+            actor_id, f"Requisition {request_no} exceeds the sanctioned strength",
+            (f"{figures} This requisition will be routed for escalation, and MD approval "
+             f"remains mandatory."),
+            kind="warning", link=link)
+        await notify_hrms_role(
+            company_id, ["MD"],
+            f"Over-sanction requisition raised: {request_no}",
+            f"{actor_name} raised a requisition for {clean.get('designation_name')}. "
+            f"{figures}",
+            kind="warning", link=link)
+
     return await get_requisition(actor, company_id, request_no)
+
+
+def _sanction_sentence(snapshot: dict) -> str:
+    """One plain-language sentence of the sanction figures, for a notification body.
+
+    A notification that says only "over sanction" makes the reader open the screen to learn
+    anything. The numbers travel with the message.
+    """
+    snapshot = snapshot or {}
+    if snapshot.get("sanctioned") is None:
+        return ("No sanctioned strength has been set for this department and designation, "
+                "so the headcount is unauthorised.")
+    return (f"Sanctioned {snapshot.get('sanctioned')}, currently filled "
+            f"{snapshot.get('actual')}, already committed by open requisitions "
+            f"{snapshot.get('open_requisitions')}, this request "
+            f"{snapshot.get('requested')}.")
+
+
+async def _notify_budget_state(actor, company_id: str, request_no: str, req: dict,
+                               creator_id: str = None) -> None:
+    """Item 6 — fire the budget notifications. Fire-and-forget, never raises.
+
+    Two triggers, both derived from `budget_status` rather than from a stored flag:
+
+      Mismatch -> HR, MD and the creator, WITH both figures and the delta in the body, so
+                  the reader can act without opening the screen.
+      Pending  -> the department head, because exactly one side has answered and the other
+                  is the one holding it up.
+    """
+    try:
+        state = budget_status(req)
+        link = f"/hrms/requisitions/{request_no}"
+        designation = req.get("designation_name") or "the role"
+
+        if state == BudgetStatus.MISMATCH.value:
+            delta = budget_delta(req)
+            body = (
+                f"The budgets recorded for {designation} ({request_no}) do not agree. "
+                f"Management sanctioned {req.get('budget_sanctioned_amount')}, the HOD "
+                f"approved {req.get('budget_hod_amount')}"
+                + (f", a difference of {delta:+,.0f}." if delta is not None else "."))
+            await notify_hrms_role(company_id, ["HR", "MD"],
+                                   f"Budget mismatch on requisition {request_no}",
+                                   body, kind="warning", link=link)
+            if creator_id:
+                await notify_user(creator_id,
+                                  f"Budget mismatch on requisition {request_no}",
+                                  body, kind="warning", link=link)
+
+        elif state == BudgetStatus.PENDING.value:
+            # Only one figure is in. Route to whoever owes the other one -- the department
+            # head when the HOD approval is missing, HR otherwise.
+            awaiting_hod = req.get("budget_hod_amount") is None
+            body = (f"The {'HOD' if awaiting_hod else 'management'} budget for {designation} "
+                    f"({request_no}) has not been recorded yet.")
+            head_id = await _department_head(company_id, req.get("department_id"))
+            if awaiting_hod and head_id:
+                await notify_user(head_id,
+                                  f"Budget approval outstanding on {request_no}",
+                                  body, kind="warning", link=link)
+            else:
+                await notify_hrms_role(company_id, ["HR"],
+                                       f"Budget approval outstanding on {request_no}",
+                                       body, kind="warning", link=link)
+    except Exception as e:
+        print(f"[WARN] HRMS budget notification failed ({request_no}): {e}")
+
+
+async def _department_head(company_id: str, department_id: str):
+    """The HOD for a department, or None. Reads the Phase 2 master rather than guessing."""
+    if not department_id:
+        return None
+    try:
+        dept = await get_collection(COLL_DEPARTMENTS).find_one(
+            {"_id": _oid(department_id, "department"), "company_id": str(company_id)},
+            {"head_user_id": 1})
+        return (dept or {}).get("head_user_id")
+    except Exception:
+        return None
 
 
 async def _has_hr_reviewer(company_id: str) -> bool:
@@ -393,11 +664,33 @@ async def update_requisition(actor: dict, company_id: str, request_no: str,
     if not clean:
         raise HTTPException(status_code=400, detail="No fields to update.")
 
+    # Cross-field rules are checked against the MERGED document, so an edit cannot empty out
+    # what made the requisition valid when it was raised.
+    merged = {**current, **clean}
+    _assert_replacement_complete(merged)
+
+    # Re-evaluate the sanction snapshot whenever anything that feeds it changes. Headcount
+    # and the position both move; a snapshot left over from raise time would show the
+    # approver a world that no longer exists.
+    if {"department_id", "designation_id", "vacancy"} & set(clean):
+        from app.services import hrms_sanction_service as sanctions
+        try:
+            clean["sanction_snapshot"] = await sanctions.snapshot_for(company_id, merged)
+        except Exception as e:
+            print(f"[WARN] HRMS sanction re-snapshot failed for {request_no}: {e}")
+
     clean["updated_at"] = datetime.now(timezone.utc)
     await get_collection(COLL_REQUISITIONS).update_one(
         {"request_no": request_no, "company_id": str(company_id)}, {"$set": clean})
     await audit(actor, AUDIT_REQ_UPDATED, ENTITY_REQUISITION, request_no,
                 ", ".join(sorted(k for k in clean if k != "updated_at")), company_id)
+
+    # Item 6: a budget edit can CREATE a mismatch, so the notification fires on update as
+    # well as on create — the correction is exactly the moment people need to know.
+    if any(k.startswith("budget_") for k in clean):
+        await _notify_budget_state(actor, company_id, request_no, merged,
+                                   current.get("created_by"))
+
     return await get_requisition(actor, company_id, request_no)
 
 
@@ -465,16 +758,107 @@ async def act_on_requisition(actor: dict, company_id: str, request_no: str,
             detail=(f'Requisition {request_no} is "{current["approval_status"]}", '
                     f'not "{required_status.value}".'))
 
+    # ── Phase 11-R, Item 6 ── the CONDITIONAL remark rule, read from the one table that
+    # declares it. A budget mismatch does not block MD approval (that is a business call,
+    # not a system one) but it does demand the approver say why -- an unexplained approval
+    # over a known disagreement is exactly the record an audit later needs.
+    predicate = REQ_CONDITIONAL_REMARKS.get(action)
+    if predicate and predicate(current) and not remarks:
+        raise HTTPException(
+            status_code=422,
+            detail=REQ_CONDITIONAL_REMARK_REASONS.get(action, "A remark is required."))
+
     now = datetime.now(timezone.utc)
     actor_id = str(actor.get("_id") or "")
     actor_name = (actor.get("full_name")
                   or f"{actor.get('first_name') or ''} {actor.get('last_name') or ''}".strip()
                   or actor.get("email") or "Unknown")
 
+    # ── Phase 11-R, Item 7 ── the over-sanction detour.
+    #
+    # The transition table still decides what is LEGAL. This decides, for one action, which
+    # of two legal destinations it lands on -- and it only ever applies to `hr-approve`,
+    # read from REQ_ESCALATION_ROUTING rather than branched on inline, so the rule lives
+    # beside the table it modifies.
+    #
+    # An IN-SANCTION requisition never enters this block: its chain is byte-for-byte the
+    # PENDING_HR -> PENDING_MD -> APPROVED it has always been.
+    escalation_updates = {}
+    if action in REQ_ESCALATION_ROUTING:
+        from app.services import hrms_sanction_service as sanctions
+        try:
+            snapshot = await sanctions.snapshot_for(company_id, current)
+        except Exception as e:
+            # Fail CLOSED on an evaluation error: treat it as needing escalation rather
+            # than waving through a headcount nobody could verify.
+            print(f"[WARN] HRMS sanction re-check failed for {request_no}: {e}")
+            snapshot = {"is_over_sanction": True, "sanctioned": None, "actual": 0,
+                        "open_requisitions": 0, "requested": current.get("vacancy") or 1,
+                        "evaluated_at": now}
+        escalation_updates["sanction_snapshot"] = snapshot
+
+        if snapshot.get("is_over_sanction"):
+            chain = await _build_escalation_chain(actor, company_id, current)
+            if chain:
+                next_status = REQ_ESCALATION_ROUTING[action]
+                escalation_updates["escalation_chain"] = chain
+                escalation_updates["escalation_level"] = 1
+            else:
+                # An orphaned raiser -- nobody above them resolves. Fail CLOSED by routing
+                # STRAIGHT TO MD rather than auto-approving, and record why, so the gap in
+                # the reporting data is visible instead of silently skipping a control.
+                escalation_updates["escalation_chain"] = []
+                escalation_updates["escalation_note"] = (
+                    "Over-sanction, but no reporting chain could be resolved for the "
+                    "raiser. Routed directly to MD.")
+                await audit(actor, AUDIT_REQ_ESCALATED, ENTITY_REQUISITION, request_no,
+                            escalation_updates["escalation_note"], company_id)
+
+    # ── Item 7 ── an escalation step advances the LADDER, not the status, until the last
+    # rung has acted. The transition table declares where the ladder ultimately leads
+    # (PENDING_MD); this decides whether we are there yet.
+    if action == "escalate-approve":
+        chain = list(current.get("escalation_chain") or [])
+        level = int(current.get("escalation_level") or 1)
+        idx = level - 1
+        if 0 <= idx < len(chain):
+            actor_is_rung = str(chain[idx].get("user_id") or "") == actor_id
+            # An MD may clear any rung -- they hold REQUISITION_ESCALATE precisely so a
+            # ladder cannot stall on an absent approver. Anyone else must be THIS rung.
+            if not actor_is_rung and not can(actor, Cap.REQUISITION_APPROVE_MD):
+                raise HTTPException(
+                    status_code=403,
+                    detail=(f"This requisition is with {chain[idx].get('name')} at "
+                            f"escalation level {level}. Only they, or the MD, can clear it."))
+            chain[idx].update({"status": EscalationStatus.APPROVED.value,
+                               "acted_at": now, "acted_by": actor_id,
+                               "remarks": remarks or None})
+        escalation_updates["escalation_chain"] = chain
+        if level < len(chain):
+            # Rungs remain: stay in escalation and move up one.
+            next_status = ReqApproval.PENDING_ESCALATION
+            escalation_updates["escalation_level"] = level + 1
+        else:
+            escalation_updates["escalation_level"] = len(chain)
+
+    if action == "escalate-reject":
+        chain = list(current.get("escalation_chain") or [])
+        idx = int(current.get("escalation_level") or 1) - 1
+        if 0 <= idx < len(chain):
+            chain[idx].update({"status": EscalationStatus.REJECTED.value,
+                               "acted_at": now, "acted_by": actor_id,
+                               "remarks": remarks or None})
+        escalation_updates["escalation_chain"] = chain
+
     updates = {"approval_status": next_status.value, "updated_at": now}
+    updates.update(escalation_updates)
     if action.startswith("hr-"):
         updates.update({"hr_reviewed_by": actor_id, "hr_reviewed_by_name": actor_name,
                         "hr_reviewed_at": now, "hr_remarks": remarks or None})
+    elif action.startswith("escalate-"):
+        updates.update({"escalation_last_actor": actor_id,
+                        "escalation_last_actor_name": actor_name,
+                        "escalation_last_acted_at": now})
     else:
         updates.update({"approved_by": actor_id, "approved_by_name": actor_name,
                         "approved_at": now, "md_remarks": remarks or None})
@@ -521,7 +905,103 @@ async def act_on_requisition(actor: dict, company_id: str, request_no: str,
                 remarks or None, company_id)
     await _notify_transition(action, current, request_no, actor_name, remarks, company_id)
 
+    # ── Phase 11-R, Item 7 ── when the requisition is sitting in the ladder, tell the rung
+    # that now holds it. Read from the UPDATES rather than from `current`, because the level
+    # we just advanced to is the one that matters.
+    if updates.get("approval_status") == ReqApproval.PENDING_ESCALATION.value:
+        await audit(actor, AUDIT_REQ_ESCALATED, ENTITY_REQUISITION, request_no,
+                    f"level {updates.get('escalation_level')}", company_id)
+        await _notify_escalation(
+            current, request_no,
+            updates.get("escalation_chain") or current.get("escalation_chain") or [],
+            updates.get("escalation_level") or 1, company_id,
+            updates.get("sanction_snapshot") or current.get("sanction_snapshot") or {})
+    elif (action == "escalate-approve"
+          and updates.get("approval_status") == ReqApproval.PENDING_MD.value):
+        # The ladder is exhausted. MD is next, and MD is NOT optional — the transition table
+        # makes APPROVED reachable only from here (models.md_approval_is_mandatory).
+        await notify_hrms_role(
+            company_id, ["MD"],
+            f"Over-sanction requisition {request_no} awaits your approval",
+            f"The escalation chain for {current.get('designation_name') or 'this role'} is "
+            f"complete. {_sanction_sentence(current.get('sanction_snapshot') or {})}",
+            kind="warning", link=f"/hrms/requisitions/{request_no}", email=True)
+
     return await get_requisition(actor, company_id, request_no)
+
+
+async def _build_escalation_chain(actor: dict, company_id: str, req: dict) -> list:
+    """Build the approval ladder for an over-sanction requisition.
+
+    REUSES the existing hierarchy resolver (`hrms_employee_service.get_hierarchy`, behind
+    GET /hrms/employees/{user_id}/hierarchy) rather than walking `reporting_manager` again
+    here. A second walk would be a second set of depth caps and cycle guards to keep in
+    step with the first, and the one that drifts is the one that loops forever.
+
+    Three properties:
+      * the RAISER is never a rung on their own ladder,
+      * the chain is de-duplicated (a shared manager appears once),
+      * it is capped at MAX_ESCALATION_LEVELS.
+
+    Returns [] when nobody resolves. The caller treats that as "route straight to MD" — it
+    must never be read as "approved".
+    """
+    raiser_id = str(req.get("created_by") or "")
+    if not raiser_id:
+        return []
+
+    try:
+        from app.services import hrms_employee_service as employees
+        hierarchy = await employees.get_hierarchy(actor, raiser_id, company_id)
+    except Exception as e:
+        print(f"[WARN] HRMS escalation chain resolution failed: {e}")
+        return []
+
+    # `manager_chain` is the resolver's upward walk, already depth-capped and cycle-guarded.
+    # A cycle is reported as a sentinel entry carrying `circular: True` and no real user;
+    # it is skipped here rather than becoming an approver nobody can be.
+    upward = (hierarchy or {}).get("manager_chain") or []
+
+    chain, seen = [], {raiser_id}
+    for person in upward:
+        if len(chain) >= MAX_ESCALATION_LEVELS:
+            break
+        if (person or {}).get("circular"):
+            break
+        uid = str((person or {}).get("user_id") or "")
+        if not uid or uid in seen:
+            continue
+        seen.add(uid)
+        chain.append({
+            "level": len(chain) + 1,
+            "user_id": uid,
+            "name": person.get("name") or person.get("email") or "Manager",
+            "role": person.get("governance_role") or "Manager",
+            "status": EscalationStatus.PENDING.value,
+            "acted_at": None,
+            "acted_by": None,
+            "remarks": None,
+        })
+    return chain
+
+
+async def _notify_escalation(current, request_no, chain, level, company_id, snapshot):
+    """Tell the rung that is now holding the requisition. Fire-and-forget."""
+    try:
+        idx = int(level or 1) - 1
+        if not chain or not (0 <= idx < len(chain)):
+            return
+        rung = chain[idx]
+        link = f"/hrms/requisitions/{request_no}"
+        await notify_user(
+            rung.get("user_id"),
+            f"Requisition {request_no} needs your escalation approval",
+            (f"{current.get('designation_name') or 'A role'} exceeds the sanctioned "
+             f"strength. {_sanction_sentence(snapshot)} You are level {rung.get('level')} "
+             f"of {len(chain)} in the approval chain; MD approval is still required after."),
+            kind="warning", link=link, email=True)
+    except Exception as e:
+        print(f"[WARN] HRMS escalation notification failed ({request_no}): {e}")
 
 
 async def _notify_transition(action, current, request_no, actor_name, remarks, company_id):
@@ -543,6 +1023,23 @@ async def _notify_transition(action, current, request_no, actor_name, remarks, c
         if creator:
             await notify_user(creator, f"Requisition {request_no} forwarded to MD",
                               f"HR reviewed your requisition for {designation}.", link=link)
+    elif action == "escalate-approve":
+        # Every hop tells the raiser their requisition moved. The NEXT rung is notified by
+        # act_on_requisition, which knows the level the ladder actually advanced to.
+        if creator:
+            await notify_user(
+                creator, f"Requisition {request_no} cleared an escalation step",
+                f"{actor_name} approved the escalation for {designation}.", link=link)
+    elif action == "escalate-reject":
+        if creator:
+            await notify_user(
+                creator, f"Requisition {request_no} rejected at escalation",
+                f"Your requisition for {designation} was rejected during escalation "
+                f"review. Reason: {remarks}", kind="warning", link=link, email=True)
+        await notify_hrms_role(
+            company_id, ["HR"], f"Requisition {request_no} rejected at escalation",
+            f"{actor_name} rejected {designation} during the over-sanction review.",
+            kind="warning", link=link)
     elif action == "md-approve":
         if creator:
             await notify_user(creator, f"Requisition {request_no} approved",

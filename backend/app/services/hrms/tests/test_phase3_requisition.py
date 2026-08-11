@@ -278,9 +278,16 @@ async def main() -> None:
         # =================================================================
         section("Approval chain: every status x action pair")
         # =================================================================
-        # 4 actions x 4 statuses = 16 combinations. Exactly the 4 on-diagonal pairs may
-        # succeed; the other 12 must be refused with a 409.
+        # Every (action, status) combination is probed. Exactly the on-diagonal pairs -- the
+        # ones the transition table declares -- may succeed; every other pair must be
+        # refused with a 409.
+        #
+        # The expected count is DERIVED from the table rather than hard-coded, so adding a
+        # stage or an action (Phase 11-R adds PENDING_ESCALATION plus escalate-approve /
+        # escalate-reject) extends the coverage automatically instead of failing an
+        # arithmetic assertion that was only ever a restatement of the table's size.
         legal = {(a, spec[0].value) for a, spec in M.REQ_TRANSITIONS.items()}
+        expected_illegal = len(M.REQ_ACTIONS) * len(list(M.ReqApproval)) - len(legal)
         illegal_ok = 0
         for action in M.REQ_ACTIONS:
             for status in (s.value for s in M.ReqApproval):
@@ -297,8 +304,8 @@ async def main() -> None:
                 except HTTPException as e:
                     if e.status_code == 409:
                         illegal_ok += 1
-        check(f"all 12 illegal status/action pairs refused with 409 (got {illegal_ok})",
-              illegal_ok == 12)
+        check(f"all {expected_illegal} illegal status/action pairs refused with 409 "
+              f"(got {illegal_ok})", illegal_ok == expected_illegal)
 
         section("Approval chain: authorization and validation")
         r2 = await RS.create_requisition(HOD, COMPANY, base_payload())
@@ -440,7 +447,14 @@ async def main() -> None:
         # =================================================================
         section("State machine table integrity")
         # =================================================================
-        check("exactly 4 actions declared", len(M.REQ_TRANSITIONS) == 4)
+        # Phase 3 declared 4 actions; Phase 11-R Item 7 adds escalate-approve and
+        # escalate-reject for the over-sanction ladder. The invariant this section really
+        # guards is the SHAPE of the table (below) plus the one rule that must never bend:
+        # APPROVED is reachable from exactly one row, and only from PENDING_MD with the MD
+        # capability -- asserted from the model itself so a later "shortcut" fails loudly.
+        check("the four Phase 3 actions are still declared",
+              {"hr-approve", "hr-reject", "md-approve", "md-reject"} <= set(M.REQ_TRANSITIONS))
+        check("MD approval cannot be skipped", M.md_approval_is_mandatory())
         check("every action has an audit label",
               set(M.REQ_TRANSITIONS) == set(M.REQ_AUDIT_ACTIONS))
         check("hr actions require the HR capability",

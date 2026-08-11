@@ -3,6 +3,7 @@ import { X, Check, CircleDot } from 'lucide-react';
 import { useHrms } from '../HrmsContext';
 import { HrmsLoading, HrmsError } from '../common/HrmsStates';
 import { getCandidateJourney } from '../../../services/hrmsApi';
+import DocumentPanel from '../documents/DocumentPanel';
 
 /**
  * HRMS ▸ candidate journey.
@@ -37,6 +38,7 @@ export const CandidateJourneyView = ({ uk }) => {
   const { scope } = useHrms();
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
+  const [showDocs, setShowDocs] = useState(false);
 
   useEffect(() => {
     let alive = true;
@@ -69,6 +71,60 @@ export const CandidateJourneyView = ({ uk }) => {
           </p>
         )}
       </div>
+
+      {/* ── Phase 11-R, Item 5 ── the referral block. Renders only for a referred
+          candidate, so an ordinary journey looks exactly as it did before this phase. */}
+      {data.candidate.is_referral && (
+        <div className="p-3.5 rounded-xl border border-[var(--border)] bg-[var(--bg-card)]">
+          <p className="text-[10.5px] font-bold uppercase tracking-widest text-[var(--text-muted)]">
+            Referral
+          </p>
+          <div className="mt-1.5 space-y-0.5 text-[12.5px] text-[var(--text-main)]">
+            <p>
+              Referred by <b>{data.candidate.referred_by}</b>
+              {data.candidate.referral_relation && (
+                <span className="text-[var(--text-muted)]"> · {data.candidate.referral_relation}</span>
+              )}
+            </p>
+            {data.candidate.referral_source && (
+              <p className="text-[var(--text-muted)]">
+                Source: {data.candidate.referral_source}
+              </p>
+            )}
+            {data.candidate.referrer_name && (
+              <p className="text-[var(--text-muted)]">
+                Verified employee: {data.candidate.referrer_name}
+                {data.candidate.referrer_employee_code
+                  && ` (${data.candidate.referrer_employee_code})`}
+              </p>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ── Phase 11-R, Item 4 ── the client-share record, when the CV has gone out. */}
+      {data.candidate.client_share?.shared_at && (
+        <div className="p-3.5 rounded-xl border border-[var(--border)] bg-[var(--bg-card)]">
+          <p className="text-[10.5px] font-bold uppercase tracking-widest text-[var(--text-muted)]">
+            Shared with client
+          </p>
+          <div className="mt-1.5 space-y-0.5 text-[12.5px] text-[var(--text-main)]">
+            <p>
+              Verdict: <b>{data.candidate.client_share.status || 'Pending'}</b>
+            </p>
+            {data.candidate.client_share.client_contact && (
+              <p className="text-[var(--text-muted)]">
+                Contact: {data.candidate.client_share.client_contact}
+              </p>
+            )}
+            {data.candidate.client_share.remarks && (
+              <p className="text-[var(--text-muted)]">
+                {data.candidate.client_share.remarks}
+              </p>
+            )}
+          </div>
+        </div>
+      )}
 
       <div className="flex items-center gap-1 overflow-x-auto pb-1">
         {data.rail.map((step, i) => (
@@ -125,6 +181,28 @@ export const CandidateJourneyView = ({ uk }) => {
             </li>
           ))}
         </ol>
+      </div>
+
+      {/* ── Phase 11-R, Item 2 ── the SAME DocumentPanel the employee profile mounts.
+          Collapsed behind a toggle so the journey stays a timeline first: documents are
+          reference material here, not the thing the reader came for. */}
+      <div>
+        <button
+          type="button"
+          onClick={() => setShowDocs((v) => !v)}
+          className="text-[10.5px] font-bold uppercase tracking-widest text-[var(--text-muted)] hover:text-[var(--text-main)]"
+        >
+          Documents {showDocs ? '▾' : '▸'}
+        </button>
+        {showDocs && (
+          <div className="mt-3">
+            <DocumentPanel
+              ownerType="candidate"
+              ownerId={data.candidate.uk}
+              ownerName={data.candidate.name}
+            />
+          </div>
+        )}
       </div>
     </div>
   );

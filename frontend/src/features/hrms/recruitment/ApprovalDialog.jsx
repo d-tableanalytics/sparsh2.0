@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { X, CheckCircle2, XCircle } from 'lucide-react';
+import { X, CheckCircle2, XCircle, AlertTriangle, Gauge } from 'lucide-react';
 
 /**
  * HRMS ▸ approval dialog.
@@ -21,6 +21,13 @@ const ApprovalDialog = ({
   salaryLabel = 'Revised CTC (optional)',
   salaryDefault = '',
   busy = false,
+  // ── Phase 11-R ── the requisition being decided, so the approver sees the figures the
+  // decision rests on WITHOUT leaving the dialog. Optional, because this component is also
+  // reused by assessments, interviews and offers, which have no such context.
+  requisition = null,
+  // Item 6: a mismatched budget makes remarks mandatory on APPROVAL too. Passed in rather
+  // than re-derived here, so the dialog and the server read the same rule.
+  requireRemarksToApprove = false,
   onApprove,
   onReject,
   onClose,
@@ -28,6 +35,12 @@ const ApprovalDialog = ({
   const [remarks, setRemarks] = useState('');
   const [salary, setSalary] = useState(salaryDefault ?? '');
   const [error, setError] = useState('');
+
+  const snapshot = requisition?.sanction_snapshot;
+  const budgetStatus = requisition?.budget_status;
+  const budgetDelta = requisition?.budget_delta;
+  const chain = requisition?.escalation_chain || [];
+  const level = requisition?.escalation_level || 0;
 
   const reject = () => {
     if (!remarks.trim()) {
@@ -38,6 +51,12 @@ const ApprovalDialog = ({
   };
 
   const approve = () => {
+    // Mirrors the server's REQ_CONDITIONAL_REMARKS rule, so the approver is told before a
+    // round trip rather than after a 422. The server still enforces it.
+    if (requireRemarksToApprove && !remarks.trim()) {
+      setError('The budgets do not match. Record a remark explaining the approval.');
+      return;
+    }
     onApprove(remarks.trim(), salary === '' ? null : Number(salary));
   };
 
@@ -56,6 +75,96 @@ const ApprovalDialog = ({
         </div>
 
         <div className="p-5 space-y-3">
+          {/* ── Phase 11-R, Item 7 — the sanction snapshot the decision rests on ──
+              The STORED snapshot, not a fresh reading: the approver must see the figures
+              the requisition was evaluated against, and re-deriving them here would show a
+              different world from the one the routing decision was made in. */}
+          {snapshot && (
+            <div className={`rounded-lg border px-3.5 py-3 ${
+              snapshot.is_over_sanction
+                ? 'border-[var(--accent-amber,var(--accent-red))] bg-[var(--accent-amber-bg,var(--accent-red-bg))]'
+                : 'border-[var(--border)] bg-[var(--input-bg)]'
+            }`}>
+              <p className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-widest text-[var(--text-muted)]">
+                <Gauge size={12} /> Sanctioned strength
+              </p>
+              <div className="flex flex-wrap gap-x-5 gap-y-1 mt-1.5 text-[12.5px] text-[var(--text-muted)]">
+                <span>Sanctioned: <b className="text-[var(--text-main)]">
+                  {snapshot.sanctioned ?? 'not set'}</b></span>
+                <span>Filled: <b className="text-[var(--text-main)]">{snapshot.actual}</b></span>
+                <span>Committed: <b className="text-[var(--text-main)]">
+                  {snapshot.open_requisitions}</b></span>
+                <span>This request: <b className="text-[var(--text-main)]">
+                  {snapshot.requested}</b></span>
+              </div>
+              {snapshot.is_over_sanction && (
+                <p className="flex items-start gap-1.5 mt-2 text-[12px] font-semibold text-[var(--accent-amber,var(--accent-red))]">
+                  <AlertTriangle size={13} className="shrink-0 mt-0.5" />
+                  Over sanctioned strength. MD approval remains mandatory whatever the
+                  escalation chain decides.
+                </p>
+              )}
+            </div>
+          )}
+
+          {/* Where this requisition sits in the escalation ladder, if it is in one. */}
+          {chain.length > 0 && (
+            <div className="rounded-lg border border-[var(--border)] bg-[var(--input-bg)] px-3.5 py-3">
+              <p className="text-[11px] font-bold uppercase tracking-widest text-[var(--text-muted)]">
+                Escalation chain
+              </p>
+              <ol className="mt-2 space-y-1.5">
+                {chain.map((step) => (
+                  <li key={step.level} className="flex items-center gap-2 text-[12.5px]">
+                    <span className={`h-4 w-4 rounded-full grid place-items-center text-[9px] font-bold ${
+                      step.status === 'Approved'
+                        ? 'bg-[var(--accent-green,var(--accent-indigo))] text-white'
+                        : step.status === 'Rejected'
+                          ? 'bg-[var(--accent-red)] text-white'
+                          : step.level === level
+                            ? 'bg-[var(--accent-indigo)] text-white'
+                            : 'bg-[var(--border)] text-[var(--text-muted)]'
+                    }`}>
+                      {step.level}
+                    </span>
+                    <span className="text-[var(--text-main)]">{step.name}</span>
+                    <span className="text-[var(--text-muted)] ml-auto">{step.status}</span>
+                  </li>
+                ))}
+              </ol>
+            </div>
+          )}
+
+          {/* ── Phase 11-R, Item 6 — sanctioned vs approved, side by side ── */}
+          {budgetStatus && budgetStatus !== 'Not Set' && (
+            <div className={`rounded-lg border px-3.5 py-3 ${
+              budgetStatus === 'Mismatch'
+                ? 'border-[var(--accent-red)] bg-[var(--accent-red-bg)]'
+                : 'border-[var(--border)] bg-[var(--input-bg)]'
+            }`}>
+              <p className="text-[11px] font-bold uppercase tracking-widest text-[var(--text-muted)]">
+                Budget — {budgetStatus}
+              </p>
+              <div className="flex flex-wrap gap-x-5 gap-y-1 mt-1.5 text-[12.5px] text-[var(--text-muted)]">
+                <span>Management sanctioned: <b className="text-[var(--text-main)]">
+                  {requisition?.budget_sanctioned_amount ?? '—'}</b></span>
+                <span>HOD approved: <b className="text-[var(--text-main)]">
+                  {requisition?.budget_hod_amount ?? '—'}</b></span>
+                {budgetDelta != null && budgetDelta !== 0 && (
+                  <span className="text-[var(--accent-red)] font-bold">
+                    Difference: {budgetDelta > 0 ? '+' : ''}
+                    {Number(budgetDelta).toLocaleString('en-IN')}
+                  </span>
+                )}
+              </div>
+              {budgetStatus === 'Mismatch' && (
+                <p className="mt-2 text-[12px] font-semibold text-[var(--accent-red)]">
+                  A mismatch does not block approval, but a remark is required.
+                </p>
+              )}
+            </div>
+          )}
+
           {showSalary && (
             <div>
               <label htmlFor="ap-salary" className="block text-[11px] font-bold uppercase tracking-widest text-[var(--text-muted)] mb-1.5">

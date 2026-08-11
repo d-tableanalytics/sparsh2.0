@@ -4,9 +4,10 @@ import {  AnimatePresence , motion } from 'framer-motion';
 import {
   LayoutDashboard, Users, Briefcase, CheckSquare,
   Settings, Building2,
-  PieChart, MessageSquare, LogOut, Layers, Copy, Calendar, Sparkles, PlayCircle, Target, BarChart3, Library, X,
+  MessageSquare, LogOut, Layers, Copy, Calendar, Sparkles, PlayCircle, Target, BarChart3, Library, X,
   Forward, Bell, Trash2, ChevronDown, Activity, CalendarDays, Database, LayoutGrid,
-  Gauge, GitBranch, AlertTriangle, UserCog, ListChecks, ScrollText, UserCircle, ClipboardList, ClipboardCheck, Megaphone, UserPlus
+  Gauge, GitBranch, AlertTriangle, UserCog, ListChecks, ScrollText, ClipboardList, ClipboardCheck,
+  FolderOpen, FileCog
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { canAccessTaskManagement } from '../../utils/taskAccess';
@@ -91,25 +92,41 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
   // the API would refuse those screens anyway (see utils/hrms_access.ROLE_CAPABILITIES).
   const isHrmsAdminUser = ['superadmin', 'admin', 'clientadmin'].includes(user?.role)
     || ['MD', 'HR'].includes((user?.governance_role || '').trim().toUpperCase());
+  // The hiring pipeline's ten stages are deliberately ABSENT here — they live in the
+  // workspace tab strip (features/hrms/common/HrmsWorkspaceBar). Listing them in both
+  // places put the same links twice and made HRMS the longest group in the sidebar.
+  //
+  // '/hrms' (Overview) is in neither nav by request. The route still resolves — HrmsGate
+  // redirects there — it simply has no menu entry pointing at it.
+  //
+  // What is left is the way IN plus the screens the strip does not carry. `Recruitment`
+  // stays highlighted anywhere in the workspace (see `match`), so the sidebar still shows
+  // which part of HRMS you are in after the tabs have moved you off the requisition screen.
+  // Phase 11-R appends `appointments` and `links` — both live in the workspace tab strip,
+  // so they belong here and NOT in hrmsSubmodules (the two lists must stay disjoint).
+  const HRMS_WORKSPACE = ['/hrms/requisitions', '/hrms/jd', '/hrms/postings', '/hrms/candidates',
+    '/hrms/screening', '/hrms/assessments', '/hrms/interviews', '/hrms/offers',
+    '/hrms/appointments', '/hrms/onboarding', '/hrms/links', '/hrms/reports'];
+
   const hrmsSubmodules = [
-    { name: 'Overview', path: '/hrms', icon: LayoutDashboard, end: true },
-    { name: 'Employees', path: '/hrms/employees', icon: Users },
-    // Requisitions are visible to everyone: any HRMS user may raise one, and whoever raises
-    // one becomes its hiring manager (the module's documented design intent).
-    { name: 'Hiring Requisitions', path: '/hrms/requisitions', icon: ClipboardList },
-    { name: 'Job Descriptions', path: '/hrms/jd', icon: ScrollText },
-    { name: 'Job Postings', path: '/hrms/postings', icon: Megaphone },
-    { name: 'Candidates', path: '/hrms/candidates', icon: UserCircle },
-    { name: 'Screening', path: '/hrms/screening', icon: ClipboardCheck },
-    { name: 'Assessments', path: '/hrms/assessments', icon: ListChecks },
-    { name: 'Interviews', path: '/hrms/interviews', icon: CalendarDays },
-    { name: 'Offers', path: '/hrms/offers', icon: ScrollText },
-    { name: 'Onboarding', path: '/hrms/onboarding', icon: UserPlus },
     { name: 'Dashboard', path: '/hrms/dashboard', icon: BarChart3 },
-    { name: 'Reports', path: '/hrms/reports', icon: PieChart },
+    { name: 'Employees', path: '/hrms/employees', icon: Users },
+    // Recruitment is visible to everyone: any HRMS user may raise a requisition, and whoever
+    // raises one becomes its hiring manager (the module's documented design intent).
+    {
+      name: 'Recruitment', path: '/hrms/requisitions', icon: ClipboardList,
+      match: (p) => HRMS_WORKSPACE.some((r) => p === r || p.startsWith(`${r}/`)),
+    },
+    // Phase 11-R, Item 2 — the document register has ONE home, and it is the sidebar
+    // (it is not a hiring stage, so it is deliberately absent from the workspace strip).
+    { name: 'Documents', path: '/hrms/documents', icon: FolderOpen },
     ...(isHrmsAdminUser ? [
       { name: 'Departments', path: '/hrms/departments', icon: Building2 },
       { name: 'Designations', path: '/hrms/designations', icon: Briefcase },
+      // Phase 11-R — company reference data, alongside the other masters.
+      { name: 'Clients', path: '/hrms/clients', icon: Building2 },
+      { name: 'Document Types', path: '/hrms/document-types', icon: FileCog },
+      { name: 'Sanctioned Strength', path: '/hrms/sanctioned-strength', icon: Gauge },
     ] : []),
   ];
 
@@ -351,7 +368,13 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
                             to={sub.path}
                             end={sub.end}
                             onClick={() => { if (isMobile) setIsMobileOpen(false); }}
-                            className={subLinkClass}
+                            // `match` lets one entry own a whole set of routes (HRMS ▸
+                            // Recruitment covers the pipeline its tab strip navigates).
+                            // Items without one keep NavLink's own matching exactly.
+                            className={(state) => subLinkClass({
+                              isActive: state.isActive
+                                || (sub.match ? sub.match(location.pathname) : false),
+                            })}
                           >
                             <sub.icon size={15} />
                             <span className="tracking-tight font-medium">{sub.name}</span>

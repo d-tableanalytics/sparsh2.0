@@ -70,3 +70,15 @@ export const getPublicOnboarding = (code) => publicApi.get(`/hrms/public/onboard
 /** Submit joining details and KYC documents. Once only — a resubmit is a 409. */
 export const submitOnboarding = (code, payload) =>
   publicApi.post(`/hrms/public/onboard/${code}`, payload);
+
+// ── Appointment letter (public) — Phase 11-R, Item 3 ──
+/** The appointment letter behind a candidate's link. A Generated (unsent) letter is
+ *  invisible here and answers with the same opaque 404 as an unknown code. Viewing moves a
+ *  Sent letter to Pending Acknowledgement. */
+export const getPublicAppointment = (code) =>
+  publicApi.get(`/hrms/public/appointment/${code}`);
+
+/** Acknowledge the letter. A typed signature is REQUIRED — there is no "decline" here,
+ *  because declining happens at the offer, one step earlier. */
+export const acknowledgeAppointment = (code, payload) =>
+  publicApi.post(`/hrms/public/appointment/${code}`, payload);

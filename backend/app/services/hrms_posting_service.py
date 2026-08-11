@@ -243,6 +243,25 @@ async def create_postings(actor: dict, company_id: str, payload: dict) -> dict:
         })
 
     await get_collection(COLL_JOB_POSTINGS).insert_many([dict(d) for d in docs])
+
+    # Phase 11-R, Item 1: register each AUTO posting's apply link.
+    #
+    # EXTERNAL postings are deliberately NOT registered. An external listing sends the
+    # applicant to a job board or a Google Form; nothing ever writes those applications back
+    # into this pipeline (see ApplyLinkMode.EXTERNAL), so there is no open to count and no
+    # submission to consume. Registering one would put a row in the Link Manager promising
+    # tracking that cannot exist -- the same honesty the posting UI already applies.
+    from app.models.hrms import LinkKind
+    from app.services.hrms_link_service import register_link
+    for d in docs:
+        if d["apply_link_mode"] != ApplyLinkMode.AUTO.value:
+            continue
+        await register_link(
+            company_id=company_id, kind=LinkKind.APPLY, code=d["posting_code"],
+            target_type="posting", target_id=d["posting_code"], actor=actor,
+            candidate_name=None, request_no=d.get("request_no"),
+            expires_at=d.get("expiry_date"))
+
     await audit(actor, AUDIT_POSTING_CREATED, ENTITY_POSTING, jd_no,
                 f"{len(docs)} platform(s): {', '.join(d['platform'] for d in docs)}", company_id)
     return {"postings": [_out(d) for d in docs], "created": len(docs)}
@@ -437,6 +456,20 @@ async def submit_application(code: str, payload: dict) -> dict:
     email = email.lower()
     company_id = posting.get("company_id")
 
+    # Phase 11-R, Item 5: the discovery / referral block. Validated BEFORE any upload is
+    # stored, so a rejected claim never costs storage -- the same ordering the existing
+    # validation already follows.
+    #
+    # "Where did you find this job" is MANDATORY on the public form, which is the point of
+    # Item 1's one-form-per-posting design: the channel comes from the applicant rather
+    # than from which of several links they clicked. Enforced here rather than in
+    # resolve_referral, because the manual add-candidate path has no applicant to ask.
+    if not payload.get("referral_source"):
+        raise HTTPException(
+            status_code=422, detail="Please tell us where you found this job.")
+    from app.services.hrms_referral_service import resolve_referral
+    referral = await resolve_referral(payload, company_id)
+
     # Server-side duplicate detection. The source flagged duplicates in the browser only
     # (BACKEND_ANALYSIS 8), so a re-submission created a second candidate record. Re-applying
     # to the SAME posting is idempotent from the applicant's point of view -- they get the
@@ -492,6 +525,10 @@ async def submit_application(code: str, payload: dict) -> dict:
         "applied_at": now,
         "created_at": now,
     }
+    # Applied AFTER the base document so `source` is overridden to "Referral" when the
+    # applicant declared one -- a referral that arrived through the LinkedIn ad is a
+    # referral, and filing it under LinkedIn would overstate that channel.
+    doc.update(referral)
     await get_collection(COLL_CANDIDATES).insert_one(dict(doc))
 
     await audit(None, AUDIT_APPLICATION, ENTITY_CANDIDATE_APPLICATION, uk,
@@ -511,6 +548,13 @@ async def submit_application(code: str, payload: dict) -> dict:
         await notify_user(req["assignee_id"], f"New application for {title}",
                           f"{name} applied via {posting.get('platform')}.",
                           link="/hrms/candidates")
+
+    # Phase 11-R, Item 5: tell the referring employee their referral landed. In-app only.
+    if doc.get("referrer_user_id"):
+        from app.services.hrms_referral_service import notify_referrer
+        await notify_referrer(
+            doc, "Your referral has applied",
+            f"{name}, whom you referred, has applied for {title}.")
 
     return {"ok": True, "duplicate": False, "reference": uk,
             "message": "Your application has been submitted."}

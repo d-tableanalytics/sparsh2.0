@@ -262,6 +262,18 @@ async def create_offer(actor: dict, company_id: str, payload: dict) -> dict:
         "created_at": now,
     }
     await get_collection(COLL_OFFERS).insert_one(dict(doc))
+
+    # Phase 11-R, Item 1: register the offer link at MINT time, not send time, so a draft's
+    # credential is already accounted for -- a code that exists but is not in the registry
+    # is exactly the blind spot this item was raised to close. Fire-and-forget by contract.
+    from app.models.hrms import LinkKind
+    from app.services.hrms_link_service import register_link
+    await register_link(
+        company_id=company_id, kind=LinkKind.OFFER, code=doc["access_code"],
+        target_type="offer", target_id=offer_no, actor=actor,
+        candidate_name=candidate.get("candidate_name"),
+        request_no=candidate.get("request_no"))
+
     await audit(actor, AUDIT_OFFER_CREATED, ENTITY_OFFER, offer_no,
                 f"{designation} for {candidate.get('candidate_name')}", company_id)
     await audit(actor, AUDIT_OFFER_CREATED, ENTITY_CANDIDATE, uk, offer_no, company_id)

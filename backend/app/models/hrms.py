@@ -54,6 +54,14 @@ COLL_OFFERS           = "hrms_offers"
 COLL_ONBOARDING       = "hrms_onboarding"
 COLL_PUBLIC_RATELIMIT = "hrms_public_rate_limit"
 
+# Phase 11-R — recruitment review enhancements
+COLL_LINKS               = "hrms_links"
+COLL_DOCUMENTS           = "hrms_documents"
+COLL_DOCUMENT_TYPES      = "hrms_document_types"
+COLL_APPOINTMENTS        = "hrms_appointments"
+COLL_CLIENTS             = "hrms_clients"
+COLL_SANCTIONED_STRENGTH = "hrms_sanctioned_strength"
+
 # Phase 11-14 — settings, HR operations, payroll
 COLL_SETTINGS         = "hrms_settings"
 COLL_PERMISSIONS      = "hrms_permissions"
@@ -180,6 +188,49 @@ HRMS_INDEXES = [
     (COLL_OFFERS,       [("company_id", 1), ("created_at", -1)], {"name": "by_company_created"}),
     (COLL_ONBOARDING,   [("company_id", 1), ("created_at", -1)], {"name": "by_company_created"}),
     (COLL_REQUISITIONS, [("company_id", 1), ("created_at", -1)], {"name": "by_company_created"}),
+
+    # ── Phase 11-R: link registry, documents, appointments, clients, sanction ──
+    # The registry is looked up by CODE on every public request (the revocation guard), so
+    # that index is unique and is the hot one. The rest serve the Link Manager's filters.
+    (COLL_LINKS, [("code", 1)],                               {"unique": True, "name": "uniq_code"}),
+    (COLL_LINKS, [("link_id", 1)],                            {"unique": True, "name": "uniq_link_id"}),
+    (COLL_LINKS, [("company_id", 1), ("kind", 1), ("status", 1)],
+                                                              {"name": "by_company_kind_status"}),
+    (COLL_LINKS, [("company_id", 1), ("created_at", -1)],     {"name": "by_company_created"}),
+    (COLL_LINKS, [("target_id", 1)],                          {"name": "by_target"}),
+    (COLL_LINKS, [("request_no", 1)],                         {"name": "by_request"}),
+
+    (COLL_DOCUMENTS, [("doc_no", 1)],                         {"unique": True, "name": "uniq_doc_no"}),
+    (COLL_DOCUMENTS, [("company_id", 1), ("owner_type", 1), ("owner_id", 1)],
+                                                              {"name": "by_owner"}),
+    (COLL_DOCUMENTS, [("company_id", 1), ("status", 1)],      {"name": "by_company_status"}),
+    # Drives the expiring-soon filter, which is a range scan on this field.
+    (COLL_DOCUMENTS, [("company_id", 1), ("expiry_date", 1)], {"name": "by_company_expiry"}),
+    (COLL_DOCUMENTS, [("request_no", 1)],                     {"name": "by_request"}),
+    (COLL_DOCUMENT_TYPES, [("company_id", 1), ("name", 1)],   {"unique": True,
+                                                               "name": "uniq_company_name"}),
+
+    # One appointment letter per candidate, enforced at the DB level: the letter confirms
+    # joining terms, and two of them for one person is a contradiction, not a workflow.
+    (COLL_APPOINTMENTS, [("appointment_no", 1)],              {"unique": True,
+                                                               "name": "uniq_appointment_no"}),
+    (COLL_APPOINTMENTS, [("access_code", 1)],                 {"unique": True,
+                                                               "name": "uniq_access_code"}),
+    (COLL_APPOINTMENTS, [("uk", 1)],                          {"unique": True,
+                                                               "name": "uniq_candidate"}),
+    (COLL_APPOINTMENTS, [("company_id", 1), ("status", 1)],   {"name": "by_company_status"}),
+    (COLL_APPOINTMENTS, [("request_no", 1)],                  {"name": "by_request"}),
+
+    (COLL_CLIENTS, [("client_id", 1)],                        {"unique": True,
+                                                               "name": "uniq_client_id"}),
+    (COLL_CLIENTS, [("company_id", 1), ("name", 1)],          {"unique": True,
+                                                               "name": "uniq_company_name"}),
+    (COLL_CLIENTS, [("company_id", 1), ("active", 1)],        {"name": "by_company_active"}),
+
+    # One sanctioned figure per position per company — the uniqueness IS the rule.
+    (COLL_SANCTIONED_STRENGTH,
+     [("company_id", 1), ("department_id", 1), ("designation_id", 1)],
+     {"unique": True, "name": "uniq_company_position"}),
     # ── Later phases append their indexes here, one phase at a time. ──
 ]
 
@@ -292,6 +343,27 @@ class Cap(str, Enum):
     ANALYTICS_READ = "analytics.read"   # dashboard, funnel, breakdowns
     REPORT_READ    = "report.read"      # the detailed tabbed tables
     REPORT_EXPORT  = "report.export"    # taking data OUT of the system
+
+    # ── Phase 11-R: recruitment review enhancements ──
+    # Item 1 — the public-link registry.
+    LINK_READ   = "link.read"     # see every issued link and its open history
+    LINK_MANAGE = "link.manage"   # revoke / reissue — killing a live credential
+    # Item 2 — documentation.
+    DOCUMENT_READ   = "document.read"
+    DOCUMENT_WRITE  = "document.write"   # upload, version, edit metadata, delete
+    DOCUMENT_VERIFY = "document.verify"  # a DECISION: Verified / Rejected
+    # Item 3 — appointment letters. Mirrors the offer capabilities exactly: read, author,
+    # and a separate COMMITMENT capability for issuing one.
+    APPOINTMENT_READ  = "appointment.read"
+    APPOINTMENT_WRITE = "appointment.write"
+    APPOINTMENT_SEND  = "appointment.send"
+    # Item 4 — the client master (recruitment-agency model; see PHASE_11R_REPORT §Decisions).
+    CLIENT_READ  = "client.read"
+    CLIENT_WRITE = "client.write"
+    # Item 7 — sanctioned strength + the escalation ladder.
+    SANCTION_READ  = "sanction.read"
+    SANCTION_WRITE = "sanction.write"
+    REQUISITION_ESCALATE = "requisition.escalate"   # act on an over-sanction escalation step
     # ── Later phases append their capabilities here. ──
 
 
@@ -330,6 +402,18 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
         # Sparsh staff support clients, which means answering "how is hiring going".
         # Read-only, and every figure is company-scoped -- see hrms_analytics_service.
         Cap.ANALYTICS_READ, Cap.REPORT_READ, Cap.REPORT_EXPORT,
+        # ── Phase 11-R ──
+        # Support routinely means "the candidate says the link does not work", so operating
+        # the link registry is squarely support work.
+        Cap.LINK_READ, Cap.LINK_MANAGE,
+        # Collecting documents is operational; VERIFYING one is the client's own governance
+        # act, the same boundary that keeps REQUISITION_REVIEW_HR off this list.
+        Cap.DOCUMENT_READ, Cap.DOCUMENT_WRITE,
+        # Read only, for the same reason OFFER_SEND is withheld: issuing an appointment
+        # letter commits the client to employing somebody.
+        Cap.APPOINTMENT_READ,
+        Cap.CLIENT_READ, Cap.CLIENT_WRITE,
+        Cap.SANCTION_READ,
     },
     HrmsRole.MD: {
         Cap.MODULE_ACCESS, Cap.MODULE_ADMIN, Cap.AUDIT_READ,
@@ -348,6 +432,15 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
         Cap.OFFER_READ, Cap.OFFER_WRITE, Cap.OFFER_SEND,
         Cap.ONBOARDING_READ, Cap.ONBOARDING_WRITE, Cap.ONBOARDING_GENERATE_ID,
         Cap.ANALYTICS_READ, Cap.REPORT_READ, Cap.REPORT_EXPORT,
+        # ── Phase 11-R ──
+        Cap.LINK_READ, Cap.LINK_MANAGE,
+        Cap.DOCUMENT_READ, Cap.DOCUMENT_WRITE, Cap.DOCUMENT_VERIFY,
+        Cap.APPOINTMENT_READ, Cap.APPOINTMENT_WRITE, Cap.APPOINTMENT_SEND,
+        Cap.CLIENT_READ, Cap.CLIENT_WRITE,
+        Cap.SANCTION_READ, Cap.SANCTION_WRITE,
+        # MD holds the escalation capability as well as the final approval: an escalation
+        # ladder that stalls because its top rung cannot act is not a control, it is a trap.
+        Cap.REQUISITION_ESCALATE,
     },
     HrmsRole.HR: {
         Cap.MODULE_ACCESS, Cap.AUDIT_READ,
@@ -365,6 +458,15 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
         Cap.OFFER_READ, Cap.OFFER_WRITE, Cap.OFFER_SEND,
         Cap.ONBOARDING_READ, Cap.ONBOARDING_WRITE, Cap.ONBOARDING_GENERATE_ID,
         Cap.ANALYTICS_READ, Cap.REPORT_READ, Cap.REPORT_EXPORT,
+        # ── Phase 11-R ──
+        Cap.LINK_READ, Cap.LINK_MANAGE,
+        Cap.DOCUMENT_READ, Cap.DOCUMENT_WRITE, Cap.DOCUMENT_VERIFY,
+        Cap.APPOINTMENT_READ, Cap.APPOINTMENT_WRITE, Cap.APPOINTMENT_SEND,
+        Cap.CLIENT_READ, Cap.CLIENT_WRITE,
+        Cap.SANCTION_READ, Cap.SANCTION_WRITE,
+        # Deliberately NO REQUISITION_ESCALATE: the escalation ladder is the reporting
+        # hierarchy above the raiser, and HR reviewing then also escalating would collapse
+        # two stages into one person -- the same separation the HR/MD split already draws.
     },
     # A hiring manager reads their own corner of the directory (enforced by row scoping in
     # hrms_employee_service, not by this set) and never sees pay. They RAISE requisitions --
@@ -385,6 +487,17 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
         # Deliberately NO export: aggregate figures on screen are one thing, a downloadable
         # file of every candidate is another.
         Cap.ANALYTICS_READ, Cap.REPORT_READ,
+        # ── Phase 11-R ──
+        # Read only, and row-scoped to their own requisitions in the services (same
+        # narrowing the candidate list applies), never enforced by this set alone.
+        Cap.LINK_READ,
+        Cap.DOCUMENT_READ,
+        Cap.APPOINTMENT_READ,
+        Cap.CLIENT_READ,
+        Cap.SANCTION_READ,
+        # A hiring manager IS the reporting line an over-sanction requisition escalates
+        # through -- this is the capability that lets them clear their rung.
+        Cap.REQUISITION_ESCALATE,
     },
     # Self-service, plus the deliberate exception that ANY employee may raise a hiring
     # requisition (FRONTEND_ANALYSIS §5: "anyone may raise a hiring requisition"). Reading
@@ -430,6 +543,11 @@ ID_FORMATS = {
     "assessment":  ("ASM",    True,  3),   # ASM-2026-001
     "employee":    ("EMP",    True,  3),   # EMP-2026-001
     "candidate":   ("CAN",    False, 3),   # CAN-001          (not year-scoped)
+    # ── Phase 11-R ──
+    "link":        ("LNK",    True,  3),   # LNK-2026-001
+    "document":    ("DOC",    True,  3),   # DOC-2026-001
+    "appointment": ("APT",    True,  3),   # APT-2026-001
+    "client":      ("CLI",    False, 3),   # CLI-001          (a client outlives a year)
 }
 
 
@@ -676,6 +794,10 @@ class ReqApproval(str, Enum):
     chain -- the source's separate JD approval was removed and the JD is co-approved at the
     MD stage (BACKEND_ANALYSIS 6.7)."""
     PENDING_HR = "Pending HR Review"
+    # Phase 11-R, Item 7: an OVER-SANCTION requisition is routed through the raiser's
+    # reporting line before it reaches the MD. An in-sanction requisition never enters this
+    # state, so the existing three-step chain is completely unchanged for it.
+    PENDING_ESCALATION = "Pending Escalation"
     PENDING_MD = "Pending MD Approval"
     APPROVED   = "Approved"
     REJECTED   = "Rejected"
@@ -729,9 +851,49 @@ REQ_TRANSITIONS = {
                    Cap.REQUISITION_APPROVE_MD, False),
     "md-reject":  (ReqApproval.PENDING_MD, ReqApproval.REJECTED,
                    Cap.REQUISITION_APPROVE_MD, True),
+    # ── Phase 11-R, Item 7 ── the over-sanction escalation ladder.
+    # `escalate-approve` results in PENDING_MD, which is the status reached once the WHOLE
+    # ladder is exhausted; while rungs remain the service holds the requisition at
+    # PENDING_ESCALATION and advances the level (see hrms_requisition_service).
+    "escalate-approve": (ReqApproval.PENDING_ESCALATION, ReqApproval.PENDING_MD,
+                         Cap.REQUISITION_ESCALATE, False),
+    "escalate-reject":  (ReqApproval.PENDING_ESCALATION, ReqApproval.REJECTED,
+                         Cap.REQUISITION_ESCALATE, True),
 }
 
 REQ_ACTIONS = tuple(REQ_TRANSITIONS.keys())
+
+# Where `hr-approve` lands when the requisition is OVER-SANCTION. Declared beside the
+# transition table rather than branched inside the handler, so the two cannot drift.
+# In-sanction requisitions ignore this map entirely and keep today's PENDING_HR ->
+# PENDING_MD edge byte for byte.
+REQ_ESCALATION_ROUTING = {"hr-approve": ReqApproval.PENDING_ESCALATION}
+
+# The escalation ladder is capped. A cyclic or absurdly deep reporting chain must not turn
+# one requisition into a twenty-step approval marathon.
+MAX_ESCALATION_LEVELS = 5
+
+
+class EscalationStatus(str, Enum):
+    PENDING  = "Pending"
+    APPROVED = "Approved"
+    REJECTED = "Rejected"
+
+
+def md_approval_is_mandatory() -> bool:
+    """MD approval cannot be skipped, asserted from the table rather than trusted.
+
+    The requirement "MD is compulsory" is only as strong as the transition table: it holds
+    exactly while `APPROVED` is reachable from ONE row, that row starts at `PENDING_MD`, and
+    it demands `REQUISITION_APPROVE_MD`. Adding a well-meaning shortcut later -- an
+    `escalate-approve` that lands on APPROVED when the chain is empty, say -- would silently
+    remove the MD from the loop. This function is what the test asserts, so that change
+    fails loudly instead.
+    """
+    rows = [spec for spec in REQ_TRANSITIONS.values() if spec[1] is ReqApproval.APPROVED]
+    return (len(rows) == 1
+            and rows[0][0] is ReqApproval.PENDING_MD
+            and rows[0][2] is Cap.REQUISITION_APPROVE_MD)
 
 AUDIT_REQ_CREATED     = "requisition raised"
 AUDIT_REQ_UPDATED     = "requisition updated"
@@ -744,14 +906,92 @@ AUDIT_REQ_CLOSED      = "requisition closing status changed"
 AUDIT_JD_UPDATED      = "job description updated"
 
 # action -> audit label, so the trail cannot drift from the transition table.
+AUDIT_REQ_ESCALATED   = "requisition escalated (over-sanction)"
+AUDIT_REQ_ESC_APPROVED = "requisition approved (escalation)"
+AUDIT_REQ_ESC_REJECTED = "requisition rejected (escalation)"
+
 REQ_AUDIT_ACTIONS = {
     "hr-approve": AUDIT_REQ_HR_APPROVED,
     "hr-reject":  AUDIT_REQ_HR_REJECTED,
     "md-approve": AUDIT_REQ_MD_APPROVED,
     "md-reject":  AUDIT_REQ_MD_REJECTED,
+    "escalate-approve": AUDIT_REQ_ESC_APPROVED,
+    "escalate-reject":  AUDIT_REQ_ESC_REJECTED,
 }
 
 ENTITY_JD = "job_description"
+
+
+# =============================================================
+# Phase 11-R, Item 6 - dual budget capture
+# =============================================================
+# How far the two figures may differ and still count as agreeing. Zero by default: a
+# requisition's budget is an exact number somebody signed off, not an estimate. It is a
+# named constant rather than a literal `==` so a client who works in thousands can widen it
+# in one reviewable place.
+BUDGET_TOLERANCE = 0.0
+
+
+class BudgetStatus(str, Enum):
+    NOT_SET  = "Not Set"    # neither figure captured
+    PENDING  = "Pending"    # one side has answered, the other has not
+    MATCHED  = "Matched"
+    MISMATCH = "Mismatch"
+
+
+def budget_status(req: dict) -> str:
+    """The budget state of a requisition, DERIVED on every read and never stored.
+
+    A stored flag would go stale the moment somebody corrects a figure, and the correction
+    is exactly the case that matters. Tolerates documents written before this phase: both
+    fields absent reads as `Not Set`, which is the truth about them.
+    """
+    req = req or {}
+    sanctioned = req.get("budget_sanctioned_amount")
+    hod = req.get("budget_hod_amount")
+    if sanctioned is None and hod is None:
+        return BudgetStatus.NOT_SET.value
+    if sanctioned is None or hod is None:
+        return BudgetStatus.PENDING.value
+    try:
+        delta = abs(float(sanctioned) - float(hod))
+    except (TypeError, ValueError):
+        # Unreadable figures are not silently "Matched" -- they are a disagreement we
+        # cannot resolve, which is what Mismatch means.
+        return BudgetStatus.MISMATCH.value
+    return (BudgetStatus.MATCHED.value if delta <= BUDGET_TOLERANCE
+            else BudgetStatus.MISMATCH.value)
+
+
+def budget_delta(req: dict):
+    """Signed difference (HOD-approved minus management-sanctioned), or None."""
+    try:
+        return float(req.get("budget_hod_amount")) - float(req.get("budget_sanctioned_amount"))
+    except (TypeError, ValueError):
+        return None
+
+
+# Actions that require remarks CONDITIONALLY, on top of the flat `remark_required` slot in
+# REQ_TRANSITIONS. Declared here so the whole "when must an approver explain themselves"
+# rule is readable in one place rather than scattered through the handler.
+#
+# The rule (confirmed with the business, see PHASE_11R_REPORT §Decisions): a budget mismatch
+# WARNS and notifies, it does not block. But an MD who approves a requisition whose two
+# budget figures disagree must say why -- an unexplained approval over a known disagreement
+# is exactly the record an audit later needs.
+REQ_CONDITIONAL_REMARKS = {
+    "md-approve": lambda req: budget_status(req) == BudgetStatus.MISMATCH.value,
+}
+
+REQ_CONDITIONAL_REMARK_REASONS = {
+    "md-approve": ("The sanctioned and HOD-approved budgets do not match. "
+                   "Record a remark explaining the approval."),
+}
+
+
+class RequisitionType(str, Enum):
+    NEW_POSITION = "New Position"
+    REPLACEMENT  = "Replacement"
 
 
 # -- API models --
@@ -810,6 +1050,29 @@ class RequisitionIn(BaseModel):
     notes: Optional[str] = None
     jd: JobDescriptionIn
 
+    # ── Phase 11-R, Item 4 ── which client this vacancy is being filled FOR.
+    # Optional: an in-house requisition has no client, and every requisition raised before
+    # this phase has none either.
+    client_id: Optional[str] = None
+
+    # ── Phase 11-R, Item 6 ── dual budget capture. All optional; omitting both preserves
+    # the pre-phase behaviour exactly (budget_status reads "Not Set").
+    budget_sanctioned_amount: Optional[float] = None   # sanctioned by management
+    budget_sanctioned_by: Optional[str] = None         # user_id
+    budget_sanctioned_ref: Optional[str] = None        # approval reference / note
+    budget_sanctioned_on: Optional[str] = None         # YYYY-MM-DD
+    budget_hod_amount: Optional[float] = None          # approved by the HOD
+    budget_hod_by: Optional[str] = None
+    budget_hod_on: Optional[str] = None
+    budget_remarks: Optional[str] = None
+
+    # ── Phase 11-R, Item 7 ── replacement vs a genuinely new position.
+    requisition_type: RequisitionType = RequisitionType.NEW_POSITION
+    replacement_for_user_id: Optional[str] = None      # required when Replacement
+    replacement_for_name: Optional[str] = None         # denormalised label
+    replacement_reason: Optional[str] = None           # required when Replacement
+    last_working_day: Optional[str] = None             # YYYY-MM-DD
+
 
 class RequisitionUpdate(BaseModel):
     """Edit requisition details. Approval fields are deliberately absent -- they change only
@@ -828,6 +1091,22 @@ class RequisitionUpdate(BaseModel):
     gender_preferred: Optional[GenderPreference] = None
     employment_type: Optional[EmploymentType] = None
     notes: Optional[str] = None
+
+    # ── Phase 11-R ── same additions as RequisitionIn, all optional.
+    client_id: Optional[str] = None
+    budget_sanctioned_amount: Optional[float] = None
+    budget_sanctioned_by: Optional[str] = None
+    budget_sanctioned_ref: Optional[str] = None
+    budget_sanctioned_on: Optional[str] = None
+    budget_hod_amount: Optional[float] = None
+    budget_hod_by: Optional[str] = None
+    budget_hod_on: Optional[str] = None
+    budget_remarks: Optional[str] = None
+    requisition_type: Optional[RequisitionType] = None
+    replacement_for_user_id: Optional[str] = None
+    replacement_for_name: Optional[str] = None
+    replacement_reason: Optional[str] = None
+    last_working_day: Optional[str] = None
 
 
 class RequisitionAction(BaseModel):
@@ -883,6 +1162,11 @@ class AppStatus(str, Enum):
     APPLIED              = "Applied"
     UNDER_REVIEW         = "Under Review"
     SHORTLISTED          = "Shortlisted"
+    # ── Phase 11-R, Item 4 ── the CV goes out to the hiring client for their verdict.
+    # This is NOT ScreenAction.FORWARD, which assigns an INTERNAL owner and moves nobody.
+    SHARED_WITH_CLIENT   = "Shared with Client"
+    CLIENT_SHORTLISTED   = "Client Shortlisted"
+    CLIENT_REJECTED      = "Client Rejected"
     ON_HOLD              = "On Hold"
     DUPLICATE            = "Duplicate"
     REJECTED             = "Rejected"
@@ -897,6 +1181,10 @@ class AppStatus(str, Enum):
     OFFER_GENERATED      = "Offer Generated"
     OFFER_ACCEPTED       = "Offer Accepted"
     OFFER_DECLINED       = "Offer Declined"
+    # ── Phase 11-R, Item 3 ── the appointment letter confirming joining terms has gone out.
+    # OPTIONAL: the direct Offer Accepted -> Pre-Onboarding edge is kept, so a company that
+    # does not issue appointment letters is never blocked by this stage existing.
+    APPOINTMENT_LETTER_SENT = "Appointment Letter Sent"
     PRE_ONBOARDING       = "Pre-Onboarding"
     JOINED               = "Joined"
     EMPLOYEE_CREATED     = "Employee Created"
@@ -967,6 +1255,48 @@ class UploadIn(BaseModel):
     data: str                                   # base64, optionally a data: URL
 
 
+# =============================================================
+# Phase 11-R, Item 5 - referral capture
+# =============================================================
+class ReferralSource(str, Enum):
+    EMPLOYEE          = "Employee"
+    EX_EMPLOYEE       = "Ex-Employee"
+    CONSULTANT_AGENCY = "Consultant / Agency"
+    JOB_PORTAL        = "Job Portal"
+    SOCIAL_MEDIA      = "Social Media"
+    WALK_IN           = "Walk-in"
+    CLIENT            = "Client"
+    OTHER             = "Other"
+
+
+# The `source` value a referred candidate is filed under, so referrals land in the existing
+# Phase 10 `source` breakdown rather than needing a parallel one.
+REFERRAL_SOURCE_LABEL = "Referral"
+
+# Employee codes are EMP-<year>-<seq> (see ID_FORMATS). Validated as a shape BEFORE the
+# lookup, exactly as posting and access codes are, so a crafted value never reaches Mongo.
+EMPLOYEE_CODE_RE = _re.compile(r"^EMP-\d{4}-\d{3,}$")
+
+# Deliberately vague, and identical for "no such code" and "belongs to another company".
+# The public form must not become an employee-directory oracle -- the same discipline
+# INVALID_LINK applies to posting codes.
+INVALID_EMPLOYEE_CODE = "We could not verify that employee code."
+
+
+class ReferralIn(BaseModel):
+    """The referral block, shared by the public form and the manual-add path.
+
+    Both intake paths capture the SAME thing: a referral entered by HR on a walk-in CV is
+    worth exactly as much as one typed by the applicant, and reporting must not be able to
+    tell them apart.
+    """
+    is_referral: bool = False
+    referred_by: Optional[str] = None                # the referrer's name
+    referral_source: Optional[ReferralSource] = None
+    referrer_employee_code: Optional[str] = None     # e.g. EMP-2026-014
+    referral_relation: Optional[str] = None
+
+
 class PublicApplicationIn(BaseModel):
     """A candidate's application. Deliberately minimal and entirely untrusted."""
     candidate_name: str
@@ -986,6 +1316,13 @@ class PublicApplicationIn(BaseModel):
     resume: Optional[UploadIn] = None
     photo: Optional[UploadIn] = None
     certificates: List[UploadIn] = Field(default_factory=list)
+    # ── Phase 11-R, Item 5 ── "Were you referred?" Collapsed by default in the UI, and
+    # entirely optional here: an application with no referral is unchanged by this phase.
+    is_referral: bool = False
+    referred_by: Optional[str] = None
+    referral_source: Optional[ReferralSource] = None
+    referrer_employee_code: Optional[str] = None
+    referral_relation: Optional[str] = None
 
 
 # =============================================================
@@ -1013,7 +1350,17 @@ FORWARD_TRANSITIONS = {
     AppStatus.UNDER_REVIEW:         {AppStatus.SHORTLISTED},
     # Shortlisting routes by the role's assessment requirement -- the screening service
     # picks which of these two edges to take (see hrms_screening_service).
-    AppStatus.SHORTLISTED:          {AppStatus.ASSESSMENT_PENDING, AppStatus.INTERVIEW_SCHEDULED},
+    # SHARED_WITH_CLIENT is a THIRD option, taken only when the CV is sent to the hiring
+    # client for their verdict (Phase 11-R, Item 4).
+    AppStatus.SHORTLISTED:          {AppStatus.ASSESSMENT_PENDING, AppStatus.INTERVIEW_SCHEDULED,
+                                     AppStatus.SHARED_WITH_CLIENT},
+    # The client's verdict, or -- if they never respond -- the pipeline carries on without
+    # one. Sharing a CV must not be able to strand a candidate on an unanswered email.
+    AppStatus.SHARED_WITH_CLIENT:   {AppStatus.CLIENT_SHORTLISTED, AppStatus.CLIENT_REJECTED,
+                                     AppStatus.ASSESSMENT_PENDING, AppStatus.INTERVIEW_SCHEDULED},
+    AppStatus.CLIENT_SHORTLISTED:   {AppStatus.ASSESSMENT_PENDING, AppStatus.INTERVIEW_SCHEDULED},
+    # Revivable, exactly like REJECTED: a client changing their mind is a real event.
+    AppStatus.CLIENT_REJECTED:      {AppStatus.UNDER_REVIEW},
     AppStatus.ASSESSMENT_PENDING:   {AppStatus.ASSESSMENT_COMPLETED},
     AppStatus.ASSESSMENT_COMPLETED: {AppStatus.ASSESSMENT_PASSED, AppStatus.ASSESSMENT_FAILED},
     AppStatus.ASSESSMENT_PASSED:    {AppStatus.INTERVIEW_SCHEDULED},
@@ -1030,7 +1377,12 @@ FORWARD_TRANSITIONS = {
     # this edge a revoked candidate is stranded -- no live offer, yet unable to receive one.
     AppStatus.OFFER_GENERATED:      {AppStatus.OFFER_ACCEPTED, AppStatus.OFFER_DECLINED,
                                      AppStatus.SELECTED},
-    AppStatus.OFFER_ACCEPTED:       {AppStatus.PRE_ONBOARDING},
+    # Both edges are kept deliberately. A company that issues appointment letters routes
+    # through APPOINTMENT_LETTER_SENT; one that does not goes straight to onboarding as it
+    # always has. Removing the direct edge would force a workflow on every existing client.
+    AppStatus.OFFER_ACCEPTED:       {AppStatus.APPOINTMENT_LETTER_SENT,
+                                     AppStatus.PRE_ONBOARDING},
+    AppStatus.APPOINTMENT_LETTER_SENT: {AppStatus.PRE_ONBOARDING},
     AppStatus.PRE_ONBOARDING:       {AppStatus.JOINED},
     AppStatus.JOINED:               {AppStatus.EMPLOYEE_CREATED},
     # Parked and rejected candidates can be revived -- a hold that cannot be lifted is a
@@ -1060,18 +1412,20 @@ def can_transition(current, target) -> bool:
 # be visible in one place and missing from another.
 PIPELINE_COLUMNS = [
     ("applied",     "Applied",     [AppStatus.APPLIED, AppStatus.UNDER_REVIEW]),
-    ("shortlisted", "Shortlisted", [AppStatus.SHORTLISTED]),
+    ("shortlisted", "Shortlisted", [AppStatus.SHORTLISTED, AppStatus.SHARED_WITH_CLIENT,
+                                    AppStatus.CLIENT_SHORTLISTED]),
     ("assessment",  "Assessment",  [AppStatus.ASSESSMENT_PENDING, AppStatus.ASSESSMENT_COMPLETED,
                                     AppStatus.ASSESSMENT_PASSED, AppStatus.ASSESSMENT_FAILED]),
     ("interview",   "Interview",   [AppStatus.INTERVIEW_SCHEDULED, AppStatus.TECHNICAL_ROUND,
                                     AppStatus.MD_ROUND]),
     ("selected",    "Selected",    [AppStatus.SELECTED, AppStatus.OFFER_GENERATED,
-                                    AppStatus.OFFER_ACCEPTED]),
+                                    AppStatus.OFFER_ACCEPTED,
+                                    AppStatus.APPOINTMENT_LETTER_SENT]),
     ("onboarding",  "Onboarding",  [AppStatus.PRE_ONBOARDING, AppStatus.JOINED,
                                     AppStatus.EMPLOYEE_CREATED]),
     ("hold",        "On Hold",     [AppStatus.ON_HOLD]),
     ("rejected",    "Rejected",    [AppStatus.REJECTED, AppStatus.DUPLICATE,
-                                    AppStatus.OFFER_DECLINED]),
+                                    AppStatus.OFFER_DECLINED, AppStatus.CLIENT_REJECTED]),
 ]
 
 
@@ -1082,6 +1436,9 @@ class ScreenAction(str, Enum):
     DUPLICATE = "duplicate"
     REJECT    = "reject"
     FORWARD   = "forward"
+    # Phase 11-R, Item 4. Distinct from FORWARD on purpose: FORWARD assigns an internal
+    # owner and moves nobody, this sends the CV OUT to the hiring client for their verdict.
+    SHARE_WITH_CLIENT = "share_with_client"
 
 
 # action -> (target status or None, remark_required, recipient_required)
@@ -1094,6 +1451,9 @@ SCREEN_ACTIONS = {
     ScreenAction.DUPLICATE: (AppStatus.DUPLICATE, False, False),
     ScreenAction.REJECT:    (AppStatus.REJECTED, True, False),
     ScreenAction.FORWARD:   (None, False, True),
+    # Remark optional (a covering note to the client), recipient optional (the client
+    # contact is free text on the share record, not an ERP user).
+    ScreenAction.SHARE_WITH_CLIENT: (AppStatus.SHARED_WITH_CLIENT, False, False),
 }
 
 MAX_BULK_SCREEN = 200
@@ -1118,6 +1478,11 @@ JOURNEY_KINDS = {
 
 # Statuses that colour a journey event regardless of which action produced it.
 JOURNEY_STATUS_KINDS = {
+    # ── Phase 11-R ──
+    AppStatus.SHARED_WITH_CLIENT: "info",
+    AppStatus.CLIENT_SHORTLISTED: "success",
+    AppStatus.CLIENT_REJECTED: "reject",
+    AppStatus.APPOINTMENT_LETTER_SENT: "offer",
     AppStatus.SHORTLISTED: "success", AppStatus.ASSESSMENT_PASSED: "success",
     AppStatus.SELECTED: "success", AppStatus.OFFER_ACCEPTED: "success",
     AppStatus.JOINED: "success", AppStatus.EMPLOYEE_CREATED: "success",
@@ -1134,13 +1499,20 @@ JOURNEY_STATUS_KINDS = {
 # The 7-step rail shown above the timeline: (label, statuses that mean it is reached).
 JOURNEY_RAIL = [
     ("Applied",     {AppStatus.APPLIED, AppStatus.UNDER_REVIEW}),
-    ("Shortlisted", {AppStatus.SHORTLISTED}),
+    # Client sharing and the client's shortlist verdict belong to the shortlisting step --
+    # they are a decision ABOUT a shortlisted CV, not a new stage of the candidate's journey.
+    ("Shortlisted", {AppStatus.SHORTLISTED, AppStatus.SHARED_WITH_CLIENT,
+                     AppStatus.CLIENT_SHORTLISTED}),
     ("Assessment",  {AppStatus.ASSESSMENT_PENDING, AppStatus.ASSESSMENT_COMPLETED,
                      AppStatus.ASSESSMENT_PASSED, AppStatus.ASSESSMENT_FAILED}),
     ("Interview",   {AppStatus.INTERVIEW_SCHEDULED, AppStatus.TECHNICAL_ROUND,
                      AppStatus.MD_ROUND}),
     ("Selected",    {AppStatus.SELECTED}),
-    ("Offer",       {AppStatus.OFFER_GENERATED, AppStatus.OFFER_ACCEPTED}),
+    # The rail stays 7 steps. The appointment letter joins the Offer step rather than
+    # becoming an 8th: it is a second paper in the same "terms agreed" phase, and an 8th
+    # step would re-flow a rail every existing screen renders. (Stated per Item 3 §2.)
+    ("Offer",       {AppStatus.OFFER_GENERATED, AppStatus.OFFER_ACCEPTED,
+                     AppStatus.APPOINTMENT_LETTER_SENT}),
     ("Hired",       {AppStatus.PRE_ONBOARDING, AppStatus.JOINED, AppStatus.EMPLOYEE_CREATED}),
 ]
 
@@ -1163,6 +1535,13 @@ class CandidateIn(BaseModel):
     linkedin: Optional[str] = None
     cover_note: Optional[str] = None
     resume: Optional[UploadIn] = None
+    # ── Phase 11-R, Item 5 ── the manual-add path captures the same referral detail as the
+    # public form. A referral typed in by HR must be as reportable as one self-declared.
+    is_referral: bool = False
+    referred_by: Optional[str] = None
+    referral_source: Optional[ReferralSource] = None
+    referrer_employee_code: Optional[str] = None
+    referral_relation: Optional[str] = None
 
 
 class CandidateUpdate(BaseModel):
@@ -1193,6 +1572,9 @@ class ScreenIn(BaseModel):
     action: ScreenAction
     remarks: Optional[str] = None
     forward_to_id: Optional[str] = None
+    # Phase 11-R, Item 4: who at the client the CV went to. Free text, not a user reference
+    # — the client contact is a person at another organisation, not an ERP account.
+    client_contact: Optional[str] = None
 
 
 # =============================================================
@@ -1446,6 +1828,10 @@ EDITABLE_OFFER_STATUSES = {OfferStatus.DRAFT}
 FILLED_STATUSES = {
     AppStatus.OFFER_ACCEPTED, AppStatus.PRE_ONBOARDING,
     AppStatus.JOINED, AppStatus.EMPLOYEE_CREATED,
+    # Phase 11-R: an issued appointment letter means the vacancy is spoken for. Omitting it
+    # would make a requisition RE-OPEN the moment the letter went out, because the candidate
+    # leaves Offer Accepted for this stage.
+    AppStatus.APPOINTMENT_LETTER_SENT,
 }
 
 AUDIT_OFFER_CREATED  = "offer created"
@@ -1591,7 +1977,11 @@ MAX_REFERENCES = 5
 # legally reach the matching stage. It is also wrong in substance: onboarding collects PAN,
 # Aadhaar and bank details, and asking for those before the person has agreed to join
 # gathers sensitive identity data on someone who may still say no.
-ONBOARDABLE_STATUSES = {AppStatus.OFFER_ACCEPTED}
+#
+# Phase 11-R adds APPOINTMENT_LETTER_SENT: it sits strictly AFTER Offer Accepted, so the
+# consent argument above is satisfied a fortiori -- the candidate has agreed to join AND
+# been sent their appointment letter. Both are onboardable because the letter is optional.
+ONBOARDABLE_STATUSES = {AppStatus.OFFER_ACCEPTED, AppStatus.APPOINTMENT_LETTER_SENT}
 
 AUDIT_ONBOARD_STARTED    = "onboarding started"
 AUDIT_ONBOARD_SUBMITTED  = "pre-onboarding submitted"
@@ -1699,6 +2089,13 @@ STAGE_RANK = {
     AppStatus.ON_HOLD:              1,
     AppStatus.REJECTED:             1,   # ranked where they entered, not where they left
     AppStatus.SHORTLISTED:          2,
+    # ── Phase 11-R ── the client-share band sits WITH Shortlisted, not after it. Sharing a
+    # CV and getting a verdict is a decision about a shortlisted candidate; it does not move
+    # them further down the funnel, so it must not out-rank shortlisting. CLIENT_REJECTED is
+    # ranked where they ENTERED, the same treatment REJECTED gets at rank 1.
+    AppStatus.SHARED_WITH_CLIENT:   2,
+    AppStatus.CLIENT_SHORTLISTED:   2,
+    AppStatus.CLIENT_REJECTED:      2,
     AppStatus.ASSESSMENT_PENDING:   3,
     AppStatus.ASSESSMENT_COMPLETED: 3,
     AppStatus.ASSESSMENT_PASSED:    3,
@@ -1710,6 +2107,9 @@ STAGE_RANK = {
     AppStatus.OFFER_GENERATED:      6,
     AppStatus.OFFER_DECLINED:       6,   # they DID receive an offer -- that stage was reached
     AppStatus.OFFER_ACCEPTED:       7,
+    # Same band as Offer Accepted / Pre-Onboarding. Existing ranks are NOT renumbered, so
+    # the funnel stays monotonic and every Phase 10 figure keeps its meaning.
+    AppStatus.APPOINTMENT_LETTER_SENT: 7,
     AppStatus.PRE_ONBOARDING:       7,
     AppStatus.JOINED:               7,
     AppStatus.EMPLOYEE_CREATED:     8,
@@ -1769,6 +2169,10 @@ REPORT_ENTITIES = {
             ("application_status", "Stage"), ("request_no", "Requisition"),
             ("current_location", "Location"), ("total_experience", "Experience"),
             ("expected_ctc", "Expected CTC"), ("notice_period", "Notice"),
+            # ── Phase 11-R ── referral detail and the client's verdict travel with the
+            # candidate into every report and export automatically.
+            ("referred_by", "Referred by"), ("referral_source", "Referral source"),
+            ("client_share_status", "Client verdict"),
             ("applied_at", "Applied on"),
         ],
     },
@@ -1781,6 +2185,10 @@ REPORT_ENTITIES = {
             ("department_name", "Department"), ("vacancy", "Vacancy"),
             ("urgency_level", "Urgency"), ("approval_status", "Approval"),
             ("closing_status", "Status"), ("assignee_name", "Hiring manager"),
+            # ── Phase 11-R ── `budget_status` is DERIVED, not a stored field; the report
+            # service computes it per row (see hrms_analytics_service._derive).
+            ("client_name", "Client"), ("requisition_type", "Type"),
+            ("budget_status", "Budget"),
             ("required_date", "Required by"), ("created_at", "Raised on"),
         ],
     },
@@ -1831,6 +2239,11 @@ BREAKDOWN_FIELDS = {
     "department":  (COLL_REQUISITIONS, "department_name",  "Department"),
     "designation": (COLL_REQUISITIONS, "designation_name", "Designation"),
     "platform":    (COLL_JOB_POSTINGS, "platform",         "Platform"),
+    # ── Phase 11-R ── still an allow-list: `by` arrives in the query string and any value
+    # absent from this map is rejected, so a dotted path here cannot become arbitrary.
+    "client_status":   (COLL_CANDIDATES, "client_share.status", "Client verdict"),
+    "referral_source": (COLL_CANDIDATES, "referral_source",     "Referral source"),
+    "client":          (COLL_REQUISITIONS, "client_name",       "Client"),
 }
 
 MAX_REPORT_PAGE_SIZE = 100
@@ -1857,8 +2270,428 @@ class BreakdownBy(str, Enum):
     DEPARTMENT  = "department"
     DESIGNATION = "designation"
     PLATFORM    = "platform"
+    # ── Phase 11-R ──
+    CLIENT_STATUS   = "client_status"
+    REFERRAL_SOURCE = "referral_source"
+    CLIENT          = "client"
 
 
 class ExportFormat(str, Enum):
     CSV  = "csv"
     XLSX = "xlsx"
+
+
+# =============================================================
+# Phase 11-R, Item 1 - the public-link registry
+# =============================================================
+# Four kinds of public link already existed (apply / assessment / offer / onboarding), each
+# minted independently and surfaced ad-hoc, with no registry, no open tracking, no expiry
+# and no revocation. The registry does not CHANGE how any of them are generated -- it
+# records them, so there is one place to answer "what links are live, who opened them, and
+# how do I kill one".
+class LinkKind(str, Enum):
+    APPLY       = "apply"
+    ASSESSMENT  = "assessment"
+    OFFER       = "offer"
+    ONBOARDING  = "onboarding"
+    APPOINTMENT = "appointment"
+
+
+class LinkStatus(str, Enum):
+    ACTIVE   = "Active"
+    EXPIRED  = "Expired"     # past `expires_at` -- COMPUTED on read, never stored
+    REVOKED  = "Revoked"     # killed by a human
+    CONSUMED = "Consumed"    # its purpose completed (applied / submitted / responded)
+
+
+# kind -> the relative public path template. One declaration, so the Link Manager, the
+# copy-to-clipboard button and the registry can never disagree about a URL.
+LINK_PATHS = {
+    LinkKind.APPLY:       "/apply/{code}",
+    LinkKind.ASSESSMENT:  "/assess/{code}",
+    LinkKind.OFFER:       "/offer/{code}",
+    LinkKind.ONBOARDING:  "/onboard/{code}",
+    LinkKind.APPOINTMENT: "/appointment/{code}",
+}
+
+# Statuses in which a link still WORKS. Anything else is refused by assert_link_live().
+LIVE_LINK_STATUSES = {LinkStatus.ACTIVE, LinkStatus.CONSUMED}
+
+# Which service owns each kind, for reissue. A reissue must delegate to the owning service
+# so the fresh code is one that service knows about -- minting a code here that
+# hrms_offer_service has never heard of would produce a link that resolves to nothing.
+REISSUABLE_KINDS = {LinkKind.ASSESSMENT, LinkKind.OFFER, LinkKind.ONBOARDING,
+                    LinkKind.APPOINTMENT}
+
+def effective_link_status(doc: dict, today: str) -> str:
+    """A link's status as it actually is right now. Pure — no DB, no clock.
+
+    Expiry is COMPUTED, exactly as hrms_posting_service._effective_status computes a
+    posting's: a link past its expiry date reads Expired without a nightly job, and nothing
+    is written, so the stored value still shows what an operator set.
+
+    Revoked and Consumed are stored facts and outrank the date. A REVOKED link that is also
+    past expiry is Revoked -- the human decision is the more informative answer.
+
+    Tolerates a document with no status at all (written before this phase), which reads
+    Active: the registry must never lock out a link it simply does not know about.
+    """
+    doc = doc or {}
+    status = doc.get("status") or LinkStatus.ACTIVE.value
+    if status in (LinkStatus.REVOKED.value, LinkStatus.CONSUMED.value):
+        return status
+    # Both are 'YYYY-MM-DD' strings, which compare correctly lexically and are immune to
+    # server-timezone drift -- the same convention is_iso_date documents for every date here.
+    expires = doc.get("expires_at")
+    if expires and today and str(expires) < str(today):
+        return LinkStatus.EXPIRED.value
+    return status
+
+
+AUDIT_LINK_ISSUED   = "public link issued"
+AUDIT_LINK_REVOKED  = "public link revoked"
+AUDIT_LINK_REISSUED = "public link reissued"
+
+ENTITY_LINK = "link"
+
+
+class LinkRevokeIn(BaseModel):
+    reason: Optional[str] = None
+
+
+# =============================================================
+# Phase 11-R, Item 2 - documentation
+# =============================================================
+class DocumentOwnerType(str, Enum):
+    CANDIDATE = "candidate"
+    EMPLOYEE  = "employee"
+
+
+class DocumentCategory(str, Enum):
+    IDENTITY       = "Identity"
+    EDUCATIONAL    = "Educational"
+    EMPLOYMENT     = "Employment"
+    STATUTORY      = "Statutory"
+    COMPANY_ISSUED = "Company Issued"
+    OTHER          = "Other"
+
+
+class DocumentStatus(str, Enum):
+    PENDING      = "Pending"        # expected, nothing uploaded yet
+    UPLOADED     = "Uploaded"
+    UNDER_REVIEW = "Under Review"
+    VERIFIED     = "Verified"
+    REJECTED     = "Rejected"
+    EXPIRED      = "Expired"        # past `expiry_date` -- COMPUTED on read, never stored
+
+
+# Rejecting a document requires a reason, the same rule REQ_TRANSITIONS applies to a
+# rejected requisition: a refusal the owner cannot act on is not a decision, it is a wall.
+DOCUMENT_STATUSES_REQUIRING_REMARKS = {DocumentStatus.REJECTED}
+
+# A document is a small number of revisions, not a version-control system. Ten is generous
+# for "the scan was blurry, here it is again" and bounds one document's storage.
+MAX_DOCUMENT_VERSIONS = 10
+
+# How many days ahead counts as "expiring soon" on the register's filter.
+DOCUMENT_EXPIRY_SOON_DAYS = 30
+
+# Seeded for a company that has no document types yet, on first read. A sensible Indian
+# HR starting set -- HR edits it; nothing here is mandatory to keep.
+# (name, category, applies_to, mandatory, expires)
+DEFAULT_DOCUMENT_TYPES = [
+    ("PAN Card",              DocumentCategory.IDENTITY,       "both",      True,  False),
+    ("Aadhaar Card",          DocumentCategory.IDENTITY,       "both",      True,  False),
+    ("Passport",              DocumentCategory.IDENTITY,       "both",      False, True),
+    ("Address Proof",         DocumentCategory.IDENTITY,       "both",      False, False),
+    ("Photograph",            DocumentCategory.IDENTITY,       "both",      True,  False),
+    ("Degree Certificate",    DocumentCategory.EDUCATIONAL,    "both",      True,  False),
+    ("Experience Letter",     DocumentCategory.EMPLOYMENT,     "both",      False, False),
+    ("Relieving Letter",      DocumentCategory.EMPLOYMENT,     "both",      False, False),
+    ("Last 3 Payslips",       DocumentCategory.EMPLOYMENT,     "candidate", False, False),
+    ("Bank Proof",            DocumentCategory.STATUTORY,      "employee",  True,  False),
+    ("Offer Letter Signed",   DocumentCategory.COMPANY_ISSUED, "candidate", False, False),
+    ("Appointment Letter",    DocumentCategory.COMPANY_ISSUED, "candidate", False, False),
+]
+
+AUDIT_DOCUMENT_UPLOADED  = "document uploaded"
+AUDIT_DOCUMENT_VERSIONED = "document version added"
+AUDIT_DOCUMENT_UPDATED   = "document updated"
+AUDIT_DOCUMENT_STATUS    = "document status changed"
+AUDIT_DOCUMENT_DELETED   = "document deleted"
+AUDIT_DOCTYPE_CREATED    = "document type created"
+AUDIT_DOCTYPE_UPDATED    = "document type updated"
+AUDIT_DOCTYPE_DELETED    = "document type deleted"
+
+ENTITY_DOCUMENT      = "document"
+ENTITY_DOCUMENT_TYPE = "document_type"
+
+
+class DocumentTypeIn(BaseModel):
+    name: str
+    code: Optional[str] = None
+    category: DocumentCategory = DocumentCategory.OTHER
+    applies_to: str = "both"                 # candidate | employee | both
+    mandatory: bool = False
+    expires: bool = False
+    active: bool = True
+
+
+class DocumentTypeUpdate(BaseModel):
+    name: Optional[str] = None
+    code: Optional[str] = None
+    category: Optional[DocumentCategory] = None
+    applies_to: Optional[str] = None
+    mandatory: Optional[bool] = None
+    expires: Optional[bool] = None
+    active: Optional[bool] = None
+
+
+class DocumentIn(BaseModel):
+    """Upload a document, or a new version of one.
+
+    Supplying `doc_no` adds a VERSION to that document; omitting it creates a new one.
+    One endpoint for both because they are the same act from the operator's side -- "here
+    is the paperwork" -- and splitting them would make the client decide which it is.
+    """
+    owner_type: DocumentOwnerType
+    owner_id: str                            # uk | employee_code
+    type_id: str
+    doc_no: Optional[str] = None             # set to add a version to an existing document
+    file: UploadIn
+    issue_date: Optional[str] = None         # YYYY-MM-DD
+    expiry_date: Optional[str] = None        # YYYY-MM-DD
+    remarks: Optional[str] = None
+
+
+class DocumentUpdate(BaseModel):
+    """Metadata only. The FILE is immutable -- correcting it means a new version, so the
+    record of what was actually submitted at each point survives."""
+    issue_date: Optional[str] = None
+    expiry_date: Optional[str] = None
+    remarks: Optional[str] = None
+    type_id: Optional[str] = None
+
+
+class DocumentStatusIn(BaseModel):
+    status: DocumentStatus
+    remarks: Optional[str] = None            # REQUIRED when rejecting
+
+
+# =============================================================
+# Phase 11-R, Item 3 - appointment letters
+# =============================================================
+# Deliberately its own collection rather than extra statuses on hrms_offers. An offer and an
+# appointment letter are two artifacts with two lifecycles: the offer proposes terms and is
+# accepted or declined; the appointment letter confirms joining and is acknowledged. Folding
+# them together would mean one `status` field trying to describe two documents -- exactly
+# the "two sources of truth in one column" problem Phase 5 removed from candidates.
+class AppointmentStatus(str, Enum):
+    NOT_GENERATED = "Not Generated"          # the eligible-list state; never stored
+    GENERATED     = "Generated"              # drafted, not yet issued
+    SENT          = "Sent"
+    PENDING_ACK   = "Pending Acknowledgement"  # the candidate has opened it
+    ACKNOWLEDGED  = "Acknowledged"
+    CANCELLED     = "Cancelled"
+
+
+# Only a Generated letter is editable. Identical rule, and identical reasoning, to
+# EDITABLE_OFFER_STATUSES: once sent, the document the candidate is reading must not change
+# underneath them.
+EDITABLE_APPOINTMENT_STATUSES = {AppointmentStatus.GENERATED}
+
+# States in which the candidate's public link still resolves.
+LIVE_APPOINTMENT_STATUSES = {AppointmentStatus.SENT, AppointmentStatus.PENDING_ACK,
+                             AppointmentStatus.ACKNOWLEDGED}
+
+AUDIT_APPOINTMENT_GENERATED = "appointment letter generated"
+AUDIT_APPOINTMENT_EDITED    = "appointment letter edited"
+AUDIT_APPOINTMENT_SENT      = "appointment letter sent"
+AUDIT_APPOINTMENT_OPENED    = "appointment letter opened"
+AUDIT_APPOINTMENT_ACK       = "appointment letter acknowledged"
+AUDIT_APPOINTMENT_CANCELLED = "appointment letter cancelled"
+
+ENTITY_APPOINTMENT = "appointment"
+
+
+DEFAULT_APPOINTMENT_BODY = """Further to your acceptance of our offer, we are pleased to confirm your appointment as {designation} at {company}.
+
+Your appointment takes effect from {joining_date} and you will be based at {location}. Your annual cost to company will be {ctc}.
+
+This appointment is subject to the terms set out in your offer letter, to the satisfactory completion of any background verification still in progress, and to the submission of the documents requested by the HR team.
+
+Please confirm your acceptance of this appointment by acknowledging this letter below. We look forward to welcoming you to the team."""
+
+
+def render_appointment_body(template: str, *, designation: str, company: str, ctc: str,
+                            joining_date: str, location: str = "") -> str:
+    """Fill the placeholders in an appointment letter body.
+
+    Same mechanism, and the same reasoning, as render_offer_body: a plain format_map with a
+    defaulting dict, so operator-edited text containing an unknown placeholder renders
+    harmlessly rather than raising or executing anything.
+    """
+    class _Safe(dict):
+        def __missing__(self, key):
+            return "{" + key + "}"
+
+    try:
+        return (template or "").format_map(_Safe(
+            designation=designation or "", company=company or "", ctc=ctc or "",
+            joining_date=joining_date or "", location=location or ""))
+    except (ValueError, IndexError):
+        return template or ""
+
+
+class AppointmentIn(BaseModel):
+    uk: str
+    joining_date: Optional[str] = None       # YYYY-MM-DD; defaults from the accepted offer
+    designation: Optional[str] = None
+    department: Optional[str] = None
+    company_name: Optional[str] = None
+    location: Optional[str] = None
+    ctc: Optional[float] = None
+    content: Optional[str] = None            # defaults to DEFAULT_APPOINTMENT_BODY
+    signature: Optional[str] = None
+
+
+class AppointmentUpdate(BaseModel):
+    joining_date: Optional[str] = None
+    designation: Optional[str] = None
+    department: Optional[str] = None
+    company_name: Optional[str] = None
+    location: Optional[str] = None
+    ctc: Optional[float] = None
+    content: Optional[str] = None
+    signature: Optional[str] = None
+
+
+class AppointmentSendIn(BaseModel):
+    signature: str                           # the company's authorised signatory
+
+
+class AppointmentCancelIn(BaseModel):
+    reason: Optional[str] = None
+
+
+class PublicAppointmentAckIn(BaseModel):
+    """The candidate's acknowledgement. A typed signature is REQUIRED -- acknowledging an
+    appointment letter is an act with consequences, so it is attributable, exactly as
+    accepting an offer is."""
+    signature: str
+    note: Optional[str] = None
+
+
+# =============================================================
+# Phase 11-R, Item 4 - the client master + client sharing
+# =============================================================
+# CONFIRMED WITH THE BUSINESS (see PHASE_11R_REPORT §Decisions): this deployment is the
+# recruitment-AGENCY model. A "client" is the organisation a vacancy is being filled FOR,
+# held in its own master, and is NOT the same thing as `company_id` (which remains the ERP
+# tenant that OWNS the data). Every requisition may name one; scoping still runs on
+# company_id throughout, so the client dimension is a reporting axis, never a security one.
+class ClientStatus(str, Enum):
+    ACTIVE   = "Active"
+    INACTIVE = "Inactive"
+
+
+class ClientShareStatus(str, Enum):
+    PENDING     = "Pending"
+    SHORTLISTED = "Shortlisted"
+    REJECTED    = "Rejected"
+    ON_HOLD     = "On Hold"
+
+
+# The client's verdict -> where the candidate lands. Declared as data, so the verdict
+# handler is a lookup rather than a branch, and FORWARD_TRANSITIONS still decides legality.
+CLIENT_RESPONSE_STATUS = {
+    ClientShareStatus.SHORTLISTED: AppStatus.CLIENT_SHORTLISTED,
+    ClientShareStatus.REJECTED:    AppStatus.CLIENT_REJECTED,
+    ClientShareStatus.ON_HOLD:     AppStatus.ON_HOLD,
+    ClientShareStatus.PENDING:     None,      # no verdict yet -- the candidate does not move
+}
+
+AUDIT_CLIENT_CREATED   = "client created"
+AUDIT_CLIENT_UPDATED   = "client updated"
+AUDIT_CLIENT_DELETED   = "client deleted"
+AUDIT_CLIENT_SHARED    = "cv shared with client"
+AUDIT_CLIENT_RESPONSE  = "client verdict recorded"
+
+ENTITY_CLIENT = "client"
+
+
+class ClientIn(BaseModel):
+    name: str
+    code: Optional[str] = None
+    industry: Optional[str] = None
+    contact_name: Optional[str] = None
+    contact_email: Optional[str] = None
+    contact_phone: Optional[str] = None
+    address: Optional[str] = None
+    notes: Optional[str] = None
+    active: bool = True
+
+
+class ClientUpdate(BaseModel):
+    name: Optional[str] = None
+    code: Optional[str] = None
+    industry: Optional[str] = None
+    contact_name: Optional[str] = None
+    contact_email: Optional[str] = None
+    contact_phone: Optional[str] = None
+    address: Optional[str] = None
+    notes: Optional[str] = None
+    active: Optional[bool] = None
+
+
+class ClientResponseIn(BaseModel):
+    """Record the hiring client's verdict on a shared CV.
+
+    Recorded BY an HRMS user on the client's behalf -- there is deliberately no public
+    client portal in this phase, and inventing one would be a far larger surface than the
+    review asked for.
+    """
+    uk: str
+    status: ClientShareStatus
+    remarks: Optional[str] = None
+    responded_at: Optional[str] = None        # YYYY-MM-DD; defaults to now
+
+
+# =============================================================
+# Phase 11-R, Item 7 - sanctioned strength
+# =============================================================
+AUDIT_SANCTION_CREATED = "sanctioned strength set"
+AUDIT_SANCTION_UPDATED = "sanctioned strength updated"
+AUDIT_SANCTION_DELETED = "sanctioned strength removed"
+
+ENTITY_SANCTION = "sanctioned_strength"
+
+
+class SanctionedStrengthIn(BaseModel):
+    department_id: str
+    designation_id: str
+    sanctioned_count: int
+    effective_from: Optional[str] = None      # YYYY-MM-DD
+    notes: Optional[str] = None
+
+
+class SanctionedStrengthUpdate(BaseModel):
+    sanctioned_count: Optional[int] = None
+    effective_from: Optional[str] = None
+    notes: Optional[str] = None
+
+
+def is_over_sanction(sanctioned, actual: int, open_vacancies: int, requested: int) -> bool:
+    """Whether filling `requested` more seats would exceed the sanctioned strength.
+
+    `sanctioned is None` means no figure has ever been set for this position, which counts
+    as over-sanction: a headcount nobody has authorised is precisely the case that should be
+    escalated rather than waved through. Failing OPEN here would make the whole control
+    optional by omission.
+    """
+    if sanctioned is None:
+        return True
+    try:
+        return (int(actual) + int(open_vacancies) + int(requested)) > int(sanctioned)
+    except (TypeError, ValueError):
+        return True

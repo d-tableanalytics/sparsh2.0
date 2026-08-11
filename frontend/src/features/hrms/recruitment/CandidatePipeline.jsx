@@ -11,6 +11,7 @@ import HrmsScopeBar from '../common/HrmsScopeBar';
 import { HrmsLoading, HrmsError, HrmsEmpty } from '../common/HrmsStates';
 import {
   getCandidates, getCandidate, updateCandidate, deleteCandidate, createCandidate,
+  recordClientResponse,
 } from '../../../services/hrmsApi';
 import { CandidateJourneyModal } from './CandidateJourney';
 
@@ -75,6 +76,9 @@ const Drawer = ({ uk, onClose, onChanged }) => {
   const [error, setError] = useState(null);
   const [saving, setSaving] = useState(false);
   const [journey, setJourney] = useState(false);
+  // Phase 11-R, Item 4 — the client-verdict form.
+  const [verdict, setVerdict] = useState('');
+  const [verdictNote, setVerdictNote] = useState('');
 
   const canWrite = can(CAP.CANDIDATE_WRITE);
 
@@ -119,6 +123,24 @@ const Drawer = ({ uk, onClose, onChanged }) => {
       onClose();
     } catch (err) {
       showError(err?.response?.data?.detail || 'Could not delete.');
+    }
+  };
+
+  // ── Phase 11-R, Item 4 ── record the hiring client's verdict on a shared CV. The stage
+  // move that follows is decided SERVER-side from CLIENT_RESPONSE_STATUS and checked
+  // against the lifecycle graph, so this only submits the answer.
+  const saveVerdict = async () => {
+    try {
+      await recordClientResponse(
+        { uk, status: verdict, remarks: verdictNote.trim() || null }, scope,
+      );
+      showSuccess(`Client verdict recorded: ${verdict}`);
+      setVerdict('');
+      setVerdictNote('');
+      await load();
+      onChanged();
+    } catch (err) {
+      showError(err?.response?.data?.detail || 'Could not record the verdict.');
     }
   };
 
@@ -227,6 +249,78 @@ const Drawer = ({ uk, onClose, onChanged }) => {
               ))}
             </div>
 
+            {/* ── Phase 11-R, Item 5 ── the referral block, shown only when there is one. */}
+            {c.is_referral && (
+              <div className="p-3 rounded-xl border border-[var(--border)] bg-[var(--input-bg)]">
+                <p className="text-[10px] font-bold uppercase tracking-widest text-[var(--text-muted)]">
+                  Referral
+                </p>
+                <p className="mt-1 text-[12.5px] text-[var(--text-main)]">
+                  {c.referred_by}
+                  {c.referral_source && (
+                    <span className="text-[var(--text-muted)]"> · {c.referral_source}</span>
+                  )}
+                </p>
+                {c.referrer_name && (
+                  <p className="text-[11.5px] text-[var(--text-muted)]">
+                    Verified employee: {c.referrer_name}
+                    {c.referrer_employee_code && ` (${c.referrer_employee_code})`}
+                  </p>
+                )}
+              </div>
+            )}
+
+            {/* ── Phase 11-R, Item 4 ── record the client's verdict on a shared CV.
+                Entered by an HRMS user on the client's behalf: there is deliberately no
+                public client portal in this phase, which would be a second unauthenticated
+                surface with its own credentials and threat model. */}
+            {c.client_share?.shared_at && (
+              <div className="p-3 rounded-xl border border-[var(--border)] bg-[var(--input-bg)] space-y-2.5">
+                <div>
+                  <p className="text-[10px] font-bold uppercase tracking-widest text-[var(--text-muted)]">
+                    Shared with client
+                  </p>
+                  <p className="mt-1 text-[12.5px] text-[var(--text-main)]">
+                    Verdict: <b>{c.client_share.status || 'Pending'}</b>
+                    {c.client_share.client_contact && (
+                      <span className="text-[var(--text-muted)]">
+                        {' '}· {c.client_share.client_contact}
+                      </span>
+                    )}
+                  </p>
+                </div>
+
+                {can(CAP.CANDIDATE_SCREEN) && c.client_share.status === 'Pending' && (
+                  <div className="space-y-2">
+                    <select
+                      value={verdict}
+                      onChange={(e) => setVerdict(e.target.value)}
+                      className="w-full h-9 px-3 rounded-lg border border-[var(--border)] bg-[var(--bg-card)] text-[13px] text-[var(--text-main)]"
+                    >
+                      <option value="">Record the client&rsquo;s verdict…</option>
+                      <option value="Shortlisted">Shortlisted</option>
+                      <option value="Rejected">Rejected</option>
+                      <option value="On Hold">On hold</option>
+                    </select>
+                    <textarea
+                      value={verdictNote}
+                      onChange={(e) => setVerdictNote(e.target.value)}
+                      placeholder="The client's remarks (required to reject)"
+                      className="w-full h-16 px-3 py-2 rounded-lg border border-[var(--border)] bg-[var(--bg-card)] text-[13px] text-[var(--text-main)] resize-none"
+                    />
+                    <button
+                      type="button"
+                      disabled={!verdict || (verdict === 'Rejected' && !verdictNote.trim())}
+                      onClick={saveVerdict}
+                      className="h-8 px-3.5 rounded-lg bg-[var(--accent-indigo)] text-white text-[12px] font-bold disabled:opacity-50"
+                    >
+                      Record verdict
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+
             {c.cover_note && (
               <div>
                 <p className="text-[10px] font-bold uppercase tracking-widest text-[var(--text-muted)]">Note</p>
@@ -250,6 +344,11 @@ const AddModal = ({ onClose, onCreated }) => {
   const [form, setForm] = useState({
     candidate_name: '', can_email: '', can_contact: '', source: 'Referral',
     total_experience: '', qualification: '', expected_ctc: '',
+    // ── Phase 11-R, Item 5 ── the SAME referral fields the public form captures, validated
+    // by the same server-side resolver. A referral HR types onto a walk-in CV must be as
+    // reportable as one an applicant declared, or the referral figures count two things.
+    is_referral: false, referred_by: '', referral_source: '',
+    referrer_employee_code: '', referral_relation: '',
   });
   const [saving, setSaving] = useState(false);
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
@@ -314,6 +413,54 @@ const AddModal = ({ onClose, onCreated }) => {
           <p className="text-[11px] text-[var(--text-muted)]">
             Provide at least an email address or a phone number.
           </p>
+
+          {/* ── Phase 11-R, Item 5 ── collapsed by default, exactly as on the public form. */}
+          <div className="pt-2 border-t border-[var(--border)] space-y-3">
+            <label className="flex items-center gap-2 text-[12.5px] text-[var(--text-main)]">
+              <input
+                type="checkbox"
+                checked={form.is_referral}
+                onChange={(e) => setForm((f) => ({ ...f, is_referral: e.target.checked }))}
+              />
+              This candidate was referred
+            </label>
+
+            {form.is_referral && (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className={LABEL} htmlFor="c-refby">Referred by *</label>
+                  <input id="c-refby" value={form.referred_by}
+                    onChange={set('referred_by')} className={FIELD} />
+                </div>
+                <div>
+                  <label className={LABEL} htmlFor="c-refsrc">Referral source *</label>
+                  <select id="c-refsrc" value={form.referral_source}
+                    onChange={set('referral_source')} className={FIELD}>
+                    <option value="">Choose…</option>
+                    {['Employee', 'Ex-Employee', 'Consultant / Agency', 'Job Portal',
+                      'Social Media', 'Walk-in', 'Client', 'Other'].map((s) => (
+                        <option key={s} value={s}>{s}</option>
+                    ))}
+                  </select>
+                </div>
+                {form.referral_source === 'Employee' && (
+                  <div className="sm:col-span-2">
+                    <label className={LABEL} htmlFor="c-refcode">
+                      Referring employee code *
+                    </label>
+                    <input id="c-refcode" value={form.referrer_employee_code}
+                      onChange={set('referrer_employee_code')}
+                      placeholder="EMP-2026-014" className={FIELD} />
+                  </div>
+                )}
+                <div className="sm:col-span-2">
+                  <label className={LABEL} htmlFor="c-refrel">Relationship</label>
+                  <input id="c-refrel" value={form.referral_relation}
+                    onChange={set('referral_relation')} className={FIELD} />
+                </div>
+              </div>
+            )}
+          </div>
           <div className="flex justify-end gap-2 pt-1">
             <button type="button" onClick={onClose}
               className="h-9 px-4 rounded-lg border border-[var(--border)] text-[12px] font-bold text-[var(--text-muted)]">

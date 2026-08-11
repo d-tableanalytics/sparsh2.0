@@ -74,17 +74,25 @@ const RequisitionDrawer = ({ requisition: req, onClose, onChanged, onEdit }) => 
   const [busy, setBusy] = useState(false);
 
   const isPendingHr = req.approval_status === 'Pending HR Review';
+  // ── Phase 11-R, Item 7 ── the over-sanction rung between HR and MD.
+  const isPendingEsc = req.approval_status === 'Pending Escalation';
   const isPendingMd = req.approval_status === 'Pending MD Approval';
   const canReviewHr = can(CAP.REQUISITION_REVIEW_HR) && isPendingHr;
+  const canEscalate = can(CAP.REQUISITION_ESCALATE) && isPendingEsc;
   const canApproveMd = can(CAP.REQUISITION_APPROVE_MD) && isPendingMd;
-  const canEdit = can(CAP.REQUISITION_WRITE) && (isPendingHr || isPendingMd);
+  const canEdit = can(CAP.REQUISITION_WRITE) && (isPendingHr || isPendingEsc || isPendingMd);
+
+  // Item 6: the MD must explain an approval made over a budget disagreement. Derived from
+  // the server's own `budget_status`, not recomputed from the two figures here.
+  const budgetMismatch = req.budget_status === 'Mismatch';
 
   const act = async (action, remarks, salaryChange) => {
     setBusy(true);
     try {
       await actOnRequisition(req.request_no, { action, remarks, salary_change: salaryChange }, scope);
       showSuccess(
-        action === 'hr-approve' ? `${req.request_no} forwarded to MD`
+        action === 'hr-approve' ? `${req.request_no} forwarded for approval`
+        : action === 'escalate-approve' ? `${req.request_no} cleared this escalation step`
         : action === 'md-approve' ? `${req.request_no} approved — posting enabled`
         : `${req.request_no} rejected`);
       setDialog(null);
@@ -189,6 +197,29 @@ const RequisitionDrawer = ({ requisition: req, onClose, onChanged, onEdit }) => 
               </button>
             </div>
           )}
+          {canEscalate && (
+            <div className="p-3.5 rounded-xl border border-[var(--accent-orange)] bg-[var(--accent-orange-bg)] flex items-center justify-between gap-3 flex-wrap">
+              <div className="flex items-center gap-2 text-[12.5px] font-semibold text-[var(--accent-orange)]">
+                <Clock size={15} />
+                Over-sanction — awaiting your escalation approval
+                {req.escalation_chain?.length ? (
+                  <span className="font-normal">
+                    (level {req.escalation_level} of {req.escalation_chain.length})
+                  </span>
+                ) : null}
+              </div>
+              <button type="button" onClick={() => setDialog('esc')}
+                className="h-8 px-3.5 rounded-lg bg-[var(--accent-indigo)] text-white text-[12px] font-bold">
+                Approve / Reject
+              </button>
+            </div>
+          )}
+          {isPendingEsc && !canEscalate && (
+            <div className="p-3 rounded-xl border border-[var(--border)] bg-[var(--input-bg)] text-[12px] text-[var(--text-muted)]">
+              This requisition exceeds the sanctioned strength and is with the reporting
+              chain. MD approval is still required afterwards.
+            </div>
+          )}
           {isPendingHr && !canReviewHr && (
             <div className="p-3 rounded-xl border border-[var(--border)] bg-[var(--input-bg)] text-[12px] text-[var(--text-muted)]">
               Waiting on HR to review this requisition.
@@ -277,11 +308,27 @@ const RequisitionDrawer = ({ requisition: req, onClose, onChanged, onEdit }) => 
 
       {dialog === 'hr' && (
         <ApprovalDialog
-          title={`Forward ${req.request_no} to MD?`}
-          subtitle={`${req.designation_name} · ${req.vacancy} vacancy`}
-          approveLabel="Forward to MD" busy={busy}
+          title={`Forward ${req.request_no}?`}
+          subtitle={
+            req.sanction_snapshot?.is_over_sanction
+              ? 'Over sanctioned strength — this will route through the escalation chain'
+              : `${req.designation_name} · ${req.vacancy} vacancy`
+          }
+          approveLabel="Forward for approval" busy={busy}
+          requisition={req}
           onApprove={(remarks) => act('hr-approve', remarks)}
           onReject={(remarks) => act('hr-reject', remarks)}
+          onClose={() => setDialog(null)}
+        />
+      )}
+      {dialog === 'esc' && (
+        <ApprovalDialog
+          title={`Escalation approval — ${req.request_no}`}
+          subtitle={`${req.designation_name} · ${req.vacancy} vacancy · MD approval still required`}
+          approveLabel="Approve this step" busy={busy}
+          requisition={req}
+          onApprove={(remarks) => act('escalate-approve', remarks)}
+          onReject={(remarks) => act('escalate-reject', remarks)}
           onClose={() => setDialog(null)}
         />
       )}
@@ -290,6 +337,8 @@ const RequisitionDrawer = ({ requisition: req, onClose, onChanged, onEdit }) => 
           title={`Approve ${req.request_no}?`}
           subtitle={req.hr_remarks ? `HR remark: ${req.hr_remarks}` : `${req.designation_name} · ${req.vacancy} vacancy`}
           approveLabel="Approve" showSalary salaryDefault={req.offering_ctc ?? ''} busy={busy}
+          requisition={req}
+          requireRemarksToApprove={budgetMismatch}
           onApprove={(remarks, salary) => act('md-approve', remarks, salary)}
           onReject={(remarks) => act('md-reject', remarks)}
           onClose={() => setDialog(null)}

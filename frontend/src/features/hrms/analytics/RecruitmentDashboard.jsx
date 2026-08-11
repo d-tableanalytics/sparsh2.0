@@ -5,7 +5,7 @@ import HrmsPageHeader from '../common/HrmsPageHeader';
 import HrmsScopeBar from '../common/HrmsScopeBar';
 import { HrmsLoading, HrmsError } from '../common/HrmsStates';
 import {
-  getHrmsDashboard, getHrmsFunnel, getHrmsBreakdown,
+  getHrmsDashboard, getHrmsFunnel, getHrmsBreakdown, getHrmsPositions, getClients,
 } from '../../../services/hrmsApi';
 import { CARD, GRID_KPI, GRID_TWO, SECTION_TITLE, nf } from './analyticsKit';
 import {
@@ -26,6 +26,9 @@ const BREAKDOWNS = [
   { by: 'department', title: 'Requisitions by department' },
   { by: 'designation', title: 'Requisitions by role' },
   { by: 'platform', title: 'Job postings by platform' },
+  // ── Phase 11-R, Item 4 ──
+  { by: 'referral_source', title: 'Referral sources' },
+  { by: 'client_status', title: 'Client verdicts' },
 ];
 
 const RecruitmentDashboard = () => {
@@ -37,6 +40,21 @@ const RecruitmentDashboard = () => {
   const [breakdowns, setBreakdowns] = useState({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  // ── Phase 11-R, Item 4 ── the client-wise dropdown. Empty means "all clients", which is
+  // what surfaces the per-client comparison table instead of one client's figures.
+  const [clients, setClients] = useState([]);
+  const [clientId, setClientId] = useState('');
+  const [positions, setPositions] = useState(null);
+
+  useEffect(() => {
+    if (!companyId) return;
+    // Failing quietly is correct: a company that does not use the client master should get
+    // the dashboard it has always had, not an error banner about a feature it ignores.
+    getClients(scope)
+      .then(({ data: d }) => setClients(d?.clients || []))
+      .catch(() => setClients([]));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [companyId]);
 
   const load = useCallback(async () => {
     if (!companyId) { setLoading(false); return; }
@@ -46,16 +64,21 @@ const RecruitmentDashboard = () => {
       ...scope,
       date_from: range.from || undefined,
       date_to: range.to || undefined,
+      client_id: clientId || undefined,
     };
     try {
-      // One await for the two headline calls so the page paints complete rather than in
-      // two visible steps.
-      const [dash, fun] = await Promise.all([
+      // One await for the headline calls so the page paints complete rather than in
+      // several visible steps.
+      const [dash, fun, pos] = await Promise.all([
         getHrmsDashboard(params),
         getHrmsFunnel(params),
+        // The matrix is supporting detail — a failure there must not blank the KPIs above
+        // it, which are the reason the reader opened the page.
+        getHrmsPositions(params).catch(() => ({ data: null })),
       ]);
       setData(dash.data);
       setFunnel(fun.data);
+      setPositions(pos.data);
 
       const results = await Promise.all(
         BREAKDOWNS.map((b) => getHrmsBreakdown({ ...params, by: b.by })
@@ -71,7 +94,7 @@ const RecruitmentDashboard = () => {
       setLoading(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [companyId, range.from, range.to]);
+  }, [companyId, range.from, range.to, clientId]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -86,6 +109,30 @@ const RecruitmentDashboard = () => {
         actions={<RangePicker value={range} onChange={setRange} />}
       />
       <HrmsScopeBar />
+
+      {/* ── Phase 11-R, Item 4 — the client-wise dropdown ──
+          Rendered only when a client master exists, so a company that does not recruit for
+          clients never sees a filter with one option in it. "All clients" is not a wider
+          scope than the default — it IS the default, and it turns on the per-client
+          comparison table below. */}
+      {clients.length > 0 && (
+        <div className="flex items-center gap-2 flex-wrap">
+          <label htmlFor="d-client" className="text-[11px] font-bold uppercase tracking-widest text-[var(--text-muted)]">
+            Client
+          </label>
+          <select
+            id="d-client"
+            value={clientId}
+            onChange={(e) => setClientId(e.target.value)}
+            className="h-9 px-3 rounded-lg border border-[var(--border)] bg-[var(--input-bg)] text-[13px] text-[var(--text-main)]"
+          >
+            <option value="">All clients</option>
+            {clients.map((c) => (
+              <option key={c.client_id} value={c.client_id}>{c.name}</option>
+            ))}
+          </select>
+        </div>
+      )}
 
       {data?.scoped_to_own_requisitions && <ScopeNotice />}
 
@@ -163,6 +210,111 @@ const RecruitmentDashboard = () => {
               </section>
             </div>
           </div>
+
+          {/* ── Phase 11-R, Item 4 — the per-client comparison ──
+              Shown only in the "all clients" view: with one client selected the KPIs above
+              already ARE that client's figures, and a one-row comparison is noise. */}
+          {!clientId && data.client_comparison?.length > 0 && (
+            <section className={CARD}>
+              <p className={`${SECTION_TITLE} mb-3`}>Client comparison</p>
+              <div className="overflow-x-auto">
+                <table className="w-full text-[12.5px] min-w-[760px]">
+                  <thead>
+                    <tr className="text-[10.5px] font-bold uppercase tracking-widest text-[var(--text-muted)] border-b border-[var(--border)]">
+                      <th className="text-left py-2 pr-3">Client</th>
+                      <th className="text-right py-2 px-2">Reqs</th>
+                      <th className="text-right py-2 px-2">CVs</th>
+                      <th className="text-right py-2 px-2">Reviewed</th>
+                      <th className="text-right py-2 px-2">Shared</th>
+                      <th className="text-right py-2 px-2">Client OK</th>
+                      <th className="text-right py-2 px-2">Client no</th>
+                      <th className="text-right py-2 px-2">Selected</th>
+                      <th className="text-right py-2 pl-2">Joined</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {data.client_comparison.map((row) => (
+                      <tr key={row.client_id || 'none'} className="border-b border-[var(--border)] last:border-0">
+                        <td className="py-2 pr-3 font-semibold text-[var(--text-main)]">
+                          {row.client_name}
+                        </td>
+                        <td className="py-2 px-2 text-right">{nf(row.requisitions)}</td>
+                        <td className="py-2 px-2 text-right">{nf(row.total)}</td>
+                        <td className="py-2 px-2 text-right">{nf(row.reviewed)}</td>
+                        <td className="py-2 px-2 text-right">{nf(row.shared_with_client)}</td>
+                        <td className="py-2 px-2 text-right text-[var(--accent-green,var(--accent-indigo))]">
+                          {nf(row.client_shortlisted)}
+                        </td>
+                        <td className="py-2 px-2 text-right text-[var(--accent-red)]">
+                          {nf(row.client_rejected)}
+                        </td>
+                        <td className="py-2 px-2 text-right">{nf(row.selected)}</td>
+                        <td className="py-2 pl-2 text-right font-bold text-[var(--text-main)]">
+                          {nf(row.joinings)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          )}
+
+          {/* ── Phase 11-R, Item 4 — position-wise CV status matrix ──
+              Horizontally scrolling with a sticky first column: there is one column per
+              application status and that will always be wider than a screen. Only statuses
+              with a non-zero count anywhere are shown, so the table stays readable rather
+              than being mostly zeros. */}
+          {positions?.rows?.length > 0 && (
+            <section className={CARD}>
+              <p className={`${SECTION_TITLE} mb-3`}>Position-wise CV status</p>
+              <div className="overflow-x-auto">
+                <table className="w-full text-[12.5px] border-collapse">
+                  <thead>
+                    <tr className="text-[10.5px] font-bold uppercase tracking-widest text-[var(--text-muted)] border-b border-[var(--border)]">
+                      <th className="text-left py-2 pr-3 sticky left-0 bg-[var(--bg-card)] z-10 min-w-[190px]">
+                        Position
+                      </th>
+                      <th className="text-right py-2 px-2">Vac</th>
+                      <th className="text-right py-2 px-2">CVs</th>
+                      {positions.statuses
+                        .filter((s) => positions.rows.some((r) => r.counts[s] > 0))
+                        .map((s) => (
+                          <th key={s} className="text-right py-2 px-2 whitespace-nowrap">{s}</th>
+                        ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {positions.rows.map((row) => (
+                      <tr key={row.request_no} className="border-b border-[var(--border)] last:border-0">
+                        <td className="py-2 pr-3 sticky left-0 bg-[var(--bg-card)] z-10">
+                          <span className="font-semibold text-[var(--text-main)]">
+                            {row.designation || row.request_no}
+                          </span>
+                          <span className="block text-[11px] text-[var(--text-muted)]">
+                            {[row.request_no, row.department, row.client_name]
+                              .filter(Boolean).join(' · ')}
+                          </span>
+                        </td>
+                        <td className="py-2 px-2 text-right">{nf(row.vacancy)}</td>
+                        <td className="py-2 px-2 text-right font-bold text-[var(--text-main)]">
+                          {nf(row.totals.candidates)}
+                        </td>
+                        {positions.statuses
+                          .filter((s) => positions.rows.some((r) => r.counts[s] > 0))
+                          .map((s) => (
+                            <td key={s} className="py-2 px-2 text-right">
+                              {row.counts[s] ? nf(row.counts[s])
+                                : <span className="text-[var(--text-muted)]">—</span>}
+                            </td>
+                          ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          )}
 
           <div className={GRID_TWO}>
             {BREAKDOWNS.map(({ by, title }) => (

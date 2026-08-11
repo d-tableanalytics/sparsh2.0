@@ -30,7 +30,7 @@ from app.models.hrms import (
     AUDIT_ASSESSMENT_REVIEWED, AUDIT_ASSESSMENT_SENT, AUDIT_ASSESSMENT_SUBMITTED,
     AUDIT_STAGE_CHANGED, COLL_ASSESSMENTS, COLL_CANDIDATES, COLL_REQUISITIONS,
     ENTITY_ASSESSMENT, ENTITY_CANDIDATE, MAX_ASSESSMENT_ATTACHMENTS, SLOT_HR, SLOT_MANAGER,
-    AppStatus, AssessmentStatus, Decision, HrmsRole, can_transition, is_iso_date,
+    AppStatus, AssessmentStatus, Decision, HrmsRole, LinkKind, can_transition, is_iso_date,
     recommendation_for,
 )
 from app.services.hrms_audit_service import audit
@@ -242,6 +242,16 @@ async def send_assessment(actor: dict, company_id: str, payload: dict) -> dict:
         "created_at": now,
     }
     await coll.insert_one(dict(doc))
+
+    # Phase 11-R, Item 1: record the link in the registry, in the same request, immediately
+    # after the code is issued. Fire-and-forget by contract -- register_link never raises,
+    # so a registry problem can never stop an assessment going out.
+    from app.services.hrms_link_service import register_link
+    await register_link(
+        company_id=company_id, kind=LinkKind.ASSESSMENT, code=doc["access_code"],
+        target_type="candidate", target_id=assessment_no, actor=actor,
+        candidate_name=doc.get("candidate_name"), request_no=request_no,
+        expires_at=due or None)
 
     # Move the candidate into the assessment stage if the graph allows it from here.
     if can_transition(status, AppStatus.ASSESSMENT_PENDING.value):

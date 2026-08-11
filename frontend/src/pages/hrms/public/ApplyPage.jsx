@@ -60,6 +60,10 @@ const ApplyPage = () => {
     current_location: '', total_experience: '', qualification: '',
     current_company: '', current_ctc: '', expected_ctc: '', notice_period: '',
     linkedin: '', portfolio: '', cover_note: '', declaration: false,
+    // ── Phase 11-R, Item 5 ── referral capture. Collapsed by default and entirely
+    // optional, so the majority who were not referred see no extra fields at all.
+    is_referral: false, referred_by: '', referral_source: '',
+    referrer_employee_code: '', referral_relation: '',
   });
   const [resume, setResume] = useState(null);
   const [certificates, setCertificates] = useState([]);
@@ -118,6 +122,22 @@ const ApplyPage = () => {
     setError('');
     if (!form.declaration) {
       setError('Please confirm that the information provided is accurate.');
+      return;
+    }
+    // Phase 11-R, Item 5. These checks pre-empt a round trip; they do NOT replace the
+    // server's — every one of them is enforced again in hrms_referral_service, which is
+    // the only validation that counts for an untrusted form.
+    if (!form.referral_source) {
+      setError('Please tell us where you found this job.');
+      return;
+    }
+    if (form.is_referral && !form.referred_by.trim()) {
+      setError('Please enter the name of the person who referred you.');
+      return;
+    }
+    if (form.is_referral && form.referral_source === 'Employee'
+        && !form.referrer_employee_code.trim()) {
+      setError('Please enter the employee code of the colleague who referred you.');
       return;
     }
     setSubmitting(true);
@@ -342,6 +362,98 @@ const ApplyPage = () => {
                 <textarea id="a-note" rows={3} value={form.cover_note} onChange={set('cover_note')}
                   className="w-full px-3 py-2 rounded-lg border border-slate-300 bg-white text-[14px] text-slate-900 resize-none focus:border-slate-500 focus:outline-none" />
               </div>
+            </div>
+          </div>
+
+          {/* ── Phase 11-R, Item 5: "Where did you find this job?" ──
+              Mandatory, and the single reason this pipeline needs only ONE form link per
+              posting rather than one per platform: the source is captured from the
+              applicant instead of inferred from which URL they clicked.
+
+              PRIVACY: there is deliberately no employee picker, autocomplete or directory
+              search here. The applicant TYPES a code and the server resolves it; an
+              unresolvable code produces one generic message that never reveals whether it
+              exists. This page must not become an employee-directory oracle. */}
+          <div>
+            <h3 className="text-[12px] font-bold uppercase tracking-widest text-slate-400 mb-3">
+              Where did you find this job? *
+            </h3>
+            <div className="space-y-3">
+              <div>
+                <label className={LABEL} htmlFor="a-src">Platform or channel *</label>
+                <select
+                  id="a-src"
+                  required
+                  className={FIELD}
+                  value={form.referral_source}
+                  onChange={set('referral_source')}
+                >
+                  <option value="">Choose one…</option>
+                  <option value="Job Portal">Job portal (Naukri, Indeed, Foundit…)</option>
+                  <option value="Social Media">Social media (LinkedIn, Instagram…)</option>
+                  <option value="Employee">Referred by an employee</option>
+                  <option value="Ex-Employee">Referred by a former employee</option>
+                  <option value="Consultant / Agency">A consultant or agency</option>
+                  <option value="Client">A client of the company</option>
+                  <option value="Walk-in">Walk-in / notice board</option>
+                  <option value="Other">Somewhere else</option>
+                </select>
+              </div>
+
+              <label className="flex items-start gap-2.5 cursor-pointer">
+                <input
+                  type="checkbox"
+                  className="mt-1"
+                  checked={form.is_referral}
+                  onChange={set('is_referral')}
+                />
+                <span className="text-[13px] text-slate-600">
+                  Somebody referred me for this role
+                </span>
+              </label>
+
+              {form.is_referral && (
+                <div className="grid sm:grid-cols-2 gap-3 pt-1">
+                  <div>
+                    <label className={LABEL} htmlFor="a-refby">Who referred you? *</label>
+                    <input
+                      id="a-refby"
+                      className={FIELD}
+                      value={form.referred_by}
+                      onChange={set('referred_by')}
+                      placeholder="Their full name"
+                    />
+                  </div>
+                  <div>
+                    <label className={LABEL} htmlFor="a-refrel">How do you know them?</label>
+                    <input
+                      id="a-refrel"
+                      className={FIELD}
+                      value={form.referral_relation}
+                      onChange={set('referral_relation')}
+                      placeholder="Former colleague, friend…"
+                    />
+                  </div>
+                  {form.referral_source === 'Employee' && (
+                    <div className="sm:col-span-2">
+                      <label className={LABEL} htmlFor="a-refcode">
+                        Their employee code *
+                      </label>
+                      <input
+                        id="a-refcode"
+                        className={FIELD}
+                        value={form.referrer_employee_code}
+                        onChange={set('referrer_employee_code')}
+                        placeholder="EMP-2026-014"
+                      />
+                      <p className="text-[12px] text-slate-400 mt-1.5">
+                        Ask the person who referred you for their employee code. We use it
+                        only to credit the referral.
+                      </p>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           </div>
 

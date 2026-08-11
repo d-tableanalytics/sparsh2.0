@@ -1,9 +1,11 @@
 import React, { useEffect, useState } from 'react';
-import { X, FilePlus2 } from 'lucide-react';
+import { X, FilePlus2, AlertTriangle } from 'lucide-react';
 import { useNotification } from '../../../context/NotificationContext';
 import { useHrms } from '../HrmsContext';
-import { createRequisition, updateRequisition, getDepartments, getDesignations, getEmployees }
-  from '../../../services/hrmsApi';
+import {
+  createRequisition, updateRequisition, getDepartments, getDesignations, getEmployees,
+  getClients, getSanctionedPosition,
+} from '../../../services/hrmsApi';
 
 /**
  * HRMS ▸ raise / edit a hiring requisition.
@@ -44,7 +46,28 @@ const RequisitionFormModal = ({ existing, onClose, onSaved }) => {
     gender_preferred: existing?.gender_preferred || 'Any',
     employment_type: existing?.employment_type || 'Full-time',
     notes: existing?.notes || '',
+    // ── Phase 11-R, Item 4 ── which client this vacancy is for. Optional: an in-house
+    // requisition has no client, and so does every requisition raised before this phase.
+    client_id: existing?.client_id || '',
+    // ── Phase 11-R, Item 6 ── the two budget figures. Both optional; leaving them empty
+    // reproduces the pre-phase behaviour exactly (budget_status reads "Not Set").
+    budget_sanctioned_amount: existing?.budget_sanctioned_amount ?? '',
+    budget_sanctioned_by: existing?.budget_sanctioned_by || '',
+    budget_sanctioned_ref: existing?.budget_sanctioned_ref || '',
+    budget_sanctioned_on: existing?.budget_sanctioned_on || '',
+    budget_hod_amount: existing?.budget_hod_amount ?? '',
+    budget_hod_by: existing?.budget_hod_by || '',
+    budget_hod_on: existing?.budget_hod_on || '',
+    budget_remarks: existing?.budget_remarks || '',
+    // ── Phase 11-R, Item 7 ── replacement vs a genuinely new position.
+    requisition_type: existing?.requisition_type || 'New Position',
+    replacement_for_user_id: existing?.replacement_for_user_id || '',
+    replacement_reason: existing?.replacement_reason || '',
+    last_working_day: existing?.last_working_day || '',
   });
+  const [clients, setClients] = useState([]);
+  // The live sanctioned/actual/available readout for the chosen position.
+  const [sanction, setSanction] = useState(null);
   const [jd, setJd] = useState({
     title: existing?.jd?.title || '',
     responsibilities: existing?.jd?.responsibilities || '',
@@ -63,8 +86,46 @@ const RequisitionFormModal = ({ existing, onClose, onSaved }) => {
     getDepartments(scope).then(({ data }) => setDepartments((data?.departments || []).filter((d) => d.active))).catch(() => {});
     getDesignations(scope).then(({ data }) => setDesignations((data?.designations || []).filter((d) => d.active))).catch(() => {});
     getEmployees({ ...scope, limit: 500 }).then(({ data }) => setPeople(data?.employees || [])).catch(() => {});
+    // Phase 11-R, Item 4. Failing quietly is correct: a company that does not use the
+    // client master should not see an error on a form that works perfectly without it.
+    getClients(scope).then(({ data }) => setClients(data?.clients || [])).catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // ── Phase 11-R, Item 7 ── read the live sanction position whenever the department,
+  // designation or vacancy count changes, so the raiser is told BEFORE they submit that
+  // the request will be escalated. This is a HINT: the server re-evaluates the same figures
+  // at raise time and again at each approval step, and its answer is the one that decides.
+  useEffect(() => {
+    if (!form.department_id || !form.designation_id) {
+      setSanction(null);
+      return;
+    }
+    let cancelled = false;
+    getSanctionedPosition({
+      ...scope,
+      department_id: form.department_id,
+      designation_id: form.designation_id,
+      requested: Number(form.vacancy) || 1,
+    })
+      .then(({ data }) => { if (!cancelled) setSanction(data); })
+      .catch(() => { if (!cancelled) setSanction(null); });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [form.department_id, form.designation_id, form.vacancy]);
+
+  const isReplacement = form.requisition_type === 'Replacement';
+
+  // Derived on the client for display only, from the SAME rule the server applies
+  // (models.budget_status). The server's answer is what the chip and the approval gate
+  // actually read — this only avoids a round trip while typing.
+  const budgetState = (() => {
+    const a = form.budget_sanctioned_amount;
+    const b = form.budget_hod_amount;
+    if (a === '' && b === '') return 'Not Set';
+    if (a === '' || b === '') return 'Pending';
+    return Number(a) === Number(b) ? 'Matched' : 'Mismatch';
+  })();
 
   const submit = async (e) => {
     e.preventDefault();
@@ -74,12 +135,27 @@ const RequisitionFormModal = ({ existing, onClose, onSaved }) => {
       showError('Provide a Job Description — enter the key responsibilities.');
       return;
     }
+    // Phase 11-R, Item 7. Mirrors the server rule; the server still enforces it.
+    if (isReplacement && !form.replacement_for_user_id) {
+      showError('Name the employee being replaced, or switch this to a new position.');
+      return;
+    }
+    if (isReplacement && !form.replacement_reason.trim()) {
+      showError('Give the reason for the replacement.');
+      return;
+    }
     setSaving(true);
     try {
       const payload = {
         ...form,
         vacancy: Number(form.vacancy) || 1,
         offering_ctc: form.offering_ctc === '' ? null : Number(form.offering_ctc),
+        client_id: form.client_id || null,
+        budget_sanctioned_amount:
+          form.budget_sanctioned_amount === '' ? null : Number(form.budget_sanctioned_amount),
+        budget_hod_amount:
+          form.budget_hod_amount === '' ? null : Number(form.budget_hod_amount),
+        replacement_for_user_id: form.replacement_for_user_id || null,
       };
       if (isEdit) {
         await updateRequisition(existing.request_no, payload, scope);
@@ -192,6 +268,155 @@ const RequisitionFormModal = ({ existing, onClose, onSaved }) => {
             <label className={LABEL} htmlFor="r-skills">Required skills *</label>
             <textarea id="r-skills" rows={2} required value={form.essential_skills}
               onChange={set('essential_skills')} placeholder="Comma-separated" className={AREA} />
+          </div>
+
+          {/* ══ Phase 11-R, Item 7 — position & sanction ══ */}
+          <div className="pt-4 border-t border-[var(--border)] space-y-3">
+            <p className="text-[13px] font-bold text-[var(--text-main)]">Position &amp; sanction</p>
+
+            <div className="flex flex-wrap gap-4">
+              {['New Position', 'Replacement'].map((value) => (
+                <label key={value} className="flex items-center gap-2 text-[13px] text-[var(--text-main)]">
+                  <input
+                    type="radio"
+                    name="requisition_type"
+                    value={value}
+                    checked={form.requisition_type === value}
+                    onChange={set('requisition_type')}
+                  />
+                  {value}
+                </label>
+              ))}
+            </div>
+
+            {isReplacement && (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className={LABEL} htmlFor="r-repl">Replacing *</label>
+                  <select id="r-repl" value={form.replacement_for_user_id}
+                    onChange={set('replacement_for_user_id')} className={FIELD}>
+                    <option value="">Select…</option>
+                    {people.map((p) => <option key={p.user_id} value={p.user_id}>{p.name}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className={LABEL} htmlFor="r-lwd">Their last working day</label>
+                  <input id="r-lwd" type="date" value={form.last_working_day}
+                    onChange={set('last_working_day')} className={FIELD} />
+                </div>
+                <div className="sm:col-span-2">
+                  <label className={LABEL} htmlFor="r-reason">Reason for replacement *</label>
+                  <input id="r-reason" value={form.replacement_reason}
+                    onChange={set('replacement_reason')}
+                    placeholder="Resignation, transfer, end of contract…" className={FIELD} />
+                </div>
+              </div>
+            )}
+
+            {sanction && (
+              <div className={`rounded-lg border px-3.5 py-3 ${
+                sanction.is_over_sanction
+                  ? 'border-[var(--accent-amber,var(--accent-red))] bg-[var(--accent-amber-bg,var(--accent-red-bg))]'
+                  : 'border-[var(--border)] bg-[var(--input-bg)]'
+              }`}>
+                <div className="flex flex-wrap gap-x-6 gap-y-1 text-[12.5px]">
+                  <span className="text-[var(--text-muted)]">
+                    Sanctioned:{' '}
+                    <b className="text-[var(--text-main)]">
+                      {sanction.has_sanction ? sanction.sanctioned : 'not set'}
+                    </b>
+                  </span>
+                  <span className="text-[var(--text-muted)]">
+                    Filled: <b className="text-[var(--text-main)]">{sanction.actual}</b>
+                  </span>
+                  <span className="text-[var(--text-muted)]">
+                    Already committed:{' '}
+                    <b className="text-[var(--text-main)]">{sanction.open_requisitions}</b>
+                  </span>
+                  <span className="text-[var(--text-muted)]">
+                    Available:{' '}
+                    <b className="text-[var(--text-main)]">
+                      {sanction.available ?? '—'}
+                    </b>
+                  </span>
+                </div>
+                {sanction.is_over_sanction && (
+                  <p className="flex items-start gap-1.5 mt-2 text-[12.5px] font-semibold text-[var(--accent-amber,var(--accent-red))]">
+                    <AlertTriangle size={14} className="shrink-0 mt-0.5" />
+                    This requisition exceeds the sanctioned strength and will be escalated
+                    for approval. MD approval is mandatory.
+                  </p>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* ══ Phase 11-R, Items 4 & 6 — client and budget ══ */}
+          <div className="pt-4 border-t border-[var(--border)] space-y-3">
+            <p className="text-[13px] font-bold text-[var(--text-main)]">Client &amp; budget</p>
+
+            {clients.length > 0 && (
+              <div>
+                <label className={LABEL} htmlFor="r-client">Client</label>
+                <select id="r-client" value={form.client_id} onChange={set('client_id')} className={FIELD}>
+                  <option value="">In-house / no client</option>
+                  {clients.map((c) => (
+                    <option key={c.client_id} value={c.client_id}>{c.name}</option>
+                  ))}
+                </select>
+              </div>
+            )}
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label className={LABEL} htmlFor="r-bsanc">Budget sanctioned by management</label>
+                <input id="r-bsanc" type="number" min="0" value={form.budget_sanctioned_amount}
+                  onChange={set('budget_sanctioned_amount')} className={FIELD} />
+              </div>
+              <div>
+                <label className={LABEL} htmlFor="r-bhod">Budget approved by HOD</label>
+                <input id="r-bhod" type="number" min="0" value={form.budget_hod_amount}
+                  onChange={set('budget_hod_amount')} className={FIELD} />
+              </div>
+              <div>
+                <label className={LABEL} htmlFor="r-bref">Sanction reference</label>
+                <input id="r-bref" value={form.budget_sanctioned_ref}
+                  onChange={set('budget_sanctioned_ref')}
+                  placeholder="Approval note or minute number" className={FIELD} />
+              </div>
+              <div>
+                <label className={LABEL} htmlFor="r-bdate">Sanctioned on</label>
+                <input id="r-bdate" type="date" value={form.budget_sanctioned_on}
+                  onChange={set('budget_sanctioned_on')} className={FIELD} />
+              </div>
+            </div>
+
+            {budgetState !== 'Not Set' && (
+              <div className={`rounded-lg border px-3.5 py-2.5 text-[12.5px] ${
+                budgetState === 'Mismatch'
+                  ? 'border-[var(--accent-red)] bg-[var(--accent-red-bg)] text-[var(--accent-red)]'
+                  : 'border-[var(--border)] bg-[var(--input-bg)] text-[var(--text-muted)]'
+              }`}>
+                <b>Budget: {budgetState}.</b>{' '}
+                {budgetState === 'Mismatch' && (
+                  <>The two figures differ by{' '}
+                    {Math.abs(Number(form.budget_hod_amount) - Number(form.budget_sanctioned_amount))
+                      .toLocaleString('en-IN')}.{' '}
+                    This does not block approval, but HR, the MD and you will be notified,
+                    and the MD must record a remark when approving.
+                  </>
+                )}
+                {budgetState === 'Pending' && (
+                  <>Only one side has been recorded. The other approver will be notified.</>
+                )}
+              </div>
+            )}
+
+            <div>
+              <label className={LABEL} htmlFor="r-brem">Budget remarks</label>
+              <textarea id="r-brem" rows={2} value={form.budget_remarks}
+                onChange={set('budget_remarks')} className={AREA} />
+            </div>
           </div>
 
           {!isEdit && (

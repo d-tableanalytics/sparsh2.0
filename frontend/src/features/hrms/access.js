@@ -89,6 +89,34 @@ export const CAP = {
   // Separate from read on purpose: reading figures on screen and taking a file of personal
   // data off the system are different acts. A hiring manager has read, not export.
   REPORT_EXPORT: 'report.export',
+
+  // Phase 11-R — recruitment review enhancements
+  // Item 1: the public-link registry.
+  LINK_READ: 'link.read',
+  // Separate from read on purpose: revoking kills a live credential a candidate is holding.
+  LINK_MANAGE: 'link.manage',
+
+  // Item 2: documentation.
+  DOCUMENT_READ: 'document.read',
+  DOCUMENT_WRITE: 'document.write',
+  // Separate from write on purpose: collecting paperwork and ATTESTING to it are different
+  // acts. Sparsh support staff hold write and deliberately not verify.
+  DOCUMENT_VERIFY: 'document.verify',
+
+  // Item 3: appointment letters. Mirrors the offer capabilities exactly.
+  APPOINTMENT_READ: 'appointment.read',
+  APPOINTMENT_WRITE: 'appointment.write',
+  // Separate from write: issuing the letter commits the company to employing somebody.
+  APPOINTMENT_SEND: 'appointment.send',
+
+  // Item 4: the client master (recruitment-agency model — a client is NOT a tenant).
+  CLIENT_READ: 'client.read',
+  CLIENT_WRITE: 'client.write',
+
+  // Item 7: sanctioned strength + the over-sanction escalation ladder.
+  SANCTION_READ: 'sanction.read',
+  SANCTION_WRITE: 'sanction.write',
+  REQUISITION_ESCALATE: 'requisition.escalate',
 };
 
 /** Sparsh internal user rather than a client-side one. Same precedence the backend uses

@@ -287,9 +287,15 @@ async def main() -> None:
         section("Public application")
         # =================================================================
         def application(**over):
+            # `referral_source` became REQUIRED in Phase 11-R, Item 1: the public form now
+            # asks every applicant where they found the job, and that answer is the source
+            # data one tracked form is supposed to produce. It is enforced server-side
+            # because a client-side "required" attribute guarantees nothing about a request.
+            # Every real form submission carries it, so the fixture does too.
             base = {"candidate_name": "Asha Rao", "can_email": "Asha@Example.com",
                     "can_contact": "+91 98765 43210", "declaration": True,
-                    "total_experience": "4 years", "certificates": []}
+                    "total_experience": "4 years", "certificates": [],
+                    "referral_source": "Job Portal"}
             base.update(over)
             return base
 

@@ -188,8 +188,15 @@ async def main() -> None:
         # =================================================================
         section("The Offer-Accepted gate")
         # =================================================================
-        check("only Offer Accepted is onboardable",
-              M.ONBOARDABLE_STATUSES == {S.OFFER_ACCEPTED})
+        # Phase 11-R Item 3 adds APPOINTMENT_LETTER_SENT, which sits strictly AFTER Offer
+        # Accepted. The property this test actually guards is that onboarding cannot begin
+        # before the candidate has agreed to join -- so it is asserted as "every onboardable
+        # stage is at or past Offer Accepted", which is the rule, rather than as a pinned
+        # set, which was only its Phase 9 instance.
+        check("nothing before Offer Accepted is onboardable",
+              M.ONBOARDABLE_STATUSES == {S.OFFER_ACCEPTED, S.APPOINTMENT_LETTER_SENT}
+              and all(M.stage_rank(s) >= M.stage_rank(S.OFFER_ACCEPTED)
+                      for s in M.ONBOARDABLE_STATUSES))
         check("the graph agrees: Offer Accepted -> Pre-Onboarding",
               M.can_transition(S.OFFER_ACCEPTED, S.PRE_ONBOARDING))
         check("the graph refuses Selected -> Pre-Onboarding, which is why Selected is out",

@@ -320,7 +320,12 @@ async def main() -> None:
         # =================================================================
         d = await AN.dashboard(HR, COMPANY)
         kpi = {k["key"]: k["value"] for k in d["kpis"]}
-        check("8 KPI tiles", len(d["kpis"]) == 8)
+        # Phase 10 shipped 8 tiles; Phase 11-R Item 4 adds 7 more (CVs reviewed / selected /
+        # rejected, shared with client, client shortlisted, client rejections, joinings).
+        # The count is asserted as >= the Phase 10 set rather than pinned, so a later phase
+        # adding a tile does not fail a test about Phase 10's arithmetic -- the tiles that
+        # matter here are checked BY KEY on the lines below, which is the real contract.
+        check("at least Phase 10's 8 KPI tiles", len(d["kpis"]) >= 8)
         check("every KPI deep-links", all(k.get("link") for k in d["kpis"]))
         check("candidates = 15", kpi["candidates"] == 15)
         check("open requisitions = 2 (REQ-3 is Hired)", kpi["open_requisitions"] == 2)

@@ -35,6 +35,9 @@ from app.models.hrms import (
     MAX_BULK_SCREEN, PHONE_RE, PIPELINE_COLUMNS, SCREEN_ACTIONS, AppStatus, Cap, HrmsRole,
     ScreenAction, allowed_next_statuses, can_transition,
 )
+from app.models.hrms import (
+    AUDIT_CLIENT_RESPONSE, AUDIT_CLIENT_SHARED, CLIENT_RESPONSE_STATUS, ClientShareStatus,
+)
 from app.services.hrms_audit_service import audit
 from app.services.hrms_id_service import next_business_id
 from app.services.hrms_notify_service import notify_user
@@ -241,9 +244,22 @@ async def create_candidate(actor: dict, company_id: str, payload: dict) -> dict:
         if posting:
             doc["requires_assessment"] = bool(posting.get("requires_assessment"))
 
+    # Phase 11-R, Item 5: the SAME referral resolver the public form uses. A referral HR
+    # types onto a walk-in CV is validated and stored identically to a self-declared one,
+    # so the referral reporting counts one kind of thing.
+    from app.services.hrms_referral_service import resolve_referral
+    doc.update(await resolve_referral(payload, company_id))
+
     await get_collection(COLL_CANDIDATES).insert_one(dict(doc))
     await audit(actor, AUDIT_CANDIDATE_ADDED, ENTITY_CANDIDATE, uk,
                 f"{name} added manually", company_id)
+
+    if doc.get("referrer_user_id"):
+        from app.services.hrms_referral_service import notify_referrer
+        await notify_referrer(
+            doc, "Your referral was added",
+            f"{name}, whom you referred, has been added to the hiring pipeline.")
+
     return await get_candidate(actor, company_id, uk)
 
 
@@ -328,6 +344,10 @@ async def update_candidate(actor: dict, company_id: str, uk: str, payload: dict)
         # stage move must be distinguishable from an ordinary field edit.
         await audit(actor, AUDIT_STAGE_CHANGED, ENTITY_CANDIDATE, uk,
                     f"{stage_from} -> {stage_to}", company_id)
+        # Phase 11-R, Item 5: the referrer hears about the two milestones that matter to
+        # them -- selection and joining -- and nothing else.
+        from app.services.hrms_referral_service import notify_referral_milestone
+        await notify_referral_milestone(current, stage_to)
     other = sorted(k for k in updates if k not in ("updated_at", "application_status"))
     if other:
         await audit(actor, AUDIT_CANDIDATE_UPDATED, ENTITY_CANDIDATE, uk,
@@ -471,12 +491,37 @@ async def screen_candidates(actor: dict, company_id: str, payload: dict) -> dict
         updates["application_status"] = target_status
         if remarks:
             updates["screening_remarks"] = remarks
+
+        # Phase 11-R, Item 4: sharing a CV also OPENS a client-share record. The stage says
+        # where the candidate is; the sub-document holds who it went to and what came back.
+        # Written in the same update as the stage move, so the two can never disagree.
+        if action is ScreenAction.SHARE_WITH_CLIENT:
+            updates["client_share"] = {
+                "shared_at": now,
+                "shared_by": str(actor.get("_id") or ""),
+                "shared_by_name": _actor_name(actor),
+                "client_contact": clean_text(payload.get("client_contact"), limit=140),
+                "status": ClientShareStatus.PENDING.value,
+                "responded_at": None,
+                "remarks": remarks,
+            }
+            # Denormalised alongside it so REPORT_ENTITIES and the breakdowns can read a
+            # flat field -- reports project a fixed column list and cannot dig into a
+            # sub-document.
+            updates["client_share_status"] = ClientShareStatus.PENDING.value
+
         await coll.update_one(query, {"$set": updates})
         moved.append({"uk": uk, "status": target_status})
         await audit(actor, AUDIT_STAGE_CHANGED, ENTITY_CANDIDATE, uk,
                     f"{current_status} -> {target_status}", company_id)
         await audit(actor, AUDIT_SCREENED, ENTITY_CANDIDATE, uk,
                     f"{action.value}" + (f": {remarks}" if remarks else ""), company_id)
+        if action is ScreenAction.SHARE_WITH_CLIENT:
+            # Its own audit action, so "we sent this CV out" is findable in the journey
+            # without reading the prose of a generic screening line.
+            await audit(actor, AUDIT_CLIENT_SHARED, ENTITY_CANDIDATE, uk,
+                        clean_text(payload.get("client_contact"), limit=140)
+                        or "shared with the client", company_id)
 
     if action is ScreenAction.FORWARD and moved and recipient:
         await notify_user(
@@ -488,6 +533,94 @@ async def screen_candidates(actor: dict, company_id: str, payload: dict) -> dict
 
     return {"moved": moved, "skipped": skipped,
             "moved_count": len(moved), "skipped_count": len(skipped)}
+
+
+# -------------------------------------------------------------
+# Client sharing (Phase 11-R, Item 4)
+# -------------------------------------------------------------
+# The write path for client verdicts lives HERE, in the service that already owns screening,
+# rather than in hrms_analytics_service. Analytics is read-only by contract and putting a
+# write in it -- even a small one -- would end that guarantee for every future reader.
+async def record_client_response(actor: dict, company_id: str, payload: dict) -> dict:
+    """Record the hiring client's verdict on a CV that was shared with them.
+
+    Recorded BY an HRMS user on the client's behalf: there is deliberately no public client
+    portal in this phase. Building one would mean a second unauthenticated surface with its
+    own credentials, rate limits and threat model, which is far more than the review asked
+    for.
+
+    The verdict drives the candidate's stage through CLIENT_RESPONSE_STATUS -- a lookup
+    table, not a branch -- and FORWARD_TRANSITIONS still decides legality, so a verdict can
+    never move somebody somewhere the lifecycle forbids.
+    """
+    uk = (payload.get("uk") or "").strip()
+    if not uk:
+        raise HTTPException(status_code=422, detail="Select a candidate.")
+
+    current = await _require_visible(actor, company_id, uk)
+    share = current.get("client_share") or {}
+    if not share.get("shared_at"):
+        raise HTTPException(
+            status_code=409,
+            detail=(f"{current.get('candidate_name')}'s CV has not been shared with a "
+                    f"client, so there is no verdict to record."))
+
+    raw = getattr(payload.get("status"), "value", payload.get("status"))
+    try:
+        verdict = ClientShareStatus(raw)
+    except ValueError:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Verdict must be one of: "
+                   f"{', '.join(s.value for s in ClientShareStatus)}.")
+
+    remarks = clean_text(payload.get("remarks"), limit=2000)
+    if verdict is ClientShareStatus.REJECTED and not remarks:
+        # Same rule a rejection carries everywhere else in this module: a refusal the
+        # recruiter cannot explain to the candidate is not usable feedback.
+        raise HTTPException(
+            status_code=422, detail="Record the client's reason for rejecting.")
+
+    now = datetime.now(timezone.utc)
+    responded_at = payload.get("responded_at") or now
+    updates = {
+        "client_share.status": verdict.value,
+        "client_share.responded_at": responded_at,
+        "client_share.remarks": remarks,
+        "client_share.recorded_by": str(actor.get("_id") or ""),
+        "client_share_status": verdict.value,
+        "updated_at": now,
+    }
+
+    # The stage move, if this verdict implies one and the graph permits it.
+    target = CLIENT_RESPONSE_STATUS.get(verdict)
+    stage_from = current.get("application_status")
+    stage_to = None
+    if target is not None and can_transition(stage_from, target.value):
+        updates["application_status"] = target.value
+        stage_to = target.value
+
+    await get_collection(COLL_CANDIDATES).update_one(
+        {"uk": uk, "company_id": str(company_id)}, {"$set": updates})
+
+    await audit(actor, AUDIT_CLIENT_RESPONSE, ENTITY_CANDIDATE, uk,
+                f"client verdict: {verdict.value}" + (f" — {remarks}" if remarks else ""),
+                company_id)
+    if stage_to:
+        await audit(actor, AUDIT_STAGE_CHANGED, ENTITY_CANDIDATE, uk,
+                    f"{stage_from} -> {stage_to}", company_id)
+
+    # Tell whoever shared it. They are waiting on this answer and nobody watches a record
+    # they were not told changed -- the gap Phase 3 closed for requisitions.
+    if share.get("shared_by"):
+        await notify_user(
+            share["shared_by"],
+            f"Client verdict: {current.get('candidate_name')} — {verdict.value}",
+            f"The client responded on {uk}." + (f" Note: {remarks}" if remarks else ""),
+            kind="success" if verdict is ClientShareStatus.SHORTLISTED else "info",
+            link="/hrms/candidates")
+
+    return await get_candidate(actor, company_id, uk)
 
 
 # -------------------------------------------------------------
@@ -555,6 +688,16 @@ async def get_journey(actor: dict, company_id: str, uk: str) -> dict:
             "source": candidate.get("source"),
             "request_no": candidate.get("request_no"),
             "applied_at": candidate.get("applied_at") or candidate.get("created_at"),
+            # ── Phase 11-R ── the referral and client-share context the journey screen
+            # renders alongside the timeline. Read with `.get`, so a candidate created
+            # before this phase simply reports nulls rather than breaking the view.
+            "is_referral": bool(candidate.get("is_referral")),
+            "referred_by": candidate.get("referred_by"),
+            "referral_source": candidate.get("referral_source"),
+            "referrer_name": candidate.get("referrer_name"),
+            "referrer_employee_code": candidate.get("referrer_employee_code"),
+            "referral_relation": candidate.get("referral_relation"),
+            "client_share": candidate.get("client_share"),
         },
         "rail": rail,
         "reached": reached,

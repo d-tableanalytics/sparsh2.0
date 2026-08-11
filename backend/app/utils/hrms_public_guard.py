@@ -56,6 +56,10 @@ RATE_LIMITS = {
     # generous; submitting is tight because it is a once-only act.
     "onboard-view":   (40, 60),      # 40 per minute per IP
     "onboard-submit": (10, 3600),    # 10 submissions per hour per IP
+    # Phase 11-R: an appointment letter is read like an offer (repeatedly) and acknowledged
+    # once, so the same generous-view / tight-act split applies.
+    "appointment-view": (40, 60),    # 40 per minute per IP
+    "appointment-ack":  (10, 3600),  # 10 acknowledgements per hour per IP
 }
 
 # Deliberately vague: a public error must never reveal whether a code exists, who applied,
@@ -190,6 +194,56 @@ def validate_access_code(code: str) -> str:
     if not ACCESS_CODE_RE.match(code):
         raise HTTPException(status_code=404, detail=INVALID_LINK)
     return code
+
+
+async def assert_link_live(code: str) -> None:
+    """Refuse a REVOKED or EXPIRED public link (Phase 11-R, Item 1).
+
+    Called by every public handler BEFORE it does any work, which is what makes revocation
+    real rather than cosmetic. A registry that merely displayed a "Revoked" chip while the
+    link kept serving would be worse than no registry at all.
+
+    Three properties worth stating:
+
+    1. **Legacy links are never locked out.** A code with no registry row -- every link
+       issued before this phase -- reads as live and passes. Failing closed here would break
+       every outstanding offer and onboarding link the moment this shipped, which is not a
+       trade a hiring system gets to make.
+
+    2. **The error is the EXISTING vague one.** A revoked link answers with exactly the same
+       CLOSED_LINK message a finished posting gives, so the endpoint cannot be used to
+       distinguish "this was withdrawn from you specifically" from "this role is filled".
+
+    3. **It fails OPEN on infrastructure trouble**, matching enforce_rate_limit. If the
+       registry is unreachable, a candidate can still complete their onboarding form; the
+       access code itself remains 128 bits of protection.
+    """
+    if not code:
+        return
+    try:
+        from datetime import datetime as _dt
+        from app.db.mongodb import get_collection
+        from app.models.hrms import (
+            COLL_LINKS, LIVE_LINK_STATUSES, effective_link_status,
+        )
+        doc = await get_collection(COLL_LINKS).find_one({"code": code})
+        if not doc:
+            return                                   # legacy / unregistered — see (1)
+        today = _dt.now(timezone.utc).strftime("%Y-%m-%d")
+        status = effective_link_status(doc, today)
+        live = {s.value for s in LIVE_LINK_STATUSES}
+    except Exception as e:
+        # Catches HTTPException too, deliberately. `get_db()` raises HTTPException(503) when
+        # Mongo is unreachable, so re-raising HTTPException here would turn every public
+        # page into a 503 the moment the database hiccuped -- a bookkeeping lookup taking
+        # down the applicant-facing surface is exactly the failure mode this guard must not
+        # have. The intentional 410 below is raised OUTSIDE this block, so it is unaffected.
+        print(f"[WARN] HRMS link-status check unavailable ({code}): {e}")
+        return                                       # fail open — see (3)
+
+    if status not in live:
+        # 410 Gone, matching how a closed posting answers: the link was real, this is over.
+        raise HTTPException(status_code=410, detail=CLOSED_LINK)
 
 
 def decode_upload(upload, *, label: str = "File") -> Tuple[bytes, str, str]:

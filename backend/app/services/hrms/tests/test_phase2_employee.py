@@ -63,6 +63,51 @@ class FakeCursor:
         return self._docs[:n] if n else self._docs
 
 
+def _dotted_get(doc, key, default=None):
+    """Read `a.b.c` out of a nested document, the way Mongo resolves a dotted field path.
+
+    Added in Phase 11-R: the candidate's `client_share` sub-document is queried and grouped
+    on `client_share.status`. A fake that only did `doc.get("client_share.status")` would
+    return None for every real document and let a broken aggregation pass its tests.
+    """
+    if "." not in key:
+        return doc.get(key, default)
+    cursor = doc
+    for part in key.split("."):
+        if not isinstance(cursor, dict) or part not in cursor:
+            return default
+        cursor = cursor[part]
+    return cursor
+
+
+def _dotted_set(doc, key, value):
+    """Write `a.b.c` into a nested document, creating intermediate dicts as Mongo does."""
+    if "." not in key:
+        doc[key] = value
+        return
+    parts = key.split(".")
+    cursor = doc
+    for part in parts[:-1]:
+        nxt = cursor.get(part)
+        if not isinstance(nxt, dict):
+            nxt = {}
+            cursor[part] = nxt
+        cursor = nxt
+    cursor[parts[-1]] = value
+
+
+def _dotted_has(doc, key):
+    """Whether a dotted path is PRESENT (as distinct from present-and-null)."""
+    if "." not in key:
+        return key in doc
+    cursor = doc
+    for part in key.split("."):
+        if not isinstance(cursor, dict) or part not in cursor:
+            return False
+        cursor = cursor[part]
+    return True
+
+
 def _matches(doc, query):
     """Support the operator subset the service actually uses."""
     for key, cond in query.items():
@@ -74,12 +119,12 @@ def _matches(doc, query):
             if not any(_matches(doc, c) for c in cond):
                 return False
             continue
-        val = doc.get(key)
+        val = _dotted_get(doc, key)
         if isinstance(cond, dict):
             # $exists compares against key PRESENCE, not value -- an onboarding-created
             # employee profile omits `user_id` entirely rather than storing null, and the
             # two must not be conflated (a null value is still indexed in Mongo).
-            if "$exists" in cond and (key in doc) != bool(cond["$exists"]):
+            if "$exists" in cond and _dotted_has(doc, key) != bool(cond["$exists"]):
                 return False
             if "$ne" in cond and val == cond["$ne"]:
                 return False
@@ -155,14 +200,15 @@ class FakeCollection:
                 field = key[1:]
                 buckets = {}
                 for d in docs:
-                    bucket = buckets.setdefault(d.get(field), {"_id": d.get(field)})
+                    value = _dotted_get(d, field)
+                    bucket = buckets.setdefault(value, {"_id": value})
                     for out, acc in spec.items():
                         if out == "_id":
                             continue
                         if "$sum" not in acc:
                             raise NotImplementedError(f"FakeCollection accumulator {acc!r}")
                         amount = acc["$sum"]
-                        amount = (d.get(amount[1:]) or 0) if isinstance(amount, str) else amount
+                        amount = (_dotted_get(d, amount[1:]) or 0)                             if isinstance(amount, str) else amount
                         bucket[out] = bucket.get(out, 0) + amount
                 docs = list(buckets.values())
             elif op == "$sort":
@@ -186,7 +232,8 @@ class FakeCollection:
             doc = {}
             doc.update(update.get("$setOnInsert", {}))
             self.docs.append(doc)
-        doc.update(update.get("$set", {}))
+        for field, value in (update.get("$set") or {}).items():
+            _dotted_set(doc, field, value)
         for field, value in (update.get("$push") or {}).items():
             target = doc.setdefault(field, [])
             if isinstance(value, dict) and "$each" in value:
@@ -196,6 +243,19 @@ class FakeCollection:
         for field in (update.get("$unset") or {}):
             doc.pop(field, None)
         return type("R", (), {"matched_count": 1, "modified_count": 1})()
+
+    async def update_many(self, query, update):
+        """Added in Phase 11-R: a rename on a master must follow through to every row that
+        denormalised it (document types, clients). Without this the fake would silently do
+        nothing and the propagation would look correct in tests but not in production."""
+        matched = [d for d in self.docs if _matches(d, query)]
+        for doc in matched:
+            for field, value in (update.get("$set") or {}).items():
+                _dotted_set(doc, field, value)
+            for field in (update.get("$unset") or {}):
+                doc.pop(field, None)
+        return type("R", (), {"matched_count": len(matched),
+                              "modified_count": len(matched)})()
 
     async def delete_one(self, query):
         doc = await self.find_one(query)
@@ -214,6 +274,12 @@ class FakeCollection:
             self.docs.append(doc)
         for k, v in update.get("$inc", {}).items():
             doc[k] = doc.get(k, 0) + v
+        # Real Mongo applies $set in the same atomic operation as $inc; a fake that
+        # silently dropped it would let a service that combines the two pass here and fail
+        # in production. Added in Phase 11-R, when hrms_link_service.record_open became the
+        # first caller to use both together.
+        for field, value in (update.get("$set") or {}).items():
+            _dotted_set(doc, field, value)
         return doc
 
 

@@ -19,10 +19,12 @@ const HrmsScopeBar = () => {
 
   if (!canSwitchCompany) {
     const only = companies[0];
+    // A chip rather than bare text: it sits beside a solid primary button, and unframed
+    // text next to one reads as a stray label instead of the scope the screen is showing.
     return (
-      <div className="flex items-center gap-2 text-[12px] text-[var(--text-muted)]">
-        <Building2 size={14} />
-        <span className="font-bold text-[var(--text-main)]">{only?.name}</span>
+      <div className="h-10 px-3 rounded-xl border border-[var(--border)] bg-[var(--bg-card)] flex items-center gap-2 text-[12px]">
+        <Building2 size={14} className="text-[var(--text-muted)] shrink-0" />
+        <span className="font-bold text-[var(--text-main)] truncate max-w-[180px]">{only?.name}</span>
       </div>
     );
   }

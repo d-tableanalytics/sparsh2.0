@@ -226,3 +226,61 @@ lines were restored alongside `delegation_enabled` (all three coexist) and the g
 asserts all four module flags stay declared. See PHASE_10_REPORT §3 Finding #2.
 
 **No new out-of-scope findings in Phases 9 or 10.** The register stands at OOS-001…005.
+
+---
+
+## Status update — Phase 11-R (2026-08-11)
+
+**No new out-of-scope findings.** The register stands at OOS-001…005.
+
+Phase 11-R touched no module outside HRMS. Its full shared-surface footprint is two
+files, both already on the Phase 1 list above and both extended additively:
+
+| File | Phase 11-R change |
+|---|---|
+| `frontend/src/App.jsx` | 7 new imports; 1 new public route (`/appointment/:code`); 6 new child routes inside the existing `/hrms` block. No pre-existing route line altered. |
+| `frontend/src/components/layout/Sidebar.jsx` | 2 icon imports; 2 entries appended to `HRMS_WORKSPACE`; 4 entries appended to `hrmsSubmodules`. No other nav group touched. |
+
+Three observations were made while working and are recorded here rather than acted on,
+because fixing any of them would mean editing a module Phase 11-R has no mandate over.
+
+### OOS-006 — `get_db()` raises `HTTPException(503)`, which makes every caller's error handling a trap
+
+`backend/app/db/mongodb.py:181` raises a **transport-layer** exception type for an
+**infrastructure** failure. Any service that legitimately wants to swallow a database
+outage — every fire-and-forget path in this codebase — must write `except Exception`, and
+any that writes the more precise-looking `except HTTPException: raise` silently converts a
+Mongo hiccup into a user-facing 503.
+
+Phase 11-R hit this exactly once, in `assert_link_live`: the guard re-raised the 503 and
+turned every candidate-facing public page into an error whenever the database was
+unreachable. It was caught by `test_phase4_public_security` and fixed **inside HRMS** by
+catching bare `Exception` with a comment explaining why. The general hazard remains for
+every other module.
+
+*Suggested fix (not made):* raise a plain `RuntimeError`/`ConnectionError` from `get_db()`
+and let the routing layer translate it, so "the database is down" and "this request is
+forbidden" stop sharing a type.
+
+### OOS-007 — the HRMS test double silently ignored operators real Mongo supports
+
+`FakeCollection` in `test_phase2_employee.py` — imported by every HRMS test file — did not
+implement `$set` inside `find_one_and_update`, did not implement `update_many` at all, and
+resolved dotted field paths (`client_share.status`) as literal keys. Each gap fails
+**silently**: the service under test appears to work while the write goes nowhere.
+
+Fixed inside HRMS (the file is an HRMS test), and noted here because it is a pattern worth
+watching: a fake that no-ops on an unsupported operator is worse than one that raises. The
+`aggregate()` implementation in the same class gets this right — it raises
+`NotImplementedError` for any stage it does not know — and the write methods should
+eventually do the same.
+
+### OOS-008 — `POST /hrms/public/apply/{code}` gained a required field
+
+Not a finding against another module, recorded here for visibility because it is the one
+**contract change** in this phase. Item 1 required the "where did you find this job" block
+to be mandatory, and a mandatory rule that is only enforced in the browser is not enforced
+at all (§3.5). `referral_source` is therefore now required server-side.
+
+Any integration that posts applications directly — there is none known — would need to send
+it. The in-repo caller (`ApplyPage.jsx`) and the Phase 4 test fixture were both updated.

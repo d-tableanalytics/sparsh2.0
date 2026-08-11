@@ -206,6 +206,104 @@ export const getHrmsBreakdown = (params) => api.get('/hrms/analytics/breakdown',
 export const getHrmsReport = (entity, params) =>
   api.get(`/hrms/reports/${entity}`, { params });
 
+/** Position-wise CV status matrix (Phase 11-R, Item 4): one row per requisition, one
+ *  column per stage. Same scoping and caps as every other analytics read. */
+export const getHrmsPositions = (params) => api.get('/hrms/analytics/positions', { params });
+
+// ══════════════════════════════════════════════════════════════
+// Phase 11-R — recruitment review enhancements
+// ══════════════════════════════════════════════════════════════
+
+// ── Item 1: the public-link registry ──
+/** Every public link this company has issued, with open counts and live status. */
+export const getHrmsLinks = (params) => api.get('/hrms/links', { params });
+export const getHrmsLink = (linkId, params) => api.get(`/hrms/links/${linkId}`, { params });
+/** Kill a live link. Enforced server-side by assert_link_live, not merely displayed. */
+export const revokeHrmsLink = (linkId, payload, params) =>
+  api.post(`/hrms/links/${linkId}/revoke`, payload, { params });
+/** Mint a fresh credential and revoke the old one. Apply links cannot be reissued. */
+export const reissueHrmsLink = (linkId, params) =>
+  api.post(`/hrms/links/${linkId}/reissue`, {}, { params });
+
+/** Absolute URL for a registry row. The registry stores the relative `path`, so this is
+ *  the one place that knows how to make it clickable — same role applyUrlFor plays. */
+export const linkUrlFor = (path) => `${window.location.origin}${path || ''}`;
+
+// ── Item 2: documentation ──
+export const getDocumentTypes = (params) => api.get('/hrms/document-types', { params });
+export const createDocumentType = (payload, params) =>
+  api.post('/hrms/document-types', payload, { params });
+export const updateDocumentType = (id, payload, params) =>
+  api.patch(`/hrms/document-types/${id}`, payload, { params });
+export const deleteDocumentType = (id, params) =>
+  api.delete(`/hrms/document-types/${id}`, { params });
+
+export const getDocuments = (params) => api.get('/hrms/documents', { params });
+export const getDocument = (docNo, params) => api.get(`/hrms/documents/${docNo}`, { params });
+/** Every applicable type for one person, with its status or `Pending`, plus the read-only
+ *  view over files already attached elsewhere (resume, KYC scans). */
+export const getDocumentChecklist = (params) =>
+  api.get('/hrms/documents/checklist', { params });
+/** Upload a document, or a new version (supply `doc_no` for a version). */
+export const uploadDocument = (payload, params) =>
+  api.post('/hrms/documents', payload, { params });
+export const updateDocument = (docNo, payload, params) =>
+  api.patch(`/hrms/documents/${docNo}`, payload, { params });
+/** Verify / reject / move to Under Review. Rejecting REQUIRES remarks. */
+export const setDocumentStatus = (docNo, payload, params) =>
+  api.post(`/hrms/documents/${docNo}/status`, payload, { params });
+/** A short-lived signed URL, minted per request — never stored. */
+export const getDocumentUrl = (docNo, params) =>
+  api.get(`/hrms/documents/${docNo}/url`, { params });
+export const deleteDocument = (docNo, params) =>
+  api.delete(`/hrms/documents/${docNo}`, { params });
+
+// ── Item 3: appointment letters ──
+export const getAppointments = (params) => api.get('/hrms/appointments', { params });
+export const getAppointableCandidates = (params) =>
+  api.get('/hrms/appointments/eligible', { params });
+export const getAppointment = (no, params) =>
+  api.get(`/hrms/appointments/${no}`, { params });
+export const createAppointment = (payload, params) =>
+  api.post('/hrms/appointments', payload, { params });
+export const updateAppointment = (no, payload, params) =>
+  api.patch(`/hrms/appointments/${no}`, payload, { params });
+export const sendAppointment = (no, payload, params) =>
+  api.post(`/hrms/appointments/${no}/send`, payload, { params });
+export const cancelAppointment = (no, payload, params) =>
+  api.post(`/hrms/appointments/${no}/cancel`, payload, { params });
+
+/** The candidate-facing appointment link. 128-bit access code, case-sensitive. */
+export const appointmentUrlFor = (code) => `${window.location.origin}/appointment/${code}`;
+
+// ── Item 4: the client master + client sharing ──
+export const getClients = (params) => api.get('/hrms/clients', { params });
+export const getClient = (clientId, params) =>
+  api.get(`/hrms/clients/${clientId}`, { params });
+export const createClient = (payload, params) =>
+  api.post('/hrms/clients', payload, { params });
+export const updateClient = (clientId, payload, params) =>
+  api.patch(`/hrms/clients/${clientId}`, payload, { params });
+export const deleteClient = (clientId, params) =>
+  api.delete(`/hrms/clients/${clientId}`, { params });
+/** Record the hiring client's verdict on a shared CV. Rejecting REQUIRES remarks. */
+export const recordClientResponse = (payload, params) =>
+  api.post('/hrms/candidates/client-response', payload, { params });
+
+// ── Item 7: sanctioned strength ──
+export const getSanctionedStrength = (params) =>
+  api.get('/hrms/sanctioned-strength', { params });
+/** Live sanctioned/actual/available for ONE position — read by the requisition form on
+ *  every change, so the raiser learns about escalation before they submit. */
+export const getSanctionedPosition = (params) =>
+  api.get('/hrms/sanctioned-strength/position', { params });
+export const setSanctionedStrength = (payload, params) =>
+  api.post('/hrms/sanctioned-strength', payload, { params });
+export const updateSanctionedStrength = (id, payload, params) =>
+  api.patch(`/hrms/sanctioned-strength/${id}`, payload, { params });
+export const deleteSanctionedStrength = (id, params) =>
+  api.delete(`/hrms/sanctioned-strength/${id}`, { params });
+
 /** Download a report. The file is rendered SERVER-side from already-scoped rows, so this
  *  only has to save the blob — it never sees rows the API withheld. */
 export const exportHrmsReport = async (entity, params) => {

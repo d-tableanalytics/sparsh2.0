@@ -9,6 +9,7 @@ import { HrmsLoading, HrmsError } from '../common/HrmsStates';
 import {
   getEmployee, updateEmployee, getEmployeeHierarchy, getDepartments, getDesignations,
 } from '../../../services/hrmsApi';
+import DocumentPanel from '../documents/DocumentPanel';
 
 /**
  * HRMS ▸ employee profile.
@@ -26,6 +27,8 @@ const TABS = [
   { key: 'personal', label: 'Personal' },
   { key: 'statutory', label: 'Statutory & Bank' },
   { key: 'reporting', label: 'Reporting' },
+  // Phase 11-R, Item 2 — one of the shared DocumentPanel's two mount points.
+  { key: 'documents', label: 'Documents' },
 ];
 
 const FIELD = 'w-full h-9 px-3 rounded-lg border border-[var(--border)] bg-[var(--input-bg)] text-[13px] text-[var(--text-main)] disabled:opacity-60';
@@ -314,6 +317,27 @@ const EmployeeProfile = () => {
             <input id="p-ifsc" value={form.bank_ifsc} onChange={set('bank_ifsc')} disabled={!canWrite} className={FIELD} placeholder="HDFC0001234" />
           </div>
         </Row>
+      )}
+
+      {/* ── Phase 11-R, Item 2 ── the SAME panel the candidate journey mounts. One
+          component, two mount points: two near-identical panels would drift, and the one
+          that drifts is the one showing a stale verification status.
+
+          Keyed on `employee_code`, which is what hrms_documents stores as `owner_id` for an
+          employee — not the user_id in the URL. */}
+      {tab === 'documents' && (
+        employee?.employee_code ? (
+          <DocumentPanel
+            ownerType="employee"
+            ownerId={employee.employee_code}
+            ownerName={employee.name}
+          />
+        ) : (
+          <p className="text-[13px] text-[var(--text-muted)]">
+            This employee has no employee code yet, so documents cannot be filed against
+            them. One is issued when their onboarding completes.
+          </p>
+        )
       )}
 
       {tab === 'reporting' && (
