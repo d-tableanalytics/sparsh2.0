@@ -148,9 +148,46 @@ async def main() -> None:
     check("an overnight window keeps the exact assigned deadline",
           occ["end"] == "2026-08-11T06:00:00+05:30")
 
-    check("the deadline is never computed anywhere in the engine",
-          "_occurrence_end" not in inspect.getsource(R)
-          and 'doc["end"]' not in inspect.getsource(R._fresh_occurrence))
+    # An ASSIGNED deadline is never recomputed — asserted behaviourally across every cadence
+    # above and below, rather than by grepping the engine's source. The source check that used
+    # to stand here forbade the string doc["end"] outright, which also forbade the deadline a
+    # no-deadline repeating task now gets (next section) — a rule the feature legitimately
+    # changed, not a regression.
+    check("an assigned deadline survives a shifted occurrence too",
+          R._fresh_occurrence(head_task(), datetime(2026, 8, 17, 9, 0, tzinfo=IST),
+                              datetime(2026, 8, 16, 9, 0, tzinfo=IST), None)["end"]
+          == head_task()["end"])
+
+    # =================================================================
+    section("Repeat without a deadline: each occurrence is due end of its own day")
+    # =================================================================
+    # The composer hides the deadline field while Repeat is on, so a repeating task arrives with
+    # no `end` at all. Every occurrence is then due at 11:59:59 PM IST on the date it lands on.
+    no_end = head_task()
+    no_end.pop("end")
+    for day in (11, 12, 13):
+        occ = R._fresh_occurrence(no_end, datetime(2026, 8, day, 9, 0, tzinfo=IST),
+                                  datetime(2026, 8, day, 9, 0, tzinfo=IST), None)
+        due_ist = datetime.fromisoformat(occ["end"]).astimezone(IST)
+        check(f"{day} Aug is due 11:59:59 PM IST on its own date",
+              (due_ist.day, due_ist.hour, due_ist.minute, due_ist.second) == (day, 23, 59, 59))
+
+    check("a no-deadline occurrence is stored as UTC, matching the other end-of-day helpers",
+          datetime.fromisoformat(
+              R._fresh_occurrence(no_end, datetime(2026, 8, 11, 9, 0, tzinfo=IST),
+                                  datetime(2026, 8, 11, 9, 0, tzinfo=IST), None)["end"]
+          ).utcoffset() == timedelta(0))
+
+    check("a shifted no-deadline occurrence is due at the end of the day it ACTUALLY lands on",
+          datetime.fromisoformat(
+              R._fresh_occurrence(no_end, datetime(2026, 8, 17, 9, 0, tzinfo=IST),
+                                  datetime(2026, 8, 16, 9, 0, tzinfo=IST), None)["end"]
+          ).astimezone(IST).day == 17)
+
+    check("a todo with no deadline is left alone — this rule is tasks-only",
+          "end" not in R._fresh_occurrence({**no_end, "type": "todo"},
+                                           datetime(2026, 8, 11, 9, 0, tzinfo=IST),
+                                           datetime(2026, 8, 11, 9, 0, tzinfo=IST), None))
 
     # =================================================================
     section("10. Every cadence keeps the assigned deadline untouched")

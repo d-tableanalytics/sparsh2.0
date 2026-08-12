@@ -614,6 +614,17 @@ async def create_event(event: CalendarEventCreate, background_tasks: BackgroundT
     if is_repeating and end_date_str:
         event_dict["recurring_group_id"] = str(ObjectId())
 
+    # A repeating TASK carries no deadline of its own — the composer hides the field, because a
+    # series has no single due moment to pick. Each occurrence is due at the end of its own day
+    # instead, and this is the first occurrence, so it gets the same treatment the nightly engine
+    # gives every later one (recurring_task_service.occurrence_end_of_day).
+    if is_repeating and event_dict.get("type") == "task" and not event_dict.get("end"):
+        from app.services.recurring_task_service import occurrence_end_of_day
+        try:
+            event_dict["end"] = occurrence_end_of_day(datetime.fromisoformat(event_dict["start"]))
+        except (KeyError, TypeError, ValueError):
+            pass    # an unparseable start is already the backdate guard's problem, not ours
+
     # ─── Recurring Todos: the whole series, up front ───
     # Every occurrence up to the Repeat End Date is written the moment the todo is saved, so the
     # user sees the full series on the calendar immediately instead of one new todo appearing at

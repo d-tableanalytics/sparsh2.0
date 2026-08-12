@@ -101,6 +101,10 @@ const TaskFormModal = ({ isOpen, onClose, onSaved, task = null, categories = [],
 
   const [pickerOpen, setPickerOpen] = useState(null); // 'assignee' | 'inLoop' | 'category' | null
   const [deadlinePickerOpen, setDeadlinePickerOpen] = useState(false);
+  // Repeat and Deadline are mutually exclusive: a series has no single due moment to pick, so
+  // the deadline field is hidden while Repeat is on and each occurrence is instead due at
+  // 11:59:59 PM IST on its own date (recurring_task_service.occurrence_end_of_day).
+  const isRepeating = form.repeat !== 'Does not repeat';
   const [startDatePickerOpen, setStartDatePickerOpen] = useState(false);
   const [repeatEndPickerOpen, setRepeatEndPickerOpen] = useState(false);
   const [reminderModalOpen, setReminderModalOpen] = useState(false);
@@ -298,13 +302,18 @@ const TaskFormModal = ({ isOpen, onClose, onSaved, task = null, categories = [],
   const validate = () => {
     if (!form.title.trim()) return 'Task title is required';
     if (!form.category.trim()) return 'Category is required';
-    // A deadline is mandatory when delegating (assigning to others) so every assignee has a due date.
-    if (form.target_staff_id.length && !form.end) return 'Deadline is required when delegating a task';
-    // Due date can't be in the past. Only enforced on create — editing an already-overdue
-    // task (a normal, common state) must still be possible without forcing a date change.
-    if (!task && form.end) {
-      const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
-      if (new Date(form.end) < todayStart) return 'Due date cannot be in the past';
+    // Deadline rules apply only to a NON-repeating task. A repeating one has no deadline field
+    // at all (see the chip row) — every occurrence is due at the end of its own day, set by the
+    // recurrence engine — so requiring one here would block a form that cannot satisfy it.
+    if (!isRepeating) {
+      // A deadline is mandatory when delegating (assigning to others) so every assignee has a due date.
+      if (form.target_staff_id.length && !form.end) return 'Deadline is required when delegating a task';
+      // Due date can't be in the past. Only enforced on create — editing an already-overdue
+      // task (a normal, common state) must still be possible without forcing a date change.
+      if (!task && form.end) {
+        const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
+        if (new Date(form.end) < todayStart) return 'Due date cannot be in the past';
+      }
     }
     if (form.repeat !== 'Does not repeat') {
       if (!form.start) return 'Start Date is required when Repeat is enabled';
@@ -345,13 +354,15 @@ const TaskFormModal = ({ isOpen, onClose, onSaved, task = null, categories = [],
 
     setSaving(true);
     try {
-      const isRepeating = form.repeat !== 'Does not repeat';
       const payload = {
         title: form.title,
         description: form.description,
         category: form.category,
         tags: form.tags,
-        end: form.end ? new Date(form.end).toISOString() : null,
+        // Never send a hand-picked deadline for a repeating task. Explicitly null rather than
+        // omitted, so switching an existing task TO repeating clears the deadline it used to
+        // carry instead of leaving a stale one behind on every future occurrence.
+        end: isRepeating ? null : (form.end ? new Date(form.end).toISOString() : null),
         repeat: form.repeat,
         repeat_end_date: isRepeating && form.repeat_end_date ? new Date(form.repeat_end_date).toISOString() : null,
         repeat_interval: (form.repeat === 'periodic' || form.repeat === 'Custom') ? (form.repeat_interval || 1) : undefined,
@@ -554,10 +565,14 @@ const TaskFormModal = ({ isOpen, onClose, onSaved, task = null, categories = [],
                 <Users size={12} /> {assigneeNames.length ? assigneeNames.join(', ') : 'Assignee *'}
               </button>
 
-              <button type="button" onClick={() => setDeadlinePickerOpen(true)}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[10px] font-black uppercase tracking-wider border transition-all ${form.end ? 'border-[var(--accent-indigo)] text-[var(--accent-indigo)]' : 'border-[var(--border)] text-[var(--text-muted)]'}`}>
-                <CalendarClock size={12} /> {form.end ? formatDateTime(form.end) : (form.target_staff_id.length ? 'Set Deadline *' : 'Set Deadline')}
-              </button>
+              {/* Hidden entirely while Repeat is on — the series sets each occurrence's own
+                  deadline, so there is nothing here for the user to choose. */}
+              {!isRepeating && (
+                <button type="button" onClick={() => setDeadlinePickerOpen(true)}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[10px] font-black uppercase tracking-wider border transition-all ${form.end ? 'border-[var(--accent-indigo)] text-[var(--accent-indigo)]' : 'border-[var(--border)] text-[var(--text-muted)]'}`}>
+                  <CalendarClock size={12} /> {form.end ? formatDateTime(form.end) : (form.target_staff_id.length ? 'Set Deadline *' : 'Set Deadline')}
+                </button>
+              )}
 
               <button type="button" onClick={() => setForm(f => ({ ...f, priority: PRIORITY_CYCLE[(PRIORITY_CYCLE.indexOf(f.priority) + 1) % 3] }))}
                 className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[10px] font-black uppercase tracking-wider border border-[var(--accent-indigo)] text-[var(--accent-indigo)]">

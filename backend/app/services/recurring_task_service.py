@@ -52,6 +52,27 @@ def _ist_date(dt):
     """The calendar date of a tz-aware datetime as seen in IST."""
     return dt.astimezone(IST).date()
 
+
+# The end of an occurrence's own day, 11:59:59 PM IST. Stored as UTC, matching the two existing
+# end-of-day helpers in routes/calendar_events.py (_apply_todo_due_end_of_day, _series_end_cutoff)
+# — they compute in IST and convert, and the overdue check compares against a naive UTC clock.
+OCCURRENCE_END_OF_DAY = (23, 59, 59)
+
+
+def occurrence_end_of_day(target) -> str:
+    """`target`'s own date at 11:59:59 PM IST, as a UTC ISO string.
+
+    The deadline for one occurrence of a repeating task that was created WITHOUT a deadline.
+    Enabling Repeat hides the deadline field (a repeating task has no single due moment), so
+    each occurrence is instead due at the end of the day it lands on.
+
+    A task the assigner *did* give a deadline never reaches this — see _fresh_occurrence.
+    """
+    ist = target.astimezone(IST) if target.tzinfo else target.replace(tzinfo=IST)
+    hour, minute, second = OCCURRENCE_END_OF_DAY
+    end_ist = ist.replace(hour=hour, minute=minute, second=second, microsecond=0)
+    return end_ist.astimezone(timezone.utc).isoformat()
+
 # Weekly off day(s) — recurring occurrences never land here, matching the task due-date
 # picker which blocks the same day. Python date.weekday(): Mon=0 … Sun=6, so {6} == Sunday.
 # (There is no persisted per-user weekly-off setting in the backend yet — see the picker's
@@ -212,13 +233,20 @@ def _fresh_occurrence(head: dict, target, natural, anchor_day) -> dict:
     if anchor_day:
         doc["recurrence_day"] = anchor_day
 
-    # `end` — the deadline — is carried over UNTOUCHED by the clone above, deliberately. The
-    # deadline belongs to the task as the assigner set it, not to the period, so it is never
-    # recomputed here for any cadence: every occurrence of a series is due at exactly the
-    # moment the user chose. (This used to move a Daily occurrence's deadline onto its own
-    # date, and slide every other cadence forward by the original start-to-deadline gap.)
-    # The only thing that changes a deadline is an explicit revision by the assigner —
-    # routes/tasks.py revise_task_deadline, which stamps `deadline_history`.
+    # `end` — the deadline — is carried over UNTOUCHED by the clone above whenever the assigner
+    # set one. The deadline belongs to the task as they set it, not to the period, so it is
+    # never recomputed for any cadence: every occurrence is due at exactly the moment chosen.
+    # (This used to move a Daily occurrence's deadline onto its own date, and slide every other
+    # cadence forward by the original start-to-deadline gap.) The only thing that changes an
+    # assigned deadline is an explicit revision — routes/tasks.py revise_task_deadline, which
+    # stamps `deadline_history`.
+    #
+    # The one exception is a repeating task created with NO deadline at all. Enabling Repeat in
+    # the composer hides the deadline field, because a series has no single due moment to pick.
+    # Those occurrences are due at the end of the day they land on, so there is a real deadline
+    # to be overdue against instead of none.
+    if head.get("type") == "task" and not head.get("end"):
+        doc["end"] = occurrence_end_of_day(target)
 
     doc["created_at"] = datetime.utcnow()
     doc["updated_at"] = None
