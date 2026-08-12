@@ -71,7 +71,7 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
         { name: 'Employee Tasks', path: '/tpms/admin/employee-tasks', icon: ListChecks },
         { name: 'Activities', path: '/tpms/admin/activities', icon: ClipboardList },
         { name: 'Departments', path: '/tpms/admin/departments', icon: Building2 },
-        { name: 'Mail Templates', path: '/tpms/admin/mail-templates', icon: ScrollText },
+        { name: 'Templates', path: '/tpms/admin/mail-templates', icon: ScrollText },
         { name: 'Reminder Rules', path: '/tpms/admin/reminder-rules', icon: AlertTriangle },
         { name: 'Form Questions', path: '/tpms/admin/form-questions', icon: ClipboardCheck },
         { name: 'Form Links', path: '/tpms/admin/form-links', icon: Link2 },

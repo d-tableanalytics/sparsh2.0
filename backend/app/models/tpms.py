@@ -36,6 +36,8 @@ COLL_MIGRATION_MAP       = "tpms_migration_map"   # sheet id → Mongo _id, for 
 COLL_DEPARTMENTS         = "tpms_departments"     # H5 — department master (governance roles + custom)
 COLL_REMINDER_LOGS       = "tpms_reminder_logs"   # H10 — per-reminder send ledger
 COLL_WHATSAPP_TEMPLATES  = "tpms_whatsapp_templates"  # H1 — Meta WhatsApp template config
+COLL_META_TEMPLATES      = "tpms_meta_whatsapp_templates"  # H1b — templates authored in TPMS
+                                                           #       and submitted to Meta for approval
 
 # Discriminator marking a calendar event as a TPMS activity.
 TPMS_EVENT_KIND = "tpms_activity"
@@ -481,6 +483,115 @@ class MailTemplate(BaseModel):
 
 
 # ─────────────────────────────────────────────────────────────
+# H1b — Meta WhatsApp template library (authored in TPMS, approved by Meta)
+#
+# A row here is a *template definition* that lives on the WhatsApp Business Account, not a
+# per-event notification. The activity × side × event rows in COLL_WHATSAPP_TEMPLATES point
+# at one of these by name, and may only point at an APPROVED one.
+#
+# Vocabulary matches the Cloud API verbatim so a document can be turned into a
+# POST /{waba_id}/message_templates payload without translation.
+# ─────────────────────────────────────────────────────────────
+META_CATEGORY_MARKETING      = "MARKETING"
+META_CATEGORY_UTILITY        = "UTILITY"
+META_CATEGORY_AUTHENTICATION = "AUTHENTICATION"
+META_CATEGORIES = [META_CATEGORY_MARKETING, META_CATEGORY_UTILITY, META_CATEGORY_AUTHENTICATION]
+
+META_HEADER_NONE     = "NONE"
+META_HEADER_TEXT     = "TEXT"
+META_HEADER_IMAGE    = "IMAGE"
+META_HEADER_VIDEO    = "VIDEO"
+META_HEADER_DOCUMENT = "DOCUMENT"
+META_HEADER_FORMATS = [META_HEADER_NONE, META_HEADER_TEXT, META_HEADER_IMAGE,
+                       META_HEADER_VIDEO, META_HEADER_DOCUMENT]
+# The three formats whose example is a media handle rather than text.
+META_MEDIA_HEADERS = {META_HEADER_IMAGE, META_HEADER_VIDEO, META_HEADER_DOCUMENT}
+
+META_BUTTON_QUICK_REPLY  = "QUICK_REPLY"
+META_BUTTON_URL          = "URL"
+META_BUTTON_PHONE_NUMBER = "PHONE_NUMBER"
+META_BUTTON_TYPES = [META_BUTTON_QUICK_REPLY, META_BUTTON_URL, META_BUTTON_PHONE_NUMBER]
+
+# "Type of variable" — one style per template; Meta rejects a mix.
+META_VAR_NUMBERED = "numbered"   # {{1}}, {{2}}, …
+META_VAR_NAMED    = "named"      # {{customer_name}}
+META_VAR_STYLES = [META_VAR_NUMBERED, META_VAR_NAMED]
+
+# Lifecycle. DRAFT is ours (never submitted); the rest mirror Meta's `status` field, which is
+# authoritative from the moment the template is created on the WABA.
+META_STATUS_DRAFT    = "DRAFT"
+META_STATUS_PENDING  = "PENDING"
+META_STATUS_APPROVED = "APPROVED"
+META_STATUS_REJECTED = "REJECTED"
+# Statuses Meta can additionally report and we store verbatim: PAUSED, DISABLED, IN_APPEAL,
+# PENDING_DELETION, DELETED. Only APPROVED is usable for sending.
+META_STATUSES = [META_STATUS_DRAFT, META_STATUS_PENDING, META_STATUS_APPROVED, META_STATUS_REJECTED]
+
+# A template may be edited/resubmitted only from these states. Once PENDING or APPROVED the
+# definition is Meta's, and editing it locally would silently diverge from what is being sent.
+META_EDITABLE_STATUSES = {META_STATUS_DRAFT, META_STATUS_REJECTED}
+
+# Meta's published field limits (Cloud API v21.0).
+META_LIMIT_NAME   = 512
+META_LIMIT_BODY   = 1024
+META_LIMIT_HEADER = 60
+META_LIMIT_FOOTER = 60
+META_LIMIT_BUTTON_TEXT = 25
+META_MAX_BUTTONS = 10
+META_MAX_URL_BUTTONS = 2
+META_MAX_PHONE_BUTTONS = 1
+
+
+class MetaTemplateButton(BaseModel):
+    """One call-to-action / quick-reply button."""
+    type: str = META_BUTTON_QUICK_REPLY
+    text: str = ""
+    url: Optional[str] = None            # URL buttons; may carry a single trailing variable
+    url_example: Optional[str] = None    # required by Meta when `url` is variable
+    phone_number: Optional[str] = None   # PHONE_NUMBER buttons, E.164
+
+
+class MetaWhatsappTemplate(BaseModel):
+    """A WhatsApp template authored in TPMS and submitted to Meta for approval.
+
+    `meta_template_id` + `status` are what Meta returned; everything else is the authored
+    definition kept so a REJECTED template can be corrected and resubmitted without
+    retyping it."""
+    name: str                            # ^[a-z0-9_]+$ — Meta rejects anything else
+    language: str = "en"
+    category: str = META_CATEGORY_UTILITY
+    variable_style: str = META_VAR_NUMBERED
+
+    header_format: str = META_HEADER_NONE
+    header_text: Optional[str] = None
+    header_examples: List[str] = []      # sample value per header variable (max 1)
+    header_handle: Optional[str] = None  # media headers — from Meta's resumable upload API
+    header_media_url: Optional[str] = None  # sample media we upload to obtain the handle
+
+    body: str = ""
+    body_examples: List[str] = []        # sample value per body variable, in order
+    footer: Optional[str] = None
+    buttons: List[MetaTemplateButton] = []
+
+    # AUTHENTICATION templates have no free-form copy — Meta generates it.
+    add_security_recommendation: bool = True
+    code_expiration_minutes: Optional[int] = None
+
+    status: str = META_STATUS_DRAFT
+    meta_template_id: Optional[str] = None
+    meta_category: Optional[str] = None  # the category Meta actually assigned (it can override)
+    rejected_reason: Optional[str] = None
+    quality_score: Optional[str] = None
+
+    submitted_at: Optional[datetime] = None
+    submitted_by: Optional[str] = None
+    synced_at: Optional[datetime] = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_by: Optional[str] = None
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+# ─────────────────────────────────────────────────────────────
 # Index specification — consumed by app/db/mongodb.py at startup
 # (collection, keys, {options})
 # ─────────────────────────────────────────────────────────────
@@ -505,4 +616,8 @@ TPMS_INDEXES = [
     (COLL_REMINDER_LOGS,       [("event_id", 1)],                                    {"name": "by_event"}),
     (COLL_REMINDER_LOGS,       [("sent_at", -1)],                                    {"name": "by_sent_at"}),
     (COLL_WHATSAPP_TEMPLATES,  [("activity", 1), ("side", 1), ("event", 1)],         {"unique": True, "name": "uniq_activity_side_event"}),
+    # A WhatsApp template is identified on the WABA by (name, language) — the same name in two
+    # languages is two templates, so the pair is what must be unique.
+    (COLL_META_TEMPLATES,      [("name", 1), ("language", 1)],                       {"unique": True, "name": "uniq_name_language"}),
+    (COLL_META_TEMPLATES,      [("status", 1)],                                      {"name": "by_status"}),
 ]
