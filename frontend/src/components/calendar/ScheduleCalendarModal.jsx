@@ -344,11 +344,19 @@ const ScheduleCalendarModal = ({ isOpen, onClose, onSaved, mode = 'erp', event =
   const toggleDept = (dept) => {
     const has = form.departments.includes(dept);
     const nextDepts = has ? form.departments.filter((d) => d !== dept) : [...form.departments, dept];
-    const matchIds = companyUsers.filter((u) => inDept(u, dept)).map(uid);
-    const nextDoers = has
-      ? form.doerIds.filter((id) => !matchIds.includes(id))       // removing dept → drop its doers
-      : [...new Set([...form.doerIds, ...matchIds])];             // adding dept → pre-select its doers
-    set({ departments: nextDepts, doerIds: nextDoers });
+    // A department decides who is OFFERED, never who is chosen: picking HOD lists every HOD with
+    // its box clear, and the scheduler ticks the ones they actually mean. Pre-selecting the whole
+    // department made "all of them" the accidental default — one unnoticed row and the activity
+    // goes out to a person who was never meant to be on it.
+    const stillOffered = (id) => {
+      if (!nextDepts.length) return true;        // no department filter → the pool is everyone
+      const u = companyUsers.find((x) => uid(x) === id);
+      return !!u && nextDepts.some((d) => inDept(u, d));
+    };
+    // Removing a department drops the doers it was the only reason to show, so a hidden row can
+    // never stay ticked and be submitted — but someone who also sits in a department that is
+    // still selected keeps their tick.
+    set({ departments: nextDepts, doerIds: has ? form.doerIds.filter(stillOffered) : form.doerIds });
   };
 
   const buildTimes = () => {

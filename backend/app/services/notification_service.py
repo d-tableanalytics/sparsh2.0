@@ -534,14 +534,18 @@ async def send_whatsapp_notification(phone: str, message: str, user_id: str = No
 
 async def send_whatsapp_template(phone: str, template_name: str, language: str, params: list,
                                  user_id: str = None, slug: str = "manual",
-                                 components: list = None):
+                                 components: list = None, meta: dict = None):
     """Business-initiated WhatsApp via a Meta-approved template.
     `params` are positional body values mapped to {{1}}, {{2}}, ... in the
     approved template.
 
     `components` overrides that body-only structure for templates whose header or buttons also
     take variables — pass the full Cloud API components array and `params` is used only for the
-    delivery log. Omit it and behaviour is exactly as before."""
+    delivery log. Omit it and behaviour is exactly as before.
+
+    `meta` is the same optional log context send_email_notification takes — TPMS passes the
+    activity and company so the Logs Report can show them next to a WhatsApp row instead of
+    the blank dashes it showed while only the mail path recorded them."""
     if not _wa_configured():
         logger.warning("WhatsApp Cloud API credentials not configured")
         return False
@@ -574,15 +578,15 @@ async def send_whatsapp_template(phone: str, template_name: str, language: str, 
         }
         response = requests.post(_wa_endpoint(), json=payload, headers=_wa_headers(), timeout=20)
         if response.status_code == 200:
-            await log_notification(user_id, to, "whatsapp", slug, log_text, "sent")
+            await log_notification(user_id, to, "whatsapp", slug, log_text, "sent", meta=meta)
             return True
         error = f"WhatsApp template error: {response.status_code} - {response.text}"
         logger.error(error)
-        await log_notification(user_id, to, "whatsapp", slug, log_text, "failed", error)
+        await log_notification(user_id, to, "whatsapp", slug, log_text, "failed", error, meta=meta)
         return False
     except Exception as e:
         logger.error(f"Failed to send WhatsApp template: {e}")
-        await log_notification(user_id, to, "whatsapp", slug, log_text, "failed", str(e))
+        await log_notification(user_id, to, "whatsapp", slug, log_text, "failed", str(e), meta=meta)
         return False
 
 async def send_notification_from_template(user_obj: dict, template_slug: str, context: Dict[str, Any], delivery_type: str = "both", scope_override: str = None):

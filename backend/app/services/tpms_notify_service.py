@@ -491,6 +491,9 @@ async def send_whatsapp(event: dict, event_kind: str, side: str) -> dict:
     # "accountability" is rejected as a non-existent template, per recipient, in the log only —
     # so normalise here and let rows written before this keep working without a data migration.
     tpl_name = str(tpl.get("meta_template_name") or tpl.get("name") or "").strip().lower()
+    # Same Activity / Company context the mail path records, so the Logs Report can fill its
+    # ACTIVITY and COMPANY columns for a WhatsApp row instead of showing a dash.
+    context = log_context(event)
     sent = failed = no_phone = 0
     for person in recipients:
         phone = normalize_phone(person.get("phone"))
@@ -502,7 +505,7 @@ async def send_whatsapp(event: dict, event_kind: str, side: str) -> dict:
                                               tpl.get("language") or "en", params,
                                               user_id=person.get("id"),
                                               slug=f"tpms_wa_{event_kind}_{side}",
-                                              components=components)
+                                              components=components, meta=context)
         except Exception as e:
             ok = False
             logger.error(f"TPMS WhatsApp to {phone} failed: {e}")
