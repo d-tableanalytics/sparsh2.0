@@ -925,7 +925,10 @@ async def upsert_whatsapp_template(payload: dict, current_user: dict = Depends(g
     activity = str(payload.get("activity") or "").strip()
     side = str(payload.get("side") or "").strip().lower()
     event = str(payload.get("event") or "").strip().lower()
-    meta_name = str(payload.get("meta_template_name") or payload.get("name") or "").strip()
+    # Lowercased because Meta template names are lowercase-only (validate_template's
+    # ^[a-z0-9_]+$). Stored as typed, "Accountability" would pass nothing at Meta and fail the
+    # approval check below even though "accountability" is approved.
+    meta_name = str(payload.get("meta_template_name") or payload.get("name") or "").strip().lower()
     if not (activity and side in {"staff", "company"} and event and meta_name):
         raise HTTPException(status_code=400,
                             detail="activity, side (staff|company), event and meta_template_name are required")
