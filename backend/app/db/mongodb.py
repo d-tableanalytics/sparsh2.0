@@ -38,6 +38,9 @@ async def connect_to_mongo():
         # Provision the TPMS core collections (activities, escalations, scores, …).
         await _ensure_tpms_collections(db_connection.db)
 
+        # Provision the IRM collections (weightage config + score snapshots).
+        await _ensure_irm_collections(db_connection.db)
+
         print(f"[OK] Successfully connected to MongoDB Atlas (Database: {settings.DATABASE_NAME})")
         
     except Exception as e:
@@ -107,6 +110,28 @@ async def _ensure_tpms_collections(db):
                 print(f"[OK] Seeded {coll_name} with {len(seed)} row(s)")
     except Exception as e:
         print(f"[WARN] Could not provision TPMS core collections: {e}")
+
+
+async def _ensure_irm_collections(db):
+    """Idempotently create the IRM collections and their indexes. No seeding: a company
+    with no `irm_configs` row simply reads the registry defaults, so the first save is
+    what creates the row. As elsewhere, failures here must never block startup."""
+    try:
+        from app.models.irm import IRM_INDEXES
+        existing = set(await db.list_collection_names())
+        for coll_name, keys, options in IRM_INDEXES:
+            if coll_name not in existing:
+                try:
+                    await db.create_collection(coll_name)
+                    existing.add(coll_name)
+                except Exception:
+                    pass  # created concurrently or already present
+            try:
+                await db[coll_name].create_index(keys, **options)
+            except Exception as ie:
+                print(f"[WARN] IRM index {options.get('name')} on {coll_name}: {ie}")
+    except Exception as e:
+        print(f"[WARN] Could not provision IRM collections: {e}")
 
 
 async def close_mongo_connection():
