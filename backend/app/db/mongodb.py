@@ -1,6 +1,5 @@
 import motor.motor_asyncio
 import certifi
-import ssl
 from fastapi import HTTPException, status
 from app.config.settings import settings
 
@@ -12,15 +11,18 @@ db_connection = Database()
 
 async def connect_to_mongo():
     try:
-        # Configuration for stability on Windows
-        ssl_context = ssl.create_default_context(cafile=certifi.where())
-        
+        # Atlas (mongodb+srv) requires TLS; a plain local mongod does not speak it at all,
+        # so forcing tls=True against localhost fails the handshake with WinError 10054.
+        client_options = {
+            "serverSelectionTimeoutMS": 20000,
+            "connectTimeoutMS": 20000,
+        }
+        if settings.MONGODB_URI.startswith("mongodb+srv://"):
+            client_options.update(tls=True, tlsCAFile=certifi.where())
+
         db_connection.client = motor.motor_asyncio.AsyncIOMotorClient(
             settings.MONGODB_URI,
-            tls=True,
-            tlsCAFile=certifi.where(),
-            serverSelectionTimeoutMS=20000,
-            connectTimeoutMS=20000
+            **client_options,
         )
         
         # Test connection with a ping
@@ -41,7 +43,7 @@ async def connect_to_mongo():
         # Provision the IRM collections (weightage config + score snapshots).
         await _ensure_irm_collections(db_connection.db)
 
-        print(f"[OK] Successfully connected to MongoDB Atlas (Database: {settings.DATABASE_NAME})")
+        print(f"[OK] Successfully connected to MongoDB (Database: {settings.DATABASE_NAME})")
         
     except Exception as e:
         print(f"[FAILED] connect to MongoDB: {e}")
@@ -143,7 +145,7 @@ def get_db():
     if db_connection.db is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Database connection is not available. Please ensure your IP is whitelisted in MongoDB Atlas dashboard."
+            detail="Database connection is not available. Check that MongoDB is running and that MONGODB_URI is correct."
         )
     return db_connection.db
 
