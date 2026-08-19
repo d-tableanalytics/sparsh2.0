@@ -139,9 +139,13 @@ async def main() -> None:
         row = await candidates.find_one({"uk": plain["reference"]})
         check("a non-referral application still records the channel",
               row["referral_source"] == "Job Portal")
-        check("its `source` remains the posting's platform (a fact about the posting)",
-              row["source"] == "LinkedIn")
+        check("the applicant's answer IS the `source` -- a posting has no platform to "
+              "infer one from", row["source"] == "Job Portal")
         check("is_referral is explicitly false", row["is_referral"] is False)
+        manual_keeps = await RS.resolve_referral(
+            {"referral_source": "Job Portal"}, COMPANY, source_from_applicant=False)
+        check("...but HR's own choice is not overwritten on the manual path",
+              "source" not in manual_keeps and manual_keeps["referral_source"] == "Job Portal")
 
         # =================================================================
         section("Referral validation -- incomplete claims are refused")

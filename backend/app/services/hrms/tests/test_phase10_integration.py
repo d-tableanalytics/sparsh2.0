@@ -156,11 +156,14 @@ def main() -> None:
                   client.get(f"/api/hrms/reports/{good}").status_code == 200)
 
         section("Breakdown dimension is an allow-list too")
-        for bad in ("can_email", "ctc", "password", "$where"):
+        # 'platform' is in this list because it was RETIRED, not merely never allowed: a
+        # posting has no platform now, so the dimension must be refused rather than group a
+        # field nothing writes.
+        for bad in ("can_email", "ctc", "password", "$where", "platform"):
             check(f"breakdown by '{bad}' refused",
                   client.get("/api/hrms/analytics/breakdown",
                              params={"by": bad}).status_code == 422)
-        for good in ("source", "department", "designation", "platform"):
+        for good in ("source", "department", "designation", "referral_source"):
             check(f"breakdown by '{good}' accepted",
                   client.get("/api/hrms/analytics/breakdown",
                              params={"by": good}).status_code == 200)

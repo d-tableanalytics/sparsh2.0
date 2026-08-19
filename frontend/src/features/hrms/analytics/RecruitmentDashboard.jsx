@@ -7,9 +7,9 @@ import { HrmsLoading, HrmsError } from '../common/HrmsStates';
 import {
   getHrmsDashboard, getHrmsFunnel, getHrmsBreakdown, getHrmsPositions, getClients,
 } from '../../../services/hrmsApi';
-import { CARD, GRID_KPI, GRID_TWO, SECTION_TITLE, nf } from './analyticsKit';
+import { CARD, GRID_TWO, SECTION_TITLE, nf } from './analyticsKit';
 import {
-  BarList, FunnelChart, KpiCard, MiniStat, RangePicker, ScopeNotice,
+  BarList, CvFunnel, FunnelChart, KpiGrid, KpiGroup, MiniStat, RangePicker, ScopeNotice,
 } from './analyticsKit.jsx';
 
 /**
@@ -21,15 +21,49 @@ import {
  * the source computed everything in the browser, per screen, inconsistently).
  */
 
+// "Job postings by platform" is deliberately absent: a posting has no platform now — one
+// posting, one link, shared anywhere — so the channel is `source`, which the applicant
+// names on the form. Grouping by a field nothing writes would draw an empty chart.
 const BREAKDOWNS = [
   { by: 'source', title: 'Where candidates come from' },
   { by: 'department', title: 'Requisitions by department' },
   { by: 'designation', title: 'Requisitions by role' },
-  { by: 'platform', title: 'Job postings by platform' },
   // ── Phase 11-R, Item 4 ──
   { by: 'referral_source', title: 'Referral sources' },
   { by: 'client_status', title: 'Client verdicts' },
 ];
+
+/**
+ * How the KPI tiles are banded, in render order.
+ *
+ * The server returns fifteen KPIs as one flat list. Rendered as one flat grid they are a
+ * wall of identical boxes with no entry point, so they are banded by the question they
+ * answer: who applied, what we are hiring for, how far they got, what the client said.
+ *
+ * The grouping is presentation only — no figure is computed, combined or filtered here.
+ * Anything the server sends whose key is absent from this map falls into the trailing
+ * band, so a KPI added to the API appears on the screen instead of vanishing.
+ */
+const KPI_BANDS = [
+  { title: 'Candidates', keys: ['candidates', 'in_pipeline', 'cvs_reviewed',
+                                'cvs_shortlisted', 'cvs_selected', 'cvs_rejected'] },
+  { title: 'Positions', keys: ['open_requisitions', 'awaiting_approval'] },
+  { title: 'Progress to hire', keys: ['interviews', 'offers_sent', 'onboarding',
+                                      'hired', 'joinings'] },
+  { title: 'Client', keys: ['shared_with_client', 'client_shortlisted',
+                            'client_rejected'] },
+];
+
+const bandKpis = (kpis) => {
+  const byKey = new Map((kpis || []).map((k) => [k.key, k]));
+  const bands = KPI_BANDS.map(({ title, keys }) => {
+    const picked = keys.map((key) => byKey.get(key)).filter(Boolean);
+    picked.forEach((k) => byKey.delete(k.key));
+    return { title, kpis: picked };
+  });
+  const rest = [...byKey.values()];
+  return rest.length ? [...bands, { title: 'Other', kpis: rest }] : bands;
+};
 
 const RecruitmentDashboard = () => {
   const { scope, companyId } = useHrms();
@@ -45,16 +79,22 @@ const RecruitmentDashboard = () => {
   const [clients, setClients] = useState([]);
   const [clientId, setClientId] = useState('');
   const [positions, setPositions] = useState(null);
+  // ── Internal track ── the SOP §10 KPI block is opt-in: asking for it changes what the
+  // dashboard IS about, so it is a deliberate switch rather than something always on.
+  const [track, setTrack] = useState('');
 
   useEffect(() => {
     if (!companyId) return;
-    // Failing quietly is correct: a company that does not use the client master should get
-    // the dashboard it has always had, not an error banner about a feature it ignores.
+    // These rows are the ERP's Companies, projected to `{ client_id, name }` by the API —
+    // HRMS keeps no client list of its own. Failing quietly is correct: losing the filter is
+    // better than an error banner over figures that are perfectly readable without it.
     getClients(scope)
       .then(({ data: d }) => setClients(d?.clients || []))
       .catch(() => setClients([]));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [companyId]);
+
+  const selectedClient = clients.find((c) => c.client_id === clientId);
 
   const load = useCallback(async () => {
     if (!companyId) { setLoading(false); return; }
@@ -65,6 +105,7 @@ const RecruitmentDashboard = () => {
       date_from: range.from || undefined,
       date_to: range.to || undefined,
       client_id: clientId || undefined,
+      track: track || undefined,
     };
     try {
       // One await for the headline calls so the page paints complete rather than in
@@ -94,7 +135,7 @@ const RecruitmentDashboard = () => {
       setLoading(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [companyId, range.from, range.to, clientId]);
+  }, [companyId, range.from, range.to, clientId, track]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -104,19 +145,24 @@ const RecruitmentDashboard = () => {
     <div className="space-y-5">
       <HrmsPageHeader
         icon={BarChart3}
-        title="Recruitment dashboard"
-        subtitle={data?.range ? `${data.range.from} to ${data.range.to}` : 'Hiring at a glance'}
+        title="Recruitment analytics"
+        subtitle={selectedClient
+          ? `${selectedClient.name} · ${data?.range ? `${data.range.from} to ${data.range.to}` : ''}`
+          : (data?.range ? `All clients · ${data.range.from} to ${data.range.to}`
+            : 'Hiring at a glance')}
         actions={<RangePicker value={range} onChange={setRange} />}
       />
       <HrmsScopeBar />
 
-      {/* ── Phase 11-R, Item 4 — the client-wise dropdown ──
-          Rendered only when a client master exists, so a company that does not recruit for
-          clients never sees a filter with one option in it. "All clients" is not a wider
-          scope than the default — it IS the default, and it turns on the per-client
-          comparison table below. */}
+      {/* ── The client-wise filter ──
+          The options are the ERP's Companies, so there is no client list to maintain here
+          and no company entered twice. Changing it re-reads every figure on the page from
+          the server — nothing below is filtered in the browser.
+
+          "All clients" is not a wider scope than the default — it IS the default, and it
+          turns on the per-client comparison table below. */}
       {clients.length > 0 && (
-        <div className="flex items-center gap-2 flex-wrap">
+        <div className="flex items-center gap-2.5 flex-wrap rounded-xl border border-[var(--border)] bg-[var(--bg-card)] px-4 py-3">
           <label htmlFor="d-client" className="text-[11px] font-bold uppercase tracking-widest text-[var(--text-muted)]">
             Client
           </label>
@@ -124,15 +170,39 @@ const RecruitmentDashboard = () => {
             id="d-client"
             value={clientId}
             onChange={(e) => setClientId(e.target.value)}
-            className="h-9 px-3 rounded-lg border border-[var(--border)] bg-[var(--input-bg)] text-[13px] text-[var(--text-main)]"
+            className="h-9 min-w-[240px] px-3 rounded-lg border border-[var(--border)] bg-[var(--input-bg)] text-[13px] font-semibold text-[var(--text-main)]"
           >
             <option value="">All clients</option>
             {clients.map((c) => (
               <option key={c.client_id} value={c.client_id}>{c.name}</option>
             ))}
           </select>
+          <p className="text-[11.5px] text-[var(--text-muted)]">
+            {selectedClient
+              ? 'Every figure below covers this client only.'
+              : 'From the Companies section. Pick one to see that client’s funnel.'}
+          </p>
         </div>
       )}
+
+      {/* ── Internal track ── the SOP §10 KPI block.
+          A separate toggle from the client filter because it answers a different question:
+          the client filter asks "how is this client's hiring going", this asks "is our own
+          recruitment policy being followed". */}
+      <div className="flex items-center gap-2 flex-wrap">
+        <label htmlFor="d-track" className="text-[11px] font-bold uppercase tracking-widest text-[var(--text-muted)]">
+          View
+        </label>
+        <select
+          id="d-track"
+          value={track}
+          onChange={(e) => setTrack(e.target.value)}
+          className="h-9 px-3 rounded-lg border border-[var(--border)] bg-[var(--input-bg)] text-[13px] text-[var(--text-main)]"
+        >
+          <option value="">Recruitment overview</option>
+          <option value="internal">Internal policy compliance (SOP KPIs)</option>
+        </select>
+      </div>
 
       {data?.scoped_to_own_requisitions && <ScopeNotice />}
 
@@ -141,9 +211,42 @@ const RecruitmentDashboard = () => {
 
       {data && !loading && !error && (
         <>
-          <div className={GRID_KPI}>
-            {data.kpis.map((k) => <KpiCard key={k.key} kpi={k} />)}
+          {/* Shown FIRST when asked for: if the reader switched to policy compliance, that
+              is what they came to see, and burying it under fifteen hiring tiles would
+              answer a question they did not ask. */}
+          {data.internal_kpis && (
+            <section className={CARD}>
+              <p className={`${SECTION_TITLE} mb-1`}>Internal recruitment KPIs</p>
+              <p className="mb-4 text-[11.5px] text-[var(--text-muted)]">
+                Against the Internal Recruitment SOP&rsquo;s own targets. Each figure shows
+                the ratio behind it — a percentage with no denominator is not a score.
+              </p>
+              <KpiGrid block={data.internal_kpis} />
+            </section>
+          )}
+
+          <div className="space-y-5">
+            {bandKpis(data.kpis).map((band) => (
+              <KpiGroup key={band.title} title={band.title} kpis={band.kpis} />
+            ))}
           </div>
+
+          {/* ── The CV funnel ──
+              CV review → selection → client sharing → client verdict → joining, which is
+              the chain a recruitment client asks about. It sits ABOVE the hiring funnel
+              because it is this screen's subject; the hiring funnel below answers the
+              different question of how far candidates got in the pipeline. */}
+          {data.cv_funnel?.length > 0 && (
+            <section className={CARD}>
+              <p className={`${SECTION_TITLE} mb-1`}>Recruitment funnel</p>
+              <p className="mb-4 text-[11.5px] text-[var(--text-muted)]">
+                {selectedClient
+                  ? `Every CV raised against ${selectedClient.name}'s requisitions.`
+                  : 'Every CV in scope, across all clients and in-house requisitions.'}
+              </p>
+              <CvFunnel stages={data.cv_funnel} />
+            </section>
+          )}
 
           <div className={GRID_TWO}>
             <section className={CARD}>
@@ -265,6 +368,17 @@ const RecruitmentDashboard = () => {
               application status and that will always be wider than a screen. Only statuses
               with a non-zero count anywhere are shown, so the table stays readable rather
               than being mostly zeros. */}
+          {positions && !positions.rows?.length && (
+            <section className={CARD}>
+              <p className={`${SECTION_TITLE} mb-2`}>Position-wise CV status</p>
+              <p className="text-[12.5px] text-[var(--text-muted)]">
+                {selectedClient
+                  ? `No requisitions were raised for ${selectedClient.name} in this period.`
+                  : 'No requisitions in this period.'}
+              </p>
+            </section>
+          )}
+
           {positions?.rows?.length > 0 && (
             <section className={CARD}>
               <p className={`${SECTION_TITLE} mb-3`}>Position-wise CV status</p>

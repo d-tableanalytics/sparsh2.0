@@ -109,14 +109,75 @@ export const CAP = {
   // Separate from write: issuing the letter commits the company to employing somebody.
   APPOINTMENT_SEND: 'appointment.send',
 
-  // Item 4: the client master (recruitment-agency model — a client is NOT a tenant).
+  // Item 4: the client dimension (recruitment-agency model — a client is NOT a tenant).
+  // READ still means reading a COMPANY, which is why nothing here edits one.
   CLIENT_READ: 'client.read',
+  // WRITE means managing ENGAGEMENTS — the record that this tenant recruits for that
+  // company, and which of our users work on it. That relationship is HRMS's own, unlike
+  // the company record itself, which the Companies module owns.
   CLIENT_WRITE: 'client.write',
 
   // Item 7: sanctioned strength + the over-sanction escalation ladder.
   SANCTION_READ: 'sanction.read',
   SANCTION_WRITE: 'sanction.write',
   REQUISITION_ESCALATE: 'requisition.escalate',
+
+  // ══ Internal (in-house) recruitment track ══
+  // Sparsh Magic hiring for itself. Granted per Annexure B of the Internal Recruitment SOP:
+  // where the RACI says "A" the capability is an approval, "R" a write, "C"/"I" read only.
+  // The budget gate — mandatory, and nothing may be sourced before it clears.
+  REQUISITION_APPROVE_BUDGET: 'requisition.approve_budget',
+  SCORECARD_READ: 'scorecard.read',
+  SCORECARD_WRITE: 'scorecard.write',
+  SCORECARD_APPROVE: 'scorecard.approve',
+  REFERENCE_READ: 'reference.read',
+  REFERENCE_WRITE: 'reference.write',
+  // Phase INT-4 — the telephonic screen (SOP step 5). WRITE is HR's alone; the HOD holds
+  // READ because they interview off the back of the call.
+  TELEPHONIC_READ: 'telephonic.read',
+  TELEPHONIC_WRITE: 'telephonic.write',
+  // Separate from offer.send: the SOP makes Management approval of the offer mandatory.
+  OFFER_APPROVE: 'offer.approve',
+  PROBATION_READ: 'probation.read',
+  PROBATION_REVIEW: 'probation.review',
+  PROBATION_CONFIRM: 'probation.confirm',
+  INDUCTION_READ: 'induction.read',
+  INDUCTION_WRITE: 'induction.write',
+  EXCEPTION_READ: 'exception.read',
+  EXCEPTION_WRITE: 'exception.write',
+  EXCEPTION_APPROVE: 'exception.approve',
+  PERSONNEL_FILE_CLOSE: 'personnel_file.close',
+
+  // ══ Phase INT-2 — the remaining Internal Recruitment SOP controls ══
+  // The internal shortlisting committee (SOP §5). Deliberately NOT held by Finance:
+  // Finance approves what a role costs, never who fills it.
+  SHORTLIST_READ: 'shortlist.read',
+  SHORTLIST_WRITE: 'shortlist.write',
+  // Pre-boarding engagement (SOP §6). Tracking, not a gate — nothing is blocked by it,
+  // which is why there is no third "approve" capability.
+  PREBOARDING_READ: 'preboarding.read',
+  PREBOARDING_WRITE: 'preboarding.write',
+  // The standing salary-band master (Annexure C). WRITE is Finance and the MD; HR reads,
+  // because the bands are an annual agreement WITH Finance rather than HR's to rewrite.
+  SALARY_BAND_READ: 'salary_band.read',
+  SALARY_BAND_WRITE: 'salary_band.write',
+  // Candidate communications (Annexure C). Editing a TEMPLATE is separate from sending,
+  // because the templates carry the equal-opportunity and data-use wording.
+  COMM_READ: 'comm.read',
+  COMM_WRITE: 'comm.write',
+  COMM_TEMPLATE_WRITE: 'comm.template.write',
+  // New-hire experience surveys (SOP §10). READ is the AGGREGATE only — the server refuses
+  // a breakdown below its suppression threshold, so this can never read one person.
+  SURVEY_READ: 'survey.read',
+  SURVEY_WRITE: 'survey.write',
+  // The policy register (SOP §14). APPROVE is the MD's alone: approving a revision is what
+  // makes a version the one in force.
+  POLICY_READ: 'policy.read',
+  POLICY_WRITE: 'policy.write',
+  POLICY_APPROVE: 'policy.approve',
+  // Executing a retention purge (SOP §13). MD only, and the same standard as probation
+  // confirmation because both destroy or end something.
+  RETENTION_PURGE: 'retention.purge',
 };
 
 /** Sparsh internal user rather than a client-side one. Same precedence the backend uses

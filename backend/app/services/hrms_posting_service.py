@@ -1,11 +1,20 @@
 """HRMS > job postings + public application intake.
 
-Publishes an APPROVED job description to one or more channels, and receives the
-applications that come back.
+Publishes an APPROVED job description as ONE posting, and receives the applications that
+come back.
 
--- One posting row per platform ----------------------------------------------------
-Publishing a JD to LinkedIn + Naukri + Career Page creates THREE rows, three codes and
-three independently-countable application streams. Each row chooses its own destination:
+-- One posting, one link ------------------------------------------------------------
+A posting used to be created once per job board: publishing to LinkedIn + Naukri + Career
+Page made three rows, three codes and three streams to reconcile, and the candidate's
+`source` was inferred from whichever link they clicked. That inference was wrong the moment
+a link was forwarded, and it made the operator maintain a link per channel forever.
+
+Now a JD produces a SINGLE application link. Paste it into LinkedIn, Naukri, a WhatsApp
+group, anywhere -- and the form itself asks the applicant where they found the role. The
+answer is what fills `source`, so the channel is reported by the person who actually knows
+it. See hrms_referral_service.
+
+A posting still chooses its destination:
 
   auto     -> the built-in public form at /apply/<posting_code>; applications enter the
               pipeline automatically.
@@ -17,7 +26,6 @@ three independently-countable application streams. Each row chooses its own dest
 A stored counter drifts the moment a candidate is deleted, merged or moved. It is derived
 from `hrms_candidates` on read, which cannot disagree with reality.
 """
-import random
 import string
 from datetime import datetime, timezone
 from typing import Optional
@@ -29,7 +37,8 @@ from app.models.hrms import (
     AUDIT_APPLICATION, AUDIT_POSTING_CREATED, AUDIT_POSTING_DELETED, AUDIT_POSTING_UPDATED,
     COLL_CANDIDATES, COLL_JOB_DESCRIPTIONS, COLL_JOB_POSTINGS, COLL_REQUISITIONS,
     EMAIL_RE, ENTITY_CANDIDATE_APPLICATION, ENTITY_POSTING, MAX_CERTIFICATES, PHONE_RE,
-    POSTING_CODE_RE, AppStatus, ApplyLinkMode, JdStatus, LiveStatus, is_iso_date,
+    POSTING_CODE_RE, AppStatus, ApplyLinkMode, JdStatus, LiveStatus, RequisitionTrack,
+    is_iso_date,
 )
 from app.services.hrms_audit_service import audit
 from app.services.hrms_id_service import next_business_id
@@ -38,11 +47,10 @@ from app.utils.hrms_public_guard import (
     CLOSED_LINK, INVALID_LINK, clean_text, decode_upload, safe_filename,
 )
 
-# Two-letter prefix per platform, so a code hints at its channel without being guessable.
-_PLATFORM_PREFIX = {
-    "LinkedIn": "LI", "Naukri": "NK", "Indeed": "ID", "Foundit": "FN",
-    "Apna": "AP", "Career Page": "CP", "Referral": "RF", "Manual": "MN",
-}
+# Every posting code now shares one prefix. It used to encode the platform, which stopped
+# meaning anything the moment a posting stopped having one -- and the pattern
+# POSTING_CODE_RE enforces is unchanged, so codes minted before this still resolve.
+_CODE_PREFIX = "JB"
 _CODE_ALPHABET = string.ascii_uppercase + string.digits
 
 
@@ -52,7 +60,7 @@ def _out(doc: dict) -> dict:
     return doc
 
 
-def _mint_code(platform: str) -> str:
+def _mint_code() -> str:
     """Generate a posting code.
 
     `secrets` is used rather than `random` even though a posting code is a public
@@ -62,12 +70,11 @@ def _mint_code(platform: str) -> str:
     Phase 6/8/9 access codes will.
     """
     import secrets
-    prefix = _PLATFORM_PREFIX.get(platform, "JB")
     body = "".join(secrets.choice(_CODE_ALPHABET) for _ in range(6))
-    return f"{prefix}-{body}"
+    return f"{_CODE_PREFIX}-{body}"
 
 
-async def _unique_code(platform: str, preferred: str = None) -> str:
+async def _unique_code(preferred: str = None) -> str:
     """Resolve a posting code, honouring a client-previewed one when it is safe to.
 
     The UI shows the applicant link WHILE the form is being filled in, so the code the user
@@ -82,7 +89,7 @@ async def _unique_code(platform: str, preferred: str = None) -> str:
             if not await coll.find_one({"posting_code": candidate}):
                 return candidate
     for _ in range(12):
-        candidate = _mint_code(platform)
+        candidate = _mint_code()
         if not await coll.find_one({"posting_code": candidate}):
             return candidate
     raise HTTPException(
@@ -134,7 +141,7 @@ async def list_postings(actor: dict, company_id: str, *, jd_no: str = None,
         query["$or"] = [
             {"posting_code": {"$regex": safe, "$options": "i"}},
             {"title": {"$regex": safe, "$options": "i"}},
-            {"platform": {"$regex": safe, "$options": "i"}},
+            {"jd_no": {"$regex": safe, "$options": "i"}},
         ]
 
     limit = max(1, min(int(limit or 100), 200))
@@ -157,13 +164,13 @@ async def list_postings(actor: dict, company_id: str, *, jd_no: str = None,
         "stats": {
             "live": live,
             "applications": sum(counts.values()),
-            "channels": len({r["platform"] for r in out}),
+            "postings": len(out),
         },
     }
 
 
-async def create_postings(actor: dict, company_id: str, payload: dict) -> dict:
-    """Publish an approved JD to one or more platforms."""
+async def create_posting(actor: dict, company_id: str, payload: dict) -> dict:
+    """Publish an approved JD as ONE posting with ONE application link."""
     jd_no = (payload.get("jd_no") or "").strip()
     if not jd_no:
         raise HTTPException(status_code=422, detail="Select a job description to publish.")
@@ -178,9 +185,16 @@ async def create_postings(actor: dict, company_id: str, payload: dict) -> dict:
             detail=(f'Only an approved job description can be published. {jd_no} is '
                     f'"{jd.get("status")}" - it must clear HR review and MD approval first.'))
 
-    links = payload.get("platform_links") or []
-    if not links:
-        raise HTTPException(status_code=422, detail="Select at least one platform.")
+    # ── Internal track ── the mandatory budget gate (SOP §11). A JD reaches APPROVED only
+    # at the END of either chain, so in practice this is belt and braces -- but publishing is
+    # the primary act of sourcing, and the gate that guards it should be asserted where the
+    # act happens rather than inferred from the state of a different document.
+    if jd.get("request_no"):
+        from app.services.hrms_requisition_service import assert_sourcing_allowed
+        req = await get_collection(COLL_REQUISITIONS).find_one(
+            {"request_no": jd["request_no"], "company_id": str(company_id)})
+        if req:
+            assert_sourcing_allowed(req)
 
     expiry = payload.get("expiry_date")
     if expiry:
@@ -190,81 +204,80 @@ async def create_postings(actor: dict, company_id: str, payload: dict) -> dict:
         if expiry < _today():
             raise HTTPException(status_code=422, detail="Expiry date cannot be in the past.")
 
-    # Validate EVERY link before writing ANY row, so a bad third platform cannot leave the
-    # first two published. Without this the operation is partially applied on failure.
-    prepared = []
-    seen_platforms = set()
-    for link in links:
-        link = link if isinstance(link, dict) else link.model_dump()
-        platform = getattr(link.get("platform"), "value", link.get("platform"))
-        mode = getattr(link.get("apply_link_mode"), "value", link.get("apply_link_mode")) \
-            or ApplyLinkMode.AUTO.value
-        external = (link.get("external_url") or "").strip()
-
-        if platform in seen_platforms:
+    mode = getattr(payload.get("apply_link_mode"), "value", payload.get("apply_link_mode")) \
+        or ApplyLinkMode.AUTO.value
+    external = (payload.get("external_url") or "").strip()
+    if mode == ApplyLinkMode.EXTERNAL.value:
+        if not external:
             raise HTTPException(
-                status_code=422, detail=f"{platform} is listed twice.")
-        seen_platforms.add(platform)
+                status_code=422,
+                detail="Enter the application link, or switch it to the generated form.")
+        if not external.lower().startswith(("http://", "https://")):
+            raise HTTPException(
+                status_code=422,
+                detail="The application link must start with http:// or https://.")
+    else:
+        external = None
 
-        if mode == ApplyLinkMode.EXTERNAL.value:
-            if not external:
-                raise HTTPException(
-                    status_code=422,
-                    detail=(f"{platform}: enter the application link, or switch it to the "
-                            f"generated form."))
-            if not external.lower().startswith(("http://", "https://")):
-                raise HTTPException(
-                    status_code=422,
-                    detail=f"{platform}: the application link must start with http:// or https://.")
-        else:
-            external = None
-        prepared.append((platform, mode, external, link.get("code")))
+    # One JD, one live link. Publishing the same JD twice used to be how an operator got a
+    # second channel; there are no channels now, so a second link is simply a second thing
+    # to keep alive and reconcile. The message names the existing code so the operator can
+    # go and copy it rather than guess why they were refused.
+    # Every Live-stored row is examined, not just the first: a JD can carry a row whose date
+    # has passed (stored Live, effectively Expired) ALONGSIDE a genuinely live one, and
+    # picking one arbitrarily would let a second link through whenever the expired row came
+    # back first.
+    today = _today()
+    existing = await get_collection(COLL_JOB_POSTINGS).find(
+        {"jd_no": jd_no, "company_id": str(company_id),
+         "live_status": LiveStatus.LIVE.value}).to_list(50)
+    live = next((p for p in existing
+                 if _effective_status(p, today) == LiveStatus.LIVE.value), None)
+    if live:
+        raise HTTPException(
+            status_code=409,
+            detail=(f"{jd_no} is already published as {live['posting_code']}. Share that "
+                    f"link, or close the posting before publishing a new one."))
 
     now = datetime.now(timezone.utc)
-    docs = []
-    for platform, mode, external, preferred in prepared:
-        code = await _unique_code(platform, preferred)
-        docs.append({
-            "posting_code": code,
-            "company_id": str(company_id),
-            "jd_no": jd_no,
-            "request_no": jd.get("request_no"),
-            "title": jd.get("title"),
-            "platform": platform,
-            "apply_link_mode": mode,
-            "external_url": external,
-            "live_status": LiveStatus.LIVE.value,
-            "expiry_date": expiry or None,
-            "notes": clean_text(payload.get("notes")),
-            "requires_assessment": bool(payload.get("requires_assessment")),
-            "posted_by": str(actor.get("_id") or ""),
-            "posting_date": now.strftime("%Y-%m-%d"),
-            "created_at": now,
-        })
+    code = await _unique_code(payload.get("code"))
+    doc = {
+        "posting_code": code,
+        "company_id": str(company_id),
+        "jd_no": jd_no,
+        "request_no": jd.get("request_no"),
+        "title": jd.get("title"),
+        "apply_link_mode": mode,
+        "external_url": external,
+        "live_status": LiveStatus.LIVE.value,
+        "expiry_date": expiry or None,
+        "notes": clean_text(payload.get("notes")),
+        "requires_assessment": bool(payload.get("requires_assessment")),
+        "posted_by": str(actor.get("_id") or ""),
+        "posting_date": now.strftime("%Y-%m-%d"),
+        "created_at": now,
+    }
 
-    await get_collection(COLL_JOB_POSTINGS).insert_many([dict(d) for d in docs])
+    await get_collection(COLL_JOB_POSTINGS).insert_one(dict(doc))
 
-    # Phase 11-R, Item 1: register each AUTO posting's apply link.
+    # Phase 11-R, Item 1: register the AUTO posting's apply link.
     #
-    # EXTERNAL postings are deliberately NOT registered. An external listing sends the
-    # applicant to a job board or a Google Form; nothing ever writes those applications back
-    # into this pipeline (see ApplyLinkMode.EXTERNAL), so there is no open to count and no
-    # submission to consume. Registering one would put a row in the Link Manager promising
-    # tracking that cannot exist -- the same honesty the posting UI already applies.
-    from app.models.hrms import LinkKind
-    from app.services.hrms_link_service import register_link
-    for d in docs:
-        if d["apply_link_mode"] != ApplyLinkMode.AUTO.value:
-            continue
+    # An EXTERNAL posting is deliberately NOT registered. It sends the applicant to a job
+    # board or a Google Form; nothing ever writes those applications back into this pipeline
+    # (see ApplyLinkMode.EXTERNAL), so there is no open to count and no submission to
+    # consume. Registering one would put a row in the Link Manager promising tracking that
+    # cannot exist -- the same honesty the posting UI already applies.
+    if mode == ApplyLinkMode.AUTO.value:
+        from app.models.hrms import LinkKind
+        from app.services.hrms_link_service import register_link
         await register_link(
-            company_id=company_id, kind=LinkKind.APPLY, code=d["posting_code"],
-            target_type="posting", target_id=d["posting_code"], actor=actor,
-            candidate_name=None, request_no=d.get("request_no"),
-            expires_at=d.get("expiry_date"))
+            company_id=company_id, kind=LinkKind.APPLY, code=code,
+            target_type="posting", target_id=code, actor=actor,
+            candidate_name=None, request_no=doc.get("request_no"),
+            expires_at=doc.get("expiry_date"))
 
-    await audit(actor, AUDIT_POSTING_CREATED, ENTITY_POSTING, jd_no,
-                f"{len(docs)} platform(s): {', '.join(d['platform'] for d in docs)}", company_id)
-    return {"postings": [_out(d) for d in docs], "created": len(docs)}
+    await audit(actor, AUDIT_POSTING_CREATED, ENTITY_POSTING, jd_no, code, company_id)
+    return {"posting": _out(doc), "created": 1}
 
 
 async def update_posting(actor: dict, company_id: str, code: str, payload: dict) -> dict:
@@ -335,7 +348,7 @@ async def delete_posting(actor: dict, company_id: str, code: str) -> dict:
 
     await coll.delete_one({"posting_code": code, "company_id": str(company_id)})
     await audit(actor, AUDIT_POSTING_DELETED, ENTITY_POSTING, code,
-                current.get("platform"), company_id)
+                current.get("jd_no"), company_id)
     return {"deleted": True, "posting_code": code,
             "applications_kept": (await _application_counts([code])).get(code, 0)}
 
@@ -362,7 +375,7 @@ async def get_public_posting(code: str) -> dict:
 
     if posting.get("apply_link_mode") == ApplyLinkMode.EXTERNAL.value:
         return {"ok": True, "external": True, "external_url": posting.get("external_url"),
-                "title": posting.get("title"), "platform": posting.get("platform")}
+                "title": posting.get("title")}
 
     jd = await get_collection(COLL_JOB_DESCRIPTIONS).find_one({"jd_no": posting.get("jd_no")}) or {}
     req = await get_collection(COLL_REQUISITIONS).find_one(
@@ -373,7 +386,6 @@ async def get_public_posting(code: str) -> dict:
         "external": False,
         "posting_code": posting["posting_code"],
         "title": jd.get("title") or posting.get("title"),
-        "platform": posting.get("platform"),
         "posting_date": posting.get("posting_date"),
         "expiry_date": posting.get("expiry_date"),
         "department": req.get("department_name"),
@@ -387,7 +399,72 @@ async def get_public_posting(code: str) -> dict:
         "benefits": jd.get("benefits"),
         "ctc": jd.get("ctc"),
         "vacancies": req.get("vacancy"),
+        # ── Phase INT-2 (SOP §11) ── the equal-opportunity and data-use statements the form
+        # must show, and the optional talent-pool consent.
+        #
+        # Sent as CONTENT rather than as a flag, because the wording lives in
+        # hrms_comm_templates precisely so legal can change it without a deploy -- a form
+        # that hard-coded the text would need one every time.
+        #
+        # Internal track only. A client-track applicant is agreeing to the CLIENT's terms,
+        # not ours, and asserting ours over their hiring would be claiming something we are
+        # not party to.
+        "acknowledgements": await _acknowledgements(posting, req),
     }
+
+
+async def _acknowledgements(posting: dict, req: dict) -> list:
+    """The tick-boxes the public form must render for this posting.
+
+    Empty on the client track and on any posting whose requisition cannot be resolved, so
+    the form is byte-for-byte what it always was there.
+
+    Never raises: a template lookup that fails must not take down a live job ad. It falls
+    back to no acknowledgements, which means the SERVER-side check is then the one that
+    refuses the application -- loudly, rather than silently accepting an un-acknowledged one.
+    """
+    track = (req or {}).get("requisition_track") or RequisitionTrack.CLIENT.value
+    if track != RequisitionTrack.INTERNAL.value:
+        return []
+    try:
+        from app.models.hrms import CONSENT_TEMPLATES
+        from app.services.hrms_comm_service import get_template
+
+        wanted = [
+            ("eeo_ack", "consent_equal_opportunity", True),
+            ("data_use_ack", "consent_data_use", True),
+            # The talent-pool consent is OPTIONAL and off by default. It is the only way
+            # into the pool, and an opt-out default would make "consent" a formality.
+            ("consent_to_retain", None, False),
+        ]
+        seeded = {key: (subject, body)
+                  for key, _channel, subject, body, _vars in CONSENT_TEMPLATES}
+
+        out = []
+        for field, template_key, required in wanted:
+            if template_key is None:
+                out.append({
+                    "field": field, "required": False,
+                    "heading": "Keeping your details for future roles",
+                    "statement": ("Tick this if you are happy for us to keep your "
+                                  "application on file and contact you about other roles. "
+                                  "You can ask us to remove it at any time, and we will "
+                                  "not keep it beyond our published retention period."),
+                })
+                continue
+            template = await get_template(posting.get("company_id"), template_key)
+            heading, statement = seeded.get(template_key, ("", ""))
+            out.append({
+                "field": field,
+                "required": required,
+                "heading": (template or {}).get("subject") or heading,
+                "statement": (template or {}).get("body") or statement,
+            })
+        return out
+    except Exception as e:
+        print(f"[WARN] HRMS acknowledgements unavailable for "
+              f"{posting.get('posting_code')}: {e}")
+        return []
 
 
 async def _store_upload(upload, label: str, prefix: str) -> Optional[dict]:
@@ -456,17 +533,41 @@ async def submit_application(code: str, payload: dict) -> dict:
     email = email.lower()
     company_id = posting.get("company_id")
 
-    # Phase 11-R, Item 5: the discovery / referral block. Validated BEFORE any upload is
-    # stored, so a rejected claim never costs storage -- the same ordering the existing
-    # validation already follows.
+    # The discovery / referral block. Validated BEFORE any upload is stored, so a rejected
+    # claim never costs storage -- the same ordering the existing validation already follows.
     #
-    # "Where did you find this job" is MANDATORY on the public form, which is the point of
-    # Item 1's one-form-per-posting design: the channel comes from the applicant rather
-    # than from which of several links they clicked. Enforced here rather than in
-    # resolve_referral, because the manual add-candidate path has no applicant to ask.
+    # "Where did you find this job" is MANDATORY on the public form, and it is the whole
+    # reason a posting needs only ONE link: the channel comes from the applicant rather than
+    # from which of several links they clicked, and it is what `source` is set to below.
+    # Enforced here rather than in resolve_referral, because the manual add-candidate path
+    # has no applicant to ask.
     if not payload.get("referral_source"):
         raise HTTPException(
             status_code=422, detail="Please tell us where you found this job.")
+
+    # ── Phase INT-2 (SOP §11) ── the equal-opportunity and data-use acknowledgements.
+    #
+    # Required on the INTERNAL track, where Sparsh Magic is the employer and the commitments
+    # are its own. A client-track application is unchanged: the client's own privacy and
+    # equal-opportunity terms govern their hiring, and asking an applicant to accept ours
+    # would be asserting something we are not party to.
+    #
+    # Checked BEFORE any upload is stored, alongside the referral validation, so a rejected
+    # form never costs storage.
+    req_for_track = await get_collection(COLL_REQUISITIONS).find_one(
+        {"request_no": posting.get("request_no")}) or {}
+    is_internal = ((req_for_track.get("requisition_track")
+                    or RequisitionTrack.CLIENT.value) == RequisitionTrack.INTERNAL.value)
+    if is_internal:
+        if not payload.get("eeo_ack"):
+            raise HTTPException(
+                status_code=422,
+                detail="Please confirm you have read our equal-opportunity statement.")
+        if not payload.get("data_use_ack"):
+            raise HTTPException(
+                status_code=422,
+                detail="Please confirm you have read how we will use your information.")
+
     from app.services.hrms_referral_service import resolve_referral
     referral = await resolve_referral(payload, company_id)
 
@@ -504,7 +605,10 @@ async def submit_application(code: str, payload: dict) -> dict:
         "candidate_name": name,
         "can_email": email,
         "can_contact": phone,
-        "source": posting.get("platform"),
+        # Overwritten by `referral` below, which always carries a `source` for a public
+        # application because the form makes the question mandatory. The fallback exists
+        # only so the field is never absent.
+        "source": None,
         "application_status": AppStatus.APPLIED.value,
         # Copied from the posting at apply time so a later change to the posting cannot
         # retroactively alter the rules an existing applicant is judged by.
@@ -522,22 +626,37 @@ async def submit_application(code: str, payload: dict) -> dict:
         "resume": resume,
         "photo": photo,
         "certificates": certs,
+        # ── Phase INT-2 (SOP §11) ── stamped WITH A TIMESTAMP, not just as a boolean. An
+        # acknowledgement with no time on it cannot be tied to the wording that was shown,
+        # and the wording is editable (it lives in hrms_comm_templates so legal can change
+        # it without a deploy) -- so "they agreed" is only meaningful with "when".
+        "eeo_ack": bool(payload.get("eeo_ack")),
+        "eeo_ack_at": now if payload.get("eeo_ack") else None,
+        "data_use_ack": bool(payload.get("data_use_ack")),
+        "data_use_ack_at": now if payload.get("data_use_ack") else None,
+        # ── Phase INT-2 (Annexure C) ── consent to be kept for future roles, captured on
+        # the form. This is the ONLY way into the talent pool; there is no path that opts
+        # somebody in because a recruiter liked their CV.
+        "consent_to_retain": bool(payload.get("consent_to_retain")),
+        "talent_pool": False,
         "applied_at": now,
         "created_at": now,
     }
-    # Applied AFTER the base document so `source` is overridden to "Referral" when the
-    # applicant declared one -- a referral that arrived through the LinkedIn ad is a
-    # referral, and filing it under LinkedIn would overstate that channel.
+    # Applied AFTER the base document, and this is what sets `source`: the channel the
+    # applicant named, or "Referral" when they declared one -- a referral that arrived
+    # through a LinkedIn post is a referral, and filing it under LinkedIn would overstate
+    # that channel.
     doc.update(referral)
     await get_collection(COLL_CANDIDATES).insert_one(dict(doc))
 
+    channel = doc.get("source") or "the application form"
     await audit(None, AUDIT_APPLICATION, ENTITY_CANDIDATE_APPLICATION, uk,
-                f"{name} applied via {posting.get('platform')} ({code})", company_id)
+                f"{name} applied via {channel} ({code})", company_id)
 
     title = posting.get("title") or "a role"
     await notify_hrms_role(
         company_id, ["HR"], f"New application for {title}",
-        f"{name} applied via {posting.get('platform')}.",
+        f"{name} applied via {channel}.",
         link="/hrms/candidates", email=False)
 
     # Also tell the requisition's assigned recruiter -- they own this pipeline, and a
@@ -546,7 +665,7 @@ async def submit_application(code: str, payload: dict) -> dict:
         {"request_no": posting.get("request_no")}) or {}
     if req.get("assignee_id"):
         await notify_user(req["assignee_id"], f"New application for {title}",
-                          f"{name} applied via {posting.get('platform')}.",
+                          f"{name} applied via {channel}.",
                           link="/hrms/candidates")
 
     # Phase 11-R, Item 5: tell the referring employee their referral landed. In-app only.
@@ -555,6 +674,13 @@ async def submit_application(code: str, payload: dict) -> dict:
         await notify_referrer(
             doc, "Your referral has applied",
             f"{name}, whom you referred, has applied for {title}.")
+
+    # ── Phase INT-2 (Annexure C) ── acknowledge every application. The SOP promises this
+    # to every applicant, and until this phase nothing did it. Fire-and-forget by contract:
+    # an acknowledgement that cannot be sent must never fail somebody's job application, so
+    # `fire_event` swallows everything and logs a Skipped row instead.
+    from app.services.hrms_comm_service import fire_event
+    await fire_event(None, company_id, uk, "application_received")
 
     return {"ok": True, "duplicate": False, "reference": uk,
             "message": "Your application has been submitted."}

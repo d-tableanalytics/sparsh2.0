@@ -1,13 +1,18 @@
-"""Phase 11-R Item 4 verification harness -- the client master + client-wise analytics.
+"""Phase 11-R Item 4 verification harness -- the client dimension + client-wise analytics.
 
-Covers: the client master's CRUD and referential integrity, client sharing as a screening
-action, the client verdict and the stage moves it drives, the analytics client filter
-(which NARROWS and never widens), the CV metrics, the per-client comparison and the
-position-wise matrix.
+Covers: clients read from the ERP's Companies section (there is no HRMS client master),
+client sharing as a screening action, the client verdict and the stage moves it drives, the
+analytics client filter (which NARROWS and never widens), the CV metrics, the CV funnel, the
+per-client comparison and the position-wise matrix.
 
-The single most important property asserted here: `client_id` is a REPORTING dimension, not
-a tenant boundary. `company_id` remains the only security scope, and a client filter
-composed with a manager's row scope must intersect rather than replace it.
+Two properties matter most here.
+
+  1. `client_id` is a REPORTING dimension, not a tenant boundary. `company_id` remains the
+     only security scope, and a client filter composed with a manager's row scope must
+     intersect rather than replace it.
+  2. There is exactly ONE record per organisation. A client is a company, so HRMS reads
+     Companies and never writes it -- asserted below by the absence of the write functions,
+     not merely by not calling them.
 
 House convention: self-contained, no pytest, fake collections, ASCII output, exit 1 on fail.
 
@@ -76,12 +81,21 @@ async def main() -> None:
         cand("CAN-005", S.REJECTED.value, "HR-REQ-2026-001"),
         cand("CAN-006", S.APPLIED.value, "HR-REQ-2026-003"),
     ])
-    clients_coll = FakeCollection()
+    # Clients are companies. These are ERP company documents, not an HRMS-owned list --
+    # the field names are the Companies module's own (`is_active`, `company_type`, ...).
+    ACME, GLOBEX = ObjectId(), ObjectId()
+    ACME_ID, GLOBEX_ID = str(ACME), str(GLOBEX)
+    companies = FakeCollection([
+        {"_id": ACME, "name": "Acme Manufacturing", "company_type": "Manufacturing",
+         "email": "r.iyer@acme.com", "contact": "+91 98765 43210", "city": "Pune",
+         "state": "MH", "is_active": True, "status": "active"},
+        {"_id": GLOBEX, "name": "Globex", "is_active": False, "status": "inactive"},
+    ])
     reqs = FakeCollection()
     counters = FakeCollection()
     audit_log = FakeCollection()
 
-    store = {M.COLL_CANDIDATES: candidates, M.COLL_CLIENTS: clients_coll,
+    store = {M.COLL_CANDIDATES: candidates, "companies": companies,
              M.COLL_REQUISITIONS: reqs, M.COLL_COUNTERS: counters,
              M.COLL_AUDIT_LOG: audit_log, M.COLL_ASSESSMENTS: FakeCollection(),
              M.COLL_INTERVIEWS: FakeCollection(), M.COLL_OFFERS: FakeCollection(),
@@ -111,59 +125,63 @@ async def main() -> None:
 
     try:
         # =================================================================
-        section("The client master")
+        section("Clients ARE the ERP's companies")
         # =================================================================
-        acme = await CS.create_client(HR, COMPANY, {
-            "name": "Acme Manufacturing", "industry": "Manufacturing",
-            "contact_name": "R Iyer", "contact_email": "R.Iyer@Acme.com",
-            "contact_phone": "+91 98765 43210"})
-        check("a client id is minted", acme["client_id"].startswith("CLI-"))
-        check("the contact email is normalised", acme["contact_email"] == "r.iyer@acme.com")
-        check("creation is audited",
-              any(a["action"] == M.AUDIT_CLIENT_CREATED for a in audit_log.docs))
-
-        globex = await CS.create_client(HR, COMPANY, {"name": "Globex"})
-        await CS.create_client(HR, OTHER, {"name": "Acme Manufacturing"})
-
-        await expect_http("a duplicate name (case-insensitively)",
-                          CS.create_client(HR, COMPANY, {"name": "acme MANUFACTURING"}),
-                          409, "already exists")
-        await expect_http("a blank name", CS.create_client(HR, COMPANY, {"name": " "}), 422)
-        await expect_http("a malformed contact email",
-                          CS.create_client(HR, COMPANY,
-                                           {"name": "Bad", "contact_email": "nope"}),
-                          422, "valid contact email")
+        for gone in ("create_client", "update_client", "delete_client"):
+            check(f"there is no {gone} -- HRMS never writes a company",
+                  not hasattr(CS, gone))
+        check("there is no hrms_clients collection constant",
+              not hasattr(M, "COLL_CLIENTS"))
 
         listing = await CS.list_clients(HR, COMPANY)
         names = {c["name"] for c in listing["clients"]}
-        check("this company's clients are listed", {"Acme Manufacturing", "Globex"} <= names)
-        check("another tenant's client of the SAME NAME is a separate row",
-              len([c for c in clients_coll.docs
-                   if c["name"] == "Acme Manufacturing"]) == 2)
-        check("the other tenant's row is not returned", listing["total"] == 2)
+        check("active companies are offered as clients", names == {"Acme Manufacturing"})
+        check("an inactive company is withheld by default", "Globex" not in names)
 
-        check("a client from another tenant does not resolve",
-              await CS.get_client(COMPANY, "CLI-999") is None)
+        with_inactive = await CS.list_clients(HR, COMPANY, include_inactive=True)
+        check("include_inactive returns it",
+              {"Acme Manufacturing", "Globex"}
+              == {c["name"] for c in with_inactive["clients"]})
+
+        acme = next(c for c in listing["clients"] if c["name"] == "Acme Manufacturing")
+        check("client_id IS the company id", acme["client_id"] == ACME_ID)
+        check("no second id is minted for a company",
+              not acme["client_id"].startswith("CLI-"))
+        check("the company's contact details ride along, unduplicated",
+              acme["contact_email"] == "r.iyer@acme.com"
+              and acme["contact_phone"] == "+91 98765 43210")
+        check("its industry is the company type, not a new field",
+              acme["industry"] == "Manufacturing")
+        check("only display fields are exposed, never the whole company document",
+              set(acme) == {"client_id", "name", "industry", "domain", "contact_email",
+                            "contact_phone", "location", "active", "status"})
+
+        found = await CS.list_clients(HR, COMPANY, search="acme")
+        check("clients can be searched by name", found["total"] == 1)
+
+        check("an unknown client does not resolve",
+              await CS.get_client(str(ObjectId())) is None)
+        check("a malformed id answers 'no such client' rather than raising",
+              await CS.get_client("not-an-object-id") is None)
         await expect_http("requiring a non-existent client",
-                          CS.require_client(COMPANY, "CLI-999"), 422, "does not exist")
-
-        await CS.update_client(HR, COMPANY, globex["client_id"], {"active": False})
-        await expect_http("requiring an INACTIVE client",
-                          CS.require_client(COMPANY, globex["client_id"]),
-                          422, "inactive")
+                          CS.require_client(str(ObjectId())), 422, "does not exist")
+        await expect_http("requiring an INACTIVE company",
+                          CS.require_client(GLOBEX_ID), 422, "inactive")
+        check("requiring an active company resolves it",
+              (await CS.require_client(ACME_ID))["name"] == "Acme Manufacturing")
 
         # =================================================================
         section("Requisitions name a client")
         # =================================================================
         await reqs.insert_one({
             "request_no": "HR-REQ-2026-001", "company_id": COMPANY, "created_by": U_HOD,
-            "client_id": acme["client_id"], "client_name": "Acme Manufacturing",
+            "client_id": ACME_ID, "client_name": "Acme Manufacturing",
             "designation_name": "Analyst", "department_name": "Ops", "vacancy": 2,
             "closing_status": M.ReqClosing.OPEN.value,
             "approval_status": M.ReqApproval.APPROVED.value, "created_at": NOW})
         await reqs.insert_one({
             "request_no": "HR-REQ-2026-002", "company_id": COMPANY, "created_by": U_HR,
-            "client_id": acme["client_id"], "client_name": "Acme Manufacturing",
+            "client_id": ACME_ID, "client_name": "Acme Manufacturing",
             "designation_name": "Engineer", "vacancy": 1,
             "closing_status": M.ReqClosing.OPEN.value,
             "approval_status": M.ReqApproval.APPROVED.value, "created_at": NOW})
@@ -173,19 +191,24 @@ async def main() -> None:
             "closing_status": M.ReqClosing.OPEN.value,
             "approval_status": M.ReqApproval.APPROVED.value, "created_at": NOW})
 
-        await expect_http("deleting a client named on requisitions",
-                          CS.delete_client(HR, COMPANY, acme["client_id"]),
-                          409, "inactive instead")
-        removable = await CS.create_client(HR, COMPANY, {"name": "Unused Co"})
-        gone = await CS.delete_client(HR, COMPANY, removable["client_id"])
-        check("an unreferenced client can be deleted", gone["deleted"] is True)
+        stats = await CS.list_clients(HR, COMPANY, with_stats=True)
+        acme_row = next(c for c in stats["clients"] if c["client_id"] == ACME_ID)
+        check("a client carries this tenant's requisition count",
+              acme_row["requisition_count"] == 2)
+        check("and how many of them are still open", acme_row["open_requisitions"] == 2)
 
-        await CS.update_client(HR, COMPANY, acme["client_id"], {"name": "Acme Mfg Ltd"})
-        check("a rename follows through to the requisitions that denormalised it",
-              all(r["client_name"] == "Acme Mfg Ltd" for r in reqs.docs
-                  if r.get("client_id") == acme["client_id"]))
+        # A rename in Companies must show through WITHOUT a sync step -- that is the whole
+        # argument for not keeping a second copy of the name.
+        await companies.update_one({"_id": ACME}, {"$set": {"name": "Acme Mfg Ltd"}})
+        renamed = await AN.positions(HR, COMPANY)
+        check("a rename in Companies shows through on the next read, with no sync step",
+              all(r["client_name"] == "Acme Mfg Ltd" for r in renamed["rows"]
+                  if r.get("request_no") in ("HR-REQ-2026-001", "HR-REQ-2026-002")))
+        check("the stale denormalised name on the requisition is NOT what was shown",
+              all(r.get("client_name") == "Acme Manufacturing" for r in reqs.docs
+                  if r.get("client_id") == ACME_ID))
 
-        summary = await CS.client_summary(COMPANY, acme["client_id"])
+        summary = await CS.client_summary(COMPANY, ACME_ID)
         check("the client summary counts its requisitions", summary["requisitions"] == 2)
         check("it counts their vacancies", summary["vacancies"] == 3)
         # CAN-001/002/005 on REQ-001 and CAN-003/004 on REQ-002 -- five in total.
@@ -294,7 +317,7 @@ async def main() -> None:
         check("manager + client filter INTERSECT (the filter cannot widen their view)",
               mgr_client["request_no"]["$in"] == ["HR-REQ-2026-001"])
 
-        empty = await AN._scope(HR, COMPANY, "CLI-DOES-NOT-EXIST")
+        empty = await AN._scope(HR, COMPANY, str(ObjectId()))
         check("an unknown client matches NOTHING (fails closed)",
               empty["request_no"]["$in"] == [])
 
@@ -304,7 +327,7 @@ async def main() -> None:
         dash = await AN.dashboard(HR, COMPANY)
         cv = dash["cv_metrics"]
         keys = {k["key"] for k in dash["kpis"]}
-        for wanted in ("cvs_reviewed", "cvs_selected", "cvs_rejected",
+        for wanted in ("cvs_reviewed", "cvs_shortlisted", "cvs_selected", "cvs_rejected",
                        "shared_with_client", "client_shortlisted", "client_rejected",
                        "joinings"):
             check(f"the '{wanted}' tile exists", wanted in keys)
@@ -320,6 +343,32 @@ async def main() -> None:
               cv["reviewed"] >= 5)
         check("the shortlist rate is measured against ANSWERED CVs only",
               dash["client_metrics"]["shortlist_rate"] == 50.0)
+
+        # CAN-006 is at Applied and nothing else has happened to it. "Reviewed" must not
+        # count it -- STAGE_RANK puts Applied and Under Review in the same band, so the
+        # obvious `rank >= rank(Under Review)` test made this figure equal the total.
+        check("a CV still at Applied is NOT counted as reviewed",
+              cv["reviewed"] == cv["total"] - 1)
+        check("what is left in the inbox is stated outright",
+              cv["awaiting_review"] == 1
+              and cv["reviewed"] + cv["awaiting_review"] == cv["total"])
+        check("shortlisted is the INTERNAL selection, ahead of client sharing",
+              cv["shortlisted"] >= cv["shared_with_client"])
+        check("selected is the FINAL selection, so it cannot exceed shortlisted",
+              cv["selected"] <= cv["shortlisted"])
+
+        # ── The CV funnel ──
+        funnel_keys = [s["key"] for s in dash["cv_funnel"]]
+        check("the funnel runs review -> selection -> sharing -> verdict -> joining",
+              funnel_keys == ["total", "reviewed", "shortlisted", "shared_with_client",
+                              "client_shortlisted", "selected", "joinings"])
+        check("every funnel stage reports the same number as its KPI",
+              all(s["value"] == cv[s["key"]] for s in dash["cv_funnel"]))
+        check("the first stage is 100% of itself",
+              dash["cv_funnel"][0]["of_total"] == 100.0)
+        check("of_previous is null where a stage out-counts the one above it, never >100%",
+              all(s["of_previous"] is None or s["of_previous"] <= 100.0
+                  for s in dash["cv_funnel"]))
 
         # =================================================================
         section("Per-client comparison and the position matrix")
@@ -384,10 +433,22 @@ async def main() -> None:
         section("Capabilities")
         # =================================================================
         from app.utils.hrms_access import can
-        check("HR reads and writes clients",
-              can(HR, M.Cap.CLIENT_READ) and can(HR, M.Cap.CLIENT_WRITE))
-        check("a manager reads clients but cannot edit them",
-              can(HOD, M.Cap.CLIENT_READ) and not can(HOD, M.Cap.CLIENT_WRITE))
+        check("HR reads clients", can(HR, M.Cap.CLIENT_READ))
+        check("a manager reads clients", can(HOD, M.Cap.CLIENT_READ))
+        # `client.write` was reintroduced by the multi-client foundation, but with a
+        # DIFFERENT meaning: it manages ENGAGEMENTS (this tenant recruits for that company,
+        # and these of our users work on it), never the company record.
+        #
+        # The invariant this line has always been about is unchanged and is asserted where
+        # it actually lives -- in the absence of create/update/delete_client above. A
+        # capability name proves nothing on its own; the missing write functions do.
+        check("client.write manages engagements, and still never edits a company",
+              hasattr(M.Cap, "CLIENT_WRITE")
+              and not any(hasattr(CS, fn) for fn in
+                          ("create_client", "update_client", "delete_client")))
+        check("and only Management or internal support hold it -- not HR",
+              M.Cap.CLIENT_WRITE in M.ROLE_CAPABILITIES[M.HrmsRole.MD]
+              and M.Cap.CLIENT_WRITE not in M.ROLE_CAPABILITIES[M.HrmsRole.HR])
         check("recording a client verdict IS screening, not a new capability",
               can(HR, M.Cap.CANDIDATE_SCREEN))
 

@@ -60,6 +60,13 @@ RATE_LIMITS = {
     # once, so the same generous-view / tight-act split applies.
     "appointment-view": (40, 60),    # 40 per minute per IP
     "appointment-ack":  (10, 3600),  # 10 acknowledgements per hour per IP
+    # Phase INT-2: the new-hire experience surveys. A survey is opened, thought about, and
+    # answered once -- so viewing is generous (people come back to it) and submitting is
+    # tight, exactly as the offer and onboarding surfaces are. Deliberately identical
+    # figures rather than new ones: a limit invented per endpoint is a limit nobody can
+    # reason about across the surface.
+    "survey-view":    (40, 60),      # 40 per minute per IP
+    "survey-submit":  (10, 3600),    # 10 submissions per hour per IP
 }
 
 # Deliberately vague: a public error must never reveal whether a code exists, who applied,

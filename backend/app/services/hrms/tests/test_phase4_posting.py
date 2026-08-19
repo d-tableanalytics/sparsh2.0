@@ -1,6 +1,6 @@
 """Phase 4 verification harness -- job postings + public application intake.
 
-Covers: publishing gates, per-platform link config, all-or-nothing validation, computed
+Covers: publishing gates, one-live-link-per-JD, external link validation, computed
 application counts, expiry, the public job ad, application validation, duplicate detection,
 upload validation, and the public guard's rate limiter / code validator / sanitisers.
 
@@ -97,6 +97,12 @@ async def main() -> None:
         {"_id": ObjectId(), "jd_no": "JD-2026-002", "company_id": COMPANY,
          "request_no": "HR-REQ-2026-002", "title": "Pending Role",
          "status": M.JdStatus.PENDING_APPROVAL.value, "responsibilities": "x"},
+        # A JD now yields ONE live posting, so every publish below that must succeed needs a
+        # JD of its own rather than another platform on the same one.
+        *[{"_id": ObjectId(), "jd_no": f"JD-2026-{n:03d}", "company_id": COMPANY,
+           "request_no": "HR-REQ-2026-001", "title": f"Spare Role {n}",
+           "status": M.JdStatus.APPROVED.value, "responsibilities": "x"}
+          for n in range(3, 9)],
     ])
     reqs = FakeCollection([
         {"_id": ObjectId(), "request_no": "HR-REQ-2026-001", "company_id": COMPANY,
@@ -150,104 +156,82 @@ async def main() -> None:
     HR = {"_id": "hr", "role": "clientuser", "_source_collection": "learners",
           "company_id": COMPANY, "governance_role": "HR", "full_name": "Hana HR"}
 
-    def links(*specs):
-        return [{"platform": p, "apply_link_mode": m, "external_url": u, "code": c}
-                for p, m, u, c in specs]
-
     try:
         # =================================================================
         section("Publishing gate: only an APPROVED JD may be published")
         # =================================================================
-        await expect_http("publishing a Pending JD", PS.create_postings(
-            HR, COMPANY, {"jd_no": "JD-2026-002",
-                          "platform_links": links(("LinkedIn", "auto", None, None))}),
-            409, "approved job description")
-        await expect_http("publishing an unknown JD", PS.create_postings(
-            HR, COMPANY, {"jd_no": "JD-9999", "platform_links": links(("LinkedIn", "auto", None, None))}),
-            404)
-        await expect_http("no platforms selected", PS.create_postings(
-            HR, COMPANY, {"jd_no": "JD-2026-001", "platform_links": []}), 422, "at least one")
-        await expect_http("no JD selected", PS.create_postings(
-            HR, COMPANY, {"platform_links": links(("LinkedIn", "auto", None, None))}), 422)
+        await expect_http("publishing a Pending JD", PS.create_posting(
+            HR, COMPANY, {"jd_no": "JD-2026-002"}), 409, "approved job description")
+        await expect_http("publishing an unknown JD", PS.create_posting(
+            HR, COMPANY, {"jd_no": "JD-9999"}), 404)
+        await expect_http("no JD selected", PS.create_posting(HR, COMPANY, {}), 422)
 
-        section("One posting row per platform")
-        res = await PS.create_postings(HR, COMPANY, {
-            "jd_no": "JD-2026-001", "requires_assessment": True,
-            "platform_links": links(("LinkedIn", "auto", None, None),
-                                    ("Naukri", "external", "https://naukri.example/job/1", None),
-                                    ("Career Page", "auto", None, None)),
-        })
-        check("three platforms -> three rows", res["created"] == 3)
-        codes = [p["posting_code"] for p in res["postings"]]
-        check("every row has its own code", len(set(codes)) == 3)
-        check("codes match the public pattern",
-              all(M.POSTING_CODE_RE.match(c) for c in codes))
-        check("platform prefix encoded in the code",
-              any(c.startswith("LI-") for c in codes) and any(c.startswith("NK-") for c in codes))
-        by_platform = {p["platform"]: p for p in res["postings"]}
-        check("auto rows carry no external url",
-              by_platform["LinkedIn"]["external_url"] is None)
-        check("external row keeps its url",
-              by_platform["Naukri"]["external_url"] == "https://naukri.example/job/1")
-        check("assessment flag stored per row",
-              all(p["requires_assessment"] for p in res["postings"]))
-        check("all rows start Live",
-              all(p["live_status"] == M.LiveStatus.LIVE.value for p in res["postings"]))
+        section("One posting, one link")
+        res = await PS.create_posting(HR, COMPANY, {
+            "jd_no": "JD-2026-001", "requires_assessment": True})
+        posting = res["posting"]
+        live_code = posting["posting_code"]
+        check("publishing creates exactly one row", res["created"] == 1)
+        check("code matches the public pattern",
+              M.POSTING_CODE_RE.match(live_code) is not None)
+        check("no platform is stored on the posting", "platform" not in posting)
+        check("an auto posting carries no external url", posting["external_url"] is None)
+        check("assessment flag stored", posting["requires_assessment"] is True)
+        check("starts Live", posting["live_status"] == M.LiveStatus.LIVE.value)
         check("publish audited", any(a["action"] == M.AUDIT_POSTING_CREATED for a in audit_log.docs))
 
-        section("Per-platform link validation (all-or-nothing)")
+        section("One LIVE link per JD")
+        await expect_http("republishing a JD that is already live", PS.create_posting(
+            HR, COMPANY, {"jd_no": "JD-2026-001"}), 409, "already published")
+        tmp = await PS.create_posting(HR, COMPANY, {"jd_no": "JD-2026-003"})
+        await PS.update_posting(HR, COMPANY, tmp["posting"]["posting_code"],
+                                {"live_status": M.LiveStatus.CLOSED.value})
+        again = await PS.create_posting(HR, COMPANY, {"jd_no": "JD-2026-003"})
+        check("closing the posting frees the JD to be published again",
+              again["created"] == 1
+              and again["posting"]["posting_code"] != tmp["posting"]["posting_code"])
+
+        section("External link validation")
         before = len(postings.docs)
-        await expect_http("external mode with no url", PS.create_postings(
-            HR, COMPANY, {"jd_no": "JD-2026-001",
-                          "platform_links": links(("Indeed", "external", "", None))}),
-            422, "enter the application link")
-        await expect_http("external url without a scheme", PS.create_postings(
-            HR, COMPANY, {"jd_no": "JD-2026-001",
-                          "platform_links": links(("Indeed", "external", "naukri.com/x", None))}),
-            422, "http")
-        await expect_http("javascript: url rejected", PS.create_postings(
-            HR, COMPANY, {"jd_no": "JD-2026-001",
-                          "platform_links": links(("Indeed", "external", "javascript:alert(1)", None))}),
-            422, "http")
-        await expect_http("the same platform twice", PS.create_postings(
-            HR, COMPANY, {"jd_no": "JD-2026-001",
-                          "platform_links": links(("Apna", "auto", None, None),
-                                                  ("Apna", "auto", None, None))}), 422, "twice")
-        # A bad THIRD platform must not leave the first two published.
-        await expect_http("one bad platform aborts the whole publish", PS.create_postings(
-            HR, COMPANY, {"jd_no": "JD-2026-001",
-                          "platform_links": links(("Apna", "auto", None, None),
-                                                  ("Indeed", "auto", None, None),
-                                                  ("Foundit", "external", "", None))}), 422)
-        check("no partial rows were written", len(postings.docs) == before)
+        await expect_http("external mode with no url", PS.create_posting(
+            HR, COMPANY, {"jd_no": "JD-2026-004", "apply_link_mode": "external",
+                          "external_url": ""}), 422, "enter the application link")
+        await expect_http("external url without a scheme", PS.create_posting(
+            HR, COMPANY, {"jd_no": "JD-2026-004", "apply_link_mode": "external",
+                          "external_url": "naukri.com/x"}), 422, "http")
+        await expect_http("javascript: url rejected", PS.create_posting(
+            HR, COMPANY, {"jd_no": "JD-2026-004", "apply_link_mode": "external",
+                          "external_url": "javascript:alert(1)"}), 422, "http")
+        check("a rejected publish writes no row", len(postings.docs) == before)
+        ext_res = await PS.create_posting(HR, COMPANY, {
+            "jd_no": "JD-2026-004", "apply_link_mode": "external",
+            "external_url": "https://naukri.example/job/1"})
+        ext_code = ext_res["posting"]["posting_code"]
+        check("an external posting keeps its url",
+              ext_res["posting"]["external_url"] == "https://naukri.example/job/1")
 
         section("Client-previewed codes")
-        res2 = await PS.create_postings(HR, COMPANY, {
-            "jd_no": "JD-2026-001",
-            "platform_links": links(("Apna", "auto", None, "AP-ABC123"))})
+        res2 = await PS.create_posting(HR, COMPANY, {
+            "jd_no": "JD-2026-005", "code": "JB-ABC123"})
         check("a valid unused preview code is honoured",
-              res2["postings"][0]["posting_code"] == "AP-ABC123")
-        res3 = await PS.create_postings(HR, COMPANY, {
-            "jd_no": "JD-2026-001",
-            "platform_links": links(("Indeed", "auto", None, "AP-ABC123"))})
+              res2["posting"]["posting_code"] == "JB-ABC123")
+        res3 = await PS.create_posting(HR, COMPANY, {
+            "jd_no": "JD-2026-006", "code": "JB-ABC123"})
         check("a DUPLICATE preview code is replaced, not reused",
-              res3["postings"][0]["posting_code"] != "AP-ABC123")
-        res4 = await PS.create_postings(HR, COMPANY, {
-            "jd_no": "JD-2026-001",
-            "platform_links": links(("Foundit", "auto", None, "not-a-code"))})
+              res3["posting"]["posting_code"] != "JB-ABC123")
+        res4 = await PS.create_posting(HR, COMPANY, {
+            "jd_no": "JD-2026-007", "code": "not-a-code"})
         check("a malformed preview code is replaced",
-              M.POSTING_CODE_RE.match(res4["postings"][0]["posting_code"]) is not None)
+              M.POSTING_CODE_RE.match(res4["posting"]["posting_code"]) is not None)
 
         section("Expiry")
-        await expect_http("expiry in the past", PS.create_postings(
-            HR, COMPANY, {"jd_no": "JD-2026-001", "expiry_date": "2020-01-01",
-                          "platform_links": links(("Manual", "auto", None, None))}),
+        await expect_http("expiry in the past", PS.create_posting(
+            HR, COMPANY, {"jd_no": "JD-2026-008", "expiry_date": "2020-01-01"}),
             422, "past")
-        await expect_http("malformed expiry", PS.create_postings(
-            HR, COMPANY, {"jd_no": "JD-2026-001", "expiry_date": "01-01-2030",
-                          "platform_links": links(("Manual", "auto", None, None))}), 422)
+        await expect_http("malformed expiry", PS.create_posting(
+            HR, COMPANY, {"jd_no": "JD-2026-008", "expiry_date": "01-01-2030"}), 422)
 
-        expired_code = codes[0]
+        expired_code = res2["posting"]["posting_code"]
         await postings.update_one({"posting_code": expired_code},
                                   {"$set": {"expiry_date": "2020-01-01"}})
         listed = await PS.list_postings(HR, COMPANY)
@@ -262,7 +246,6 @@ async def main() -> None:
         # =================================================================
         section("Public job ad")
         # =================================================================
-        live_code = by_platform["Career Page"]["posting_code"]
         ad = await PS.get_public_posting(live_code)
         check("ad returns the role", ad["title"] == "Analyst")
         check("ad includes JD content", ad["responsibilities"] == "Own the ledger.")
@@ -272,10 +255,10 @@ async def main() -> None:
                      "posted_by", "notes"):
             check(f"public ad does NOT leak {leak}", leak not in ad)
 
-        ext = await PS.get_public_posting(by_platform["Naukri"]["posting_code"])
+        ext = await PS.get_public_posting(ext_code)
         check("external posting signposts rather than serving a form", ext["external"] is True)
         check("external posting exposes only its destination",
-              set(ext) == {"ok", "external", "external_url", "title", "platform"})
+              set(ext) == {"ok", "external", "external_url", "title"})
 
         await expect_http("unknown code", PS.get_public_posting("ZZ-ZZZZZZ"), 404, "not valid")
         await PS.update_posting(HR, COMPANY, live_code, {"live_status": M.LiveStatus.PAUSED.value})
@@ -287,10 +270,10 @@ async def main() -> None:
         section("Public application")
         # =================================================================
         def application(**over):
-            # `referral_source` became REQUIRED in Phase 11-R, Item 1: the public form now
-            # asks every applicant where they found the job, and that answer is the source
-            # data one tracked form is supposed to produce. It is enforced server-side
-            # because a client-side "required" attribute guarantees nothing about a request.
+            # `referral_source` is REQUIRED: the public form asks every applicant where they
+            # found the job, and that answer BECOMES the candidate's source now that a
+            # posting has no platform to infer one from. It is enforced server-side because
+            # a client-side "required" attribute guarantees nothing about a request.
             # Every real form submission carries it, so the fixture does too.
             base = {"candidate_name": "Asha Rao", "can_email": "Asha@Example.com",
                     "can_contact": "+91 98765 43210", "declaration": True,
@@ -305,7 +288,8 @@ async def main() -> None:
         cand = await candidates.find_one({"uk": out["reference"]})
         check("status is Applied", cand["application_status"] == M.AppStatus.APPLIED.value)
         check("email normalised to lowercase", cand["can_email"] == "asha@example.com")
-        check("source recorded from the platform", cand["source"] == "Career Page")
+        check("source comes from the applicant's answer, not the posting",
+              cand["source"] == "Job Portal")
         check("assessment flag COPIED onto the candidate", cand["requires_assessment"] is True)
         check("linked to posting/jd/requisition",
               cand["posting_code"] == live_code and cand["jd_no"] == "JD-2026-001"
@@ -331,7 +315,7 @@ async def main() -> None:
         await expect_http("applying to an unknown code", PS.submit_application(
             "ZZ-ZZZZZZ", application()), 404, "not valid")
         await expect_http("applying through an external posting", PS.submit_application(
-            by_platform["Naukri"]["posting_code"], application()), 409, "original job board")
+            ext_code, application()), 409, "original job board")
 
         section("Duplicate detection (server-side)")
         dup = await PS.submit_application(live_code, application())

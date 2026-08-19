@@ -35,9 +35,22 @@ from app.models.hrms import (
 # ── Phase 11-R — recruitment review enhancements ──
 from app.models.hrms import (
     AppointmentCancelIn, AppointmentIn, AppointmentSendIn, AppointmentUpdate,
-    ClientIn, ClientResponseIn, ClientUpdate,
+    ClientResponseIn,
+    ScorecardApproveIn, ScorecardEvaluateIn, ScorecardIn, ScorecardUpdate,
+    ReferenceCheckIn, ReferenceCheckUpdate, OfferApproveIn,
+    TelephonicScreeningIn, TelephonicScreeningUpdate,
+    PersonnelFileCloseIn, ProbationConfirmIn, ProbationIn, ProbationUpdate,
+    ExceptionDecisionIn, ExceptionIn,
+    ClientEngagementIn, ClientEngagementUpdate, EngagementMemberIn,
     DocumentIn, DocumentStatusIn, DocumentTypeIn, DocumentTypeUpdate, DocumentUpdate,
     LinkRevokeIn, SanctionedStrengthIn, SanctionedStrengthUpdate,
+)
+# ── Phase INT-2 — the remaining Internal Recruitment SOP controls ──
+from app.models.hrms import (
+    PRINTABLE_DOCUMENTS,
+    CommSendIn, CommTemplateUpdate, InterviewWindowIn, InterviewWindowUpdate,
+    PolicyApproveIn, PolicyIn, PolicyRevisionIn, PreboardingTouchpointIn, PurgeApproveIn,
+    SalaryBandIn, SalaryBandUpdate, ShortlistReviewIn, ShortlistReviewUpdate, TalentPoolIn,
 )
 from app.services import hrms_analytics_service as analytics
 from app.services import hrms_employee_service as employees
@@ -46,6 +59,12 @@ from app.services import hrms_assessment_service as assessments
 from app.services import hrms_candidate_service as candidates
 from app.services import hrms_interview_service as interviews
 from app.services import hrms_offer_service as offers
+from app.services import hrms_exception_service as exceptions
+from app.services import hrms_probation_service as probation
+from app.services import hrms_reference_service as references
+from app.services import hrms_scorecard_service as scorecards
+from app.services import hrms_telephonic_service as telephonic
+from app.services import hrms_sla_service as sla
 from app.services import hrms_onboarding_service as onboarding
 from app.services import hrms_posting_service as postings
 from app.services import hrms_requisition_service as requisitions
@@ -55,11 +74,22 @@ from app.services import hrms_client_service as clients
 from app.services import hrms_document_service as documents
 from app.services import hrms_link_service as links
 from app.services import hrms_sanction_service as sanctions
+# ── Phase INT-2 ──
+from app.services import hrms_comm_service as comms
+from app.services import hrms_interview_window_service as interview_windows
+from app.services import hrms_policy_service as policies
+from app.services import hrms_preboarding_service as preboarding
+from app.services import hrms_purge_service as purge
+from app.services import hrms_record_document_service as record_documents
+from app.services import hrms_salary_band_service as salary_bands
+from app.services import hrms_shortlist_service as shortlists
+from app.services import hrms_survey_service as surveys
 from app.services.hrms_audit_service import read_audit
 from app.utils.hrms_access import (
     NO_ACCESS_MESSAGE, can, capabilities_for, ensure_hrms_enabled, hrms_role,
     is_internal_user, scope_company_id,
 )
+from app.utils.hrms_access import is_client_scoped_user, scope_client_ids
 
 
 async def _hrms_company_gate(current_user: dict = Depends(get_current_user)) -> None:
@@ -106,12 +136,20 @@ async def hrms_health(current_user: dict = Depends(get_current_user)):
     inferring status from an HTTP code.
     """
     role = hrms_role(current_user)
+    company_id = scope_company_id(current_user)
+    # ── Client scope ──
+    # Resolved SERVER-SIDE from the engagement records and handed to the frontend as an
+    # answer, never as a question. The frontend renders from it; a client id it later sends
+    # back is a filter, and `assert_client_allowed` is what keeps it one.
+    allowed_client_ids = await scope_client_ids(current_user, company_id)
     return HrmsHealthResponse(
         enabled=True,
         role=role.value if role else None,
         capabilities=sorted(c.value for c in capabilities_for(current_user)),
-        company_id=scope_company_id(current_user),
+        company_id=company_id,
         is_internal=is_internal_user(current_user),
+        is_client_user=is_client_scoped_user(current_user),
+        allowed_client_ids=allowed_client_ids,
     )
 
 
@@ -402,16 +440,21 @@ async def list_requisitions(
     approval_status: Optional[str] = Query(None),
     closing_status: Optional[str] = Query(None),
     department_id: Optional[str] = Query(None),
+    track: Optional[str] = Query(None, description="client | internal"),
     limit: int = Query(100, ge=1, le=200),
     skip: int = Query(0, ge=0),
     current_user: dict = Depends(get_current_user),
 ):
-    """Requisition list + stat tiles. A plain employee sees only the ones they raised."""
+    """Requisition list + stat tiles. A plain employee sees only the ones they raised.
+
+    `track` filters to one hiring track. Omitting it returns BOTH, which is what every
+    caller written before the internal track existed does -- so their behaviour is unchanged.
+    """
     _require(current_user, Cap.REQUISITION_READ)
     return await requisitions.list_requisitions(
         current_user, _company(current_user, company_id),
         search=search, approval_status=approval_status, closing_status=closing_status,
-        department_id=department_id, limit=limit, skip=skip)
+        department_id=department_id, track=track, limit=limit, skip=skip)
 
 
 @router.post("/requisitions", status_code=201)
@@ -472,14 +515,61 @@ async def act_on_requisition(
     company_id: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user),
 ):
-    """One transition of the approval chain: hr-approve | hr-reject | md-approve | md-reject.
+    """One transition of the approval chain.
 
-    The per-action capability is enforced inside the service, from the same transition table
-    that defines the state machine -- so the gate can never drift from the rule it guards.
+    Client track:   hr-approve | hr-reject | md-approve | md-reject
+                    (+ escalate-approve | escalate-reject when over sanctioned strength)
+    Internal track: hr-verify | budget-approve | scorecard-approve, each with its -reject twin
+                    (+ the same escalation pair)
+
+    WHICH set applies is a property of the requisition, not of the caller, so an action from
+    the other track's chain is rejected as unknown. The per-action capability is enforced
+    inside the service from the same transition table that defines the state machine -- so
+    the gate can never drift from the rule it guards.
     """
     return await requisitions.act_on_requisition(
         current_user, _company(current_user, company_id), request_no,
-        body.action, body.remarks, body.salary_change)
+        body.action, body.remarks, body.salary_change,
+        budget={"approved_headcount": body.approved_headcount,
+                "approved_salary_band_min": body.approved_salary_band_min,
+                "approved_salary_band_max": body.approved_salary_band_max})
+
+
+@router.get("/requisitions/{request_no}/sla")
+async def requisition_sla(
+    request_no: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Milestone targets against actuals for one requisition (SOP §8).
+
+    Everything except the actual timestamps is computed on read, so a target changed in the
+    SOP takes effect immediately and a stored breach flag can never go stale.
+    """
+    _require(current_user, Cap.REQUISITION_READ)
+    scoped = _company(current_user, company_id)
+    req = await requisitions.get_requisition(current_user, scoped, request_no)
+    if not req:
+        raise HTTPException(status_code=404, detail="Requisition not found.")
+    return await sla.sla_for(scoped, req)
+
+
+@router.get("/sla/breaches")
+async def sla_breaches(
+    notify: bool = Query(False, description="fire escalations for anything newly overdue"),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Open internal requisitions with a milestone that is overdue and still incomplete.
+
+    The dangerous half of breach detection: a milestone recorded late announces itself, but
+    one never recorded at all is silent precisely because nothing is happening. Intended to
+    be driven by a scheduled job; `notify` is off by default so opening a screen does not
+    quietly email people.
+    """
+    _require(current_user, Cap.ANALYTICS_READ)
+    return await sla.sweep_open_breaches(
+        current_user, _company(current_user, company_id), notify=notify)
 
 
 @router.post("/requisitions/{request_no}/close")
@@ -558,15 +648,16 @@ async def list_postings(
 
 
 @router.post("/postings", status_code=201)
-async def create_postings(
+async def create_posting(
     body: PostingIn,
     company_id: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user),
 ):
-    """Publish an APPROVED job description to one or more platforms -- one posting row per
-    platform, each with its own code and its own destination."""
+    """Publish an APPROVED job description as ONE posting with ONE application link. The
+    link is shared wherever the company likes; the form asks the applicant which channel
+    they came through, and that answer becomes the candidate's source."""
     _require(current_user, Cap.POSTING_WRITE)
-    return await postings.create_postings(
+    return await postings.create_posting(
         current_user, _company(current_user, company_id), body.model_dump())
 
 
@@ -606,18 +697,27 @@ async def list_candidates(
     status: Optional[str] = Query(None),
     request_no: Optional[str] = Query(None),
     posting_code: Optional[str] = Query(None),
+    talent_pool: Optional[bool] = Query(
+        None, description="Phase INT-2: only pooled candidates, or only unpooled ones."),
+    tags: Optional[str] = Query(
+        None, description="Comma-separated talent-pool tags. Matches ANY of them."),
     limit: int = Query(200, ge=1, le=500),
     skip: int = Query(0, ge=0),
     current_user: dict = Depends(get_current_user),
 ):
     """The candidate pipeline. Row-scoped: a hiring manager sees only candidates on
     requisitions they raised. Column counts come from the same scoped query as the rows,
-    so the board totals always match what the caller can open."""
+    so the board totals always match what the caller can open.
+
+    `talent_pool` and `tags` are the Annexure C sourcing filter. The pool is deliberately a
+    FILTER on this list rather than a collection of its own, so a pooled candidate keeps the
+    same scoping, the same row security and the same retention as every other CV."""
     _require(current_user, Cap.CANDIDATE_READ)
     return await candidates.list_candidates(
         current_user, _company(current_user, company_id),
         search=search, status=status, request_no=request_no,
-        posting_code=posting_code, limit=limit, skip=skip)
+        posting_code=posting_code, talent_pool=talent_pool, tags=tags,
+        limit=limit, skip=skip)
 
 
 @router.post("/candidates", status_code=201)
@@ -981,6 +1081,24 @@ async def send_offer(
         current_user, _company(current_user, company_id), offer_no, body.model_dump())
 
 
+@router.post("/offers/{offer_no}/approve")
+async def approve_offer(
+    offer_no: str,
+    body: OfferApproveIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Management's sign-off on an internal offer, mandatory before it can be sent.
+
+    Separate from `offer.send` on purpose: verifying the figure sits inside the approved band
+    says the offer is affordable; this says it should go out. Annexure B of the Internal
+    Recruitment SOP makes the second one Management/Finance's call, not HR's.
+    """
+    _require(current_user, Cap.OFFER_APPROVE)
+    return await offers.approve_offer(
+        current_user, _company(current_user, company_id), offer_no, body.model_dump())
+
+
 @router.post("/offers/{offer_no}/revoke")
 async def revoke_offer(
     offer_no: str,
@@ -1167,6 +1285,7 @@ async def analytics_dashboard(
     # Phase 11-R, Item 4: optional client filter. Absent -> the existing company-wide
     # behaviour, unchanged, plus a per-client comparison table in the payload.
     client_id: Optional[str] = Query(None),
+    track: Optional[str] = Query(None, description="internal — adds the SOP §10 KPI block"),
     company_id: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user),
 ):
@@ -1175,11 +1294,14 @@ async def analytics_dashboard(
     A hiring manager gets the same shape scoped to their own requisitions — the response
     says so via `scoped_to_own_requisitions`, so the UI can label the numbers honestly
     rather than implying they are company-wide.
+
+    `track=internal` adds `internal_kpis`, the Internal Recruitment SOP's own dashboard.
+    Omitting it leaves the payload byte-for-byte what every existing caller receives.
     """
     _require(current_user, Cap.ANALYTICS_READ)
     return await analytics.dashboard(
         current_user, _company(current_user, company_id),
-        date_from=date_from, date_to=date_to, client_id=client_id)
+        date_from=date_from, date_to=date_to, client_id=client_id, track=track)
 
 
 @router.get("/analytics/funnel")
@@ -1637,8 +1759,11 @@ async def cancel_hrms_appointment(
 
 
 # ─────────────────────────────────────────────────────────────
-# Item 4 — the client master + client sharing
+# Item 4 — the client dimension (READ-ONLY) + client sharing
 # ─────────────────────────────────────────────────────────────
+# Clients are the ERP's existing Companies. There is deliberately no create/update/delete
+# here: a second way to enter an organisation is a second list to keep in step, and the
+# Companies module already owns that job. Editing a client means editing the company.
 @router.get("/clients")
 async def list_hrms_clients(
     include_inactive: bool = Query(False),
@@ -1647,7 +1772,7 @@ async def list_hrms_clients(
     company_id: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user),
 ):
-    """The client master — who vacancies are being filled FOR.
+    """Companies that can be named as the client of a requisition.
 
     NOTE: a client is NOT a tenant. `company_id` remains the only security boundary;
     `client_id` is a reporting dimension inside one tenant (see hrms_client_service).
@@ -1658,15 +1783,111 @@ async def list_hrms_clients(
         include_inactive=include_inactive, search=search, with_stats=with_stats)
 
 
-@router.post("/clients", status_code=201)
-async def create_hrms_client(
-    body: ClientIn,
+# ─────────────────────────────────────────────────────────────
+# Client engagements — the tenant/client relationship
+# ─────────────────────────────────────────────────────────────
+# `GET /clients` above lists COMPANIES, which is what you pick FROM when opening an
+# engagement. These routes list and manage the engagements themselves: which of those
+# companies are actually ours to recruit for, and which of our users work on each.
+#
+# Every one is scoped by `_company()`, so a client-side caller is pinned to their own
+# tenant and an engagement belonging to another company is never read, let alone filtered
+# out afterwards.
+@router.get("/client-engagements")
+async def list_client_engagements(
+    status: Optional[str] = Query(None),
+    include_ended: bool = Query(False),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """The clients this tenant has engaged."""
+    _require(current_user, Cap.CLIENT_READ)
+    return await clients.list_engagements(
+        current_user, _company(current_user, company_id),
+        status=status, include_ended=include_ended)
+
+
+@router.post("/client-engagements", status_code=201)
+async def create_client_engagement(
+    body: ClientEngagementIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Record that this tenant recruits for that company.
+
+    Creates no company and duplicates no company data -- `client_id` stays a
+    `companies._id`. What is new is the RELATIONSHIP, which exists nowhere in the ERP.
+    """
+    _require(current_user, Cap.CLIENT_WRITE)
+    return await clients.create_engagement(
+        current_user, _company(current_user, company_id), body.model_dump())
+
+
+@router.get("/client-engagements/{engagement_id}")
+async def get_client_engagement(
+    engagement_id: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.CLIENT_READ)
+    doc = await clients.get_engagement(_company(current_user, company_id), engagement_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Engagement not found.")
+    return doc
+
+
+@router.patch("/client-engagements/{engagement_id}")
+async def update_client_engagement(
+    engagement_id: str,
+    body: ClientEngagementUpdate,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Suspending or ending an engagement revokes its members' scope immediately."""
+    _require(current_user, Cap.CLIENT_WRITE)
+    return await clients.update_engagement(
+        current_user, _company(current_user, company_id), engagement_id,
+        body.model_dump(exclude_unset=True))
+
+
+@router.get("/client-engagements/{engagement_id}/members")
+async def list_client_engagement_members(
+    engagement_id: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.CLIENT_READ)
+    return await clients.list_engagement_members(
+        _company(current_user, company_id), engagement_id)
+
+
+@router.post("/client-engagements/{engagement_id}/members", status_code=201)
+async def add_client_engagement_member(
+    engagement_id: str,
+    body: EngagementMemberIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Give one user access to one client's recruitment.
+
+    The user must belong to this same company -- client scope narrows INSIDE the tenant
+    boundary and never reaches across it.
+    """
+    _require(current_user, Cap.CLIENT_WRITE)
+    return await clients.add_engagement_member(
+        current_user, _company(current_user, company_id), engagement_id, body.user_id)
+
+
+@router.delete("/client-engagements/{engagement_id}/members/{user_id}")
+async def remove_client_engagement_member(
+    engagement_id: str,
+    user_id: str,
     company_id: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user),
 ):
     _require(current_user, Cap.CLIENT_WRITE)
-    return await clients.create_client(
-        current_user, _company(current_user, company_id), body.model_dump())
+    return await clients.remove_engagement_member(
+        current_user, _company(current_user, company_id), engagement_id, user_id)
 
 
 @router.get("/clients/{client_id}")
@@ -1677,36 +1898,394 @@ async def get_hrms_client(
 ):
     _require(current_user, Cap.CLIENT_READ)
     scoped = _company(current_user, company_id)
-    doc = await clients.get_client(scoped, client_id)
+    doc = await clients.get_client(client_id)
     if not doc:
         raise HTTPException(status_code=404, detail="Client not found.")
+    # The summary IS tenant-scoped even though the company record is not: it counts this
+    # tenant's requisitions and candidates for that client, nobody else's.
     doc["summary"] = await clients.client_summary(scoped, client_id)
     return doc
 
 
-@router.patch("/clients/{client_id}")
-async def update_hrms_client(
-    client_id: str,
-    body: ClientUpdate,
+# ─────────────────────────────────────────────────────────────
+# Internal track — position scorecards
+# ─────────────────────────────────────────────────────────────
+# HR drafts, the hiring manager approves, and for managerial+ roles Management approves too
+# (Internal Recruitment SOP, Annexure B). The scorecard IS the bar candidates are measured
+# against, so an approved one is frozen and the requisition cannot be approved without it.
+@router.get("/scorecards")
+async def list_scorecards(
+    request_no: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    limit: int = Query(100, ge=1, le=200),
     company_id: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user),
 ):
-    _require(current_user, Cap.CLIENT_WRITE)
-    return await clients.update_client(
-        current_user, _company(current_user, company_id), client_id,
+    _require(current_user, Cap.SCORECARD_READ)
+    return await scorecards.list_scorecards(
+        current_user, _company(current_user, company_id),
+        request_no=request_no, status=status, limit=limit)
+
+
+@router.post("/scorecards", status_code=201)
+async def create_scorecard(
+    body: ScorecardIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.SCORECARD_WRITE)
+    return await scorecards.create_scorecard(
+        current_user, _company(current_user, company_id), body.model_dump())
+
+
+@router.get("/scorecards/{scr_no}")
+async def get_scorecard(
+    scr_no: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.SCORECARD_READ)
+    doc = await scorecards.get_scorecard(_company(current_user, company_id), scr_no)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Scorecard not found.")
+    return doc
+
+
+@router.patch("/scorecards/{scr_no}")
+async def update_scorecard(
+    scr_no: str,
+    body: ScorecardUpdate,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.SCORECARD_WRITE)
+    return await scorecards.update_scorecard(
+        current_user, _company(current_user, company_id), scr_no,
         body.model_dump(exclude_unset=True))
 
 
-@router.delete("/clients/{client_id}")
-async def delete_hrms_client(
-    client_id: str,
+@router.post("/scorecards/{scr_no}/approve")
+async def approve_scorecard(
+    scr_no: str,
+    body: ScorecardApproveIn,
     company_id: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user),
 ):
-    """Blocked while any requisition names the client — deactivate instead."""
-    _require(current_user, Cap.CLIENT_WRITE)
-    return await clients.delete_client(
-        current_user, _company(current_user, company_id), client_id)
+    """One approval signature. The scorecard completes when every required role has signed."""
+    _require(current_user, Cap.SCORECARD_APPROVE)
+    return await scorecards.approve_scorecard(
+        current_user, _company(current_user, company_id), scr_no, body.model_dump())
+
+
+@router.post("/candidates/{uk}/scorecard-evaluate")
+async def evaluate_against_scorecard(
+    uk: str,
+    body: ScorecardEvaluateIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Score a candidate against their requisition's scorecard.
+
+    Records the weighted score and its band; deliberately does NOT move the candidate. The
+    band is advice for whoever reads it, not an instruction to the pipeline.
+    """
+    _require(current_user, Cap.CANDIDATE_SCREEN)
+    return await scorecards.evaluate_candidate(
+        current_user, _company(current_user, company_id), uk, body.model_dump())
+
+
+# ─────────────────────────────────────────────────────────────
+# Internal track — reference checks
+# ─────────────────────────────────────────────────────────────
+# Mandatory before an internal offer (SOP §6). A candidate may have several referees; the
+# offer gate asks whether ANY of them cleared.
+@router.get("/reference-checks")
+async def list_reference_checks(
+    uk: Optional[str] = Query(None),
+    request_no: Optional[str] = Query(None),
+    outcome: Optional[str] = Query(None),
+    limit: int = Query(100, ge=1, le=200),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.REFERENCE_READ)
+    return await references.list_reference_checks(
+        current_user, _company(current_user, company_id),
+        uk=uk, request_no=request_no, outcome=outcome, limit=limit)
+
+
+@router.post("/reference-checks", status_code=201)
+async def create_reference_check(
+    body: ReferenceCheckIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.REFERENCE_WRITE)
+    return await references.create_reference_check(
+        current_user, _company(current_user, company_id), body.model_dump())
+
+
+@router.get("/reference-checks/{ref_no}")
+async def get_reference_check(
+    ref_no: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.REFERENCE_READ)
+    doc = await references.get_reference_check(_company(current_user, company_id), ref_no)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Reference check not found.")
+    return doc
+
+
+@router.patch("/reference-checks/{ref_no}")
+async def update_reference_check(
+    ref_no: str,
+    body: ReferenceCheckUpdate,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.REFERENCE_WRITE)
+    return await references.update_reference_check(
+        current_user, _company(current_user, company_id), ref_no,
+        body.model_dump(exclude_unset=True))
+
+
+# ─────────────────────────────────────────────────────────────
+# Internal track — telephonic screening (SOP step 5)
+# ─────────────────────────────────────────────────────────────
+# The brief call HR makes between CV screening and the panel. `telephonic.write` is HR's
+# alone (Annexure B marks HR "R" and everybody else "I"); the HOD reads it because they
+# interview off the back of it.
+#
+# The GATE this feeds lives on interview scheduling, not here -- see
+# hrms_telephonic_service.assert_telephonic_cleared.
+@router.get("/telephonic-screenings")
+async def list_telephonic_screenings(
+    uk: Optional[str] = Query(None),
+    request_no: Optional[str] = Query(None),
+    outcome: Optional[str] = Query(None),
+    limit: int = Query(100, ge=1, le=200),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.TELEPHONIC_READ)
+    return await telephonic.list_screenings(
+        current_user, _company(current_user, company_id),
+        uk=uk, request_no=request_no, outcome=outcome, limit=limit)
+
+
+# Declared BEFORE /telephonic-screenings/{tel_no}, or "screenable" is parsed as a tel_no --
+# the same ordering /interviews/schedulable and /offers/offerable rely on.
+@router.get("/telephonic-screenings/screenable")
+async def screenable_candidates(
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.TELEPHONIC_READ)
+    return await telephonic.screenable_candidates(
+        current_user, _company(current_user, company_id))
+
+
+@router.post("/telephonic-screenings", status_code=201)
+async def create_telephonic_screening(
+    body: TelephonicScreeningIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.TELEPHONIC_WRITE)
+    return await telephonic.create_screening(
+        current_user, _company(current_user, company_id), body.model_dump())
+
+
+@router.get("/telephonic-screenings/{tel_no}")
+async def get_telephonic_screening(
+    tel_no: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.TELEPHONIC_READ)
+    doc = await telephonic.get_screening(_company(current_user, company_id), tel_no)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Telephonic screening not found.")
+    return doc
+
+
+@router.patch("/telephonic-screenings/{tel_no}")
+async def update_telephonic_screening(
+    tel_no: str,
+    body: TelephonicScreeningUpdate,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.TELEPHONIC_WRITE)
+    return await telephonic.update_screening(
+        current_user, _company(current_user, company_id), tel_no,
+        body.model_dump(exclude_unset=True))
+
+
+# ─────────────────────────────────────────────────────────────
+# Internal track — probation and personnel-file closure
+# ─────────────────────────────────────────────────────────────
+# Probation is an EMPLOYEE event, not a recruitment stage: the candidate lifecycle ends at
+# joining. See hrms_probation_service for why no AppStatus was added.
+@router.get("/probation")
+async def list_probations(
+    outcome: Optional[str] = Query(None),
+    request_no: Optional[str] = Query(None),
+    limit: int = Query(100, ge=1, le=200),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.PROBATION_READ)
+    return await probation.list_probations(
+        current_user, _company(current_user, company_id),
+        outcome=outcome, request_no=request_no, limit=limit)
+
+
+@router.get("/probation/due")
+async def due_probations(
+    within_days: int = Query(30, ge=0, le=365),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Reviews that are overdue, and those falling due inside the window.
+
+    Split rather than merged: a missed commitment and a diary entry are two different
+    conversations, and one date-sorted list leaves the reader to tell them apart.
+    """
+    _require(current_user, Cap.PROBATION_READ)
+    return await probation.due_probations(
+        current_user, _company(current_user, company_id), within_days=within_days)
+
+
+@router.post("/probation", status_code=201)
+async def open_probation(
+    body: ProbationIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Open a review by hand. Internal-track joiners get one automatically at handover."""
+    _require(current_user, Cap.PROBATION_REVIEW)
+    return await probation.open_probation(
+        current_user, _company(current_user, company_id), body.model_dump())
+
+
+@router.get("/probation/{prb_no}")
+async def get_probation(
+    prb_no: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.PROBATION_READ)
+    doc = await probation.get_probation(_company(current_user, company_id), prb_no)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Probation review not found.")
+    return doc
+
+
+@router.patch("/probation/{prb_no}")
+async def update_probation(
+    prb_no: str,
+    body: ProbationUpdate,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.PROBATION_REVIEW)
+    return await probation.update_probation(
+        current_user, _company(current_user, company_id), prb_no,
+        body.model_dump(exclude_unset=True))
+
+
+@router.post("/probation/{prb_no}/confirm")
+async def confirm_probation(
+    prb_no: str,
+    body: ProbationConfirmIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Confirm, extend or end a probation.
+
+    The hiring manager's call (Annexure B: "Probation review & confirmation -- Department
+    Head: A/R"). A confirmation closes the internal requisition as Hired, because there is no
+    client handover on this track.
+    """
+    _require(current_user, Cap.PROBATION_CONFIRM)
+    return await probation.confirm_probation(
+        current_user, _company(current_user, company_id), prb_no, body.model_dump())
+
+
+@router.post("/personnel-file/close")
+async def close_personnel_file(
+    body: PersonnelFileCloseIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Record that the personnel file has been checked and closed (SOP §7, §9)."""
+    _require(current_user, Cap.PERSONNEL_FILE_CLOSE)
+    return await probation.close_personnel_file(
+        current_user, _company(current_user, company_id), body.model_dump())
+
+
+# ─────────────────────────────────────────────────────────────
+# Internal track — the exception log
+# ─────────────────────────────────────────────────────────────
+# An APPROVED exception is the only thing that lifts the reference-check and salary-band
+# gates. There is deliberately no override flag on either of those endpoints: a boolean in a
+# payload records nothing and attributes nothing.
+@router.get("/exceptions")
+async def list_exceptions(
+    request_no: Optional[str] = Query(None),
+    uk: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    exception_type: Optional[str] = Query(None),
+    limit: int = Query(100, ge=1, le=200),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.EXCEPTION_READ)
+    return await exceptions.list_exceptions(
+        current_user, _company(current_user, company_id),
+        request_no=request_no, uk=uk, status=status,
+        exception_type=exception_type, limit=limit)
+
+
+@router.post("/exceptions", status_code=201)
+async def raise_exception(
+    body: ExceptionIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Log a deviation for approval. Raising one grants nothing until it is approved."""
+    _require(current_user, Cap.EXCEPTION_WRITE)
+    return await exceptions.raise_exception(
+        current_user, _company(current_user, company_id), body.model_dump())
+
+
+@router.get("/exceptions/{exc_no}")
+async def get_exception(
+    exc_no: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.EXCEPTION_READ)
+    doc = await exceptions.get_exception(_company(current_user, company_id), exc_no)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Exception not found.")
+    return doc
+
+
+@router.post("/exceptions/{exc_no}/approve")
+async def decide_exception(
+    exc_no: str,
+    body: ExceptionDecisionIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Approve or reject. Management/Finance only, and never the person who raised it."""
+    _require(current_user, Cap.EXCEPTION_APPROVE)
+    return await exceptions.decide_exception(
+        current_user, _company(current_user, company_id), exc_no, body.model_dump())
 
 
 @router.post("/candidates/client-response")
@@ -1821,3 +2400,606 @@ async def delete_sanctioned_strength(
     _require(current_user, Cap.SANCTION_WRITE)
     return await sanctions.delete_sanction(
         current_user, _company(current_user, company_id), sanction_id)
+
+
+# ═════════════════════════════════════════════════════════════
+# Phase INT-2 — the remaining Internal Recruitment SOP controls
+# ═════════════════════════════════════════════════════════════
+# Every endpoint below is additive and internal-track only. None of them changes a status
+# code, a payload or a message on any pre-existing route, and none of them is reachable for
+# a client-track requisition -- the services refuse one outright rather than half-applying
+# a control the client track has no counterpart for.
+
+
+# ─────────────────────────────────────────────────────────────
+# INT-2.1 — the internal shortlisting committee (SOP §5)
+# ─────────────────────────────────────────────────────────────
+# HR and the Department Head jointly finalise the shortlist. Two roles, two DIFFERENT
+# people, and a finalised record is what lifts the gate on `Selected`.
+@router.get("/shortlist-reviews")
+async def list_shortlist_reviews(
+    request_no: Optional[str] = Query(None),
+    outcome: Optional[str] = Query(None),
+    uk: Optional[str] = Query(None),
+    limit: int = Query(100, ge=1, le=200),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.SHORTLIST_READ)
+    return await shortlists.list_shortlist_reviews(
+        current_user, _company(current_user, company_id),
+        request_no=request_no, outcome=outcome, uk=uk, limit=limit)
+
+
+@router.post("/shortlist-reviews", status_code=201)
+async def create_shortlist_review(
+    body: ShortlistReviewIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Convene a sitting. Convening decides nothing until the outcome is Finalised."""
+    _require(current_user, Cap.SHORTLIST_WRITE)
+    return await shortlists.create_shortlist_review(
+        current_user, _company(current_user, company_id), body.model_dump())
+
+
+@router.get("/shortlist-reviews/{slr_no}")
+async def get_shortlist_review(
+    slr_no: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.SHORTLIST_READ)
+    doc = await shortlists.get_shortlist_review(_company(current_user, company_id), slr_no)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Shortlist review not found.")
+    return doc
+
+
+@router.patch("/shortlist-reviews/{slr_no}")
+async def update_shortlist_review(
+    slr_no: str,
+    body: ShortlistReviewUpdate,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Record members, candidates or the outcome. A DECIDED sitting is frozen."""
+    _require(current_user, Cap.SHORTLIST_WRITE)
+    return await shortlists.update_shortlist_review(
+        current_user, _company(current_user, company_id), slr_no,
+        body.model_dump(exclude_unset=True))
+
+
+# ─────────────────────────────────────────────────────────────
+# INT-2.1 — batch interview windows (Annexure C)
+# ─────────────────────────────────────────────────────────────
+# A PREFERENCE, never a rule: scheduling outside a window warns in the response and books
+# the interview anyway. `interview.schedule` governs, because a window is a scheduling
+# artifact rather than a governance one.
+@router.get("/interview-windows")
+async def list_interview_windows(
+    department_id: Optional[str] = Query(None),
+    include_inactive: bool = Query(False),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.INTERVIEW_READ)
+    return await interview_windows.list_windows(
+        _company(current_user, company_id),
+        department_id=department_id, include_inactive=include_inactive)
+
+
+@router.post("/interview-windows", status_code=201)
+async def create_interview_window(
+    body: InterviewWindowIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.INTERVIEW_SCHEDULE)
+    return await interview_windows.create_window(
+        current_user, _company(current_user, company_id), body.model_dump())
+
+
+@router.patch("/interview-windows/{window_id}")
+async def update_interview_window(
+    window_id: str,
+    body: InterviewWindowUpdate,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.INTERVIEW_SCHEDULE)
+    return await interview_windows.update_window(
+        current_user, _company(current_user, company_id), window_id,
+        body.model_dump(exclude_unset=True))
+
+
+@router.delete("/interview-windows/{window_id}")
+async def delete_interview_window(
+    window_id: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.INTERVIEW_SCHEDULE)
+    return await interview_windows.delete_window(
+        current_user, _company(current_user, company_id), window_id)
+
+
+# ─────────────────────────────────────────────────────────────
+# INT-2.3 — pre-boarding engagement (SOP §6)
+# ─────────────────────────────────────────────────────────────
+# Tracking, not a control. NOTHING is gated on a touchpoint: a candidate with none onboards
+# exactly as they always did. What it does is put people on a due list and flag the ones who
+# say they are wavering.
+@router.get("/preboarding")
+async def list_preboarding(
+    uk: Optional[str] = Query(None),
+    request_no: Optional[str] = Query(None),
+    sentiment: Optional[str] = Query(None),
+    limit: int = Query(200, ge=1, le=500),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.PREBOARDING_READ)
+    return await preboarding.list_touchpoints(
+        current_user, _company(current_user, company_id),
+        uk=uk, request_no=request_no, sentiment=sentiment, limit=limit)
+
+
+@router.get("/preboarding/due")
+async def due_preboarding(
+    within_days: int = Query(7, ge=0, le=90),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Accepted candidates nobody has spoken to lately.
+
+    Split into `never_contacted` and `gone_quiet` rather than one sorted list, the same way
+    `/probation/due` splits: "we have not started" and "we have let it slip" are two
+    different conversations.
+    """
+    _require(current_user, Cap.PREBOARDING_READ)
+    return await preboarding.due_touchpoints(
+        current_user, _company(current_user, company_id), within_days=within_days)
+
+
+@router.post("/preboarding", status_code=201)
+async def record_preboarding_touchpoint(
+    body: PreboardingTouchpointIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Log one contact. An `At Risk` sentiment notifies the recruiter and the HOD."""
+    _require(current_user, Cap.PREBOARDING_WRITE)
+    return await preboarding.record_touchpoint(
+        current_user, _company(current_user, company_id), body.model_dump())
+
+
+# ─────────────────────────────────────────────────────────────
+# INT-2.5 — the standing salary-band master (Annexure C)
+# ─────────────────────────────────────────────────────────────
+# A CONVENIENCE, never an authority: the budget gate pre-fills from this table, and the
+# offer check still reads the band stamped on the REQUISITION. A master edited in April must
+# not retroactively legalise an offer approved in March.
+@router.get("/salary-bands")
+async def list_salary_bands(
+    department_id: Optional[str] = Query(None),
+    designation_id: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    limit: int = Query(200, ge=1, le=500),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.SALARY_BAND_READ)
+    return await salary_bands.list_salary_bands(
+        current_user, _company(current_user, company_id),
+        department_id=department_id, designation_id=designation_id,
+        status=status, limit=limit)
+
+
+@router.get("/salary-bands/for-requisition/{request_no}")
+async def salary_band_prefill(
+    request_no: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """The band the budget gate would pre-fill for this requisition, or null.
+
+    A SUGGESTION in the shape the approval body expects, so the UI can fill the boxes and
+    the approver can still change them. Nothing here writes.
+    """
+    _require(current_user, Cap.SALARY_BAND_READ)
+    scoped = _company(current_user, company_id)
+    req = await requisitions.get_requisition(current_user, scoped, request_no)
+    if not req:
+        raise HTTPException(status_code=404, detail="Requisition not found.")
+    return {"request_no": request_no,
+            "prefill": await salary_bands.prefill_for_requisition(scoped, req)}
+
+
+@router.post("/salary-bands", status_code=201)
+async def create_salary_band(
+    body: SalaryBandIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Publish a band. An existing active band for the same position is superseded."""
+    _require(current_user, Cap.SALARY_BAND_WRITE)
+    return await salary_bands.create_salary_band(
+        current_user, _company(current_user, company_id), body.model_dump())
+
+
+@router.get("/salary-bands/{band_no}")
+async def get_salary_band(
+    band_no: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.SALARY_BAND_READ)
+    doc = await salary_bands.get_salary_band(_company(current_user, company_id), band_no)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Salary band not found.")
+    return doc
+
+
+@router.patch("/salary-bands/{band_no}")
+async def update_salary_band(
+    band_no: str,
+    body: SalaryBandUpdate,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Edit the descriptive fields or retire a band. The FIGURES are not editable -- publish
+    a new band instead, so what was agreed last year still reads as what was agreed."""
+    _require(current_user, Cap.SALARY_BAND_WRITE)
+    return await salary_bands.update_salary_band(
+        current_user, _company(current_user, company_id), band_no,
+        body.model_dump(exclude_unset=True))
+
+
+# ─────────────────────────────────────────────────────────────
+# INT-2.6 — the talent pool (Annexure C)
+# ─────────────────────────────────────────────────────────────
+# Listing is `GET /candidates?talent_pool=true&tags=` -- the pool is a filter on the
+# candidate list, not a second collection. These two endpoints manage membership.
+@router.post("/candidates/{uk}/talent-pool")
+async def set_talent_pool(
+    uk: str,
+    body: TalentPoolIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Add a candidate to the pool, or take them out.
+
+    Consent is REQUIRED to join and its expiry may not outlive the record's retention
+    period. Leaving is unconditional -- consent is a thing somebody may withdraw.
+    """
+    _require(current_user, Cap.CANDIDATE_WRITE)
+    return await candidates.set_talent_pool(
+        current_user, _company(current_user, company_id), uk, body.model_dump())
+
+
+@router.post("/candidates/{uk}/source-to/{request_no}", status_code=201)
+async def source_from_talent_pool(
+    uk: str,
+    request_no: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Bring a pooled candidate forward onto a NEW requisition.
+
+    Copies the CV into a new candidate record with its own uk and its own retention clock.
+    It never re-points the old one: the original application is a record of what somebody
+    applied for and when.
+    """
+    _require(current_user, Cap.CANDIDATE_WRITE)
+    return await candidates.create_from_pool(
+        current_user, _company(current_user, company_id), uk, request_no)
+
+
+# ─────────────────────────────────────────────────────────────
+# INT-2.7 — candidate communications (Annexure C)
+# ─────────────────────────────────────────────────────────────
+# Everything goes out through hrms_notify_service. There is no second mail path; what is new
+# here is the template and the append-only log.
+@router.get("/communications")
+async def list_communications(
+    uk: Optional[str] = Query(None),
+    request_no: Optional[str] = Query(None),
+    template_key: Optional[str] = Query(None),
+    limit: int = Query(200, ge=1, le=500),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.COMM_READ)
+    return await comms.list_log(
+        current_user, _company(current_user, company_id),
+        uk=uk, request_no=request_no, template_key=template_key, limit=limit)
+
+
+@router.get("/communications/templates")
+async def list_comm_templates(
+    include_inactive: bool = Query(False),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """The six message templates plus the two consent statements, seeded on first read.
+
+    The consent wording lives here rather than in code so legal can change it without a
+    deploy -- which is exactly why editing a template is its own capability.
+    """
+    _require(current_user, Cap.COMM_READ)
+    return {"templates": await comms.list_templates(
+        _company(current_user, company_id), include_inactive=include_inactive)}
+
+
+@router.patch("/communications/templates/{key}")
+async def update_comm_template(
+    key: str,
+    body: CommTemplateUpdate,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.COMM_TEMPLATE_WRITE)
+    return await comms.update_template(
+        current_user, _company(current_user, company_id), key,
+        body.model_dump(exclude_unset=True))
+
+
+@router.post("/communications/send", status_code=201)
+async def send_communication(
+    body: CommSendIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Send one templated message by hand.
+
+    The facts -- name, designation, CTC, joining date -- are DERIVED from the record, never
+    accepted from the caller. A sender who could type those in could quote a candidate a
+    salary the record does not hold.
+    """
+    _require(current_user, Cap.COMM_WRITE)
+    return await comms.send_template(
+        current_user, _company(current_user, company_id), body.candidate_uk,
+        body.template_key, variables=body.variables)
+
+
+# ─────────────────────────────────────────────────────────────
+# INT-2.8 — new-hire experience surveys (SOP §10)
+# ─────────────────────────────────────────────────────────────
+# Read is the AGGREGATE only. There is deliberately no endpoint that returns response rows,
+# and the aggregation refuses a figure below SURVEY_MIN_RESPONSES -- a satisfaction survey a
+# manager can de-anonymise measures nothing.
+@router.get("/surveys")
+async def list_surveys(
+    include_inactive: bool = Query(False),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.SURVEY_READ)
+    return {"surveys": await surveys.list_surveys(
+        _company(current_user, company_id), include_inactive=include_inactive)}
+
+
+@router.get("/surveys/results")
+async def survey_results(
+    kind: Optional[str] = Query(None),
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Mean scores. SCORES ONLY -- never rows, and never below the suppression threshold."""
+    _require(current_user, Cap.SURVEY_READ)
+    scoped = _company(current_user, company_id)
+    return {
+        "results": await surveys.aggregate(
+            scoped, kind=kind, date_from=date_from, date_to=date_to),
+        "response_rate": await surveys.issue_rate(scoped),
+    }
+
+
+# ─────────────────────────────────────────────────────────────
+# INT-2.9 — the complete internal KPI set (SOP §10)
+# ─────────────────────────────────────────────────────────────
+@router.get("/analytics/internal-kpis")
+async def analytics_internal_kpis(
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """All eight SOP KPIs, computed server-side and role-scoped.
+
+    Already present inside `GET /analytics/dashboard`; exposed on its own so the dashboard's
+    track filter can fetch just this block rather than the whole payload. Every ratio carries
+    `eligible_n` and, where records were left out, `excluded_n` with the reason -- a joiner
+    whose 90-day window has not matured is excluded from the denominator, never counted as
+    retained.
+    """
+    _require(current_user, Cap.ANALYTICS_READ)
+    return await analytics.internal_kpis(
+        current_user, _company(current_user, company_id),
+        date_from=date_from, date_to=date_to)
+
+
+# ─────────────────────────────────────────────────────────────
+# INT-2.10 — statutory pre-employment checks (SOP §11)
+# ─────────────────────────────────────────────────────────────
+@router.get("/probation/{prb_no}/statutory")
+async def probation_statutory_state(
+    prb_no: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """What is outstanding before this probation can be CONFIRMED.
+
+    Read-only, and surfaced while the probation is still running rather than sprung at the
+    moment somebody tries to confirm -- a control the user meets for the first time when it
+    blocks them is a control that reads as a bug.
+    """
+    _require(current_user, Cap.PROBATION_READ)
+    scoped = _company(current_user, company_id)
+    review = await probation.get_probation(scoped, prb_no)
+    if not review:
+        raise HTTPException(status_code=404, detail="Probation review not found.")
+    return await probation.statutory_state(scoped, review.get("employee_code"))
+
+
+# ─────────────────────────────────────────────────────────────
+# INT-2.11 — the policy register and its review cycle (SOP §14)
+# ─────────────────────────────────────────────────────────────
+@router.get("/policies")
+async def list_policies(
+    include_withdrawn: bool = Query(False),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.POLICY_READ)
+    return await policies.list_policies(
+        _company(current_user, company_id), include_withdrawn=include_withdrawn)
+
+
+@router.get("/policies/due")
+async def due_policy_reviews(
+    within_days: int = Query(30, ge=0, le=365),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Reviews overdue, and those falling due inside the window."""
+    _require(current_user, Cap.POLICY_READ)
+    return await policies.due_reviews(
+        _company(current_user, company_id), within_days=within_days)
+
+
+@router.post("/policies", status_code=201)
+async def register_policy(
+    body: PolicyIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.POLICY_WRITE)
+    return await policies.register_policy(
+        current_user, _company(current_user, company_id), body.model_dump())
+
+
+@router.get("/policies/{policy_key}")
+async def get_policy(
+    policy_key: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """One policy plus its full Modification History (SOP §14's own table)."""
+    _require(current_user, Cap.POLICY_READ)
+    doc = await policies.get_policy(_company(current_user, company_id), policy_key)
+    if not doc:
+        raise HTTPException(status_code=404, detail="That policy is not in the register.")
+    return doc
+
+
+@router.post("/policies/{policy_key}/revisions", status_code=201)
+async def log_policy_revision(
+    policy_key: str,
+    body: PolicyRevisionIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Draft an amendment. It does NOT come into force until it is approved."""
+    _require(current_user, Cap.POLICY_WRITE)
+    return await policies.log_revision(
+        current_user, _company(current_user, company_id), policy_key, body.model_dump())
+
+
+@router.post("/policies/{policy_key}/approve")
+async def approve_policy_revision(
+    policy_key: str,
+    body: PolicyApproveIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Make a revision the version in force. MD only, and signed."""
+    _require(current_user, Cap.POLICY_APPROVE)
+    return await policies.approve_revision(
+        current_user, _company(current_user, company_id), policy_key, body.model_dump())
+
+
+# ─────────────────────────────────────────────────────────────
+# INT-2.12 — the retention purge (SOP §13)
+# ─────────────────────────────────────────────────────────────
+# Proposals are written by `scripts/hrms_retention_purge.py`, which defaults to a dry run.
+# Execution requires an MD's typed signature here -- the same standard probation confirmation
+# holds, because both destroy or end something.
+@router.get("/purge-batches")
+async def list_purge_batches(
+    status: Optional[str] = Query(None),
+    limit: int = Query(50, ge=1, le=200),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.RETENTION_PURGE)
+    return await purge.list_batches(
+        _company(current_user, company_id), status=status, limit=limit)
+
+
+@router.get("/purge-batches/{batch_no}")
+async def get_purge_batch(
+    batch_no: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """The full proposal, INCLUDING the exact ids. A proposal that says "412 candidates"
+    and does not say which is not something anybody can meaningfully approve."""
+    _require(current_user, Cap.RETENTION_PURGE)
+    doc = await purge.get_batch(_company(current_user, company_id), batch_no)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Purge batch not found.")
+    return doc
+
+
+@router.post("/purge-batches/{batch_no}/approve")
+async def approve_purge_batch(
+    batch_no: str,
+    body: PurgeApproveIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Authorise the purge and carry it out.
+
+    Redacts rather than hard-deletes: the id and the audit spine survive and the PII fields
+    are cleared, stamped with the batch number. An audit trail with dangling references
+    proves nothing. It is not reversible.
+    """
+    _require(current_user, Cap.RETENTION_PURGE)
+    return await purge.approve_and_execute(
+        current_user, _company(current_user, company_id), batch_no, body.model_dump())
+
+
+# ─────────────────────────────────────────────────────────────
+# INT-2.13 — the printable documentation set (SOP §9)
+# ─────────────────────────────────────────────────────────────
+# ONE endpoint pattern for all five forms, gated by the entity's EXISTING read capability.
+# Printing a record is reading it, so a separate `document.generate` capability would create
+# a user who may read a probation review but not print it.
+@router.get("/records/{entity}/{business_no}/document")
+async def generate_record_document(
+    entity: str,
+    business_no: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Render one record as a PDF and return a signed URL.
+
+    `entity` is an allow-list key (PRINTABLE_DOCUMENTS), never a collection name -- mapping
+    a URL segment onto a collection would let a caller print any collection in the database.
+    Every figure on the form is read from the record; nothing is re-entered.
+    """
+    spec = PRINTABLE_DOCUMENTS.get(entity)
+    if not spec:
+        raise HTTPException(
+            status_code=404,
+            detail=(f"There is no printable document for '{entity}'. Available: "
+                    f"{', '.join(sorted(PRINTABLE_DOCUMENTS))}."))
+    # The capability comes from the TABLE, so a new form cannot be added without deciding
+    # who may read it.
+    _require(current_user, spec[3])
+    return await record_documents.generate(
+        current_user, _company(current_user, company_id), entity, business_no)

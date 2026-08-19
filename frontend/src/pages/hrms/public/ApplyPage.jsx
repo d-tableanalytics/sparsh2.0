@@ -60,6 +60,10 @@ const ApplyPage = () => {
     current_location: '', total_experience: '', qualification: '',
     current_company: '', current_ctc: '', expected_ctc: '', notice_period: '',
     linkedin: '', portfolio: '', cover_note: '', declaration: false,
+    // ── Phase INT-2 (SOP §11) ── the acknowledgements an INTERNAL vacancy asks for. The
+    // form only renders them when the server sends them (`job.acknowledgements`), so a
+    // client-track application is exactly the form it always was.
+    eeo_ack: false, data_use_ack: false, consent_to_retain: false,
     // ── Phase 11-R, Item 5 ── referral capture. Collapsed by default and entirely
     // optional, so the majority who were not referred see no extra fields at all.
     is_referral: false, referred_by: '', referral_source: '',
@@ -122,6 +126,14 @@ const ApplyPage = () => {
     setError('');
     if (!form.declaration) {
       setError('Please confirm that the information provided is accurate.');
+      return;
+    }
+    // Phase INT-2. Pre-empts a round trip; the server enforces the same thing in
+    // hrms_posting_service, which is the check that actually counts.
+    const missing = (job?.acknowledgements || [])
+      .filter((a) => a.required && !form[a.field]);
+    if (missing.length) {
+      setError(`Please confirm you have read: ${missing.map((a) => a.heading).join(', ')}.`);
       return;
     }
     // Phase 11-R, Item 5. These checks pre-empt a round trip; they do NOT replace the
@@ -365,10 +377,11 @@ const ApplyPage = () => {
             </div>
           </div>
 
-          {/* ── Phase 11-R, Item 5: "Where did you find this job?" ──
+          {/* ── "Where did you find this job?" ──
               Mandatory, and the single reason this pipeline needs only ONE form link per
-              posting rather than one per platform: the source is captured from the
-              applicant instead of inferred from which URL they clicked.
+              posting rather than one per job board: this answer BECOMES the candidate's
+              source in the hiring pipeline, instead of being inferred from which URL they
+              clicked — an inference that was wrong the moment a link was forwarded.
 
               PRIVACY: there is deliberately no employee picker, autocomplete or directory
               search here. The applicant TYPES a code and the server resolves it; an
@@ -464,6 +477,31 @@ const ApplyPage = () => {
               I confirm that the information provided above is accurate and complete. *
             </span>
           </label>
+
+          {/* ── Phase INT-2 (SOP §11) ── equal opportunity, data use, and the optional
+              consent to be kept for future roles.
+
+              The WORDING comes from the server, because it lives in the communication
+              templates precisely so legal can change it without a deploy. A form that
+              hard-coded it would need one every time. Rendered only when the server sends
+              them, which is the internal track only — a client-track applicant is agreeing
+              to the client's terms, not ours. */}
+          {(job?.acknowledgements || []).map((ack) => (
+            <label key={ack.field} className="flex items-start gap-2.5 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={!!form[ack.field]}
+                onChange={set(ack.field)}
+                className="mt-1"
+                required={ack.required}
+              />
+              <span className="text-[13px] text-slate-600">
+                <span className="font-semibold text-slate-700">{ack.heading}</span>
+                {ack.required && ' *'}
+                <span className="block mt-0.5">{ack.statement}</span>
+              </span>
+            </label>
+          ))}
 
           {error && (
             <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-[13px] text-red-700">

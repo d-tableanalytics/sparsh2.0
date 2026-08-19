@@ -16,8 +16,10 @@ import CreatePostingModal from './CreatePostingModal';
 /**
  * HRMS ▸ job postings.
  *
- * One card per platform row. Each card shows the destination that platform actually uses —
- * a generated form link, or the poster's own URL — and copies exactly that.
+ * One card per posting, and one posting per role — there is no platform breakdown here
+ * because a posting no longer has one. Each card shows the single link to share and copies
+ * exactly that; which channel a candidate came through is answered on the form itself and
+ * read from the `source` column in the pipeline.
  *
  * External postings carry a visible warning: applications made on a job board never reach
  * this pipeline. Showing an application count of 0 without that context would look like a
@@ -51,7 +53,7 @@ const PostingCard = ({ posting: p, canWrite, onCopy, copied, onStatus, onDelete 
         <div className="min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
             <span className="px-2 py-0.5 rounded-md text-[11px] font-bold bg-[var(--input-bg)] text-[var(--text-main)]">
-              {p.platform}
+              {isExternal ? 'External link' : 'Form link'}
             </span>
             <span className={`px-2 py-0.5 rounded-md text-[11px] font-bold ${
               STATUS_TONES[p.live_status] || 'bg-[var(--input-bg)] text-[var(--text-muted)]'}`}>
@@ -98,9 +100,13 @@ const PostingCard = ({ posting: p, canWrite, onCopy, copied, onStatus, onDelete 
             </a>
           )}
         </div>
-        {isExternal && (
+        {isExternal ? (
           <p className="mt-1.5 text-[11px] text-[var(--accent-red)]">
-            Applications on this platform do not appear here — it links out to their own site.
+            Applications made there do not appear here — it links out to another site.
+          </p>
+        ) : (
+          <p className="mt-1.5 text-[11px] text-[var(--text-muted)]">
+            Share this one link anywhere — applicants tell the form where they found the job.
           </p>
         )}
       </div>
@@ -204,7 +210,7 @@ const PostingList = () => {
       <HrmsPageHeader
         icon={Megaphone}
         title="Job Postings"
-        subtitle="Publish approved roles across channels — one link per platform."
+        subtitle="Publish an approved role and share its single application link anywhere."
         actions={
           <div className="flex items-center gap-2">
             <HrmsScopeBar />
@@ -221,14 +227,14 @@ const PostingList = () => {
       <div className="grid grid-cols-3 gap-3">
         <Tile icon={Radio} label="Live postings" value={stats.live} />
         <Tile icon={Users2} label="Applications" value={stats.applications} />
-        <Tile icon={Megaphone} label="Channels" value={stats.channels} />
+        <Tile icon={Megaphone} label="Postings" value={stats.postings} />
       </div>
 
       <div className="flex flex-wrap items-center gap-2">
         <div className="relative flex-1 min-w-[220px]">
           <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-[var(--text-muted)]" />
           <input value={search} onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search by code, role or platform…"
+            placeholder="Search by code, role or JD…"
             className="w-full h-9 pl-9 pr-3 rounded-lg border border-[var(--border)] bg-[var(--input-bg)] text-[13px] text-[var(--text-main)]" />
         </div>
         <select value={status} onChange={(e) => setStatus(e.target.value)}

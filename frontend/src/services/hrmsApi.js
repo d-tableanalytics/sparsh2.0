@@ -99,7 +99,7 @@ export const updateJd = (jdNo, payload, params) =>
 
 // ── Job postings (authenticated) ──
 export const getPostings = (params) => api.get('/hrms/postings', { params });
-export const createPostings = (payload, params) =>
+export const createPosting = (payload, params) =>
   api.post('/hrms/postings', payload, { params });
 export const updatePosting = (code, payload, params) =>
   api.patch(`/hrms/postings/${code}`, payload, { params });
@@ -215,19 +215,9 @@ export const getHrmsPositions = (params) => api.get('/hrms/analytics/positions',
 // ══════════════════════════════════════════════════════════════
 
 // ── Item 1: the public-link registry ──
-/** Every public link this company has issued, with open counts and live status. */
-export const getHrmsLinks = (params) => api.get('/hrms/links', { params });
-export const getHrmsLink = (linkId, params) => api.get(`/hrms/links/${linkId}`, { params });
-/** Kill a live link. Enforced server-side by assert_link_live, not merely displayed. */
-export const revokeHrmsLink = (linkId, payload, params) =>
-  api.post(`/hrms/links/${linkId}/revoke`, payload, { params });
-/** Mint a fresh credential and revoke the old one. Apply links cannot be reissued. */
-export const reissueHrmsLink = (linkId, params) =>
-  api.post(`/hrms/links/${linkId}/reissue`, {}, { params });
-
-/** Absolute URL for a registry row. The registry stores the relative `path`, so this is
- *  the one place that knows how to make it clickable — same role applyUrlFor plays. */
-export const linkUrlFor = (path) => `${window.location.origin}${path || ''}`;
+// The registry SCREEN was removed (HRMS ▸ Links); its /hrms/links endpoints still exist
+// server-side and still govern the candidate-facing links the pipeline issues, so nothing
+// about link validity changed — only the admin view over them is gone.
 
 // ── Item 2: documentation ──
 export const getDocumentTypes = (params) => api.get('/hrms/document-types', { params });
@@ -276,16 +266,15 @@ export const cancelAppointment = (no, payload, params) =>
 /** The candidate-facing appointment link. 128-bit access code, case-sensitive. */
 export const appointmentUrlFor = (code) => `${window.location.origin}/appointment/${code}`;
 
-// ── Item 4: the client master + client sharing ──
+// ── Item 4: the client dimension + client sharing ──
+/** The companies that may be named as the client of a requisition.
+ *
+ *  READ ONLY, and that is the point: these rows are the ERP's own Companies, projected into
+ *  the `{ client_id, name }` shape HRMS reports on. There is no create/update/delete because
+ *  a client is a company — it is created and edited in the Companies section, once. */
 export const getClients = (params) => api.get('/hrms/clients', { params });
 export const getClient = (clientId, params) =>
   api.get(`/hrms/clients/${clientId}`, { params });
-export const createClient = (payload, params) =>
-  api.post('/hrms/clients', payload, { params });
-export const updateClient = (clientId, payload, params) =>
-  api.patch(`/hrms/clients/${clientId}`, payload, { params });
-export const deleteClient = (clientId, params) =>
-  api.delete(`/hrms/clients/${clientId}`, { params });
 /** Record the hiring client's verdict on a shared CV. Rejecting REQUIRES remarks. */
 export const recordClientResponse = (payload, params) =>
   api.post('/hrms/candidates/client-response', payload, { params });
@@ -326,3 +315,193 @@ export const exportHrmsReport = async (entity, params) => {
     total: Number(res.headers?.['x-export-total'] || 0),
   };
 };
+
+// ══════════════════════════════════════════════════════════════
+// Internal (in-house) recruitment track
+// ══════════════════════════════════════════════════════════════
+// Sparsh Magic hiring for itself, governed by the Internal Recruitment SOP. Everything here
+// is ADDITIVE: no existing call changed shape, and `track` is optional everywhere it appears,
+// so a caller that omits it gets exactly the behaviour it had before.
+
+/** Position scorecards — the bar a role is hired against, agreed before sourcing. */
+export const getScorecards = (params) => api.get('/hrms/scorecards', { params });
+export const getScorecard = (scrNo, params) =>
+  api.get(`/hrms/scorecards/${scrNo}`, { params });
+export const createScorecard = (payload, params) =>
+  api.post('/hrms/scorecards', payload, { params });
+export const updateScorecard = (scrNo, payload, params) =>
+  api.patch(`/hrms/scorecards/${scrNo}`, payload, { params });
+/** One approval signature. The scorecard completes when every required role has signed. */
+export const approveScorecard = (scrNo, payload, params) =>
+  api.post(`/hrms/scorecards/${scrNo}/approve`, payload, { params });
+/** Score a candidate against their requisition's scorecard. Records; never moves them. */
+export const evaluateAgainstScorecard = (uk, payload, params) =>
+  api.post(`/hrms/candidates/${uk}/scorecard-evaluate`, payload, { params });
+
+/** Reference checks. Mandatory before an internal offer; optional on the client track. */
+export const getReferenceChecks = (params) => api.get('/hrms/reference-checks', { params });
+export const getReferenceCheck = (refNo, params) =>
+  api.get(`/hrms/reference-checks/${refNo}`, { params });
+export const createReferenceCheck = (payload, params) =>
+  api.post('/hrms/reference-checks', payload, { params });
+export const updateReferenceCheck = (refNo, payload, params) =>
+  api.patch(`/hrms/reference-checks/${refNo}`, payload, { params });
+
+/**
+ * Telephonic screening (SOP step 5) — the brief call between CV screening and the panel.
+ * Internal track only. A PASSED screen is what clears a candidate for an interview; the
+ * gate itself lives server-side on interview creation.
+ */
+export const getTelephonicScreenings = (params) =>
+  api.get('/hrms/telephonic-screenings', { params });
+export const getScreenableCandidates = (params) =>
+  api.get('/hrms/telephonic-screenings/screenable', { params });
+export const getTelephonicScreening = (telNo, params) =>
+  api.get(`/hrms/telephonic-screenings/${telNo}`, { params });
+export const createTelephonicScreening = (payload, params) =>
+  api.post('/hrms/telephonic-screenings', payload, { params });
+export const updateTelephonicScreening = (telNo, payload, params) =>
+  api.patch(`/hrms/telephonic-screenings/${telNo}`, payload, { params });
+
+/** Management's sign-off on an internal offer, mandatory before it can be sent. */
+export const approveOffer = (offerNo, payload, params) =>
+  api.post(`/hrms/offers/${offerNo}/approve`, payload, { params });
+
+/** Probation. An EMPLOYEE event, not a recruitment stage — see hrms_probation_service. */
+export const getProbations = (params) => api.get('/hrms/probation', { params });
+export const getProbationsDue = (params) => api.get('/hrms/probation/due', { params });
+export const getProbation = (prbNo, params) =>
+  api.get(`/hrms/probation/${prbNo}`, { params });
+export const openProbation = (payload, params) =>
+  api.post('/hrms/probation', payload, { params });
+export const updateProbation = (prbNo, payload, params) =>
+  api.patch(`/hrms/probation/${prbNo}`, payload, { params });
+export const confirmProbation = (prbNo, payload, params) =>
+  api.post(`/hrms/probation/${prbNo}/confirm`, payload, { params });
+export const closePersonnelFile = (payload, params) =>
+  api.post('/hrms/personnel-file/close', payload, { params });
+
+/** The exception log. An APPROVED exception is the only thing that lifts a gate. */
+export const getExceptions = (params) => api.get('/hrms/exceptions', { params });
+export const getException = (excNo, params) =>
+  api.get(`/hrms/exceptions/${excNo}`, { params });
+export const raiseException = (payload, params) =>
+  api.post('/hrms/exceptions', payload, { params });
+export const decideException = (excNo, payload, params) =>
+  api.post(`/hrms/exceptions/${excNo}/approve`, payload, { params });
+
+/** SLA milestones for one requisition, and the open-breach sweep. */
+export const getRequisitionSla = (requestNo, params) =>
+  api.get(`/hrms/requisitions/${requestNo}/sla`, { params });
+export const getSlaBreaches = (params) => api.get('/hrms/sla/breaches', { params });
+
+
+// ══ Phase INT-2 — the remaining Internal Recruitment SOP controls ══
+// Every call below is internal-track only. The server refuses a client requisition outright
+// rather than half-applying a control the client track has no counterpart for.
+
+/** The internal shortlisting committee (SOP §5). HR and the Department Head jointly
+ *  finalise the shortlist, and a FINALISED record is what lifts the gate on `Selected`. */
+export const getShortlistReviews = (params) =>
+  api.get('/hrms/shortlist-reviews', { params });
+export const getShortlistReview = (slrNo, params) =>
+  api.get(`/hrms/shortlist-reviews/${slrNo}`, { params });
+export const createShortlistReview = (payload, params) =>
+  api.post('/hrms/shortlist-reviews', payload, { params });
+export const updateShortlistReview = (slrNo, payload, params) =>
+  api.patch(`/hrms/shortlist-reviews/${slrNo}`, payload, { params });
+
+/** Batch interview windows (Annexure C). A PREFERENCE, never a rule — scheduling outside
+ *  one warns in the response and books the interview anyway. */
+export const getInterviewWindows = (params) =>
+  api.get('/hrms/interview-windows', { params });
+export const createInterviewWindow = (payload, params) =>
+  api.post('/hrms/interview-windows', payload, { params });
+export const updateInterviewWindow = (id, payload, params) =>
+  api.patch(`/hrms/interview-windows/${id}`, payload, { params });
+export const deleteInterviewWindow = (id, params) =>
+  api.delete(`/hrms/interview-windows/${id}`, { params });
+
+/** Pre-boarding engagement (SOP §6). Tracking, NOT a gate: nothing is blocked by a missing
+ *  touchpoint. `due` splits never-contacted from gone-quiet, because those are two
+ *  different conversations. */
+export const getPreboarding = (params) => api.get('/hrms/preboarding', { params });
+export const getPreboardingDue = (params) =>
+  api.get('/hrms/preboarding/due', { params });
+export const recordPreboardingTouchpoint = (payload, params) =>
+  api.post('/hrms/preboarding', payload, { params });
+
+/** The standing salary-band master (Annexure C). A CONVENIENCE for the budget gate; the
+ *  offer check still reads the band stamped on the requisition, so a band edited today can
+ *  never retroactively legalise an offer approved last month. */
+export const getSalaryBands = (params) => api.get('/hrms/salary-bands', { params });
+export const getSalaryBand = (bandNo, params) =>
+  api.get(`/hrms/salary-bands/${bandNo}`, { params });
+export const getSalaryBandPrefill = (requestNo, params) =>
+  api.get(`/hrms/salary-bands/for-requisition/${requestNo}`, { params });
+export const createSalaryBand = (payload, params) =>
+  api.post('/hrms/salary-bands', payload, { params });
+export const updateSalaryBand = (bandNo, payload, params) =>
+  api.patch(`/hrms/salary-bands/${bandNo}`, payload, { params });
+
+/** The talent pool (Annexure C). Listing is `getCandidates({ talent_pool: true, tags })` —
+ *  the pool is a FILTER on the candidate list, not a second collection, so a pooled
+ *  candidate keeps the same scoping and the same retention as every other CV. */
+export const setTalentPool = (uk, payload, params) =>
+  api.post(`/hrms/candidates/${uk}/talent-pool`, payload, { params });
+export const sourceFromTalentPool = (uk, requestNo, params) =>
+  api.post(`/hrms/candidates/${uk}/source-to/${requestNo}`, null, { params });
+
+/** Candidate communications (Annexure C). Delivery goes through the existing notification
+ *  service; what is new is the template and the append-only log. */
+export const getCommunications = (params) => api.get('/hrms/communications', { params });
+export const getCommTemplates = (params) =>
+  api.get('/hrms/communications/templates', { params });
+export const updateCommTemplate = (key, payload, params) =>
+  api.patch(`/hrms/communications/templates/${key}`, payload, { params });
+export const sendCommunication = (payload, params) =>
+  api.post('/hrms/communications/send', payload, { params });
+
+/** New-hire experience surveys (SOP §10). READ IS THE AGGREGATE ONLY — there is no endpoint
+ *  that returns response rows, and the server suppresses any figure below its minimum
+ *  response count. A survey a manager can de-anonymise measures nothing. */
+export const getSurveys = (params) => api.get('/hrms/surveys', { params });
+export const getSurveyResults = (params) => api.get('/hrms/surveys/results', { params });
+
+/** All eight SOP KPIs, computed server-side and role-scoped. Every ratio carries
+ *  `eligible_n`, and `excluded_n` where records were deliberately left out. */
+export const getInternalKpis = (params) =>
+  api.get('/hrms/analytics/internal-kpis', { params });
+
+/** What is outstanding before a probation can be CONFIRMED (SOP §11). Surfaced while the
+ *  probation is still running rather than sprung at the moment somebody tries to confirm. */
+export const getProbationStatutory = (prbNo, params) =>
+  api.get(`/hrms/probation/${prbNo}/statutory`, { params });
+
+/** The policy register and its review cycle (SOP §14). A revision is DRAFTED and then
+ *  APPROVED; drafting one changes nothing about which version governs. */
+export const getPolicies = (params) => api.get('/hrms/policies', { params });
+export const getPolicy = (policyKey, params) =>
+  api.get(`/hrms/policies/${policyKey}`, { params });
+export const getPolicyReviewsDue = (params) => api.get('/hrms/policies/due', { params });
+export const registerPolicy = (payload, params) =>
+  api.post('/hrms/policies', payload, { params });
+export const logPolicyRevision = (policyKey, payload, params) =>
+  api.post(`/hrms/policies/${policyKey}/revisions`, payload, { params });
+export const approvePolicyRevision = (policyKey, payload, params) =>
+  api.post(`/hrms/policies/${policyKey}/approve`, payload, { params });
+
+/** The retention purge (SOP §13). Proposals come from `scripts/hrms_retention_purge.py`,
+ *  which defaults to a dry run. Approving one REDACTS the personal fields and keeps the ids
+ *  and the audit trail — it is not reversible. */
+export const getPurgeBatches = (params) => api.get('/hrms/purge-batches', { params });
+export const getPurgeBatch = (batchNo, params) =>
+  api.get(`/hrms/purge-batches/${batchNo}`, { params });
+export const approvePurgeBatch = (batchNo, payload, params) =>
+  api.post(`/hrms/purge-batches/${batchNo}/approve`, payload, { params });
+
+/** Printable record documents (SOP §9). One pattern for all five forms, gated by the
+ *  entity's existing READ capability — printing a record is reading it. Returns a signed
+ *  URL; every figure on the form is read from the record and nothing is re-entered. */
+export const getRecordDocument = (entity, businessNo, params) =>
+  api.get(`/hrms/records/${entity}/${businessNo}/document`, { params });

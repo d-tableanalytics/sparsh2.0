@@ -32,6 +32,11 @@ const RequisitionFormModal = ({ existing, onClose, onSaved }) => {
   const [people, setPeople] = useState([]);
   const [saving, setSaving] = useState(false);
   const [form, setForm] = useState({
+    // ── Which hiring track this vacancy runs on ──
+    // Defaults to `client`, so the form behaves exactly as it always has unless somebody
+    // deliberately switches it. IMMUTABLE once raised: the server refuses a change, because
+    // an approval granted under one track's rules means nothing under the other's.
+    requisition_track: existing?.requisition_track || 'client',
     department_id: existing?.department_id || '',
     designation_id: existing?.designation_id || '',
     vacancy: existing?.vacancy ?? 1,
@@ -86,8 +91,8 @@ const RequisitionFormModal = ({ existing, onClose, onSaved }) => {
     getDepartments(scope).then(({ data }) => setDepartments((data?.departments || []).filter((d) => d.active))).catch(() => {});
     getDesignations(scope).then(({ data }) => setDesignations((data?.designations || []).filter((d) => d.active))).catch(() => {});
     getEmployees({ ...scope, limit: 500 }).then(({ data }) => setPeople(data?.employees || [])).catch(() => {});
-    // Phase 11-R, Item 4. Failing quietly is correct: a company that does not use the
-    // client master should not see an error on a form that works perfectly without it.
+    // Phase 11-R, Item 4. The options are the ERP's Companies — there is no separate client
+    // master. Failing quietly is correct: the form works perfectly without a client.
     getClients(scope).then(({ data }) => setClients(data?.clients || [])).catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -162,7 +167,11 @@ const RequisitionFormModal = ({ existing, onClose, onSaved }) => {
         showSuccess(`Requisition ${existing.request_no} updated`);
       } else {
         const { data } = await createRequisition({ ...payload, jd }, scope);
-        showSuccess(`Requisition ${data.request_no} raised — routed to HR for review`);
+        showSuccess(
+          form.requisition_track === 'internal'
+            ? `Requisition ${data.request_no} raised — HR verifies it, then Management or `
+              + 'Finance approves the budget before sourcing can begin'
+            : `Requisition ${data.request_no} raised — routed to HR for review`);
       }
       onSaved();
     } catch (err) {
@@ -189,6 +198,61 @@ const RequisitionFormModal = ({ existing, onClose, onSaved }) => {
         </div>
 
         <form onSubmit={submit} className="p-5 space-y-5 overflow-y-auto">
+          {/* ── The track ──
+              Two radios rather than a dropdown: there are exactly two, and the choice
+              changes which approvals the requisition will need, so it deserves to be
+              visible rather than folded into a select. Disabled when editing, because the
+              server refuses a change and offering one would be a lie. */}
+          <fieldset className="rounded-xl border border-[var(--border)] p-3.5">
+            <legend className="px-1.5 text-[11px] font-bold uppercase tracking-widest text-[var(--text-muted)]">
+              Hiring track
+            </legend>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+              {[
+                { value: 'client', label: 'For a client',
+                  hint: 'The client owns the budget and gives the verdict on CVs.' },
+                { value: 'internal', label: 'Sparsh Magic (internal)',
+                  hint: 'Budget approved internally. No client, and no CVs shared out.' },
+              ].map((option) => (
+                <label
+                  key={option.value}
+                  className={`flex gap-2.5 rounded-lg border p-3 cursor-pointer transition-colors
+                    ${form.requisition_track === option.value
+                      ? 'border-[var(--accent-indigo)] bg-[var(--accent-indigo-bg)]'
+                      : 'border-[var(--border)] hover:bg-[var(--input-bg)]'}
+                    ${isEdit ? 'opacity-60 cursor-not-allowed' : ''}`}
+                >
+                  <input
+                    type="radio" name="requisition_track" value={option.value}
+                    checked={form.requisition_track === option.value}
+                    disabled={isEdit}
+                    onChange={() => setForm((f) => ({
+                      ...f, requisition_track: option.value,
+                      // An internal requisition can never carry a client, so clearing it
+                      // here keeps the form from submitting a value the server would refuse.
+                      client_id: option.value === 'internal' ? '' : f.client_id,
+                    }))}
+                    className="mt-0.5 accent-[var(--accent-indigo)]"
+                  />
+                  <span className="min-w-0">
+                    <span className="block text-[13px] font-semibold text-[var(--text-main)]">
+                      {option.label}
+                    </span>
+                    <span className="block text-[11px] text-[var(--text-muted)] mt-0.5">
+                      {option.hint}
+                    </span>
+                  </span>
+                </label>
+              ))}
+            </div>
+            {isEdit && (
+              <p className="mt-2 text-[11px] text-[var(--text-muted)]">
+                The track cannot be changed once a requisition is raised — an approval given
+                under one track&rsquo;s rules would not mean the same under the other&rsquo;s.
+              </p>
+            )}
+          </fieldset>
+
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
               <label className={LABEL} htmlFor="r-dept">Department *</label>
@@ -355,7 +419,10 @@ const RequisitionFormModal = ({ existing, onClose, onSaved }) => {
           <div className="pt-4 border-t border-[var(--border)] space-y-3">
             <p className="text-[13px] font-bold text-[var(--text-main)]">Client &amp; budget</p>
 
-            {clients.length > 0 && (
+            {/* An internal requisition is Sparsh Magic's own vacancy, so it has no client.
+                The selector is not disabled, it is ABSENT -- a greyed-out control invites
+                the question "why can't I pick one", which the track radio already answered. */}
+            {clients.length > 0 && form.requisition_track !== 'internal' && (
               <div>
                 <label className={LABEL} htmlFor="r-client">Client</label>
                 <select id="r-client" value={form.client_id} onChange={set('client_id')} className={FIELD}>
@@ -364,6 +431,10 @@ const RequisitionFormModal = ({ existing, onClose, onSaved }) => {
                     <option key={c.client_id} value={c.client_id}>{c.name}</option>
                   ))}
                 </select>
+                <p className="mt-1 text-[11px] text-[var(--text-muted)]">
+                  From the Companies section. This is what the recruitment dashboard filters
+                  by, so a requisition left in-house will not appear under any client.
+                </p>
               </div>
             )}
 

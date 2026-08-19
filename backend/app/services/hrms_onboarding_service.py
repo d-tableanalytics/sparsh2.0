@@ -46,6 +46,7 @@ from app.models.hrms import (
     AUDIT_STAGE_CHANGED, CHECKLIST_KEYS, COLL_CANDIDATES, COLL_OFFERS, COLL_ONBOARDING,
     COLL_REQUISITIONS, ENTITY_CANDIDATE, ENTITY_ONBOARDING,
     IFSC_RE, MAX_ONBOARD_DOCUMENTS, MAX_REFERENCES, ONBOARDABLE_STATUSES, PAN_RE,
+    INDUCTION_CHECKLIST, RequisitionTrack,
     SYSTEM_CHECKLIST_KEYS, AppStatus, BgVerification, Gender, OfferStatus,
     OnboardStatus, PreOnboardStatus, can_transition, is_iso_date, seed_checklist,
 )
@@ -257,7 +258,12 @@ async def start_onboarding(actor: dict, company_id: str, payload: dict) -> dict:
         "asset_requirements": None,
         "submission": None,
         "documents": [],
-        "checklist": seed_checklist(),
+        # The track rides on the onboarding record so every later read -- the checklist, the
+        # probation opener, the KPI block -- knows which rules apply without re-fetching the
+        # requisition. Defaults to client for a candidate with no requisition at all.
+        "requisition_track": ((req or {}).get("requisition_track")
+                              or RequisitionTrack.CLIENT.value),
+        "checklist": seed_checklist((req or {}).get("requisition_track")),
         "employee_id": None,
         "created_at": now,
         "created_by": str(actor.get("_id")) if actor and actor.get("_id") else None,
@@ -424,7 +430,17 @@ async def set_checklist(actor: dict, company_id: str, onb_no: str, payload: dict
     _assert_open(doc)
 
     key = clean_text(payload.get("key"), limit=60)
-    if key not in CHECKLIST_KEYS:
+    # Validated against THIS record's own checklist, not a global list. The internal track
+    # adds Day-1 induction items and the client track does not, so a global allow-list would
+    # accept an induction key on a client onboarding and then silently tick nothing --
+    # `_set_item` only updates items that are already there.
+    own_keys = {item.get("key") for item in (doc.get("checklist") or [])}
+    if key not in own_keys:
+        if key in CHECKLIST_KEYS or key in {k for k, _ in INDUCTION_CHECKLIST}:
+            raise HTTPException(
+                status_code=409,
+                detail=(f'"{key}" is not on this onboarding\'s checklist. Induction items '
+                        f"exist on internal-track onboardings only."))
         raise HTTPException(status_code=422, detail="Unknown checklist item.")
     if key in SYSTEM_CHECKLIST_KEYS:
         # The system owns these three because it can verify them. A hand-tick would let the
@@ -441,7 +457,41 @@ async def set_checklist(actor: dict, company_id: str, onb_no: str, payload: dict
         {"$set": {"checklist": checklist, "updated_at": now}})
     await audit(actor, AUDIT_ONBOARD_CHECKLIST, ENTITY_ONBOARDING, onb_no,
                 f"{key} {'done' if payload.get('done') else 'reopened'}", company_id)
+
+    # ── Phase INT-2 (SOP §10) ── issue the induction experience survey the moment the
+    # induction is finished, not on a schedule: this is the point the module already knows
+    # the joining experience is over, and asking a fortnight later measures memory.
+    #
+    # Best-effort by contract -- `issue_survey` swallows everything and is idempotent per
+    # (instrument, employee), so re-ticking an item never issues a second link and a survey
+    # that cannot be minted never fails the checklist update.
+    await _issue_induction_survey(actor, company_id, onb_no, checklist, doc)
     return await _refresh(actor, company_id, onb_no)
+
+
+async def _issue_induction_survey(actor: dict, company_id: str, onb_no: str,
+                                  checklist: list, doc: dict) -> None:
+    """Fire the induction survey once every induction item is done.
+
+    Keyed on the INDUCTION items alone rather than the whole checklist. The rest of the
+    list runs for weeks (assets, buddy, payroll) and the induction experience is over on
+    Day 1 -- waiting for the last item would ask somebody about their first day two months
+    after it happened.
+    """
+    induction_items = [i for i in (checklist or []) if i.get("induction")]
+    if not induction_items or not all(i.get("done") for i in induction_items):
+        return                          # client track, or not finished yet
+    if not doc.get("employee_id"):
+        # De-duplication keys on the employee code, so there is nothing to key on yet. The
+        # next tick after the ID is minted issues it.
+        return
+
+    from app.models.hrms import SurveyKind
+    from app.services.hrms_survey_service import issue_survey
+    await issue_survey(actor, company_id, SurveyKind.INDUCTION,
+                       employee_code=doc["employee_id"],
+                       request_no=doc.get("request_no"),
+                       employee_name=doc.get("candidate_name"))
 
 
 # ─────────────────────────────────────────────────────────────
@@ -532,6 +582,27 @@ async def generate_employee_id(actor: dict, company_id: str, onb_no: str) -> dic
 
     # An Employee ID means the person has joined.
     await _advance_candidate(actor, company_id, doc.get("uk"), AppStatus.JOINED)
+
+    # ── Internal track ── open the probation review now, at joining, rather than leaving it
+    # to be remembered later. A probation record nobody created is a probation nobody
+    # reviews, and `GET /probation/due` is only honest if every internal joiner is in it.
+    #
+    # Deliberately best-effort: a probation record is important, but failing the handover
+    # over it would strand an employee who HAS been created. The warning is loud enough to
+    # act on and the record can be opened by hand.
+    if (doc.get("requisition_track") or RequisitionTrack.CLIENT.value) \
+            == RequisitionTrack.INTERNAL.value:
+        try:
+            from app.services.hrms_probation_service import open_probation
+            await open_probation(actor, company_id, {
+                "employee_code": employee_code,
+                "request_no": doc.get("request_no"),
+                "started_on": doc.get("joining_date"),
+                "reviewer_id": doc.get("reporting_manager_id"),
+            }, silent=True)
+        except Exception as e:
+            print(f"[WARN] HRMS could not open probation for {employee_code}: {e}")
+
     await audit(actor, AUDIT_EMPLOYEE_ID_ISSUED, ENTITY_ONBOARDING, onb_no,
                 f"{employee_code} for {doc.get('candidate_name')}", company_id)
     await notify_hrms_role(

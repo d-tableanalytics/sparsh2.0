@@ -52,8 +52,12 @@ def main() -> None:
         seen["payload"] = payload
         return {"request_no": "HR-REQ-2026-001"}
 
-    async def fake_act(actor, company_id, request_no, action, remarks=None, salary_change=None):
+    # `budget` carries the internal track's approved headcount and salary band. The route
+    # always passes it, so the double must accept it or this stops testing the route.
+    async def fake_act(actor, company_id, request_no, action, remarks=None,
+                       salary_change=None, budget=None):
         seen["act"] = (company_id, request_no, action, remarks, salary_change)
+        seen["budget"] = budget
         return {"request_no": request_no, "approval_status": "Pending MD Approval"}
 
     async def fake_list_jds(actor, company_id, **kw):

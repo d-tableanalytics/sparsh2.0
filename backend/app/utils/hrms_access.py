@@ -34,6 +34,7 @@ from app.models.hrms import (
     CLIENT_ROLES, GOVERNANCE_TO_HRMS, INTERNAL_OWNER_ROLES, INTERNAL_STAFF_ROLES,
     ROLE_CAPABILITIES, TOGGLE_ROLES, Cap, HrmsRole,
 )
+from app.models.hrms import COLL_CLIENT_ENGAGEMENTS, ENGAGEMENT_GRANTS_SCOPE
 
 MODULE_DISABLED_MESSAGE = (
     "The HRMS module is not enabled for your company. Please contact your administrator."
@@ -79,6 +80,7 @@ def hrms_role(user: dict) -> Optional[HrmsRole]:
     Client:    clientadmin             → MD        (top of their company's ladder)
                governance_role MD      → MD
                governance_role HR      → HR
+               governance_role FINANCE → FINANCE   (internal-track budget authority)
                governance_role HOD     → MANAGER
                anything else           → EMPLOYEE  (self-service only)
 
@@ -211,3 +213,116 @@ def company_filter(user: dict, requested: str = None) -> dict:
     """
     scoped = scope_company_id(user, requested)
     return {"company_id": scoped} if scoped else {}
+
+
+# ─────────────────────────────────────────────────────────────
+# Client scope — the SECOND narrowing, inside the tenant
+# ─────────────────────────────────────────────────────────────
+# `company_id` is and remains the security boundary. Client scope narrows FURTHER, inside
+# one tenant, for users who belong to a client organisation rather than to this company.
+# It never widens anything, and it never reaches across companies.
+#
+# -- Why the return type is Optional[list], not list ----------------------------------------
+# Two situations look alike and must not be confused:
+#
+#     None  ->  the caller is NOT client-scoped (Sparsh HR, MD, Finance, a manager...).
+#               No client filter applies, and their behaviour is exactly what it was
+#               before client scope existed.
+#
+#     []    ->  the caller IS client-scoped but has no valid membership. Everything must
+#               match NOTHING.
+#
+# Collapsing them into a single empty list would either lock out every HR user or open the
+# gate for an unmapped client user, depending which way the collapse went. Both are wrong,
+# and only one of them is loud.
+def is_client_scoped_user(user: dict) -> bool:
+    """Whether this user's access is narrowed to specific client organisations.
+
+    A property of the RESOLVED ROLE, not of any request field. Nothing a caller sends can
+    make them client-scoped, and nothing a caller sends can make them stop being.
+    """
+    return hrms_role(user) is HrmsRole.CLIENT
+
+
+async def scope_client_ids(user: dict, company_id: str) -> Optional[list]:
+    """The client ids this user may work on, or None if they are not client-scoped.
+
+    Resolved ENTIRELY from the engagement records: an engagement of THIS company, whose
+    status grants scope, listing THIS user as a member. A client id from a request is never
+    consulted -- see the module note above and `assert_client_allowed`.
+
+    Cross-company membership is impossible by construction rather than by a later check:
+    `company_id` is part of the query, so an engagement belonging to another tenant simply
+    is not found.
+
+    Fails closed on ANY error. An access resolver that returns "unrestricted" because a
+    database read failed is a resolver that opens the door when the lock breaks.
+    """
+    if not is_client_scoped_user(user):
+        return None
+
+    user_id = str(user.get("_id") or "")
+    if not user_id or not company_id:
+        return []
+
+    try:
+        rows = await get_collection(COLL_CLIENT_ENGAGEMENTS).find(
+            {"company_id": str(company_id),
+             "member_user_ids": user_id,
+             "status": {"$in": sorted(ENGAGEMENT_GRANTS_SCOPE)}},
+            {"client_id": 1}).to_list(200)
+    except Exception as e:
+        print(f"[WARN] HRMS client scope resolution failed for {user_id}: {e}")
+        return []
+
+    # Deduplicated and ordered so the value is stable between requests -- an unstable scope
+    # makes a cached or logged decision impossible to compare against a later one.
+    return sorted({str(r["client_id"]) for r in rows if r.get("client_id")})
+
+
+def client_filter(allowed: Optional[list]) -> dict:
+    """A Mongo filter fragment for a resolved client scope.
+
+    Takes the RESOLVED scope, never a user and never a request, so there is no path by
+    which a query parameter reaches this function.
+
+        None -> {}                                (not client-scoped)
+        []   -> {"client_id": {"$in": []}}        (scoped, no membership -> matches nothing)
+        [..] -> {"client_id": {"$in": [...]}}
+
+    The empty case is spelled out rather than short-circuited to `{}` on purpose: a caller
+    that drops the filter when the list is empty turns "no clients" into "all clients",
+    which is the single most likely way this control gets broken later.
+    """
+    if allowed is None:
+        return {}
+    return {"client_id": {"$in": list(allowed)}}
+
+
+def assert_client_allowed(allowed: Optional[list], requested: Optional[str]) -> Optional[str]:
+    """Reconcile a REQUESTED client id with the caller's resolved scope.
+
+    This is the function that makes `?client_id=` a FILTER rather than an authorisation
+    input. A requested id narrows what the caller already had; it can never add to it.
+
+        not client-scoped   -> the request is honoured as a plain filter (Sparsh staff
+                               choosing which client to look at)
+        client-scoped, in scope   -> honoured
+        client-scoped, out of scope -> 403
+        client-scoped, nothing requested -> None, and the caller applies the full
+                               `client_filter(allowed)` instead
+
+    Returning the id rather than a boolean lets the caller build one filter and keeps the
+    "which client" decision in one place.
+    """
+    if allowed is None:
+        return str(requested) if requested else None
+    if not requested:
+        return None
+    if str(requested) not in set(allowed):
+        # 403 rather than an empty result set: the caller asked for something specific and
+        # is entitled to know it was refused rather than to read silence as "no data".
+        raise HTTPException(
+            status_code=403,
+            detail="You do not have access to that client.")
+    return str(requested)

@@ -28,12 +28,19 @@ const ApprovalDialog = ({
   // Item 6: a mismatched budget makes remarks mandatory on APPROVAL too. Passed in rather
   // than re-derived here, so the dialog and the server read the same rule.
   requireRemarksToApprove = false,
+  // ── Internal track ── the budget gate collects the approved headcount and salary band.
+  // The band is what every later offer on this requisition is validated against, so the
+  // server refuses an approval without it; asking here avoids a round trip to be told so.
+  showBudgetBand = false,
   onApprove,
   onReject,
   onClose,
 }) => {
   const [remarks, setRemarks] = useState('');
   const [salary, setSalary] = useState(salaryDefault ?? '');
+  const [headcount, setHeadcount] = useState(requisition?.vacancy ?? 1);
+  const [bandMin, setBandMin] = useState('');
+  const [bandMax, setBandMax] = useState('');
   const [error, setError] = useState('');
 
   const snapshot = requisition?.sanction_snapshot;
@@ -55,6 +62,29 @@ const ApprovalDialog = ({
     // round trip rather than after a 422. The server still enforces it.
     if (requireRemarksToApprove && !remarks.trim()) {
       setError('The budgets do not match. Record a remark explaining the approval.');
+      return;
+    }
+    if (showBudgetBand) {
+      const min = Number(bandMin);
+      const max = Number(bandMax);
+      if (bandMin === '' || bandMax === '' || Number.isNaN(min) || Number.isNaN(max)) {
+        setError('Record the salary band. Every offer on this requisition is checked '
+          + 'against it.');
+        return;
+      }
+      if (min > max) {
+        setError('The minimum of the band cannot exceed its maximum.');
+        return;
+      }
+      if (!Number(headcount) || Number(headcount) < 1) {
+        setError('Approved headcount must be at least 1.');
+        return;
+      }
+      onApprove(remarks.trim(), null, {
+        approved_headcount: Number(headcount),
+        approved_salary_band_min: min,
+        approved_salary_band_max: max,
+      });
       return;
     }
     onApprove(remarks.trim(), salary === '' ? null : Number(salary));
@@ -163,6 +193,54 @@ const ApprovalDialog = ({
                 </p>
               )}
             </div>
+          )}
+
+          {/* ── Internal track ── the mandatory budget gate.
+              Headcount and band are collected together because they are one decision: how
+              many seats, at what cost. The band is stored on the requisition and every
+              later offer is validated against it, which is why it cannot be skipped. */}
+          {showBudgetBand && (
+            <fieldset className="rounded-lg border border-[var(--border)] bg-[var(--input-bg)] px-3.5 py-3">
+              <legend className="px-1 text-[11px] font-bold uppercase tracking-widest text-[var(--text-muted)]">
+                Approved headcount &amp; salary band
+              </legend>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 mt-1">
+                <div>
+                  <label htmlFor="ap-headcount" className="block text-[11px] text-[var(--text-muted)] mb-1">
+                    Headcount
+                  </label>
+                  <input
+                    id="ap-headcount" type="number" min="1" value={headcount}
+                    onChange={(e) => { setHeadcount(e.target.value); setError(''); }}
+                    className="w-full h-9 px-3 rounded-lg border border-[var(--border)] bg-[var(--bg-card)] text-[13px] text-[var(--text-main)]"
+                  />
+                </div>
+                <div>
+                  <label htmlFor="ap-band-min" className="block text-[11px] text-[var(--text-muted)] mb-1">
+                    Band minimum
+                  </label>
+                  <input
+                    id="ap-band-min" type="number" min="0" value={bandMin}
+                    onChange={(e) => { setBandMin(e.target.value); setError(''); }}
+                    className="w-full h-9 px-3 rounded-lg border border-[var(--border)] bg-[var(--bg-card)] text-[13px] text-[var(--text-main)]"
+                  />
+                </div>
+                <div>
+                  <label htmlFor="ap-band-max" className="block text-[11px] text-[var(--text-muted)] mb-1">
+                    Band maximum
+                  </label>
+                  <input
+                    id="ap-band-max" type="number" min="0" value={bandMax}
+                    onChange={(e) => { setBandMax(e.target.value); setError(''); }}
+                    className="w-full h-9 px-3 rounded-lg border border-[var(--border)] bg-[var(--bg-card)] text-[13px] text-[var(--text-main)]"
+                  />
+                </div>
+              </div>
+              <p className="mt-2 text-[11px] text-[var(--text-muted)]">
+                No internal role may be sourced until this is approved, and every offer is
+                checked against the band.
+              </p>
+            </fieldset>
           )}
 
           {showSalary && (

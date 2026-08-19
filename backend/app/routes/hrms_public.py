@@ -13,6 +13,8 @@ Mounted under /api/hrms/public.
   POST /hrms/public/onboard/{code}   submit joining details and KYC documents
   GET  /hrms/public/appointment/{code}   a candidate's appointment letter   (Phase 11-R)
   POST /hrms/public/appointment/{code}   acknowledge it                     (Phase 11-R)
+  GET  /hrms/public/survey/{code}    a new joiner's experience survey   (Phase INT-2)
+  POST /hrms/public/survey/{code}    submit it, anonymously             (Phase INT-2)
 
 *** READ THIS BEFORE ADDING AN ENDPOINT HERE ***
 
@@ -45,12 +47,15 @@ from app.models.hrms import (
     PublicAppointmentAckIn, PublicApplicationIn, PublicAssessmentIn, PublicOfferResponseIn,
     PublicOnboardIn,
 )
+# ── Phase INT-2 ── the sixth public surface.
+from app.models.hrms import SurveyResponseIn
 from app.services import hrms_appointment_service as appointments
 from app.services import hrms_assessment_service as assessments
 from app.services import hrms_link_service as links
 from app.services import hrms_offer_service as offers
 from app.services import hrms_onboarding_service as onboarding
 from app.services import hrms_posting_service as postings
+from app.services import hrms_survey_service as surveys
 from app.utils.hrms_public_guard import (
     assert_link_live, client_ip, enforce_rate_limit, validate_access_code,
     validate_posting_code,
@@ -229,5 +234,40 @@ async def public_appointment_ack(code: str, body: PublicAppointmentAckIn, reques
     await enforce_rate_limit("appointment-ack", client_ip(request))
     await assert_link_live(code)
     result = await appointments.acknowledge_appointment(code, body.model_dump())
+    await links.record_consumed(code)
+    return result
+
+
+# ─────────────────────────────────────────────────────────────
+# Phase INT-2 — the new-hire experience surveys (SOP §10)
+# ─────────────────────────────────────────────────────────────
+# The sixth public surface, and it follows the same four-step order as every one above it:
+# validate the code shape, rate limit, assert the link is live, then do the work.
+#
+# One thing is different, and it is the point of the whole feature: this surface is
+# ANONYMOUS TO THE READER. The GET returns the questionnaire and nothing about the person --
+# no employee code, no name, no requisition. The respondent already knows who they are, and
+# a page that echoes their identity back is a page that can be screenshotted next to their
+# answers. The stored `employee_code` exists solely so nobody answers twice, and the
+# reporting layer refuses to return a figure below SURVEY_MIN_RESPONSES.
+@router.get("/survey/{code}")
+async def public_survey(code: str, request: Request):
+    """The questionnaire behind a new joiner's link."""
+    code = validate_access_code(code)
+    await enforce_rate_limit("survey-view", client_ip(request))
+    await assert_link_live(code)
+    result = await surveys.get_public_survey(code)
+    await links.record_open(code)
+    return result
+
+
+@router.post("/survey/{code}")
+async def public_survey_submit(code: str, body: SurveyResponseIn, request: Request):
+    """Submit answers. Once submitted a response is final -- a live link that can rewrite an
+    average after somebody has read it would make the figure meaningless."""
+    code = validate_access_code(code)
+    await enforce_rate_limit("survey-submit", client_ip(request))
+    await assert_link_live(code)
+    result = await surveys.submit_public_survey(code, body.model_dump())
     await links.record_consumed(code)
     return result

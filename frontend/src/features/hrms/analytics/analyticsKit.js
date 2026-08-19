@@ -4,7 +4,9 @@
 // Keeping constants and components in one module trips react-refresh/only-export-components
 // and, more to the point, means a styling tweak invalidates the component module too.
 
-export const GRID_KPI = 'grid grid-cols-2 lg:grid-cols-4 gap-3';
+// Tiles stay wide enough to hold a label and a 30px figure without wrapping: two up on a
+// phone, and a fifth column only past `xl`, where there is room for it.
+export const GRID_KPI = 'grid grid-cols-2 md:grid-cols-3 xl:grid-cols-5 gap-3';
 export const GRID_TWO = 'grid grid-cols-1 lg:grid-cols-2 gap-4';
 
 export const CARD =

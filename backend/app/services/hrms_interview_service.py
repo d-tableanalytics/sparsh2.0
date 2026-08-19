@@ -17,6 +17,27 @@ permission edit. `interview.read` WIDENS the list; it does not unlock it.
   HR / MD / ADMIN / INTERNAL   every interview in the company
   MANAGER                      their own interviews + candidates on requisitions they raised
   EMPLOYEE / anyone else       only interviews where they are the interviewer
+
+-- Phase INT-2: interview governance (SOP §5) -----------------------------------------
+Three rules were added, and all three are INTERNAL-TRACK ONLY. A client-track booking is
+byte-for-byte the call it always was: every one of the functions below returns immediately
+for a client requisition, before it reads anything.
+
+  1. PANEL COMPOSITION. HR + the Department Head for junior and mid roles, plus Management
+     for senior and managerial ones. Read from REQUIRED_PANEL_ROLES, not branched -- and a
+     panel missing a role is a 422 that NAMES the missing roles, because "invalid panel" is
+     a message somebody has to guess their way out of.
+  2. THE MANDATORY MANAGEMENT FINAL ROUND. For managerial and above, `Selected` is
+     unreachable without an evaluated MD Round that passed. Checked at the point the round
+     is evaluated AND again at offer creation, so a hand-set status cannot route around it.
+  3. CONFLICT OF INTEREST. A panel member who has recused themselves may not submit a
+     scorecard. Declaring a conflict is not disqualifying; standing down is what removes it,
+     and having stood down you do not then score the person.
+
+One person cannot cover two role-slots. The MD holds every capability on this track, so
+without that check a single MD would satisfy "HR + HOD + Management" alone -- which is the
+same failure a two-stage approval one person completes has, and it is refused here with the
+same reasoning hrms_scorecard_service refuses it on a managerial scorecard.
 """
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -34,6 +55,11 @@ from app.models.hrms import (
     MAX_SCORE, MIN_DURATION_MIN, MIN_SCORE, OUTCOME_STATUS, PASS_NEXT,
     PRE_ASSESSMENT_STATUSES, AppStatus, Cap, HrmsRole, InterviewMode, InterviewRound,
     InterviewStatus, Outcome, can_transition,
+)
+# ── Phase INT-2 ── interview governance (SOP §5).
+from app.models.hrms import (
+    COLL_DESIGNATIONS, COLL_INTERVIEW_WINDOWS, FINAL_ROUND, FINAL_ROUND_PASSING, WEEKDAYS,
+    RequisitionTrack, designation_level, final_round_is_mandatory, required_panel_roles,
 )
 from app.services.hrms_audit_service import audit
 from app.services.hrms_ics import build_invite
@@ -124,6 +150,197 @@ def _person_name(doc: dict) -> str:
     return (doc.get("full_name")
             or f"{doc.get('first_name') or ''} {doc.get('last_name') or ''}".strip()
             or doc.get("email") or "Unknown")
+
+
+# ─────────────────────────────────────────────────────────────
+# Phase INT-2 — interview governance (SOP §5). Internal track only.
+# ─────────────────────────────────────────────────────────────
+def _is_internal(req: dict) -> bool:
+    return ((req or {}).get("requisition_track")
+            or RequisitionTrack.CLIENT.value) == RequisitionTrack.INTERNAL.value
+
+
+async def _requisition_for(company_id: str, request_no: str) -> dict:
+    if not request_no:
+        return {}
+    return await get_collection(COLL_REQUISITIONS).find_one(
+        {"request_no": request_no, "company_id": str(company_id)}) or {}
+
+
+async def _level_for(company_id: str, req: dict):
+    """The seniority band of a requisition's designation.
+
+    Resolved from the designation MASTER rather than from anything on the requisition, for
+    the reason the masters exist at all: a band typed onto one requisition would disagree
+    with the next one for the same role. An unbanded designation reads as the default (mid),
+    so nothing breaks on a row created before this phase.
+    """
+    designation_id = (req or {}).get("designation_id")
+    if not designation_id:
+        return designation_level(None)
+    try:
+        oid = ObjectId(str(designation_id))
+    except (InvalidId, TypeError):
+        return designation_level(None)
+    row = await get_collection(COLL_DESIGNATIONS).find_one(
+        {"_id": oid, "company_id": str(company_id)}, {"designation_level": 1, "name": 1})
+    return designation_level(row)
+
+
+async def _resolve_panel(company_id: str, panel) -> list:
+    """Resolve panel entries to real users of this company, with their HRMS roles.
+
+    Every member must be a user of the SAME company, exactly as `_resolve_interviewer`
+    demands of the interviewer -- a panel drawn from another tenant is not a panel, it is a
+    scoping hole. Their ROLE is resolved server-side from the user record; a caller cannot
+    declare "this person counts as HR".
+    """
+    out = []
+    for entry in panel or []:
+        entry = dict(entry or {})
+        user_id = str(entry.get("user_id") or "").strip()
+        if not user_id:
+            raise HTTPException(status_code=422, detail="Every panel member needs a user.")
+        try:
+            oid = ObjectId(user_id)
+        except (InvalidId, TypeError):
+            raise HTTPException(status_code=422, detail="Invalid panel member.")
+        person = await get_collection("learners").find_one(
+            {"_id": oid, "company_id": str(company_id)})
+        if not person:
+            raise HTTPException(
+                status_code=422,
+                detail="Every panel member must be a user of this company.")
+        role = hrms_role(person)
+        out.append({
+            "user_id": user_id,
+            "name": _person_name(person),
+            "email": person.get("email"),
+            # Stamped at scheduling time. If somebody's governance role changes next month,
+            # the record still says who sat on the panel AS WHAT -- which is the question an
+            # audit asks, and it cannot be answered by re-deriving it later.
+            "role": role.value if role else None,
+            "coi_declared": bool(entry.get("coi_declared")),
+            "coi_relationship": clean_text(entry.get("coi_relationship"), limit=200),
+            "recused": bool(entry.get("recused")),
+        })
+    return out
+
+
+def assert_panel_composition(panel: list, level, *, round_name: str = None) -> None:
+    """Refuse a panel that does not cover the roles this seniority band requires.
+
+    Two independent conditions, and both matter:
+
+      * every required ROLE is covered, and
+      * by at least as many DIFFERENT PEOPLE as there are required roles.
+
+    The second is not redundant. An MD holds every capability on this track, so a panel of
+    one MD would otherwise satisfy "HR + HOD + Management" on their own -- one person wearing
+    three hats is not a panel, it is an interview with extra paperwork. This is the same
+    "two different users" rule hrms_scorecard_service applies to a managerial scorecard.
+
+    A RECUSED member is counted as absent (SOP §11): somebody who has stood down over a
+    conflict cannot also be the reason the panel is quorate.
+    """
+    required = required_panel_roles(level)
+    active = [m for m in (panel or []) if not m.get("recused")]
+    covered = {m.get("role") for m in active if m.get("role")}
+
+    missing = [r.value for r in required if r.value not in covered]
+    if missing:
+        recused_note = ""
+        if any(m.get("recused") for m in (panel or [])):
+            recused_note = (" A recused member does not count towards the panel.")
+        raise HTTPException(
+            status_code=422,
+            detail=(f"This role needs a panel covering "
+                    f"{', '.join(r.value for r in required)}. Still missing: "
+                    f"{', '.join(missing)}.{recused_note}"))
+
+    people = {str(m.get("user_id")) for m in active if m.get("user_id")}
+    if len(people) < len(required):
+        raise HTTPException(
+            status_code=422,
+            detail=(f"A panel of {len(people)} cannot cover {len(required)} required roles. "
+                    f"{', '.join(r.value for r in required)} must be "
+                    f"{len(required)} different people -- one person holding two of the "
+                    f"seats is not a panel."))
+
+
+async def assert_final_round_complete(company_id: str, candidate: dict, req: dict) -> None:
+    """SOP §5: managerial and above may not reach `Selected` without a passed MD round.
+
+    Written as a TABLE ASSERTION in the spirit of `budget_approval_is_mandatory()`: the rule
+    is read from `final_round_is_mandatory` and `FINAL_ROUND`, so a future change that made
+    the MD round optional for managerial roles would fail this check loudly instead of
+    quietly deleting the gate.
+
+    Called from TWO places on purpose -- when a round is evaluated, and again when an offer
+    is created. The second is what makes a hand-set `Selected` status useless as a way round
+    it: the offer still asks whether the round happened.
+    """
+    if not _is_internal(req):
+        return
+    level = await _level_for(company_id, req)
+    if not final_round_is_mandatory(level):
+        return
+
+    rounds = await get_collection(COLL_INTERVIEWS).find(
+        {"company_id": str(company_id), "uk": candidate.get("uk"),
+         "round": FINAL_ROUND.value},
+        {"interview_no": 1, "outcome": 1, "status": 1}).to_list(50)
+    passed = [r for r in rounds if r.get("outcome") in FINAL_ROUND_PASSING]
+    if passed:
+        return
+
+    if rounds:
+        detail = (f'{candidate.get("candidate_name")} has a {FINAL_ROUND.value} on record '
+                  f'but it has not been passed. A "{level.value}" role needs a Management '
+                  f"final interview with a Pass before the offer stage.")
+    else:
+        detail = (f'{candidate.get("candidate_name")} has not sat the {FINAL_ROUND.value}. '
+                  f'A "{level.value}" role needs a final interview with Management before '
+                  f"the offer stage (SOP section 5).")
+    raise HTTPException(status_code=409, detail=detail)
+
+
+async def interview_window_warning(company_id: str, req: dict, when: datetime) -> Optional[str]:
+    """Whether this booking falls outside the department's batch interview windows.
+
+    A WARNING, returned in the response, never a refusal. Annexure C asks for batching to
+    reduce panel disruption; a hard block would make an urgent hire impossible at 4pm on a
+    Friday, which is exactly when an urgent hire happens. So the caller is told, and the
+    booking goes through.
+
+    No windows defined at all means no warning: a company that has not opted into batching
+    is not "always out of window".
+    """
+    department_id = (req or {}).get("department_id")
+    if not department_id or when is None:
+        return None
+    windows = await get_collection(COLL_INTERVIEW_WINDOWS).find(
+        {"company_id": str(company_id), "department_id": str(department_id),
+         "active": True}).to_list(50)
+    if not windows:
+        return None
+
+    from app.services.hrms_ics import IST
+    local = when.astimezone(IST)
+    weekday = WEEKDAYS[local.weekday()]
+    clock = local.strftime("%H:%M")
+
+    for w in windows:
+        if w.get("weekday") != weekday:
+            continue
+        if str(w.get("start_time") or "") <= clock <= str(w.get("end_time") or ""):
+            return None
+
+    slots = ", ".join(
+        f'{w.get("weekday")} {w.get("start_time")}-{w.get("end_time")}'
+        for w in windows[:5])
+    return (f"{weekday} {clock} is outside this department's interview windows ({slots}). "
+            f"The booking has been made -- batching is a preference, not a rule.")
 
 
 # -------------------------------------------------------------
@@ -313,6 +530,24 @@ async def schedule_interview(actor: dict, company_id: str, payload: dict) -> dic
         payload.get("location"))
     interviewer = await _resolve_interviewer(company_id, payload.get("interviewer_id"))
 
+    # ── Phase INT-2 ── panel composition (SOP §5). Everything below is checked BEFORE
+    # anything is written, so a refused panel cannot leave a half-booked interview behind --
+    # the same all-or-nothing rule the offer service follows.
+    req = await _requisition_for(company_id, candidate.get("request_no"))
+    panel = await _resolve_panel(company_id, payload.get("panel"))
+    window_warning = None
+    if _is_internal(req):
+        # ── Phase INT-4 ── the telephonic gate (SOP step 5). Asked first, because it is the
+        # cheapest refusal to act on: being told to make a ten-minute call is better than
+        # being told the panel is wrong after assembling one. Silent once the candidate is
+        # already being interviewed, so an in-flight pipeline is never gated retroactively.
+        from app.services.hrms_telephonic_service import assert_telephonic_cleared
+        await assert_telephonic_cleared(company_id, candidate, req)
+
+        level = await _level_for(company_id, req)
+        assert_panel_composition(panel, level, round_name=round_name)
+        window_warning = await interview_window_warning(company_id, req, when)
+
     year = datetime.now(timezone.utc).year
     interview_no = await next_business_id("interview", str(company_id), year)
     now = datetime.now(timezone.utc)
@@ -334,6 +569,11 @@ async def schedule_interview(actor: dict, company_id: str, payload: dict) -> dic
         "meeting_link": link,
         "location": location,
         "notes": clean_text(payload.get("notes"), limit=2000),
+        # ── Phase INT-2 ── who else is in the room, with their role stamped as it stood.
+        # Empty on the client track and on any booking made before this phase, which is
+        # exactly what `assert_panel_composition` reads as "no panel" -- and it is never
+        # asked about a client requisition.
+        "panel": panel,
         "status": InterviewStatus.SCHEDULED.value,
         "outcome": None,
         # Incremented on every reschedule so a calendar client treats the new invite as an
@@ -357,7 +597,12 @@ async def schedule_interview(actor: dict, company_id: str, payload: dict) -> dic
     await audit(actor, AUDIT_INTERVIEW_SCHEDULED, ENTITY_CANDIDATE, uk,
                 f"{interview_no}: {round_name}", company_id)
     await _notify_scheduled(doc, rescheduled=False)
-    return _out(doc)
+    out = _out(doc)
+    # Surfaced, not enforced. Present only when there IS one, so a caller can render it
+    # without first deciding whether an empty string means "fine" or "unchecked".
+    if window_warning:
+        out["warning"] = window_warning
+    return out
 
 
 async def _notify_scheduled(doc: dict, *, rescheduled: bool) -> None:
@@ -438,6 +683,18 @@ async def update_interview(actor: dict, company_id: str, interview_no: str,
     if payload.get("notes") is not None:
         updates["notes"] = clean_text(payload["notes"], limit=2000)
 
+    # ── Phase INT-2 ── the panel may legitimately change: somebody is away, or declares a
+    # conflict and stands down. The composition rule is therefore re-checked on every edit,
+    # so a panel cannot be quietly edited down below what the SOP requires after the booking
+    # was made -- which would make the check at scheduling time a formality.
+    if payload.get("panel") is not None:
+        req = await _requisition_for(company_id, current.get("request_no"))
+        panel = await _resolve_panel(company_id, payload["panel"])
+        if _is_internal(req):
+            assert_panel_composition(panel, await _level_for(company_id, req),
+                                     round_name=current.get("round"))
+        updates["panel"] = panel
+
     if payload.get("status") is not None:
         raw = getattr(payload["status"], "value", payload["status"])
         try:
@@ -513,6 +770,21 @@ async def evaluate_interview(actor: dict, company_id: str, interview_no: str,
     if current.get("outcome"):
         raise HTTPException(
             status_code=409, detail="This interview has already been evaluated.")
+
+    # ── Phase INT-2, SOP §11 ── a recused panel member may not score the candidate.
+    # Standing down over a conflict and then submitting a scorecard is not standing down.
+    # Checked against the stored panel, not the request, so it cannot be sidestepped by
+    # omitting the flag on this call.
+    actor_id = str(actor.get("_id") or "")
+    recused = next((m for m in (current.get("panel") or [])
+                    if str(m.get("user_id")) == actor_id and m.get("recused")), None)
+    if recused:
+        raise HTTPException(
+            status_code=422,
+            detail=(f'You recused yourself from this panel'
+                    + (f' ({recused.get("coi_relationship")})'
+                       if recused.get("coi_relationship") else "")
+                    + ". A member who has stood down cannot score the candidate."))
 
     raw = getattr(payload.get("outcome"), "value", payload.get("outcome"))
     try:
@@ -593,12 +865,47 @@ async def _advance_candidate(actor: dict, company_id: str, interview: dict,
                     f"(no legal move to {target.value})", company_id)
         return
 
+    # ── Phase INT-2 ── the §5 gates on `Selected`. A passed MD round is the usual road to
+    # Selected, so this normally passes trivially -- but the shortlisting-committee check
+    # does not, and this is the path that would otherwise skip it.
+    #
+    # The EVALUATION IS ALREADY RECORDED at this point and must stay recorded: an interview
+    # that happened, happened, and rolling it back because a committee record is missing
+    # would lose the scorecard somebody just wrote. So a refusal here leaves the candidate
+    # where they are and says why, in the audit trail, rather than raising.
+    if target is AppStatus.SELECTED:
+        from app.services.hrms_candidate_service import assert_selectable
+        try:
+            await assert_selectable(actor, company_id, candidate)
+        except HTTPException as e:
+            await audit(actor, AUDIT_INTERVIEW_EVALUATED, ENTITY_CANDIDATE, uk,
+                        f"passed {interview.get('round')}; NOT selected -- {e.detail}",
+                        company_id)
+            if interview.get("interviewer_id"):
+                await notify_user(
+                    interview["interviewer_id"],
+                    f"{interview.get('candidate_name')} passed, but is not Selected",
+                    str(e.detail), kind="warning", link="/hrms/candidates")
+            return
+
+    now = datetime.now(timezone.utc)
     await get_collection(COLL_CANDIDATES).update_one(
         {"uk": uk, "company_id": str(company_id)},
         {"$set": {"application_status": target.value,
-                  "updated_at": datetime.now(timezone.utc)}})
+                  # Stamped on the candidate as a first-class timestamp, not left to be
+                  # parsed back out of the audit trail's prose later.
+                  **({"selected_at": now} if target is AppStatus.SELECTED else {}),
+                  "updated_at": now}})
     await audit(actor, AUDIT_STAGE_CHANGED, ENTITY_CANDIDATE, uk,
                 f"{current_status} -> {target.value}", company_id)
+
+    # ── Internal track ── SOP §8 measures "offer released" from FINAL SELECTION, so the
+    # clock for that milestone starts here. First selection on the requisition only: a
+    # second person selected later does not restart the deadline for the first offer.
+    if target is AppStatus.SELECTED and interview.get("request_no"):
+        from app.services.hrms_sla_service import stamp_if_internal
+        await stamp_if_internal(actor, company_id, interview["request_no"],
+                                "final_selection", when=now)
 
     if interview.get("interviewer_id"):
         await notify_user(

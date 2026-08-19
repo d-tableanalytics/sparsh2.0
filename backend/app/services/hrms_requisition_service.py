@@ -45,6 +45,8 @@ from app.models.hrms import (
     REQ_CONDITIONAL_REMARKS, REQ_ESCALATION_ROUTING, BudgetStatus, Cap, EscalationStatus,
     RequisitionType, budget_delta, budget_status,
 )
+# ── Internal (in-house) recruitment track ──
+from app.models.hrms import PRE_BUDGET_STATES, TRACK_TRANSITIONS, RequisitionTrack
 from app.services.hrms_audit_service import audit
 from app.services.hrms_id_service import next_business_id
 from app.services.hrms_notify_service import notify_hrms_role, notify_user
@@ -57,7 +59,52 @@ from app.utils.hrms_access import can
 # Phase 11-R adds PENDING_ESCALATION: a requisition still working its way up the reporting
 # chain has not been finally approved by anyone, so the same editing logic applies to it.
 EDITABLE_STATUSES = {ReqApproval.PENDING_HR.value, ReqApproval.PENDING_MD.value,
-                     ReqApproval.PENDING_ESCALATION.value}
+                     ReqApproval.PENDING_ESCALATION.value,
+                     # The internal chain's pre-approval states, for the same reason: none
+                     # of them represents a final sign-off by anybody.
+                     ReqApproval.PENDING_HR_VERIFICATION.value,
+                     ReqApproval.PENDING_BUDGET.value,
+                     ReqApproval.PENDING_SCORECARD.value}
+
+
+def assert_sourcing_allowed(req: dict) -> None:
+    """Refuse any sourcing against an internal requisition that has not cleared its budget.
+
+    SOP §11: "No internal role may be sourced without prior written headcount and budget
+    approval from Management/Finance." Sourcing means publishing a posting or putting a
+    candidate against the requisition -- both are entry points into the pipeline, so both
+    call this.
+
+    It lives HERE, in the service that owns the approval chain, rather than being copied
+    into the posting and candidate services. Two copies of a gate is one gate and one bug
+    waiting to drift out of step with it, and this particular gate is the SOP's only
+    mandatory control.
+
+    The client track is untouched: it never enters PRE_BUDGET_STATES, so this returns
+    immediately for every requisition that existed before this phase.
+    """
+    if track_of(req) is not RequisitionTrack.INTERNAL:
+        return
+    status = req.get("approval_status")
+    if status in PRE_BUDGET_STATES:
+        raise HTTPException(
+            status_code=409,
+            detail=(f"{req.get('request_no')} has not cleared budget approval yet "
+                    f'(it is "{status}"). No internal role may be sourced before '
+                    f"Management or Finance has approved the headcount and salary band."))
+
+
+def track_of(req: dict) -> RequisitionTrack:
+    """The track a requisition runs on, defaulting to CLIENT.
+
+    Every requisition raised before this phase has no `requisition_track` field at all, and
+    must keep behaving exactly as it did -- so the default is not a convenience, it is the
+    compatibility guarantee.
+    """
+    try:
+        return RequisitionTrack(req.get("requisition_track") or RequisitionTrack.CLIENT.value)
+    except ValueError:
+        return RequisitionTrack.CLIENT
 
 
 def _oid(value: str, label: str) -> ObjectId:
@@ -172,11 +219,42 @@ async def _validate_requisition(payload: dict, company_id: str, *, partial: bool
                                 or f"{assignee.get('first_name') or ''} {assignee.get('last_name') or ''}".strip()
                                 or assignee.get("email"))
 
+    # ── The track: whose vacancy this is, and therefore whose rules apply ──
+    # Validated BEFORE the client block below, because the two interact: an internal
+    # requisition may not name a client, and saying so plainly beats a confusing failure
+    # three lines later.
+    if "requisition_track" in payload and payload["requisition_track"] is not None:
+        raw = getattr(payload["requisition_track"], "value", payload["requisition_track"])
+        try:
+            track = RequisitionTrack(raw)
+        except ValueError:
+            raise HTTPException(
+                status_code=422,
+                detail=(f"Track must be one of: "
+                        f"{', '.join(t.value for t in RequisitionTrack)}."))
+        if not partial:
+            out["requisition_track"] = track.value
+        elif track.value != (payload.get("_current_track") or track.value):
+            # Immutable after creation: an approval already granted under one track's rules
+            # would be meaningless under the other's. update_requisition enforces this too;
+            # the check is here as well so no write path can bypass it.
+            raise HTTPException(
+                status_code=409,
+                detail="A requisition's track cannot be changed after it is raised.")
+        if track is RequisitionTrack.INTERNAL and payload.get("client_id"):
+            raise HTTPException(
+                status_code=422,
+                detail=("An internal requisition is Sparsh Magic's own vacancy, so it has "
+                        "no client. Leave the client empty, or raise it on the client "
+                        "track instead."))
+
     # ── Phase 11-R, Item 4: the client this vacancy is being filled for ──
+    # The client is a company from the ERP's Companies section, so `client_id` is that
+    # company's id and the name is denormalised from it (see hrms_client_service).
     if "client_id" in payload:
         if payload["client_id"]:
             from app.services.hrms_client_service import require_client
-            client = await require_client(company_id, str(payload["client_id"]))
+            client = await require_client(str(payload["client_id"]))
             out["client_id"] = str(payload["client_id"])
             out["client_name"] = client.get("name")
         else:
@@ -362,10 +440,26 @@ def _visibility_filter(actor: dict) -> dict:
 
 async def list_requisitions(actor: dict, company_id: str, *, search: str = None,
                             approval_status: str = None, closing_status: str = None,
-                            department_id: str = None, limit: int = 100,
-                            skip: int = 0) -> dict:
+                            department_id: str = None, track: str = None,
+                            limit: int = 100, skip: int = 0) -> dict:
     query = {"company_id": str(company_id)}
     query.update(_visibility_filter(actor))
+    # `track=client` must also match every requisition raised BEFORE this phase, which
+    # carries no `requisition_track` field at all -- hence the explicit missing-field arm.
+    # Without it the client list would silently shed its own history.
+    if track:
+        try:
+            wanted = RequisitionTrack(track)
+        except ValueError:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Track must be one of: {', '.join(t.value for t in RequisitionTrack)}.")
+        if wanted is RequisitionTrack.CLIENT:
+            query["$and"] = [{"$or": [{"requisition_track": wanted.value},
+                                      {"requisition_track": {"$exists": False}},
+                                      {"requisition_track": None}]}]
+        else:
+            query["requisition_track"] = wanted.value
     if approval_status:
         query["approval_status"] = approval_status
     if closing_status:
@@ -458,10 +552,29 @@ async def create_requisition(actor: dict, company_id: str, payload: dict) -> dic
         "created_by": actor_id, "created_at": now,
         **jd_clean,
     }
+    # The two chains start in different places. `clean` already carries the validated track
+    # (defaulting to CLIENT when the caller said nothing), so the starting state is read from
+    # it rather than passed around separately.
+    raised_track = RequisitionTrack(
+        clean.get("requisition_track") or RequisitionTrack.CLIENT.value)
+    opening_status = (ReqApproval.PENDING_HR_VERIFICATION
+                      if raised_track is RequisitionTrack.INTERNAL
+                      else ReqApproval.PENDING_HR)
+
     req_doc = {
         "request_no": request_no, "company_id": str(company_id), "jd_no": jd_no,
-        "approval_status": ReqApproval.PENDING_HR.value,
+        "requisition_track": raised_track.value,
+        "approval_status": opening_status.value,
         "closing_status": ReqClosing.OPEN.value,
+        # ── Internal track ── the budget gate's record. Null until `budget-approve` clears,
+        # and read by the posting service, the candidate service and the offer band check.
+        "budget_approved_by": None, "budget_approved_by_name": None,
+        "budget_approved_at": None, "budget_remarks_approver": None,
+        "approved_headcount": None,
+        "approved_salary_band_min": None, "approved_salary_band_max": None,
+        # SLA actuals, stamped as each milestone happens (SOP §8). Targets are computed from
+        # SLA_MILESTONES against these; nothing here is derived in the browser.
+        "sla_actuals": {},
         "created_by": actor_id, "created_by_name": actor_name, "created_at": now,
         "hr_reviewed_by": None, "hr_reviewed_at": None, "hr_remarks": None,
         "approved_by": None, "approved_at": None, "md_remarks": None, "salary_change": None,
@@ -660,6 +773,25 @@ async def update_requisition(actor: dict, company_id: str, request_no: str,
             detail=(f'Requisition {request_no} is "{current["approval_status"]}" and can no '
                     f"longer be edited."))
 
+    # The track is IMMUTABLE. An approval already granted under one track's rules would be
+    # meaningless under the other's -- a budget cleared by Finance says nothing about a
+    # client-track requisition, and an MD sign-off says nothing about an internal one.
+    if "requisition_track" in payload and payload["requisition_track"] is not None:
+        requested = getattr(payload["requisition_track"], "value",
+                            payload["requisition_track"])
+        if requested != track_of(current).value:
+            raise HTTPException(
+                status_code=409,
+                detail=("A requisition's track cannot be changed after it is raised. "
+                        "Close this one and raise it on the other track."))
+        payload = {k: v for k, v in payload.items() if k != "requisition_track"}
+
+    # An internal requisition can never acquire a client, whatever the edit says.
+    if payload.get("client_id") and track_of(current) is RequisitionTrack.INTERNAL:
+        raise HTTPException(
+            status_code=422,
+            detail="An internal requisition is Sparsh Magic's own vacancy and has no client.")
+
     clean = await _validate_requisition(payload, company_id, partial=True)
     if not clean:
         raise HTTPException(status_code=400, detail="No fields to update.")
@@ -725,33 +857,50 @@ async def delete_requisition(actor: dict, company_id: str, request_no: str) -> d
 # -------------------------------------------------------------
 async def act_on_requisition(actor: dict, company_id: str, request_no: str,
                              action: str, remarks: str = None,
-                             salary_change: float = None) -> dict:
+                             salary_change: float = None,
+                             budget: dict = None) -> dict:
     """Drive one transition of the approval state machine.
 
-    Every rule is read from REQ_TRANSITIONS, and the write is a compare-and-swap on the
-    current status, so concurrent approvals cannot both land.
+    Every rule is read from the transition table for the requisition's TRACK, and the write
+    is a compare-and-swap on the current status, so concurrent approvals cannot both land.
+
+    Two tables exist -- the client chain and the internal chain -- and which one applies is a
+    property of the requisition, never of the caller. `budget` carries the approved headcount
+    and salary band, and is required by (and only by) `budget-approve`.
     """
-    if action not in REQ_TRANSITIONS:
+    coll = get_collection(COLL_REQUISITIONS)
+    current = await coll.find_one({"request_no": request_no, "company_id": str(company_id)})
+    if not current:
+        raise HTTPException(status_code=404, detail="Requisition not found.")
+
+    # The table is chosen by the requisition, so an action from the other track's chain is
+    # simply unknown here -- which is the right error, and stops a client requisition being
+    # walked through internal gates or vice versa.
+    track = track_of(current)
+    transitions, escalation_routing = TRACK_TRANSITIONS[track]
+
+    if action not in transitions:
         raise HTTPException(
             status_code=422,
-            detail=f"Invalid action. Expected one of: {', '.join(REQ_TRANSITIONS)}.")
+            detail=(f"Invalid action for a {track.value} requisition. Expected one of: "
+                    f"{', '.join(transitions)}."))
 
-    required_status, next_status, capability, remark_required = REQ_TRANSITIONS[action]
+    required_status, next_status, capability, remark_required = transitions[action]
 
     if not can(actor, capability):
         raise HTTPException(
             status_code=403,
             detail=("You are not authorised to perform this approval step. "
-                    "HR forwards a requisition; the MD approves it."))
+                    "HR forwards a requisition; the MD approves it."
+                    if track is RequisitionTrack.CLIENT else
+                    "You are not authorised to perform this approval step. HR verifies, "
+                    "Management or Finance approves the budget, and the hiring manager "
+                    "approves the scorecard."))
 
     remarks = (remarks or "").strip()
     if remark_required and not remarks:
         raise HTTPException(status_code=422, detail="A remark is required when rejecting.")
 
-    coll = get_collection(COLL_REQUISITIONS)
-    current = await coll.find_one({"request_no": request_no, "company_id": str(company_id)})
-    if not current:
-        raise HTTPException(status_code=404, detail="Requisition not found.")
     if current["approval_status"] != required_status.value:
         raise HTTPException(
             status_code=409,
@@ -783,8 +932,75 @@ async def act_on_requisition(actor: dict, company_id: str, request_no: str,
     #
     # An IN-SANCTION requisition never enters this block: its chain is byte-for-byte the
     # PENDING_HR -> PENDING_MD -> APPROVED it has always been.
+    # ── Internal track ── the budget gate's payload.
+    #
+    # Validated BEFORE the state is written, so a malformed band cannot leave a requisition
+    # marked approved with nothing to validate a later offer against. The figures are
+    # mandatory precisely because the gate exists to record that a number was authorised.
+    budget_updates = {}
+    if action == "budget-approve":
+        payload = budget or {}
+        try:
+            headcount = int(payload.get("approved_headcount"))
+            band_min = float(payload.get("approved_salary_band_min"))
+            band_max = float(payload.get("approved_salary_band_max"))
+        except (TypeError, ValueError):
+            raise HTTPException(
+                status_code=422,
+                detail=("Record the approved headcount and salary band. The band is what "
+                        "every later offer on this requisition is checked against."))
+        if headcount < 1:
+            raise HTTPException(
+                status_code=422, detail="Approved headcount must be at least 1.")
+        if band_min < 0 or band_max < 0:
+            raise HTTPException(
+                status_code=422, detail="A salary band cannot be negative.")
+        if band_min > band_max:
+            raise HTTPException(
+                status_code=422,
+                detail="The minimum of the salary band cannot exceed its maximum.")
+        # ── Phase INT-2 (Annexure C) ── where the figures came from.
+        #
+        # The standing band master is a CONVENIENCE, never an authority: it pre-fills the
+        # approval form, and the offer check still reads the band stamped here rather than
+        # the master. That separation is what stops a band edited in April retroactively
+        # legalising an offer approved in March.
+        #
+        # An approver may still type something else -- Finance's standing band cannot know
+        # about a scarce skill or a counter-offer. What is insisted on is that the deviation
+        # is visible and explained: an override with no reason is indistinguishable from a
+        # typo, and "why is this role's band non-standard" is the first thing an audit asks.
+        from app.services import hrms_salary_band_service as bands
+        prefill = await bands.prefill_for_requisition(company_id, current)
+        decision = bands.resolve_band_decision(prefill, payload)
+        if decision.get("override_reason_required") and not remarks:
+            raise HTTPException(
+                status_code=422,
+                detail=(f"This band differs from the standing band for the role "
+                        f'({decision.get("standing_min"):,.0f}-'
+                        f'{decision.get("standing_max"):,.0f}). Record why, so the '
+                        f"deviation is on the record rather than in somebody's memory."))
+
+        budget_updates = {
+            "approved_headcount": headcount,
+            "approved_salary_band_min": band_min,
+            "approved_salary_band_max": band_max,
+            "budget_remarks_approver": remarks or None,
+            "band_source": decision["band_source"],
+            # The master row this was taken from (or deviated from), so the two are
+            # traceable to each other without guessing from the numbers.
+            "band_master_no": decision.get("band_no"),
+        }
+
+    # ── Internal track ── the scorecard gate is only real if a scorecard actually exists and
+    # has been approved. Without this the requisition could reach Approved while the bar it
+    # hires against was still a draft somebody meant to finish.
+    if action == "scorecard-approve":
+        from app.services.hrms_scorecard_service import assert_scorecard_approved
+        await assert_scorecard_approved(company_id, request_no)
+
     escalation_updates = {}
-    if action in REQ_ESCALATION_ROUTING:
+    if action in escalation_routing:
         from app.services import hrms_sanction_service as sanctions
         try:
             snapshot = await sanctions.snapshot_for(company_id, current)
@@ -800,7 +1016,7 @@ async def act_on_requisition(actor: dict, company_id: str, request_no: str,
         if snapshot.get("is_over_sanction"):
             chain = await _build_escalation_chain(actor, company_id, current)
             if chain:
-                next_status = REQ_ESCALATION_ROUTING[action]
+                next_status = escalation_routing[action]
                 escalation_updates["escalation_chain"] = chain
                 escalation_updates["escalation_level"] = 1
             else:
@@ -835,7 +1051,9 @@ async def act_on_requisition(actor: dict, company_id: str, request_no: str,
                                "remarks": remarks or None})
         escalation_updates["escalation_chain"] = chain
         if level < len(chain):
-            # Rungs remain: stay in escalation and move up one.
+            # Rungs remain: stay in escalation and move up one. Track-agnostic -- the ladder
+            # does not care whose budget it is; only where it RETURNS to differs, and that
+            # comes from the track's own table.
             next_status = ReqApproval.PENDING_ESCALATION
             escalation_updates["escalation_level"] = level + 1
         else:
@@ -852,6 +1070,7 @@ async def act_on_requisition(actor: dict, company_id: str, request_no: str,
 
     updates = {"approval_status": next_status.value, "updated_at": now}
     updates.update(escalation_updates)
+    updates.update(budget_updates)
     if action.startswith("hr-"):
         updates.update({"hr_reviewed_by": actor_id, "hr_reviewed_by_name": actor_name,
                         "hr_reviewed_at": now, "hr_remarks": remarks or None})
@@ -859,6 +1078,25 @@ async def act_on_requisition(actor: dict, company_id: str, request_no: str,
         updates.update({"escalation_last_actor": actor_id,
                         "escalation_last_actor_name": actor_name,
                         "escalation_last_acted_at": now})
+    elif action.startswith("budget-"):
+        # ── Internal track ── who committed the company's money, and when. Recorded on the
+        # REJECT path too: "Finance declined this on the 4th" is as much a fact the audit
+        # needs as an approval is.
+        updates.update({"budget_approved_by": actor_id,
+                        "budget_approved_by_name": actor_name,
+                        "budget_approved_at": now})
+        if action == "budget-approve":
+            # SLA §8 milestone 1. Stamped here, at the moment it happened, rather than
+            # inferred later from the audit trail -- deriving a metric from prose written
+            # for a human is what the module already refuses to do for time-to-hire.
+            updates["sla_actuals.budget_approved"] = now
+    elif action.startswith("scorecard-"):
+        updates.update({"scorecard_approved_by": actor_id,
+                        "scorecard_approved_by_name": actor_name,
+                        "scorecard_approved_at": now,
+                        "scorecard_remarks": remarks or None})
+        if action == "scorecard-approve":
+            updates["sla_actuals.scorecard_approved"] = now
     else:
         updates.update({"approved_by": actor_id, "approved_by_name": actor_name,
                         "approved_at": now, "md_remarks": remarks or None})
@@ -1048,8 +1286,38 @@ async def _notify_transition(action, current, request_no, actor_name, remarks, c
         await notify_hrms_role(
             company_id, ["HR"], f"Requisition {request_no} approved",
             f"{designation} is approved and ready to publish.", kind="success", link=link)
+    # ── Internal track ── each gate tells the party that now holds the requisition. Without
+    # this an internal requisition would sit silently at the budget gate, which is exactly
+    # the "sat unseen in a queue" failure this function exists to prevent.
+    elif action == "hr-verify":
+        await notify_hrms_role(
+            company_id, ["MD", "FINANCE"],
+            f"Requisition {request_no} awaits budget approval",
+            f"{actor_name} (HR) verified the internal requisition for {designation}. "
+            f"No sourcing may begin until the headcount and budget are approved.",
+            link=link, email=True)
+    elif action == "budget-approve":
+        await notify_hrms_role(
+            company_id, ["HR"], f"Requisition {request_no} has budget approval",
+            f"{actor_name} approved the headcount and salary band for {designation}. "
+            f"The position scorecard is the next gate.", kind="success", link=link)
+        if creator:
+            await notify_user(creator, f"Requisition {request_no} is funded",
+                              f"Headcount and budget approved for {designation}.",
+                              kind="success", link=link)
+    elif action == "scorecard-approve":
+        if creator:
+            await notify_user(creator, f"Requisition {request_no} approved",
+                              f"The scorecard for {designation} is approved - sourcing is "
+                              f"now enabled.", kind="success", link=link, email=True)
+        await notify_hrms_role(
+            company_id, ["HR"], f"Requisition {request_no} approved",
+            f"{designation} is approved and ready to source.", kind="success", link=link)
     else:
-        stage = "HR review" if action == "hr-reject" else "MD approval"
+        stage = ("HR review" if action == "hr-reject"
+                 else "budget approval" if action == "budget-reject"
+                 else "scorecard approval" if action == "scorecard-reject"
+                 else "MD approval")
         if creator:
             await notify_user(creator, f"Requisition {request_no} rejected",
                               f"Your requisition for {designation} was rejected at {stage}. "

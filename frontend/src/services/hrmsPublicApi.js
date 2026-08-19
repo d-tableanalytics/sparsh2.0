@@ -82,3 +82,16 @@ export const getPublicAppointment = (code) =>
  *  because declining happens at the offer, one step earlier. */
 export const acknowledgeAppointment = (code, payload) =>
   publicApi.post(`/hrms/public/appointment/${code}`, payload);
+
+// ── New-hire experience survey (public) — Phase INT-2, SOP §10 ──
+/** The questionnaire behind a new joiner's link.
+ *
+ *  Returns the questions and NOTHING about the person — no employee code, no name, no
+ *  requisition. The respondent already knows who they are, and a page that echoes their
+ *  identity back is a page that can be screenshotted next to their answers. */
+export const getPublicSurvey = (code) => publicApi.get(`/hrms/public/survey/${code}`);
+
+/** Submit answers. Once submitted a response is FINAL: a live link that could rewrite an
+ *  average after somebody had read it would make the figure meaningless. */
+export const submitSurvey = (code, payload) =>
+  publicApi.post(`/hrms/public/survey/${code}`, payload);

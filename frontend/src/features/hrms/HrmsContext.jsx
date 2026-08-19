@@ -83,6 +83,28 @@ export const HrmsProvider = ({ children }) => {
     canSwitchCompany: !!health?.is_internal && companies.length > 1,
     /** Query params for every scoped HRMS call. */
     scope: companyId ? { company_id: companyId } : {},
+
+    // ── Client scope ──
+    // The SERVER's answer, resolved from the engagement records and returned by
+    // /hrms/health. The frontend renders from it and never derives it.
+    //
+    // What this is NOT: a security control. A `client_id` sent on any later request is a
+    // FILTER, reconciled server-side against this same scope (hrms_access.assert_client_
+    // allowed). Hiding a selector prevents a mistake; it does not prevent an attack.
+    isClientUser: !!health?.is_client_user,
+    /** null  -> not client-scoped (a Sparsh user); no client narrowing applies.
+     *  []    -> client-scoped with no valid membership; everything must show nothing.
+     *  [..]  -> the clients this user may work on.
+     *  Undefined while loading, which every consumer must treat as "not yet known"
+     *  rather than as "unrestricted" — the same fail-closed rule `can()` follows. */
+    allowedClientIds: health?.allowed_client_ids ?? null,
+    /** The single client a client-scoped user is pinned to, or null.
+     *  With exactly one membership there is nothing to choose, so the UI shows a label
+     *  rather than a selector. With several, a later phase adds a picker bounded BY THIS
+     *  LIST — never by an arbitrary value. */
+    clientScope: (health?.is_client_user && (health?.allowed_client_ids || []).length === 1)
+      ? health.allowed_client_ids[0]
+      : null,
   };
 
   return <HrmsContext.Provider value={value}>{children}</HrmsContext.Provider>;

@@ -214,7 +214,15 @@ async def get_ineligible_recipient_ids(actor: dict, user_ids) -> list:
 #   • Client: MD > HR > HOD > Implementor. A user may assign only at or below their own rank,
 #     within their own company (same-company is enforced by get_ineligible_recipient_ids).
 ADMIN_TIER = {"superadmin", "admin"}
-CLIENT_RANK = {"MD": 4, "HR": 3, "HOD": 2, "IMPLEMENTOR": 1}
+# FINANCE ranks WITH HR rather than above it: a finance controller is not senior to HR in the
+# governance ladder, they own a different decision (budget rather than people). Ranking them
+# equal keeps task assignment symmetric between the two.
+# CLIENT is a user of a client ORGANISATION, not part of this company's governance
+# ladder at all. Ranked lowest EXPLICITLY rather than by falling through to the
+# IMPLEMENTOR default, so nobody later reads the omission as an oversight and
+# "corrects" it upward.
+CLIENT_RANK = {"MD": 4, "HR": 3, "FINANCE": 3, "HOD": 2,
+               "IMPLEMENTOR": 1, "CLIENT": 1}
 ASSIGN_RANK_DENIED_MESSAGE = (
     "You can only assign tasks to your own level or below within your team/company."
 )

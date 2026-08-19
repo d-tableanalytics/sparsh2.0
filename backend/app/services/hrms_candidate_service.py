@@ -33,7 +33,7 @@ from app.models.hrms import (
     AUDIT_SCREENED, AUDIT_STAGE_CHANGED, COLL_AUDIT_LOG, COLL_CANDIDATES, COLL_REQUISITIONS,
     EMAIL_RE, ENTITY_CANDIDATE, JOURNEY_KINDS, JOURNEY_RAIL, JOURNEY_STATUS_KINDS,
     MAX_BULK_SCREEN, PHONE_RE, PIPELINE_COLUMNS, SCREEN_ACTIONS, AppStatus, Cap, HrmsRole,
-    ScreenAction, allowed_next_statuses, can_transition,
+    ScreenAction, allowed_next_statuses, can_transition, is_iso_date,
 )
 from app.models.hrms import (
     AUDIT_CLIENT_RESPONSE, AUDIT_CLIENT_SHARED, CLIENT_RESPONSE_STATUS, ClientShareStatus,
@@ -49,6 +49,10 @@ def _out(doc: dict) -> dict:
     doc = dict(doc)
     doc.pop("_id", None)
     return doc
+
+
+def _today() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
 def _actor_name(actor: dict) -> str:
@@ -93,7 +97,8 @@ async def _require_visible(actor: dict, company_id: str, uk: str) -> dict:
 # -------------------------------------------------------------
 async def list_candidates(actor: dict, company_id: str, *, search: str = None,
                           status: str = None, request_no: str = None,
-                          posting_code: str = None, limit: int = 200,
+                          posting_code: str = None, talent_pool: bool = None,
+                          tags: str = None, limit: int = 200,
                           skip: int = 0) -> dict:
     query = {"company_id": str(company_id)}
     query.update(await _scope_filter(actor, company_id))
@@ -103,6 +108,21 @@ async def list_candidates(actor: dict, company_id: str, *, search: str = None,
         query["request_no"] = request_no
     if posting_code:
         query["posting_code"] = posting_code
+    # ── Phase INT-2 (Annexure C) ── sourcing against a new requisition. The pool is a FILTER
+    # on the candidate list rather than a collection of its own: a pooled candidate is still
+    # a candidate, with the same scoping, the same row security and the same retention.
+    if talent_pool is not None:
+        query["talent_pool"] = bool(talent_pool)
+    if tags:
+        # Lower-cased to match how they are STORED. Both ends normalise, so a search for
+        # "Python" finds a CV tagged "python" -- which is the only behaviour a recruiter
+        # typing into a box would expect.
+        wanted = [t.strip().lower() for t in str(tags).split(",") if t.strip()]
+        if wanted:
+            # ANY of the tags, not all: a recruiter looking for "python, django" wants
+            # everybody who matches either, and narrowing to the intersection would hide
+            # most of the pool behind a search that looks broader than it is.
+            query["talent_pool_tags"] = {"$in": wanted}
     if search:
         import re
         safe = re.escape(search.strip())
@@ -210,6 +230,12 @@ async def create_candidate(actor: dict, company_id: str, payload: dict) -> dict:
         if not req:
             raise HTTPException(
                 status_code=422, detail="That requisition does not exist for this company.")
+        # ── Internal track ── putting a CV against a requisition IS sourcing, so the same
+        # budget gate applies here as to publishing a posting (SOP §11). Enforced server-side
+        # rather than by hiding a button: a walk-in CV entered by hand is exactly the route
+        # that would otherwise slip past an unfunded requisition.
+        from app.services.hrms_requisition_service import assert_sourcing_allowed
+        assert_sourcing_allowed(req)
 
     year = datetime.now(timezone.utc).year
     uk = await next_business_id("candidate", str(company_id), year)
@@ -247,8 +273,11 @@ async def create_candidate(actor: dict, company_id: str, payload: dict) -> dict:
     # Phase 11-R, Item 5: the SAME referral resolver the public form uses. A referral HR
     # types onto a walk-in CV is validated and stored identically to a self-declared one,
     # so the referral reporting counts one kind of thing.
+    # `source_from_applicant=False`: there is no applicant to ask here. HR chose the source
+    # from the CV in front of them and that choice stands -- but a declared referral still
+    # files as one, exactly as it does on the public form.
     from app.services.hrms_referral_service import resolve_referral
-    doc.update(await resolve_referral(payload, company_id))
+    doc.update(await resolve_referral(payload, company_id, source_from_applicant=False))
 
     await get_collection(COLL_CANDIDATES).insert_one(dict(doc))
     await audit(actor, AUDIT_CANDIDATE_ADDED, ENTITY_CANDIDATE, uk,
@@ -261,6 +290,37 @@ async def create_candidate(actor: dict, company_id: str, payload: dict) -> dict:
             f"{name}, whom you referred, has been added to the hiring pipeline.")
 
     return await get_candidate(actor, company_id, uk)
+
+
+# ─────────────────────────────────────────────────────────────
+# Phase INT-2 — the two gates on `Selected` (SOP §5)
+# ─────────────────────────────────────────────────────────────
+async def assert_selectable(actor: Optional[dict], company_id: str,
+                            candidate: dict) -> None:
+    """Refuse to select an internal candidate the SOP's two §5 controls have not cleared.
+
+    ONE function, called from every path that can reach `Selected`: the hand-set stage move
+    here, the interview pass-chain, and offer creation. Three copies of a gate is one gate
+    and two bugs waiting to drift out of step -- the same reasoning that keeps
+    `assert_sourcing_allowed` in a single place.
+
+    Both checks return immediately on a client requisition, so the agency track is
+    untouched: a client-track candidate reaches Selected exactly as they always did.
+    """
+    request_no = (candidate or {}).get("request_no")
+    if not request_no:
+        return
+    req = await get_collection(COLL_REQUISITIONS).find_one(
+        {"request_no": request_no, "company_id": str(company_id)})
+    if not req:
+        return
+
+    # The shortlisting committee (SOP §5): HR and the HOD agreed this person goes forward.
+    from app.services.hrms_shortlist_service import assert_shortlist_cleared
+    await assert_shortlist_cleared(company_id, candidate, req)
+    # The mandatory Management final round for managerial+ roles (SOP §5).
+    from app.services.hrms_interview_service import assert_final_round_complete
+    await assert_final_round_complete(company_id, candidate, req)
 
 
 async def update_candidate(actor: dict, company_id: str, uk: str, payload: dict) -> dict:
@@ -329,6 +389,15 @@ async def update_candidate(actor: dict, company_id: str, uk: str, payload: dict)
                     status_code=409,
                     detail=(f'A candidate at "{current_status}" cannot move to "{target}". '
                             f'Allowed from here: {", ".join(legal) or "nothing - this stage is final"}.'))
+            # ── Phase INT-2 ── the two gates on `Selected` (SOP §5). Applied HERE as well
+            # as on the offer, because this is the hand-set path: without it, typing
+            # "Selected" onto a candidate would route around both controls and the offer
+            # gate would find a status it had no reason to doubt.
+            #
+            # Both are silent on the client track, and both are checked BEFORE anything is
+            # written so a refusal cannot leave a half-moved candidate behind.
+            if target == AppStatus.SELECTED.value:
+                await assert_selectable(actor, company_id, current)
             updates["application_status"] = target
             stage_from, stage_to = current_status, target
 
@@ -362,6 +431,235 @@ async def update_candidate(actor: dict, company_id: str, uk: str, payload: dict)
                     updates.get("assigned_recruiter_name"), company_id)
 
     return await get_candidate(actor, company_id, uk)
+
+
+# ─────────────────────────────────────────────────────────────
+# Phase INT-2 — the talent pool (Annexure C) and record retention (SOP §13)
+# ─────────────────────────────────────────────────────────────
+def _add_years(iso_date: str, years: int) -> str:
+    """`iso_date` plus N years, clamped for 29 February. Pure."""
+    try:
+        y, m, d = (int(p) for p in str(iso_date)[:10].split("-"))
+    except (ValueError, TypeError):
+        return iso_date
+    if m == 2 and d == 29:
+        d = 28
+    return f"{y + years:04d}-{m:02d}-{d:02d}"
+
+
+def candidate_retention_until(candidate: dict) -> Optional[str]:
+    """The date this CV may be considered for disposal (SOP §13). Pure.
+
+    A FLOOR, not a purge date -- nothing in this function deletes anything, and the purge
+    job asks a human before it acts on the answer.
+
+    Two figures, because the SOP gives two. A candidate who JOINED is kept for three years
+    from joining and then lives on in the personnel file; everybody else is kept for one
+    year from their application. The distinction matters here more than anywhere else in the
+    module, because it is the ceiling the talent pool's consent may not exceed.
+    """
+    from app.models.hrms import RETENTION_YEARS
+    status = (candidate or {}).get("application_status")
+    selected = status in (AppStatus.JOINED.value, AppStatus.EMPLOYEE_CREATED.value)
+    anchor = (candidate.get("joined_at") if selected else None) \
+        or candidate.get("applied_at") or candidate.get("created_at")
+    if hasattr(anchor, "strftime"):
+        anchor = anchor.strftime("%Y-%m-%d")
+    if not anchor:
+        return None
+    years = RETENTION_YEARS["candidate_selected" if selected else "candidate_unselected"]
+    return _add_years(str(anchor)[:10], years)
+
+
+async def set_talent_pool(actor: dict, company_id: str, uk: str, payload: dict) -> dict:
+    """Add a candidate to the talent pool, or take them out of it.
+
+    -- Consent is the whole control ---------------------------------------------------
+    A candidate enters the pool ONLY with explicit consent. Keeping a CV to consider for a
+    future role is a different act from keeping it to process one application, and only the
+    candidate can agree to the second. There is deliberately no path that opts somebody in
+    because a recruiter found their profile useful.
+
+    -- Consent may not outlive retention ---------------------------------------------
+    `consent_expires_at` is capped at the candidate's `retention_until`. Retaining a CV past
+    its retention period BECAUSE it is "in the pool" is exactly the compliance failure SOP
+    §11 and §13 exist to prevent: the pool would become a way of quietly making a one-year
+    record permanent. A caller asking for longer is refused rather than silently clamped --
+    a promise the module cannot keep should be visible at the moment it is made.
+    """
+    from app.models.hrms import (
+        AUDIT_TALENT_POOL_ADDED, AUDIT_TALENT_POOL_REMOVED, MAX_TALENT_POOL_TAGS,
+    )
+    current = await _require_visible(actor, company_id, uk)
+    now = datetime.now(timezone.utc)
+    joining = bool(payload.get("talent_pool", True))
+
+    if not joining:
+        # Leaving is unconditional and immediate. Consent is a thing somebody may withdraw,
+        # and asking them to justify it would be the wrong shape entirely.
+        await get_collection(COLL_CANDIDATES).update_one(
+            {"uk": uk, "company_id": str(company_id)},
+            {"$set": {"talent_pool": False, "talent_pool_tags": [],
+                      "talent_pool_removed_at": now, "updated_at": now}})
+        await audit(actor, AUDIT_TALENT_POOL_REMOVED, ENTITY_CANDIDATE, uk,
+                    clean_text(payload.get("remarks"), limit=500) or "removed on request",
+                    company_id)
+        return await get_candidate(actor, company_id, uk)
+
+    # Consent recorded on the application form counts; so does consent given later and
+    # recorded here. What does not count is its absence.
+    consented = bool(payload.get("consent_to_retain")) or bool(
+        current.get("consent_to_retain"))
+    if not consented:
+        raise HTTPException(
+            status_code=422,
+            detail=(f'{current.get("candidate_name")} has not consented to their CV being '
+                    f"kept for future roles. The talent pool needs explicit consent -- "
+                    f"keeping a CV to consider later is a different thing from keeping it "
+                    f"to process one application."))
+
+    retention_until = candidate_retention_until(current)
+    expires = payload.get("consent_expires_at") or retention_until
+    if expires and not is_iso_date(expires):
+        raise HTTPException(
+            status_code=422,
+            detail="The consent expiry must be a valid YYYY-MM-DD date.")
+    if expires and retention_until and expires > retention_until:
+        raise HTTPException(
+            status_code=422,
+            detail=(f"Consent cannot outlive the retention period. This record may be kept "
+                    f"until {retention_until}; being in the talent pool does not extend "
+                    f"that. Ask again nearer the time if you want to keep the CV longer."))
+
+    tags = [t for t in
+            (clean_text(tag, limit=40) for tag in (payload.get("talent_pool_tags") or []))
+            if t]
+    if len(tags) > MAX_TALENT_POOL_TAGS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"At most {MAX_TALENT_POOL_TAGS} tags. Tags are for finding people, "
+                   f"not for describing them exhaustively.")
+
+    updates = {
+        "talent_pool": True,
+        "talent_pool_added_at": current.get("talent_pool_added_at") or now,
+        "consent_to_retain": True,
+        "consent_expires_at": expires,
+        # Stamped now so the purge proposal can read one field rather than re-deriving the
+        # rule per row. It is still a FLOOR: nothing deletes on this date by itself.
+        "retention_until": retention_until,
+        "updated_at": now,
+    }
+    # Tags are written only when the caller SENT some. A call that renews consent or fixes
+    # an expiry date must not silently wipe the tags somebody spent time adding -- an
+    # unconditional write here would make every partial update destructive.
+    if payload.get("talent_pool_tags") is not None:
+        # Stored LOWER-CASED, and de-duplicated by that. Tags exist to find people, and
+        # Mongo's `$in` is case-sensitive -- so preserving whatever capitalisation somebody
+        # happened to type would mean "Python" and "python" were two tags and a search for
+        # one silently missed the other. Both ends normalise; see `list_candidates`.
+        updates["talent_pool_tags"] = sorted({t.lower() for t in tags})
+    await get_collection(COLL_CANDIDATES).update_one(
+        {"uk": uk, "company_id": str(company_id)}, {"$set": updates})
+    await audit(actor, AUDIT_TALENT_POOL_ADDED, ENTITY_CANDIDATE, uk,
+                f'tags: {", ".join(updates.get("talent_pool_tags") or []) or "unchanged"}; '
+                f"consent to {expires or 'unspecified'}", company_id)
+    return await get_candidate(actor, company_id, uk)
+
+
+async def create_from_pool(actor: dict, company_id: str, uk: str,
+                           request_no: str) -> dict:
+    """Bring a pooled candidate forward onto a NEW requisition.
+
+    Copies the CV forward into a NEW candidate record. It deliberately does not re-point the
+    old one, for two reasons that both matter:
+
+      * the original application is a record of what somebody applied for and when, and
+        moving it to a different vacancy would falsify that; and
+      * every downstream record -- screening, interviews, the audit trail -- hangs off the
+        candidate. Re-pointing would drag one requisition's history onto another's.
+
+    The new record starts at `Applied` with its own uk, its own applied_at and its own
+    retention clock. What is carried over is the CV and the contact details; nothing about
+    how the previous process went, because that was a judgement about a different role.
+    """
+    source = await _require_visible(actor, company_id, uk)
+    if not source.get("talent_pool"):
+        raise HTTPException(
+            status_code=409,
+            detail=(f'{source.get("candidate_name")} is not in the talent pool. Only a '
+                    f"candidate who consented to being kept for future roles can be "
+                    f"brought forward."))
+
+    expires = source.get("consent_expires_at")
+    if expires and str(expires) < _today():
+        raise HTTPException(
+            status_code=409,
+            detail=(f'{source.get("candidate_name")}\'s consent to be kept expired on '
+                    f"{expires}. Ask them again before putting them forward."))
+
+    req = await get_collection(COLL_REQUISITIONS).find_one(
+        {"request_no": request_no, "company_id": str(company_id)})
+    if not req:
+        raise HTTPException(
+            status_code=422, detail="That requisition does not exist for this company.")
+    # The budget gate applies to a pooled candidate exactly as it does to a fresh one:
+    # sourcing is sourcing, whichever drawer the CV came out of.
+    from app.services.hrms_requisition_service import assert_sourcing_allowed
+    assert_sourcing_allowed(req)
+
+    existing = await get_collection(COLL_CANDIDATES).find_one({
+        "company_id": str(company_id), "request_no": request_no,
+        "$or": [{"can_email": source.get("can_email")},
+                {"can_contact": source.get("can_contact")}]})
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail=(f'{source.get("candidate_name")} is already a candidate on '
+                    f'{request_no} ({existing.get("uk")}).'))
+
+    now = datetime.now(timezone.utc)
+    new_uk = await next_business_id("candidate", str(company_id), now.year)
+    doc = {
+        "uk": new_uk,
+        "company_id": str(company_id),
+        "request_no": request_no,
+        "jd_no": req.get("jd_no"),
+        "posting_code": None,
+        "candidate_name": source.get("candidate_name"),
+        "can_email": source.get("can_email"),
+        "can_contact": source.get("can_contact"),
+        # The channel is the pool itself, stated plainly rather than inheriting the source
+        # the person originally came through -- they did not answer an advert this time.
+        "source": "Talent Pool",
+        "sourced_from_uk": uk,
+        "application_status": AppStatus.APPLIED.value,
+        "requires_assessment": False,
+        "current_location": source.get("current_location"),
+        "total_experience": source.get("total_experience"),
+        "qualification": source.get("qualification"),
+        "current_company": source.get("current_company"),
+        "current_ctc": source.get("current_ctc"),
+        "expected_ctc": source.get("expected_ctc"),
+        "notice_period": source.get("notice_period"),
+        "linkedin": source.get("linkedin"),
+        "resume": source.get("resume"),
+        # The acknowledgements travel with the CV: they were given about this company's
+        # handling of this person's data, not about one vacancy.
+        "eeo_ack": source.get("eeo_ack"),
+        "data_use_ack": source.get("data_use_ack"),
+        "consent_to_retain": source.get("consent_to_retain"),
+        "consent_expires_at": expires,
+        "applied_at": now,
+        "created_at": now,
+        "created_by": str(actor.get("_id") or ""),
+    }
+    doc["retention_until"] = candidate_retention_until(doc)
+    await get_collection(COLL_CANDIDATES).insert_one(dict(doc))
+    await audit(actor, AUDIT_CANDIDATE_ADDED, ENTITY_CANDIDATE, new_uk,
+                f"brought forward from the talent pool ({uk}) onto {request_no}",
+                company_id)
+    return _out(doc)
 
 
 async def delete_candidate(actor: dict, company_id: str, uk: str) -> dict:
@@ -512,10 +810,31 @@ async def screen_candidates(actor: dict, company_id: str, payload: dict) -> dict
 
         await coll.update_one(query, {"$set": updates})
         moved.append({"uk": uk, "status": target_status})
+
+        # ── Internal track ── SOP §8 milestone 3: "shortlist ready for HOD review".
+        # The FIRST shortlisting on a requisition is the moment a shortlist exists; every
+        # later one adds to a list that is already ready, so `stamp_if_internal` records
+        # only the first.
+        if action is ScreenAction.SHORTLIST and doc.get("request_no"):
+            from app.services.hrms_sla_service import stamp_if_internal
+            await stamp_if_internal(actor, company_id, doc["request_no"],
+                                    "shortlist_ready", when=now)
+
         await audit(actor, AUDIT_STAGE_CHANGED, ENTITY_CANDIDATE, uk,
                     f"{current_status} -> {target_status}", company_id)
         await audit(actor, AUDIT_SCREENED, ENTITY_CANDIDATE, uk,
                     f"{action.value}" + (f": {remarks}" if remarks else ""), company_id)
+
+        # ── Phase INT-2 (Annexure C) ── communicate rejections. The SOP promises every
+        # applicant a closure message and nothing sent one.
+        #
+        # Fired on `reject` specifically, and on no other screening action: this action
+        # already REQUIRES remarks, which means the decision has been thought about and
+        # written down. It is fire-and-forget -- a candidate must still be rejected if the
+        # email cannot go out, and a batch of fifty must not half-fail on the tenth.
+        if action is ScreenAction.REJECT:
+            from app.services.hrms_comm_service import fire_event
+            await fire_event(actor, company_id, uk, "screening_rejected")
         if action is ScreenAction.SHARE_WITH_CLIENT:
             # Its own audit action, so "we sent this CV out" is findable in the journey
             # without reading the prose of a generic screening line.

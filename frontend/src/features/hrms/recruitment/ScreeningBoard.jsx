@@ -248,7 +248,18 @@ const ScreeningBoard = () => {
                     </span>
                   </td>
                   <td className="px-4 py-2.5 text-[var(--text-muted)]">{c.request_no || '—'}</td>
-                  <td className="px-4 py-2.5 text-[var(--text-main)]">{c.source || '—'}</td>
+                  {/* The channel the APPLICANT named on the form — postings no longer carry
+                      a platform to infer one from. For a referral the source reads
+                      "Referral", so the channel they chose is shown beneath it rather than
+                      lost. */}
+                  <td className="px-4 py-2.5 text-[var(--text-main)]">
+                    {c.source || '—'}
+                    {c.is_referral && c.referral_source && c.referral_source !== c.source && (
+                      <span className="block text-[11px] text-[var(--text-muted)]">
+                        via {c.referral_source}
+                      </span>
+                    )}
+                  </td>
                   <td className="px-4 py-2.5 text-[var(--text-main)]">{c.application_status}</td>
                   <td className="px-4 py-2.5 text-[var(--text-muted)]">
                     {c.assigned_recruiter_name || '—'}

@@ -99,9 +99,15 @@ REQUEST_REJECTED = "Rejected"
 # Client-side departments the doers are grouped by. Matches the `Department` sheet and
 # the hardcoded list in frontend ScheduleCalendarModal.jsx. Retained as the built-in
 # fallback; the authoritative list now lives in the tpms_departments master (H5).
-TPMS_DEPARTMENTS = ["HOD", "MD", "HR", "IMPLEMENTOR"]
+#
+# FINANCE was added for the HRMS internal recruitment track, where Management/Finance is the
+# mandatory budget approver (Internal Recruitment SOP, Annexure B). It is a governance role
+# like the other four: a user carries it in `governance_role`, auth_controller.CLIENT_RANK
+# ranks it with HR, and hrms_access maps it to HrmsRole.FINANCE. TPMS itself does not treat
+# it specially — it is simply another governance department to the escalation logic.
+TPMS_DEPARTMENTS = ["HOD", "MD", "HR", "FINANCE", "CLIENT", "IMPLEMENTOR"]
 
-# H5 — department master seed. The 4 governance roles are flagged `is_governance_role` so
+# H5 — department master seed. The governance roles are flagged `is_governance_role` so
 # escalation/form logic can tell them apart from custom client departments (Sales, Ops…),
 # which admins add via the API. Seed is insert-only; company_id=None means global/default.
 DEPARTMENT_SEED = [

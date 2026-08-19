@@ -7,7 +7,9 @@ import {
   MessageSquare, LogOut, Layers, Copy, Calendar, Sparkles, PlayCircle, Target, BarChart3, Library, X,
   Forward, Bell, Trash2, ChevronDown, Activity, CalendarDays, Database, LayoutGrid,
   Gauge, GitBranch, AlertTriangle, UserCog, ListChecks, ScrollText, ClipboardList, ClipboardCheck,
-  FolderOpen, FileCog
+  FolderOpen, FileCog, CalendarClock, ShieldAlert,
+  // ── Phase INT-2 ── the remaining Internal Recruitment SOP surfaces.
+  HeartHandshake, Bookmark, Scale, Mail, BookMarked
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { canAccessTaskManagement } from '../../utils/taskAccess';
@@ -102,11 +104,20 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
   // What is left is the way IN plus the screens the strip does not carry. `Recruitment`
   // stays highlighted anywhere in the workspace (see `match`), so the sidebar still shows
   // which part of HRMS you are in after the tabs have moved you off the requisition screen.
-  // Phase 11-R appends `appointments` and `links` — both live in the workspace tab strip,
-  // so they belong here and NOT in hrmsSubmodules (the two lists must stay disjoint).
+  // Phase 11-R appends `appointments` — it lives in the workspace tab strip, so it belongs
+  // here and NOT in hrmsSubmodules (the two lists must stay disjoint).
   const HRMS_WORKSPACE = ['/hrms/requisitions', '/hrms/jd', '/hrms/postings', '/hrms/candidates',
     '/hrms/screening', '/hrms/assessments', '/hrms/interviews', '/hrms/offers',
-    '/hrms/appointments', '/hrms/onboarding', '/hrms/links', '/hrms/reports'];
+    '/hrms/appointments', '/hrms/onboarding', '/hrms/reports',
+    // Internal track — hiring stages, so they live in the tab strip.
+    '/hrms/internal-requisitions', '/hrms/scorecards', '/hrms/reference-checks',
+    // Phase INT-2: the shortlisting committee is a hiring stage too — it sits between
+    // screening and the final interview, and gates `Selected`.
+    '/hrms/shortlist-reviews',
+    // Phase INT-4: the telephonic screen sits between CV screening and the panel, and
+    // gates interview scheduling. A stage, so it belongs in the strip — which means it
+    // belongs in THIS list, so "Recruitment" stays lit while somebody is on it.
+    '/hrms/telephonic-screening'];
 
   const hrmsSubmodules = [
     { name: 'Dashboard', path: '/hrms/dashboard', icon: BarChart3 },
@@ -120,13 +131,30 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
     // Phase 11-R, Item 2 — the document register has ONE home, and it is the sidebar
     // (it is not a hiring stage, so it is deliberately absent from the workspace strip).
     { name: 'Documents', path: '/hrms/documents', icon: FolderOpen },
+    // ── Internal track ── GOVERNANCE, not pipeline: probation is a post-hire employment
+    // event and the exception log is a control surface. Both are deliberately absent from
+    // the workspace tab strip, which owns the hiring stages (the two lists stay disjoint).
+    { name: 'Probation', path: '/hrms/probation', icon: CalendarClock },
+    { name: 'Exceptions', path: '/hrms/exceptions', icon: ShieldAlert },
+    // ── Phase INT-2 ── governance and sourcing surfaces, deliberately NOT in the tab
+    // strip. Pre-boarding is post-offer engagement rather than a pipeline stage; the
+    // talent pool is a search across candidates rather than a step in one hire.
+    { name: 'Pre-boarding', path: '/hrms/preboarding', icon: HeartHandshake },
+    { name: 'Talent Pool', path: '/hrms/talent-pool', icon: Bookmark },
     ...(isHrmsAdminUser ? [
       { name: 'Departments', path: '/hrms/departments', icon: Building2 },
       { name: 'Designations', path: '/hrms/designations', icon: Briefcase },
-      // Phase 11-R — company reference data, alongside the other masters.
-      { name: 'Clients', path: '/hrms/clients', icon: Building2 },
+      // No 'Clients' entry: a recruitment client IS a company, so it is maintained in the
+      // Companies section. A second master here is the duplication this replaced.
       { name: 'Document Types', path: '/hrms/document-types', icon: FileCog },
       { name: 'Sanctioned Strength', path: '/hrms/sanctioned-strength', icon: Gauge },
+      // ── Phase INT-2 ── admin-only masters. Salary bands are agreed annually with
+      // Finance; the communication templates carry the equal-opportunity and data-use
+      // wording; the policy register records which version of the SOP governs. The
+      // capability checks are the real control -- this list only decides visibility.
+      { name: 'Salary Bands', path: '/hrms/salary-bands', icon: Scale },
+      { name: 'Communications', path: '/hrms/communications', icon: Mail },
+      { name: 'Policy Register', path: '/hrms/policies', icon: BookMarked },
     ] : []),
   ];
 

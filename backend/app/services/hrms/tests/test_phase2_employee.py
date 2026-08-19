@@ -126,10 +126,23 @@ def _matches(doc, query):
             # two must not be conflated (a null value is still indexed in Mongo).
             if "$exists" in cond and _dotted_has(doc, key) != bool(cond["$exists"]):
                 return False
-            if "$ne" in cond and val == cond["$ne"]:
-                return False
-            if "$in" in cond and val not in cond["$in"]:
-                return False
+            # Mongo matches a query against an ARRAY field element-wise: {"tags": "x"}
+            # means "the array contains x", and $in means "shares any element". Without
+            # this the fake silently answers "no match" for every array-membership query
+            # -- which is how a client-scope resolver reading `member_user_ids` can look
+            # broken when it is correct, or look correct when it is broken.
+            if "$ne" in cond:
+                if isinstance(val, list):
+                    if cond["$ne"] in val:
+                        return False
+                elif val == cond["$ne"]:
+                    return False
+            if "$in" in cond:
+                if isinstance(val, list):
+                    if not set(map(str, val)) & set(map(str, cond["$in"])):
+                        return False
+                elif val not in cond["$in"]:
+                    return False
             if "$nin" in cond and val in cond["$nin"]:
                 return False
             # Range operators, for the Phase 10 date windows.
@@ -148,6 +161,10 @@ def _matches(doc, query):
                 flags = re.I if "i" in cond.get("$options", "") else 0
                 if not re.search(cond["$regex"], str(val or ""), flags):
                     return False
+        elif isinstance(val, list):
+            # Array-contains, per the note above.
+            if cond not in val:
+                return False
         elif val != cond:
             return False
     return True
@@ -240,6 +257,23 @@ class FakeCollection:
                 target.extend(value["$each"])
             else:
                 target.append(value)
+        # Added for the SLA escalation guard: "notify once per breach" is expressed as an
+        # $addToSet, and a fake that silently ignored it would let a test pass while the
+        # guard did nothing -- which is exactly the bug it exists to prevent.
+        for field, value in (update.get("$addToSet") or {}).items():
+            target = doc.setdefault(field, [])
+            values = value["$each"] if isinstance(value, dict) and "$each" in value \
+                else [value]
+            for item in values:
+                if item not in target:
+                    target.append(item)
+        # Revoking a client-engagement membership is a $pull. A fake that ignored it would
+        # let a "member removed" test pass while the member kept their access -- the same
+        # silent-no-op trap $addToSet had.
+        for field, value in (update.get("$pull") or {}).items():
+            target = doc.get(field)
+            if isinstance(target, list):
+                doc[field] = [item for item in target if item != value]
         for field in (update.get("$unset") or {}):
             doc.pop(field, None)
         return type("R", (), {"matched_count": 1, "modified_count": 1})()

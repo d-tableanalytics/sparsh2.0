@@ -455,8 +455,11 @@ async def main() -> None:
         check("the four Phase 3 actions are still declared",
               {"hr-approve", "hr-reject", "md-approve", "md-reject"} <= set(M.REQ_TRANSITIONS))
         check("MD approval cannot be skipped", M.md_approval_is_mandatory())
+        # Subset, not equality: REQ_AUDIT_ACTIONS also labels the internal track's actions,
+        # which have their own table. What this asserts is what it always meant -- no client
+        # action may transition without leaving a labelled trail.
         check("every action has an audit label",
-              set(M.REQ_TRANSITIONS) == set(M.REQ_AUDIT_ACTIONS))
+              set(M.REQ_TRANSITIONS) <= set(M.REQ_AUDIT_ACTIONS))
         check("hr actions require the HR capability",
               all(spec[2] == M.Cap.REQUISITION_REVIEW_HR
                   for a, spec in M.REQ_TRANSITIONS.items() if a.startswith("hr-")))

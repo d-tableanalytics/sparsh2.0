@@ -94,13 +94,26 @@ import AssessPage from './pages/hrms/public/AssessPage';
 import OfferPage from './pages/hrms/public/OfferPage';
 import OnboardPage from './pages/hrms/public/OnboardPage';
 // ── Phase 11-R — recruitment review enhancements ──
-import LinkManager from './features/hrms/links/LinkManager';
 import DocumentCenter from './features/hrms/documents/DocumentCenter';
 import DocumentTypeManager from './features/hrms/documents/DocumentTypeManager';
 import AppointmentBoard from './features/hrms/recruitment/AppointmentBoard';
-import ClientManager from './features/hrms/clients/ClientManager';
 import SanctionedStrength from './features/hrms/people/SanctionedStrength';
+// ── Internal (in-house) recruitment track ──
+import InternalRequisitionList from './features/hrms/internal/InternalRequisitionList';
+import ScorecardLibrary from './features/hrms/internal/ScorecardLibrary';
+import ReferenceCheckBoard from './features/hrms/internal/ReferenceCheckBoard';
+import TelephonicBoard from './features/hrms/internal/TelephonicBoard';
+import ProbationBoard from './features/hrms/internal/ProbationBoard';
+import ExceptionLog from './features/hrms/internal/ExceptionLog';
 import AppointmentPage from './pages/hrms/public/AppointmentPage';
+// ── Phase INT-2 — the remaining Internal Recruitment SOP controls ──
+import ShortlistCommittee from './features/hrms/internal/ShortlistCommittee';
+import PreboardingBoard from './features/hrms/internal/PreboardingBoard';
+import TalentPool from './features/hrms/internal/TalentPool';
+import CommTemplates from './features/hrms/internal/CommTemplates';
+import PolicyRegister from './features/hrms/internal/PolicyRegister';
+import SalaryBandManager from './features/hrms/people/SalaryBandManager';
+import SurveyPage from './pages/hrms/public/SurveyPage';
 import TpmsCalendar from './features/tpms/calendar/TpmsCalendar';
 import AssignedFormPage from './features/tpms/forms/AssignedFormPage';
 import ClientDashboard from './features/tpms/client/ClientDashboard';
@@ -168,6 +181,10 @@ const AppRoutes = () => {
       {/* Phase 11-R: the appointment letter a candidate acknowledges. Same anonymous
           treatment as the four above — an applicant is not a user of this ERP. */}
       <Route path="/appointment/:code" element={<AppointmentPage />} />
+      {/* Phase INT-2: the new-hire experience survey. Anonymous in a stronger sense than
+          the five above — the page is not told who the respondent is, because a survey that
+          greets you by name is one you can screenshot beside your answers. */}
+      <Route path="/survey/:code" element={<SurveyPage />} />
 
       <Route path="/" element={<PrivateRoute><Dashboard /></PrivateRoute>} />
       <Route path="/dashboard" element={<Navigate to="/" />} />
@@ -275,13 +292,32 @@ const AppRoutes = () => {
         <Route path="onboarding"         element={<OnboardingBoard />} />
         <Route path="dashboard"          element={<RecruitmentDashboard />} />
         <Route path="reports"            element={<RecruitmentReports />} />
-        {/* Phase 11-R — recruitment review enhancements (Items 1-4, 7). */}
-        <Route path="links"              element={<LinkManager />} />
+        {/* Phase 11-R — recruitment review enhancements (Items 2-4, 7). */}
         <Route path="documents"          element={<DocumentCenter />} />
         <Route path="document-types"     element={<DocumentTypeManager />} />
         <Route path="appointments"       element={<AppointmentBoard />} />
-        <Route path="clients"            element={<ClientManager />} />
+        {/* No /hrms/clients: clients are the ERP's companies, managed at /companies. */}
         <Route path="sanctioned-strength" element={<SanctionedStrength />} />
+        {/* ── Internal track ── Sparsh Magic's own hiring, governed by the Internal
+            Recruitment SOP. The pipeline screens sit in the workspace tab strip; the
+            governance ones (probation, exceptions) sit in the sidebar. */}
+        <Route path="internal-requisitions" element={<InternalRequisitionList />} />
+        <Route path="scorecards"           element={<ScorecardLibrary />} />
+        <Route path="reference-checks"     element={<ReferenceCheckBoard />} />
+        {/* Phase INT-4 — the SOP's step 5 telephonic screen, between CV screening and
+            the panel. A hiring stage, so it lives in the workspace tab strip. */}
+        <Route path="telephonic-screening" element={<TelephonicBoard />} />
+        <Route path="probation"            element={<ProbationBoard />} />
+        <Route path="exceptions"           element={<ExceptionLog />} />
+        {/* ── Phase INT-2 ── the remaining SOP controls. `shortlist-reviews` is a hiring
+            stage and lives in the workspace tab strip; the rest are governance and live in
+            the sidebar. The two navigations stay disjoint. */}
+        <Route path="shortlist-reviews"    element={<ShortlistCommittee />} />
+        <Route path="preboarding"          element={<PreboardingBoard />} />
+        <Route path="talent-pool"          element={<TalentPool />} />
+        <Route path="salary-bands"         element={<SalaryBandManager />} />
+        <Route path="communications"       element={<CommTemplates />} />
+        <Route path="policies"             element={<PolicyRegister />} />
       </Route>
 
       <Route path="/admin/settings" element={<Navigate to="/settings" />} />

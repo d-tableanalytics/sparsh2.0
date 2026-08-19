@@ -171,11 +171,9 @@ async def main() -> None:
     ])
     postings = FakeCollection([
         {"_id": ObjectId(), "company_id": COMPANY, "request_no": "REQ-1",
-         "platform": "LinkedIn", "created_at": ago(25)},
-        {"_id": ObjectId(), "company_id": COMPANY, "request_no": "REQ-1",
-         "platform": "Naukri", "created_at": ago(25)},
+         "posting_code": "JB-AAA111", "created_at": ago(25)},
         {"_id": ObjectId(), "company_id": COMPANY, "request_no": "REQ-2",
-         "platform": "LinkedIn", "created_at": ago(19)},
+         "posting_code": "JB-BBB222", "created_at": ago(19)},
     ])
 
     store = {M.COLL_CANDIDATES: candidates, M.COLL_REQUISITIONS: requisitions,
@@ -412,9 +410,10 @@ async def main() -> None:
         dept = await AN.breakdown(HR, COMPANY, "department")
         check("grouped by department", {r["name"] for r in dept["rows"]}
               == {"Analytics", "Delivery"})
-        plat = await AN.breakdown(HR, COMPANY, "platform")
-        check("grouped by platform", {r["name"] for r in plat["rows"]}
-              == {"LinkedIn", "Naukri"})
+        # A posting no longer HAS a platform -- one posting, one link, shared anywhere -- so
+        # the dimension is gone rather than left to group a field nothing writes.
+        await expect_http("the retired platform breakdown",
+                          AN.breakdown(HR, COMPANY, "platform"), 422, "Unknown breakdown")
         await expect_http("an unknown breakdown dimension",
                           AN.breakdown(HR, COMPANY, "salary"), 422, "Unknown breakdown")
         await expect_http("an injected field name",

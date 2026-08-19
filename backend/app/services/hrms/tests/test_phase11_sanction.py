@@ -412,8 +412,9 @@ async def main() -> None:
         check("escalation routing is declared beside the transition table",
               M.REQ_ESCALATION_ROUTING["hr-approve"]
               is M.ReqApproval.PENDING_ESCALATION)
+        # Subset, not equality: REQ_AUDIT_ACTIONS also labels the internal track's actions.
         check("every action still has an audit label",
-              set(M.REQ_TRANSITIONS) == set(M.REQ_AUDIT_ACTIONS))
+              set(M.REQ_TRANSITIONS) <= set(M.REQ_AUDIT_ACTIONS))
         check("both escalation actions demand the escalate capability",
               all(spec[2] is M.Cap.REQUISITION_ESCALATE
                   for a, spec in M.REQ_TRANSITIONS.items() if a.startswith("escalate-")))

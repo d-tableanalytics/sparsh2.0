@@ -31,6 +31,7 @@ from typing import Optional
 from fastapi import HTTPException
 
 from app.db.mongodb import get_collection
+from app.models.hrms import AUDIT_OFFER_APPROVED, RequisitionTrack
 from app.models.hrms import (
     ACTIVE_OFFER_STATUSES, AUDIT_OFFER_ACCEPTED, AUDIT_OFFER_CREATED, AUDIT_OFFER_DECLINED,
     AUDIT_OFFER_DELETED, AUDIT_OFFER_EDITED, AUDIT_OFFER_REVOKED, AUDIT_OFFER_SENT,
@@ -186,6 +187,137 @@ async def offerable_candidates(actor: dict, company_id: str) -> list:
     return out
 
 
+# ─────────────────────────────────────────────────────────────
+# Internal track — the two offer gates
+# ─────────────────────────────────────────────────────────────
+def _is_internal(req: dict) -> bool:
+    return ((req or {}).get("requisition_track")
+            or RequisitionTrack.CLIENT.value) == RequisitionTrack.INTERNAL.value
+
+
+def _money(value) -> str:
+    """A figure a human can check at a glance. No currency symbol: the module never asks
+    which currency a company works in, and inventing one would be worse than omitting it."""
+    try:
+        return f"{float(value):,.0f}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+async def assert_within_band(company_id: str, ctc: float, candidate: dict,
+                             req: dict) -> None:
+    """Refuse an internal offer outside the approved salary band.
+
+    SOP §6: "Salary negotiation must stay within the internally approved budget from Step 2;
+    any deviation requires fresh Management/Finance approval."
+
+    So there are exactly two ways past this, and both leave a record: re-approve the budget
+    at the new figure (which rewrites the band), or log an approved Offer Outside Budget
+    exception. There is deliberately no override parameter.
+
+    A requisition with no band recorded is not gated. That can only happen for an internal
+    requisition approved before this phase existed; the budget gate makes the band mandatory
+    for every one raised since, and failing closed on historical rows would strand them.
+    """
+    if not _is_internal(req):
+        return
+
+    band_min = req.get("approved_salary_band_min")
+    band_max = req.get("approved_salary_band_max")
+    if band_min is None or band_max is None:
+        return
+    if float(band_min) <= float(ctc) <= float(band_max):
+        return
+
+    from app.services.hrms_exception_service import approved_exception_for
+    if await approved_exception_for(company_id, "salary_band", req.get("request_no"),
+                                    candidate.get("uk")):
+        return
+
+    direction = "below" if float(ctc) < float(band_min) else "above"
+    raise HTTPException(
+        status_code=409,
+        detail=(f'{_money(ctc)} is {direction} the approved salary band for '
+                f'{req.get("request_no")} ({_money(band_min)} to {_money(band_max)}). '
+                f"Re-approve the budget at the new figure, or log an approved "
+                f"Offer Outside Budget exception."))
+
+
+async def assert_offer_approved(company_id: str, offer: dict, req: dict) -> None:
+    """Refuse to SEND an internal offer that Management has not approved.
+
+    Annexure B marks "Offer approval" accountable to Management/Finance, and Table 2 calls it
+    mandatory. Verifying the band is not the same act: the band says the figure is affordable,
+    the approval says this offer, to this person, should go out.
+
+    Recorded as a field rather than a new OfferStatus. `Draft -> Sent -> Accepted/Declined`
+    is shared with the client track and read by the public offer page, the pipeline ranks and
+    the analytics funnel; slipping an extra state into that sequence would change what an
+    existing status MEANS on a track this phase is not supposed to touch.
+    """
+    if not _is_internal(req):
+        return
+    if (offer.get("offer_approval") or {}).get("approved_at"):
+        return
+    raise HTTPException(
+        status_code=409,
+        detail=(f'{offer.get("offer_no")} has not been approved yet. An internal offer '
+                f"needs Management or Finance sign-off before it goes to the candidate."))
+
+
+async def approve_offer(actor: dict, company_id: str, offer_no: str,
+                        payload: dict) -> dict:
+    """Record Management's approval of an offer. Internal track only."""
+    current = await _get_offer(company_id, offer_no)
+    if current["status"] != OfferStatus.DRAFT.value:
+        raise HTTPException(
+            status_code=409,
+            detail=(f'{offer_no} is "{current["status"]}". Only a draft offer can be '
+                    f"approved -- once it has gone out there is nothing left to approve."))
+
+    req = {}
+    if current.get("request_no"):
+        req = await get_collection(COLL_REQUISITIONS).find_one(
+            {"request_no": current["request_no"], "company_id": str(company_id)}) or {}
+    if not _is_internal(req):
+        raise HTTPException(
+            status_code=409,
+            detail=("Offer approval is an internal-track control. On a client requisition "
+                    "the client approves the offer, not Sparsh Magic."))
+
+    signature = clean_text(payload.get("signature"), limit=140)
+    if not signature:
+        raise HTTPException(
+            status_code=422,
+            detail="Type your name to sign this approval. An unsigned sign-off is not one.")
+
+    # Re-check the band at approval time. The figure may have been edited since the offer was
+    # raised, and approving a number nobody validated is exactly the hole this gate closes.
+    candidate = {"uk": current.get("uk")}
+    await assert_within_band(company_id, current.get("ctc"), candidate, req)
+
+    now = datetime.now(timezone.utc)
+    approval = {
+        "approved_by": str(actor.get("_id") or ""),
+        "approved_by_name": _actor_name(actor),
+        "approved_at": now,
+        "signature": signature,
+        "remarks": clean_text(payload.get("remarks"), limit=2000),
+        # The band as it stood when this was approved, so a later band change is visible as a
+        # discrepancy rather than silently rewriting history.
+        "band_min_at_approval": req.get("approved_salary_band_min"),
+        "band_max_at_approval": req.get("approved_salary_band_max"),
+    }
+    await get_collection(COLL_OFFERS).update_one(
+        {"offer_no": offer_no, "company_id": str(company_id)},
+        {"$set": {"offer_approval": approval, "updated_at": now}})
+    await audit(actor, AUDIT_OFFER_APPROVED, ENTITY_OFFER, offer_no,
+                f"approved at {_money(current.get('ctc'))}", company_id)
+
+    fresh = await _get_offer(company_id, offer_no)
+    return _out(fresh, include_ctc=can(actor, Cap.EMPLOYEE_SALARY_READ))
+
+
 async def create_offer(actor: dict, company_id: str, payload: dict) -> dict:
     uk = (payload.get("uk") or "").strip()
     if not uk:
@@ -230,6 +362,35 @@ async def create_offer(actor: dict, company_id: str, payload: dict) -> dict:
     if candidate.get("request_no"):
         req = await get_collection(COLL_REQUISITIONS).find_one(
             {"request_no": candidate["request_no"], "company_id": str(company_id)}) or {}
+
+    # ── Internal track ── two gates, both checked BEFORE anything is written so a refusal
+    # cannot leave a draft offer behind. Both are silent on the client track.
+    #
+    #   1. The reference check is mandatory (SOP §6) -- Sparsh Magic carries the employment
+    #      risk directly rather than passing it to a client.
+    #   2. The CTC must sit inside the band Management approved at the budget gate (SOP §6:
+    #      "Salary negotiation must stay within the internally approved budget from Step 2").
+    from app.services.hrms_reference_service import assert_reference_cleared
+    await assert_reference_cleared(company_id, candidate, req)
+    await assert_within_band(company_id, ctc, candidate, req)
+    # ── Phase INT-2 ── the §5 selection gates, re-asserted at the offer.
+    #
+    # The candidate is already at `Selected` or this call would not have got here -- which
+    # is exactly why this check is worth making a second time. A status is a label somebody
+    # can set; the committee record and the MD round are facts. Asking again at the offer
+    # is what makes a hand-set `Selected` useless as a way past either control.
+    from app.services.hrms_candidate_service import assert_selectable
+    await assert_selectable(actor, company_id, candidate)
+
+    # Create-and-send in one call cannot work on the internal track: Management's approval
+    # happens BETWEEN the two, so there is no moment at which both could be satisfied.
+    # Refused here rather than at the send step, because failing after the write would leave
+    # an orphaned draft -- the same all-or-nothing rule the signature check above follows.
+    if send_now and _is_internal(req):
+        raise HTTPException(
+            status_code=409,
+            detail=("An internal offer cannot be created and sent in one step. Raise it, "
+                    "have Management or Finance approve it, then send it."))
 
     designation = clean_text(payload.get("designation"), limit=140) \
         or req.get("designation_name") or "the role"
@@ -319,6 +480,24 @@ async def update_offer(actor: dict, company_id: str, offer_no: str, payload: dic
     if not updates:
         raise HTTPException(status_code=400, detail="No fields to update.")
 
+    # ── Internal track ── an edited figure is a different offer from the one Management
+    # approved, so the approval is withdrawn and the new figure re-checked against the band.
+    # Carrying the old signature over onto a new salary would make the approval a formality.
+    if "ctc" in updates:
+        req = {}
+        if current.get("request_no"):
+            req = await get_collection(COLL_REQUISITIONS).find_one(
+                {"request_no": current["request_no"],
+                 "company_id": str(company_id)}) or {}
+        if _is_internal(req):
+            await assert_within_band(company_id, updates["ctc"],
+                                     {"uk": current.get("uk")}, req)
+            if current.get("offer_approval"):
+                updates["offer_approval"] = None
+                updates["approval_withdrawn_reason"] = (
+                    f'CTC changed from {_money(current.get("ctc"))} to '
+                    f'{_money(updates["ctc"])} after approval.')
+
     now = datetime.now(timezone.utc)
     # Archive what the letter said BEFORE this edit, so every version is recoverable.
     history = list(current.get("history") or [])
@@ -360,6 +539,15 @@ async def send_offer(actor: dict, company_id: str, offer_no: str, payload: dict)
             status_code=422,
             detail="Type the authorised signatory's name to send this offer.")
 
+    # ── Internal track ── Management's approval is mandatory before the letter goes out.
+    # Checked here rather than only in the route so the direct create-and-send path and any
+    # future caller are gated by the same rule.
+    req = {}
+    if current.get("request_no"):
+        req = await get_collection(COLL_REQUISITIONS).find_one(
+            {"request_no": current["request_no"], "company_id": str(company_id)}) or {}
+    await assert_offer_approved(company_id, current, req)
+
     now = datetime.now(timezone.utc)
     # Conditional on it still being a Draft: two send clicks must not both fire.
     result = await get_collection(COLL_OFFERS).update_one(
@@ -370,6 +558,15 @@ async def send_offer(actor: dict, company_id: str, offer_no: str, payload: dict)
                   "updated_at": now}})
     if result.matched_count == 0:
         raise HTTPException(status_code=409, detail="This offer has already been sent.")
+
+    # ── Internal track ── SLA §8 milestone 4: "offer released after final selection".
+    # Stamped only for the FIRST offer on a requisition -- a second offer to a second
+    # candidate is not a second breach of the same deadline, and overwriting the stamp would
+    # quietly make a late requisition look punctual.
+    if _is_internal(req) and not (req.get("sla_actuals") or {}).get("offer_released"):
+        await get_collection(COLL_REQUISITIONS).update_one(
+            {"request_no": current["request_no"], "company_id": str(company_id)},
+            {"$set": {"sla_actuals.offer_released": now}})
 
     candidate_status = None
     candidate = await get_collection(COLL_CANDIDATES).find_one(
@@ -388,8 +585,26 @@ async def send_offer(actor: dict, company_id: str, offer_no: str, payload: dict)
                 f"sent to {current.get('candidate_name')}", company_id)
     await audit(actor, AUDIT_OFFER_SENT, ENTITY_CANDIDATE, current["uk"], offer_no, company_id)
 
+    # ── Phase INT-2 (Annexure C) ── "a written offer summary before the formal offer".
+    #
+    # A WARNING, not a block, and the letter has already gone out by the time it is raised.
+    # Blocking would be wrong twice: the summary is a courtesy the SOP recommends rather
+    # than a control it mandates, and refusing to send an approved offer over a missing
+    # courtesy email would make somebody route the offer outside the system entirely.
+    warning = None
+    if _is_internal(req):
+        from app.services.hrms_comm_service import was_sent
+        if not await was_sent(company_id, current["uk"], "offer_summary"):
+            warning = ("No written offer summary was sent to "
+                       f'{current.get("candidate_name")} before this letter. The SOP asks '
+                       f"for one so the terms are not a surprise; send it from the offer "
+                       f"board if it is not too late to be useful.")
+
     fresh = await _get_offer(company_id, offer_no)
-    return _out(fresh, include_ctc=can(actor, Cap.EMPLOYEE_SALARY_READ))
+    out = _out(fresh, include_ctc=can(actor, Cap.EMPLOYEE_SALARY_READ))
+    if warning:
+        out["warning"] = warning
+    return out
 
 
 async def revoke_offer(actor: dict, company_id: str, offer_no: str, payload: dict) -> dict:

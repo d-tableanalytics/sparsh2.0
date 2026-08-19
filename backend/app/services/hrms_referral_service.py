@@ -40,19 +40,26 @@ from app.models.hrms import (
 from app.utils.hrms_public_guard import clean_text
 
 
-async def resolve_referral(payload: dict, company_id: str) -> dict:
+async def resolve_referral(payload: dict, company_id: str, *,
+                           source_from_applicant: bool = True) -> dict:
     """Validate the discovery / referral block and return the fields to store.
 
     Two jobs, because the form asks two related questions:
 
-      1. WHERE DID YOU FIND THIS JOB -- always captured when answered. This is the source
-         data the review asked for, and it is why one posting needs only ONE form link
-         rather than a link per platform: the channel is captured from the applicant
-         instead of inferred from which URL they happened to click.
+      1. WHERE DID YOU FIND THIS JOB -- always captured when answered, and stored as the
+         candidate's `source`. This is why one posting needs only ONE form link rather than
+         a link per platform: the channel is captured from the applicant instead of
+         inferred from which URL they happened to click.
       2. WERE YOU REFERRED -- optional, and only then are the referrer fields required.
 
     Returns `{}` when neither was answered, so a caller can `doc.update(...)` it
     unconditionally and an application from before this phase is unchanged.
+
+    `source_from_applicant` says whose answer owns `source`. On the public form it is the
+    applicant's -- nobody else knows which channel they came through. On the manual
+    add-candidate path HR picks the source themselves from a CV in front of them, so their
+    choice must not be silently replaced; a declared REFERRAL still wins there, because a
+    referral is what that candidate is regardless of who typed it.
 
     Raises 422 with a field-naming message when a referral claim is incomplete, and the
     deliberately opaque INVALID_EMPLOYEE_CODE when an employee code does not resolve.
@@ -62,12 +69,17 @@ async def resolve_referral(payload: dict, company_id: str) -> dict:
         raise HTTPException(status_code=422, detail="Choose a valid referral source.")
 
     if not payload.get("is_referral"):
-        # Not a referral, but the applicant still told us how they found the role. Record
-        # it as the discovery channel WITHOUT overwriting `source`: `source` already holds
-        # the posting's platform, which is a fact about the posting, and the applicant's
-        # answer is a fact about the applicant. Both are worth keeping, and the breakdowns
-        # read them as separate dimensions.
-        return {"referral_source": source, "is_referral": False} if source else {}
+        # Not a referral, but the applicant told us how they found the role -- and that
+        # answer IS the source. A posting no longer carries a platform to infer one from:
+        # there is a single link, shared wherever the company likes, so the only party who
+        # knows which channel worked is the applicant. `referral_source` keeps the same
+        # value so the two breakdowns still line up.
+        if not source:
+            return {}
+        out = {"referral_source": source, "is_referral": False}
+        if source_from_applicant:
+            out["source"] = source
+        return out
 
     referred_by = clean_text(payload.get("referred_by"), limit=140)
 

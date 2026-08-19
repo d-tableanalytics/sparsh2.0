@@ -111,10 +111,15 @@ async def _seed_types(company_id: str) -> None:
         "applies_to": applies_to,
         "mandatory": mandatory,
         "expires": expires,
+        # ── Phase INT-2, SOP §11 ── distinct from `mandatory`: this one decides whether
+        # probation confirmation is BLOCKED until the document is Verified. Seeded true on
+        # the identity and education types only.
+        "statutory_required": statutory,
         "active": True,
         "seeded": True,          # so an operator can tell defaults from their own additions
         "created_at": now,
-    } for name, category, applies_to, mandatory, expires in DEFAULT_DOCUMENT_TYPES]
+    } for name, category, applies_to, mandatory, expires, statutory
+        in DEFAULT_DOCUMENT_TYPES]
     try:
         await get_collection(COLL_DOCUMENT_TYPES).insert_many(docs)
     except Exception as e:
@@ -158,6 +163,9 @@ async def create_document_type(actor: dict, company_id: str, payload: dict) -> d
         "applies_to": applies_to,
         "mandatory": bool(payload.get("mandatory")),
         "expires": bool(payload.get("expires")),
+        # ── Phase INT-2, SOP §11 ── defaults FALSE on a hand-created type: a document HR
+        # adds should never silently start blocking probation confirmations.
+        "statutory_required": bool(payload.get("statutory_required")),
         "active": bool(payload.get("active", True)),
         "seeded": False,
         "created_at": datetime.now(timezone.utc),
@@ -206,7 +214,7 @@ async def update_document_type(actor: dict, company_id: str, type_id: str,
                 status_code=422,
                 detail=f"applies_to must be one of: {', '.join(sorted(APPLIES_TO_VALUES))}.")
         updates["applies_to"] = applies_to
-    for flag in ("mandatory", "expires", "active"):
+    for flag in ("mandatory", "expires", "active", "statutory_required"):
         if payload.get(flag) is not None:
             updates[flag] = bool(payload[flag])
 

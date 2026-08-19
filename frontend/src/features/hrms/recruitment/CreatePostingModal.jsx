@@ -1,15 +1,19 @@
-import React, { useEffect, useMemo, useState } from 'react';
-import { X, Megaphone, Link2, FileText } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import { X, Megaphone, Link2, FileText, Copy, Check } from 'lucide-react';
 import { useNotification } from '../../../context/NotificationContext';
 import { useHrms } from '../HrmsContext';
-import { getJds, createPostings, applyUrlFor } from '../../../services/hrmsApi';
+import { getJds, createPosting, applyUrlFor } from '../../../services/hrmsApi';
 
 /**
  * HRMS ▸ publish a job description.
  *
- * One posting ROW per selected platform, each independently configured:
- *   • Generate form link → the built-in public form at /apply/<code>
- *   • Paste external link → the platform's own listing
+ * ONE posting, ONE link. There is deliberately no platform picker: a posting used to be
+ * created once per job board, which meant a link per board to mint, share and keep alive,
+ * and a candidate `source` inferred from whichever URL they clicked — an inference that was
+ * wrong the moment somebody forwarded a link.
+ *
+ * The single link goes wherever the company likes, and the application form asks the
+ * applicant where they found the role. That answer is the source column HR reads.
  *
  * Two things this screen is careful about:
  *
@@ -17,25 +21,20 @@ import { getJds, createPostings, applyUrlFor } from '../../../services/hrmsApi';
  *    apply link while filling the form, so the code they copied must be the one stored. The
  *    server honours it only if it matches the public pattern and is unused, and returns
  *    whatever it actually saved.
- * 2. **External postings are labelled honestly.** Applications made on a job board never
- *    reach this pipeline — nothing writes them back. Saying so here is better than an
- *    application count that silently stays at zero.
+ * 2. **An external posting is labelled honestly.** Applications made on a job board never
+ *    reach this pipeline — nothing writes them back, and no source is captured either.
+ *    Saying so here is better than an application count that silently stays at zero.
  */
 
-const PLATFORMS = ['LinkedIn', 'Naukri', 'Indeed', 'Foundit', 'Apna', 'Career Page', 'Referral', 'Manual'];
-const PREFIX = {
-  LinkedIn: 'LI', Naukri: 'NK', Indeed: 'ID', Foundit: 'FN',
-  Apna: 'AP', 'Career Page': 'CP', Referral: 'RF', Manual: 'MN',
-};
 const ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
 
 /** Mirrors the server's `^[A-Z]{2}-[A-Z0-9]{6}$`. Uses crypto when available — this is a
  *  public identifier, and guessable codes would let someone enumerate a company's openings. */
-const previewCode = (platform) => {
+const previewCode = () => {
   const bytes = new Uint8Array(6);
   (window.crypto || window.msCrypto)?.getRandomValues?.(bytes);
   const body = Array.from(bytes, (b) => ALPHABET[b % ALPHABET.length]).join('');
-  return `${PREFIX[platform] || 'JB'}-${body || 'XXXXXX'}`;
+  return `JB-${body || 'XXXXXX'}`;
 };
 
 const FIELD = 'w-full h-9 px-3 rounded-lg border border-[var(--border)] bg-[var(--input-bg)] text-[13px] text-[var(--text-main)]';
@@ -47,12 +46,19 @@ const CreatePostingModal = ({ onClose, onCreated }) => {
 
   const [jds, setJds] = useState([]);
   const [jdNo, setJdNo] = useState('');
-  const [selected, setSelected] = useState({ 'Career Page': true });
-  const [config, setConfig] = useState({});
+  const [mode, setMode] = useState('auto');
+  const [externalUrl, setExternalUrl] = useState('');
+  // Minted once per modal, not per render: the user copies this link while the rest of the
+  // form is still being filled in, and a code that changed underneath them would be copied
+  // wrong. The server stores this exact value unless it is already taken.
+  const [code] = useState(previewCode);
   const [expiry, setExpiry] = useState('');
   const [notes, setNotes] = useState('');
   const [requiresAssessment, setRequiresAssessment] = useState(false);
+  const [copied, setCopied] = useState(false);
   const [saving, setSaving] = useState(false);
+
+  const applyUrl = applyUrlFor(code);
 
   useEffect(() => {
     getJds({ ...scope, status: 'Approved' })
@@ -65,47 +71,37 @@ const CreatePostingModal = ({ onClose, onCreated }) => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const chosen = useMemo(() => PLATFORMS.filter((p) => selected[p]), [selected]);
-
-  const toggle = (platform) => {
-    setSelected((s) => ({ ...s, [platform]: !s[platform] }));
-    setConfig((c) => (c[platform] ? c : {
-      ...c, [platform]: { mode: 'auto', url: '', code: previewCode(platform) },
-    }));
+  const copyLink = async () => {
+    try {
+      await navigator.clipboard.writeText(applyUrl);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1800);
+    } catch {
+      showError('Could not copy the link.');
+    }
   };
-
-  const setCfg = (platform, patch) =>
-    setConfig((c) => ({ ...c, [platform]: { ...c[platform], ...patch } }));
 
   const submit = async (e) => {
     e.preventDefault();
     if (!jdNo) return showError('Select an approved job description.');
-    if (!chosen.length) return showError('Select at least one platform.');
-    for (const p of chosen) {
-      const cfg = config[p] || {};
-      if (cfg.mode === 'external' && !/^https?:\/\//i.test((cfg.url || '').trim())) {
-        return showError(`${p}: enter a link starting with http:// or https://, or switch it to a generated form.`);
-      }
+    if (mode === 'external' && !/^https?:\/\//i.test(externalUrl.trim())) {
+      return showError('Enter a link starting with http:// or https://, or switch back to the generated form.');
     }
 
     setSaving(true);
     try {
-      const { data } = await createPostings({
+      const { data } = await createPosting({
         jd_no: jdNo,
+        apply_link_mode: mode,
+        external_url: mode === 'external' ? externalUrl.trim() : null,
+        code: mode === 'external' ? null : code,
         expiry_date: expiry || null,
         notes: notes || null,
         requires_assessment: requiresAssessment,
-        platform_links: chosen.map((p) => {
-          const cfg = config[p] || {};
-          return {
-            platform: p,
-            apply_link_mode: cfg.mode || 'auto',
-            external_url: cfg.mode === 'external' ? cfg.url.trim() : null,
-            code: cfg.mode === 'external' ? null : cfg.code,
-          };
-        }),
       }, scope);
-      showSuccess(`Published to ${data.created} platform${data.created === 1 ? '' : 's'}`);
+      showSuccess(mode === 'external'
+        ? `Published as ${data.posting.posting_code}`
+        : `Published — share ${applyUrlFor(data.posting.posting_code)}`);
       onCreated();
     } catch (err) {
       showError(err?.response?.data?.detail || 'Could not publish the posting.');
@@ -149,61 +145,51 @@ const CreatePostingModal = ({ onClose, onCreated }) => {
           </div>
 
           <div>
-            <span className={LABEL}>Platforms *</span>
-            <div className="flex flex-wrap gap-1.5">
-              {PLATFORMS.map((p) => (
-                <button key={p} type="button" onClick={() => toggle(p)}
-                  className={`px-2.5 py-1 rounded-lg text-[12px] font-bold border transition-colors ${
-                    selected[p]
-                      ? 'border-[var(--accent-indigo)] bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)]'
-                      : 'border-[var(--border)] text-[var(--text-muted)] hover:text-[var(--text-main)]'}`}>
-                  {p}
-                </button>
-              ))}
+            <div className="flex items-center justify-between gap-2 flex-wrap mb-1.5">
+              <span className={`${LABEL} mb-0`}>Where applicants apply</span>
+              <div className="flex gap-1">
+                {[['auto', 'Generate form link'], ['external', 'Paste external link']].map(([m, label]) => (
+                  <button key={m} type="button" onClick={() => setMode(m)}
+                    className={`px-2 py-0.5 rounded-md text-[11px] font-bold border ${
+                      mode === m
+                        ? 'border-[var(--accent-indigo)] bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)]'
+                        : 'border-[var(--border)] text-[var(--text-muted)]'}`}>
+                    {label}
+                  </button>
+                ))}
+              </div>
             </div>
-          </div>
 
-          {chosen.length > 0 && (
-            <div className="space-y-2">
-              <span className={LABEL}>Where each platform sends applicants</span>
-              {chosen.map((p) => {
-                const cfg = config[p] || { mode: 'auto', url: '', code: previewCode(p) };
-                return (
-                  <div key={p} className="p-3 rounded-xl border border-[var(--border)] bg-[var(--input-bg)] space-y-2">
-                    <div className="flex items-center justify-between gap-2 flex-wrap">
-                      <span className="text-[12.5px] font-bold text-[var(--text-main)]">{p}</span>
-                      <div className="flex gap-1">
-                        {[['auto', 'Generate form link'], ['external', 'Paste external link']].map(([mode, label]) => (
-                          <button key={mode} type="button" onClick={() => setCfg(p, { mode })}
-                            className={`px-2 py-0.5 rounded-md text-[11px] font-bold border ${
-                              cfg.mode === mode
-                                ? 'border-[var(--accent-indigo)] bg-[var(--bg-card)] text-[var(--accent-indigo)]'
-                                : 'border-transparent text-[var(--text-muted)]'}`}>
-                            {label}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                    {cfg.mode === 'external' ? (
-                      <>
-                        <input value={cfg.url} onChange={(e) => setCfg(p, { url: e.target.value })}
-                          placeholder="https://…" className={FIELD} />
-                        <p className="text-[11px] text-[var(--accent-red)]">
-                          Applications made on that site will <strong>not</strong> appear in this
-                          pipeline — nothing sends them back here.
-                        </p>
-                      </>
-                    ) : (
-                      <div className="flex items-center gap-2 text-[11.5px] text-[var(--text-muted)]">
-                        <Link2 size={13} className="shrink-0" />
-                        <span className="font-mono truncate">{applyUrlFor(cfg.code)}</span>
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          )}
+            {mode === 'external' ? (
+              <div className="p-3 rounded-xl border border-[var(--border)] bg-[var(--input-bg)] space-y-2">
+                <input value={externalUrl} onChange={(e) => setExternalUrl(e.target.value)}
+                  placeholder="https://…" className={FIELD} />
+                <p className="text-[11px] text-[var(--accent-red)]">
+                  Applications made on that site will <strong>not</strong> appear in this
+                  pipeline — nothing sends them back here, and no source is recorded.
+                </p>
+              </div>
+            ) : (
+              <div className="p-3 rounded-xl border border-[var(--border)] bg-[var(--input-bg)] space-y-2">
+                <div className="flex items-center gap-2">
+                  <Link2 size={13} className="shrink-0 text-[var(--text-muted)]" />
+                  <span className="flex-1 font-mono text-[11.5px] text-[var(--text-main)] truncate">
+                    {applyUrl}
+                  </span>
+                  <button type="button" onClick={copyLink} title="Copy application link"
+                    className="p-1 rounded-md text-[var(--text-muted)] hover:text-[var(--accent-indigo)]">
+                    {copied ? <Check size={14} /> : <Copy size={14} />}
+                  </button>
+                </div>
+                <p className="text-[11.5px] text-[var(--text-muted)]">
+                  One link for this role. Share it on LinkedIn, Naukri, your careers page or
+                  a WhatsApp group — the form asks every applicant where they found the job,
+                  and that answer becomes their <strong>source</strong> in the candidate
+                  pipeline.
+                </p>
+              </div>
+            )}
+          </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
@@ -233,9 +219,9 @@ const CreatePostingModal = ({ onClose, onCreated }) => {
               className="h-9 px-4 rounded-lg border border-[var(--border)] text-[12px] font-bold text-[var(--text-muted)]">
               Cancel
             </button>
-            <button type="submit" disabled={saving || !jdNo || chosen.length === 0}
+            <button type="submit" disabled={saving || !jdNo}
               className="h-9 px-4 rounded-lg bg-[var(--accent-indigo)] text-white text-[12px] font-bold disabled:opacity-50">
-              {saving ? 'Publishing…' : `Publish to ${chosen.length || 0}`}
+              {saving ? 'Publishing…' : 'Publish'}
             </button>
           </div>
         </form>

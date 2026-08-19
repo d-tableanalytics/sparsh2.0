@@ -3,7 +3,7 @@ import { NavLink, useLocation } from 'react-router-dom';
 import {
   UserCog, ClipboardList, ScrollText, Megaphone, UserCircle,
   ClipboardCheck, ListChecks, CalendarDays, FileSignature, UserPlus, PieChart,
-  BadgeCheck, Link2,
+  BadgeCheck, Building, Target, PhoneCall, Users2, Phone,
 } from 'lucide-react';
 
 /**
@@ -35,9 +35,21 @@ const TABS = [
   // real process: the letter is issued after the offer is accepted and before joining.
   { label: 'Appointments',     to: '/hrms/appointments', icon: BadgeCheck },
   { label: 'Onboarding',       to: '/hrms/onboarding',   icon: UserPlus },
-  // Phase 11-R, Item 1 — the register of every candidate-facing link the pipeline issues.
-  { label: 'Links',            to: '/hrms/links',        icon: Link2 },
   { label: 'Reports',          to: '/hrms/reports',      icon: PieChart },
+  // ── Internal track ── these three ARE hiring stages, so they belong in the strip beside
+  // the others. Probation and Exceptions are governance rather than pipeline and live in
+  // the sidebar instead; the two lists must stay disjoint (see Sidebar.jsx).
+  { label: 'Internal reqs',    to: '/hrms/internal-requisitions', icon: Building },
+  { label: 'Scorecards',       to: '/hrms/scorecards',   icon: Target },
+  { label: 'References',       to: '/hrms/reference-checks', icon: PhoneCall },
+  // Phase INT-2: the shortlisting committee (SOP §5). A hiring STAGE -- it sits between
+  // screening and the final interview and gates `Selected` -- so it belongs in the strip.
+  // Pre-boarding, the talent pool, the salary bands, the communication templates and the
+  // policy register are governance and live in the sidebar; the two lists stay disjoint.
+  { label: 'Shortlisting',     to: '/hrms/shortlist-reviews', icon: Users2 },
+  // Phase INT-4: the telephonic screen (SOP step 5). A hiring STAGE -- it sits between CV
+  // screening and the panel, and gates interview scheduling -- so it belongs in the strip.
+  { label: 'Phone screen',     to: '/hrms/telephonic-screening', icon: Phone },
 ];
 
 // Prefix match, so a detail route under a stage keeps that stage's tab lit. Anything added
