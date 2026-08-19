@@ -5,7 +5,6 @@ from typing import Optional, Dict, Any
 from app.db.mongodb import get_collection
 from datetime import datetime, timedelta, timezone
 from bson import ObjectId
-import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import asyncio
@@ -450,7 +449,17 @@ async def log_notification(user_id: str, contact: str, channel: str, slug: str, 
 async def send_email_notification(to_email: str, subject: str, message: str, user_id: str = None, slug: str = "manual", cc: list = None, meta: dict = None):
     """`cc` and `meta` are optional and default to None, so existing callers are unaffected.
     `cc` exists for the TPMS escalation ladder, which addresses owners/HODs directly and
-    copies SMOps; `meta` records which activity a send belonged to, for the Logs Report."""
+    copies SMOps; `meta` records which activity a send belonged to, for the Logs Report.
+
+    The message is built exactly as before — same From/To/Cc/Subject headers and HTML body.
+    What changed is underneath: delivery goes through app.services.smtp_delivery, which
+    reuses one SMTP session across consecutive sends, paces them, retries a dropped socket
+    with backoff, and stops calling out entirely once too many sends fail in a row. Opening
+    a fresh authenticated connection per email is what got the Gmail account throttled.
+
+    The contract here is unchanged: returns True/False, never raises, and writes exactly one
+    `notifications` row per call with the same fields and statuses as before.
+    """
     if not settings.SMTP_USERNAME or not settings.SMTP_PASSWORD:
         logger.warning("SMTP credentials not configured")
         return False
@@ -465,13 +474,15 @@ async def send_email_notification(to_email: str, subject: str, message: str, use
         msg['Subject'] = subject
         msg.attach(MIMEText(message, 'html'))
 
-        server = smtplib.SMTP(settings.SMTP_SERVER, settings.SMTP_PORT)
-        server.starttls()
-        server.login(settings.SMTP_USERNAME, settings.SMTP_PASSWORD)
-        server.send_message(msg, to_addrs=[to_email] + cc_list)
-        server.quit()
-        await log_notification(user_id, to_email, "email", slug, message, "sent", meta=meta)
-        return True
+        from app.services import smtp_delivery
+        sent, error = await smtp_delivery.send_message(msg, [to_email] + cc_list)
+        if sent:
+            await log_notification(user_id, to_email, "email", slug, message, "sent", meta=meta)
+            return True
+
+        logger.error(f"Failed to send email: {error}")
+        await log_notification(user_id, to_email, "email", slug, message, "failed", error, meta=meta)
+        return False
     except Exception as e:
         logger.error(f"Failed to send email: {e}")
         await log_notification(user_id, to_email, "email", slug, message, "failed", str(e), meta=meta)

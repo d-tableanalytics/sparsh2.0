@@ -63,6 +63,13 @@ import ReminderRuleAdmin from './features/tpms/admin/pages/ReminderRuleAdmin';
 import FormQuestionAdmin from './features/tpms/admin/pages/FormQuestionAdmin';
 import FormLinks from './features/tpms/admin/pages/FormLinks';
 import ReviewReport from './features/tpms/common/ReviewReport';
+// TPMS ▸ Leadership Score (additive — no existing TPMS route is changed).
+import LeadershipCycles from './features/tpms/admin/pages/LeadershipCycles';
+import LeadershipSubjects from './features/tpms/admin/pages/LeadershipSubjects';
+import LeadershipQuestions from './features/tpms/admin/pages/LeadershipQuestions';
+import LeadershipTemplate from './features/tpms/admin/pages/LeadershipTemplate';
+import LeadershipReport from './features/tpms/common/LeadershipReport';
+import LeadershipFormPage from './features/tpms/leadership/LeadershipFormPage';
 import { CompanyProvider } from './features/tpms/smops/CompanyContext';
 import SmopsDashboard from './features/tpms/smops/pages/SmopsDashboard';
 import HodActivity from './features/tpms/smops/pages/HodActivity';
@@ -122,6 +129,12 @@ const AppRoutes = () => {
           it back). The token selects WHICH of the four forms renders — the backend also checks
           the signed-in user is the assignment's respondent, so a forwarded link opens nothing. */}
       <Route path="/f/:token" element={<PrivateRoute><AssignedFormPage /></PrivateRoute>} />
+
+      {/* TPMS Leadership Score feedback form. Its own route so the existing /f/:token flow
+          for the four original forms is untouched. Same two-check security model: the
+          token must resolve to a live assignment AND the signed-in user must be its
+          feedback giver, so a forwarded link opens nothing. */}
+      <Route path="/lf/:token" element={<PrivateRoute><LeadershipFormPage /></PrivateRoute>} />
       <Route path="/forgot-password" element={<ForgotPassword />} />
 
       <Route path="/" element={<PrivateRoute><Dashboard /></PrivateRoute>} />
@@ -191,6 +204,12 @@ const AppRoutes = () => {
         <Route path="form-questions" element={<FormQuestionAdmin />} />
         <Route path="form-links"     element={<FormLinks />} />
         <Route path="reviews"        element={<ReviewReport />} />
+        {/* Leadership Score — additive; the routes above are unchanged. */}
+        <Route path="leadership"           element={<LeadershipCycles />} />
+        <Route path="leadership/subjects"  element={<LeadershipSubjects />} />
+        <Route path="leadership/questions" element={<LeadershipQuestions />} />
+        <Route path="leadership/template"  element={<LeadershipTemplate />} />
+        <Route path="leadership/report"    element={<LeadershipReport />} />
       </Route>
 
       {/* TPMS ▸ SMOPS PANEL (any internal user) — rendered inside the main app layout.
@@ -203,6 +222,11 @@ const AppRoutes = () => {
         <Route path="hod-activity"  element={<HodActivity />} />
         <Route path="tasks"         element={<SmopsEmployeeTask />} />
         <Route path="reviews"       element={<ReviewReport title="Review Report" subtitle="Detailed evaluation and feedback for your companies." />} />
+        {/* Leadership Score for the client/SMOPS side. The report is self-scoping: HR sees
+            every enrolled leader, a manager their direct reports, a leader only their own. */}
+        <Route path="leadership"           element={<LeadershipReport />} />
+        <Route path="leadership/cycles"    element={<LeadershipCycles />} />
+        <Route path="leadership/subjects"  element={<LeadershipSubjects />} />
       </Route>
 
 

@@ -34,6 +34,10 @@ logger = logging.getLogger(__name__)
 ASSIGNMENT_COLLECTION = "tpms_form_assignments"
 
 # ─── Form status (the lifecycle of the LINK, not of the schedule) ───
+# A link exists but has NOT been mailed yet. Rows used to be created as "sent", so a link
+# that was minted and never delivered still read as Sent in TPMS ▸ Form Mail Logs. The real
+# delivery is what promotes pending -> sent (see mark_email_result).
+STATUS_PENDING = "pending"
 STATUS_SENT = "sent"           # link generated and mailed, not yet opened
 STATUS_OPENED = "opened"       # recipient loaded the form at least once
 STATUS_SUBMITTED = "submitted" # answers recorded — terminal
@@ -176,7 +180,8 @@ async def create_assignment(*, form_type: str, form_title: str, activity: str, p
         "respondent_role": _governance_role(respondent),
         "assigned_by_id": str((assigned_by or {}).get("_id") or ""),
         "assigned_by_name": _display_name(assigned_by or {}),
-        "status": STATUS_SENT,
+        # Not "sent": nothing has been mailed yet. mark_email_result promotes it.
+        "status": STATUS_PENDING,
         "email_status": EMAIL_PENDING,
         "email_error": None,
         "whatsapp_status": None,
@@ -249,13 +254,19 @@ async def assignments_for_event(event: dict, actor: Optional[dict] = None) -> li
 async def mark_email_result(assignment_id, status: str, error: Optional[str] = None) -> None:
     """Record what happened when the link was mailed, for the Form Mail Logs status column."""
     now = datetime.now(timezone.utc)
+    oid = assignment_id if isinstance(assignment_id, ObjectId) else ObjectId(str(assignment_id))
     updates = {"email_status": status, "email_error": error, "updated_at": now}
     if status == EMAIL_SENT:
         updates["sent_at"] = now
-    await get_collection(ASSIGNMENT_COLLECTION).update_one(
-        {"_id": assignment_id if isinstance(assignment_id, ObjectId) else ObjectId(str(assignment_id))},
-        {"$set": updates},
-    )
+    col = get_collection(ASSIGNMENT_COLLECTION)
+    await col.update_one({"_id": oid}, {"$set": updates})
+
+    # A real delivery is what turns a minted link into a Sent one. Done as a separate,
+    # FILTERED update so it can only ever move pending -> sent: a resend of a link the
+    # respondent has already opened or submitted must not drag its status backwards.
+    if status == EMAIL_SENT:
+        await col.update_one({"_id": oid, "status": STATUS_PENDING},
+                             {"$set": {"status": STATUS_SENT}})
 
 
 async def mark_whatsapp_result(assignment_id, status: str) -> None:
@@ -301,10 +312,10 @@ async def resolve_token(token: str) -> Optional[dict]:
 async def mark_opened(doc: dict) -> None:
     """First open moves Sent → Opened. Later opens only refresh nothing: `opened_at` records the
     FIRST view, which is what the log column means."""
-    if doc.get("status") != STATUS_SENT:
+    if doc.get("status") not in (STATUS_PENDING, STATUS_SENT):
         return
     await get_collection(ASSIGNMENT_COLLECTION).update_one(
-        {"_id": doc["_id"], "status": STATUS_SENT},
+        {"_id": doc["_id"], "status": {"$in": [STATUS_PENDING, STATUS_SENT]}},
         {"$set": {"status": STATUS_OPENED,
                   "opened_at": datetime.now(timezone.utc),
                   "updated_at": datetime.now(timezone.utc)}},

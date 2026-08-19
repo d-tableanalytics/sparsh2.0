@@ -38,6 +38,14 @@ COLL_REMINDER_LOGS       = "tpms_reminder_logs"   # H10 — per-reminder send le
 COLL_WHATSAPP_TEMPLATES  = "tpms_whatsapp_templates"  # H1 — Meta WhatsApp template config
 COLL_META_TEMPLATES      = "tpms_meta_whatsapp_templates"  # H1b — templates authored in TPMS
                                                            #       and submitted to Meta for approval
+# Delivery-idempotency ledger: one row per (event, escalation stage, recipient) that has
+# been mailed. The ladder claims a row BEFORE sending, so however many times it runs — a
+# restart mid-run, two overlapping runs — each person is mailed once per stage. Purely
+# additive: it is written only by new code and never rewrites an event or a notification.
+COLL_ESCALATION_SENDS    = "tpms_escalation_sends"
+# Durable "this daily job already ran" claim. The scheduler previously held this in memory,
+# so any container restart replayed the whole day's escalation ladder from scratch.
+COLL_JOB_RUNS            = "tpms_job_runs"
 
 # Discriminator marking a calendar event as a TPMS activity.
 TPMS_EVENT_KIND = "tpms_activity"
@@ -620,4 +628,11 @@ TPMS_INDEXES = [
     # languages is two templates, so the pair is what must be unique.
     (COLL_META_TEMPLATES,      [("name", 1), ("language", 1)],                       {"unique": True, "name": "uniq_name_language"}),
     (COLL_META_TEMPLATES,      [("status", 1)],                                      {"name": "by_status"}),
+    # The unique index IS the de-duplication: the claim is an insert, and a duplicate key
+    # error is what tells the ladder this person was already mailed for this stage.
+    (COLL_ESCALATION_SENDS,    [("event_id", 1), ("stage", 1), ("recipient", 1)],    {"unique": True, "name": "uniq_event_stage_recipient"}),
+    (COLL_ESCALATION_SENDS,    [("sent_on", 1)],                                     {"name": "by_sent_on"}),
+    # Drives the undelivered-mail retry sweep (tpms_escalation_service.retry_failed_escalation_mail).
+    (COLL_ESCALATION_SENDS,    [("delivered", 1), ("next_retry_at", 1)],             {"name": "by_delivered_retry"}),
+    (COLL_JOB_RUNS,            [("job", 1), ("stamp", 1)],                           {"unique": True, "name": "uniq_job_stamp"}),
 ]

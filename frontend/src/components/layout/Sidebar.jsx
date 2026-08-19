@@ -6,7 +6,8 @@ import {
   Settings, Building2,
   PieChart, MessageSquare, LogOut, Layers, Copy, Calendar, Sparkles, PlayCircle, Target, BarChart3, Library, X,
   Forward, Bell, Trash2, ChevronDown, Activity, CalendarDays, Database, LayoutGrid,
-  Gauge, GitBranch, AlertTriangle, UserCog, ListChecks, ScrollText, UserCircle, ClipboardList, ClipboardCheck, Link2
+  Gauge, GitBranch, AlertTriangle, UserCog, ListChecks, ScrollText, UserCircle, ClipboardList, ClipboardCheck, Link2,
+  Award
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { canAccessTaskManagement } from '../../utils/taskAccess';
@@ -56,6 +57,9 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
     { name: 'HOD Activity', path: '/tpms/smops/hod-activity', icon: Activity },
     { name: 'Employee Task', path: '/tpms/smops/tasks', icon: ClipboardList },
     { name: 'Review Report', path: '/tpms/smops/reviews', icon: BarChart3 },
+    // Leadership Score — every client-side user gets the result view; the page itself
+    // scopes what they see (HR: all leaders, manager: direct reports, leader: their own).
+    { name: 'Leadership Score', path: '/tpms/smops/leadership', icon: Award, end: true },
   ];
   const tpmsSubmodules = isTpmsClientUser
     ? tpmsClientForms
@@ -75,6 +79,17 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
         { name: 'Reminder Rules', path: '/tpms/admin/reminder-rules', icon: AlertTriangle },
         { name: 'Form Questions', path: '/tpms/admin/form-questions', icon: ClipboardCheck },
         { name: 'Form Links', path: '/tpms/admin/form-links', icon: Link2 },
+        // Leadership Score (additive group — the entries above are unchanged).
+        {
+          name: 'Leadership Score', path: '/tpms/admin/leadership', icon: Award,
+          children: [
+            { name: 'Cycles', path: '/tpms/admin/leadership', icon: CalendarDays, end: true },
+            { name: 'Leaders & Givers', path: '/tpms/admin/leadership/subjects', icon: UserCog },
+            { name: 'Questions', path: '/tpms/admin/leadership/questions', icon: ClipboardCheck },
+            { name: 'Invitation Email', path: '/tpms/admin/leadership/template', icon: ScrollText },
+            { name: 'Results', path: '/tpms/admin/leadership/report', icon: BarChart3 },
+          ],
+        },
         { name: 'Logs Report', path: '/tpms/admin/logs', icon: ScrollText },
         { name: 'Review Report', path: '/tpms/admin/reviews', icon: BarChart3 },
       ]
@@ -84,6 +99,7 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
         { name: 'HOD Activity', path: '/tpms/smops/hod-activity', icon: Activity },
         { name: 'Employee Task', path: '/tpms/smops/tasks', icon: ClipboardList },
         { name: 'Review Report', path: '/tpms/smops/reviews', icon: BarChart3 },
+        { name: 'Leadership Score', path: '/tpms/smops/leadership', icon: Award, end: true },
       ];
 
   const links = [

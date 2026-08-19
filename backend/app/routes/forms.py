@@ -1196,10 +1196,22 @@ async def resend_form_assignment(assignment_id: str, current_user: dict = Depend
             f'<p style="font-size:12px;color:#6b7280">{link}</p></div>')
     from app.services.notification_service import send_email_notification
     try:
-        await send_email_notification(email, f"[{title}] Your form link – {period}", html,
-                                      user_id=doc.get("respondent_id"), slug=f"tpms_form_{doc.get('form_type')}_resend")
+        # send_email_notification returns False on failure and never raises, so the result
+        # must be captured — otherwise a failed resend reports 200 OK and stamps the link
+        # as delivered, and the admin has no idea the recipient still has nothing.
+        delivered = await send_email_notification(
+            email, f"[{title}] Your form link – {period}", html,
+            user_id=doc.get("respondent_id"), slug=f"tpms_form_{doc.get('form_type')}_resend")
+        if not delivered:
+            await mark_email_result(doc["_id"], EMAIL_FAILED, "Delivery failed")
+            raise HTTPException(
+                status_code=502,
+                detail="The mail server did not accept this message. The link has not been "
+                       "resent — please try again shortly.")
         await mark_email_result(doc["_id"], EMAIL_SENT, None)
         return {"ok": True, "email": email}
+    except HTTPException:
+        raise
     except Exception as e:
         await mark_email_result(doc["_id"], EMAIL_FAILED, str(e))
         raise HTTPException(status_code=500, detail=f"Send failed: {e}")
