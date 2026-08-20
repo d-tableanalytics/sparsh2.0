@@ -37,11 +37,12 @@ from bson import ObjectId
 
 from app.db.mongodb import get_collection
 from app.models.leadership import (
+    COLL_LS_ASSIGNMENTS,
     COLL_LS_CYCLES, COLL_LS_QUESTIONS, COLL_LS_RESPONSES, COLL_LS_SCORES, COLL_LS_SUBJECTS,
     CYCLE_CLOSED, CYCLE_DRAFT, CYCLE_OPEN,
     DEGREE_360, DEGREE_RELATIONS,
     LEVELS, LEVEL_LABELS, LEVEL_THEMES,
-    RELATIONS, RELATION_LABELS,
+    RECOMMENDED_PER_RELATION, RELATIONS, RELATION_LABELS,
     SCALE_MAX, TOTAL_WEIGHTAGE, WEIGHTAGE_EPSILON,
     all_seed_rows, cycle_label, cycle_period, current_cycle, seed_rows_for_level,
 )
@@ -233,6 +234,64 @@ async def assert_dispatchable(company_id: str, cycle: str) -> dict:
             f"{expiry.strftime('%d %b %Y') if expiry else 'its closing date'}. "
             "Feedback links have expired, so nothing further can be sent.")
     return cyc
+
+
+async def panel_shortfall(company_id: str, cycle: str, subject_id: str) -> Dict[str, int]:
+    """How many givers each relation is still short of, for one leader's panel.
+
+    The document is specific about who is asked: "hum aapke 8 logon se feedback lenge — 2
+    superiors, 2 peers, 2 other departments, aur 2 direct reports". That is not decoration.
+    A single superior's rating IS that superior's opinion, and a leader reading a 360° score
+    built from two juniors is reading something the label does not describe.
+
+    Returns {relation: missing} for every relation the cycle's degree collects. An empty
+    dict means the panel is complete. Reporting the shortfall rather than a bare boolean
+    lets the caller tell HR exactly who is still needed.
+    """
+    cyc = await get_cycle(company_id, cycle)
+    wanted = DEGREE_RELATIONS.get((cyc or {}).get("degree") or DEGREE_360, RELATIONS)
+
+    rows = await get_collection(COLL_LS_ASSIGNMENTS).find({
+        "company_id": str(company_id), "cycle": str(cycle), "subject_id": str(subject_id),
+    }).to_list(500)
+
+    have: Dict[str, int] = {}
+    for r in rows:
+        rel = str(r.get("relation") or "")
+        have[rel] = have.get(rel, 0) + 1
+
+    return {rel: RECOMMENDED_PER_RELATION - have.get(rel, 0)
+            for rel in wanted
+            if have.get(rel, 0) < RECOMMENDED_PER_RELATION}
+
+
+def describe_shortfall(missing: Dict[str, int]) -> str:
+    """'2 x Supervisor, 1 x Junior / Direct report' — for an error a human reads.
+
+    Counted rather than pluralised: the labels already carry parentheses ("Peer (same
+    department)"), and appending an "s" to those reads as a typo.
+    """
+    return ", ".join(f"{n} x {RELATION_LABELS.get(rel, rel)}" for rel, n in missing.items())
+
+
+async def incomplete_panels(company_id: str, cycle: str) -> Dict[str, dict]:
+    """{subject_id: {name, missing, summary}} for every enrolled leader whose panel is short.
+
+    Used by the cycle-wide dispatch, which mails the leaders that ARE ready and reports the
+    rest rather than refusing the whole batch — one unfinished panel should not hold up
+    seven finished ones.
+    """
+    out: Dict[str, dict] = {}
+    for s in await get_collection(COLL_LS_SUBJECTS).find({
+        "company_id": str(company_id), "cycle": str(cycle),
+    }).to_list(500):
+        sid = str(s.get("subject_id"))
+        missing = await panel_shortfall(company_id, cycle, sid)
+        if missing:
+            out[sid] = {"subject_name": s.get("subject_name") or sid,
+                        "missing": missing,
+                        "summary": describe_shortfall(missing)}
+    return out
 
 
 async def create_cycle(company_id: str, payload, user: dict) -> dict:

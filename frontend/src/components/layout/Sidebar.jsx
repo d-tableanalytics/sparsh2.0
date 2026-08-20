@@ -12,6 +12,7 @@ import {
 import { useAuth } from '../../context/AuthContext';
 import { canAccessTaskManagement } from '../../utils/taskAccess';
 import { canAccessTpms } from '../../features/tpms/access';
+import { canManage as canManageLeadershipCycle } from '../../features/tpms/leadership/leadershipUtils';
 
 import logo1 from '../../assets/Sparsh Magic  Logo PNG1.png';
 import logo2 from '../../assets/Sparsh Magic  Logo PNG2.png';
@@ -44,6 +45,10 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
   // panel a user lands on: superadmin/admin → Admin panel, every other internal → SMOPS.
   const isTpmsAdminUser = ['superadmin', 'admin'].includes(user?.role);
   const isTpmsClientUser = ['clientadmin', 'clientuser'].includes(user?.role);
+  // Who may run a Leadership Score cycle from the client side — HR or the client admin.
+  // Reuses the same predicate the Leadership pages use, so the menu can never offer a page
+  // the page itself will refuse.
+  const canManageLeadership = canManageLeadershipCycle(user);
   // Client-side users share the SMOPS submodules (Dashboard, HOD Activity, Employee Task,
   // Review Report, My Profile).
   //
@@ -59,7 +64,22 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
     { name: 'Review Report', path: '/tpms/smops/reviews', icon: BarChart3 },
     // Leadership Score — every client-side user gets the result view; the page itself
     // scopes what they see (HR: all leaders, manager: direct reports, leader: their own).
-    { name: 'Leadership Score', path: '/tpms/smops/leadership', icon: Award, end: true },
+    //
+    // HR and the client admin also RUN the cycle, and those pages had no entry here at all —
+    // the routes existed and the API allowed them, so the work was reachable only by typing
+    // the URL. They are listed for whoever `canManage` admits (mirrors _can_manage on the
+    // server: HR + clientadmin), and no wider: choosing the feedback panel is HR-only, which
+    // the Leaders & Givers page and the API both still enforce on their own.
+    canManageLeadership
+      ? {
+        name: 'Leadership Score', path: '/tpms/smops/leadership', icon: Award,
+        children: [
+          { name: 'Results', path: '/tpms/smops/leadership', icon: BarChart3, end: true },
+          { name: 'Cycles', path: '/tpms/smops/leadership/cycles', icon: CalendarDays },
+          { name: 'Leaders & Givers', path: '/tpms/smops/leadership/subjects', icon: UserCog },
+        ],
+      }
+      : { name: 'Leadership Score', path: '/tpms/smops/leadership', icon: Award, end: true },
   ];
   const tpmsSubmodules = isTpmsClientUser
     ? tpmsClientForms

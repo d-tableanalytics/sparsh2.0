@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useLocation } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   CalendarRange, Plus, RefreshCw, AlertTriangle, CheckCircle2, X, ShieldAlert,
@@ -160,6 +160,11 @@ const CycleModal = ({ config, existing, onClose, onSubmit }) => {
 const LeadershipCycles = () => {
   const { user, staff, companyOptions, companyId, setCompanyId } = useLeadershipCompany();
   const manage = canManage(user);
+  // This page is mounted on BOTH panels — /tpms/admin/leadership for internal staff and
+  // /tpms/smops/leadership/cycles for HR and the client admin — so "Leaders →" must stay on
+  // whichever panel the visitor is already in. Hardcoding /tpms/admin sent a client-side user
+  // into a route guarded by `RequireTpms admin`, which bounced them to their dashboard.
+  const panelBase = useLocation().pathname.startsWith('/tpms/admin') ? '/tpms/admin' : '/tpms/smops';
   const [adding, setAdding] = useState(false);
   const [busy, setBusy] = useState('');
   const [notice, setNotice] = useState('');
@@ -290,7 +295,7 @@ const LeadershipCycles = () => {
                   <Td align="center"><Pill label={c.status} tone={c.status} /></Td>
                   <Td align="right">
                     <div className="inline-flex items-center gap-1.5 justify-end flex-wrap">
-                      <Link to={`/tpms/admin/leadership/subjects?cycle=${c.cycle}`}
+                      <Link to={`${panelBase}/leadership/subjects?cycle=${c.cycle}`}
                         className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11.5px] font-bold text-[var(--accent-indigo)] bg-[var(--accent-indigo-bg)] border border-[var(--accent-indigo-border)] hover:opacity-90 transition-opacity">
                         Leaders <ArrowRight size={12} />
                       </Link>

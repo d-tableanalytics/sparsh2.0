@@ -97,6 +97,15 @@ RELATION_LABELS: Dict[str, str] = {
 RECOMMENDED_PER_RELATION = 2
 RECOMMENDED_PANEL_SIZE = RECOMMENDED_PER_RELATION * len(RELATIONS)
 
+# Fewest responses a score may ever be computed from.
+#
+# The whole module rests on "ye feedback completely confidential hoga". A score built from
+# one or two responses breaks that promise arithmetically: HR knows the panel, the result
+# carries a per-relation breakdown, and with a single response in a relation the rating IS
+# that person's rating, named. Three is the smallest number that keeps an individual answer
+# inside an average. It is a floor, not a default — HR can still require more.
+MIN_RESPONSES_FLOOR = 3
+
 # 180° collects from superiors and same-department peers; 360° from everyone.
 # ("The feedback may be 180 degree or 360 degree.")
 DEGREE_180 = "180"
@@ -544,17 +553,30 @@ LEADERSHIP_QUESTION_SEED: Dict[str, List[dict]] = {
             ),
         },
         {
-            # NOTE: the source prints these four option scores in an order that rewards
-            # the weaker statements (option "a" = 1, option "c" = 4). Preserved EXACTLY as
-            # printed — this is the single most important reported issue to confirm.
+            # CORRECTED — the only place this file departs from the printed source.
+            #
+            # The document prints these four options in reverse merit order: "Goals are
+            # aligned and largely executed" scored 1 while "Goals are unclear and execution
+            # is inconsistent" scored 4, so the best answer earned the lowest number and the
+            # worst earned the second-highest. Seeded verbatim, every L7 leader lost roughly
+            # a sixth of their total weightage for doing the right thing, and the error is
+            # invisible in the result — it just reads as a low score.
+            #
+            # The statements are unchanged and each keeps the letter it carries in the
+            # document ("a".."d"), so any row can still be traced back to the printed page;
+            # only the score attached to each has been put in merit order, and they are
+            # listed worst-first to match every other question here. Nothing else in §3 of
+            # docs/LEADERSHIP_SCORE_IMPLEMENTATION_PLAN.md is touched — the mismatched
+            # prompts (L5 Q3/Q4/Q5, L7 Q1/Q2) still need the business to say what was meant,
+            # whereas this one has only one defensible reading.
             "item_id": "L7Q6",
             "title": "Goal alignment and strategy execution",
             "prompt": "How do you rate him towards goal alignment and strategy execution?",
             "options": _opts(
-                ("a", "Goals are aligned and largely executed", 1),
-                ("b", "Goals are embedded and strategy drives action", 2),
-                ("c", "Goals are unclear and execution is inconsistent", 4),
-                ("d", "Goals are communicated, execution is uneven", 5),
+                ("c", "Goals are unclear and execution is inconsistent", 1),
+                ("d", "Goals are communicated, execution is uneven", 2),
+                ("a", "Goals are aligned and largely executed", 4),
+                ("b", "Goals are embedded and strategy drives action", 5),
             ),
         },
     ],
@@ -601,14 +623,34 @@ def all_seed_rows() -> List[dict]:
 # ─────────────────────────────────────────────────────────────
 # Request payloads
 # ─────────────────────────────────────────────────────────────
+def _validate_threshold(v) -> int:
+    """Shared by CycleCreate and CycleUpdate.
+
+    CycleUpdate used to declare `min_responses` with no validator at all, so PATCH could set
+    any integer a caller liked — including 0 or a negative, which would have shown a score
+    computed from nothing. Both paths now run the same check.
+    """
+    # NB: `int(v or FLOOR)` would quietly turn an explicit 0 into the floor instead of
+    # refusing it. The None case belongs to the caller (CycleUpdate), not here.
+    n = int(v)
+    if n < MIN_RESPONSES_FLOOR:
+        raise ValueError(
+            f"min_responses cannot be below {MIN_RESPONSES_FLOOR}: a score built from fewer "
+            "responses can be traced back to an individual giver, which this module promises "
+            "it never will be.")
+    if n > RECOMMENDED_PANEL_SIZE:
+        raise ValueError(f"min_responses cannot exceed the panel size ({RECOMMENDED_PANEL_SIZE})")
+    return n
+
+
 class CycleCreate(BaseModel):
     company_id: Optional[str] = None
     cycle: Optional[str] = None                 # defaults to the current 2-month window
     degree: str = DEGREE_360
-    # How many responses a subject needs before a score is shown. The document does not
-    # define a threshold, so the default of 1 imposes none; HR may raise it per cycle to
-    # strengthen anonymity.
-    min_responses: int = 1
+    # How many responses a subject needs before a score is shown. The document sets no
+    # threshold, so this defaults to the anonymity floor rather than to 1 — see
+    # MIN_RESPONSES_FLOOR. HR may raise it per cycle, never lower it.
+    min_responses: int = MIN_RESPONSES_FLOOR
     notes: Optional[str] = ""
 
     @field_validator("degree")
@@ -622,10 +664,7 @@ class CycleCreate(BaseModel):
     @field_validator("min_responses")
     @classmethod
     def _sane_threshold(cls, v: int) -> int:
-        n = int(v or 1)
-        if n < 1 or n > RECOMMENDED_PANEL_SIZE:
-            raise ValueError(f"min_responses must be between 1 and {RECOMMENDED_PANEL_SIZE}")
-        return n
+        return _validate_threshold(v)
 
 
 class CycleUpdate(BaseModel):
@@ -633,6 +672,11 @@ class CycleUpdate(BaseModel):
     min_responses: Optional[int] = None
     status: Optional[str] = None
     notes: Optional[str] = None
+
+    @field_validator("min_responses")
+    @classmethod
+    def _sane_threshold(cls, v):
+        return None if v is None else _validate_threshold(v)
 
     @field_validator("degree")
     @classmethod

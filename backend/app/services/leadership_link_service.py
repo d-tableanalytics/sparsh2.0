@@ -380,7 +380,8 @@ async def send_assignment_email(doc: dict, template: Optional[dict] = None) -> d
 
 
 async def dispatch_pending(company_id: str, cycle: str,
-                           subject_id: Optional[str] = None) -> dict:
+                           subject_id: Optional[str] = None,
+                           skip_subjects: Optional[list] = None) -> dict:
     """Mail every not-yet-submitted link for a cycle (or one subject within it).
 
     Two things are skipped rather than mailed:
@@ -392,6 +393,11 @@ async def dispatch_pending(company_id: str, cycle: str,
     Neither skip loses a link: `skipped_recent` is reported back so the caller can say
     exactly how many were held, and a single giver can always be re-mailed immediately
     through the explicit per-assignment resend.
+
+    `skip_subjects` is the third exclusion: leaders whose panel does not yet meet the
+    document's 2-per-relation composition. The caller decides who those are (see
+    leadership_service.incomplete_panels) — this function only honours the list, so one
+    unfinished panel never holds up the leaders who are ready.
     """
     query: dict = {
         "company_id": str(company_id),
@@ -400,6 +406,8 @@ async def dispatch_pending(company_id: str, cycle: str,
     }
     if subject_id:
         query["subject_id"] = str(subject_id)
+    elif skip_subjects:
+        query["subject_id"] = {"$nin": [str(x) for x in skip_subjects]}
 
     rows = await get_collection(COLL_LS_ASSIGNMENTS).find(query).to_list(2000)
     now = datetime.now(timezone.utc)

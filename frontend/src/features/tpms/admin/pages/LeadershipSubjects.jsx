@@ -497,11 +497,20 @@ const LeadershipSubjects = () => {
     setNotice('');
     try {
       const res = await dispatchLeadershipLinks(companyId, cycle);
-      const { sent = 0, failed = 0, skipped_recent: held = 0, cooldown_hours: cd = 24 } = res.data || {};
+      const {
+        sent = 0, failed = 0, skipped_recent: held = 0, cooldown_hours: cd = 24,
+        skipped_incomplete: incomplete = [],
+      } = res.data || {};
       const parts = [`${sent} link${sent === 1 ? '' : 's'} emailed`];
       if (failed) parts.push(`${failed} failed`);
       // Say what was held and why, so a second click reads as deliberate rather than broken.
       if (held) parts.push(`${held} already emailed in the last ${cd}h and skipped`);
+      // Leaders whose panel is still short are named rather than counted: "2 skipped" leaves
+      // HR hunting for which two, and the whole point is that they can go and finish them.
+      if (incomplete.length) {
+        parts.push(`${incomplete.length} panel${incomplete.length === 1 ? '' : 's'} not yet complete `
+          + `(${incomplete.map((x) => `${x.subject_name} needs ${x.needs}`).join('; ')})`);
+      }
       setNotice(`${parts.join(', ')}.`);
       await reload();
     } catch (e) {

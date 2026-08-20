@@ -472,7 +472,33 @@ async def dispatch(cycle: str, subject_id: Optional[str] = Query(None),
         await svc.assert_dispatchable(cid, cycle)
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
-    return await links.dispatch_pending(cid, cycle, subject_id)
+
+    # The panel composition the document specifies — 2 per relation for the degree being
+    # collected — is enforced HERE rather than when the panel is saved, so HR can still
+    # build a panel over several sittings. It is the mail going out that turns an incomplete
+    # panel into a real problem: once a giver has been invited, the score that follows is
+    # labelled 360° whatever it was actually built from.
+    if subject_id:
+        missing = await svc.panel_shortfall(cid, cycle, subject_id)
+        if missing:
+            raise HTTPException(
+                status_code=409,
+                detail=("This panel is not complete yet — it still needs "
+                        f"{svc.describe_shortfall(missing)}. The document asks for 2 givers per "
+                        "relation so no single person's rating decides the score."))
+        return await links.dispatch_pending(cid, cycle, subject_id)
+
+    # Cycle-wide: mail the leaders who ARE ready and name the ones who are not. Refusing the
+    # whole batch because one panel of eight is unfinished would punish the other seven.
+    blocked = await svc.incomplete_panels(cid, cycle)
+    result = await links.dispatch_pending(cid, cycle, skip_subjects=list(blocked.keys()))
+    if blocked:
+        result["skipped_incomplete"] = [
+            {"subject_id": sid, "subject_name": info["subject_name"], "needs": info["summary"]}
+            for sid, info in blocked.items()
+        ]
+        result["skipped_incomplete_count"] = len(blocked)
+    return result
 
 
 @router.post("/assignments/{assignment_id}/resend")

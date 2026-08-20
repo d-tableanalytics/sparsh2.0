@@ -157,9 +157,14 @@ Found while reading the question tables. **Fix before seeding the question maste
    priority-setting ("Everything feels urgent", "Clear priorities aligned to goals"). Q4 asks
    about making the team accountable but its options describe communication ("Causes confusion
    or mixed messages"). Q5 then asks about priorities again with accountability options.
-2. **L7+ Q6 scores are inverted.** "Goals are aligned and largely executed" scores **1**;
-   "Goals are unclear and execution is inconsistent" scores **4**. As written, the worst answer
-   earns the second-highest score.
+2. ~~**L7+ Q6 scores are inverted.**~~ **FIXED in the seed.** "Goals are aligned and largely
+   executed" scored **1** while "Goals are unclear and execution is inconsistent" scored **4**,
+   so the worst answer earned the second-highest score and every L7 leader lost roughly a sixth
+   of their weightage for doing the right thing. The four statements are unchanged and each
+   keeps its printed letter; only the score attached to each is now in merit order (worst = 1,
+   best = 5). This is the one defect here with a single defensible reading, which is why it was
+   corrected rather than referred back. The remaining items still need the business to say what
+   was intended.
 3. **L7+ Q1 and Q2 prompts don't match their options.** Q1 asks about measuring progress and
    counselling but the options describe team structure; Q2 asks about building a strong team
    but the options describe business impact — which is what Q3 then asks.
