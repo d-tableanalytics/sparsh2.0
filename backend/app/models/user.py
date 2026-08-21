@@ -24,7 +24,14 @@ class UserBase(BaseModel):
     # Business specific fields
     session_type: Optional[str] = "None" # Core, Support, Both, None
     designation: Optional[str] = None
-    department: Optional[str] = "Other" # HOD, Implementor, EA, MD, Other
+    department: Optional[str] = "Other" # HOD, Implementor, EA, MD, HR, Other
+    # Leadership Score eligibility. "Applicable from L4 (Asst Managers) and above."
+    #
+    # Explicit, and deliberately NOT derived from `designation`: that field is free text,
+    # so "Sr. Manager" and "Senior Manager" would land on different levels — or on none —
+    # and a leader would silently drop out of a cycle with nothing on screen to say why.
+    # Optional with a None default, so no existing user record changes meaning.
+    leadership_level: Optional[str] = None  # "L4" | "L5" | "L6" | "L7"
 
     # Profile / HR fields (self-editable via PATCH /users/me — see user.py)
     emergency_mobile: Optional[str] = None
@@ -57,6 +64,8 @@ class UserResponse(UserBase):
     # utils/taskAccess.canAccessTaskManagement hid the module for every company user however
     # the company toggle was set.
     delegation_enabled: Optional[bool] = False
+    # No leadership flag: Leadership Score follows `tpms_enabled`, so the client gates it
+    # on the TPMS flag it already receives.
 
     class Config:
         populate_by_name = True

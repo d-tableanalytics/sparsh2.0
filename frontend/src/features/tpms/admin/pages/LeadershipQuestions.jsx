@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   ClipboardCheck, RefreshCw, AlertTriangle, CheckCircle2, X, ShieldAlert, Pencil,
-  Percent, Save, RotateCcw, Star,
+  Percent, Save, RotateCcw, Star, ShieldCheck, FileWarning, Undo2,
 } from 'lucide-react';
 import {
   DashboardHero, HeaderSelect, HeroButton, Section, Th, Td, TableShell,
@@ -10,9 +10,11 @@ import {
 import {
   getLeadershipConfig, getLeadershipQuestions, updateLeadershipQuestion,
   saveLeadershipWeightages, restoreLeadershipQuestions,
+  getLeadershipReview, signOffLeadershipLevel, withdrawLeadershipSignOff,
 } from '../../../../services/leadershipApi';
-import { errText, fmtNum, isStaff } from '../../leadership/leadershipUtils';
-import { useAuth } from '../../../../context/AuthContext';
+import {
+  errText, fmtNum, isStaff, canSignOff, useLeadershipCompany,
+} from '../../leadership/leadershipUtils';
 
 /* ─────────────────────────────────────────────────────────────
    Leadership Score ▸ Questions & Weightages.
@@ -153,9 +155,59 @@ const QuestionModal = ({ question, onClose, onSubmit }) => {
   );
 };
 
+/** One open issue carried in from the source document.
+ *  A blocking issue reads red: the printed rubric produces an arithmetically wrong
+ *  number, which is a different problem from a correct number under the wrong heading. */
+const IssueRow = ({ issue }) => {
+  const blocking = issue.severity === 'blocking';
+  const fg = blocking ? 'var(--accent-red)' : 'var(--accent-orange)';
+  return (
+    <li className="flex items-start gap-2">
+      <span className="mt-[5px] w-1.5 h-1.5 rounded-full shrink-0" style={{ background: fg }} />
+      <p className="text-[11.5px] leading-relaxed" style={{ color: fg }}>
+        {issue.item_id && (
+          <span className="font-mono font-bold mr-1.5">{issue.item_id}</span>
+        )}
+        {blocking && (
+          <span className="font-bold uppercase tracking-wide text-[10px] mr-1.5">Blocking</span>
+        )}
+        {issue.scope === 'global' && (
+          <span className="font-bold uppercase tracking-wide text-[10px] mr-1.5">All levels</span>
+        )}
+        {issue.note}
+      </p>
+    </li>
+  );
+};
+
+/** Approval state as a single chip — the same three states everywhere they appear.
+ *  A stale approval reads as "Out of date", never as a qualified "signed off": the
+ *  backend already treats the two as identical, and so must the screen. */
+const SignOffChip = ({ state }) => {
+  const tone = state?.signed_off
+    ? { fg: 'var(--accent-green)', bg: 'var(--accent-green-bg)', bd: 'var(--accent-green-border)', text: 'Signed off' }
+    : state?.stale
+      ? { fg: 'var(--accent-orange)', bg: 'var(--accent-yellow-bg)', bd: 'var(--accent-yellow-border)', text: 'Out of date' }
+      : { fg: 'var(--accent-red)', bg: 'var(--accent-red-bg)', bd: 'var(--accent-red-border)', text: 'Not signed off' };
+  return (
+    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-bold border"
+      style={{ color: tone.fg, background: tone.bg, borderColor: tone.bd }}>
+      {state?.signed_off ? <ShieldCheck size={11} /> : <FileWarning size={11} />}
+      {tone.text}
+    </span>
+  );
+};
+
 const LeadershipQuestions = () => {
-  const { user } = useAuth();
+  const { user, staff, companyOptions, companyId, setCompanyId } = useLeadershipCompany();
+  // Editing the shared question master stays with internal staff, as before. HR and MD
+  // reach this screen to READ the rubric and sign it off — they cannot reword it.
   const admin = isStaff(user);
+  const reviewer = canSignOff(user);
+
+  const [review, setReview] = useState(null);
+  const [signing, setSigning] = useState(false);
+  const [signNote, setSignNote] = useState('');
 
   const [config, setConfig] = useState(null);
   const [level, setLevel] = useState('L4');
@@ -169,13 +221,13 @@ const LeadershipQuestions = () => {
   const [notice, setNotice] = useState('');
 
   useEffect(() => {
-    if (!admin) return undefined;
+    if (!reviewer) return undefined;
     let alive = true;
     getLeadershipConfig()
       .then((res) => { if (alive) setConfig(res.data); })
       .catch(() => {});
     return () => { alive = false; };
-  }, [admin]);
+  }, [reviewer]);
 
   const load = useMemo(() => async () => {
     setLoading(true);
@@ -186,14 +238,25 @@ const LeadershipQuestions = () => {
       setQuestions(rows);
       setSummary(res.data?.weightage_summary || []);
       setDraft(Object.fromEntries(rows.map((q) => [q.item_id, String(q.weightage ?? 0)])));
+
+      // Approval is per company, so staff need one picked before it means anything.
+      // Failing this must not blank the questions — the rubric is still readable.
+      if (companyId || !staff) {
+        try {
+          const rev = await getLeadershipReview(companyId);
+          setReview(rev.data);
+        } catch { setReview(null); }
+      } else {
+        setReview(null);
+      }
     } catch (e) {
       setError(errText(e, 'Could not load the questions.'));
     } finally {
       setLoading(false);
     }
-  }, [level]);
+  }, [level, companyId, staff]);
 
-  useEffect(() => { if (admin) load(); }, [admin, load]);
+  useEffect(() => { if (reviewer) load(); }, [reviewer, load]);
 
   const total = useMemo(
     () => Math.round(questions.reduce((s, q) => s + (Number(draft[q.item_id]) || 0), 0) * 100) / 100,
@@ -237,31 +300,72 @@ const LeadershipQuestions = () => {
   const saveQuestion = async (payload) => {
     await updateLeadershipQuestion(editing._id, payload);
     setEditing(null);
-    setNotice('Question updated.');
+    // Any edit invalidates an existing approval — the fingerprint stored with the
+    // sign-off no longer matches — so say so rather than letting HR discover it at close.
+    setNotice('Question updated. This level now needs signing off again.');
     await load();
   };
 
-  if (!admin) {
+  const signOff = async () => {
+    setSigning(true);
+    setError('');
+    setNotice('');
+    try {
+      await signOffLeadershipLevel(companyId, level, signNote);
+      setSignNote('');
+      setNotice(`${levelName} signed off. Cycles scoring this level can now be closed.`);
+      await load();
+    } catch (e) {
+      setError(errText(e, 'Could not sign off this level.'));
+    } finally {
+      setSigning(false);
+    }
+  };
+
+  const withdraw = async () => {
+    setSigning(true);
+    setError('');
+    setNotice('');
+    try {
+      await withdrawLeadershipSignOff(companyId, level);
+      setNotice(`${levelName} is back under review. Cycles scoring it can no longer be closed.`);
+      await load();
+    } catch (e) {
+      setError(errText(e, 'Could not withdraw the sign-off.'));
+    } finally {
+      setSigning(false);
+    }
+  };
+
+  if (!reviewer) {
     return (
       <div className="flex flex-col items-center justify-center gap-3 px-5 py-20 text-center">
         <span className="w-12 h-12 rounded-2xl bg-[var(--accent-red-bg)] text-[var(--accent-red)] flex items-center justify-center">
           <ShieldAlert size={22} />
         </span>
-        <p className="text-[14px] font-bold">Administrators only</p>
+        <p className="text-[14px] font-bold">HR, MD or an administrator only</p>
         <p className="text-[12.5px] text-[var(--text-muted)] max-w-sm">
-          Leadership questions and weightages decide how every leader is scored, so only a
-          Super Admin or Admin can change them.
+          Leadership questions and weightages decide how every leader is scored. HR and the
+          MD review and sign off a level; an administrator maintains the wording.
         </p>
       </div>
     );
   }
 
   const levelMeta = (config?.levels || []).find((l) => l.code === level);
+  const levelName = levelMeta?.label || level;
+  const levelReview = (review?.levels || []).find((l) => l.level === level);
+  const openIssues = levelReview?.issues || [];
+  const needsCompany = staff && !companyId;
 
   return (
     <div className="space-y-5">
       <DashboardHero icon={ClipboardCheck} title="Leadership Score — Questions"
         subtitle="Level-specific parameters, options and weightages">
+        {/* Approval is recorded per company, so staff pick one before signing anything. */}
+        {staff && (
+          <HeaderSelect value={companyId} onChange={setCompanyId} options={companyOptions} />
+        )}
         <HeaderSelect value={level} onChange={setLevel}
           options={(config?.levels || [{ code: 'L4', label: 'L4' }]).map(
             (l) => ({ id: l.code, name: l.label }))} />
@@ -295,17 +399,36 @@ const LeadershipQuestions = () => {
               {s.questions} question{s.questions === 1 ? '' : 's'}
               {!s.is_valid && <span className="text-[var(--accent-red)] font-bold"> · must total 100%</span>}
             </p>
+            {(() => {
+              const st = (review?.levels || []).find((l) => l.level === s.level);
+              if (!st) return null;
+              return (
+                <div className="mt-2 flex items-center gap-1.5 flex-wrap">
+                  <SignOffChip state={st} />
+                  {st.issue_count > 0 && (
+                    <span className="text-[10px] font-bold text-[var(--text-muted)]">
+                      {st.issue_count} open issue{st.issue_count === 1 ? '' : 's'}
+                    </span>
+                  )}
+                  {st.blocking_count > 0 && (
+                    <span className="text-[10px] font-bold text-[var(--accent-red)]">
+                      {st.blocking_count} blocking
+                    </span>
+                  )}
+                </div>
+              );
+            })()}
           </button>
         ))}
       </div>
 
       <Section title={levelMeta?.label || level} icon={Star} subtitle={levelMeta?.theme || ''}
-        action={
+        action={admin ? (
           <button type="button" onClick={restore} disabled={saving}
             className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11.5px] font-bold text-[var(--text-muted)] border border-[var(--border)] hover:bg-[var(--input-bg)] transition-colors disabled:opacity-50">
             <RotateCcw size={13} /> Restore missing
           </button>
-        }>
+        ) : null}>
         {loading ? (
           <div className="px-5 py-14 text-center text-[13px] font-bold text-[var(--text-muted)]">
             Loading questions…
@@ -325,9 +448,37 @@ const LeadershipQuestions = () => {
                     <Td className="tabular-nums text-[var(--text-muted)] font-mono">{i + 1}</Td>
                     <Td>
                       <span className="font-bold">{q.title}</span>
+                      {q.needs_review && (
+                        <span title={q.review_note}
+                          className="ml-1.5 inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9.5px] font-bold align-middle border"
+                          style={q.review_severity === 'blocking'
+                            ? { color: 'var(--accent-red)', background: 'var(--accent-red-bg)', borderColor: 'var(--accent-red-border)' }
+                            : { color: 'var(--accent-orange)', background: 'var(--accent-yellow-bg)', borderColor: 'var(--accent-yellow-border)' }}>
+                          <FileWarning size={9} />
+                          {q.review_severity === 'blocking' ? 'Blocking' : 'Review'}
+                        </span>
+                      )}
                       <span className="block text-[11px] text-[var(--text-muted)] mt-0.5 max-w-[320px]">
                         {q.prompt}
                       </span>
+                      {/* The source-document issue is shown in full, not hidden behind a
+                          tooltip: it says which parameter the options actually measure,
+                          which is the thing an approver has to rule on. */}
+                      {q.needs_review && (
+                        <span className="block text-[10.5px] leading-relaxed mt-1 max-w-[320px]"
+                          style={{ color: q.review_severity === 'blocking'
+                            ? 'var(--accent-red)' : 'var(--accent-orange)' }}>
+                          {q.review_note}
+                        </span>
+                      )}
+                      {/* Configured rows that no longer match the printed document.
+                          Shown, never auto-repaired — an existing record is only changed
+                          by a deliberate edit. */}
+                      {(q.source_drift || []).length > 0 && (
+                        <span className="block text-[10.5px] leading-relaxed text-[var(--accent-red)] mt-1 max-w-[320px] font-bold">
+                          Differs from the document: {q.source_drift.join(' ')}
+                        </span>
+                      )}
                     </Td>
                     <Td>
                       <div className="flex flex-col gap-0.5 max-w-[340px]">
@@ -342,17 +493,19 @@ const LeadershipQuestions = () => {
                     <Td align="right">
                       <div className="inline-flex items-center gap-1.5 justify-end">
                         <input type="number" min={0} max={100} step="0.01"
-                          value={draft[q.item_id] ?? ''}
+                          value={draft[q.item_id] ?? ''} readOnly={!admin} disabled={!admin}
                           onChange={(e) => { setDraft((d) => ({ ...d, [q.item_id]: e.target.value })); setNotice(''); }}
-                          className="w-20 px-2.5 py-1.5 rounded-lg bg-[var(--input-bg)] border border-[var(--input-border)] text-[12.5px] font-bold tabular-nums text-right outline-none focus:border-[var(--accent-indigo)]" />
+                          className="w-20 px-2.5 py-1.5 rounded-lg bg-[var(--input-bg)] border border-[var(--input-border)] text-[12.5px] font-bold tabular-nums text-right outline-none focus:border-[var(--accent-indigo)] disabled:opacity-70" />
                         <span className="text-[11px] font-bold text-[var(--text-muted)]">%</span>
                       </div>
                     </Td>
                     <Td align="right">
-                      <button type="button" onClick={() => setEditing(q)}
-                        className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11.5px] font-bold text-[var(--accent-indigo)] bg-[var(--accent-indigo-bg)] border border-[var(--accent-indigo-border)] hover:opacity-90 transition-opacity">
-                        <Pencil size={12} />
-                      </button>
+                      {admin && (
+                        <button type="button" onClick={() => setEditing(q)}
+                          className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11.5px] font-bold text-[var(--accent-indigo)] bg-[var(--accent-indigo-bg)] border border-[var(--accent-indigo-border)] hover:opacity-90 transition-opacity">
+                          <Pencil size={12} />
+                        </button>
+                      )}
                     </Td>
                   </tr>
                 ))}
@@ -378,11 +531,13 @@ const LeadershipQuestions = () => {
             <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4 border-t border-[var(--border)]">
               <p className="text-[11.5px] font-bold"
                 style={{ color: isValid ? 'var(--text-muted)' : 'var(--accent-red)' }}>
-                {isValid
-                  ? 'Total is 100% — ready to save.'
-                  : `Total must be exactly 100% (currently ${fmtNum(total)}%).`}
+                {!admin
+                  ? 'Weightages are maintained by an administrator. HR and the MD review and sign off.'
+                  : isValid
+                    ? 'Total is 100% — ready to save.'
+                    : `Total must be exactly 100% (currently ${fmtNum(total)}%).`}
               </p>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2" style={{ display: admin ? undefined : 'none' }}>
                 <button type="button" onClick={load} disabled={saving || !dirty}
                   className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-[12.5px] font-bold text-[var(--text-muted)] border border-[var(--border)] hover:bg-[var(--input-bg)] transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
                   <RefreshCw size={13} /> Discard
@@ -398,14 +553,127 @@ const LeadershipQuestions = () => {
         )}
       </Section>
 
-      <div className="flex items-start gap-2 rounded-2xl border border-[var(--accent-yellow-border)] bg-[var(--accent-yellow-bg)] px-4 py-3">
-        <Percent size={15} className="text-[var(--accent-orange)] mt-0.5 shrink-0" />
-        <p className="text-[12px] font-medium text-[var(--accent-orange)]">
-          Questions, options and scores are seeded exactly as printed in the source
-          Leadership Score document. Weightages were not specified there, so each level was
-          seeded with weight spread equally — HR and the MD set the real values here.
-        </p>
-      </div>
+      {/* Source-document review & sign-off.
+          The seeded rubric carries defects that change what a leader is scored on, so a
+          cycle cannot be CLOSED — the moment scores are frozen and released — until every
+          level it scores has been approved. Collecting feedback is deliberately not gated,
+          so the flow can be tested end to end first. */}
+      <Section title="Source document review" icon={FileWarning}
+        subtitle={`What HR and the MD need to rule on for ${levelName}`}>
+        <div className="px-5 py-4 space-y-4">
+          {needsCompany ? (
+            <p className="text-[12px] font-bold text-[var(--text-muted)]">
+              Pick a company above to see and record its sign-off.
+            </p>
+          ) : (
+            <>
+              <div className="flex items-center gap-2 flex-wrap">
+                <SignOffChip state={levelReview} />
+                {levelReview?.signed_off_at && (
+                  <span className="text-[11px] text-[var(--text-muted)] font-medium">
+                    by <span className="font-bold text-[var(--text-main)]">{levelReview.signed_off_by}</span>
+                    {' · '}{new Date(levelReview.signed_off_at).toLocaleDateString()}
+                  </span>
+                )}
+                {levelReview?.stale && (
+                  <span className="text-[11px] font-bold text-[var(--accent-orange)]">
+                    The questions changed after approval — review and sign off again.
+                  </span>
+                )}
+              </div>
+
+              {levelReview?.weightage_is_placeholder && (
+                <div className="flex items-start gap-2 rounded-xl border border-[var(--accent-yellow-border)] bg-[var(--accent-yellow-bg)] px-3.5 py-2.5">
+                  <Percent size={14} className="text-[var(--accent-orange)] mt-0.5 shrink-0" />
+                  <p className="text-[11.5px] font-medium text-[var(--accent-orange)]">
+                    Every question at this level carries equal weight. That is the seeded
+                    placeholder, not a decision — the source document supplies no
+                    weightages, it only says HR and the MD should set them.
+                  </p>
+                </div>
+              )}
+
+              {(levelReview?.source_drift || []).length > 0 && (
+                <div className="rounded-xl border border-[var(--accent-red-border)] bg-[var(--accent-red-bg)] px-4 py-3">
+                  <p className="text-[11px] font-extrabold uppercase tracking-wide text-[var(--accent-red)] mb-2">
+                    Configured questions differ from the source document
+                  </p>
+                  <ul className="space-y-1.5">
+                    {levelReview.source_drift.map((d) => (
+                      <li key={d.item_id} className="flex items-start gap-2">
+                        <span className="mt-[5px] w-1.5 h-1.5 rounded-full bg-[var(--accent-red)] shrink-0" />
+                        <p className="text-[11.5px] leading-relaxed text-[var(--accent-red)]">
+                          <span className="font-mono font-bold mr-1.5">{d.item_id}</span>
+                          {d.differences.join(' ')}
+                        </p>
+                      </li>
+                    ))}
+                  </ul>
+                  <p className="text-[10.5px] text-[var(--accent-red)] mt-2 opacity-80">
+                    Nothing has been changed automatically. Edit the question to match the
+                    document, or sign off deliberately if the difference is intended.
+                  </p>
+                </div>
+              )}
+
+              {openIssues.length > 0 && (
+                <div className="rounded-xl border border-[var(--accent-yellow-border)] bg-[var(--accent-yellow-bg)] px-4 py-3">
+                  <p className="text-[11px] font-extrabold uppercase tracking-wide text-[var(--accent-orange)] mb-2">
+                    {openIssues.length} item{openIssues.length === 1 ? '' : 's'} carried in from the source document
+                    {levelReview?.blocking_count > 0 && (
+                      <span className="text-[var(--accent-red)]">
+                        {' · '}{levelReview.blocking_count} blocking
+                      </span>
+                    )}
+                  </p>
+                  <ul className="space-y-1.5">
+                    {openIssues.map((iss, i) => (
+                      <IssueRow key={`${iss.code}-${iss.item_id || i}`} issue={iss} />
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {levelReview?.signed_off ? (
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <p className="text-[11.5px] text-[var(--text-muted)] font-medium max-w-xl">
+                    {levelReview.note
+                      ? <>Recorded decision: <span className="font-bold text-[var(--text-main)]">{levelReview.note}</span></>
+                      : 'No decision note was recorded with this approval.'}
+                  </p>
+                  <button type="button" onClick={withdraw} disabled={signing}
+                    className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-[12.5px] font-bold text-[var(--text-muted)] border border-[var(--border)] hover:bg-[var(--input-bg)] transition-colors disabled:opacity-40">
+                    <Undo2 size={13} /> Withdraw sign-off
+                  </button>
+                </div>
+              ) : (
+                <div className="flex flex-col gap-2.5">
+                  <Field label="Decision note"
+                    hint="What was agreed about the items above. Stored with the approval.">
+                    <textarea value={signNote} onChange={(e) => setSignNote(e.target.value)}
+                      rows={2} className={`${inputCls} resize-y`}
+                      placeholder="e.g. Titles confirmed as printed for this cycle; L7 re-authoring deferred to the next one." />
+                  </Field>
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <p className="text-[11.5px] font-bold text-[var(--accent-red)]">
+                      Until this level is signed off, a cycle scoring it cannot be closed.
+                    </p>
+                    <button type="button" onClick={signOff}
+                      disabled={signing || !levelReview?.weightage_valid}
+                      title={levelReview?.weightage_valid ? undefined
+                        : 'Weightages must total exactly 100% before a level can be signed off.'}
+                      className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-[var(--accent-green)] text-white text-[12.5px] font-bold shadow-sm hover:opacity-90 transition-opacity disabled:opacity-40 disabled:cursor-not-allowed">
+                      {signing ? <RefreshCw size={13} className="animate-spin" /> : <ShieldCheck size={13} />}
+                      {signing ? 'Saving…' : `Sign off ${level}`}
+                    </button>
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      </Section>
+
 
       <AnimatePresence>
         {editing && (

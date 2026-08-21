@@ -122,8 +122,21 @@ async def _ensure_leadership_collections(db):
     once any row exists), so an admin's edited questions are never overwritten. As with
     the two provisioners above, failures must never block startup."""
     try:
-        from app.models.leadership import LEADERSHIP_INDEXES
+        from app.models.leadership import LEADERSHIP_INDEXES, LEADERSHIP_OBSOLETE_INDEXES
         existing = set(await db.list_collection_names())
+
+        # Drop indexes an earlier build created that are now wrong. This removes an INDEX,
+        # never a document — see LEADERSHIP_OBSOLETE_INDEXES for why each one has to go.
+        # The response index in particular would reject every second response now that
+        # responses carry no giver identity.
+        for coll_name, index_name in LEADERSHIP_OBSOLETE_INDEXES:
+            if coll_name not in existing:
+                continue
+            try:
+                await db[coll_name].drop_index(index_name)
+                print(f"[OK] Dropped obsolete index {index_name} on {coll_name}")
+            except Exception:
+                pass  # never created, or already gone
         for coll_name, keys, options in LEADERSHIP_INDEXES:
             if coll_name not in existing:
                 try:

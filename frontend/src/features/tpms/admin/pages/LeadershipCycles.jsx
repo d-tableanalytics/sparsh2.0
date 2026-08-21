@@ -3,13 +3,14 @@ import { Link, useLocation } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   CalendarRange, Plus, RefreshCw, AlertTriangle, CheckCircle2, X, ShieldAlert,
-  Users, Lock, Unlock, ArrowRight, Layers,
+  Users, Lock, Unlock, ArrowRight, Layers, Calculator, Send,
 } from 'lucide-react';
 import {
   DashboardHero, HeaderSelect, HeroButton, Section, Th, Td, TableShell, KpiTile, FilterSelect,
 } from '../../common/dashboardKit';
 import {
   getLeadershipConfig, getLeadershipCycles, createLeadershipCycle, updateLeadershipCycle,
+  getLeadershipQuorum, computeLeadershipCycle, publishLeadershipCycle,
 } from '../../../../services/leadershipApi';
 import {
   canManage, errText, fmtNum, useAsync, useLeadershipCompany,
@@ -28,9 +29,11 @@ import {
 const MotionDiv = motion.div;
 
 const STATUS_TONE = {
-  draft:  { c: 'var(--text-muted)',    bg: 'var(--input-bg)',          bd: 'var(--border)' },
-  open:   { c: 'var(--accent-green)',  bg: 'var(--accent-green-bg)',   bd: 'var(--accent-green-border)' },
-  closed: { c: 'var(--accent-indigo)', bg: 'var(--accent-indigo-bg)',  bd: 'var(--accent-indigo-border)' },
+  draft:     { c: 'var(--text-muted)',    bg: 'var(--input-bg)',          bd: 'var(--border)' },
+  open:      { c: 'var(--accent-green)',  bg: 'var(--accent-green-bg)',   bd: 'var(--accent-green-border)' },
+  closed:    { c: 'var(--accent-yellow)', bg: 'var(--accent-yellow-bg)',  bd: 'var(--accent-yellow-border)' },
+  computed:  { c: 'var(--accent-indigo)', bg: 'var(--accent-indigo-bg)',  bd: 'var(--accent-indigo-border)' },
+  published: { c: 'var(--accent-green)',  bg: 'var(--accent-green-bg)',   bd: 'var(--accent-green-border)' },
 };
 
 const Pill = ({ label, tone = 'draft' }) => {
@@ -194,15 +197,59 @@ const LeadershipCycles = () => {
     setNotice('');
     try {
       await updateLeadershipCycle(companyId, cycle, { status });
-      setNotice(status === 'closed'
-        ? 'Cycle closed. Its scores are now frozen in history.'
-        : 'Cycle is open — feedback links can be sent.');
+      setNotice({
+        open: 'Cycle is open — feedback links can be sent.',
+        closed: 'Window closed. No further feedback is accepted; compute when you are ready.',
+      }[status] || 'Cycle updated.');
       await reload();
     } catch (e) {
       setError(errText(e, 'Could not update the cycle.'));
     } finally {
       setBusy('');
     }
+  };
+
+  // Freeze the scores. Refused until every level this cycle scores has been signed off by
+  // HR + MD — a frozen number is what a leader is shown and a manager discusses at RRO, so
+  // it must not come from a rubric nobody has approved.
+  //
+  // Quorum is a warning, not a block: the document sets no threshold, so HR decides
+  // whether a thin result is still worth freezing. They just should not do it unknowingly.
+  const compute = async (cycle) => {
+    setBusy(cycle); setError(''); setNotice('');
+    try {
+      const q = await getLeadershipQuorum(companyId, cycle);
+      const short = q.data?.below_quorum || [];
+      if (short.length && !window.confirm(
+        `${short.length} leader(s) are below the quorum of ${q.data.quorum}:\n\n`
+        + short.map((r) => `  ${r.subject_name} — ${r.responses} of ${r.panel_size}`).join('\n')
+        + `\n\nRe-open the cycle to extend the window, or continue and freeze these scores as they stand?`)) {
+        setBusy(''); return;
+      }
+      await computeLeadershipCycle(companyId, cycle);
+      setNotice('Scores frozen. Review them, then publish to release them to leaders.');
+      await reload();
+    } catch (e) {
+      setError(errText(e, 'Could not compute this cycle.'));
+    } finally { setBusy(''); }
+  };
+
+  // The moment a leader can first see their own score. Irreversible for collection: once
+  // people have been shown a number, changing the inputs behind it would rewrite a
+  // conversation that has already happened.
+  const publish = async (cycle) => {
+    if (!window.confirm(
+      'Publishing releases these scores to every leader and their reporting manager, and sends the notification.'
+      + `\n\nA published cycle cannot be re-opened. Continue?`
+    )) return;
+    setBusy(cycle); setError(''); setNotice('');
+    try {
+      await publishLeadershipCycle(companyId, cycle);
+      setNotice('Published. Leaders and their managers have been notified.');
+      await reload();
+    } catch (e) {
+      setError(errText(e, 'Could not publish this cycle.'));
+    } finally { setBusy(''); }
   };
 
   if (!manage) {
@@ -309,6 +356,28 @@ const LeadershipCycles = () => {
                         <button type="button" onClick={() => setStatus(c.cycle, 'closed')} disabled={busy === c.cycle}
                           className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11.5px] font-bold text-[var(--text-muted)] border border-[var(--border)] hover:bg-[var(--input-bg)] transition-colors disabled:opacity-50">
                           <Lock size={12} /> Close
+                        </button>
+                      )}
+                      {/* closed → computed → published. Splitting these is what stops a
+                          leader watching their own score move during collection. */}
+                      {c.status === 'closed' && (
+                        <>
+                          <button type="button" onClick={() => setStatus(c.cycle, 'open')} disabled={busy === c.cycle}
+                            title="Extend the window — the remedy when quorum is not met"
+                            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11.5px] font-bold text-[var(--text-muted)] border border-[var(--border)] hover:bg-[var(--input-bg)] transition-colors disabled:opacity-50">
+                            <Unlock size={12} /> Re-open
+                          </button>
+                          <button type="button" onClick={() => compute(c.cycle)} disabled={busy === c.cycle}
+                            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11.5px] font-bold text-[var(--accent-indigo)] bg-[var(--accent-indigo-bg)] border border-[var(--accent-indigo-border)] hover:opacity-90 transition-opacity disabled:opacity-50">
+                            <Calculator size={12} /> Compute
+                          </button>
+                        </>
+                      )}
+                      {c.status === 'computed' && (
+                        <button type="button" onClick={() => publish(c.cycle)} disabled={busy === c.cycle}
+                          title="Release the scores to leaders and their reporting managers"
+                          className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11.5px] font-bold text-[var(--accent-green)] bg-[var(--accent-green-bg)] border border-[var(--accent-green-border)] hover:opacity-90 transition-opacity disabled:opacity-50">
+                          <Send size={12} /> Publish
                         </button>
                       )}
                     </div>

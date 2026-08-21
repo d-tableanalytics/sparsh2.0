@@ -6,7 +6,7 @@ import { useAuth } from '../../context/AuthContext';
 import { useNotification } from '../../context/NotificationContext';
 import { motion } from 'framer-motion';
 
-const DEPARTMENTS = ['HOD', 'Implementor', 'EA', 'MD', 'Other'];
+const DEPARTMENTS = ['HOD', 'Implementor', 'EA', 'MD', 'HR', 'Other'];
 
 // One editable field row (label + value display, or input while editing).
 const Field = ({ label, value, editing, children }) => (

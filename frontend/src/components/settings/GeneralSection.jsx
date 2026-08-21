@@ -12,7 +12,7 @@ import { useTheme } from '../../context/ThemeContext';
 import { canAccessTaskManagement } from '../../utils/taskAccess';
 import { motion } from 'framer-motion';
 
-const DEPARTMENTS = ['HOD', 'Implementor', 'EA', 'MD', 'Other'];
+const DEPARTMENTS = ['HOD', 'Implementor', 'EA', 'MD', 'HR', 'Other'];
 
 // A single label + input row. Editable sections pass `editing`; unsupported/read-only
 // fields (no backend self-update support yet) pass `readOnly` and just display the value

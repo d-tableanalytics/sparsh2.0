@@ -33,6 +33,9 @@ Nothing here silently "fixes" the document. All question text, option text, opti
 scores and weightages are editable at runtime through the admin API, which is the
 intended place to apply corrections once they are signed off.
 """
+import hashlib
+import json
+
 from pydantic import BaseModel, Field, field_validator
 from typing import Dict, List, Optional
 from datetime import datetime
@@ -47,6 +50,9 @@ COLL_LS_ASSIGNMENTS = "tpms_leadership_assignments"  # one mailed link per (subj
 COLL_LS_RESPONSES   = "tpms_leadership_responses"    # one submitted feedback form
 COLL_LS_QUESTIONS   = "tpms_leadership_questions"    # level-specific question master
 COLL_LS_SCORES      = "tpms_leadership_scores"       # snapshot taken when a cycle closes
+COLL_LS_SIGNOFF     = "tpms_leadership_level_signoff"  # HR+MD approval of a level rubric
+COLL_LS_DISCUSSIONS = "tpms_leadership_discussions"   # the RRO conversation + action plan
+COLL_LS_BRIEFINGS   = "tpms_leadership_briefings"     # pre/post briefing tracker
 
 
 # ─────────────────────────────────────────────────────────────
@@ -106,6 +112,31 @@ RECOMMENDED_PANEL_SIZE = RECOMMENDED_PER_RELATION * len(RELATIONS)
 # inside an average. It is a floor, not a default — HR can still require more.
 MIN_RESPONSES_FLOOR = 3
 
+# COLLECTION IS DIGITAL ONLY.
+#
+# The source document prefers hard copy — "HR just approach each persons (feedback givers)
+# for their score in hard copies, preferably, otherwise through digital form" — but the
+# business has decided otherwise: every giver is emailed a personal link and submits
+# online, and there is no paper intake at all.
+#
+# This is a deliberate departure from the document, recorded here so nobody reinstates a
+# paper path by reading §5 of the source and assuming it was overlooked. It also removes
+# the weakest point in the chain: a folder of completed forms in an HR drawer, and an
+# administrator able to key in or delete feedback nobody can trace.
+
+# Fewest responses a subject needs before a score may be FROZEN and released.
+#
+# Distinct from MIN_RESPONSES_FLOOR, which is the anonymity floor for showing a number at
+# all. This is the confidence floor: the document's panel is 8, and a result built from
+# three of them is not the 360° view its label claims. HR may raise or lower it per cycle
+# but never below the anonymity floor.
+DEFAULT_QUORUM = 5
+
+# Relation groups are averaged first, then weighted against each other. Equal by default:
+# the document does not say whether a direct report's view should outweigh a superior's,
+# so the neutral split is the only defensible starting point and the screen says so.
+DEFAULT_GROUP_WEIGHT = "equal"
+
 # 180° collects from superiors and same-department peers; 360° from everyone.
 # ("The feedback may be 180 degree or 360 degree.")
 DEGREE_180 = "180"
@@ -121,11 +152,40 @@ DEGREE_RELATIONS: Dict[str, List[str]] = {
 # ─────────────────────────────────────────────────────────────
 # Cycle lifecycle
 # ─────────────────────────────────────────────────────────────
-CYCLE_DRAFT  = "draft"    # being set up; no links issued
-CYCLE_OPEN   = "open"     # links issued, feedback being collected
-CYCLE_CLOSED = "closed"   # scores frozen into COLL_LS_SCORES
+CYCLE_DRAFT     = "draft"      # being set up; no links issued
+CYCLE_OPEN      = "open"       # links issued, feedback being collected
+CYCLE_CLOSED    = "closed"     # window shut; no further feedback accepted
+CYCLE_COMPUTED  = "computed"   # scores frozen into COLL_LS_SCORES, HR reviewing
+CYCLE_PUBLISHED = "published"  # released to leaders and their reporting managers
 
-CYCLE_STATUSES: List[str] = [CYCLE_DRAFT, CYCLE_OPEN, CYCLE_CLOSED]
+CYCLE_STATUSES: List[str] = [CYCLE_DRAFT, CYCLE_OPEN, CYCLE_CLOSED,
+                             CYCLE_COMPUTED, CYCLE_PUBLISHED]
+
+# Which states a cycle may move to from where.
+#
+# The important edge is that a leader sees NOTHING until `published`. Without that step a
+# subject could read their own score while collection was still open, refresh after each
+# submission and difference the average — which is one named person's rating, arrived at
+# arithmetically. Group suppression does not stop that; only withholding the number does.
+#
+# Re-opening a closed cycle is allowed (HR extends a window for a late responder) and
+# recomputing is allowed, but `published` is terminal for collection: once leaders have
+# seen a number, changing the inputs behind it would rewrite a conversation that already
+# happened.
+CYCLE_TRANSITIONS: Dict[str, List[str]] = {
+    CYCLE_DRAFT:     [CYCLE_OPEN],
+    CYCLE_OPEN:      [CYCLE_CLOSED, CYCLE_DRAFT],
+    CYCLE_CLOSED:    [CYCLE_OPEN, CYCLE_COMPUTED],
+    CYCLE_COMPUTED:  [CYCLE_CLOSED, CYCLE_PUBLISHED],
+    CYCLE_PUBLISHED: [],
+}
+
+# Feedback may still arrive in these states only.
+CYCLE_COLLECTING: List[str] = [CYCLE_DRAFT, CYCLE_OPEN]
+
+
+def can_transition(current: str, target: str) -> bool:
+    return target in CYCLE_TRANSITIONS.get(str(current or CYCLE_DRAFT), [])
 
 # Assignment (link) lifecycle — mirrors the vocabulary of tpms_form_link_service so the
 # admin log reads identically, without sharing its storage.
@@ -553,34 +613,337 @@ LEADERSHIP_QUESTION_SEED: Dict[str, List[dict]] = {
             ),
         },
         {
-            # CORRECTED — the only place this file departs from the printed source.
+            # SEEDED VERBATIM, INCLUDING ITS INVERTED SCORING.
             #
             # The document prints these four options in reverse merit order: "Goals are
-            # aligned and largely executed" scored 1 while "Goals are unclear and execution
-            # is inconsistent" scored 4, so the best answer earned the lowest number and the
-            # worst earned the second-highest. Seeded verbatim, every L7 leader lost roughly
-            # a sixth of their total weightage for doing the right thing, and the error is
-            # invisible in the result — it just reads as a low score.
+            # aligned and largely executed" scores 1 while "Goals are unclear and execution
+            # is inconsistent" scores 4 — the best answer earns the lowest number and the
+            # worst earns the second-highest. As printed, an L7 leader loses roughly a sixth
+            # of their total weightage for doing the right thing, and the error is invisible
+            # in the result: it simply reads as a low score.
             #
-            # The statements are unchanged and each keeps the letter it carries in the
-            # document ("a".."d"), so any row can still be traced back to the printed page;
-            # only the score attached to each has been put in merit order, and they are
-            # listed worst-first to match every other question here. Nothing else in §3 of
-            # docs/LEADERSHIP_SCORE_IMPLEMENTATION_PLAN.md is touched — the mismatched
-            # prompts (L5 Q3/Q4/Q5, L7 Q1/Q2) still need the business to say what was meant,
-            # whereas this one has only one defensible reading.
+            # This is NOT corrected here. The document is the source of truth, so the
+            # option order, the letters and the printed scores are reproduced exactly and
+            # the defect is raised for HR + MD instead (QUESTION_REVIEW["L7Q6"]), which is
+            # what blocks a cycle scoring L7 from being closed. Re-authoring this question
+            # is a business decision; guessing it in code would silently change what a
+            # senior leader is measured on.
             "item_id": "L7Q6",
             "title": "Goal alignment and strategy execution",
             "prompt": "How do you rate him towards goal alignment and strategy execution?",
             "options": _opts(
-                ("c", "Goals are unclear and execution is inconsistent", 1),
-                ("d", "Goals are communicated, execution is uneven", 2),
-                ("a", "Goals are aligned and largely executed", 4),
-                ("b", "Goals are embedded and strategy drives action", 5),
+                ("a", "Goals are aligned and largely executed", 1),
+                ("b", "Goals are embedded and strategy drives action", 2),
+                ("c", "Goals are unclear and execution is inconsistent", 4),
+                ("d", "Goals are communicated, execution is uneven", 5),
             ),
         },
     ],
 }
+
+
+# ─────────────────────────────────────────────────────────────
+# Source-document review register
+#
+# "Key insights of Leadership Score" carries defects that change WHAT A LEADER IS
+# SCORED ON, not merely how a screen reads. They are recorded here as data rather than
+# fixed in the seed, because every one of them needs the business to say what was meant
+# — inventing an answer would silently rewrite the rubric leaders are measured against.
+#
+# Each entry is attached to its question at seed time (`needs_review`, `review_code`,
+# `review_note`) and surfaced by GET /leadership/questions/review. A level carrying open
+# issues cannot be signed off, and a cycle cannot be CLOSED — the moment its scores are
+# frozen and released — until every level it scores has been signed off. Collecting and
+# testing are deliberately left open, so the flow can be exercised end to end first.
+#
+# Resolving an issue is an edit through the admin API (retitle the question, restate an
+# option) followed by a sign-off. Nothing here has to be true forever: the register
+# describes the SEEDED text, and `signoff_fingerprint()` is what proves the live rows
+# were actually reviewed.
+# ─────────────────────────────────────────────────────────────
+
+# How badly an issue damages the number itself.
+#
+#   blocking  the question, as printed, produces an arithmetically WRONG score. L7 Q6 is
+#             the only one: its options are scored in reverse merit order, so answering
+#             honestly lowers the leader's result.
+#   review    the arithmetic is sound but the business has to confirm intent — a title
+#             that names a different parameter than its options measure files a correct
+#             number under the wrong heading, which is what an RRO conversation reads.
+SEVERITY_BLOCKING = "blocking"
+SEVERITY_REVIEW = "review"
+
+# Title names one parameter, the four options measure a different one.
+REVIEW_TITLE_MISMATCH = "title_option_mismatch"
+# Option text imported from a different level's question set.
+REVIEW_OPTION_IMPORTED = "option_from_other_level"
+# Printed option scores are not in merit order. Reproduced as printed — NOT corrected.
+REVIEW_SCORE_INVERTED = "score_order_inverted"
+# Two questions at the same level measure substantially the same thing.
+REVIEW_DUPLICATE = "duplicate_parameter"
+# A parameter the source names but supplies no option set for.
+REVIEW_NOT_MEASURED = "parameter_not_measured"
+# Affects every level rather than one question.
+REVIEW_SCALE = "scale_has_no_midpoint"
+REVIEW_WEIGHTAGE = "weightage_not_supplied"
+
+QUESTION_REVIEW: Dict[str, dict] = {
+    "L4Q5": {
+        "code": REVIEW_OPTION_IMPORTED,
+        "note": "Option A (“Loses accountability under scale”) is the L7 Q4 wording "
+                "(“Loses control under scale”). “Under scale” is not a condition an "
+                "Asst. Manager operates in, so the worst-case option describes something "
+                "that cannot happen at L4 and ratings drift upward. Confirm or replace.",
+    },
+    "L5Q2": {
+        "code": REVIEW_TITLE_MISMATCH,
+        "note": "Titled “Getting things done” — the same title L4 Q3 carries — but every "
+                "option describes delegation (“Delegates tasks but redoes work later” … "
+                "“Delegation builds ownership and capability”). Confirm the intended "
+                "parameter, and whether it should share L4 Q3's name.",
+    },
+    "L5Q3": {
+        "code": REVIEW_TITLE_MISMATCH,
+        "note": "Titled “Communication skill”; the options measure PRIORITY SETTING "
+                "(“Everything feels urgent” … “Priorities are clear, stable, and "
+                "well-communicated”). Part of a three-way rotation across L5 Q3/Q4/Q5.",
+    },
+    "L5Q4": {
+        "code": REVIEW_TITLE_MISMATCH,
+        "note": "Titled “Making the team accountable”; the options measure COMMUNICATION "
+                "(“Causes confusion or mixed messages” … “Communication aligns teams and "
+                "prevents issues”). Part of the L5 Q3/Q4/Q5 rotation.",
+    },
+    "L5Q5": {
+        "code": REVIEW_TITLE_MISMATCH,
+        "note": "Titled “Setting priorities”; the options measure ACCOUNTABILITY (“Avoids "
+                "tough conversations” … “Accountability culture exists within the team”). "
+                "Part of the L5 Q3/Q4/Q5 rotation. All three parameters are measured — "
+                "each under the wrong name — so the scores are usable but the labels on "
+                "the score card are not, and the RRO conversation is parameter-wise.",
+    },
+    "L6Q5": {
+        "code": REVIEW_DUPLICATE,
+        "note": "Titled “Inspiring the team to achieve results”, but the options measure "
+                "process improvement (“Repeats old methods” … “Redesigns jobs to improve "
+                "outcomes”), which overlaps Q6 (job design / innovation). Nothing at L6 "
+                "then measures how the leader actually motivates people.",
+    },
+    "L7Q1": {
+        "code": REVIEW_TITLE_MISMATCH,
+        "note": "Titled “Measuring progress and counselling” — copied verbatim from L6 Q4 "
+                "— while the options measure TEAM STRUCTURE (“Team depends heavily on "
+                "leader” … “Self-driven leadership teams exist”). This is where the L7 "
+                "displacement starts; every question after it is shifted by one.",
+    },
+    "L7Q2": {
+        "code": REVIEW_TITLE_MISMATCH,
+        "note": "Titled “Building a strong team”; the options measure BUSINESS IMPACT "
+                "UNDERSTANDING (“Understands own function only” … “Drives decisions based "
+                "on business outcomes”).",
+    },
+    "L7Q3": {
+        "code": REVIEW_TITLE_MISMATCH,
+        "note": "Titled “Business acumen”; the options measure FINANCIAL acumen "
+                "specifically (“Avoids financial discussions” … “Uses finance to drive "
+                "strategy”). The closest match of the L7 set — confirm the narrower "
+                "reading is intended.",
+    },
+    "L7Q4": {
+        "code": REVIEW_TITLE_MISMATCH,
+        "note": "Titled “Business finance understanding”; the options measure MANAGING "
+                "SCALE (“Loses control under scale” … “Scale handled through systems and "
+                "leaders”). Nothing to do with finance.",
+    },
+    "L7Q5": {
+        "code": REVIEW_TITLE_MISMATCH,
+        "note": "Titled “Managing multiple / diversified projects”; the options measure "
+                "STRATEGY EXECUTION (“Strategy unclear to teams” … “Strategy translates "
+                "into measurable results”).",
+    },
+    "L7Q6": {
+        "code": REVIEW_SCORE_INVERTED,
+        "severity": SEVERITY_BLOCKING,
+        "note": "SCORING IS INVERTED AND UNUSABLE AS PRINTED. The document scores “Goals "
+                "are aligned and largely executed” 1 and “Goals are unclear and execution "
+                "is inconsistent” 4 — the best answer earns the lowest number and the worst "
+                "earns the second-highest. Seeded exactly as printed and NOT corrected "
+                "here. As it stands an L7 leader loses roughly a sixth of their weightage "
+                "for doing the right thing, and it is invisible in the result: it simply "
+                "reads as a low score. This question must be re-authored by HR + MD before "
+                "any L7 score is relied on. It also duplicates Q5 in substance (strategy "
+                "execution), so strategy is weighted twice — decide whether it survives at "
+                "all.",
+    },
+}
+
+# Issues that belong to a level as a whole rather than to one question.
+LEVEL_REVIEW: Dict[str, List[dict]] = {
+    LEVEL_L7: [{
+        "code": REVIEW_NOT_MEASURED,
+        "note": "Two parameters the source names have no option set at all. Because the "
+                "titles are displaced by one (see Q1), nothing measures “measuring the "
+                "progress of team members and subsequent counselling” or “managing "
+                "multiple / diversified projects”, while strategy execution is measured "
+                "twice (Q5 and Q6). An L7 score currently says nothing about diversified "
+                "project management. Re-authoring is needed, not just retitling.",
+    }],
+}
+
+# Issues that apply to every level.
+GLOBAL_REVIEW: List[dict] = [
+    {
+        "code": REVIEW_SCALE,
+        "note": "Every level is headed “(Rating 1-5)” but only four options exist, worth "
+                "1, 2, 4 and 5 — 3 is never awardable. There is no “meets expectations” "
+                "midpoint, so a rater who thinks the leader is adequate must pick between "
+                "2 (struggles) and 4 (does it well). The floor is not zero either: the "
+                "worst possible leader scores 20/100, so the usable band is 20-100 and any "
+                "threshold set against 100 is off by that much. Confirm this is deliberate.",
+    },
+    {
+        "code": REVIEW_WEIGHTAGE,
+        "note": "The source supplies no weightages — it only says “All parameters should "
+                "have weightages to create scoring - HR and MD”. Until they are set, every "
+                "question in a level carries equal weight. That is a placeholder chosen by "
+                "the system, not a business decision, and it is shown as such on screen.",
+    },
+]
+
+
+def _with_severity(issue: dict) -> dict:
+    """Every issue carries a severity; entries that do not set one need confirmation
+    rather than repair, which is the common case."""
+    return {"severity": SEVERITY_REVIEW, **issue}
+
+
+def question_review(item_id: str) -> Optional[dict]:
+    """The open source-document issue for one question, or None."""
+    issue = QUESTION_REVIEW.get(str(item_id).upper())
+    return _with_severity(issue) if issue else None
+
+
+def level_review(level: str) -> List[dict]:
+    """Every open issue affecting one level: per-question, level-wide and global."""
+    level = str(level).upper()
+    out: List[dict] = []
+    for q in LEADERSHIP_QUESTION_SEED.get(level) or []:
+        issue = QUESTION_REVIEW.get(q["item_id"])
+        if issue:
+            out.append({"scope": "question", "item_id": q["item_id"],
+                        "title": q["title"], **_with_severity(issue)})
+    for issue in LEVEL_REVIEW.get(level, []):
+        out.append({"scope": "level", "item_id": None, "title": None,
+                    **_with_severity(issue)})
+    for issue in GLOBAL_REVIEW:
+        out.append({"scope": "global", "item_id": None, "title": None,
+                    **_with_severity(issue)})
+    # Blocking issues first — a wrong number outranks a wrongly-named one.
+    out.sort(key=lambda i: 0 if i["severity"] == SEVERITY_BLOCKING else 1)
+    return out
+
+
+def _doc_question(level: str, item_id: str) -> Optional[dict]:
+    """The document's own row for one question, or None if the document has no such row."""
+    for q in LEADERSHIP_QUESTION_SEED.get(str(level).upper()) or []:
+        if q["item_id"] == item_id:
+            return q
+    return None
+
+
+def source_drift(level: str, live: List[dict]) -> List[dict]:
+    """Where the rows actually in the database differ from the printed document.
+
+    The document is the source of truth, so any difference is reported rather than
+    repaired — including differences this codebase itself introduced. An earlier build
+    seeded L7 Q6 with its option scores put into merit order; those rows are already in
+    live databases and are deliberately NOT rewritten, because migrating seeded records
+    would change what leaders were scored on without anyone approving it. They surface
+    here instead, so HR sees exactly what their rubric says versus what the document says
+    and rules on it.
+
+    Weightage is not compared: the document supplies none at all, so every weightage in
+    the system is an addition by definition and is covered by its own review item.
+    """
+    level = str(level).upper()
+    drift: List[dict] = []
+
+    for row in live:
+        item_id = str(row.get("item_id") or "")
+        doc = _doc_question(level, item_id)
+        if not doc:
+            drift.append({
+                "item_id": item_id,
+                "title": row.get("title") or "",
+                "differences": ["This question does not appear in the source document."],
+            })
+            continue
+
+        diffs: List[str] = []
+        if (row.get("prompt") or "").strip() != doc["prompt"]:
+            diffs.append(f"Question text differs from the document (“{doc['prompt']}”).")
+
+        doc_opts = {o["option_id"]: o for o in doc["options"]}
+        live_opts = {str(o.get("option_id")): o for o in (row.get("options") or [])}
+
+        for oid, d in doc_opts.items():
+            l = live_opts.get(oid)
+            if l is None:
+                diffs.append(f"Option {oid} is missing; the document has “{d['label']}”.")
+                continue
+            if (l.get("label") or "").strip() != d["label"]:
+                diffs.append(f"Option {oid} wording differs; the document has “{d['label']}”.")
+            if float(l.get("score") or 0) != float(d["score"]):
+                diffs.append(
+                    f"Option {oid} scores {int(float(l.get('score') or 0))}; "
+                    f"the document prints {int(float(d['score']))}.")
+        for oid in live_opts:
+            if oid not in doc_opts:
+                diffs.append(f"Option {oid} is not in the document.")
+
+        if diffs:
+            drift.append({"item_id": item_id, "title": row.get("title") or "",
+                          "differences": diffs})
+
+    missing = ({q["item_id"] for q in LEADERSHIP_QUESTION_SEED.get(level) or []}
+               - {str(r.get("item_id") or "") for r in live})
+    for item_id in sorted(missing):
+        drift.append({
+            "item_id": item_id,
+            "title": (_doc_question(level, item_id) or {}).get("title", ""),
+            "differences": ["In the source document but not configured. "
+                            "Use “Restore missing” to add it."],
+        })
+    return drift
+
+
+def signoff_fingerprint(questions: List[dict]) -> str:
+    """A stable digest of the rubric a level is actually scoring on.
+
+    Stored with the sign-off so an edit made AFTERWARDS invalidates it. Without this a
+    sign-off would certify nothing: HR approves the wording, someone retitles a question
+    or moves a weightage, and the approval silently carries over to text nobody read.
+
+    Covers exactly the fields that change what a leader is scored on — text, option
+    scores and weightage. `order` is excluded: reordering the form changes no score.
+    """
+    payload = sorted(
+        [{
+            "item_id": str(q.get("item_id") or ""),
+            "title": (q.get("title") or "").strip(),
+            "prompt": (q.get("prompt") or "").strip(),
+            "weightage": round(float(q.get("weightage") or 0), 2),
+            "options": sorted(
+                [{"option_id": str(o.get("option_id") or ""),
+                  "label": (o.get("label") or "").strip(),
+                  "score": float(o.get("score") or 0)}
+                 for o in (q.get("options") or [])],
+                key=lambda o: o["option_id"]),
+        } for q in questions if q.get("active", True) is not False],
+        key=lambda q: q["item_id"],
+    )
+    blob = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
 def seed_rows_for_level(level: str) -> List[dict]:
@@ -601,16 +964,27 @@ def seed_rows_for_level(level: str) -> List[dict]:
     for i in range(steps):
         weights[i % n] = round(weights[i % n] + step, 2)
 
-    return [{
-        "level": level,
-        "item_id": q["item_id"],
-        "title": q["title"],
-        "prompt": q["prompt"],
-        "options": [dict(o) for o in q["options"]],
-        "weightage": weights[i],
-        "order": i,
-        "active": True,
-    } for i, q in enumerate(questions)]
+    rows = []
+    for i, q in enumerate(questions):
+        # The source-document issue, if this question carries one, is stamped onto the row
+        # at seed time so it travels with the data rather than living only in the API
+        # layer — an admin reading the collection directly sees it too.
+        issue = question_review(q["item_id"]) or {}
+        rows.append({
+            "level": level,
+            "item_id": q["item_id"],
+            "title": q["title"],
+            "prompt": q["prompt"],
+            "options": [dict(o) for o in q["options"]],
+            "weightage": weights[i],
+            "order": i,
+            "active": True,
+            "needs_review": bool(issue),
+            "review_code": issue.get("code"),
+            "review_note": issue.get("note"),
+            "review_severity": issue.get("severity"),
+        })
+    return rows
 
 
 def all_seed_rows() -> List[dict]:
@@ -647,6 +1021,16 @@ class CycleCreate(BaseModel):
     company_id: Optional[str] = None
     cycle: Optional[str] = None                 # defaults to the current 2-month window
     degree: str = DEGREE_360
+    # Fewest responses before a score may be FROZEN and released. Distinct from
+    # min_responses, which is the anonymity floor for showing a number at all.
+    quorum: int = DEFAULT_QUORUM
+    # Empty = equal across the groups in play. Left empty rather than filled in, so the
+    # screen can say "default" instead of showing numbers nobody chose.
+    group_weightages: Optional[Dict[str, float]] = None
+    # HR's collection window, independent of the cycle's calendar months — which is what
+    # makes "extend the window" possible when quorum is not met.
+    opens_at: Optional[datetime] = None
+    closes_at: Optional[datetime] = None
     # How many responses a subject needs before a score is shown. The document sets no
     # threshold, so this defaults to the anonymity floor rather than to 1 — see
     # MIN_RESPONSES_FLOOR. HR may raise it per cycle, never lower it.
@@ -670,8 +1054,27 @@ class CycleCreate(BaseModel):
 class CycleUpdate(BaseModel):
     degree: Optional[str] = None
     min_responses: Optional[int] = None
+    quorum: Optional[int] = None
+    group_weightages: Optional[Dict[str, float]] = None
+    opens_at: Optional[datetime] = None
+    closes_at: Optional[datetime] = None
     status: Optional[str] = None
     notes: Optional[str] = None
+
+    @field_validator("group_weightages")
+    @classmethod
+    def _weights(cls, v):
+        return _validate_group_weightages(v)
+
+    @field_validator("quorum")
+    @classmethod
+    def _quorum(cls, v):
+        if v is None:
+            return None
+        if int(v) < MIN_RESPONSES_FLOOR:
+            raise ValueError(
+                f"quorum cannot be below the anonymity floor of {MIN_RESPONSES_FLOOR}")
+        return int(v)
 
     @field_validator("min_responses")
     @classmethod
@@ -701,6 +1104,8 @@ class SubjectCreate(BaseModel):
     """Enrol one leader into a cycle at a level."""
     subject_id: str
     level: str
+    # A leader with no direct reports cannot be a 360° subject.
+    mode_override: Optional[str] = None
 
     @field_validator("subject_id")
     @classmethod
@@ -852,6 +1257,106 @@ class WeightageUpdate(BaseModel):
         return items
 
 
+class ActionItem(BaseModel):
+    text: str
+    owner: Optional[str] = ""
+    due_date: Optional[datetime] = None
+    done: bool = False
+
+
+class DiscussionCreate(BaseModel):
+    """The RRO conversation, logged by the reporting manager.
+
+    `parameters_discussed` holds item ids. "Agar zarurat ho toh parameter-wise discuss
+    karo" — recording WHICH parameters were covered is what makes the next cycle's
+    conversation able to start where this one finished.
+    """
+    notes: Optional[str] = ""
+    parameters_discussed: Optional[List[str]] = None
+    action_items: Optional[List[ActionItem]] = None
+    discussed_at: Optional[datetime] = None
+
+
+class DiscussionAck(BaseModel):
+    comment: Optional[str] = ""
+
+
+class BriefingCreate(BaseModel):
+    user_id: str
+    type: str = "pre"
+    conducted_by: Optional[str] = ""
+    notes: Optional[str] = ""
+
+    @field_validator("type")
+    @classmethod
+    def _known_type(cls, v: str) -> str:
+        t = str(v or "").strip().lower()
+        if t not in ("pre", "post"):
+            raise ValueError("type must be 'pre' or 'post'")
+        return t
+
+
+class SubjectMode(BaseModel):
+    """Put one leader on a different degree from the rest of their cycle."""
+    mode_override: Optional[str] = None
+
+    @field_validator("mode_override")
+    @classmethod
+    def _known(cls, v):
+        if v in (None, ""):
+            return None
+        d = str(v).strip()
+        if d not in DEGREES:
+            raise ValueError(f"mode_override must be one of {', '.join(DEGREES)}")
+        return d
+
+
+def _validate_group_weightages(v):
+    """Group weights must name known relations and be non-negative.
+
+    They are NOT required to total 100: the scorer renormalises over whichever groups
+    actually responded, so a fixed total would be a false promise the moment one group
+    stays silent.
+    """
+    if v in (None, {}):
+        return v
+    unknown = [k for k in v if k not in RELATIONS]
+    if unknown:
+        raise ValueError(f"Unknown relation(s): {', '.join(unknown)}")
+    if any(float(x) < 0 for x in v.values()):
+        raise ValueError("A group weightage cannot be negative")
+    if sum(float(x) for x in v.values()) <= 0:
+        raise ValueError("At least one group must carry weight")
+    return {k: float(x) for k, x in v.items()}
+
+
+class LevelSignOff(BaseModel):
+    """HR + MD confirming a level's rubric is what leaders should be scored on.
+
+    `acknowledge` is required and must be true. The source document's defects are not
+    incidental — they change which parameter a score belongs to — so approving a level is
+    an explicit act, never a side effect of saving a weightage. `note` is where the
+    approver records what was decided about the open issues (see QUESTION_REVIEW), and it
+    is stored with the fingerprint of the exact rubric that was approved.
+    """
+    acknowledge: bool = False
+    note: Optional[str] = ""
+
+    @field_validator("acknowledge")
+    @classmethod
+    def _must_acknowledge(cls, v: bool) -> bool:
+        if not v:
+            raise ValueError(
+                "Sign-off must be explicit: confirm the question titles, option wording "
+                "and weightages for this level have been reviewed by HR and MD.")
+        return v
+
+    @field_validator("note")
+    @classmethod
+    def _trim(cls, v):
+        return (v or "").strip()
+
+
 # ─────────────────────────────────────────────────────────────
 # Index specification — consumed by app/db/mongodb.py at startup.
 # Every collection here is new, so no existing index is touched.
@@ -865,18 +1370,60 @@ LEADERSHIP_INDEXES = [
      {"name": "by_company_cycle"}),
     (COLL_LS_ASSIGNMENTS, [("company_id", 1), ("cycle", 1), ("subject_id", 1), ("giver_id", 1)],
      {"unique": True, "name": "uniq_cycle_subject_giver"}),
+    (COLL_LS_ASSIGNMENTS, [("token_hash", 1)],
+     {"unique": True, "sparse": True, "name": "uniq_token_hash"}),
+    # Legacy plaintext tokens issued before hashing. Sparse, so rows without one are
+    # ignored; kept only so links already in someone's inbox keep working.
     (COLL_LS_ASSIGNMENTS, [("token", 1)],
-     {"unique": True, "name": "uniq_token"}),
+     {"unique": True, "sparse": True, "name": "uniq_token"}),
     (COLL_LS_ASSIGNMENTS, [("company_id", 1), ("cycle", 1)],
      {"name": "by_company_cycle"}),
-    (COLL_LS_RESPONSES,   [("company_id", 1), ("cycle", 1), ("subject_id", 1), ("giver_id", 1)],
-     {"unique": True, "name": "uniq_cycle_subject_giver"}),
+    # NOT unique, and NOT keyed on any giver. A response carries no rater identity, so
+    # there is nothing per-person to be unique on; duplicate submission is prevented on
+    # the assignment row instead (see leadership_link_service.claim_for_submission).
     (COLL_LS_RESPONSES,   [("company_id", 1), ("cycle", 1), ("subject_id", 1)],
      {"name": "by_subject"}),
+    (COLL_LS_RESPONSES,   [("company_id", 1), ("cycle", 1), ("subject_id", 1), ("relation", 1)],
+     {"name": "by_subject_relation"}),
     (COLL_LS_QUESTIONS,   [("level", 1), ("item_id", 1)],
-     {"unique": True, "name": "uniq_level_item"}),
+     {"name": "by_level_item"}),
     (COLL_LS_QUESTIONS,   [("level", 1), ("order", 1)],
      {"name": "by_level_order"}),
     (COLL_LS_SCORES,      [("company_id", 1), ("cycle", 1), ("subject_id", 1)],
      {"unique": True, "name": "uniq_company_cycle_subject"}),
+    # Sign-off is per (company, level): the question master is shared today, but approving
+    # a rubric is a decision each company's HR and MD make for themselves, and one
+    # company's approval must never stand in for another's.
+    (COLL_LS_SIGNOFF,     [("company_id", 1), ("level", 1)],
+     {"unique": True, "name": "uniq_company_level"}),
+    (COLL_LS_DISCUSSIONS, [("company_id", 1), ("cycle", 1), ("subject_id", 1)],
+     {"unique": True, "name": "uniq_company_cycle_subject"}),
+    (COLL_LS_BRIEFINGS,   [("company_id", 1), ("cycle", 1), ("user_id", 1), ("type", 1)],
+     {"unique": True, "name": "uniq_company_cycle_user_type"}),
+    # Company-scoped question master (see get_questions). Rows with company_id=None are the
+    # shared default; a company gets its own copy the first time it edits one.
+    (COLL_LS_QUESTIONS,   [("company_id", 1), ("level", 1), ("item_id", 1)],
+     {"name": "by_company_level_item"}),
+]
+
+# Indexes an EARLIER build created that are now wrong, dropped at startup if present.
+#
+# `uniq_cycle_subject_giver` on responses was unique across (company, cycle, subject,
+# giver_id). Responses no longer store a giver, so every row would key on the same
+# (company, cycle, subject, null) and the SECOND response for a leader would be rejected
+# as a duplicate. Dropping it is required for correctness; it removes an index, never a
+# document.
+LEADERSHIP_OBSOLETE_INDEXES = [
+    (COLL_LS_RESPONSES, "uniq_cycle_subject_giver"),
+    (COLL_LS_QUESTIONS, "uniq_level_item"),   # replaced by the company-scoped index
+    # `uniq_token` was unique but NOT sparse, from when every assignment stored a raw
+    # token. Assignments now store only `token_hash`, and a submitted one has even that
+    # unset — so `token` is absent on every new row. A non-sparse unique index treats a
+    # missing field as null, which means the FIRST new assignment indexes null and the
+    # SECOND is rejected as a duplicate key. It is dropped and recreated sparse below.
+    #
+    # MongoDB will not change an existing index's options in place: createIndex with the
+    # same name and different options raises IndexKeySpecsConflict (code 86) and the new
+    # options are silently never applied. Dropping first is the only way.
+    (COLL_LS_ASSIGNMENTS, "uniq_token"),
 ]

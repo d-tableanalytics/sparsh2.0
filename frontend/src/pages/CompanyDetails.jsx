@@ -214,6 +214,7 @@ const CompanyDetails = () => {
   const [newUser, setNewUser] = useState({
     email: '', password: '', first_name: '', last_name: '', mobile: '',
     role: 'clientuser', session_type: 'None', designation: '', department: 'Other',
+    leadership_level: '',
     reporting_manager: ''
   });
   // Reporting-manager dropdown options (active users of THIS company)
@@ -384,7 +385,7 @@ const CompanyDetails = () => {
       await api.post(`/companies/${companyId}/users/bulk`, [cleanUser]);
       setShowAddUser(false);
       showSuccess('User added successfully');
-      setNewUser({ email: '', password: '', first_name: '', last_name: '', mobile: '', role: 'clientuser', session_type: 'None', designation: '', department: 'Other', reporting_manager: '' });
+      setNewUser({ email: '', password: '', first_name: '', last_name: '', mobile: '', role: 'clientuser', session_type: 'None', designation: '', department: 'Other', leadership_level: '', reporting_manager: '' });
       fetchData();
     } catch (err) { showError(err.response?.data?.detail || 'Failed to create user'); }
   };
@@ -1156,11 +1157,27 @@ const CompanyDetails = () => {
               </select></div>
             <div className="space-y-1"><label className="text-[10px] font-bold text-[var(--text-muted)] uppercase tracking-widest">Department</label>
               <select className="w-full px-3 py-1.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-md text-[13px] text-[var(--text-main)] outline-none" value={newUser.department} onChange={e => setNewUser({...newUser, department: e.target.value})}>
-                <option value="HOD">HOD</option><option value="Implementor">Implementor</option><option value="EA">EA</option><option value="MD">MD</option><option value="Other">Other</option>
+                <option value="HOD">HOD</option><option value="Implementor">Implementor</option><option value="EA">EA</option><option value="MD">MD</option><option value="HR">HR</option><option value="Other">Other</option>
               </select></div>
           </div>
-          <div className="space-y-1"><label className="text-[10px] font-bold text-[var(--text-muted)] uppercase tracking-widest">Reporting Manager</label>
-            <ReportingManagerSelect options={managerOptions} value={newUser.reporting_manager} onChange={val => setNewUser({...newUser, reporting_manager: val})} />
+          <div className="grid grid-cols-2 gap-4">
+            <div className="space-y-1"><label className="text-[10px] font-bold text-[var(--text-muted)] uppercase tracking-widest">Reporting Manager</label>
+              <ReportingManagerSelect options={managerOptions} value={newUser.reporting_manager} onChange={val => setNewUser({...newUser, reporting_manager: val})} />
+            </div>
+            {/* Leadership Score eligibility — "Applicable from L4 (Asst Managers) and
+                above". Set explicitly: it is never derived from the free-text Designation,
+                because "Sr. Manager" and "Senior Manager" are the same job and would land
+                on different levels, silently dropping someone from a cycle. */}
+            <div className="space-y-1"><label className="text-[10px] font-bold text-[var(--text-muted)] uppercase tracking-widest">Leadership Level</label>
+              <select className="w-full px-3 py-1.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-md text-[13px] text-[var(--text-main)] outline-none" value={newUser.leadership_level} onChange={e => setNewUser({...newUser, leadership_level: e.target.value})}>
+                <option value="">— Not a leader —</option>
+                <option value="L4">L4 · Asst. Manager</option>
+                <option value="L5">L5 · Manager</option>
+                <option value="L6">L6 · Senior Manager</option>
+                <option value="L7">L7 &amp; above</option>
+              </select>
+              <p className="text-[10px] text-[var(--text-muted)]">Required to enrol them in a Leadership Score cycle.</p>
+            </div>
           </div>
           <div className="flex gap-3 mt-6">
             <button type="submit" className="flex-1 py-2 bg-[var(--btn-primary)] text-white rounded-lg text-[13px] font-bold hover:bg-[var(--btn-primary-hover)] transition-all">Create User</button>

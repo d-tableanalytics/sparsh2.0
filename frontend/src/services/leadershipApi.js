@@ -35,6 +35,24 @@ export const saveLeadershipWeightages = (level, weightages) =>
 export const restoreLeadershipQuestions = (level) =>
   api.post(`/leadership/questions/${level}/restore`);
 
+// ── Source-document review & level sign-off ──
+// The seeded rubric carries defects from "Key insights of Leadership Score" that change
+// what a leader is scored on (see QUESTION_REVIEW in backend/app/models/leadership.py).
+// A cycle cannot be CLOSED until every level it scores has been signed off by HR + MD.
+
+/** Every level's open issues, weightage health and approval state. */
+export const getLeadershipReview = (companyId) =>
+  api.get('/leadership/questions/review', withCompany(companyId));
+
+/** Approve a level's rubric exactly as it stands. Any later edit invalidates it. */
+export const signOffLeadershipLevel = (companyId, level, note) =>
+  api.post(`/leadership/questions/${level}/sign-off`,
+    { acknowledge: true, note: note || '' }, withCompany(companyId));
+
+/** Withdraw an approval, putting the level back under review. */
+export const withdrawLeadershipSignOff = (companyId, level) =>
+  api.delete(`/leadership/questions/${level}/sign-off`, withCompany(companyId));
+
 // ── Cycles (the 2-month assessment window) ──
 export const getLeadershipCycles = (companyId) =>
   api.get('/leadership/cycles', withCompany(companyId));
@@ -106,3 +124,53 @@ export const getLeadershipScores = (companyId, cycle) =>
 
 export const getLeaderScore = (companyId, cycle, subjectId) =>
   api.get(`/leadership/scores/${subjectId}`, withCompany(companyId, { cycle }));
+
+// ── Eligibility ──
+// "Applicable from L4 (Asst Managers) and above." `unlevelled` lists people who look
+// senior but carry no leadership_level — the level is never guessed from a designation.
+export const getLeadershipEligible = (companyId) =>
+  api.get('/leadership/eligible', withCompany(companyId));
+
+/** Put one leader on a different degree from the rest of their cycle (e.g. no direct reports). */
+export const setLeadershipSubjectMode = (companyId, cycle, subjectId, modeOverride) =>
+  api.patch(`/leadership/subjects/${subjectId}/mode`, { mode_override: modeOverride },
+    withCompany(companyId, { cycle }));
+
+// ── Close → compute → publish ──
+// A leader sees nothing until publish. Without it they could watch their own number move
+// during collection and difference it after each submission.
+export const getLeadershipQuorum = (companyId, cycle) =>
+  api.get(`/leadership/cycles/${cycle}/quorum`, withCompany(companyId));
+
+export const computeLeadershipCycle = (companyId, cycle) =>
+  api.post(`/leadership/cycles/${cycle}/compute`, {}, withCompany(companyId));
+
+export const publishLeadershipCycle = (companyId, cycle) =>
+  api.post(`/leadership/cycles/${cycle}/publish`, {}, withCompany(companyId));
+
+// ── RRO discussion + action plan ──
+// "Their respective reporting Manager should discuss the score with each leader during RRO."
+export const getLeadershipDiscussion = (companyId, cycle, subjectId) =>
+  api.get(`/leadership/subjects/${subjectId}/discussion`, withCompany(companyId, { cycle }));
+
+export const logLeadershipDiscussion = (companyId, cycle, subjectId, payload) =>
+  api.post(`/leadership/subjects/${subjectId}/discussion`, payload,
+    withCompany(companyId, { cycle }));
+
+export const acknowledgeLeadershipDiscussion = (companyId, cycle, subjectId, comment) =>
+  api.patch(`/leadership/subjects/${subjectId}/discussion/acknowledge`, { comment },
+    withCompany(companyId, { cycle }));
+
+export const getLeadershipPendingDiscussions = (companyId, cycle) =>
+  api.get(`/leadership/cycles/${cycle}/discussions/pending`, withCompany(companyId));
+
+// ── Briefing tracker ──
+export const getLeadershipBriefings = (companyId, cycle) =>
+  api.get(`/leadership/cycles/${cycle}/briefings`, withCompany(companyId));
+
+export const recordLeadershipBriefing = (companyId, cycle, payload) =>
+  api.post(`/leadership/cycles/${cycle}/briefings`, payload, withCompany(companyId));
+
+// ── Organisation roll-up ──
+export const getLeadershipDashboard = (companyId, cycle) =>
+  api.get('/leadership/dashboard', withCompany(companyId, { cycle: cycle || undefined }));

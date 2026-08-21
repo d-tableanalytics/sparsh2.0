@@ -279,6 +279,16 @@ async def run_tpms_scheduled_jobs(state: dict):
         from app.services.tpms_escalation_service import run_escalation_ladder
         await _run_job(state, "ladder", today, "escalation ladder", run_escalation_ladder)
 
+    # ── Daily @ 07:00 — Leadership Score: the reminder ladder and cycle notices ──
+    #
+    # Runs alongside the TPMS ladder and gates itself on the clock the same way, so it
+    # needs no scheduler of its own. Every job reads the ASSIGNMENT's status, never a
+    # response — nothing here can walk from an answer back to the person who gave it.
+    if now.hour >= TPMS_LADDER_HOUR:
+        from app.services.leadership_notify_service import run_leadership_jobs
+        await _run_job(state, "leadership", today, "leadership reminder ladder",
+                       run_leadership_jobs)
+
 
 async def check_and_trigger_reminders():
     now = datetime.utcnow()

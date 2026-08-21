@@ -37,14 +37,18 @@ from bson import ObjectId
 
 from app.db.mongodb import get_collection
 from app.models.leadership import (
-    COLL_LS_ASSIGNMENTS,
-    COLL_LS_CYCLES, COLL_LS_QUESTIONS, COLL_LS_RESPONSES, COLL_LS_SCORES, COLL_LS_SUBJECTS,
-    CYCLE_CLOSED, CYCLE_DRAFT, CYCLE_OPEN,
-    DEGREE_360, DEGREE_RELATIONS,
-    LEVELS, LEVEL_LABELS, LEVEL_THEMES,
-    RECOMMENDED_PER_RELATION, RELATIONS, RELATION_LABELS,
+    COLL_LS_ASSIGNMENTS, COLL_LS_BRIEFINGS, COLL_LS_CYCLES, COLL_LS_DISCUSSIONS,
+    COLL_LS_QUESTIONS, COLL_LS_RESPONSES, COLL_LS_SCORES,
+    COLL_LS_SIGNOFF, COLL_LS_SUBJECTS,
+    CYCLE_CLOSED, CYCLE_COLLECTING, CYCLE_COMPUTED, CYCLE_DRAFT, CYCLE_OPEN,
+    CYCLE_PUBLISHED, CYCLE_STATUSES, CYCLE_TRANSITIONS, can_transition,
+    DEFAULT_QUORUM, DEGREE_180, DEGREE_360, DEGREE_RELATIONS,
+    LEVEL_L4, LEVELS, LEVEL_LABELS, LEVEL_THEMES, MIN_RESPONSES_FLOOR,
+    RECOMMENDED_PER_RELATION, REL_DIRECT_REPORT, REL_OTHER_DEPT, REL_PEER,
+    REL_SUPERIOR, RELATIONS, RELATION_LABELS,
     SCALE_MAX, TOTAL_WEIGHTAGE, WEIGHTAGE_EPSILON,
-    all_seed_rows, cycle_label, cycle_period, current_cycle, seed_rows_for_level,
+    all_seed_rows, cycle_label, cycle_period, current_cycle, level_review,
+    question_review, seed_rows_for_level, signoff_fingerprint, source_drift,
 )
 
 logger = logging.getLogger(__name__)
@@ -80,6 +84,8 @@ async def seed_questions_if_empty() -> int:
         return 0
     now = datetime.utcnow()
     for r in rows:
+        # None = the shared default every company reads until it edits a level of its own.
+        r["company_id"] = None
         r["created_at"] = now
         r["updated_at"] = now
     try:
@@ -91,49 +97,176 @@ async def seed_questions_if_empty() -> int:
     return len(rows)
 
 
-async def get_questions(level: Optional[str] = None, include_inactive: bool = False) -> List[dict]:
+async def get_questions(level: Optional[str] = None, include_inactive: bool = False,
+                        company_id: Optional[str] = None) -> List[dict]:
+    """The question master a company is actually scored on.
+
+    COMPANY SCOPING (copy-on-write)
+    -------------------------------
+    Rows with `company_id = None` are the shared default seeded from the HR document.
+    A company that edits a level gets its OWN copy of that level's rows first, and from
+    then on reads and writes only its copy.
+
+    Before this, one master served every client: an admin retitling a question or moving a
+    weightage for one company silently rewrote the rubric — and therefore the scores — for
+    every other company on the platform. Copy-on-write fixes that without migrating
+    anything: existing rows keep `company_id` absent and go on serving as the default.
+
+    `company_id=None` here means "the shared default", which is what the internal template
+    editor asks for. It is not a wildcard.
+    """
     await seed_questions_if_empty()
-    query: dict = {}
+    col = get_collection(COLL_LS_QUESTIONS)
+
+    base: dict = {}
     if level:
-        query["level"] = str(level).upper()
+        base["level"] = str(level).upper()
     if not include_inactive:
-        query["active"] = {"$ne": False}
-    docs = await get_collection(COLL_LS_QUESTIONS).find(query).sort(
-        [("level", 1), ("order", 1)]).to_list(500)
+        base["active"] = {"$ne": False}
+
+    docs: List[dict] = []
+    if company_id:
+        docs = await col.find({**base, "company_id": str(company_id)}).to_list(500)
+        if not docs:
+            # No override for this company (or this level) — serve the shared default.
+            docs = await col.find({**base, "company_id": None}).to_list(500)
+            if not docs:
+                docs = [d for d in await col.find(base).to_list(500)
+                        if not d.get("company_id")]
+    else:
+        docs = await col.find({**base, "company_id": None}).to_list(500)
+        if not docs:
+            docs = [d for d in await col.find(base).to_list(500) if not d.get("company_id")]
+
+    docs.sort(key=lambda d: (str(d.get("level") or ""), int(d.get("order") or 0)))
+
     for d in docs:
         d["_id"] = str(d["_id"])
+        # The source-document issue register is the authority, applied on READ. Rows
+        # seeded before the register existed therefore show their issue without anything
+        # being rewritten in the collection — no migration, and the flag cannot drift out
+        # of step with the register the way a stored copy would.
+        issue = question_review(d.get("item_id") or "") or {}
+        d["needs_review"] = bool(issue)
+        d["review_code"] = issue.get("code")
+        d["review_note"] = issue.get("note")
+        d["review_severity"] = issue.get("severity")
+
+    # Where the configured rows differ from the printed document. Reported, never
+    # repaired: rewriting a seeded record would change what leaders are scored on with
+    # nobody approving it. An admin edit shows up here too, which is the point — the
+    # screen should always be able to answer "does this still match the document?".
+    by_level: Dict[str, List[dict]] = {}
+    for d in docs:
+        by_level.setdefault(str(d.get("level") or "").upper(), []).append(d)
+    for lvl, rows in by_level.items():
+        drift = {x["item_id"]: x["differences"] for x in source_drift(lvl, rows)}
+        for d in rows:
+            d["source_drift"] = drift.get(d.get("item_id"), [])
     return docs
 
 
-async def restore_level_questions(level: str) -> dict:
-    """Re-insert any seeded question missing from a level. Insert-only: existing rows,
-    including their edited text and weightages, are left exactly as they are."""
+async def fork_level_for_company(company_id: str, level: str) -> int:
+    """Give one company its own copy of a level, so editing it cannot touch anyone else.
+
+    Insert-only and idempotent: if the company already owns the level, nothing happens.
+    The shared default rows are never modified, only read.
+    """
     level = str(level).upper()
     col = get_collection(COLL_LS_QUESTIONS)
-    present = {d.get("item_id") for d in await col.find({"level": level}).to_list(200)}
+    if await col.count_documents({"company_id": str(company_id), "level": level}):
+        return 0
+
+    defaults = [d for d in await col.find({"level": level}).to_list(200)
+                if not d.get("company_id")]
+    if not defaults:
+        defaults = seed_rows_for_level(level)
+
+    now = datetime.utcnow()
+    copies = []
+    for d in defaults:
+        row = {k: v for k, v in d.items() if k != "_id"}
+        row["company_id"] = str(company_id)
+        row["forked_from_default_at"] = now
+        row["created_at"] = now
+        row["updated_at"] = now
+        copies.append(row)
+    if copies:
+        await col.insert_many(copies, ordered=False)
+    logger.info("Leadership %s forked to company %s (%d questions)",
+                level, company_id, len(copies))
+    return len(copies)
+
+
+async def restore_level_questions(level: str, company_id: Optional[str] = None) -> dict:
+    """Re-insert any question from the document that is missing from a level.
+
+    Insert-only: existing rows, including their edited text and weightages, are left
+    exactly as they are. Scoped to the company's own copy when it has one.
+    """
+    level = str(level).upper()
+    col = get_collection(COLL_LS_QUESTIONS)
+    scope = {"level": level, "company_id": str(company_id) if company_id else None}
+
+    rows = await col.find(scope).to_list(200)
+    if not rows and company_id:
+        # The company reads the shared default, so restoring belongs there — forking a
+        # level just to add a missing question would silently detach it from the default.
+        scope = {"level": level, "company_id": None}
+        rows = await col.find(scope).to_list(200)
+
+    present = {d.get("item_id") for d in rows}
     missing = [r for r in seed_rows_for_level(level) if r["item_id"] not in present]
     if missing:
         now = datetime.utcnow()
         for r in missing:
+            r["company_id"] = scope["company_id"]
             r["created_at"] = now
             r["updated_at"] = now
         await col.insert_many(missing, ordered=False)
     return {"level": level, "restored": len(missing)}
 
 
-async def update_question(question_id: str, updates: dict) -> bool:
+async def update_question(question_id: str, updates: dict,
+                          company_id: Optional[str] = None) -> bool:
+    """Reword a question or restate its options — for ONE company.
+
+    If the row being edited is a shared default and a company is editing it, that
+    company's copy of the level is created first and the edit lands on the copy. The
+    default is never modified, so no other client's rubric — or scores — move because of
+    an edit made for someone else.
+    """
     fields = {k: v for k, v in updates.items() if v is not None}
     if not fields:
         return False
+
+    col = get_collection(COLL_LS_QUESTIONS)
+    row = await col.find_one({"_id": ObjectId(str(question_id))})
+    if not row:
+        return False
+
     fields["updated_at"] = datetime.utcnow()
-    res = await get_collection(COLL_LS_QUESTIONS).update_one(
-        {"_id": ObjectId(str(question_id))}, {"$set": fields})
+
+    if company_id and not row.get("company_id"):
+        await fork_level_for_company(company_id, row.get("level"))
+        res = await col.update_one(
+            {"company_id": str(company_id), "level": row.get("level"),
+             "item_id": row.get("item_id")},
+            {"$set": fields})
+        return res.matched_count > 0
+
+    res = await col.update_one({"_id": ObjectId(str(question_id))}, {"$set": fields})
     return res.matched_count > 0
 
 
-async def set_weightages(level: str, weightages: Dict[str, float]) -> dict:
-    """Write a level's weightage column. Totalling to 100 is validated by the payload
-    model and re-checked here so a direct service call cannot bypass it."""
+async def set_weightages(level: str, weightages: Dict[str, float],
+                         company_id: Optional[str] = None) -> dict:
+    """Write a level's weightage column for one company.
+
+    Totalling exactly 100 is validated by the payload model and re-checked here so a
+    direct service call cannot bypass it — a half-configured level produces a
+    plausible-looking wrong score rather than an obvious error.
+    """
     level = str(level).upper()
     total = round(sum(weightages.values()), 2)
     if abs(total - TOTAL_WEIGHTAGE) > WEIGHTAGE_EPSILON:
@@ -141,25 +274,28 @@ async def set_weightages(level: str, weightages: Dict[str, float]) -> dict:
             f"Total weightage must be exactly {TOTAL_WEIGHTAGE:g}% (currently {total:g}%)")
 
     col = get_collection(COLL_LS_QUESTIONS)
-    known = {d.get("item_id") for d in await col.find({"level": level}).to_list(200)}
+    if company_id:
+        await fork_level_for_company(company_id, level)
+    scope = {"level": level, "company_id": str(company_id) if company_id else None}
+
+    known = {d.get("item_id") for d in await col.find(scope).to_list(200)}
     unknown = [i for i in weightages if i not in known]
     if unknown:
         raise ValueError(f"Unknown question(s) for {level}: {', '.join(unknown)}")
 
     now = datetime.utcnow()
     for item_id, w in weightages.items():
-        await col.update_one({"level": level, "item_id": item_id},
+        await col.update_one({**scope, "item_id": item_id},
                              {"$set": {"weightage": round(float(w), 2), "updated_at": now}})
     return {"level": level, "updated": len(weightages), "total": total}
 
 
-async def weightage_summary() -> List[dict]:
+async def weightage_summary(company_id: Optional[str] = None) -> List[dict]:
     """Per-level totals, so the admin screen can flag a level that does not add to 100."""
     await seed_questions_if_empty()
     out = []
     for level in LEVELS:
-        rows = await get_collection(COLL_LS_QUESTIONS).find(
-            {"level": level, "active": {"$ne": False}}).to_list(200)
+        rows = await get_questions(level, company_id=company_id)
         total = round(sum(float(r.get("weightage") or 0) for r in rows), 2)
         out.append({
             "level": level,
@@ -168,8 +304,179 @@ async def weightage_summary() -> List[dict]:
             "questions": len(rows),
             "total_weightage": total,
             "is_valid": abs(total - TOTAL_WEIGHTAGE) <= WEIGHTAGE_EPSILON,
+            # True once this company holds its own copy of the level, so the screen can say
+            # whether an edit here affects only them.
+            "company_owned": bool(rows and rows[0].get("company_id")),
         })
     return out
+
+
+# ─────────────────────────────────────────────────────────────
+# Source-document review and level sign-off
+#
+# The seeded rubric carries defects the business has to rule on (see QUESTION_REVIEW in
+# app/models/leadership.py). Rather than guess what was meant, the module records them,
+# shows them, and refuses to FREEZE a score computed from a level nobody has approved.
+#
+# Deliberately narrow: only closing a cycle is blocked. Creating a cycle, enrolling
+# leaders, assigning panels, mailing links and collecting feedback all stay open, so the
+# whole flow can be tested before anyone signs anything.
+# ─────────────────────────────────────────────────────────────
+async def level_signoff(company_id: str, level: str) -> dict:
+    """One level's approval state for one company.
+
+    `stale` is the important field. A sign-off stores the fingerprint of the exact rubric
+    that was approved; if a question has been retitled, an option restated or a weightage
+    moved since, the fingerprint no longer matches and the approval no longer applies.
+    Silently honouring it would let an unreviewed rubric ride in on an old approval.
+    """
+    level = str(level).upper()
+    questions = await get_questions(level, company_id=company_id)
+    current = signoff_fingerprint(questions)
+
+    row = await get_collection(COLL_LS_SIGNOFF).find_one(
+        {"company_id": str(company_id), "level": level})
+
+    if not row:
+        return {"level": level, "label": LEVEL_LABELS.get(level, level),
+                "signed_off": False, "stale": False, "fingerprint": current,
+                "signed_off_at": None, "signed_off_by": None, "note": ""}
+
+    stale = str(row.get("fingerprint") or "") != current
+    return {
+        "level": level,
+        "label": LEVEL_LABELS.get(level, level),
+        # A stale approval is reported as NOT signed off — it is the same thing for every
+        # decision that depends on it, and calling it "signed off (stale)" invites someone
+        # to read only the first half.
+        "signed_off": not stale,
+        "stale": stale,
+        "fingerprint": current,
+        "signed_off_fingerprint": row.get("fingerprint"),
+        "signed_off_at": row.get("signed_off_at"),
+        "signed_off_by": row.get("signed_off_by"),
+        "signed_off_by_id": row.get("signed_off_by_id"),
+        "note": row.get("note") or "",
+        "acknowledged_issues": row.get("acknowledged_issues") or [],
+    }
+
+
+async def set_level_signoff(company_id: str, level: str, note: str, user: dict) -> dict:
+    """Record HR + MD approval of a level's rubric as it stands right now.
+
+    The open issues are stored alongside, so the record says what was accepted rather than
+    merely that someone clicked a button.
+    """
+    level = str(level).upper()
+    if level not in LEVELS:
+        raise ValueError(f"level must be one of {', '.join(LEVELS)}")
+
+    questions = await get_questions(level, company_id=company_id)
+    if not questions:
+        raise ValueError(f"No active questions configured for {level}")
+
+    total = round(sum(float(q.get("weightage") or 0) for q in questions), 2)
+    if abs(total - TOTAL_WEIGHTAGE) > WEIGHTAGE_EPSILON:
+        # Approving a level whose weightages do not total 100 would certify a rubric that
+        # cannot produce a correct score.
+        raise ValueError(
+            f"{LEVEL_LABELS.get(level, level)} weightages total {total:g}%, not "
+            f"{TOTAL_WEIGHTAGE:g}%. Fix the weightage column before signing off.")
+
+    now = datetime.utcnow()
+    doc = {
+        "company_id": str(company_id),
+        "level": level,
+        "fingerprint": signoff_fingerprint(questions),
+        "note": (note or "").strip(),
+        "acknowledged_issues": [
+            {"scope": i["scope"], "item_id": i.get("item_id"), "code": i["code"]}
+            for i in level_review(level)
+        ],
+        "signed_off_by": _display_name(user),
+        "signed_off_by_id": str(user.get("_id") or ""),
+        "signed_off_at": now,
+        "updated_at": now,
+    }
+    await get_collection(COLL_LS_SIGNOFF).update_one(
+        {"company_id": str(company_id), "level": level},
+        {"$set": doc, "$setOnInsert": {"created_at": now}},
+        upsert=True,
+    )
+    logger.info("Leadership %s signed off by %s [company=%s]",
+                level, doc["signed_off_by"], company_id)
+    return await level_signoff(company_id, level)
+
+
+async def clear_level_signoff(company_id: str, level: str) -> dict:
+    """Withdraw an approval — for when HR decides the rubric needs another look."""
+    level = str(level).upper()
+    res = await get_collection(COLL_LS_SIGNOFF).delete_one(
+        {"company_id": str(company_id), "level": level})
+    if not res.deleted_count:
+        raise ValueError(f"{LEVEL_LABELS.get(level, level)} is not signed off")
+    return await level_signoff(company_id, level)
+
+
+async def review_summary(company_id: str) -> dict:
+    """Every level: its questions, its open source-document issues, its approval state.
+
+    This is what the admin question screen renders, and what tells HR why a cycle will not
+    close yet.
+    """
+    await seed_questions_if_empty()
+    levels = []
+    for level in LEVELS:
+        questions = await get_questions(level, company_id=company_id)
+        issues = level_review(level)
+        signoff = await level_signoff(company_id, level)
+        total = round(sum(float(q.get("weightage") or 0) for q in questions), 2)
+        levels.append({
+            **signoff,
+            "theme": LEVEL_THEMES.get(level, ""),
+            "questions": len(questions),
+            "total_weightage": total,
+            "weightage_valid": abs(total - TOTAL_WEIGHTAGE) <= WEIGHTAGE_EPSILON,
+            # Equal weight across a level is the seeded placeholder, not a business
+            # decision. Surfaced explicitly so nobody reads it as HR's intent.
+            "weightage_is_placeholder": len({round(float(q.get("weightage") or 0), 2)
+                                             for q in questions}) <= 1,
+            "issues": issues,
+            "issue_count": len(issues),
+            "blocking_count": len([i for i in issues if i.get("severity") == "blocking"]),
+            "flagged_questions": [q["item_id"] for q in questions if q.get("needs_review")],
+            "source_drift": source_drift(level, questions),
+        })
+    return {
+        "levels": levels,
+        "signed_off": [l["level"] for l in levels if l["signed_off"]],
+        "pending": [l["level"] for l in levels if not l["signed_off"]],
+    }
+
+
+async def unsigned_levels(company_id: str, cycle: str) -> List[dict]:
+    """Levels enrolled in this cycle whose rubric has no valid approval.
+
+    Only levels actually being scored are checked — an unapproved L7 does not block a
+    cycle that enrolled nobody at L7.
+    """
+    subjects = await get_collection(COLL_LS_SUBJECTS).find(
+        {"company_id": str(company_id), "cycle": str(cycle)}).to_list(500)
+    enrolled = sorted({str(s.get("level") or "").upper() for s in subjects if s.get("level")})
+
+    out = []
+    for level in enrolled:
+        state = await level_signoff(company_id, level)
+        if not state["signed_off"]:
+            out.append(state)
+    return out
+
+
+def describe_unsigned(states: List[dict]) -> str:
+    """'L-5 (Manager) (approval out of date), L7 & Above' — for an error a human reads."""
+    return ", ".join(
+        f"{s['label']}{' (approval out of date)' if s.get('stale') else ''}"
+        for s in states)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -249,7 +556,11 @@ async def panel_shortfall(company_id: str, cycle: str, subject_id: str) -> Dict[
     lets the caller tell HR exactly who is still needed.
     """
     cyc = await get_cycle(company_id, cycle)
-    wanted = DEGREE_RELATIONS.get((cyc or {}).get("degree") or DEGREE_360, RELATIONS)
+    subject = await get_subject(company_id, cycle, subject_id)
+    # Per SUBJECT, not per cycle: a leader with no direct reports is on 180° even inside a
+    # 360° cycle, and asking for groups they cannot have would hold them out of dispatch
+    # permanently.
+    wanted = DEGREE_RELATIONS.get(effective_degree(cyc, subject), RELATIONS)
 
     rows = await get_collection(COLL_LS_ASSIGNMENTS).find({
         "company_id": str(company_id), "cycle": str(cycle), "subject_id": str(subject_id),
@@ -294,6 +605,19 @@ async def incomplete_panels(company_id: str, cycle: str) -> Dict[str, dict]:
     return out
 
 
+def effective_degree(cyc: dict, subject: Optional[dict] = None) -> str:
+    """The degree that actually applies to one leader.
+
+    Set per cycle, overridable per subject. The override is not a nicety: a leader with no
+    direct reports cannot be a 360° subject, and without it their panel can never be
+    completed — `incomplete_panels` would hold them out of every dispatch forever, with no
+    way to say why.
+    """
+    if subject and subject.get("mode_override"):
+        return str(subject["mode_override"])
+    return str((cyc or {}).get("degree") or DEGREE_360)
+
+
 async def create_cycle(company_id: str, payload, user: dict) -> dict:
     cycle = str(payload.cycle or current_cycle())
     cycle_label(cycle)  # validates the code shape; raises ValueError on nonsense
@@ -308,7 +632,20 @@ async def create_cycle(company_id: str, payload, user: dict) -> dict:
         "cycle": cycle,
         "period": cycle_period(cycle),
         "degree": payload.degree,
-        "min_responses": int(payload.min_responses or 1),
+        # Anonymity floor: fewest responses before a number is shown at all.
+        "min_responses": max(int(payload.min_responses or MIN_RESPONSES_FLOOR),
+                             MIN_RESPONSES_FLOOR),
+        # Confidence floor: fewest responses before a score may be FROZEN and released.
+        # The document's panel is 8; a result from three of them is not the 360° view its
+        # label claims.
+        "quorum": int(getattr(payload, "quorum", None) or DEFAULT_QUORUM),
+        # Empty = equal across the groups in play. Stored empty rather than filled in, so
+        # the screen can honestly say "default" instead of showing invented numbers.
+        "group_weightages": getattr(payload, "group_weightages", None) or {},
+        # HR's collection window. Independent of the cycle's calendar months, so a window
+        # can be opened late or EXTENDED — which is the remedy when quorum is not met.
+        "opens_at": getattr(payload, "opens_at", None),
+        "closes_at": getattr(payload, "closes_at", None),
         "status": CYCLE_DRAFT,
         "notes": payload.notes or "",
         "created_by": _display_name(user),
@@ -316,6 +653,8 @@ async def create_cycle(company_id: str, payload, user: dict) -> dict:
         "created_at": now,
         "updated_at": now,
         "closed_at": None,
+        "computed_at": None,
+        "published_at": None,
     }
     await get_collection(COLL_LS_CYCLES).insert_one(doc)
     await seed_questions_if_empty()
@@ -325,24 +664,99 @@ async def create_cycle(company_id: str, payload, user: dict) -> dict:
 
 
 async def update_cycle(company_id: str, cycle: str, updates: dict, user: dict) -> dict:
+    """Edit a cycle, or move it along the state machine.
+
+    The state machine is the point. `draft → open → closed → computed → published`, with
+    every step checked here rather than trusted from the caller, because the same three
+    guarantees hang off it: feedback is only accepted while collecting, a score is only
+    frozen once, and a leader sees nothing until HR publishes.
+    """
     fields = {k: v for k, v in updates.items() if v is not None}
     if not fields:
         raise ValueError("Nothing to update")
 
-    # Closing a cycle freezes its scores so history can never silently move afterwards.
-    closing = fields.get("status") == CYCLE_CLOSED
-    fields["updated_at"] = datetime.utcnow()
-    if closing:
-        fields["closed_at"] = datetime.utcnow()
-
-    res = await get_collection(COLL_LS_CYCLES).update_one(
-        {"company_id": str(company_id), "cycle": str(cycle)}, {"$set": fields})
-    if res.matched_count == 0:
+    cyc = await get_cycle(company_id, cycle)
+    if not cyc:
         raise ValueError("Cycle not found")
+    current = cyc.get("status") or CYCLE_DRAFT
+    target = fields.get("status")
 
-    if closing:
+    if target and target != current:
+        if target not in CYCLE_STATUSES:
+            raise ValueError(f"status must be one of {', '.join(CYCLE_STATUSES)}")
+        if not can_transition(current, target):
+            allowed = CYCLE_TRANSITIONS.get(current) or []
+            raise ValueError(
+                f"{cycle_label(cycle)} is {current} and cannot become {target}"
+                + (f" — it can only move to {', '.join(allowed)}." if allowed else
+                   ". A published cycle is final."))
+
+    # Settings are frozen once collection starts: changing a weightage, the degree or the
+    # quorum midway would score the responses already in hand against different rules from
+    # the ones they were collected under.
+    locked = {"degree", "group_weightages", "quorum", "min_responses"}
+    if current not in (CYCLE_DRAFT,) and (locked & set(fields)):
+        raise ValueError(
+            f"{cycle_label(cycle)} has already opened. Its degree, quorum and weightages "
+            "are fixed so that every response is scored under the rules it was collected "
+            "under.")
+
+    if target == CYCLE_COMPUTED:
+        # A frozen score is what a leader is shown and a manager discusses at RRO. It must
+        # not be built from a rubric nobody has approved — the source document's question
+        # titles do not always match the parameter their options measure, so an unreviewed
+        # level produces a number filed under the wrong parameter name.
+        pending = await unsigned_levels(company_id, cycle)
+        if pending:
+            raise ValueError(
+                f"{cycle_label(cycle)} cannot be computed yet: "
+                f"{describe_unsigned(pending)} still needs HR + MD sign-off. "
+                "Review the question titles, option wording and weightages on the "
+                "Leadership Questions screen, then sign the level off.")
+
+    now = datetime.utcnow()
+    fields["updated_at"] = now
+    if target == CYCLE_CLOSED:
+        fields["closed_at"] = now
+    if target == CYCLE_COMPUTED:
+        fields["computed_at"] = now
+    if target == CYCLE_PUBLISHED:
+        fields["published_at"] = now
+        fields["published_by"] = _display_name(user)
+
+    await get_collection(COLL_LS_CYCLES).update_one(
+        {"company_id": str(company_id), "cycle": str(cycle)}, {"$set": fields})
+
+    if target == CYCLE_COMPUTED:
         await snapshot_cycle_scores(company_id, cycle)
     return await get_cycle(company_id, cycle)
+
+
+async def quorum_report(company_id: str, cycle: str) -> dict:
+    """Who is short of quorum, so HR can extend the window instead of publishing a thin score.
+
+    Names leaders, never raters, and reports counts only — "3 of 8 responses", never which
+    three.
+    """
+    cyc = await get_cycle(company_id, cycle) or {}
+    quorum = int(cyc.get("quorum") or DEFAULT_QUORUM)
+    subjects = await get_collection(COLL_LS_SUBJECTS).find({
+        "company_id": str(company_id), "cycle": str(cycle)}).to_list(500)
+
+    short = []
+    for s in subjects:
+        n = await get_collection(COLL_LS_RESPONSES).count_documents({
+            "company_id": str(company_id), "cycle": str(cycle),
+            "subject_id": str(s.get("subject_id"))})
+        panel = await get_collection(COLL_LS_ASSIGNMENTS).count_documents({
+            "company_id": str(company_id), "cycle": str(cycle),
+            "subject_id": str(s.get("subject_id"))})
+        if n < quorum:
+            short.append({"subject_id": str(s.get("subject_id")),
+                          "subject_name": s.get("subject_name"),
+                          "responses": n, "panel_size": panel, "short_by": quorum - n})
+    return {"quorum": quorum, "subjects": len(subjects),
+            "below_quorum": short, "all_met": not short}
 
 
 # ─────────────────────────────────────────────────────────────
@@ -405,15 +819,82 @@ async def list_subjects(company_id: str, cycle: str) -> List[dict]:
     return out
 
 
+def leadership_level_of(person: dict) -> str:
+    """A person's Leadership level, or "" if nobody has set one.
+
+    Read from the explicit `leadership_level` field ONLY. It is deliberately never derived
+    from the free-text `designation`: "Sr. Manager" and "Senior Manager" are the same job
+    and would land on different levels — or on none — so a leader would silently drop out
+    of a cycle with nothing on screen to say why.
+    """
+    return str(person.get("leadership_level") or "").strip().upper()
+
+
+def is_eligible(person: dict) -> bool:
+    """"Applicable from L4 (Asst Managers) and above.\""""
+    return leadership_level_of(person) in LEVELS
+
+
+async def list_eligible_people(company_id: str) -> dict:
+    """The roster split into who can be enrolled and who cannot yet.
+
+    `unlevelled` is the important half: people whose designation looks senior but who
+    carry no `leadership_level`. They are listed rather than hidden, so HR fixes the user
+    record before the cycle opens instead of discovering the omission afterwards.
+    """
+    eligible, unlevelled, other = [], [], []
+    for p in await list_company_people(company_id):
+        level = leadership_level_of(p)
+        row = {**p, "leadership_level": level or None}
+        if level in LEVELS:
+            row["level_label"] = LEVEL_LABELS.get(level, level)
+            eligible.append(row)
+        elif level:
+            other.append(row)          # levelled, but below L4
+        else:
+            unlevelled.append(row)
+    return {"eligible": eligible, "unlevelled": unlevelled, "below_l4": other,
+            "levels": [{"code": lv, "label": LEVEL_LABELS[lv]} for lv in LEVELS]}
+
+
 async def add_subject(company_id: str, cycle: str, subject_id: str, level: str,
-                      user: dict) -> dict:
+                      user: dict, mode_override: Optional[str] = None) -> dict:
     person = await _find_person(subject_id, company_id)
     if not person:
         raise ValueError("That person is not on this company's roster")
 
-    questions = await get_questions(level)
+    cyc = await get_cycle(company_id, cycle)
+    if not cyc:
+        raise ValueError("This cycle does not exist")
+    if cyc.get("status") not in CYCLE_COLLECTING:
+        raise ValueError(
+            f"{cycle_label(cycle)} is {cyc.get('status')}. Leaders can only be enrolled "
+            "while a cycle is still being set up or collecting.")
+
+    level = str(level or "").upper()
+    if level not in LEVELS:
+        raise ValueError(f"level must be one of {', '.join(LEVELS)}")
+
+    # Eligibility is the user's own recorded level, not the caller's claim. Enrolling a
+    # leader at a level they do not hold would score them against a rubric written for a
+    # different job.
+    on_record = leadership_level_of(person)
+    if not on_record:
+        raise ValueError(
+            f"{_display_name(person)} has no Leadership level on their user record. "
+            "Set it to L4, L5, L6 or L7 before enrolling them — it must not be guessed "
+            "from their designation.")
+    if on_record != level:
+        raise ValueError(
+            f"{_display_name(person)} is recorded as {LEVEL_LABELS.get(on_record, on_record)}. "
+            f"Enrol them at that level, or correct their user record first.")
+
+    questions = await get_questions(level, company_id=company_id)
     if not questions:
         raise ValueError(f"No active questions configured for {level}")
+
+    if mode_override and mode_override not in DEGREE_RELATIONS:
+        raise ValueError(f"mode_override must be one of {', '.join(DEGREE_RELATIONS)}")
 
     existing = await get_collection(COLL_LS_SUBJECTS).find_one({
         "company_id": str(company_id), "cycle": str(cycle), "subject_id": str(subject_id)})
@@ -421,8 +902,6 @@ async def add_subject(company_id: str, cycle: str, subject_id: str, level: str,
         raise ValueError("This leader is already enrolled in this cycle")
 
     now = datetime.utcnow()
-    # Snapshot name/designation/level so a later promotion or rename cannot retro-change
-    # a closed cycle's record.
     doc = {
         "company_id": str(company_id),
         "cycle": str(cycle),
@@ -432,7 +911,23 @@ async def add_subject(company_id: str, cycle: str, subject_id: str, level: str,
         "designation": person.get("designation") or "",
         "department": person.get("department") or "",
         "reporting_manager": str(person.get("reporting_manager") or ""),
-        "level": str(level).upper(),
+        "level": level,
+        # A leader with no direct reports cannot be a 360° subject; the override is how
+        # that is said, rather than leaving their panel permanently incomplete.
+        "mode_override": mode_override or None,
+        # THE RUBRIC THEY ARE SCORED AGAINST, frozen at enrolment.
+        #
+        # Without this, every score was recomputed from whatever the question master said
+        # today — so editing a weightage retroactively moved scores that had already been
+        # discussed at RRO. The snapshot is what makes a published number permanent.
+        "rubric": [{
+            "item_id": q["item_id"],
+            "title": q.get("title", ""),
+            "prompt": q.get("prompt", ""),
+            "weightage": float(q.get("weightage") or 0),
+            "options": [dict(o) for o in (q.get("options") or [])],
+        } for q in questions],
+        "rubric_fingerprint": signoff_fingerprint(questions),
         "enrolled_by": _display_name(user),
         "enrolled_by_id": str(user.get("_id") or ""),
         "created_at": now,
@@ -441,6 +936,25 @@ async def add_subject(company_id: str, cycle: str, subject_id: str, level: str,
     await get_collection(COLL_LS_SUBJECTS).insert_one(doc)
     doc["_id"] = str(doc.get("_id", ""))
     return doc
+
+
+async def set_subject_mode(company_id: str, cycle: str, subject_id: str,
+                           mode_override: Optional[str]) -> dict:
+    """Put one leader on a different degree from the rest of the cycle."""
+    if mode_override and mode_override not in DEGREE_RELATIONS:
+        raise ValueError(f"mode_override must be one of {', '.join(DEGREE_RELATIONS)}")
+
+    cyc = await get_cycle(company_id, cycle)
+    if cyc and cyc.get("status") not in CYCLE_COLLECTING:
+        raise ValueError("The degree can only be changed while a cycle is still collecting")
+
+    res = await get_collection(COLL_LS_SUBJECTS).update_one(
+        {"company_id": str(company_id), "cycle": str(cycle), "subject_id": str(subject_id)},
+        {"$set": {"mode_override": mode_override or None,
+                  "updated_at": datetime.utcnow()}})
+    if not res.matched_count:
+        raise ValueError("This leader is not enrolled in this cycle")
+    return await get_subject(company_id, cycle, subject_id)
 
 
 async def get_subject(company_id: str, cycle: str, subject_id: str) -> Optional[dict]:
@@ -472,6 +986,11 @@ async def set_panel(company_id: str, cycle: str, subject_id: str,
 
     Members already holding a link keep it (and their submitted feedback). Members dropped
     from the list lose their unsubmitted link. Nothing already submitted is ever removed.
+
+    LOCKED ONCE ANY FEEDBACK HAS ARRIVED. Swapping a panel member mid-collection narrows
+    the pool the responses came from, and a group of two that quietly became a group of
+    one is a signed statement — the suppression rule cannot save it, because it is applied
+    to the count at read time and the count still says two.
     """
     from app.services.leadership_link_service import create_assignment, remove_assignment
 
@@ -480,7 +999,20 @@ async def set_panel(company_id: str, cycle: str, subject_id: str,
         raise ValueError("This leader is not enrolled in this cycle")
 
     cyc = await get_cycle(company_id, cycle)
-    allowed = set(DEGREE_RELATIONS.get((cyc or {}).get("degree") or DEGREE_360, RELATIONS))
+    if (cyc or {}).get("status") not in CYCLE_COLLECTING:
+        raise ValueError(
+            f"{cycle_label(cycle)} is {(cyc or {}).get('status')}. Panels cannot be "
+            "changed once a cycle has closed.")
+
+    received = await get_collection(COLL_LS_RESPONSES).count_documents({
+        "company_id": str(company_id), "cycle": str(cycle), "subject_id": str(subject_id)})
+    if received:
+        raise ValueError(
+            f"Feedback has already been received for {subject.get('subject_name')}. "
+            "The panel is fixed from the first response onward, so that nobody can work "
+            "out who said what by comparing who was on it before and after.")
+
+    allowed = set(DEGREE_RELATIONS.get(effective_degree(cyc, subject), RELATIONS))
 
     company = None
     try:
@@ -490,6 +1022,7 @@ async def set_panel(company_id: str, cycle: str, subject_id: str,
     company_name = (company or {}).get("name") or ""
 
     wanted: Dict[str, str] = {}
+    warnings: List[str] = []
     for g in givers:
         if g.relation not in allowed:
             raise ValueError(
@@ -500,6 +1033,9 @@ async def set_panel(company_id: str, cycle: str, subject_id: str,
         person = await _find_person(g.giver_id, company_id)
         if not person:
             raise ValueError("A selected feedback giver is not on this company's roster")
+        warning = _relation_mismatch(subject, person, g.relation)
+        if warning:
+            warnings.append(warning)
         wanted[str(g.giver_id)] = g.relation
 
     created = 0
@@ -520,27 +1056,102 @@ async def set_panel(company_id: str, cycle: str, subject_id: str,
             if await remove_assignment(company_id, cycle, subject_id, row.get("giver_id")):
                 removed += 1
 
-    return {"panel_size": created, "removed": removed}
+    return {"panel_size": created, "removed": removed, "warnings": warnings}
+
+
+def _relation_mismatch(subject: dict, giver: dict, relation: str) -> str:
+    """Where the org data disagrees with the label HR put on a panel member.
+
+    Reported, never enforced. `reporting_manager` and `department` are frequently
+    incomplete on a real roster, so refusing the panel would block HR over a data gap they
+    cannot fix today — but a panel of eight juniors labelled 2/2/2/2 passes a pure count
+    check, and the score would then be presented as a 360° view it is not.
+    """
+    subject_id = str(subject.get("subject_id") or "")
+    giver_id = str(giver.get("_id") or "")
+    name = _display_name(giver)
+    giver_mgr = str(giver.get("reporting_manager") or "")
+    subject_mgr = str(subject.get("reporting_manager") or "")
+    same_dept = (str(giver.get("department") or "").strip().lower()
+                 == str(subject.get("department") or "").strip().lower())
+
+    if relation == REL_DIRECT_REPORT and giver_mgr and giver_mgr != subject_id:
+        return f"{name} is marked a direct report but does not report to this leader."
+    if relation == REL_SUPERIOR and subject_mgr and giver_id != subject_mgr:
+        return (f"{name} is marked a superior but is not this leader's reporting manager. "
+                "Confirm they are the level above.")
+    if relation == REL_PEER and not same_dept and giver.get("department"):
+        return f"{name} is marked a same-department peer but is in another department."
+    if relation == REL_OTHER_DEPT and same_dept and giver.get("department"):
+        return f"{name} is marked an other-department peer but is in this leader's department."
+    if giver_mgr and giver_mgr == subject_id and relation != REL_DIRECT_REPORT:
+        return f"{name} reports to this leader but is not marked a direct report."
+    return ""
 
 
 # ─────────────────────────────────────────────────────────────
 # Response capture
 # ─────────────────────────────────────────────────────────────
 async def record_response(assignment: dict, answers: List) -> dict:
-    """Store one giver's completed form.
+    """Store one giver's completed form — with NO link back to the giver.
 
-    Validates every (question, option) pair against the live master for the SUBJECT's
-    level, so a client cannot post a score the rubric does not offer — the document's
-    option scores are 1, 2, 4 and 5, and nothing else is accepted.
+    The response document carries the cycle, the subject, the relation group and the
+    answers. It does not carry `giver_id`, and it never has a field that can be joined to
+    one. "Ye feedback completely confidential hoga" cannot be kept by hiding the identity
+    in the API layer: one aggregation, one export, one support query and the promise is
+    gone. The only way to keep it is for the join not to exist.
+
+    Duplicate submission is prevented on the ASSIGNMENT instead, which is where it
+    belongs: `claim_for_submission()` flips that row to submitted atomically, and only the
+    caller that wins the flip reaches this function.
+
+    Every (question, option) pair is validated against the live master for the SUBJECT's
+    level, so a client cannot post a score the rubric does not offer.
     """
     level = str(assignment.get("subject_level") or "").upper()
-    questions = {q["item_id"]: q for q in await get_questions(level)}
+    company_id = str(assignment.get("company_id"))
+    questions = await get_questions(level, company_id=company_id)
     if not questions:
         raise ValueError(f"No active questions configured for {level}")
 
+    stored = _validate_answers(answers, questions, level)
+
+    now = datetime.utcnow()
+    await get_collection(COLL_LS_RESPONSES).insert_one({
+        "company_id": company_id,
+        "cycle": str(assignment.get("cycle")),
+        "subject_id": str(assignment.get("subject_id")),
+        "period": assignment.get("period"),
+        "subject_level": level,
+        # The relation group is the ONLY thing about the giver that is kept. It is what
+        # makes a group breakdown possible, and it identifies nobody on its own — the
+        # breakdown itself is suppressed below MIN_GROUP_FOR_BREAKDOWN.
+        "relation": assignment.get("relation"),
+        "answers": stored,
+        # The assignment row, not the person. It exists so a support question about one
+        # submission can be answered without walking from an answer to a name: the
+        # assignment holds the giver, and only HR can read assignments.
+        "assignment_ref": str(assignment.get("_id") or ""),
+        "submitted_at": now,
+        "created_at": now,
+        "updated_at": now,
+    })
+    return {"saved": len(stored)}
+
+
+def _validate_answers(answers: List, questions: List[dict], level: str) -> Dict[str, dict]:
+    """Answers → stored form, or ValueError.
+
+    EVERY active question must be answered. A part-filled form used to be accepted and
+    then counted as a whole response: it advanced the quorum, while its unanswered
+    questions dropped out of the weightage denominator, so the leader's headline number
+    was quietly computed out of less than 100 and read as a low score.
+    """
+    by_id = {q["item_id"]: q for q in questions}
     stored: Dict[str, dict] = {}
+
     for a in answers:
-        q = questions.get(a.question_id)
+        q = by_id.get(a.question_id)
         if not q:
             raise ValueError(f"Unknown question '{a.question_id}' for {level}")
         option = next((o for o in (q.get("options") or [])
@@ -553,48 +1164,47 @@ async def record_response(assignment: dict, answers: List) -> dict:
             "score": float(option.get("score") or 0),
         }
 
-    if not stored:
-        raise ValueError("No valid answers supplied")
-
-    now = datetime.utcnow()
-    key = {
-        "company_id": str(assignment.get("company_id")),
-        "cycle": str(assignment.get("cycle")),
-        "subject_id": str(assignment.get("subject_id")),
-        "giver_id": str(assignment.get("giver_id")),
-    }
-    await get_collection(COLL_LS_RESPONSES).update_one(
-        key,
-        {"$set": {
-            **key,
-            "period": assignment.get("period"),
-            "subject_level": level,
-            # Relation is kept for the HR-only breakdown; never returned to a leader.
-            "relation": assignment.get("relation"),
-            "answers": stored,
-            "submitted_at": now,
-            "updated_at": now,
-        },
-         "$setOnInsert": {"created_at": now}},
-        upsert=True,
-    )
-    return {"saved": len(stored)}
-
-
-async def has_responded(assignment: dict) -> bool:
-    return bool(await get_collection(COLL_LS_RESPONSES).find_one({
-        "company_id": str(assignment.get("company_id")),
-        "cycle": str(assignment.get("cycle")),
-        "subject_id": str(assignment.get("subject_id")),
-        "giver_id": str(assignment.get("giver_id")),
-    }))
+    missing = [q["item_id"] for q in questions if q["item_id"] not in stored]
+    if missing:
+        raise ValueError(
+            f"Please answer every question before submitting — "
+            f"{len(missing)} still unanswered.")
+    return stored
 
 
 # ─────────────────────────────────────────────────────────────
 # Scoring
+#
+# GROUP-WEIGHTED, NOT RATER-WEIGHTED.
+#
+# Every rater's answers are averaged WITHIN their relation group first, and the four group
+# results are then weighted against each other. Averaging all eight raters flat — which is
+# what this did before — lets whichever group happened to respond most decide the number:
+# if both superiors reply and one junior does, the superiors carry two thirds of the
+# weight. A leader who is admired upward and feared downward then scores well, which is
+# the single failure mode a 360° instrument exists to catch.
+#
+# Groups with no responses are dropped and the remaining weights renormalised, so a
+# missing group lowers confidence (reported as `groups_scored`) rather than silently
+# deflating the score.
+#
+# The rubric is the one SNAPSHOTTED onto the subject at enrolment, never today's master —
+# see `add_subject`. Editing a weightage must not move a score a manager already discussed.
 # ─────────────────────────────────────────────────────────────
+def _rubric_for(subject: dict, live: List[dict]) -> List[dict]:
+    """The questions this subject is scored against.
+
+    Prefers the snapshot taken when they were enrolled. Falls back to the live master for
+    subjects enrolled before snapshots existed — their scores can still move if the
+    rubric is edited, which is exactly what `rubric_snapshot` reports so the score card
+    can say so rather than pretending otherwise.
+    """
+    snap = subject.get("rubric") or []
+    return snap if snap else live
+
+
 def _score_answers(responses: List[dict], questions: List[dict]) -> dict:
-    """The weighted calculation, over an already-selected set of responses."""
+    """Weighted parameter scores over one already-selected set of responses."""
     parameters = []
     total = 0.0
     applicable = 0.0
@@ -639,90 +1249,238 @@ def _score_answers(responses: List[dict], questions: List[dict]) -> dict:
     }
 
 
+def group_weights(cyc: dict, relations: List[str]) -> Dict[str, float]:
+    """How much each relation group counts, normalised to 1 over the groups in play.
+
+    Equal unless HR sets otherwise. The document does not say whether a direct report's
+    view should outweigh a superior's — they see day-to-day leadership most closely, which
+    is an argument for more, and they are the most exposed, which is an argument for
+    care — so the neutral split is the only defensible default, and the screen labels it
+    as a default rather than a decision.
+    """
+    configured = (cyc or {}).get("group_weightages") or {}
+    raw = {rel: float(configured.get(rel, 0) or 0) for rel in relations}
+    if sum(raw.values()) <= 0:
+        raw = {rel: 1.0 for rel in relations}
+    total = sum(raw.values())
+    return {rel: v / total for rel, v in raw.items()}
+
+
+def _combine_groups(by_group: Dict[str, dict], weights: Dict[str, float]) -> Optional[float]:
+    """Group scores → one number, renormalised over the groups that actually responded."""
+    live = {rel: g for rel, g in by_group.items() if g.get("leadership_score") is not None}
+    if not live:
+        return None
+    weight_sum = sum(weights.get(rel, 0) for rel in live) or float(len(live))
+    return round(sum(g["leadership_score"] * (weights.get(rel, 0) or 1) for rel, g in live.items())
+                 / weight_sum, 2)
+
+
 async def subject_score(company_id: str, cycle: str, subject_id: str,
-                        include_relations: bool = False) -> dict:
+                        include_relations: bool = False,
+                        for_leader: bool = False) -> dict:
     """One leader's Leadership Score for one cycle.
 
-    NEVER includes giver identity or individual responses. `include_relations` adds the
-    per-relation breakdown and is passed True only for HR/staff — and even then a group
-    with fewer than MIN_GROUP_FOR_BREAKDOWN responses is withheld.
+    NEVER includes giver identity or an individual response — responses do not carry one.
+    `include_relations` adds the per-group breakdown and is passed True only for HR/staff;
+    even then a group with fewer than MIN_GROUP_FOR_BREAKDOWN responses is withheld,
+    because a group of one names the person who filled it.
+
+    `for_leader` withholds everything until the cycle is PUBLISHED. Without that, a subject
+    could watch their own number move during collection and difference it after each
+    submission, which recovers one named person's rating no matter what the group
+    suppression does.
     """
     subject = await get_subject(company_id, cycle, subject_id)
     if not subject:
         raise ValueError("This leader is not enrolled in this cycle")
 
     cyc = await get_cycle(company_id, cycle) or {}
-    min_responses = int(cyc.get("min_responses") or 1)
+    status = cyc.get("status") or CYCLE_DRAFT
 
-    questions = await get_questions(subject.get("level"))
-    responses = await get_collection(COLL_LS_RESPONSES).find({
-        "company_id": str(company_id), "cycle": str(cycle), "subject_id": str(subject_id),
-    }).to_list(200)
+    # A frozen result is the truth for any cycle that has been computed: it is what HR
+    # reviewed and what the leader was shown. Recomputing would let a later weightage edit
+    # silently rewrite a score that has already been discussed at RRO.
+    if status in (CYCLE_COMPUTED, CYCLE_PUBLISHED):
+        frozen = await get_collection(COLL_LS_SCORES).find_one(
+            {"company_id": str(company_id), "cycle": str(cycle), "subject_id": str(subject_id)})
+        if frozen:
+            frozen.pop("_id", None)
+            frozen["cycle_status"] = status
+            frozen["frozen"] = True
+            if for_leader and status != CYCLE_PUBLISHED:
+                return _withheld(frozen, "not_published")
+            if not include_relations:
+                frozen.pop("by_relation", None)
+            return frozen
 
-    panel_size = await get_collection("tpms_leadership_assignments").count_documents({
-        "company_id": str(company_id), "cycle": str(cycle), "subject_id": str(subject_id)})
+    head = await _score_head(company_id, cycle, subject, cyc)
 
-    head = {
+    if for_leader and status != CYCLE_PUBLISHED:
+        return _withheld(head, "not_published")
+
+    return await _compute_subject_score(company_id, cycle, subject, cyc, head,
+                                        include_relations=include_relations)
+
+
+def _withheld(head: dict, reason: str) -> dict:
+    """A score a leader may not see yet — with no number in the payload at all.
+
+    Zeroing or rounding would still leak: the response count alone, watched over a few
+    days, tells a leader when each of eight people replied.
+    """
+    keep = {"company_id", "cycle", "cycle_label", "period", "subject_id", "subject_name",
+            "designation", "department", "level", "level_label", "level_theme",
+            "cycle_status"}
+    return {
+        **{k: v for k, v in head.items() if k in keep},
+        "state": reason,
+        "parameters": [],
+        "leadership_score": None,
+        "message": "Your score will be available once HR publishes this cycle.",
+    }
+
+
+async def _score_head(company_id: str, cycle: str, subject: dict, cyc: dict) -> dict:
+    responses = await get_collection(COLL_LS_RESPONSES).count_documents({
+        "company_id": str(company_id), "cycle": str(cycle),
+        "subject_id": str(subject.get("subject_id"))})
+    panel_size = await get_collection(COLL_LS_ASSIGNMENTS).count_documents({
+        "company_id": str(company_id), "cycle": str(cycle),
+        "subject_id": str(subject.get("subject_id"))})
+    level = subject.get("level") or ""
+    return {
         "company_id": str(company_id),
         "cycle": str(cycle),
         "cycle_label": cycle_label(cycle),
         "period": cycle_period(cycle),
-        "subject_id": str(subject_id),
+        "subject_id": str(subject.get("subject_id")),
         "subject_name": subject.get("subject_name"),
         "designation": subject.get("designation"),
         "department": subject.get("department"),
-        "level": subject.get("level"),
-        "level_label": LEVEL_LABELS.get(subject.get("level") or "", subject.get("level") or ""),
-        "level_theme": LEVEL_THEMES.get(subject.get("level") or "", ""),
-        "response_count": len(responses),
+        "level": level,
+        "level_label": LEVEL_LABELS.get(level, level),
+        "level_theme": LEVEL_THEMES.get(level, ""),
+        "response_count": responses,
         "panel_size": panel_size,
-        "min_responses": min_responses,
-        "degree": cyc.get("degree"),
+        "degree": effective_degree(cyc, subject),
         "cycle_status": cyc.get("status"),
     }
 
-    if len(responses) < min_responses:
-        # Below the configured threshold nothing is computed at all — there is no partial
-        # number to leak and no breakdown to attribute.
-        return {
-            **head,
-            "state": "awaiting_responses",
-            "parameters": [],
-            "leadership_score": None,
-        }
 
-    result = _score_answers(responses, questions)
-    payload = {**head, "state": "scored", **result}
+async def _compute_subject_score(company_id: str, cycle: str, subject: dict, cyc: dict,
+                                 head: dict, *, include_relations: bool) -> dict:
+    subject_id = str(subject.get("subject_id"))
+    min_responses = max(int(cyc.get("min_responses") or MIN_RESPONSES_FLOOR),
+                        MIN_RESPONSES_FLOOR)
+    quorum = int(cyc.get("quorum") or DEFAULT_QUORUM)
+
+    live = await get_questions(subject.get("level"), company_id=company_id)
+    questions = _rubric_for(subject, live)
+
+    responses = await get_collection(COLL_LS_RESPONSES).find({
+        "company_id": str(company_id), "cycle": str(cycle), "subject_id": subject_id,
+    }).to_list(200)
+
+    head = {
+        **head,
+        "min_responses": min_responses,
+        "quorum": quorum,
+        "meets_quorum": len(responses) >= quorum,
+        "rubric_snapshot": bool(subject.get("rubric")),
+    }
+
+    if len(responses) < min_responses:
+        # Below the anonymity floor nothing is computed at all — there is no partial
+        # number to leak and no breakdown to attribute to anyone.
+        return {**head, "state": "awaiting_responses", "parameters": [],
+                "leadership_score": None}
+
+    relations = DEGREE_RELATIONS.get(effective_degree(cyc, subject), RELATIONS)
+    weights = group_weights(cyc, relations)
+
+    # Score each relation group on its own, then weight the groups against each other.
+    by_group: Dict[str, dict] = {}
+    for rel in relations:
+        group = [r for r in responses if str(r.get("relation") or "") == rel]
+        by_group[rel] = ({**_score_answers(group, questions), "response_count": len(group)}
+                         if group else
+                         {"parameters": [], "leadership_score": None, "response_count": 0})
+
+    overall = _combine_groups(by_group, weights)
+
+    # Parameter-wise, combined the same way — the RRO conversation is parameter-wise, so
+    # a parameter total must be built like the headline number, not like a flat average.
+    parameters = []
+    for i, q in enumerate(questions):
+        per_group = {}
+        for rel in relations:
+            p = (by_group[rel]["parameters"] or [None] * len(questions))[i] \
+                if by_group[rel]["parameters"] else None
+            if p and p["has_data"]:
+                per_group[rel] = p
+        achievement = None
+        if per_group:
+            wsum = sum(weights.get(rel, 0) for rel in per_group) or float(len(per_group))
+            achievement = round(
+                sum(p["achievement"] * (weights.get(rel, 0) or 1)
+                    for rel, p in per_group.items()) / wsum, 2)
+        weightage = float(q.get("weightage") or 0)
+        parameters.append({
+            "item_id": q["item_id"],
+            "title": q.get("title", ""),
+            "prompt": q.get("prompt", ""),
+            "weightage": _round(weightage),
+            "achievement": achievement,
+            "weighted_score": _round(achievement * weightage / 100) if achievement is not None else None,
+            "answered_by": sum(p["answered_by"] for p in per_group.values()),
+            "has_data": bool(per_group),
+            "groups_scored": len(per_group),
+        })
+
+    scored = [p for p in parameters if p["has_data"]]
+    focus = sorted(scored, key=lambda p: p["achievement"])[:2]
+
+    payload = {
+        **head,
+        "state": "scored",
+        "leadership_score": overall,
+        "parameters": parameters,
+        # The two weakest parameters, named. "Generally scores self-explanatory hote hain"
+        # is what the document says; a bare number is not actionable, and a manager
+        # opening an RRO needs to know where to start.
+        "focus_areas": [{"item_id": p["item_id"], "title": p["title"],
+                         "achievement": p["achievement"]} for p in focus],
+        "groups_scored": len([g for g in by_group.values() if g["leadership_score"] is not None]),
+        "groups_expected": len(relations),
+        "group_weightages": {rel: _round(w * 100) for rel, w in weights.items()},
+        "group_weightage_is_default": not (cyc.get("group_weightages") or {}),
+    }
 
     if include_relations:
-        breakdown = []
-        for rel in RELATIONS:
-            group = [r for r in responses if str(r.get("relation") or "") == rel]
-            if len(group) < MIN_GROUP_FOR_BREAKDOWN:
-                # Withheld rather than shown: a group of one names its author.
-                breakdown.append({
-                    "relation": rel,
-                    "relation_label": RELATION_LABELS[rel],
-                    "response_count": len(group),
-                    "leadership_score": None,
-                    "withheld": True,
-                })
-                continue
-            g = _score_answers(group, questions)
-            breakdown.append({
-                "relation": rel,
-                "relation_label": RELATION_LABELS[rel],
-                "response_count": len(group),
-                "leadership_score": g["leadership_score"],
-                "withheld": False,
-            })
-        payload["by_relation"] = breakdown
+        payload["by_relation"] = [{
+            "relation": rel,
+            "relation_label": RELATION_LABELS[rel],
+            "response_count": by_group[rel]["response_count"],
+            "leadership_score": (by_group[rel]["leadership_score"]
+                                 if by_group[rel]["response_count"] >= MIN_GROUP_FOR_BREAKDOWN
+                                 else None),
+            # Withheld rather than shown: a group of one names its author.
+            "withheld": by_group[rel]["response_count"] < MIN_GROUP_FOR_BREAKDOWN,
+            "weightage": _round(weights.get(rel, 0) * 100),
+        } for rel in relations]
 
     return payload
 
 
-async def cycle_scores(company_id: str, cycle: str, include_relations: bool = False) -> dict:
-    """Every enrolled leader's score for a cycle."""
+async def cycle_scores(company_id: str, cycle: str, include_relations: bool = False,
+                       for_leader: bool = False) -> dict:
+    """Every enrolled leader's score for a cycle.
+
+    `for_leader` withholds every number until the cycle is published. It must be passed
+    for anyone who is not running the module — the leader being rated AND their reporting
+    manager — because publication is the moment the document releases scores to both.
+    """
     subjects = await get_collection(COLL_LS_SUBJECTS).find({
         "company_id": str(company_id), "cycle": str(cycle)}).to_list(500)
 
@@ -730,7 +1488,8 @@ async def cycle_scores(company_id: str, cycle: str, include_relations: bool = Fa
     for s in subjects:
         try:
             rows.append(await subject_score(company_id, cycle, s.get("subject_id"),
-                                            include_relations=include_relations))
+                                            include_relations=include_relations,
+                                            for_leader=for_leader))
         except ValueError:
             continue
 
@@ -746,6 +1505,7 @@ async def cycle_scores(company_id: str, cycle: str, include_relations: bool = Fa
         "status": cyc.get("status"),
         "degree": cyc.get("degree"),
         "rows": rows,
+        "below_quorum": [r["subject_id"] for r in rows if not r.get("meets_quorum", True)],
         "summary": {
             "leaders": len(rows),
             "scored": len(scored),
@@ -758,43 +1518,354 @@ async def cycle_scores(company_id: str, cycle: str, include_relations: bool = Fa
 
 
 async def snapshot_cycle_scores(company_id: str, cycle: str) -> dict:
-    """Freeze a closed cycle's scores into COLL_LS_SCORES for history.
+    """Freeze a cycle's scores into COLL_LS_SCORES.
 
-    Writes only into the Leadership Score collections — responses are left untouched.
+    This is what every later read returns, so a weightage edit can never move a number a
+    manager has already discussed. Responses themselves are left untouched.
     """
-    result = await cycle_scores(company_id, cycle, include_relations=True)
+    subjects = await get_collection(COLL_LS_SUBJECTS).find({
+        "company_id": str(company_id), "cycle": str(cycle)}).to_list(500)
+    cyc = await get_cycle(company_id, cycle) or {}
+
     now = datetime.utcnow()
     col = get_collection(COLL_LS_SCORES)
-    for row in result["rows"]:
+    frozen = 0
+    for s in subjects:
+        head = await _score_head(company_id, cycle, s, cyc)
+        row = await _compute_subject_score(company_id, cycle, s, cyc, head,
+                                           include_relations=True)
         await col.update_one(
             {"company_id": str(company_id), "cycle": str(cycle),
              "subject_id": row["subject_id"]},
             {"$set": {**row, "computed_at": now}},
             upsert=True,
         )
-    logger.info("Leadership scores snapshotted: %s rows [company=%s cycle=%s]",
-                len(result["rows"]), company_id, cycle)
-    return {"snapshotted": len(result["rows"]), "cycle": cycle}
+        frozen += 1
+    logger.info("Leadership scores frozen: %s rows [company=%s cycle=%s]",
+                frozen, company_id, cycle)
+    return {"snapshotted": frozen, "cycle": cycle}
 
 
-async def subject_history(company_id: str, subject_id: str, limit: int = 12) -> List[dict]:
-    """A leader's score across past cycles — the trend an RRO conversation builds on."""
-    enrolments = await get_collection(COLL_LS_SUBJECTS).find({
+async def subject_history(company_id: str, subject_id: str, limit: int = 12,
+                          published_only: bool = False) -> List[dict]:
+    """A leader's score across past cycles — the trend an RRO conversation builds on.
+
+    Reads the FROZEN rows only. Recomputing history from live responses meant every past
+    score moved whenever a weightage was edited, so a leader could open their card and
+    find last cycle's number different from the one they were shown.
+
+    Carries the parameter breakdown, so the card can show a per-parameter delta rather
+    than only a movement in the total — the discussion is parameter-wise.
+    """
+    rows = await get_collection(COLL_LS_SCORES).find({
         "company_id": str(company_id), "subject_id": str(subject_id),
-    }).sort("cycle", -1).to_list(limit)
+    }).to_list(200)
+
+    if published_only:
+        # A frozen row exists from the moment a cycle is COMPUTED, which is before anyone
+        # outside HR may see it. Without this filter the trend chart would hand a leader
+        # the current cycle's number while HR was still reviewing it.
+        published = {str(c.get("cycle")) for c in await get_collection(COLL_LS_CYCLES).find(
+            {"company_id": str(company_id), "status": CYCLE_PUBLISHED}).to_list(200)}
+        rows = [r for r in rows if str(r.get("cycle")) in published]
+
+    rows.sort(key=lambda r: str(r.get("cycle") or ""), reverse=True)
 
     out = []
-    for e in enrolments:
-        try:
-            s = await subject_score(company_id, e.get("cycle"), subject_id)
-        except ValueError:
-            continue
+    for r in rows[:limit]:
         out.append({
-            "cycle": s["cycle"],
-            "cycle_label": s["cycle_label"],
-            "level": s["level"],
-            "leadership_score": s.get("leadership_score"),
-            "response_count": s.get("response_count"),
-            "state": s.get("state"),
+            "cycle": r.get("cycle"),
+            "cycle_label": r.get("cycle_label") or cycle_label(r.get("cycle") or ""),
+            "level": r.get("level"),
+            "leadership_score": r.get("leadership_score"),
+            "response_count": r.get("response_count"),
+            "state": r.get("state"),
+            "parameters": [{"item_id": p.get("item_id"), "title": p.get("title"),
+                            "achievement": p.get("achievement")}
+                           for p in (r.get("parameters") or [])],
         })
     return out
+
+
+def parameter_deltas(current: dict, previous: Optional[dict]) -> List[dict]:
+    """Per-parameter movement against the previous cycle, matched on item_id.
+
+    Matched by id rather than position: a level can gain or lose a question between
+    cycles, and lining the lists up by index would silently compare one parameter against
+    a different one.
+    """
+    if not previous:
+        return []
+    before = {p.get("item_id"): p.get("achievement") for p in (previous.get("parameters") or [])}
+    out = []
+    for p in current.get("parameters") or []:
+        was = before.get(p.get("item_id"))
+        now = p.get("achievement")
+        out.append({
+            "item_id": p.get("item_id"),
+            "title": p.get("title"),
+            "previous": was,
+            "current": now,
+            "delta": _round(now - was) if (was is not None and now is not None) else None,
+        })
+    return out
+
+
+# ─────────────────────────────────────────────────────────────
+# Audit
+# ─────────────────────────────────────────────────────────────
+async def audit(user: dict, action: str, detail: str, **meta) -> None:
+    """Record a read or change of confidential Leadership data.
+
+    Every read of a giver panel goes through here. Panel access is the one thing that can
+    undo "ye feedback completely confidential hoga" from the inside, so it is never
+    silent: if someone looks at who rates whom, there is a row saying who looked and when.
+
+    Never raises. An audit failure must not take down the request it is describing — but
+    it is logged loudly, because an unaudited panel read is exactly what this exists to
+    prevent going unnoticed.
+    """
+    try:
+        from app.services.activity_log_service import log_activity
+        await log_activity(user, action, "leadership", details=detail, meta=meta or {})
+    except Exception as e:                                   # pragma: no cover
+        logger.warning("Leadership audit write failed (%s): %s | %s", action, detail, e)
+
+
+# ─────────────────────────────────────────────────────────────
+# RRO discussion and action plan
+#
+# "Their respective reporting Manager should discuss the score with each leader during RRO
+# and every two months this should happen."
+#
+# This is the last step of the documented process and the reason the score exists at all —
+# the "one thing" is improvement, and a number nobody acts on improves nothing. Without it
+# the module produced a figure and stopped.
+# ─────────────────────────────────────────────────────────────
+async def get_discussion(company_id: str, cycle: str, subject_id: str) -> Optional[dict]:
+    doc = await get_collection(COLL_LS_DISCUSSIONS).find_one({
+        "company_id": str(company_id), "cycle": str(cycle), "subject_id": str(subject_id)})
+    if doc:
+        doc["_id"] = str(doc["_id"])
+    return doc
+
+
+async def log_discussion(company_id: str, cycle: str, subject_id: str,
+                         payload, user: dict) -> dict:
+    """Record the RRO conversation and the action plan that came out of it."""
+    cyc = await get_cycle(company_id, cycle)
+    if not cyc:
+        raise ValueError("This cycle does not exist")
+    if cyc.get("status") != CYCLE_PUBLISHED:
+        # Discussing a number the leader has not been shown is not the RRO conversation
+        # the document describes.
+        raise ValueError(
+            f"{cycle_label(cycle)} has not been published yet. Scores are discussed at RRO "
+            "once HR releases them.")
+
+    subject = await get_subject(company_id, cycle, subject_id)
+    if not subject:
+        raise ValueError("This leader is not enrolled in this cycle")
+
+    now = datetime.utcnow()
+    items = [{
+        "text": str(getattr(a, "text", "") or "").strip(),
+        "owner": str(getattr(a, "owner", "") or "").strip(),
+        "due_date": getattr(a, "due_date", None),
+        "done": bool(getattr(a, "done", False)),
+    } for a in (payload.action_items or []) if str(getattr(a, "text", "") or "").strip()]
+
+    doc = {
+        "company_id": str(company_id),
+        "cycle": str(cycle),
+        "subject_id": str(subject_id),
+        "subject_name": subject.get("subject_name"),
+        "manager_id": str(user.get("_id") or ""),
+        "manager_name": _display_name(user),
+        "notes": (payload.notes or "").strip(),
+        "parameters_discussed": list(payload.parameters_discussed or []),
+        "action_items": items,
+        "discussed_at": payload.discussed_at or now,
+        "updated_at": now,
+    }
+    await get_collection(COLL_LS_DISCUSSIONS).update_one(
+        {"company_id": str(company_id), "cycle": str(cycle), "subject_id": str(subject_id)},
+        {"$set": doc,
+         # The leader's acknowledgement belongs to the leader. Re-saving the notes must
+         # not quietly clear it, nor set it on their behalf.
+         "$setOnInsert": {"created_at": now, "acknowledged_at": None,
+                          "acknowledged_by_leader": False}},
+        upsert=True,
+    )
+    return await get_discussion(company_id, cycle, subject_id)
+
+
+async def acknowledge_discussion(company_id: str, cycle: str, subject_id: str,
+                                 user: dict, comment: str = "") -> dict:
+    """The leader confirming the conversation happened. Only they can do this."""
+    if str(user.get("_id")) != str(subject_id):
+        raise ValueError("Only the leader themselves can acknowledge their RRO discussion")
+
+    res = await get_collection(COLL_LS_DISCUSSIONS).update_one(
+        {"company_id": str(company_id), "cycle": str(cycle), "subject_id": str(subject_id)},
+        {"$set": {"acknowledged_by_leader": True,
+                  "acknowledged_at": datetime.utcnow(),
+                  "leader_comment": (comment or "").strip()}})
+    if not res.matched_count:
+        raise ValueError("No RRO discussion has been logged for this cycle yet")
+    return await get_discussion(company_id, cycle, subject_id)
+
+
+async def pending_discussions(company_id: str, cycle: str) -> List[dict]:
+    """Published leaders whose RRO conversation has not been logged."""
+    subjects = await get_collection(COLL_LS_SUBJECTS).find({
+        "company_id": str(company_id), "cycle": str(cycle)}).to_list(500)
+    logged = {str(d.get("subject_id")) for d in await get_collection(COLL_LS_DISCUSSIONS).find(
+        {"company_id": str(company_id), "cycle": str(cycle)}).to_list(500)}
+    return [{"subject_id": str(s.get("subject_id")),
+             "subject_name": s.get("subject_name"),
+             "reporting_manager": s.get("reporting_manager")}
+            for s in subjects if str(s.get("subject_id")) not in logged]
+
+
+# ─────────────────────────────────────────────────────────────
+# Briefing tracker
+#
+# "Pre Leadership Score Briefing: It has to be done only till L4 (Asst Managers only)"
+# against process item 1, "MD should take a session of Leadership Expectations with L4 and
+# above". The document says both, so the module records both and does not choose: `type`
+# distinguishes the MD's expectations session from HR's pre-briefing, and the L4-only rule
+# is reported as guidance rather than enforced.
+# ─────────────────────────────────────────────────────────────
+BRIEFING_PRE = "pre"
+BRIEFING_POST = "post"
+BRIEFING_TYPES = [BRIEFING_PRE, BRIEFING_POST]
+
+
+async def record_briefing(company_id: str, cycle: str, user_id: str, briefing_type: str,
+                          conducted_by: str, user: dict, notes: str = "") -> dict:
+    if briefing_type not in BRIEFING_TYPES:
+        raise ValueError(f"type must be one of {', '.join(BRIEFING_TYPES)}")
+    person = await _find_person(user_id, company_id)
+    if not person:
+        raise ValueError("That person is not on this company's roster")
+
+    now = datetime.utcnow()
+    doc = {
+        "company_id": str(company_id),
+        "cycle": str(cycle),
+        "user_id": str(user_id),
+        "user_name": _display_name(person),
+        "level": leadership_level_of(person) or None,
+        "type": briefing_type,
+        "conducted_by": (conducted_by or "").strip() or _display_name(user),
+        "conducted_at": now,
+        "notes": (notes or "").strip(),
+        "recorded_by_id": str(user.get("_id") or ""),
+        "updated_at": now,
+    }
+    await get_collection(COLL_LS_BRIEFINGS).update_one(
+        {"company_id": str(company_id), "cycle": str(cycle),
+         "user_id": str(user_id), "type": briefing_type},
+        {"$set": doc, "$setOnInsert": {"created_at": now}},
+        upsert=True,
+    )
+    return doc
+
+
+async def briefing_status(company_id: str, cycle: str) -> dict:
+    """Who has been briefed and who has not, for this cycle."""
+    rows = await get_collection(COLL_LS_BRIEFINGS).find({
+        "company_id": str(company_id), "cycle": str(cycle)}).to_list(1000)
+    done = {(str(r.get("user_id")), r.get("type")) for r in rows}
+
+    people = await list_company_people(company_id)
+    eligible = [p for p in people if is_eligible(p)]
+
+    return {
+        "cycle": str(cycle),
+        "records": [{k: v for k, v in r.items() if k != "_id"} for r in rows],
+        "pre_pending": [
+            {"person_id": p["person_id"], "name": p["name"],
+             "leadership_level": leadership_level_of(p)}
+            for p in eligible if (p["person_id"], BRIEFING_PRE) not in done],
+        # The document restricts the pre-briefing to L4 in one place and to "L4 and above"
+        # in another. Both readings are surfaced; neither is enforced.
+        "l4_only_pending": [
+            {"person_id": p["person_id"], "name": p["name"]}
+            for p in eligible
+            if leadership_level_of(p) == LEVEL_L4 and (p["person_id"], BRIEFING_PRE) not in done],
+        "note": ("The source document says the pre-briefing is “only till L4 (Asst "
+                 "Managers only)”, while the process list says the MD's Leadership "
+                 "Expectations session covers “L4 and above”. Both lists are shown; HR "
+                 "should confirm which applies."),
+    }
+
+
+# ─────────────────────────────────────────────────────────────
+# Organisation roll-up
+# ─────────────────────────────────────────────────────────────
+async def dashboard(company_id: str, cycle: Optional[str] = None) -> dict:
+    """Distribution, by level and by department — the MD's view of a cycle.
+
+    Built from FROZEN scores only, so the roll-up cannot disagree with the cards the
+    leaders were shown. Carries no rater information of any kind.
+    """
+    query = {"company_id": str(company_id)}
+    if cycle:
+        query["cycle"] = str(cycle)
+    else:
+        latest = await get_collection(COLL_LS_CYCLES).find(
+            {"company_id": str(company_id), "status": CYCLE_PUBLISHED}).to_list(200)
+        latest.sort(key=lambda c: str(c.get("cycle") or ""), reverse=True)
+        if not latest:
+            return {"cycle": None, "scored": 0, "bands": [], "by_level": [],
+                    "by_department": [], "trend": []}
+        query["cycle"] = str(latest[0]["cycle"])
+
+    rows = [r for r in await get_collection(COLL_LS_SCORES).find(query).to_list(1000)
+            if r.get("leadership_score") is not None]
+
+    def bucket(key):
+        out: Dict[str, List[float]] = {}
+        for r in rows:
+            out.setdefault(str(r.get(key) or "—"), []).append(float(r["leadership_score"]))
+        return sorted(
+            [{"key": k, "label": LEVEL_LABELS.get(k, k), "leaders": len(v),
+              "average": _round(sum(v) / len(v)),
+              "lowest": _round(min(v)), "highest": _round(max(v))}
+             for k, v in out.items()],
+            key=lambda x: x["key"])
+
+    # Bands start at 20, not 0: with options worth 1/2/4/5 the lowest attainable score is
+    # 20/100, so a 0-20 band could never contain anybody and would make the spread look
+    # healthier than it is.
+    edges = [(20, 40, "Needs attention"), (40, 55, "Developing"),
+             (55, 70, "On track"), (70, 85, "Strong"), (85, 100.01, "Exemplary")]
+    bands = [{"band": label, "from": lo, "to": int(hi),
+              "leaders": len([r for r in rows if lo <= r["leadership_score"] < hi])}
+             for lo, hi, label in edges]
+
+    history = await get_collection(COLL_LS_SCORES).find(
+        {"company_id": str(company_id)}).to_list(2000)
+    per_cycle: Dict[str, List[float]] = {}
+    for r in history:
+        if r.get("leadership_score") is not None:
+            per_cycle.setdefault(str(r.get("cycle")), []).append(float(r["leadership_score"]))
+    trend = sorted([{"cycle": c, "cycle_label": cycle_label(c), "leaders": len(v),
+                     "average": _round(sum(v) / len(v))}
+                    for c, v in per_cycle.items()], key=lambda x: x["cycle"])
+
+    scores = [r["leadership_score"] for r in rows]
+    return {
+        "cycle": query["cycle"],
+        "cycle_label": cycle_label(query["cycle"]),
+        "scored": len(rows),
+        "average": _round(sum(scores) / len(scores)) if scores else None,
+        "bands": bands,
+        "by_level": bucket("level"),
+        "by_department": bucket("department"),
+        "trend": trend[-12:],
+        "scale_note": ("Options are worth 1, 2, 4 or 5 — the source document awards no 3 — "
+                       "so the lowest attainable score is 20, not 0."),
+    }

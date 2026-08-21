@@ -29,6 +29,7 @@ which would breach the anonymity this module is required to preserve.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import secrets
@@ -61,6 +62,16 @@ LOCAL_FRONTEND_URL = "http://localhost:5173"
 def new_token() -> str:
     """A fresh, unguessable link credential."""
     return secrets.token_urlsafe(32)
+
+
+def token_hash(token: str) -> str:
+    """What is stored. The raw token is a live credential — anyone holding it can submit
+    as that giver for the whole window — so it is kept only in the recipient's mailbox,
+    never in the database. A lookup hashes the incoming value and matches on that.
+
+    Plain SHA-256 is right here, not a password KDF: the token is 32 bytes from `secrets`,
+    so there is no dictionary to attack and stretching would only slow every form open."""
+    return hashlib.sha256(str(token or "").encode("utf-8")).hexdigest()
 
 
 def public_link(token: str) -> str:
@@ -179,8 +190,10 @@ async def create_assignment(*, company_id: str, company_name: str, cycle: str,
     doc = {
         **key,
         "period": cycle_period(cycle),
-        "token": token,
-        "link": public_link(token),
+        # The hash only. `_issued_token` carries the raw value back to the caller in
+        # memory so this dispatch can mail it; it is never persisted and never returned by
+        # an API. A resend mints a fresh token (see rotate_token).
+        "token_hash": token_hash(token),
         "relation": relation,
         "company_name": company_name or "",
         # Subject snapshot: the giver's form must still name the leader correctly even if
@@ -192,6 +205,10 @@ async def create_assignment(*, company_id: str, company_name: str, cycle: str,
         # never serialized to a leader. See leadership_service._public_* helpers.
         "giver_name": _display_name(giver),
         "giver_email": giver.get("email") or "",
+        # Snapshotted for the reminder ladder, which mails and messages non-submitters
+        # without ever reading a response. Absent on rows created before this field
+        # existed — leadership_notify_service falls back to a roster lookup for those.
+        "giver_phone": giver.get("mobile") or "",
         "assigned_by_id": str((assigned_by or {}).get("_id") or ""),
         "assigned_by_name": _display_name(assigned_by or {}),
         # Not "sent": nothing has been mailed yet. mark_email_result promotes it.
@@ -206,6 +223,7 @@ async def create_assignment(*, company_id: str, company_name: str, cycle: str,
         "updated_at": now,
     }
     await col.insert_one(doc)
+    doc["_issued_token"] = token
     return doc
 
 
@@ -224,13 +242,83 @@ async def remove_assignment(company_id: str, cycle: str, subject_id: str, giver_
 async def resolve_token(token: str) -> Optional[dict]:
     """The assignment a link token refers to, or None when unknown.
 
-    Returns expired and submitted rows too — the form page needs to tell the giver WHY a
-    link no longer works, which it cannot do if invalid tokens are indistinguishable from
-    missing ones.
+    Matches on the HASH. Rows issued before hashing still carry a plaintext `token`, and
+    those links are already in people's inboxes, so they are accepted as a second lookup —
+    a giver must not be locked out of a form because of when their link was minted. Such a
+    row is marked `legacy_token` so the admin screen can show which invitations still hold
+    a credential in the database, and rotating one clears it for good.
+
+    Returns expired and submitted rows too: the form page has to tell the giver WHY a link
+    no longer works, which it cannot do if a dead token is indistinguishable from a typo.
     """
     if not token:
         return None
-    return await get_collection(COLL_LS_ASSIGNMENTS).find_one({"token": token})
+    col = get_collection(COLL_LS_ASSIGNMENTS)
+    doc = await col.find_one({"token_hash": token_hash(token)})
+    if doc:
+        return doc
+    legacy = await col.find_one({"token": token})
+    if legacy:
+        legacy["legacy_token"] = True
+    return legacy
+
+
+async def rotate_token(doc: dict) -> str:
+    """Issue a fresh credential for an existing invitation and return it, once.
+
+    Resending has to produce a working URL, and the old one cannot be reproduced because
+    only its hash was kept. So a resend mints a new token and the previous link stops
+    working. That is the safer default for a single-use form — a forwarded or leaked link
+    dies the moment the real recipient is chased again — and it is what the resend button
+    tells HR it will do.
+
+    Also the repair path for a legacy row: rotating drops the plaintext `token` field, so
+    the credential stops existing in the database.
+    """
+    token = new_token()
+    await get_collection(COLL_LS_ASSIGNMENTS).update_one(
+        {"_id": doc["_id"]},
+        {"$set": {"token_hash": token_hash(token),
+                  "updated_at": datetime.now(timezone.utc)},
+         "$unset": {"token": "", "link": ""}},
+    )
+    doc["token_hash"] = token_hash(token)
+    doc.pop("token", None)
+    doc.pop("link", None)
+    doc["_issued_token"] = token
+    return token
+
+
+async def claim_for_submission(doc: dict) -> bool:
+    """Atomically take this invitation from open to submitted. True if this caller won it.
+
+    This is what makes a response safe to store with NO rater identity on it. Duplicate
+    submission used to be prevented by a unique index over (cycle, subject, giver_id) on
+    the RESPONSE — which meant every answer carried the name of the person who gave it,
+    permanently, to enforce a rule that belongs on the invitation.
+
+    The filter is the lock: `status` must still be one of the open states, so two
+    concurrent submits cannot both match, and only the winner goes on to write a response.
+    If writing that response then fails, `release_claim` puts the row back.
+    """
+    now = datetime.now(timezone.utc)
+    res = await get_collection(COLL_LS_ASSIGNMENTS).update_one(
+        {"_id": doc["_id"], "status": {"$in": [LINK_PENDING, LINK_SENT, LINK_OPENED]}},
+        {"$set": {"status": LINK_SUBMITTED, "submitted_at": now, "updated_at": now},
+         # The credential has done its job. Removing it here is what "single use" means:
+         # the link is dead in the database, not merely refused by a status check.
+         "$unset": {"token_hash": "", "token": "", "link": ""}},
+    )
+    return res.modified_count == 1
+
+
+async def release_claim(doc: dict) -> None:
+    """Undo a claim whose response could not be written, so the giver can try again."""
+    await get_collection(COLL_LS_ASSIGNMENTS).update_one(
+        {"_id": doc["_id"], "status": LINK_SUBMITTED},
+        {"$set": {"status": LINK_OPENED, "submitted_at": None,
+                  "updated_at": datetime.now(timezone.utc)}},
+    )
 
 
 async def mark_opened(doc: dict) -> None:
@@ -245,14 +333,6 @@ async def mark_opened(doc: dict) -> None:
     await get_collection(COLL_LS_ASSIGNMENTS).update_one(
         {"_id": doc["_id"], "status": {"$in": [LINK_PENDING, LINK_SENT]}},
         {"$set": {"status": LINK_OPENED, "opened_at": now, "updated_at": now}},
-    )
-
-
-async def mark_submitted(doc: dict) -> None:
-    now = datetime.now(timezone.utc)
-    await get_collection(COLL_LS_ASSIGNMENTS).update_one(
-        {"_id": doc["_id"]},
-        {"$set": {"status": LINK_SUBMITTED, "submitted_at": now, "updated_at": now}},
     )
 
 
@@ -289,16 +369,18 @@ async def get_invite_template() -> Optional[dict]:
         return None
 
 
-def template_map(doc: dict) -> dict:
+def template_map(doc: dict, link: str = "") -> dict:
     """Placeholder values for ONE assignment.
 
-    `leadership_link` is this row's own token URL. Because the map is rebuilt per
-    assignment and the template is filled per assignment, two givers can never receive the
-    same link — the one thing that would break both single-use submission and anonymity.
+    `leadership_link` is the URL minted for this send. It is passed in rather than read
+    off the row, because the row holds only a hash — the raw credential exists for the
+    length of one dispatch and then only in the recipient's mailbox. Because the map is
+    rebuilt per assignment, two givers can never receive the same link, which is what
+    keeps both single-use submission and anonymity intact.
     """
     expires = doc.get("expires_at")
     return {
-        "leadership_link": doc.get("link") or "",
+        "leadership_link": link or "",
         "giver_name": doc.get("giver_name") or "",
         "subject_name": doc.get("subject_name") or "a colleague",
         "subject_designation": doc.get("subject_designation") or "",
@@ -329,14 +411,14 @@ def _ensure_link_present(html: str, link: str) -> str:
     )
 
 
-async def render_invite(doc: dict, template: Optional[dict] = None) -> tuple:
+async def render_invite(doc: dict, template: Optional[dict] = None, link: str = "") -> tuple:
     """(subject, html) for one giver — template if configured, built-in default otherwise.
 
     Pass `template` when sending a batch so the row is fetched once rather than per
     recipient; the FILLING still happens per recipient, which is what personalises the link.
     """
     tpl = template if template is not None else await get_invite_template()
-    mapping = template_map(doc)
+    mapping = template_map(doc, link)
 
     from app.services.tpms_notify_service import fill
     subject_tpl = (tpl or {}).get("subject") or DEFAULT_TEMPLATE_SUBJECT
@@ -355,9 +437,16 @@ async def send_assignment_email(doc: dict, template: Optional[dict] = None) -> d
         await mark_email_result(doc["_id"], EMAIL_FAILED, "No email address on file")
         return {"ok": False, "error": "No email address on file"}
 
+    # Every send mints a fresh credential. The previous URL stops working, which is the
+    # point: a single-use link that has been forwarded, or is sitting in an old mailbox,
+    # dies the moment the real recipient is chased again. A row already submitted never
+    # reaches here (dispatch_pending filters it out), so nothing completed is reopened.
+    link = doc.get("_issued_token")
+    link = public_link(link) if link else public_link(await rotate_token(doc))
+
     from app.services.notification_service import send_email_notification
     try:
-        subject_line, html = await render_invite(doc, template)
+        subject_line, html = await render_invite(doc, template, link)
         # send_email_notification NEVER raises — it returns False. The result must be
         # captured: marking EMAIL_SENT on a failed send both lies to the dispatch screen and
         # (since the cooldown is keyed on `sent_at`) locks the invitation out of retry for
@@ -467,7 +556,10 @@ def panel_row(doc: dict, now: Optional[datetime] = None) -> dict:
         "status": effective_status(doc, now),
         "email_status": doc.get("email_status"),
         "email_error": doc.get("email_error"),
-        "link": doc.get("link"),
+        # No link. Only its hash is stored, so there is nothing to hand back — and a URL
+        # on screen is a live credential that could be used to submit as this person.
+        # HR who needs one presses Resend, which mints a fresh link and mails it to them.
+        "legacy_token": bool(doc.get("token")),
         "sent_at": doc.get("sent_at"),
         "opened_at": doc.get("opened_at"),
         "submitted_at": doc.get("submitted_at"),

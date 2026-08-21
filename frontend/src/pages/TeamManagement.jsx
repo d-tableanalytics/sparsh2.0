@@ -289,6 +289,7 @@ const TeamManagement = () => {
                                              <option value="Implementor">Implementor</option>
                                              <option value="EA">EA</option>
                                              <option value="MD">MD</option>
+                                             <option value="HR">HR</option>
                                              <option value="Other">Other</option>
                                          </select>
                                      </div>

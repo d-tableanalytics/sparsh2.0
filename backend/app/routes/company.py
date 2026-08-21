@@ -259,6 +259,7 @@ async def update_company_delegation_access(company_id: str, body: CompanyDelegat
     await log_activity(current_user, "Toggle Task Management Access", "Company", f"{'Enabled' if body.enabled else 'Disabled'} Task Management for company {company_id}")
     return {"message": f"Task Management access {'enabled' if body.enabled else 'disabled'}", "delegation_enabled": body.enabled}
 
+
 # ─── Delete Company ───
 @router.delete("/{company_id}")
 async def delete_company(company_id: str, current_user: dict = Depends(get_current_user)):

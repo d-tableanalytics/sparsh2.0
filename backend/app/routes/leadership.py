@@ -29,8 +29,9 @@ from typing import List, Optional
 
 from app.controllers.auth_controller import get_current_user
 from app.models.leadership import (
-    CycleCreate, CycleUpdate, GiverAssignment, QuestionUpdate, ResponseSubmit,
-    SubjectCreate, WeightageUpdate,
+    BriefingCreate, CycleCreate, CycleUpdate, DiscussionAck, DiscussionCreate,
+    GiverAssignment, LevelSignOff, QuestionUpdate,
+    ResponseSubmit, SubjectCreate, SubjectMode, WeightageUpdate,
     DEGREE_RELATIONS, DEGREES, LEVELS, LEVEL_LABELS, LEVEL_THEMES,
     RECOMMENDED_PANEL_SIZE, RECOMMENDED_PER_RELATION, RELATIONS, RELATION_LABELS,
     LINK_EXPIRED, LINK_SUBMITTED,
@@ -43,15 +44,18 @@ from app.services import leadership_service as svc
 from app.services import leadership_link_service as links
 
 
-async def _tpms_company_gate(current_user: dict = Depends(get_current_user)) -> None:
-    """Router-wide guard — the same one the TPMS forms router uses. Leadership Score is
-    part of TPMS, so a company with TPMS switched off cannot open or submit any of it."""
-    from app.utils.tpms_access import ensure_tpms_enabled
-    await ensure_tpms_enabled(current_user)
+async def _leadership_company_gate(current_user: dict = Depends(get_current_user)) -> None:
+    """Router-wide guard — Leadership Score is part of TPMS and follows its switch.
+
+    There is no separate Leadership toggle: TPMS on means Leadership Score on, TPMS off
+    means off. One control for both, so the two can never end up disagreeing.
+    """
+    from app.utils.leadership_access import ensure_leadership_enabled
+    await ensure_leadership_enabled(current_user)
 
 
-router = APIRouter(prefix="/leadership", tags=["TPMS Leadership Score"],
-                   dependencies=[Depends(_tpms_company_gate)])
+router = APIRouter(prefix="/leadership", tags=["Leadership Score"],
+                   dependencies=[Depends(_leadership_company_gate)])
 
 STAFF_ROLES = {"superadmin", "admin"}
 CLIENT_ROLES = {"clientadmin", "clientuser"}
@@ -283,23 +287,38 @@ async def read_config(current_user: dict = Depends(get_current_user)):
 async def list_questions(
     level: Optional[str] = Query(None),
     include_inactive: bool = Query(False),
+    company_id: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user),
 ):
+    """The question master this company is scored on.
+
+    Company-scoped: a company that has edited a level reads its own copy, everyone else
+    reads the shared default seeded from the HR document.
+    """
     _require_manage(current_user)
+    cid = _company_for(current_user, company_id)
     return {
-        "questions": await svc.get_questions(level, include_inactive),
-        "weightage_summary": await svc.weightage_summary(),
+        "questions": await svc.get_questions(level, include_inactive, company_id=cid),
+        "weightage_summary": await svc.weightage_summary(cid),
     }
 
 
 @router.patch("/questions/{question_id}")
 async def patch_question(question_id: str, payload: QuestionUpdate,
+                         company_id: Optional[str] = Query(None),
                          current_user: dict = Depends(get_current_user)):
     """Reword a question or restate its options. Level and item_id are immutable — they
-    key the stored responses."""
+    key the stored responses.
+
+    The edit lands on THIS COMPANY's copy of the level, forking it from the shared default
+    on first write. Before that, one admin's rewording silently changed the rubric — and
+    therefore the scores — for every other client on the platform.
+    """
     if not _is_staff(current_user):
         raise HTTPException(status_code=403, detail="Only an administrator can edit questions")
-    ok = await svc.update_question(question_id, payload.model_dump(exclude_none=True))
+    cid = _company_for(current_user, company_id)
+    ok = await svc.update_question(question_id, payload.model_dump(exclude_none=True),
+                                   company_id=cid)
     if not ok:
         raise HTTPException(status_code=404, detail="Question not found")
     return {"ok": True}
@@ -307,26 +326,97 @@ async def patch_question(question_id: str, payload: QuestionUpdate,
 
 @router.put("/questions/weightages")
 async def put_weightages(payload: WeightageUpdate,
+                         company_id: Optional[str] = Query(None),
                          current_user: dict = Depends(get_current_user)):
     """Set a level's weightage column. Rejected unless it totals exactly 100."""
-    if not _is_staff(current_user):
-        raise HTTPException(status_code=403, detail="Only an administrator can edit weightages")
+    if not (_is_staff(current_user) or _is_hr(current_user) or _is_md(current_user)):
+        # "All parameters should have weightages to create scoring - HR and MD."
+        raise HTTPException(
+            status_code=403,
+            detail="Only HR, MD or an administrator can edit weightages.")
+    cid = _company_for(current_user, company_id)
     try:
         return await svc.set_weightages(
-            payload.level, {i.item_id: i.weightage for i in payload.weightages})
+            payload.level, {i.item_id: i.weightage for i in payload.weightages},
+            company_id=cid)
     except ValueError as e:
         raise _bad(e)
 
 
 @router.post("/questions/{level}/restore")
-async def restore_questions(level: str, current_user: dict = Depends(get_current_user)):
-    """Re-insert any seeded question missing from a level. Insert-only — existing rows,
-    their edited text and their weightages are left exactly as they are."""
+async def restore_questions(level: str, company_id: Optional[str] = Query(None),
+                            current_user: dict = Depends(get_current_user)):
+    """Re-insert any question from the HR document missing from a level. Insert-only —
+    existing rows, their edited text and their weightages are left exactly as they are."""
     if not _is_staff(current_user):
         raise HTTPException(status_code=403, detail="Only an administrator can restore questions")
     if str(level).upper() not in LEVELS:
         raise HTTPException(status_code=400, detail=f"level must be one of {', '.join(LEVELS)}")
-    return await svc.restore_level_questions(level)
+    return await svc.restore_level_questions(level, company_id=_company_for(current_user, company_id))
+
+
+# ─────────────────────────────────────────────────────────────
+# Source-document review and level sign-off
+#
+# "All parameters should have weightages to create scoring - HR and MD", so approving a
+# level is HR's and MD's call, not an administrator's. Internal staff keep access because
+# they seed and support the module.
+# ─────────────────────────────────────────────────────────────
+def _is_md(user: dict) -> bool:
+    """The company's MD. `clientadmin` counts: it is the company's top-authority account
+    and already maps to MD rank in auth_controller.client_rank, so the two routes into
+    that authority behave the same here."""
+    return _role(user) == "clientadmin" or (
+        _role(user) == "clientuser" and _governance_role(user) == "md")
+
+
+def _require_signoff(user: dict) -> None:
+    if not (_is_staff(user) or _is_hr(user) or _is_md(user)):
+        raise HTTPException(
+            status_code=403,
+            detail="Only HR, MD or an administrator can sign off a level's questions.")
+
+
+@router.get("/questions/review")
+async def read_review(company_id: Optional[str] = Query(None),
+                      current_user: dict = Depends(get_current_user)):
+    """Every level's open source-document issues and its approval state.
+
+    Read-only and open to anyone who can manage the module, because it is the explanation
+    for why a cycle will not close — hiding it would leave HR with a refusal and no reason.
+    """
+    _require_manage(current_user)
+    cid = _company_for(current_user, company_id)
+    return await svc.review_summary(cid)
+
+
+@router.post("/questions/{level}/sign-off")
+async def sign_off_level(level: str, payload: LevelSignOff,
+                         company_id: Optional[str] = Query(None),
+                         current_user: dict = Depends(get_current_user)):
+    """Confirm this level's rubric is what leaders should be scored on.
+
+    Stores the fingerprint of the exact questions, options and weightages approved, so any
+    later edit invalidates the approval rather than inheriting it.
+    """
+    _require_signoff(current_user)
+    cid = _company_for(current_user, company_id)
+    try:
+        return await svc.set_level_signoff(cid, level, payload.note, current_user)
+    except ValueError as e:
+        raise _bad(e)
+
+
+@router.delete("/questions/{level}/sign-off")
+async def withdraw_sign_off(level: str, company_id: Optional[str] = Query(None),
+                            current_user: dict = Depends(get_current_user)):
+    """Withdraw an approval, putting the level back under review."""
+    _require_signoff(current_user)
+    cid = _company_for(current_user, company_id)
+    try:
+        return await svc.clear_level_signoff(cid, level)
+    except ValueError as e:
+        raise _bad(e)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -425,6 +515,12 @@ async def read_panel(subject_id: str, cycle: str = Query(...),
     _require_panel(current_user)
     cid = _company_for(current_user, company_id)
     rows = await links.assignments_for_subject(cid, cycle, subject_id)
+    # Audited, always. Panel access is the one thing that can undo "ye feedback completely
+    # confidential hoga" from the inside, so every read leaves a record of who looked.
+    await svc.audit(current_user, "panel.read",
+                    f"Viewed the feedback panel for subject {subject_id} in {cycle}",
+                    company_id=cid, cycle=cycle, subject_id=subject_id,
+                    panel_size=len(rows))
     return {
         "cycle": cycle,
         "subject_id": subject_id,
@@ -447,9 +543,14 @@ async def set_panel(subject_id: str, payload: GiverAssignment, cycle: str = Quer
     _require_panel(current_user)
     cid = _company_for(current_user, company_id)
     try:
-        return await svc.set_panel(cid, cycle, subject_id, payload.givers, current_user)
+        result = await svc.set_panel(cid, cycle, subject_id, payload.givers, current_user)
     except ValueError as e:
         raise _bad(e)
+    await svc.audit(current_user, "panel.set",
+                    f"Set the feedback panel for subject {subject_id} in {cycle}",
+                    company_id=cid, cycle=cycle, subject_id=subject_id,
+                    panel_size=result.get("panel_size"))
+    return result
 
 
 @router.post("/cycles/{cycle}/dispatch")
@@ -605,7 +706,8 @@ async def assigned_form(token: str, current_user: dict = Depends(get_current_use
         return head
 
     await links.mark_opened(doc)
-    questions = await svc.get_questions(doc.get("subject_level"))
+    questions = await svc.get_questions(doc.get("subject_level"),
+                                        company_id=doc.get("company_id"))
     return {
         **head,
         "state": "open",
@@ -631,11 +733,23 @@ async def submit_response(token: str, payload: ResponseSubmit,
     per-employee scorecard, which would breach the anonymity this module guarantees.
     """
     doc = await _assignment_for(token, current_user, must_be_open=True)
+
+    # Claim the invitation FIRST, atomically. This is what lets the response carry no
+    # rater identity at all: uniqueness lives on the invitation, not on a `giver_id`
+    # stamped into the answers. Two concurrent submits cannot both win the claim, so only
+    # one response is ever written.
+    if not await links.claim_for_submission(doc):
+        raise HTTPException(status_code=409,
+                            detail="This feedback has already been submitted.")
     try:
         result = await svc.record_response(doc, payload.answers)
     except ValueError as e:
+        # Give the link back — the giver has to be able to correct and resubmit.
+        await links.release_claim(doc)
         raise _bad(e)
-    await links.mark_submitted(doc)
+    except Exception:
+        await links.release_claim(doc)
+        raise
     return {"ok": True, **result}
 
 
@@ -668,7 +782,13 @@ async def read_scores(cycle: str = Query(...),
     """
     cid = _company_for(current_user, company_id)
     manage = _can_manage(current_user)
-    result = await svc.cycle_scores(cid, cycle, include_relations=manage)
+    # Anyone who is not running the module sees nothing until the cycle is PUBLISHED —
+    # the leader being rated and their reporting manager alike. Without this a subject
+    # could poll their own score during collection and difference it after each
+    # submission, which recovers one named person's rating whatever the group
+    # suppression does.
+    result = await svc.cycle_scores(cid, cycle, include_relations=manage,
+                                    for_leader=not manage)
 
     if not manage:
         allowed = []
@@ -700,12 +820,18 @@ async def read_subject_score(subject_id: str, cycle: str = Query(...),
     cid = _company_for(current_user, company_id)
     if not await _may_view_subject(current_user, cid, subject_id):
         raise HTTPException(status_code=403, detail="You are not authorized to view this score")
+    manage = _can_manage(current_user)
     try:
         score = await svc.subject_score(cid, cycle, subject_id,
-                                        include_relations=_can_manage(current_user))
+                                        include_relations=manage,
+                                        for_leader=not manage)
     except ValueError as e:
         raise _bad(e)
-    return {**score, "history": await svc.subject_history(cid, subject_id)}
+    # The trend is gated the same way, or the current cycle's number would arrive through
+    # the history while the score itself was still withheld.
+    return {**score,
+            "history": await svc.subject_history(cid, subject_id,
+                                                 published_only=not manage)}
 
 
 @router.get("/my-feedback")
@@ -727,3 +853,198 @@ async def my_feedback(current_user: dict = Depends(get_current_user)):
         "link": r.get("link"),
         "expires_at": r.get("expires_at"),
     } for r in rows]}
+
+
+# ─────────────────────────────────────────────────────────────
+# Eligibility — "Applicable from L4 (Asst Managers) and above"
+# ─────────────────────────────────────────────────────────────
+@router.get("/eligible")
+async def list_eligible(company_id: Optional[str] = Query(None),
+                        current_user: dict = Depends(get_current_user)):
+    """Who can be enrolled, and who is missing a Leadership level.
+
+    `unlevelled` is the half that matters: people who look senior by designation but carry
+    no `leadership_level`. Listing them is what stops a leader being silently left out of
+    a cycle — the level is never guessed from the free-text designation.
+    """
+    _require_manage(current_user)
+    cid = _company_for(current_user, company_id)
+    return await svc.list_eligible_people(cid)
+
+
+# ─────────────────────────────────────────────────────────────
+# Close → compute → publish
+# ─────────────────────────────────────────────────────────────
+@router.get("/cycles/{cycle}/quorum")
+async def read_quorum(cycle: str, company_id: Optional[str] = Query(None),
+                      current_user: dict = Depends(get_current_user)):
+    """Who is short of quorum, so HR can extend the window instead of publishing a thin
+    score. Counts only — never which raters replied."""
+    _require_manage(current_user)
+    cid = _company_for(current_user, company_id)
+    return await svc.quorum_report(cid, cycle)
+
+
+@router.post("/cycles/{cycle}/compute")
+async def compute_cycle(cycle: str, company_id: Optional[str] = Query(None),
+                        current_user: dict = Depends(get_current_user)):
+    """Freeze this cycle's scores. Refused until every level it scores is signed off."""
+    _require_manage(current_user)
+    cid = _company_for(current_user, company_id)
+    try:
+        result = await svc.update_cycle(cid, cycle, {"status": "computed"}, current_user)
+    except ValueError as e:
+        raise _bad(e)
+    await svc.audit(current_user, "cycle.compute", f"Computed and froze scores for {cycle}",
+                    company_id=cid, cycle=cycle)
+    return result
+
+
+@router.post("/cycles/{cycle}/publish")
+async def publish_cycle(cycle: str, company_id: Optional[str] = Query(None),
+                        current_user: dict = Depends(get_current_user)):
+    """Release the scores to leaders and their reporting managers.
+
+    Until this runs, a leader sees nothing at all. Without the step they could watch their
+    own number move during collection and difference it after each submission, which
+    recovers one named person's rating however the group breakdown is suppressed.
+    """
+    _require_manage(current_user)
+    cid = _company_for(current_user, company_id)
+    try:
+        result = await svc.update_cycle(cid, cycle, {"status": "published"}, current_user)
+    except ValueError as e:
+        raise _bad(e)
+    await svc.audit(current_user, "cycle.publish", f"Published {cycle} to leaders",
+                    company_id=cid, cycle=cycle)
+    try:
+        from app.services import leadership_notify_service as notify
+        await notify.notify_published(cid, cycle)
+    except Exception as e:                                       # pragma: no cover
+        # A notification failure must not leave the cycle half-published.
+        import logging
+        logging.getLogger(__name__).warning("Leadership publish notice failed: %s", e)
+    return result
+
+
+# ─────────────────────────────────────────────────────────────
+# RRO discussion and action plan
+# ─────────────────────────────────────────────────────────────
+@router.get("/subjects/{subject_id}/discussion")
+async def read_discussion(subject_id: str, cycle: str = Query(...),
+                          company_id: Optional[str] = Query(None),
+                          current_user: dict = Depends(get_current_user)):
+    """The RRO record for one leader. Visible to HR, the leader, and their manager."""
+    cid = _company_for(current_user, company_id)
+    if not await _may_view_subject(current_user, cid, subject_id):
+        raise HTTPException(status_code=403, detail="You are not authorized to view this")
+    return await svc.get_discussion(cid, cycle, subject_id) or {}
+
+
+@router.post("/subjects/{subject_id}/discussion")
+async def log_discussion(subject_id: str, payload: DiscussionCreate,
+                         cycle: str = Query(...),
+                         company_id: Optional[str] = Query(None),
+                         current_user: dict = Depends(get_current_user)):
+    """Log the RRO conversation and the action plan that came out of it.
+
+    "Their respective reporting Manager should discuss the score with each leader during
+    RRO" — so the reporting manager, or HR. Not the leader themselves.
+    """
+    cid = _company_for(current_user, company_id)
+    if not await _may_view_subject(current_user, cid, subject_id):
+        raise HTTPException(status_code=403, detail="You are not authorized to do this")
+    if _self_id(current_user) == str(subject_id) and not _can_manage(current_user):
+        raise HTTPException(
+            status_code=403,
+            detail="Your reporting manager logs this discussion, not you. You can "
+                   "acknowledge it once it is recorded.")
+    try:
+        return await svc.log_discussion(cid, cycle, subject_id, payload, current_user)
+    except ValueError as e:
+        raise _bad(e)
+
+
+@router.patch("/subjects/{subject_id}/discussion/acknowledge")
+async def acknowledge_discussion(subject_id: str, payload: DiscussionAck,
+                                 cycle: str = Query(...),
+                                 company_id: Optional[str] = Query(None),
+                                 current_user: dict = Depends(get_current_user)):
+    """The leader confirming the conversation happened. Only they can do this."""
+    cid = _company_for(current_user, company_id)
+    try:
+        return await svc.acknowledge_discussion(cid, cycle, subject_id, current_user,
+                                                payload.comment or "")
+    except ValueError as e:
+        raise _bad(e)
+
+
+@router.get("/cycles/{cycle}/discussions/pending")
+async def pending_discussions(cycle: str, company_id: Optional[str] = Query(None),
+                              current_user: dict = Depends(get_current_user)):
+    """Leaders whose RRO conversation has not been logged yet."""
+    _require_manage(current_user)
+    cid = _company_for(current_user, company_id)
+    return {"pending": await svc.pending_discussions(cid, cycle)}
+
+
+# ─────────────────────────────────────────────────────────────
+# Briefing tracker
+# ─────────────────────────────────────────────────────────────
+@router.get("/cycles/{cycle}/briefings")
+async def read_briefings(cycle: str, company_id: Optional[str] = Query(None),
+                         current_user: dict = Depends(get_current_user)):
+    """Who has been briefed, and who is still outstanding."""
+    _require_manage(current_user)
+    cid = _company_for(current_user, company_id)
+    return await svc.briefing_status(cid, cycle)
+
+
+@router.post("/cycles/{cycle}/briefings")
+async def record_briefing(cycle: str, payload: BriefingCreate,
+                          company_id: Optional[str] = Query(None),
+                          current_user: dict = Depends(get_current_user)):
+    """Record that one person has had their briefing."""
+    _require_manage(current_user)
+    cid = _company_for(current_user, company_id)
+    try:
+        return await svc.record_briefing(cid, cycle, payload.user_id, payload.type,
+                                         payload.conducted_by or "", current_user,
+                                         payload.notes or "")
+    except ValueError as e:
+        raise _bad(e)
+
+
+# ─────────────────────────────────────────────────────────────
+# Organisation roll-up
+# ─────────────────────────────────────────────────────────────
+@router.get("/dashboard")
+async def read_dashboard(cycle: Optional[str] = Query(None),
+                         company_id: Optional[str] = Query(None),
+                         current_user: dict = Depends(get_current_user)):
+    """Distribution, by level and by department — the MD's view.
+
+    Built from frozen scores only, so it can never disagree with the cards leaders were
+    shown, and carries no rater information of any kind.
+    """
+    _require_manage(current_user)
+    cid = _company_for(current_user, company_id)
+    return await svc.dashboard(cid, cycle)
+
+
+@router.patch("/subjects/{subject_id}/mode")
+async def set_subject_mode(subject_id: str, payload: SubjectMode,
+                           cycle: str = Query(...),
+                           company_id: Optional[str] = Query(None),
+                           current_user: dict = Depends(get_current_user)):
+    """Put one leader on a different degree from the rest of their cycle.
+
+    A leader with no direct reports cannot be a 360° subject; without this their panel can
+    never be completed and they are held out of every dispatch with nothing to explain it.
+    """
+    _require_manage(current_user)
+    cid = _company_for(current_user, company_id)
+    try:
+        return await svc.set_subject_mode(cid, cycle, subject_id, payload.mode_override)
+    except ValueError as e:
+        raise _bad(e)

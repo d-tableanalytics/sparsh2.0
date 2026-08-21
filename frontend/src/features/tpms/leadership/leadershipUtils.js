@@ -10,6 +10,36 @@ export const CLIENT_ROLES = ['clientadmin', 'clientuser'];
 
 export const isStaff = (user) => STAFF_ROLES.includes(user?.role);
 
+/** Whether this user's company can reach Leadership Score.
+ *
+ *  Leadership Score is part of TPMS and has no switch of its own, so this reads the TPMS
+ *  flag — one control for both, which is why they can never disagree. Opt-in, so a
+ *  missing flag means OFF. Internal staff always pass; they administer it across clients.
+ *
+ *  Presentation only. The backend gates every endpoint independently in
+ *  utils/leadership_access.ensure_leadership_enabled. */
+export const canAccessLeadership = (user) =>
+  isStaff(user) || Boolean(user?.tpms_enabled);
+
+/** The four levels a leader can be scored at. "Applicable from L4 (Asst Managers) and
+ *  above" — set explicitly on the user record, never derived from their designation. */
+export const LEADERSHIP_LEVELS = [
+  { code: 'L4', label: 'L4 · Asst. Manager' },
+  { code: 'L5', label: 'L5 · Manager' },
+  { code: 'L6', label: 'L6 · Senior Manager' },
+  { code: 'L7', label: 'L7 & above' },
+];
+
+/** Cycle status → tone, so chips agree everywhere. `published` is the state that matters:
+ *  it is the first moment a leader can see their own score. */
+export const cycleTone = (status) => ({
+  draft: 'plain',
+  open: 'blue',
+  closed: 'yellow',
+  computed: 'indigo',
+  published: 'green',
+}[status] || 'plain');
+
 /** A client user's governance role — mirrors the backend's `_governance_role`. */
 export const governanceRole = (user) =>
   String(user?.governance_role || user?.department || '').trim().toLowerCase();
@@ -20,6 +50,18 @@ export const governanceRole = (user) =>
  *  than a named person. */
 export const isHr = (user) =>
   user?.role === 'clientuser' && governanceRole(user) === 'hr';
+
+/** The company's MD. A clientadmin counts: it is the company's top-authority account and
+ *  already maps to MD rank in auth_controller.client_rank, so both routes into that
+ *  authority behave the same. Mirrors `_is_md` in routes/leadership.py. */
+export const isMd = (user) =>
+  user?.role === 'clientadmin' ||
+  (user?.role === 'clientuser' && governanceRole(user) === 'md');
+
+/** May sign off a level's question set. "All parameters should have weightages to create
+ *  scoring - HR and MD", so approving a rubric is HR's and MD's call; internal staff keep
+ *  access because they seed and support the module. Mirrors `_require_signoff`. */
+export const canSignOff = (user) => isStaff(user) || isHr(user) || isMd(user);
 
 /** Runs the process — cycles, enrolling leaders, reading scores.
  *  Mirrors `_can_manage` in routes/leadership.py. */

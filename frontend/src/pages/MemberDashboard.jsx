@@ -439,7 +439,17 @@ const MemberDashboard = () => {
                 </select></div>
               <div className="space-y-1"><label className="text-[10px] font-bold text-[var(--text-muted)] uppercase tracking-widest">Department</label>
                 <select value={editData.department || ''} onChange={e => setEditData({ ...editData, department: e.target.value })} className="w-full px-3 py-1.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-md text-[13px] text-[var(--text-main)] outline-none">
-                  <option value="HOD">HOD</option><option value="Implementor">Implementor</option><option value="EA">EA</option><option value="MD">MD</option><option value="Other">Other</option>
+                  <option value="HOD">HOD</option><option value="Implementor">Implementor</option><option value="EA">EA</option><option value="MD">MD</option><option value="HR">HR</option><option value="Other">Other</option>
+                </select></div>
+              {/* Leadership Score eligibility — L4 and above. Explicit, never derived
+                  from the free-text Designation. */}
+              <div className="space-y-1"><label className="text-[10px] font-bold text-[var(--text-muted)] uppercase tracking-widest">Leadership Level</label>
+                <select value={editData.leadership_level || ''} onChange={e => setEditData({ ...editData, leadership_level: e.target.value })} className="w-full px-3 py-1.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-md text-[13px] text-[var(--text-main)] outline-none">
+                  <option value="">— Not a leader —</option>
+                  <option value="L4">L4 · Asst. Manager</option>
+                  <option value="L5">L5 · Manager</option>
+                  <option value="L6">L6 · Senior Manager</option>
+                  <option value="L7">L7 &amp; above</option>
                 </select></div>
               <div className="space-y-1"><label className="text-[10px] font-bold text-[var(--text-muted)] uppercase tracking-widest">Reporting Manager</label>
                 <select value={editData.reporting_manager || ''} onChange={e => setEditData({ ...editData, reporting_manager: e.target.value })} className="w-full px-3 py-1.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-md text-[13px] text-[var(--text-main)] outline-none">

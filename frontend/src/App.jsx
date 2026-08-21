@@ -227,6 +227,10 @@ const AppRoutes = () => {
         <Route path="leadership"           element={<LeadershipReport />} />
         <Route path="leadership/cycles"    element={<LeadershipCycles />} />
         <Route path="leadership/subjects"  element={<LeadershipSubjects />} />
+        {/* HR and the MD reach the question bank to REVIEW and sign off a level — the
+            page itself keeps the wording and weightages editable by staff only. A cycle
+            cannot be closed until every level it scores has been signed off. */}
+        <Route path="leadership/questions" element={<LeadershipQuestions />} />
       </Route>
 
 
