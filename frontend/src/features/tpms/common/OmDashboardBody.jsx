@@ -29,9 +29,6 @@ const delayColor = (v) => {
   return 'var(--accent-red)';
 };
 
-// Completion-% colour for the client matrix's Pct column.
-const pctColor = (p) => (p >= 75 ? 'var(--accent-green)' : p >= 40 ? 'var(--accent-orange)' : 'var(--accent-red)');
-
 // Spec §9.2 / §17 — "Action pending-side". Values match `pending_side` from _open_actions.
 const PENDING_SIDE_OPTIONS = [
   { id: '', name: 'Either side' },
@@ -86,7 +83,7 @@ const OmDashboardBody = ({ kpis = [], activities = [], matrix = [], actions = []
     setFOwner('All Owners'); setFSide(''); setFStatus('open');
   };
 
-  const matrixCols = activities.length + 4; // Client + activities + Planned + Done + Pct
+  const matrixCols = activities.length + 2; // Client + activities + Done
 
   return (
     <>
@@ -107,7 +104,7 @@ const OmDashboardBody = ({ kpis = [], activities = [], matrix = [], actions = []
             <tr className="bg-[var(--table-header-bg)] border-b border-[var(--border)]">
               <Th className={stickyHead}>Client</Th>
               {activities.map((a) => <Th key={a.full} align="center">{a.short}</Th>)}
-              <Th align="center">Planned</Th><Th align="center">Done</Th><Th align="center">Pct</Th>
+              <Th align="center">Done</Th>
             </tr>
           </thead>
           <tbody>
@@ -118,13 +115,11 @@ const OmDashboardBody = ({ kpis = [], activities = [], matrix = [], actions = []
                   const cell = r.cells?.[a.full];
                   return (
                     <Td key={a.full} align="center">
-                      <Fraction v={cell && cell.total ? `${cell.done}/${cell.total}` : ''} status={cell?.status} />
+                      <Fraction v={cell && cell.total ? `${cell.done}/${cell.total}` : ''} />
                     </Td>
                   );
                 })}
-                <Td align="center" className="font-bold tabular-nums">{r.total ?? 0}</Td>
                 <Td align="center" className="font-extrabold text-[var(--accent-green)]">{r.done ?? 0}</Td>
-                <Td align="center" className="font-extrabold tabular-nums" style={{ color: pctColor(r.total ? Math.round((r.done / r.total) * 100) : 0) }}>{r.total ? Math.round((r.done / r.total) * 100) : 0}%</Td>
               </tr>
             ))}
             {matrix.length === 0 && (

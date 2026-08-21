@@ -32,6 +32,8 @@ export const updateReminderRule = (id, payload) => api.patch(`/tpms/reminder-rul
 export const getMailTemplates = (activity) =>
   api.get('/tpms/mail-templates', { params: { activity: activity || undefined } });
 export const upsertMailTemplate = (payload) => api.post('/tpms/mail-templates', payload);
+// WhatsApp templates are listed read-only — authoring stays out of this screen; the Active
+// switch is what this endpoint exists for.
 export const getWhatsappTemplates = (activity) =>
   api.get('/tpms/whatsapp-templates', { params: { activity: activity || undefined } });
 export const upsertWhatsappTemplate = (payload) => api.post('/tpms/whatsapp-templates', payload);

@@ -56,7 +56,6 @@ from app.models.tpms import (
     TPMS_EVENT_KIND,
 )
 from app.utils.calendar_utils import CALENDAR_COLLECTIONS
-from app.models.forms import FORM_COLLECTIONS, QUESTION_COLLECTION
 
 logger = logging.getLogger(__name__)
 
@@ -82,8 +81,6 @@ BACKUP_COLLECTIONS: List[str] = [
     COLL_TASK_UPLOADS,
     COLL_MIGRATION_MAP,
     "tpms_form_assignments",
-    QUESTION_COLLECTION,                 # tpms_form_questions (question master)
-    *FORM_COLLECTIONS.values(),          # the 4 review/feedback response tables
 ]
 
 SCHEDULE_SHEET = "Schedules"
@@ -382,28 +379,6 @@ async def export_workbook() -> Tuple[bytes, Dict[str, int]]:
             tab.append([_cell(doc.get(key)) for key in headers])
         tab.freeze_panes = "A2"
         counts[coll_name] = len(docs)
-
-    # Export-only reference sheets: the ERP core entities the other sheets point at by _id.
-    # These are NOT re-imported (they live in the main app with their own management) — they are
-    # here so you can look up the Mongo _id of a company / person while filling the sheets.
-    reference = [
-        ("Ref_Companies", "companies", ["_id", "name", "domain", "company_type"]),
-        ("Ref_Staff", "staff", ["_id", "full_name", "email", "role", "mobile"]),
-        ("Ref_Employees", "learners",
-         ["_id", "full_name", "email", "company_id", "governance_role", "department", "mobile"]),
-    ]
-    for title, coll_name, cols in reference:
-        try:
-            docs = await get_collection(coll_name).find({}).to_list(50000)
-        except Exception as exc:
-            logger.warning("TPMS export: could not read reference %s — %s", coll_name, exc)
-            docs = []
-        tab = workbook.create_sheet(title)
-        tab.append(cols)
-        for doc in docs:
-            tab.append([_cell(doc.get(c)) for c in cols])
-        tab.freeze_panes = "A2"
-        counts[title] = len(docs)
 
     buffer = io.BytesIO()
     workbook.save(buffer)

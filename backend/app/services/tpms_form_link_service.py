@@ -103,11 +103,11 @@ def _display_name(user: dict) -> str:
 async def eligible_respondents(company_id: str, form_type: str, assigned_member_ids=None) -> list:
     """Who must fill `form_type` for this company.
 
-    Explicit selection wins: when doers are put on the schedule (`assigned_member_ids`), the form
-    goes to EXACTLY those people (that have an email) — it is NEVER fanned out to the whole
-    company. This is what stops a single selected doer from mailing every role-holder. Only when
-    NO doer is selected do we apply the audience rule — every company user holding the form's
-    governance role (HODs for the rating forms, the MD for the feedback checklist).
+    A form's audience is a governance role — rating forms are answered by HODs, the feedback
+    checklist by the MD. Preference order:
+      1. The people actually put on the schedule (`assigned_member_ids`) whose role matches.
+      2. Otherwise every company user holding that role, which is the audience rule the Forms
+         API has always applied.
     Users without an email are dropped: there would be nowhere to send their link.
     """
     from app.models.forms import AUDIENCE_DEPARTMENT, form_audience
@@ -118,6 +118,7 @@ async def eligible_respondents(company_id: str, form_type: str, assigned_member_
 
     learners = get_collection("learners")
 
+    picked = []
     oids = []
     for mid in (assigned_member_ids or []):
         try:
@@ -125,12 +126,16 @@ async def eligible_respondents(company_id: str, form_type: str, assigned_member_
         except Exception:
             pass
     if oids:
-        # Respect the exact people chosen — no role fan-out.
-        return [u for u in await learners.find({"_id": {"$in": oids}}).to_list(500) if u.get("email")]
+        for u in await learners.find({"_id": {"$in": oids}}).to_list(500):
+            if _governance_role(u) == want and u.get("email"):
+                picked.append(u)
 
-    # No one was selected → the audience rule: every company user holding the form's role.
-    return [u for u in await learners.find({"company_id": str(company_id)}).to_list(1000)
-            if _governance_role(u) == want and u.get("email")]
+    if not picked:
+        for u in await learners.find({"company_id": str(company_id)}).to_list(1000):
+            if _governance_role(u) == want and u.get("email"):
+                picked.append(u)
+
+    return picked
 
 
 async def create_assignment(*, form_type: str, form_title: str, activity: str, period: str,

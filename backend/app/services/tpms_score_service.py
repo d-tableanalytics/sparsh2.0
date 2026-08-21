@@ -344,32 +344,6 @@ async def save_manual_score(user: dict, payload: dict) -> dict:
     return {"ok": True}
 
 
-async def dedupe_success_measures() -> dict:
-    """One-off cleanup (port of dedupeSuccessMeasures): collapse duplicate Success_Measure
-    rows to the most-recently-updated one per (company, activity, period, scope, hod). A unique
-    index now prevents new duplicates, but migrated/legacy data may still carry them."""
-    col = get_collection(COLL_SUCCESS_MEASURES)
-    seen = {}
-    dupes = []
-    async for row in col.find({}):
-        key = (str(row.get("company_id") or ""), str(row.get("activity") or ""),
-               str(row.get("period") or ""), str(row.get("scope") or SCOPE_COMPANY),
-               str(row.get("hod_id") or ""))
-        keep = seen.get(key)
-        if keep is None:
-            seen[key] = row
-            continue
-        # Keep whichever was updated later; drop the older row.
-        keep_at = keep.get("updated_at") or datetime.min
-        row_at = row.get("updated_at") or datetime.min
-        older, newer = (keep, row) if keep_at <= row_at else (row, keep)
-        seen[key] = newer
-        dupes.append(older["_id"])
-    if dupes:
-        await col.delete_many({"_id": {"$in": dupes}})
-    return {"ok": True, "removed": len(dupes), "kept": len(seen)}
-
-
 async def run_daily(period: Optional[str] = None) -> dict:
     """Seed then sync — the two triggers the Apps Script installed, in their order."""
     if period is None:

@@ -863,7 +863,12 @@ async def list_whatsapp_templates(
     activity: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user),
 ):
-    """WhatsApp templates (activity × side × event). Admin only."""
+    """WhatsApp templates (activity × side × event). Admin only.
+
+    Read-only listing so the Active switch has something to act on — WhatsApp template
+    AUTHORING is unchanged and still out of scope here; rows are configured directly against
+    the Meta-approved template names.
+    """
     if (current_user.get("role") or "").lower() not in STAFF_ROLES:
         raise HTTPException(status_code=403, detail="Admin only")
     query = {}
@@ -1475,24 +1480,10 @@ async def success_measures_sync(
     period: Optional[str] = Query(None, description="'YYYY-MM'; defaults to this month"),
     current_user: dict = Depends(get_current_user),
 ):
-    """One-click recalculate of everything the dashboards read — the ERP equivalent of running
-    the Apps Script syncAutoFeed + seedSuccessMeasures + syncSuccessMeasures triggers together.
-    Also runs daily in the scheduler."""
+    """Seed + recompute on demand. The same pair also runs daily in the scheduler."""
     if (current_user.get("role") or "").lower() not in STAFF_ROLES:
         raise HTTPException(status_code=403, detail="Admin only")
-    from app.services.tpms_escalation_service import sync_auto_feed
-    auto = await sync_auto_feed()            # create/close Action_Items + refresh Escalations
-    scores = await run_score_daily(period)   # seed + recompute Success_Measures
-    return {"ok": True, "auto_feed": auto, "scores": scores}
-
-
-@router.post("/success-measures/dedupe")
-async def success_measures_dedupe(current_user: dict = Depends(get_current_user)):
-    """Collapse duplicate success-measure rows to the latest per key. Admin-only, one-off."""
-    if (current_user.get("role") or "").lower() not in STAFF_ROLES:
-        raise HTTPException(status_code=403, detail="Admin only")
-    from app.services.tpms_score_service import dedupe_success_measures
-    return await dedupe_success_measures()
+    return await run_score_daily(period)
 
 
 # GET /form-mail-logs used to live here, backing the TPMS ▸ Form Mail Logs admin page. Both were

@@ -174,7 +174,7 @@ def build_occurrences(payload: dict) -> List[date]:
                 out.append(d)
             d += timedelta(days=1)
 
-    # Any unrecognized recurrence value yields [] (the caller treats empty as an error).
+    # Any other recurrence (notably "Daily") intentionally yields [] — see docstring.
     return out
 
 
@@ -373,23 +373,6 @@ async def build_reminders(payload: dict) -> List[dict]:
     return out
 
 
-def _exact_reminder_offset(reminder: dict, occ_start: datetime) -> dict:
-    """Turn an absolute 'exact' reminder (tpms_exact_date/time) into the offset the reminder
-    scheduler understands (offset_minutes + timing_type), measured from this occurrence's
-    start — so it fires at the chosen absolute moment instead of at event start."""
-    doc = {k: v for k, v in reminder.items() if not k.startswith("tpms_exact")}
-    d = str(reminder.get("tpms_exact_date") or "").strip()
-    t = str(reminder.get("tpms_exact_time") or "").strip() or DEFAULT_REMIND_TIME
-    try:
-        target = datetime.fromisoformat(f"{d}T{t[:5]}:00")
-    except Exception:
-        return doc  # unparseable → leave the 0-offset default rather than crash the create
-    delta_min = int(round((occ_start - target).total_seconds() / 60))
-    doc["timing_type"] = "before" if delta_min >= 0 else "after"
-    doc["offset_minutes"] = abs(delta_min)
-    return doc
-
-
 def _start_iso(day: date, event_time: Optional[str]) -> str:
     hhmm = (event_time or "").strip() or DEFAULT_REMIND_TIME
     return f"{day.isoformat()}T{hhmm[:5]}:00"
@@ -454,17 +437,12 @@ async def create_schedule(user: dict, payload: dict) -> dict:
 
     docs = []
     for idx, day in enumerate(occurrences):
-        occ_start = datetime.fromisoformat(_start_iso(day, event_time))
-        # Exact reminders ride only on the first occurrence (Apps Script parity) and carry an
-        # absolute date/time — convert that to an offset from this occurrence's start. Offset
-        # reminders pass through unchanged.
-        occ_reminders = []
-        for r in reminders:
-            if r.get("tpms_stage") == "exact":
-                if idx == 0:
-                    occ_reminders.append(_exact_reminder_offset(r, occ_start))
-            else:
-                occ_reminders.append({k: v for k, v in r.items() if not k.startswith("tpms_exact")})
+        # Exact reminders ride only on the first occurrence — Apps Script parity.
+        occ_reminders = [
+            {k: v for k, v in r.items() if not k.startswith("tpms_exact")}
+            for r in reminders
+            if r.get("tpms_stage") != "exact" or idx == 0
+        ]
         docs.append({
             "title": title,
             "type": "event",
@@ -504,15 +482,12 @@ async def create_schedule(user: dict, payload: dict) -> dict:
 
     tracker = await write_tracker_rows(docs, event_ids)
 
-    # Schedule mail to both sides — DETACHED so the API returns immediately and the user sees the
-    # success toast without waiting for every email (and form-link) to be generated. The send runs
-    # on the event loop in the background; inline fallback only if there is no running loop.
-    mails = {"detached": True}
+    # Schedule mail to both sides. Mirrors saveSchedule, which wraps the send so a mail
+    # failure never rolls back the schedule that was just written (code.js:845).
+    mails = {"sent": 0, "failed": 0}
     try:
-        from app.services.tpms_notify_service import notify_schedule, _enqueue_status_mail, EVENT_SCHEDULE
-        ev = {**docs[0], "_id": event_ids[0]}
-        if not _enqueue_status_mail(ev, EVENT_SCHEDULE, "Scheduled", None):
-            mails = await notify_schedule(ev)  # no running loop → send inline as a fallback
+        from app.services.tpms_notify_service import notify_schedule
+        mails = await notify_schedule({**docs[0], "_id": event_ids[0]})
     except Exception as e:
         logger.error(f"TPMS schedule mail failed: {e}")
 
@@ -629,16 +604,6 @@ async def update_schedule(user: dict, event_id: str, payload: dict) -> dict:
             updates["esc_stage"] = 0
 
     await get_collection(coll).update_one({"_id": doc["_id"]}, {"$set": updates})
-
-    # Cancelling notifies both sides (spec §7). The pending reminders are consumed by the
-    # reminder scheduler's terminal-status guard, so there is no separate reminder cleanup here.
-    if updates.get("tpms_status") == STATUS_CANCELLED:
-        try:
-            from app.services.tpms_notify_service import notify_status, EVENT_CANCEL
-            await notify_status({**doc, **updates}, EVENT_CANCEL)
-        except Exception as exc:
-            import logging
-            logging.getLogger(__name__).warning(f"TPMS cancel notify failed for {event_id}: {exc}")
 
     tracker_set = {"updated_at": datetime.utcnow()}
     if moved:

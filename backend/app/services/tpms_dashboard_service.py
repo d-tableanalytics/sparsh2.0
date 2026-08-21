@@ -258,9 +258,6 @@ def _accumulate(events: List[dict], allowed: Optional[List[str]],
 
         day = str(e.get("start") or "")[:10]
         status = e.get("tpms_status") or STATUS_SCHEDULED
-        # F-07: a Cancelled activity is not "planned" work, so it must not inflate the
-        # completion-% denominator. It is still counted separately (cancelled) below.
-        is_cancelled = status == STATUS_CANCELLED
         in_cur = _in_range(day, frm, to)
         in_prev = _in_range(day, prev_frm, prev_to)
         if not in_cur and not in_prev:
@@ -272,16 +269,14 @@ def _accumulate(events: List[dict], allowed: Optional[List[str]],
 
         if in_prev:
             for b in buckets:
-                if not is_cancelled:
-                    b["prev_planned"] += 1
+                b["prev_planned"] += 1
                 if status == STATUS_COMPLETED:
                     b["prev_done"] += 1
             if not in_cur:
                 continue
 
         for b in buckets:
-            if not is_cancelled:
-                b["planned"] += 1
+            b["planned"] += 1
 
         if status == STATUS_COMPLETED:
             for b in buckets:
@@ -313,22 +308,17 @@ def _accumulate(events: List[dict], allowed: Optional[List[str]],
 # ─────────────────────────────────────────────────────────────
 # Success-measure rollups (code.js:1395)
 # ─────────────────────────────────────────────────────────────
-async def _success_rollup(allowed: Optional[List[str]], period: Optional[str] = None) -> dict:
+async def _success_rollup(allowed: Optional[List[str]]) -> dict:
     query: dict = {"scope": "company"}
     if allowed is not None:
         query["company_id"] = {"$in": allowed}
-    if period:
-        query["period"] = period        # spec: KPIs are for the SELECTED month, not all-time
     rows = await get_collection(COLL_SUCCESS_MEASURES).find(query).to_list(20000)
 
     per_activity: Dict[str, dict] = {}
     all_sum = all_n = 0
     for r in rows:
         target, actual = r.get("score_target"), r.get("score_actual")
-        # Skip activities with no actual score yet — an unscored activity (a manual/DRM row
-        # awaiting its score, or a review not yet submitted) must NOT count as 0% and drag the
-        # average down. It contributes to the KPI only once it actually has a score.
-        if actual is None:
+        if target is None and actual is None:
             continue
         ach = round((actual or 0) / target * 100) if target else (actual or 0)
         key = str(r.get("activity") or "").lower()
@@ -398,11 +388,8 @@ async def _clients_grid(events: List[dict], allowed: Optional[List[str]],
             "cells": {}, "done": 0, "total": 0,
         })
         cell = row["cells"].setdefault(activity, {"done": 0, "total": 0, "status": "pending"})
-        # F-07: Cancelled activities are excluded from the matrix denominator too, so the
-        # per-company/per-cell % stays consistent with the headline completion above.
-        if status != STATUS_CANCELLED:
-            cell["total"] += 1
-            row["total"] += 1
+        cell["total"] += 1
+        row["total"] += 1
         if status == STATUS_COMPLETED:
             cell["done"] += 1
             row["done"] += 1
@@ -563,7 +550,7 @@ async def get_analytics(user: dict, scope: dict) -> dict:
     totals, by_company, by_om = _accumulate(events, allowed, companies, window, om_filter)
     closure = await _action_closure()
     escalations = await _active_escalations()
-    rollup = await _success_rollup(allowed, period=window[0][:7])
+    rollup = await _success_rollup(allowed)
 
     def closure_pct(cid: str):
         a = closure.get(cid)

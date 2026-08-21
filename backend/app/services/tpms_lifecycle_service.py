@@ -199,8 +199,6 @@ async def request_reschedule(user: dict, event_id: str, new_date: str,
         raise HTTPException(status_code=403, detail="Only the doer can request a reschedule.")
     if not new_date:
         raise HTTPException(status_code=400, detail="Choose a new date")
-    if not (reason or "").strip():
-        raise HTTPException(status_code=400, detail="A reason is required to request a reschedule.")
 
     doc, _coll = await find_tpms_event(event_id)
     if str(doc.get("company_id") or "") != str(user.get("company_id") or ""):
@@ -281,11 +279,6 @@ async def decide_reschedule_request(user: dict, request_id: str,
         raise HTTPException(status_code=404, detail="Request not found.")
     if req.get("status") != REQUEST_PENDING:
         raise HTTPException(status_code=400, detail=f"Request already {req.get('status')}.")
-
-    # Spec §4 / G-4: an internal staff member may only decide requests for a company they own
-    # (admins may decide any). Mirrors the ownership rule enforced on schedule create/edit.
-    from app.services.tpms_schedule_service import assert_can_schedule
-    await assert_can_schedule(user, str(req.get("company_id") or ""))
 
     now = datetime.utcnow()
     await get_collection(COLL_RESCHEDULE_REQUESTS).update_one({"_id": oid}, {"$set": {

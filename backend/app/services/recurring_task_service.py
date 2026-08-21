@@ -52,6 +52,27 @@ def _ist_date(dt):
     """The calendar date of a tz-aware datetime as seen in IST."""
     return dt.astimezone(IST).date()
 
+
+# The end of an occurrence's own day, 11:59:59 PM IST. Stored as UTC, matching the two existing
+# end-of-day helpers in routes/calendar_events.py (_apply_todo_due_end_of_day, _series_end_cutoff)
+# — they compute in IST and convert, and the overdue check compares against a naive UTC clock.
+OCCURRENCE_END_OF_DAY = (23, 59, 59)
+
+
+def occurrence_end_of_day(target) -> str:
+    """`target`'s own date at 11:59:59 PM IST, as a UTC ISO string.
+
+    The deadline for one occurrence of a repeating task that was created WITHOUT a deadline.
+    Enabling Repeat hides the deadline field (a repeating task has no single due moment), so
+    each occurrence is instead due at the end of the day it lands on.
+
+    A task the assigner *did* give a deadline never reaches this — see _fresh_occurrence.
+    """
+    ist = target.astimezone(IST) if target.tzinfo else target.replace(tzinfo=IST)
+    hour, minute, second = OCCURRENCE_END_OF_DAY
+    end_ist = ist.replace(hour=hour, minute=minute, second=second, microsecond=0)
+    return end_ist.astimezone(timezone.utc).isoformat()
+
 # Weekly off day(s) — recurring occurrences never land here, matching the task due-date
 # picker which blocks the same day. Python date.weekday(): Mon=0 … Sun=6, so {6} == Sunday.
 # (There is no persisted per-user weekly-off setting in the backend yet — see the picker's
@@ -59,11 +80,20 @@ def _ist_date(dt):
 WEEKLY_OFF_WEEKDAYS = {6}
 
 
+def _is_holiday(dt, holiday_dates) -> bool:
+    """A configured holiday, judged in IST so it matches the date the user actually picked."""
+    return dt.astimezone(IST).date().isoformat() in holiday_dates
+
+
+def _is_weekly_off(dt) -> bool:
+    """A weekly off (Sunday), judged in IST."""
+    return dt.astimezone(IST).weekday() in WEEKLY_OFF_WEEKDAYS
+
+
 def _is_off_day(dt, holiday_dates) -> bool:
     """A date the task must never land on: a holiday or a weekly off (Sunday). Judged in IST
     so the day/weekday matches the date the user actually picked."""
-    ist = dt.astimezone(IST)
-    return ist.date().isoformat() in holiday_dates or ist.weekday() in WEEKLY_OFF_WEEKDAYS
+    return _is_holiday(dt, holiday_dates) or _is_weekly_off(dt)
 
 
 def _steps_by_single_day(repeat_type, interval) -> bool:
@@ -76,23 +106,39 @@ def _steps_by_single_day(repeat_type, interval) -> bool:
 
 
 def drops_off_days(doc_type, repeat_type, interval) -> bool:
-    """Whether an occurrence landing on an off-day is DROPPED (no todo/task that day at all)
-    rather than shifted forward onto the next working day.
+    """Whether an occurrence landing on a WEEKLY OFF is DROPPED rather than shifted forward.
 
-    TODOS always drop. A personal todo is a note-to-self for a specific day; if that day is a
-    holiday or a weekly off there is nobody working, so the todo simply does not exist for that
-    period — it is not moved onto a day the user never chose. This holds for every cadence: a
-    monthly-15th todo whose 15th is a holiday produces nothing that month, and resumes on the
-    15th of the next.
+    Holidays no longer come through here at all — they are always dropped, for every cadence
+    and every type (see `drops_on_holiday`). This function now governs weekly offs only.
 
-    TASKS keep the delegation rule, which depends on the cadence: a daily-style task drops the
-    day (the next day is its own occurrence, so shifting would collide with it), while a
-    weekly/monthly/annual/custom task shifts, because dropping would lose the whole period of
-    work — a task is owed to someone else and still has to be done.
+    TODOS always drop. A personal todo is a note-to-self for a specific day; if nobody is
+    working that day the todo simply does not exist for that period, rather than being moved
+    onto a day the user never chose.
+
+    TASKS depend on the cadence: a daily-style task drops the day (the next day is its own
+    occurrence, so shifting would collide with it), while a weekly/monthly/annual/custom task
+    shifts to the next working day, because dropping a weekly off would lose a whole period of
+    work that is owed to someone else.
     """
     if doc_type == "todo":
         return True
     return _steps_by_single_day(repeat_type, interval)
+
+
+def drops_on_holiday() -> bool:
+    """A configured holiday ALWAYS drops the occurrence — every cadence, every type.
+
+    Nobody is working that day, so no task is created at all: no checklist, no reminders, no
+    notification, no placeholder. The series then continues from its own next calendar date;
+    the skipped occurrence is NOT moved to the next working day, because moving it would put
+    work on a date the schedule never called for and collide with whatever that date already
+    owns.
+
+    Previously only daily-style cadences dropped, and a weekly/monthly task landing on a
+    holiday was shifted forward instead. A function rather than a constant so every call site
+    reads as a policy decision, and so a per-company holiday policy has one obvious seam.
+    """
+    return True
 
 
 def _shift_to_working_day(dt, holiday_dates, max_shift=14):
@@ -140,6 +186,28 @@ def _series_anchor_day(head: dict):
     return first.day if first else None
 
 
+# Per-occurrence state, reset to an empty list on every new occurrence. Each of these records
+# what happened during ONE period, so carrying it forward would make a fresh task claim work
+# that belongs to the previous one.
+#
+# `completion_attachments` is the sharpest of these: the completion gate in routes/tasks.py
+# accepts a task as evidenced when that array is non-empty, so an inherited copy let a new
+# occurrence be completed with last period's proof and no new upload at all.
+#
+# `attachments` is deliberately ABSENT from this list. It holds the assigner's brief and
+# reference files — the material the doer needs in order to start — and it describes the task,
+# not the period. It was previously wiped on every occurrence, which is the exact inverse of
+# what these two arrays mean.
+_RESET_LISTS = (
+    "remarks",
+    "status_history",
+    "completion_attachments",   # completion evidence — see above
+    "follow_ups",
+    "deadline_history",
+    "dependency_stack",
+)
+
+
 def _fresh_occurrence(head: dict, target, natural, anchor_day) -> dict:
     """A new occurrence cloned from `head`, due on `target`.
 
@@ -148,19 +216,38 @@ def _fresh_occurrence(head: dict, target, natural, anchor_day) -> dict:
     when this one was pushed off a holiday / weekly off. Without it a single shift would drag
     the rest of the series forward permanently.
 
-    A fresh occurrence must not inherit the previous period's work: the checklist comes back
-    unticked and remarks / attachments / status history / completion start empty, with the
-    reminders re-armed for the new date.
+    THE definition of a fresh occurrence, used by both paths that create one — the nightly
+    engine and the series-extension in routes/calendar_events.py. Keeping it in one place is
+    what stops the two disagreeing about what "fresh" means.
+
+    What a new occurrence keeps: the task itself (title, description, assignees, cadence,
+    checklist ITEMS, reminders), the assigner's reference `attachments`, and the DEADLINE
+    (`end`) exactly as the user assigned it.
+    What it does not keep: anything recording what happened last period — ticks, completion
+    timestamps, evidence, remarks, follow-ups, history, and any delegation the previous
+    occurrence went through.
     """
     doc = {k: v for k, v in head.items() if k not in ("_id", "id")}
     doc["start"] = target.isoformat()
     doc["recurrence_anchor"] = natural.isoformat()
     if anchor_day:
         doc["recurrence_day"] = anchor_day
-    # Preserve the original start→end offset (zero for a todo, which keeps start == end).
-    orig_end, orig_start = _parse(head.get("end")), _parse(head.get("start"))
-    if orig_end and orig_start:
-        doc["end"] = (target + (orig_end - orig_start)).isoformat()
+
+    # `end` — the deadline — is carried over UNTOUCHED by the clone above whenever the assigner
+    # set one. The deadline belongs to the task as they set it, not to the period, so it is
+    # never recomputed for any cadence: every occurrence is due at exactly the moment chosen.
+    # (This used to move a Daily occurrence's deadline onto its own date, and slide every other
+    # cadence forward by the original start-to-deadline gap.) The only thing that changes an
+    # assigned deadline is an explicit revision — routes/tasks.py revise_task_deadline, which
+    # stamps `deadline_history`.
+    #
+    # The one exception is a repeating task created with NO deadline at all. Enabling Repeat in
+    # the composer hides the deadline field, because a series has no single due moment to pick.
+    # Those occurrences are due at the end of the day they land on, so there is a real deadline
+    # to be overdue against instead of none.
+    if head.get("type") == "task" and not head.get("end"):
+        doc["end"] = occurrence_end_of_day(target)
+
     doc["created_at"] = datetime.utcnow()
     doc["updated_at"] = None
     if head.get("type") == "task":
@@ -170,11 +257,29 @@ def _fresh_occurrence(head: dict, target, natural, anchor_day) -> dict:
     doc["completed_at"] = None
     doc["completed_by"] = None
     doc["deleted_at"] = None
+
     if head.get("checklist"):
-        doc["checklist"] = [{**c, "completed": False} for c in head["checklist"]]
-    doc["remarks"] = []
-    doc["attachments"] = []
-    doc["status_history"] = []
+        # `completed_at` must be cleared alongside `completed`. Overriding only `completed`
+        # left last period's timestamp on an unticked item, so anything reading it saw a
+        # "done at" date on work that had not been done.
+        doc["checklist"] = [{**c, "completed": False, "completed_at": None}
+                            for c in head["checklist"]]
+
+    for field in _RESET_LISTS:
+        doc[field] = []
+    doc["dependency_doer_id"] = None
+
+    # Raising a dependency ADDS the doer to `target_staff_id` and flips `assigned_to` to
+    # "other" (routes/tasks.py). Clearing only the stack would leave the new occurrence
+    # assigned to whoever last helped out. The bottom of the stack records the assignment as
+    # it was before any hand-off, so the original owners are restored from the data itself
+    # rather than guessed at.
+    stack = head.get("dependency_stack") or []
+    if stack:
+        base = stack[0] or {}
+        doc["target_staff_id"] = base.get("assignee_ids") or []
+        doc["assigned_to"] = base.get("assigned_to") or doc.get("assigned_to")
+
     if head.get("reminders"):
         doc["reminders"] = [{**r, "sent": False} for r in head["reminders"]]
     return doc
@@ -231,11 +336,15 @@ async def build_series_occurrences(head: dict, end_dt, holiday_dates=None, taken
         if _ist_date(nxt) > _ist_date(end_dt):
             break
 
-        # Off-day handling, shared with the nightly engine — see drops_off_days. For a todo
-        # that means: a holiday or weekly off produces NO occurrence at all, whatever the
-        # cadence. The series just resumes at its next natural date.
+        # Off-day handling, identical to the nightly engine's — a holiday always drops the
+        # occurrence for every cadence and type, while a weekly off follows drops_off_days.
+        # The two paths MUST agree: the same series is built here when it is created or
+        # extended, and rolled forward there overnight.
         target = nxt
-        if _is_off_day(nxt, holiday_dates):
+        if _is_holiday(nxt, holiday_dates):
+            curr = nxt
+            continue
+        if _is_weekly_off(nxt):
             if drops_off_days(head.get("type"), repeat_type, interval):
                 curr = nxt
                 continue
@@ -280,16 +389,24 @@ async def generate_due_recurring_tasks():
             "deleted_at": None,
         }).to_list(10000)
 
-        # Keep only the latest occurrence per series (by start).
+        # Keep only the latest occurrence per series (by start), and record every IST date the
+        # series already covers. Both come from the documents already fetched above, so the
+        # de-duplication below costs no extra query — it replaces one round trip per candidate
+        # date with none at all.
         latest = {}
+        dates_by_series = {}
         for d in docs:
             gid = d.get("recurring_group_id")
             if not gid:
                 continue
             if gid not in latest or (d.get("start") or "") > (latest[gid].get("start") or ""):
                 latest[gid] = d
+            when = _parse(d.get("start"))
+            if when:
+                dates_by_series.setdefault(gid, set()).add(_ist_date(when))
 
         for gid, head in latest.items():
+            existing_dates = dates_by_series.setdefault(gid, set())
             repeat_type = head.get("repeat")
             interval = head.get("repeat_interval", 1) or 1
             end_dt = _parse(head.get("repeat_end_date"))
@@ -324,21 +441,24 @@ async def generate_due_recurring_tasks():
                     break
                 if _ist_date(nxt) > today:
                     break  # future occurrence — created at 12 AM IST on its own day
-                # An off-day (holiday or weekly off) must never hold a task — drop it or shift
-                # it forward per drops_off_days:
-                #   • Daily-style (1-day step): drop that day — the next day is its own
-                #     occurrence, so shifting would collide with it. e.g. a daily 1–10 Aug task
-                #     with 3 & 7 Aug holidays generates every day except 3 & 7 Aug.
-                #   • Weekly / Monthly / Annually / Custom: shift the occurrence forward to the
-                #     next working day so the whole week/month is not lost. e.g. a monthly-15th
-                #     task whose 15th is a Sunday generates on Mon the 16th instead.
+                # A HOLIDAY always drops the occurrence, whatever the cadence: nothing is
+                # created for that date — no task, no checklist, no reminders — and the series
+                # resumes at its own next calendar date. e.g. a daily 10–15 Aug task with a
+                # 12 Aug holiday produces 10, 11, 13, 14, 15 Aug.
+                #
+                # A WEEKLY OFF keeps the older, cadence-dependent rule (drops_off_days):
+                #   • Daily-style (1-day step): dropped — the next day is its own occurrence,
+                #     so shifting would collide with it.
+                #   • Weekly / Monthly / Annually / Custom: shifted to the next working day so
+                #     a whole week or month of work is not lost.
                 target = nxt
-                if _is_off_day(nxt, holiday_dates):
+                if _is_holiday(nxt, holiday_dates):
+                    skipped_holidays += 1
+                    curr = nxt
+                    continue
+                if _is_weekly_off(nxt):
                     if drops_off_days(head.get("type"), repeat_type, interval):
-                        if _ist_date(nxt).isoformat() in holiday_dates:
-                            skipped_holidays += 1
-                        else:
-                            skipped_weekly_offs += 1
+                        skipped_weekly_offs += 1
                         curr = nxt
                         continue
                     shifted = _shift_to_working_day(nxt, holiday_dates)
@@ -349,13 +469,19 @@ async def generate_due_recurring_tasks():
                         break  # shifted target hasn't arrived yet — created on its own day
                     shifted_occurrences += 1
                     target = shifted
-                # Skip if an occurrence already exists for that date in this series.
-                day_prefix = target.date().isoformat()
-                exists = await col.find_one({"recurring_group_id": gid, "start": {"$regex": f"^{day_prefix}"}})
-                if not exists:
+                # Skip if an occurrence already exists for that IST date in this series.
+                #
+                # Compared as IST dates on BOTH sides. The previous check matched a
+                # `^YYYY-MM-DD` prefix built from `target.date()` — the date in the datetime's
+                # own zone — while every due/boundary decision above uses `_ist_date`. For a
+                # series whose start time falls before 05:30 IST the two disagree by a day, so
+                # the engine could re-create an occurrence it had already made. Deciding and
+                # de-duplicating on the same calendar date removes that whole class of bug.
+                if _ist_date(target) not in existing_dates:
                     # Same builder the up-front series generator uses, so a rolled-forward
                     # occurrence and a bulk-generated one are byte-for-byte the same shape.
                     await col.insert_one(_fresh_occurrence(head, target, nxt, anchor_day))
+                    existing_dates.add(_ist_date(target))
                     created += 1
                 curr = nxt
 

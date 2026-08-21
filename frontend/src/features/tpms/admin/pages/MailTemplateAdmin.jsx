@@ -41,11 +41,7 @@ import { isTpmsAdmin } from '../../access';
 const MotionDiv = motion.div;
 
 const SIDE_OPTIONS = ['staff', 'company'];
-const EVENT_OPTIONS = ['schedule', 'reminder', 'reschedule', 'cancel', 'completed', 'form_summary', 'form_scorecard'];
-
-// Variables available to the two post-submission form emails (event = form_summary / form_scorecard).
-const FORM_SUMMARY_VARS = ['Recipient_Name', 'HOD_Name', 'Company_Name', 'Month', 'Form_Type', 'Submitted_On', 'Total_Ratings', 'Response_Table'];
-const FORM_SCORECARD_VARS = ['Recipient_Name', 'Employee_Name', 'Company_Name', 'Month', 'Form_Type', 'Average_Rating', 'Total_Questions', 'Score_Table'];
+const EVENT_OPTIONS = ['schedule', 'reminder', 'reschedule', 'cancel', 'completed'];
 
 const errMsg = (e, fallback) => e?.response?.data?.detail || fallback;
 
@@ -422,54 +418,10 @@ const TemplateModal = ({ editing, activityOptions, channel = 'mail', variableFie
             </Field>
           </div>
 
-          {!isWa && (
-            <>
-              <Field label="Subject" required>
-                <input type="text" value={form.subject} onChange={(e) => set('subject', e.target.value)}
-                  placeholder="e.g. [Reminder] {{Activity}} due in 2 days | {{Company_Name}}" className={inputCls} autoFocus />
-              </Field>
-
-              <Field label="Body (HTML)">
-                <textarea id="mail-body" value={form.body_html} onChange={(e) => set('body_html', e.target.value)}
-                  placeholder="<p>Hello {{Recipient_Name}}, …</p>  — use {{double-brace}} placeholders" rows={7}
-                  className={`${inputCls} font-mono text-[12px] leading-relaxed resize-y`} />
-              </Field>
-
-              <div>
-                <div className="flex items-center justify-between mb-1.5">
-                  <label className="text-[11px] font-black text-[var(--text-muted)] uppercase tracking-wide">Insert a variable</label>
-                  <span className="text-[11px] text-[var(--text-muted)]">click to add at the cursor</span>
-                </div>
-                <div className="flex flex-wrap gap-1.5">
-                  {paletteVars.map((v) => (
-                    <button key={v} type="button" onClick={() => insertBodyVar(v)}
-                      className={`font-mono text-[11px] px-2 py-1 rounded-md border transition-colors ${(v === 'Form_Link' || v === 'Response_Table' || v === 'Score_Table')
-                        ? 'border-[var(--accent-indigo-border)] bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] font-bold'
-                        : 'border-[var(--border)] bg-[var(--input-bg)] text-[var(--text-main)] hover:border-[var(--accent-indigo)]'}`}>
-                      {`{{${v}}}`}
-                    </button>
-                  ))}
-                </div>
-                {isForm ? (
-                  <p className="text-[11.5px] text-[var(--text-muted)] mt-2 leading-relaxed">
-                    This mail is sent <b>after a form is submitted</b>.
-                    {form.event === 'form_summary'
-                      ? <> Use <b style={{ color: 'var(--accent-indigo)' }}>{'{{Response_Table}}'}</b> for the full ratings grid (HOD/MD summary).</>
-                      : <> Use <b style={{ color: 'var(--accent-indigo)' }}>{'{{Score_Table}}'}</b> and <b style={{ color: 'var(--accent-indigo)' }}>{'{{Average_Rating}}'}</b> for the employee's scorecard.</>}
-                    &nbsp;Leave the body empty to use the built-in default layout.
-                  </p>
-                ) : (
-                  <p className="text-[11.5px] text-[var(--text-muted)] mt-2 leading-relaxed">
-                    <b style={{ color: 'var(--accent-indigo)' }}>{'{{Form_Link}}'}</b> = the recipient's own unique,
-                    single-use link (valid for that month only). For a <b>two-form</b> activity like
-                    Accountability&nbsp;&amp;&nbsp;Ownership, use <b style={{ color: 'var(--accent-indigo)' }}>{'{{Form_Link_2}}'}</b>
-                    for the second form, or <b style={{ color: 'var(--accent-indigo)' }}>{'{{Form_Links}}'}</b> to drop a
-                    ready-made block of <em>all</em> the recipient's links at once. Put these in the <b>schedule</b> email.
-                  </p>
-                )}
-              </div>
-            </>
-          )}
+          <Field label="Subject" required>
+            <input type="text" value={form.subject} onChange={(e) => set('subject', e.target.value)}
+              placeholder="e.g. [Reminder] {Activity} due in 2 days | {Client}" className={inputCls} autoFocus />
+          </Field>
 
           {isWa && (
             <>
@@ -778,19 +730,11 @@ const MailTemplateAdmin = () => {
   const openLibrary = (row = null) => { setModalKind('library'); setEditing(row); setModalOpen(true); };
 
   const handleSubmit = async (payload) => {
-    await (channel === 'whatsapp' ? upsertWhatsappTemplate(payload) : upsertMailTemplate(payload));
+    await upsertMailTemplate(payload);
     setModalOpen(false);
     setEditing(null);
     await load();
   };
-
-  // Available {{placeholders}} for both channels — powers the email insert palette and the
-  // WhatsApp parameter dropdowns. Loaded once for any admin.
-  useEffect(() => {
-    if (admin && variableFields.length === 0) {
-      getWhatsappVariables().then(({ data }) => setVariableFields(data.fields || [])).catch(() => {});
-    }
-  }, [admin, variableFields.length]);
 
   if (!admin) {
     return (
@@ -990,7 +934,7 @@ const MailTemplateAdmin = () => {
             <thead>
               <tr className="bg-[var(--table-header-bg)] border-b border-[var(--border)]">
                 <Th>Activity</Th><Th align="center">Side</Th><Th align="center">Event</Th>
-                <Th>{channel === 'whatsapp' ? 'Meta Template' : 'Subject'}</Th><Th align="center">Active</Th><Th align="right">Actions</Th>
+                <Th>Subject</Th><Th align="center">Active</Th><Th align="right">Actions</Th>
               </tr>
             </thead>
             <tbody>
@@ -1002,7 +946,7 @@ const MailTemplateAdmin = () => {
                     <Td className="font-bold whitespace-nowrap">{t.activity || '*'}</Td>
                     <Td align="center"><Pill label={t.side || '—'} tone={SIDE_TONE[t.side] || 'muted'} /></Td>
                     <Td align="center"><Pill label={t.event || '—'} tone="indigo" /></Td>
-                    <Td className="font-medium max-w-[360px] truncate" title={(channel === 'whatsapp' ? (t.meta_template_name || t.name) : t.subject) || ''}>{(channel === 'whatsapp' ? (t.meta_template_name || t.name) : t.subject) || '—'}</Td>
+                    <Td className="font-medium max-w-[360px] truncate" title={t.subject || ''}>{t.subject || '—'}</Td>
                     <Td align="center">
                       <div className="flex justify-center">
                         <StatusToggle

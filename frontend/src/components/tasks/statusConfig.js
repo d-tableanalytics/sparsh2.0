@@ -37,10 +37,14 @@ export const CARD_KEY_TO_STATUS = {
 };
 
 // Full 11-card order (Dashboard page): adds In Time / Delayed on top of the workflow states.
+// Dashboard summary cards. `pending` and `delayed` are deliberately absent — the dashboard
+// shows the live workflow states plus the on-time count, and those two were removed from this
+// view. Both remain fully supported elsewhere: `pending` is still a card on the task LIST
+// pages (LIST_CARD_ORDER below) and both still appear in the monthly performance table and the
+// donut breakdowns on this same page, which read the summary directly rather than this order.
 export const SUMMARY_CARD_ORDER = [
   ['totalTasks', EXTRA_CARD_CONFIG.totalTasks],
   ['overdue', EXTRA_CARD_CONFIG.overdue],
-  ['pending', STATUS_CONFIG.pending],
   ['accepted', STATUS_CONFIG.accepted],
   ['dependentOnOthers', STATUS_CONFIG.dependent_on_others],
   ['blocked', STATUS_CONFIG.blocked],
@@ -48,7 +52,6 @@ export const SUMMARY_CARD_ORDER = [
   ['verification', STATUS_CONFIG.verification],
   ['completed', STATUS_CONFIG.completed],
   ['inTime', EXTRA_CARD_CONFIG.inTime],
-  ['delayed', EXTRA_CARD_CONFIG.delayed],
 ];
 
 // 9-card order used on the task list pages (My/Delegated/Subscribed/All/Deleted Tasks) —

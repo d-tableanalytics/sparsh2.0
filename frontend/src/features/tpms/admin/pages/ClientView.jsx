@@ -1,11 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   RefreshCw, Building2, Target, Gauge, CheckCircle2, ClipboardList, Star,
-  ListChecks, AlertTriangle, CalendarClock,
+  ListChecks, AlertTriangle,
 } from 'lucide-react';
 import {
   DashboardHero, HeroButton, HeaderSelect, Section, Th, Td, Progress, TableShell, KpiTile,
-  usePaged, Pager, Fraction,
+  usePaged, Pager,
 } from '../../common/dashboardKit';
 import { getClientDashboard, currentPeriod, periodLabel } from '../../../../services/tpmsApi';
 import api from '../../../../services/api';
@@ -36,14 +36,6 @@ const STATUS_STYLE = {
   'Met':     { c: 'var(--accent-green)',  bg: 'var(--accent-green-bg)',  bd: 'var(--accent-green-border)' },
   'Partial': { c: 'var(--accent-orange)', bg: 'var(--accent-orange-bg)', bd: 'var(--accent-orange-border)' },
   'Not Met': { c: 'var(--accent-red)',    bg: 'var(--accent-red-bg)',    bd: 'var(--accent-red-border)' },
-};
-
-/* Company-level health band (spec §7): STRONG ≥95 · GOOD ≥85 · WATCH ≥70 · AT-RISK below. */
-const BAND_TONE = {
-  'STRONG':  { c: 'var(--accent-green)',  bg: 'var(--accent-green-bg)',  bd: 'var(--accent-green-border)' },
-  'GOOD':    { c: 'var(--accent-indigo)', bg: 'var(--accent-indigo-bg)', bd: 'var(--accent-indigo-border)' },
-  'WATCH':   { c: 'var(--accent-orange)', bg: 'var(--accent-orange-bg)', bd: 'var(--accent-orange-border)' },
-  'AT-RISK': { c: 'var(--accent-red)',    bg: 'var(--accent-red-bg)',    bd: 'var(--accent-red-border)' },
 };
 
 const Pill = ({ label }) => {
@@ -118,7 +110,6 @@ const ClientView = () => {
   const pPending = usePaged(pending || [], 10);
 
   const kpis = [
-    { value: opCards.planned ?? 0,          label: 'Total Planned',   sub: 'Scheduled this period', tone: 'blue', icon: CalendarClock },
     { value: cards.total ?? 0,              label: 'Activities',      sub: 'Tracked',          tone: 'blue',   icon: ListChecks },
     { value: `${cards.avg_score ?? 0}%`,    label: 'Avg Achievement', sub: 'Success measure',  tone: (cards.avg_score ?? 0) >= 80 ? 'green' : 'yellow', icon: Target },
     { value: cards.met ?? 0,               label: 'On Track',        sub: 'Met (≥ 100%)',     tone: 'green',  icon: CheckCircle2 },
@@ -149,53 +140,10 @@ const ClientView = () => {
 
       {!loading && !error && data && (
         <>
-          {/* Health banner — spec §7 status band (STRONG / GOOD / WATCH / AT-RISK) */}
-          {data.status && (() => {
-            const b = BAND_TONE[data.status] || BAND_TONE.WATCH;
-            return (
-              <div className="rounded-2xl border px-5 py-4 flex items-center justify-between" style={{ background: b.bg, borderColor: b.bd }}>
-                <div className="flex items-center gap-3">
-                  <span className="w-2.5 h-2.5 rounded-full" style={{ background: b.c }} />
-                  <span className="text-[13px] font-black uppercase tracking-widest" style={{ color: b.c }}>{data.status}</span>
-                  <span className="text-[12px] font-bold text-[var(--text-muted)]">{clientName} · {periodLabel(period) || period}</span>
-                </div>
-                <div className="text-right">
-                  <div className="text-[22px] font-black leading-none" style={{ color: b.c }}>{data.completion ?? 0}%</div>
-                  <div className="text-[10px] font-bold uppercase tracking-widest text-[var(--text-muted)]">Completion</div>
-                </div>
-              </div>
-            );
-          })()}
-
           {/* Summary tiles */}
-          <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-7 gap-3">
+          <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-6 gap-3">
             {kpis.map((k) => <KpiTile key={k.label} {...k} />)}
           </div>
-
-          {/* Single-row activity status grid for the selected client */}
-          {data.activities?.length > 0 && (
-            <Section title="Activity Status" subtitle="Completion per activity for the selected client & period" icon={ListChecks}>
-              <TableShell minWidth={720}>
-                <thead>
-                  <tr className="bg-[var(--table-header-bg)] border-b border-[var(--border)]">
-                    {data.activities.map((a) => <Th key={a.full} align="center">{a.short}</Th>)}
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr className="border-b border-[var(--border)] last:border-0">
-                    {data.activities.map((a) => {
-                      const cell = (data.clients_grid?.[0]?.cells || {})[a.full];
-                      return (
-                        <Td key={a.full} align="center">
-                          <Fraction v={cell && cell.total ? `${cell.done}/${cell.total}` : ''} status={cell?.status} />
-                        </Td>
-                      );
-                    })}
-                  </tr>
-                </tbody>
-              </TableShell>
-            </Section>
-          )}
 
           {/* Activity Scorecard — Success Measures */}
           <Section title="Activity Scorecard — Success Measures" subtitle="Implementation vs. score performance per activity" icon={Target}

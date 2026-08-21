@@ -2,14 +2,14 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   CalendarDays, Plus, RefreshCw, Inbox, X, Clock, Building2, Tag, Users2,
   UserCog, CheckCircle2, Paperclip, Upload, FileText, RotateCcw, Trash2, Pencil, Pin,
-  Download, FileSpreadsheet, AlertTriangle, Ban,
+  Download, FileSpreadsheet, AlertTriangle,
 } from 'lucide-react';
 import { DashboardHero, HeroButton, KpiTile, FilterSelect } from '../common/dashboardKit';
 import ScheduleCalendarModal from '../../../components/calendar/ScheduleCalendarModal';
 import { useAuth } from '../../../context/AuthContext';
 import { useNotification } from '../../../context/NotificationContext';
 import {
-  getSchedules, getActivities, getDepartments, deleteSchedule, updateSchedule, markLearnerDone, confirmCompletion,
+  getSchedules, getActivities, deleteSchedule, markLearnerDone, confirmCompletion,
   requestReschedule, getRescheduleRequests, decideRescheduleRequest,
   getScheduleUploads, uploadScheduleFile,
   exportTpms, importTpms, saveExportedWorkbook,
@@ -195,7 +195,6 @@ const TpmsCalendar = () => {
   const [month, setMonth] = useState(today.getMonth() + 1);   // 1-12
   const [events, setEvents] = useState([]);
   const [activities, setActivities] = useState([]);
-  const [departments, setDepartments] = useState([]);
   const [loading, setLoading] = useState(true);
 
   const [fActivity, setFActivity] = useState('');
@@ -248,7 +247,6 @@ const TpmsCalendar = () => {
   useEffect(() => { loadRequests(); }, [loadRequests]);
   useEffect(() => {
     getActivities().then(({ data }) => setActivities(data.activities || [])).catch(() => {});
-    getDepartments().then(({ data }) => setDepartments(data.items || [])).catch(() => {});
   }, []);
 
   // Download the whole of TPMS as one workbook. The Schedules sheet is the fillable one:
@@ -357,7 +355,6 @@ const TpmsCalendar = () => {
 
   const submitReschedule = async () => {
     if (!rr?.new_date) return showError('Choose a new date');
-    if (!rr?.reason?.trim()) return showError('A reason is required to request a reschedule');
     await act(() => requestReschedule(rr.id, {
       new_date: rr.new_date, new_time: rr.new_time, reason: rr.reason,
     }), 'Request sent — staff will review it');
@@ -491,12 +488,6 @@ const TpmsCalendar = () => {
       {/* ── Day drawer ── */}
       {openDay && (
         <Overlay onClose={() => setOpenDay(null)} title={`Activities on ${openDay}`}>
-          {/* Schedule another activity on this same day. */}
-          <button type="button"
-            onClick={() => { setScheduleDate(openDay); setShowModal(true); setOpenDay(null); }}
-            className="w-full mb-3 flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl border border-dashed border-[var(--accent-indigo-border)] bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] text-[12.5px] font-black hover:bg-[var(--accent-indigo)] hover:text-white transition-all">
-            <Plus size={15} /> Schedule an activity on this day
-          </button>
           {(byDate[openDay] || []).map((e) => {
             const canAct = !['Completed', 'Cancelled', 'Lapsed'].includes(e.status);
             return (
@@ -547,13 +538,6 @@ const TpmsCalendar = () => {
                   )}
                   {isStaffSide && e.learner_done && canAct && (
                     <Btn onClick={() => act(() => confirmCompletion(e.id), 'Completed')}>✔ Confirm Complete</Btn>
-                  )}
-                  {isStaffSide && canAct && (
-                    <Btn danger ghost onClick={() => {
-                      if (window.confirm('Cancel this activity? Its pending reminders stop and both sides are notified.')) {
-                        act(() => updateSchedule(e.id, { status: 'Cancelled' }), 'Activity cancelled');
-                      }
-                    }}><Ban size={12} /> Cancel</Btn>
                   )}
                   {isAdmin && (
                     <Btn danger ghost onClick={() => {
@@ -687,8 +671,6 @@ const TpmsCalendar = () => {
         mode="tpms"
         event={editEvent}
         initialDate={scheduleDate}
-        activities={activities}
-        departments={departments}
         isOpen={showModal || !!editEvent}
         onClose={() => { setShowModal(false); setEditEvent(null); setScheduleDate(''); }}
         onSaved={() => { load(); setShowModal(false); setEditEvent(null); setScheduleDate(''); }}

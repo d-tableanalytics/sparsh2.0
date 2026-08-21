@@ -15,12 +15,6 @@ export const getMyForms = () => api.get('/forms/my-forms');
 // Companies for the selector (reuses the existing companies endpoint).
 export const getCompanies = () => api.get('/companies');
 
-// ── Form-link viewer (admin) ──
-// Every unique form link (tpms_form_assignments), filterable by company + period.
-export const getFormAssignments = (params) => api.get('/forms/assignments', { params });
-// Re-email one recipient their existing link.
-export const resendFormAssignment = (id) => api.post(`/forms/assignments/${id}/resend`);
-
 // Candidate team members to rate for a company (optionally excluding the HOD).
 export const getFormMembers = (companyId, hodId) =>
   api.get('/forms/members', { params: { company_id: companyId, hod_id: hodId || undefined } });

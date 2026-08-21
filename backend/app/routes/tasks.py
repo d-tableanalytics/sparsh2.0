@@ -1110,14 +1110,36 @@ async def update_checklist_item(task_id: str, item_id: str, body: dict, current_
     if not item:
         raise HTTPException(status_code=404, detail="Checklist item not found")
 
+    # Write ONLY this item's fields, matched positionally — never the whole array.
+    #
+    # Ticking several check points sends one request per item, and they run concurrently. The
+    # previous read-modify-write ($set of the entire `checklist`) made those requests clobber
+    # each other: each one read the array before the others had written, so the last write to
+    # land silently reverted every tick but its own, and only one check point appeared saved.
+    # `checklist.$` touches just the matched element, so concurrent updates to different items
+    # no longer overwrite one another.
+    update = {}
     if "completed" in body:
-        item["completed"] = bool(body["completed"])
-        item["completed_at"] = datetime.now(timezone.utc).isoformat() if item["completed"] else None
+        completed = bool(body["completed"])
+        update["checklist.$.completed"] = completed
+        update["checklist.$.completed_at"] = (
+            datetime.now(timezone.utc).isoformat() if completed else None
+        )
     if "title" in body and body["title"].strip():
-        item["title"] = body["title"].strip()
+        update["checklist.$.title"] = body["title"].strip()
 
-    await get_collection(col_name).update_one({"_id": ObjectId(task_id)}, {"$set": {"checklist": checklist}})
-    return item
+    if update:
+        result = await get_collection(col_name).update_one(
+            {"_id": ObjectId(task_id), "checklist.id": item_id},
+            {"$set": update},
+        )
+        if result.matched_count == 0:
+            # Removed by someone else between the read above and this write.
+            raise HTTPException(status_code=404, detail="Checklist item not found")
+
+    # Mirror the applied changes onto the item we return, so the response describes the row as
+    # it now stands without a second round trip to re-read it.
+    return {**item, **{k.split(".")[-1]: v for k, v in update.items()}}
 
 
 @router.delete("/{task_id}/checklist/{item_id}")

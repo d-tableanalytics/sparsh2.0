@@ -61,7 +61,6 @@ import ClientActivityCalendar from './features/tpms/admin/pages/ClientActivityCa
 import MailTemplateAdmin from './features/tpms/admin/pages/MailTemplateAdmin';
 import ReminderRuleAdmin from './features/tpms/admin/pages/ReminderRuleAdmin';
 import FormQuestionAdmin from './features/tpms/admin/pages/FormQuestionAdmin';
-import FormLinks from './features/tpms/admin/pages/FormLinks';
 import ReviewReport from './features/tpms/common/ReviewReport';
 import { CompanyProvider } from './features/tpms/smops/CompanyContext';
 import SmopsDashboard from './features/tpms/smops/pages/SmopsDashboard';
@@ -189,7 +188,6 @@ const AppRoutes = () => {
         <Route path="mail-templates" element={<MailTemplateAdmin />} />
         <Route path="reminder-rules" element={<ReminderRuleAdmin />} />
         <Route path="form-questions" element={<FormQuestionAdmin />} />
-        <Route path="form-links"     element={<FormLinks />} />
         <Route path="reviews"        element={<ReviewReport />} />
       </Route>
 

@@ -38,9 +38,6 @@ EVENT_REMINDER = "reminder"
 EVENT_RESCHEDULE = "reschedule"
 EVENT_CANCEL = "cancel"
 EVENT_COMPLETED = "completed"
-# Fired after a review form is submitted — the HOD/MD summary and the per-employee scorecard.
-EVENT_FORM_SUMMARY = "form_summary"
-EVENT_FORM_SCORECARD = "form_scorecard"
 
 _PLACEHOLDER = re.compile(r"\{\{\s*(\w+)\s*\}\}")
 
@@ -580,15 +577,14 @@ async def _dispatch(event: dict, event_kind: str, heading: str,
         if not recipients:
             continue
         tpl = await get_template(activity, event_kind, side)
-        # Spec parity (defaultBody_): when no Active template with a body is configured for this
-        # (activity, side), fall back to a branded default body + generic subject so the
-        # notification still goes out — instead of silently sending nothing.
-        if tpl and tpl.get("body_html"):
-            subject_tpl = tpl.get("subject") or f"[{heading}] {{{{Title}}}} – {{{{Activity}}}}"
-            body_tpl = tpl.get("body_html")
-        else:
-            subject_tpl = f"[{heading}] {{{{Title}}}} – {{{{Activity}}}}"
-            body_tpl = _default_body(mapping, heading)
+        # Strictly respect the template's Active/Inactive status. get_template returns None when
+        # the template is Inactive OR not configured — in BOTH cases send nothing for this side:
+        # no default subject, no _default_body fallback. Only an Active template that has a body
+        # is used for delivery.
+        if not tpl or not tpl.get("body_html"):
+            continue
+        subject_tpl = tpl.get("subject") or f"[{heading}] {{{{Title}}}} – {{{{Activity}}}}"
+        body_tpl = tpl.get("body_html")
 
         for person in recipients:
             person_map = {**mapping, "Recipient_Name": person["name"]}
@@ -597,11 +593,6 @@ async def _dispatch(event: dict, event_kind: str, heading: str,
             my_links = form_links.get(str(person.get("id") or "")) or []
             if my_links and SEND_FORM_LINKS:
                 person_map["Form_Link"] = my_links[0]["link"]
-                # Second form's link — e.g. "Accountability & Ownership Rating" carries TWO forms
-                # (accountability + ownership), so each HOD needs both. Empty when there is only one.
-                person_map["Form_Link_2"] = my_links[1]["link"] if len(my_links) > 1 else ""
-                # A ready-made HTML block of ALL of this recipient's links; drop it anywhere.
-                person_map["Form_Links"] = _link_block(my_links)
             subject = fill(subject_tpl, person_map)
             html = fill(body_tpl, person_map)
             if my_links and SEND_FORM_LINKS:
@@ -795,53 +786,11 @@ async def notify_reschedule_decision(event: dict, approved: bool, note: str = ""
     return {"sent": sent}
 
 
-def _form_response_table(cells: List[dict], qlabel) -> str:
-    """HOD/MD summary — ratings grouped by criterion, each member's score listed under it."""
-    if not cells:
-        return ""
-    by_q: Dict[str, List[dict]] = {}
-    order: List[str] = []
-    for c in cells:
-        code = str(c.get("criterion_code"))
-        if code not in by_q:
-            by_q[code] = []
-            order.append(code)
-        by_q[code].append(c)
-    blocks = []
-    for i, code in enumerate(order, 1):
-        rows = "".join(
-            f'<tr><td style="border:1px solid #e5e7eb;padding:6px 10px">{c.get("member_name","")}</td>'
-            f'<td align="center" style="border:1px solid #e5e7eb;padding:6px 10px"><b>{c.get("rating")}</b>/5</td></tr>'
-            for c in by_q[code])
-        blocks.append(
-            f'<div style="margin:16px 0 6px;font-weight:600">{i}. {qlabel(code)}</div>'
-            '<table style="border-collapse:collapse;width:100%;font-size:13px">'
-            '<tr><th align="left" style="border:1px solid #e5e7eb;padding:6px 10px;background:#f5f5f5">Employee</th>'
-            '<th style="border:1px solid #e5e7eb;padding:6px 10px;background:#f5f5f5;width:90px">Rating</th></tr>'
-            f'{rows}</table>')
-    return "".join(blocks)
-
-
-def _form_score_table(cells: List[dict], qlabel) -> str:
-    """Per-employee scorecard — their criterion → score."""
-    rows = "".join(
-        f'<tr><td style="border:1px solid #e5e7eb;padding:8px 10px">{qlabel(c.get("criterion_code"))}</td>'
-        f'<td align="center" style="border:1px solid #e5e7eb;padding:8px 10px"><b>{c.get("rating")}</b>/5</td></tr>'
-        for c in cells)
-    return ('<table style="border-collapse:collapse;width:100%;font-size:13px;margin-top:8px">'
-            '<tr><th align="left" style="border:1px solid #e5e7eb;padding:8px 10px;background:#f5f5f5">Criteria</th>'
-            '<th style="border:1px solid #e5e7eb;padding:8px 10px;background:#f5f5f5;width:90px">Score</th></tr>'
-            f'{rows}</table>')
-
-
 async def notify_form_submission(*, form_type: str, title: str, company_id: str, period: str,
                                  respondent_id: str, respondent_name: str,
                                  ratings: Optional[List[dict]] = None) -> dict:
     """H3 — after a review form is submitted: a summary mail to the HOD/MD respondent, plus a
-    per-employee scorecard mail to each rated team member (rating forms only).
-
-    Both are template-driven — events `form_summary` / `form_scorecard`, side `company` — with
-    a built-in default body when no active template is configured. Gated by the TPMS switch."""
+    per-employee scorecard mail to each rated team member (rating forms only). Gated."""
     if not TPMS_NOTIFICATIONS_ENABLED:
         return {"summary_sent": 0, "employee_sent": 0}
     from bson import ObjectId
@@ -857,82 +806,38 @@ async def notify_form_submission(*, form_type: str, title: str, company_id: str,
         except Exception:
             return None
 
-    # Company name + a criterion_code → question-text map, so the tables read nicely.
-    company_name = str(company_id)
-    try:
-        co = await get_collection("companies").find_one({"_id": ObjectId(str(company_id))})
-        if co:
-            company_name = co.get("name") or str(company_id)
-    except Exception:
-        pass
-    qtitle: Dict[str, str] = {}
-    try:
-        from app.models.forms import QUESTION_COLLECTION
-        for q in await get_collection(QUESTION_COLLECTION).find({"form_type": form_type}).to_list(200):
-            qtitle[str(q.get("item_id"))] = q.get("title") or q.get("prompt") or str(q.get("item_id"))
-    except Exception:
-        pass
-
-    def qlabel(code):
-        return qtitle.get(str(code)) or str(code)
-
-    submitted_on = datetime.utcnow().strftime("%d %b %Y")
-    base = {
-        "Form_Type": title, "Company_Name": company_name, "Company_ID": str(company_id),
-        "Month": period, "HOD_Name": respondent_name, "Submitted_On": submitted_on,
-        "Total_Ratings": str(len(ratings or [])),
-    }
     summary_sent = employee_sent = 0
 
-    # 1) Respondent (HOD/MD) summary — template first, else default body.
+    # 1) Respondent (HOD/MD) summary.
     respondent = await _find(respondent_id)
     if respondent and respondent.get("email"):
-        ctx = {**base, "Recipient_Name": respondent_name or respondent.get("full_name", ""),
-               "Response_Table": _form_response_table(ratings or [], qlabel)}
-        tpl = await get_template(title, EVENT_FORM_SUMMARY, SIDE_COMPANY)
-        if tpl and tpl.get("body_html"):
-            subject = fill(tpl.get("subject") or f"[{title}] Submission received – {{{{Month}}}}", ctx)
-            html = _strip_form_links(fill(tpl["body_html"], ctx))
-        else:
-            subject = f"[{title}] Submission received – {period}"
-            html = _wrap(f"{title} submitted",
-                         f"<p>Your <b>{title}</b> submission for <b>{period}</b> has been received. Thank you.</p>"
-                         + (ctx["Response_Table"] or ""))
+        html = _wrap(f"{title} submitted",
+                     f"<p>Your <b>{title}</b> submission for <b>{period}</b> has been received. Thank you.</p>")
         try:
-            await send_email_notification(respondent["email"], subject, html,
-                                          user_id=str(respondent["_id"]), slug=f"tpms_form_{form_type}_summary")
+            await send_email_notification(respondent["email"], f"[{title}] Submission received – {period}",
+                                          html, user_id=str(respondent["_id"]), slug=f"tpms_form_{form_type}_summary")
             summary_sent += 1
         except Exception as e:
             logger.error(f"TPMS form summary mail failed: {e}")
 
-    # 2) Per-employee scorecards (rating forms only) — template first, else default body.
+    # 2) Per-employee scorecards (rating forms only).
     if ratings:
         by_member: Dict[tuple, List[dict]] = {}
         for c in ratings:
             by_member.setdefault((str(c.get("member_id")), c.get("member_name") or ""), []).append(c)
-        tpl_emp = await get_template(title, EVENT_FORM_SCORECARD, SIDE_COMPANY)
         for (mid, mname), cells in by_member.items():
             member = await _find(mid)
             if not member or not member.get("email"):
                 continue
-            avg = sum(int(c.get("rating") or 0) for c in cells) / max(1, len(cells))
-            ctx = {**base,
-                   "Recipient_Name": mname or member.get("full_name", ""),
-                   "Employee_Name": mname or member.get("full_name", ""),
-                   "Average_Rating": f"{round(avg, 1):.1f}",
-                   "Total_Questions": str(len(cells)),
-                   "Score_Table": _form_score_table(cells, qlabel)}
-            if tpl_emp and tpl_emp.get("body_html"):
-                subject = fill(tpl_emp.get("subject") or f"[{title}] Your scorecard – {{{{Month}}}}", ctx)
-                html = _strip_form_links(fill(tpl_emp["body_html"], ctx))
-            else:
-                subject = f"[{title}] Your scorecard – {period}"
-                html = _wrap(f"Your {title} scorecard – {period}",
-                             f'<p>Hello {ctx["Employee_Name"]}, your ratings for <b>{period}</b>:</p>'
-                             + ctx["Score_Table"])
+            rows = "".join(
+                f'<tr><td style="padding:3px 12px 3px 0;color:#64748b">{c.get("criterion_code")}</td>'
+                f'<td style="padding:3px 0"><b>{c.get("rating")}</b>/5</td></tr>' for c in cells)
+            html = _wrap(f"Your {title} scorecard – {period}",
+                         f'<p>Hello {mname or member.get("full_name","")}, your ratings for <b>{period}</b>:</p>'
+                         f'<table style="border-collapse:collapse;font-size:14px">{rows}</table>')
             try:
-                await send_email_notification(member["email"], subject, html,
-                                              user_id=str(member["_id"]), slug=f"tpms_form_{form_type}_scorecard")
+                await send_email_notification(member["email"], f"[{title}] Your scorecard – {period}",
+                                              html, user_id=str(member["_id"]), slug=f"tpms_form_{form_type}_scorecard")
                 employee_sent += 1
             except Exception as e:
                 logger.error(f"TPMS form scorecard mail failed: {e}")

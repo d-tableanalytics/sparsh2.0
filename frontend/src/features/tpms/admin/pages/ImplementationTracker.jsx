@@ -468,63 +468,47 @@ const ImplementationTracker = () => {
           <EmptyState icon={Inbox} title="No files uploaded for this client this month."
             hint="Proof files are attached from the activity itself, on activities that require an upload." />
         ) : (
-          <div className="space-y-6">
-            {Object.entries((uploads || []).reduce((acc, u) => {
-              const k = u.activity || 'Unspecified';
-              (acc[k] = acc[k] || []).push(u);
-              return acc;
-            }, {})).map(([activity, files]) => (
-              <div key={activity}>
-                <div className="flex items-center gap-2 mb-2 px-1">
-                  <Grid3x3 size={13} className="text-[var(--text-muted)]" />
-                  <span className="text-[11px] font-black uppercase tracking-widest text-[var(--text-main)]">{activity}</span>
-                  <span className="text-[10px] font-bold text-[var(--text-muted)]">· {files.length} file{files.length === 1 ? '' : 's'}</span>
-                </div>
-                <TableShell minWidth={820}>
-                  <thead>
-                    <tr className="bg-[var(--table-header-bg)] border-b border-[var(--border)]">
-                      <Th>File</Th><Th align="center">Scope</Th><Th>Uploaded By</Th>
-                      <Th align="center">Date</Th><Th align="right"> </Th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {files.map((u) => (
-                      <tr key={u._id} className="border-b border-[var(--border)] last:border-0 hover:bg-[var(--table-hover)] transition-colors">
-                        <Td>
-                          <div className="flex items-center gap-2.5 min-w-0">
-                            <span className="w-8 h-8 rounded-lg bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] flex items-center justify-center shrink-0">
-                              <Paperclip size={14} />
-                            </span>
-                            <div className="min-w-0">
-                              <div className="font-bold truncate max-w-[280px]">{u.file_name || 'Untitled'}</div>
-                              {u.size != null && <div className="text-[11px] text-[var(--text-muted)]">{fmtBytes(u.size)}</div>}
-                            </div>
-                          </div>
-                        </Td>
-                        <Td align="center">
-                          <span className={`inline-block text-[9px] font-black uppercase tracking-wider px-2 py-0.5 rounded-md ${u.scope === 'hod' ? 'bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)]' : 'bg-[var(--accent-green-bg)] text-[var(--accent-green)]'}`}>
-                            {u.scope === 'hod' ? 'HOD-wise' : 'Company-wise'}
-                          </span>
-                        </Td>
-                        <Td>{u.uploaded_by_name || u.member_name || '—'}</Td>
-                        <Td align="center" className="tabular-nums text-[var(--text-muted)]">{fmtDate(u.uploaded_at)}</Td>
-                        <Td align="right">
-                          {u.url ? (
-                            <a href={u.url} target="_blank" rel="noreferrer"
-                              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--accent-indigo-border)] bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] text-[11.5px] font-bold hover:bg-[var(--accent-indigo)] hover:text-white transition-all">
-                              <Download size={13} /> Open
-                            </a>
-                          ) : (
-                            <span className="text-[11.5px] font-semibold text-[var(--text-muted)]">Link unavailable</span>
-                          )}
-                        </Td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </TableShell>
-              </div>
-            ))}
-          </div>
+          <>
+          <TableShell minWidth={820}>
+            <thead>
+              <tr className="bg-[var(--table-header-bg)] border-b border-[var(--border)]">
+                <Th>File</Th><Th>Activity</Th><Th>Uploaded By</Th>
+                <Th align="center">Date</Th><Th align="right"> </Th>
+              </tr>
+            </thead>
+            <tbody>
+              {pUploads.pageRows.map((u) => (
+                <tr key={u._id} className="border-b border-[var(--border)] last:border-0 hover:bg-[var(--table-hover)] transition-colors">
+                  <Td>
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <span className="w-8 h-8 rounded-lg bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] flex items-center justify-center shrink-0">
+                        <Paperclip size={14} />
+                      </span>
+                      <div className="min-w-0">
+                        <div className="font-bold truncate max-w-[280px]">{u.file_name || 'Untitled'}</div>
+                        {u.size != null && <div className="text-[11px] text-[var(--text-muted)]">{fmtBytes(u.size)}</div>}
+                      </div>
+                    </div>
+                  </Td>
+                  <Td className="text-[var(--text-muted)]">{u.activity || '—'}</Td>
+                  <Td>{u.uploaded_by_name || u.member_name || '—'}</Td>
+                  <Td align="center" className="tabular-nums text-[var(--text-muted)]">{fmtDate(u.uploaded_at)}</Td>
+                  <Td align="right">
+                    {u.url ? (
+                      <a href={u.url} target="_blank" rel="noreferrer"
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--accent-indigo-border)] bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] text-[11.5px] font-bold hover:bg-[var(--accent-indigo)] hover:text-white transition-all">
+                        <Download size={13} /> Open
+                      </a>
+                    ) : (
+                      <span className="text-[11.5px] font-semibold text-[var(--text-muted)]">Link unavailable</span>
+                    )}
+                  </Td>
+                </tr>
+              ))}
+            </tbody>
+          </TableShell>
+          <Pager {...pUploads} label="uploads" />
+          </>
         )}
       </Section>
 
@@ -543,7 +527,6 @@ const ImplementationTracker = () => {
                 <Th className={stickyHead}>Client</Th>
                 <Th>OM</Th>
                 {matrixActivities.map((a) => <Th key={a.full} align="center">{a.short}</Th>)}
-                <Th align="center">AVG</Th>
               </tr>
             </thead>
             <tbody>
@@ -560,18 +543,6 @@ const ImplementationTracker = () => {
                       </Td>
                     );
                   })}
-                  {(() => {
-                    // Per-client average across the activities that have any scheduled work.
-                    const vals = matrixActivities
-                      .map((a) => { const cell = c.cells?.[a.full]; return cell && cell.total ? (cell.done / cell.total) * 100 : null; })
-                      .filter((x) => x != null);
-                    const avg = vals.length ? Math.round(vals.reduce((s, x) => s + x, 0) / vals.length) : null;
-                    return (
-                      <Td align="center" className="tabular-nums font-extrabold" style={{ color: avg == null ? 'var(--text-muted)' : scoreColor(avg) }}>
-                        {avg == null ? '—' : `${avg}%`}
-                      </Td>
-                    );
-                  })()}
                 </tr>
               ))}
             </tbody>

@@ -69,32 +69,14 @@ export const Progress = ({ value }) => {
   );
 };
 
-// Lifecycle-status → cell colour, matching the Admin grid (AdminView CELL_TONE) so every
-// client×activity grid reads the same. A not-yet-due (pending) cell should look neutral, not
-// like a failure — which is why colouring by raw done/total ratio is wrong for these grids.
-const CELL_STATUS_TONE = {
-  done:      { c: 'var(--accent-green)',  bg: 'var(--accent-green-bg)' },
-  pending:   { c: 'var(--accent-indigo)', bg: 'var(--accent-indigo-bg)' },
-  overdue:   { c: 'var(--accent-red)',    bg: 'var(--accent-red-bg)' },
-  cancelled: { c: 'var(--text-muted)',    bg: 'var(--input-bg)' },
-};
-
-/** Fraction cell like 1/1 or 0/1 → a compact pill. Pass `status` to colour by lifecycle
- *  status (preferred, consistent with Admin/Client grids); without it, falls back to the
- *  done/total ratio colouring for any legacy caller. */
-export const Fraction = ({ v, status }) => {
+/** Fraction cell like 1/1 or 0/1 → a compact met/partial pill. */
+export const Fraction = ({ v }) => {
   if (!v) return <span className="text-[var(--text-muted)]">—</span>;
-  const tone = status && CELL_STATUS_TONE[status];
-  let c, bg;
-  if (tone) {
-    ({ c, bg } = tone);
-  } else {
-    const [a, b] = v.split('/').map(Number);
-    const ok = a >= b;
-    const zero = a === 0;
-    c = zero ? 'var(--accent-red)' : ok ? 'var(--accent-green)' : 'var(--accent-orange)';
-    bg = zero ? 'var(--accent-red-bg)' : ok ? 'var(--accent-green-bg)' : 'var(--accent-orange-bg)';
-  }
+  const [a, b] = v.split('/').map(Number);
+  const ok = a >= b;
+  const zero = a === 0;
+  const c = zero ? 'var(--accent-red)' : ok ? 'var(--accent-green)' : 'var(--accent-orange)';
+  const bg = zero ? 'var(--accent-red-bg)' : ok ? 'var(--accent-green-bg)' : 'var(--accent-orange-bg)';
   return (
     <span className="inline-flex items-center justify-center min-w-[34px] text-[11px] font-bold px-1.5 py-0.5 rounded-md tabular-nums" style={{ color: c, background: bg }}>{v}</span>
   );
