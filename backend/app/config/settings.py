@@ -30,6 +30,9 @@ class Settings(BaseSettings):
     WHATSAPP_BUSINESS_ACCOUNT_ID: Optional[str] = None
     WHATSAPP_ACCESS_TOKEN: Optional[str] = None
     WHATSAPP_API_VERSION: str = "v21.0"
+    # Meta App ID — only needed to author templates with an IMAGE/VIDEO/DOCUMENT header, whose
+    # sample media must be pushed through the Resumable Upload API to obtain a handle.
+    WHATSAPP_APP_ID: Optional[str] = None
     # Local numbers stored without a country code get this prefixed (India = 91).
     WHATSAPP_DEFAULT_COUNTRY_CODE: str = "91"
 

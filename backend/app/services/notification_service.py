@@ -533,10 +533,15 @@ async def send_whatsapp_notification(phone: str, message: str, user_id: str = No
         return False
 
 async def send_whatsapp_template(phone: str, template_name: str, language: str, params: list,
-                                 user_id: str = None, slug: str = "manual"):
+                                 user_id: str = None, slug: str = "manual",
+                                 components: list = None):
     """Business-initiated WhatsApp via a Meta-approved template.
     `params` are positional body values mapped to {{1}}, {{2}}, ... in the
-    approved template."""
+    approved template.
+
+    `components` overrides that body-only structure for templates whose header or buttons also
+    take variables — pass the full Cloud API components array and `params` is used only for the
+    delivery log. Omit it and behaviour is exactly as before."""
     if not _wa_configured():
         logger.warning("WhatsApp Cloud API credentials not configured")
         return False
@@ -547,12 +552,13 @@ async def send_whatsapp_template(phone: str, template_name: str, language: str, 
         return False
 
     params = params or []
-    components = []
-    if params:
-        components = [{
-            "type": "body",
-            "parameters": [{"type": "text", "text": str(p)} for p in params],
-        }]
+    if components is None:
+        components = []
+        if params:
+            components = [{
+                "type": "body",
+                "parameters": [{"type": "text", "text": str(p)} for p in params],
+            }]
     log_text = f"[template:{template_name}] " + " | ".join(str(p) for p in params)
 
     try:

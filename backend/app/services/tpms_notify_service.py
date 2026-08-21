@@ -394,51 +394,127 @@ def wa_guess_field(variable: str, mapping: Dict[str, str]) -> str:
 
 
 async def get_whatsapp_template(activity: str, event_kind: str, side: str) -> Optional[dict]:
-    """Most-specific WhatsApp template wins: exact activity, then '*'. Returns None when no
-    row exists — the business's per-event on/off switch ("no template row = skip")."""
+    """Most-specific WhatsApp template wins: the exact activity, the same name ignoring case
+    and surrounding space, then the '*' catch-all. Returns None when no row exists — the
+    business's per-event on/off switch ("no template row = skip").
+
+    The tolerant middle step matters because the wiring row stores the activity as free text
+    while the calendar event carries the canonical name: a row saved as "accountability &
+    ownership rating" (or with a trailing space) would otherwise never match
+    "Accountability & Ownership Rating", and the send would skip silently."""
     from app.models.tpms import COLL_WHATSAPP_TEMPLATES
     coll = get_collection(COLL_WHATSAPP_TEMPLATES)
-    for name in (activity, "*"):
-        if not name:
-            continue
-        doc = await coll.find_one({"activity": name, "side": side,
-                                   "event": event_kind, "active": {"$ne": False}})
+    base = {"side": side, "event": event_kind, "active": {"$ne": False}}
+    name = str(activity or "").strip()
+    if name:
+        doc = await coll.find_one({**base, "activity": name})
         if doc:
             return doc
-    return None
+        doc = await coll.find_one(
+            {**base, "activity": {"$regex": rf"^\s*{re.escape(name)}\s*$", "$options": "i"}})
+        if doc:
+            return doc
+    return await coll.find_one({**base, "activity": "*"})
+
+
+def _resolve_params(keys, mapping: Dict[str, str]) -> list:
+    """Data-field names → the values Meta will substitute. A key that doesn't name a known
+    field falls back to the heuristic guesser (spec §11); "-" is the last resort because Meta
+    rejects a blank parameter outright."""
+    return [str(mapping.get(k) or wa_guess_field(k, mapping) or "-") for k in (keys or [])]
+
+
+def _build_send_components(tpl: dict, mapping: Dict[str, str], body_params: list) -> Optional[list]:
+    """The Cloud API `components` array for one send.
+
+    Returns None when the template only takes body parameters, so the send layer keeps using
+    its own body-only shape and nothing about the existing path changes. Header and button
+    parameters are only produced for templates authored with them — the mapping row stores
+    which data field fills each slot."""
+    header_keys = tpl.get("header_variables") or []
+    button_keys = tpl.get("button_variables") or []
+    if not header_keys and not button_keys:
+        return None
+
+    components = []
+    if header_keys:
+        components.append({
+            "type": "header",
+            "parameters": [{"type": "text", "text": v}
+                           for v in _resolve_params(header_keys, mapping)],
+        })
+    if body_params:
+        components.append({
+            "type": "body",
+            "parameters": [{"type": "text", "text": str(p)} for p in body_params],
+        })
+    # Meta addresses button parameters by the button's own position in the template, one
+    # component per button — hence the stored index rather than the loop counter. Rows written
+    # before that was recorded stored bare field names; those fall back to their list position.
+    for position, entry in enumerate(button_keys):
+        field = entry.get("field") if isinstance(entry, dict) else entry
+        index = entry.get("index", position) if isinstance(entry, dict) else position
+        value = _resolve_params([field], mapping)[0]
+        components.append({
+            "type": "button", "sub_type": "url", "index": str(index),
+            "parameters": [{"type": "text", "text": value}],
+        })
+    return components
 
 
 async def send_whatsapp(event: dict, event_kind: str, side: str) -> dict:
     """Resolve a Meta template, map ordered positional params from build_map, normalise
     phones, and send. No template row → skip (returns skipped=1). Gated by the TPMS switch."""
     if not TPMS_NOTIFICATIONS_ENABLED:
-        return {"sent": 0, "skipped": 0}
-    tpl = await get_whatsapp_template(event.get("activity") or "", event_kind, side)
+        return {"sent": 0, "failed": 0, "skipped": 0, "no_phone": 0}
+    activity = event.get("activity") or ""
+    tpl = await get_whatsapp_template(activity, event_kind, side)
     if not tpl:
-        return {"sent": 0, "skipped": 1}  # no template = intentional skip
+        # Not an error — but the single most common reason a WhatsApp notification "never
+        # arrives", so say which key was looked up instead of returning in silence.
+        logger.info("TPMS WhatsApp skip: no active template wired for "
+                    f"'{activity}' / {side} / {event_kind}")
+        return {"sent": 0, "failed": 0, "skipped": 1, "no_phone": 0}
     from app.services.notification_service import send_whatsapp_template
 
     mapping = await build_map(event)
-    # Meta requires ORDERED params; the template row stores the variable order. A variable
-    # that doesn't name a known field falls back to the heuristic guesser (spec §11) rather
-    # than silently sending "-".
-    var_keys = tpl.get("variables") or []
-    params = [str(mapping.get(k) or wa_guess_field(k, mapping) or "-") for k in var_keys]
+    # Meta requires ORDERED params; the template row stores the variable order.
+    params = _resolve_params(tpl.get("variables") or [], mapping)
+    components = _build_send_components(tpl, mapping, params)
     people = await _recipients(event)
-    sent = failed = 0
-    for person in people.get(side) or []:
+    recipients = people.get(side) or []
+    # Meta template names are lowercase-only (validate_template enforces ^[a-z0-9_]+$), but the
+    # wiring row holds whatever was typed. Sending "Accountability" for the approved
+    # "accountability" is rejected as a non-existent template, per recipient, in the log only —
+    # so normalise here and let rows written before this keep working without a data migration.
+    tpl_name = str(tpl.get("meta_template_name") or tpl.get("name") or "").strip().lower()
+    sent = failed = no_phone = 0
+    for person in recipients:
         phone = normalize_phone(person.get("phone"))
         if not phone:
+            no_phone += 1
             continue
         try:
-            await send_whatsapp_template(phone, tpl.get("meta_template_name") or tpl.get("name"),
-                                         tpl.get("language") or "en", params,
-                                         user_id=person.get("id"), slug=f"tpms_wa_{event_kind}_{side}")
-            sent += 1
+            ok = await send_whatsapp_template(phone, tpl_name,
+                                              tpl.get("language") or "en", params,
+                                              user_id=person.get("id"),
+                                              slug=f"tpms_wa_{event_kind}_{side}",
+                                              components=components)
         except Exception as e:
-            failed += 1
+            ok = False
             logger.error(f"TPMS WhatsApp to {phone} failed: {e}")
-    return {"sent": sent, "failed": failed, "skipped": 0}
+        # The send layer REPORTS failure by returning False — missing credentials, a template
+        # Meta does not consider approved, a number not on WhatsApp — and only raises on an
+        # unexpected error. Counting that as sent is what made this look delivered when
+        # nothing arrived; the Cloud API's own error is already in the notification log.
+        if ok:
+            sent += 1
+        else:
+            failed += 1
+    if no_phone:
+        logger.warning(f"TPMS WhatsApp '{tpl_name}' ({side}/{event_kind}): {no_phone} of "
+                       f"{len(recipients)} recipient(s) have no usable mobile number")
+    return {"sent": sent, "failed": failed, "skipped": 0, "no_phone": no_phone}
 
 
 async def _record_form_link_delivery(event: dict, person: dict, status: str,
@@ -466,8 +542,9 @@ async def _record_form_link_delivery(event: dict, person: dict, status: str,
 
 async def _dispatch(event: dict, event_kind: str, heading: str,
                     extra: Optional[dict] = None) -> dict:
-    """Resolve a template per side, fill it and send. Never raises — a mail failure must
-    not roll back the action that triggered it (the source wraps every send too)."""
+    """Resolve a template per side, fill it and send — mail first, then WhatsApp for the sides
+    that have a template wired. Never raises: a delivery failure must not roll back the action
+    that triggered it (the source wraps every send too)."""
     # TPMS notifications globally disabled → send nothing (schedule/reschedule/cancel/complete).
     if not TPMS_NOTIFICATIONS_ENABLED:
         return {"sent": 0, "failed": 0}
@@ -539,7 +616,28 @@ async def _dispatch(event: dict, event_kind: str, heading: str,
                 if my_links and SEND_FORM_LINKS:
                     await _record_form_link_delivery(event, person, "failed", str(e))
 
-    return {"sent": sent, "failed": failed}
+    # ── WhatsApp, off the same (activity × side × event) wiring as the mail above.
+    # Every lifecycle event goes through here, not just reminders: the admin screen has always
+    # offered `schedule` / `reschedule` / `cancel` / `completed` for WhatsApp and validated the
+    # chosen template against Meta, but this dispatcher was mail-only, so those rows saved,
+    # listed — and never fired. The reminder path calls send_whatsapp() directly from the
+    # reminder scheduler and never reaches _dispatch, so nothing double-sends.
+    #
+    # Isolated per side and non-fatal by design: mail has already gone out at this point, and a
+    # WhatsApp failure must not turn a delivered notification into a failed request.
+    whatsapp = {"sent": 0, "failed": 0, "skipped": 0, "no_phone": 0}
+    for side in (SIDE_STAFF, SIDE_COMPANY):
+        if not (people.get(side) or []):
+            continue
+        try:
+            result = await send_whatsapp(event, event_kind, side)
+        except Exception as e:
+            logger.error(f"TPMS {event_kind} WhatsApp ({side}) failed: {e}")
+            continue
+        for key in whatsapp:
+            whatsapp[key] += result.get(key) or 0
+
+    return {"sent": sent, "failed": failed, "whatsapp": whatsapp}
 
 
 # ─────────────────────────────────────────────────────────────

@@ -36,6 +36,33 @@ export const upsertMailTemplate = (payload) => api.post('/tpms/mail-templates', 
 // switch is what this endpoint exists for.
 export const getWhatsappTemplates = (activity) =>
   api.get('/tpms/whatsapp-templates', { params: { activity: activity || undefined } });
+export const upsertWhatsappTemplate = (payload) => api.post('/tpms/whatsapp-templates', payload);
+// The data fields a WhatsApp template's positional params can map to.
+export const getWhatsappVariables = () => api.get('/tpms/whatsapp-variables');
+
+/* ── WhatsApp template library (Meta approval workflow) ──
+   Templates authored in TPMS and submitted to Meta for review. These are the definitions that
+   live on the WhatsApp Business Account; the whatsapp-templates endpoints above are the
+   notification wiring that points at an APPROVED one. */
+export const getMetaTemplates = (status) =>
+  api.get('/tpms/meta-templates', { params: { status: status || undefined } });
+// Only APPROVED rows, each with the parameter slots it declares — what a notification may use.
+export const getApprovedMetaTemplates = () => api.get('/tpms/meta-templates/approved');
+// Create or update a draft. Pass `_id` to update; editing is refused once Meta owns it.
+export const saveMetaTemplate = (payload) => api.post('/tpms/meta-templates', payload);
+// Validate and return the exact Graph payload — the "Check payload" step, no Graph call made.
+export const checkMetaTemplate = (payload) => api.post('/tpms/meta-templates/check', payload);
+// Irreversible: sends the template to Meta for review.
+export const submitMetaTemplate = (id) => api.post(`/tpms/meta-templates/${id}/submit`);
+// Pull current approval statuses (and rejection reasons) from Meta.
+export const syncMetaTemplates = () => api.post('/tpms/meta-templates/sync');
+export const deleteMetaTemplate = (id) => api.delete(`/tpms/meta-templates/${id}`);
+/** Send the template being composed to one number. Works before the template is saved — pass
+ *  the form as `template`. An APPROVED template goes as the real thing; anything else is sent
+ *  as free-form text, which only lands inside Meta's 24-hour window. */
+export const testMetaTemplate = (payload) => api.post('/tpms/meta-templates/test', payload);
+// Smoke-test send of one WhatsApp template to a phone number.
+export const testWhatsappTemplate = (payload) => api.post('/tpms/whatsapp-templates/test', payload);
 /** Activate / deactivate one template. `channel` is 'mail' or 'whatsapp'. Admin only —
  *  writes just the flag, never the subject/body, so content cannot change by toggling. */
 export const setTemplateStatus = (channel, id, active) =>
