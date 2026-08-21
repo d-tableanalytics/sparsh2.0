@@ -1,5 +1,5 @@
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from app.db.mongodb import get_collection
 from app.services.notification_service import send_reminder_email
 from bson import ObjectId
@@ -8,7 +8,14 @@ import logging
 logger = logging.getLogger(__name__)
 
 from app.utils.calendar_utils import CALENDAR_COLLECTIONS, find_user_by_id
-from app.models.tpms import TPMS_EVENT_KIND, TPMS_NOTIFICATIONS_ENABLED
+from app.models.tpms import (
+    TPMS_EVENT_KIND, TPMS_NOTIFICATIONS_ENABLED,
+    STATUS_CANCELLED, STATUS_COMPLETED, STATUS_LAPSED,
+)
+
+# A TPMS activity in one of these states no longer occupies the calendar, so its still-pending
+# reminders are consumed without firing (covers manual cancel, staff confirm, escalation lapse).
+_TPMS_TERMINAL = {STATUS_CANCELLED, STATUS_COMPLETED, STATUS_LAPSED}
 
 # How far past its trigger a TPMS reminder may be and still be worth sending. Anything older
 # is marked sent and skipped — see the note at the send site in check_and_trigger_reminders.
@@ -50,6 +57,14 @@ TPMS_SEED_HOUR = 6          # seedSuccessMeasures     — monthly, 1st @ 06:00
 # Anchoring these to `start` made every "before" reminder resolve to a past trigger time and
 # fire on the next 60s tick — a todo's reminder went out seconds after it was created.
 DUE_ANCHORED_TYPES = {"task", "todo"}
+
+# TPMS schedule starts are stored as a NAIVE IST wall-clock string (see
+# tpms_schedule_service._start_iso → "2026-08-11T15:56:00", no zone marker), unlike every
+# other calendar start, which the ERP writes as a UTC-marked ISO string. This offset converts
+# that naive IST value to UTC so its reminder trigger lines up with datetime.utcnow(); without
+# it, a "5 min before" reminder for a 15:56 IST activity resolved to 15:51 UTC (21:21 IST) and
+# never arrived while the user was watching.
+IST_OFFSET = timedelta(hours=5, minutes=30)
 
 
 def get_reminder_anchor(event: dict):
@@ -189,6 +204,16 @@ async def check_and_trigger_reminders():
                     await col.update_one({"_id": event["_id"]}, {"$set": {"reminders": reminders}})
                 continue
 
+            # A TPMS activity in a terminal state (Cancelled / Completed / Lapsed) must stop
+            # nagging — consume its pending reminders without sending. Covers manual cancel,
+            # staff confirmation, and the escalation lapse, whichever set the status.
+            if is_tpms_event and str(event.get("tpms_status") or "") in _TPMS_TERMINAL:
+                if any(not r.get("sent") for r in reminders):
+                    for r in reminders:
+                        r["sent"] = True
+                    await col.update_one({"_id": event["_id"]}, {"$set": {"reminders": reminders}})
+                continue
+
             # A task's/todo's offset is measured from its DUE date (`end`), an event's from
             # when it starts (`start`) — see get_reminder_anchor. Reading `start` directly here
             # meant a task's "1 hour before" resolved against its recurrence anchor, which is
@@ -198,9 +223,17 @@ async def check_and_trigger_reminders():
             if not event_time_str: continue
 
             try:
-                # Robust ISO parsing
+                # Robust ISO parsing → naive UTC, so it compares directly against utcnow().
                 clean_time = event_time_str.replace("Z", "+00:00").replace(" ", "T")
-                event_time = datetime.fromisoformat(clean_time).replace(tzinfo=None)
+                parsed = datetime.fromisoformat(clean_time)
+                if parsed.tzinfo is not None:
+                    # Zone-marked (every non-TPMS start; the ERP writes UTC-marked ISO).
+                    event_time = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+                elif is_tpms_event:
+                    # TPMS's one exception: a naive IST wall-clock string. Convert IST→UTC.
+                    event_time = parsed - IST_OFFSET
+                else:
+                    event_time = parsed  # legacy naive value → treat as UTC (unchanged)
             except Exception as e:
                 logger.error(f"Date Parse Error for event {event.get('_id')}: {e}")
                 continue
@@ -258,22 +291,25 @@ async def _send_tpms_reminder_email(user_data, event) -> bool:
     """
     from app.services.tpms_notify_service import (
         EVENT_REMINDER, SIDE_COMPANY, SIDE_STAFF,
-        build_map, fill, get_template, log_context,
+        build_map, fill, get_template, log_context, _default_body,
     )
     from app.services.notification_service import send_email_notification
 
     side = SIDE_COMPANY if user_data.get("company_id") else SIDE_STAFF
     tpl = await get_template(event.get("activity") or "", EVENT_REMINDER, side)
-    # Inactive or not configured → send nothing (no default body).
-    if not tpl or not tpl.get("body_html"):
-        return False
     mapping = await build_map(event)
     mapping["Recipient_Name"] = (user_data.get("full_name")
                                  or " ".join(filter(None, [user_data.get("first_name"),
                                                            user_data.get("last_name")])).strip()
                                  or user_data.get("email") or "")
-    subject_tpl = tpl.get("subject") or "[Reminder] {{Title}} – {{Activity}}"
-    html = fill(tpl["body_html"], mapping)
+    # Spec parity — when no Active reminder template is configured, send a branded default body
+    # rather than silently dropping the reminder (matches the schedule/status mail fallback).
+    if tpl and tpl.get("body_html"):
+        subject_tpl = tpl.get("subject") or "[Reminder] {{Title}} – {{Activity}}"
+        html = fill(tpl["body_html"], mapping)
+    else:
+        subject_tpl = "[Reminder] {{Title}} – {{Activity}}"
+        html = _default_body(mapping, "Reminder")
     await send_email_notification(
         user_data.get("email"), fill(subject_tpl, mapping), html,
         user_id=str(user_data.get("_id")), slug=f"tpms_reminder_{side}",

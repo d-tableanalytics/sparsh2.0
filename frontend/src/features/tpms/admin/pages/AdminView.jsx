@@ -33,6 +33,7 @@ const monthOptions = () => {
 // Backend trend is 'Up' / 'Down' / 'Flat'; the Trend component expects lowercase.
 const trendDir = (t) => String(t || '').toLowerCase();
 const pctCell = (v) => (v === '' || v == null ? '—' : `${v}%`);
+const pctColor = (p) => (p >= 75 ? 'var(--accent-green)' : p >= 40 ? 'var(--accent-orange)' : 'var(--accent-red)');
 
 const stickyHead = 'sticky left-0 z-10 bg-[var(--table-header-bg)]';
 const stickyCell = 'sticky left-0 z-10 bg-[var(--bg-card)] group-hover:bg-[var(--table-hover)]';
@@ -236,7 +237,7 @@ const AdminView = () => {
             <TableShell minWidth={980}>
               <thead>
                 <tr className="bg-[var(--table-header-bg)] border-b border-[var(--border)]">
-                  <Th className={stickyHead}>Client</Th><Th>OM</Th><Th align="center">Done</Th><Th align="center">Pending</Th>
+                  <Th className={stickyHead}>Client</Th><Th>OM</Th><Th align="center">Planned</Th><Th align="center">Done</Th><Th align="center">Pending</Th>
                   <Th align="center">Overdue</Th><Th align="center">Completion</Th><Th>Progress</Th>
                   <Th align="center">Action Cls</Th><Th align="center">Avg Delay</Th><Th align="center">Esc</Th><Th align="center">Trend</Th><Th align="center">Status</Th>
                 </tr>
@@ -248,6 +249,7 @@ const AdminView = () => {
                   <tr key={r.company_id || r.company} className="group border-b border-[var(--border)] last:border-0 hover:bg-[var(--table-hover)] transition-colors">
                     <Td className={`font-bold ${stickyCell}`}>{r.company}</Td>
                     <Td className="text-[var(--text-muted)]">{r.om || '—'}</Td>
+                    <Td align="center" className="font-bold tabular-nums">{r.planned ?? 0}</Td>
                     <Td align="center" className="font-bold text-[var(--accent-green)]">{r.done ?? 0}</Td>
                     <Td align="center" className="font-bold text-[var(--accent-orange)]">{r.pending ?? 0}</Td>
                     <Td align="center" className="font-bold text-[var(--accent-red)]">{r.overdue ?? 0}</Td>
@@ -341,11 +343,12 @@ const AdminView = () => {
               <div className="py-12 text-center text-[13px] font-bold text-[var(--text-muted)]">No activity for this period.</div>
             ) : (
               <>
-              <TableShell minWidth={Math.max(720, 240 + gridActivities.length * 66)}>
+              <TableShell minWidth={Math.max(720, 240 + gridActivities.length * 66 + 220)}>
                 <thead>
                   <tr className="bg-[var(--table-header-bg)] border-b border-[var(--border)]">
                     <Th className={stickyHead}>Client</Th>
                     {gridActivities.map((a) => <Th key={a.full} align="center">{a.short}</Th>)}
+                    <Th align="center">Planned</Th><Th align="center">Done</Th><Th align="center">Pct</Th>
                   </tr>
                 </thead>
                 <tbody>
@@ -367,6 +370,9 @@ const AdminView = () => {
                           </Td>
                         );
                       })}
+                      <Td align="center" className="font-bold tabular-nums">{r.total ?? 0}</Td>
+                      <Td align="center" className="font-extrabold tabular-nums text-[var(--accent-green)]">{r.done ?? 0}</Td>
+                      <Td align="center" className="font-extrabold tabular-nums" style={{ color: pctColor(r.total ? Math.round((r.done / r.total) * 100) : 0) }}>{r.total ? Math.round((r.done / r.total) * 100) : 0}%</Td>
                     </tr>
                   ))}
                 </tbody>

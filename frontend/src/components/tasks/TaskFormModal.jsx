@@ -101,10 +101,6 @@ const TaskFormModal = ({ isOpen, onClose, onSaved, task = null, categories = [],
 
   const [pickerOpen, setPickerOpen] = useState(null); // 'assignee' | 'inLoop' | 'category' | null
   const [deadlinePickerOpen, setDeadlinePickerOpen] = useState(false);
-  // Repeat and Deadline are mutually exclusive: a series has no single due moment to pick, so
-  // the deadline field is hidden while Repeat is on and each occurrence is instead due at
-  // 11:59:59 PM IST on its own date (recurring_task_service.occurrence_end_of_day).
-  const isRepeating = form.repeat !== 'Does not repeat';
   const [startDatePickerOpen, setStartDatePickerOpen] = useState(false);
   const [repeatEndPickerOpen, setRepeatEndPickerOpen] = useState(false);
   const [reminderModalOpen, setReminderModalOpen] = useState(false);
@@ -302,27 +298,17 @@ const TaskFormModal = ({ isOpen, onClose, onSaved, task = null, categories = [],
   const validate = () => {
     if (!form.title.trim()) return 'Task title is required';
     if (!form.category.trim()) return 'Category is required';
-    // Deadline rules apply only to a NON-repeating task. A repeating one has no deadline field
-    // at all (see the chip row) — every occurrence is due at the end of its own day, set by the
-    // recurrence engine — so requiring one here would block a form that cannot satisfy it.
-    if (!isRepeating) {
-      // A deadline is mandatory when delegating (assigning to others) so every assignee has a due date.
-      if (form.target_staff_id.length && !form.end) return 'Deadline is required when delegating a task';
-      // Due date can't be in the past. Only enforced on create — editing an already-overdue
-      // task (a normal, common state) must still be possible without forcing a date change.
-      if (!task && form.end) {
-        const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
-        if (new Date(form.end) < todayStart) return 'Due date cannot be in the past';
-      }
+    // A deadline is mandatory when delegating (assigning to others) so every assignee has a due date.
+    if (form.target_staff_id.length && !form.end) return 'Deadline is required when delegating a task';
+    // Due date can't be in the past. Only enforced on create — editing an already-overdue
+    // task (a normal, common state) must still be possible without forcing a date change.
+    if (!task && form.end) {
+      const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
+      if (new Date(form.end) < todayStart) return 'Due date cannot be in the past';
     }
     if (form.repeat !== 'Does not repeat') {
       if (!form.start) return 'Start Date is required when Repeat is enabled';
       if (!form.repeat) return 'Frequency is required when Repeat is enabled';
-      // Required, and load-bearing: the backend only ties a series together (and the nightly
-      // engine only picks it up) when an end date is present. Without one the task saved
-      // silently as a one-off — it looked repeating and never repeated. The API rejects this
-      // too; checking here just saves the round trip.
-      if (!form.repeat_end_date) return 'End Date is required when Repeat is enabled';
       if (form.repeat === 'Monthly' && !form.repeat_data.lastDay && form.repeat_data.monthlyDates.length === 0) {
         return 'Select at least one date (or Last Day) for a Monthly repeat';
       }
@@ -354,15 +340,13 @@ const TaskFormModal = ({ isOpen, onClose, onSaved, task = null, categories = [],
 
     setSaving(true);
     try {
+      const isRepeating = form.repeat !== 'Does not repeat';
       const payload = {
         title: form.title,
         description: form.description,
         category: form.category,
         tags: form.tags,
-        // Never send a hand-picked deadline for a repeating task. Explicitly null rather than
-        // omitted, so switching an existing task TO repeating clears the deadline it used to
-        // carry instead of leaving a stale one behind on every future occurrence.
-        end: isRepeating ? null : (form.end ? new Date(form.end).toISOString() : null),
+        end: form.end ? new Date(form.end).toISOString() : null,
         repeat: form.repeat,
         repeat_end_date: isRepeating && form.repeat_end_date ? new Date(form.repeat_end_date).toISOString() : null,
         repeat_interval: (form.repeat === 'periodic' || form.repeat === 'Custom') ? (form.repeat_interval || 1) : undefined,
@@ -565,14 +549,10 @@ const TaskFormModal = ({ isOpen, onClose, onSaved, task = null, categories = [],
                 <Users size={12} /> {assigneeNames.length ? assigneeNames.join(', ') : 'Assignee *'}
               </button>
 
-              {/* Hidden entirely while Repeat is on — the series sets each occurrence's own
-                  deadline, so there is nothing here for the user to choose. */}
-              {!isRepeating && (
-                <button type="button" onClick={() => setDeadlinePickerOpen(true)}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[10px] font-black uppercase tracking-wider border transition-all ${form.end ? 'border-[var(--accent-indigo)] text-[var(--accent-indigo)]' : 'border-[var(--border)] text-[var(--text-muted)]'}`}>
-                  <CalendarClock size={12} /> {form.end ? formatDateTime(form.end) : (form.target_staff_id.length ? 'Set Deadline *' : 'Set Deadline')}
-                </button>
-              )}
+              <button type="button" onClick={() => setDeadlinePickerOpen(true)}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[10px] font-black uppercase tracking-wider border transition-all ${form.end ? 'border-[var(--accent-indigo)] text-[var(--accent-indigo)]' : 'border-[var(--border)] text-[var(--text-muted)]'}`}>
+                <CalendarClock size={12} /> {form.end ? formatDateTime(form.end) : (form.target_staff_id.length ? 'Set Deadline *' : 'Set Deadline')}
+              </button>
 
               <button type="button" onClick={() => setForm(f => ({ ...f, priority: PRIORITY_CYCLE[(PRIORITY_CYCLE.indexOf(f.priority) + 1) % 3] }))}
                 className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[10px] font-black uppercase tracking-wider border border-[var(--accent-indigo)] text-[var(--accent-indigo)]">
@@ -675,11 +655,9 @@ const TaskFormModal = ({ isOpen, onClose, onSaved, task = null, categories = [],
                       <CalendarClock size={12} /> {form.start ? formatDate(form.start) : 'Start Date *'}
                     </button>
 
-                    {/* Required, and styled like Start Date so the asterisk is not the only
-                        cue that it must be filled in. */}
                     <button type="button" onClick={() => setRepeatEndPickerOpen(true)}
-                      className={`flex items-center gap-1.5 px-3 py-1.5 bg-[var(--bg-card)] border rounded-full text-[10px] font-black uppercase tracking-wider ${form.repeat_end_date ? 'border-[var(--accent-indigo)] text-[var(--accent-indigo)]' : 'border-[var(--border)] text-[var(--text-muted)]'}`}>
-                      <CalendarClock size={12} /> {form.repeat_end_date ? formatDate(form.repeat_end_date) : 'End Date *'}
+                      className="flex items-center gap-1.5 px-3 py-1.5 bg-[var(--bg-card)] border border-[var(--border)] rounded-full text-[10px] font-black text-[var(--text-muted)]">
+                      <CalendarClock size={12} /> {form.repeat_end_date ? formatDate(form.repeat_end_date) : 'End Date'}
                     </button>
                   </>
                 )}
@@ -871,19 +849,15 @@ const TaskFormModal = ({ isOpen, onClose, onSaved, task = null, categories = [],
       <MiniDatePicker isOpen={deadlinePickerOpen} onClose={() => setDeadlinePickerOpen(false)}
         value={form.end} title="Select Due Date" onApply={(iso) => setForm(f => ({ ...f, end: iso }))}
         holidayDates={holidayDates} weeklyOffs={WEEKLY_OFFS} onBlocked={showError} disablePast />
-      {/* Repeat Start Date is a DATE, not a moment: a series starts on a day. `dateOnly`
-          hides the time tab so the picker cannot imply otherwise. (The stored ISO keeps a
-          midday anchor — deliberately, since a midnight local time would read as the
-          PREVIOUS day once converted to UTC.) */}
       <MiniDatePicker isOpen={startDatePickerOpen} onClose={() => setStartDatePickerOpen(false)}
         value={form.start} title="Repeat Start Date" onApply={(iso) => setForm(f => ({ ...f, start: iso }))}
-        holidayDates={holidayDates} weeklyOffs={WEEKLY_OFFS} onBlocked={showError} dateOnly />
+        holidayDates={holidayDates} weeklyOffs={WEEKLY_OFFS} onBlocked={showError} />
       {/* Repeat End Date: holidays are marked (indicator + label) but still selectable —
           the end date is only the series boundary; the recurring engine skips holiday
           occurrences within the range. */}
       <MiniDatePicker isOpen={repeatEndPickerOpen} onClose={() => setRepeatEndPickerOpen(false)}
         value={form.repeat_end_date} title="Repeat End Date" onApply={(iso) => setForm(f => ({ ...f, repeat_end_date: iso }))}
-        holidayDates={holidayDates} weeklyOffs={WEEKLY_OFFS} onBlocked={showError} dateOnly />
+        holidayDates={holidayDates} weeklyOffs={WEEKLY_OFFS} onBlocked={showError} />
       <ReminderModal isOpen={reminderModalOpen} onClose={() => setReminderModalOpen(false)}
         reminders={form.reminders} onApply={(reminders) => setForm(f => ({ ...f, reminders: reminders.map(r => ({ ...r, parent_type: 'task' })) }))} />
       <TaskTagsModal

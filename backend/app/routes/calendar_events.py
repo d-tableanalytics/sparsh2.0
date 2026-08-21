@@ -215,10 +215,6 @@ async def notify_users_instant(event_dict: dict, action: str, creator_name: str)
         except Exception as e:
             print(f"Conflict Notification Error: {e}")
 
-# The two spellings of the yearly cadence. The form sends "Yearly"; older records and the
-# ported Apps Script use "Annually". Declared once so every cadence check agrees on both.
-ANNUAL_REPEATS = ("Annually", "Yearly")
-
 def _days_in_month(year, month):
     return calendar.monthrange(year, month)[1]
 
@@ -284,12 +280,7 @@ def _next_occurrence(curr_dt, repeat_type, interval, repeat_data=None, anchor_da
         return curr_dt + timedelta(weeks=1)
     if repeat_type == "Monthly":
         return _month_step(curr_dt, 1, repeat_data, anchor_day)
-    # "Yearly" and "Annually" are the SAME cadence under two names. The form has always sent
-    # "Yearly" while this function only matched "Annually", so it fell through to the final
-    # `return None` and the series silently never advanced — a yearly task was a one-off with
-    # no error anywhere. Both names are accepted rather than renaming either, so records
-    # already stored under either spelling keep working.
-    if repeat_type in ANNUAL_REPEATS:
+    if repeat_type == "Annually":
         year = curr_dt.year + 1
         # 29 Feb only exists in a leap year. replace() raised ValueError here, and because the
         # recurring engine does not catch it the exception aborted the WHOLE nightly run for
@@ -593,37 +584,19 @@ async def create_event(event: CalendarEventCreate, background_tasks: BackgroundT
     is_todo = event_dict.get("type") == TODO_TYPE
     is_repeating = repeat_type != "Does not repeat"
 
-    # A Repeat End Date is REQUIRED for every repeating item, todo or task.
-    #
-    # For a todo it bounds a series generated in full up front — "generate every occurrence up
-    # to no end date" has no meaning.
-    #
-    # For a TASK it is load-bearing in a way that used to fail silently: `recurring_group_id`
-    # is only assigned when an end date is present (just below), and the nightly engine only
-    # looks at documents that have that id. A repeating task saved without one was therefore a
-    # one-off — it never generated a second occurrence, and nothing told the user. Rejecting it
-    # here turns an invisible no-op into a message they can act on.
-    if is_repeating and not end_date_str:
+    # A repeating TODO is generated in full, up to its Repeat End Date, so that date is what
+    # bounds the series and is therefore required. (It was optional while todos rolled forward
+    # one day at a time forever — "generate every occurrence up to no end date" has no meaning.)
+    if is_todo and is_repeating and not end_date_str:
         raise HTTPException(
             status_code=400,
-            detail="Select a Repeat End Date — a repeating item needs a date to repeat until.",
+            detail="Select a Repeat End Date — a repeating todo is generated up to that date.",
         )
 
     # A series needs a group id to tie its occurrences together: the nightly task rollover, the
     # series edit rules and the end-date timeline sync below all key off it.
     if is_repeating and end_date_str:
         event_dict["recurring_group_id"] = str(ObjectId())
-
-    # A repeating TASK carries no deadline of its own — the composer hides the field, because a
-    # series has no single due moment to pick. Each occurrence is due at the end of its own day
-    # instead, and this is the first occurrence, so it gets the same treatment the nightly engine
-    # gives every later one (recurring_task_service.occurrence_end_of_day).
-    if is_repeating and event_dict.get("type") == "task" and not event_dict.get("end"):
-        from app.services.recurring_task_service import occurrence_end_of_day
-        try:
-            event_dict["end"] = occurrence_end_of_day(datetime.fromisoformat(event_dict["start"]))
-        except (KeyError, TypeError, ValueError):
-            pass    # an unparseable start is already the backdate guard's problem, not ours
 
     # ─── Recurring Todos: the whole series, up front ───
     # Every occurrence up to the Repeat End Date is written the moment the todo is saved, so the
@@ -836,22 +809,6 @@ async def update_event(event_id: str, updates: dict, background_tasks: Backgroun
 
     if not (is_admin or has_update_perm or is_creator or is_company_admin):
         raise HTTPException(status_code=403, detail="Not authorized to edit this event.")
-
-    # A Repeat End Date is required on edit too, not only on create. Without this an edit could
-    # switch an item to a repeating cadence, or clear an existing end date, and land in exactly
-    # the silent state the create guard now rejects — repeating in the form, one-off in reality.
-    # The effective values are checked (the edit merged over what is stored), so an edit that
-    # touches neither field is unaffected.
-    effective_repeat = updates.get("repeat", existing.get("repeat")) or "Does not repeat"
-    if "repeat_end_date" in updates or "repeat" in updates:
-        effective_end = (updates.get("repeat_end_date")
-                         if "repeat_end_date" in updates
-                         else existing.get("repeat_end_date"))
-        if effective_repeat != "Does not repeat" and not effective_end:
-            raise HTTPException(
-                status_code=400,
-                detail="Select a Repeat End Date — a repeating item needs a date to repeat until.",
-            )
          
     # ─── Record Completion Timestamp ───
     if updates.get("status") == "completed" and existing.get("status") != "completed":
@@ -963,48 +920,67 @@ async def update_event(event_id: str, updates: dict, background_tasks: Backgroun
                     "start": {"$gt": cutoff_dt.isoformat()}
                 })
 
-                # 2a. Rebuild forward from whatever occurrence is now last in the series,
-                # through the SHARED builder — so an extended series keeps the holiday /
-                # weekly-off and anti-drift rules its original dates were generated under, and
-                # every occurrence goes through `_fresh_occurrence` exactly as the nightly
-                # engine's do.
-                #
-                # This used to run for todos only; tasks fell through to a naive
-                # `{**existing, **updates}` walk below that copied the source occurrence
-                # wholesale — its ticked checklist, its remarks, its evidence. Extending a
-                # series therefore produced occurrences that looked completed before anyone
-                # touched them, and behaved differently from occurrences of the same series
-                # created overnight. One builder for both paths is the only way those two can
-                # be guaranteed to agree.
-                from app.services.recurring_task_service import (
-                    build_series_occurrences, MAX_SERIES_OCCURRENCES,
-                    _ist_date as _rec_ist_date, _parse as _rec_parse,
-                )
-                remaining = await get_collection(new_col_name).find(
-                    {"recurring_group_id": gid}).to_list(MAX_SERIES_OCCURRENCES + 1)
-                if remaining:
-                    # Walk on from the LAST surviving occurrence. The edit's own content
-                    # (title, details, cadence) carries onto the new dates, but its
-                    # per-occurrence fields must not: `updates` holds the start/end of
-                    # whichever occurrence the user happened to open, and letting that
-                    # through would restart the series from that date instead of the last.
-                    head = max(remaining, key=lambda d: d.get("start") or "")
-                    series_head = {**head, **{k: v for k, v in updates.items()
-                                              if k not in PER_OCCURRENCE_FIELDS}}
-                    # IST dates, matching how build_series_occurrences tracks what is already
-                    # taken. A raw `start[:10]` is the date in the stored string's own zone,
-                    # which drifts by a day for start times before 05:30 IST and would let an
-                    # extension duplicate a date the series already covers.
-                    taken = set()
-                    for d in remaining:
-                        when = _rec_parse(d.get("start"))
-                        if when:
-                            taken.add(_rec_ist_date(when).isoformat())
-                    occurrences, _ = await build_series_occurrences(
-                        series_head, cutoff_dt, taken_dates=taken)
-                    if occurrences:
-                        await get_collection(new_col_name).insert_many(occurrences)
+                # 2a. TODOS: rebuild forward from whatever occurrence is now last in the series,
+                # through the shared builder — so an extended todo series keeps the holiday /
+                # weekly-off and anti-drift rules its original dates were generated under. The
+                # naive walk below would ignore them and put todos on Sundays and holidays.
+                if is_todo_series:
+                    from app.services.recurring_task_service import (
+                        build_series_occurrences, MAX_SERIES_OCCURRENCES,
+                    )
+                    remaining = await get_collection(new_col_name).find(
+                        {"recurring_group_id": gid}).to_list(MAX_SERIES_OCCURRENCES + 1)
+                    if remaining:
+                        # Walk on from the LAST surviving occurrence. The edit's own content
+                        # (title, details, cadence) carries onto the new dates, but its
+                        # per-occurrence fields must not: `updates` holds the start/end of
+                        # whichever occurrence the user happened to open, and letting that
+                        # through would restart the series from that date instead of the last.
+                        head = max(remaining, key=lambda d: d.get("start") or "")
+                        series_head = {**head, **{k: v for k, v in updates.items()
+                                                  if k not in PER_OCCURRENCE_FIELDS}}
+                        taken = {(d.get("start") or "")[:10] for d in remaining}
+                        occurrences, _ = await build_series_occurrences(
+                            series_head, cutoff_dt, taken_dates=taken)
+                        if occurrences:
+                            await get_collection(new_col_name).insert_many(occurrences)
 
+                # 2b. GENERATE: If expanded, create new ones
+                elif old_end_str:
+                    old_raw_end = old_end_str.replace("Z", "+00:00")
+                    if len(old_raw_end) <= 10: old_raw_end += "T23:59:59+00:00"
+                    current_end_dt = datetime.fromisoformat(old_raw_end)
+                    if current_end_dt.tzinfo is None: current_end_dt = current_end_dt.replace(tzinfo=timezone.utc)
+                    
+                    if new_end_dt > current_end_dt:
+                        # Find the step from repeat_type
+                        repeat_type = existing.get("repeat", "Daily")
+                        interval = existing.get("repeat_interval", 1) or 1
+                        
+                        generated = []
+                        curr_dt = current_end_dt
+                        # Avoid duplicate on the current_end_dt itself
+                        next_dt = _next_occurrence(curr_dt, repeat_type, interval, existing.get("repeat_data"))
+                        if next_dt is not None: curr_dt = next_dt
+
+                        while curr_dt <= new_end_dt:
+                            new_ev = {**existing, **updates}
+                            new_ev["start"] = curr_dt.isoformat()
+                            if new_ev.get("end"):
+                                diff = (datetime.fromisoformat(existing["end"].replace("Z", "+00:00")) - datetime.fromisoformat(existing["start"].replace("Z", "+00:00")))
+                                new_ev["end"] = (curr_dt + diff).isoformat()
+                            
+                            new_ev["created_at"] = datetime.utcnow()
+                            if "_id" in new_ev: del new_ev["_id"]
+                            generated.append(new_ev)
+                            
+                            next_dt = _next_occurrence(curr_dt, repeat_type, interval, existing.get("repeat_data"))
+                            if next_dt is None: break
+                            curr_dt = next_dt
+                            if len(generated) > 365: break
+                        
+                        if generated:
+                            await get_collection(new_col_name).insert_many(generated)
             except Exception as se:
                 print(f"SERIES SYNC FAILURE: {se}")
 

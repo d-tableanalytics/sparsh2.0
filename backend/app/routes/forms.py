@@ -15,7 +15,7 @@ computation is performed here — this module only captures and serves the data.
 """
 from fastapi import APIRouter, Depends, HTTPException, Query
 from typing import List, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 from bson import ObjectId
 from bson.errors import InvalidId
 
@@ -1129,3 +1129,77 @@ async def mark_assigned_form_submitted(token: str, current_user: dict = Depends(
     doc = await _assignment_for(token, current_user, must_be_open=True)
     await mark_submitted(doc)
     return {"ok": True}
+
+
+# ─────────────────────────────────────────────────────────────
+# Admin: form-link viewer (list + resend)
+# ─────────────────────────────────────────────────────────────
+@router.get("/assignments")
+async def list_form_assignments(
+    company_id: Optional[str] = Query(None),
+    period: Optional[str] = Query(None, description="'YYYY-MM'"),
+    current_user: dict = Depends(get_current_user),
+):
+    """Every unique form link (tpms_form_assignments), newest first. Admin only."""
+    if (current_user.get("role") or "").lower() not in STAFF_ROLES:
+        raise HTTPException(status_code=403, detail="Admin only")
+    from app.services.tpms_form_link_service import ASSIGNMENT_COLLECTION, effective_status
+    query: dict = {}
+    if company_id:
+        query["company_id"] = str(company_id)
+    if period:
+        query["period"] = str(period)
+    docs = await get_collection(ASSIGNMENT_COLLECTION).find(query).sort("created_at", -1).to_list(2000)
+    now = datetime.now(timezone.utc)
+    out = [{
+        "id": str(d["_id"]),
+        "form_type": d.get("form_type"),
+        "form_title": d.get("form_title"),
+        "period": d.get("period"),
+        "company_id": d.get("company_id"),
+        "company_name": d.get("company_name"),
+        "respondent_name": d.get("respondent_name"),
+        "respondent_email": d.get("respondent_email"),
+        "respondent_role": d.get("respondent_role"),
+        "link": d.get("link"),
+        "status": effective_status(d, now),
+        "email_status": d.get("email_status"),
+    } for d in docs]
+    return {"assignments": out}
+
+
+@router.post("/assignments/{assignment_id}/resend")
+async def resend_form_assignment(assignment_id: str, current_user: dict = Depends(get_current_user)):
+    """Email the recipient their existing form link again. Admin only."""
+    if (current_user.get("role") or "").lower() not in STAFF_ROLES:
+        raise HTTPException(status_code=403, detail="Admin only")
+    from app.services.tpms_form_link_service import (
+        ASSIGNMENT_COLLECTION, mark_email_result, EMAIL_SENT, EMAIL_FAILED,
+    )
+    try:
+        doc = await get_collection(ASSIGNMENT_COLLECTION).find_one({"_id": ObjectId(assignment_id)})
+    except (InvalidId, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid id")
+    if not doc:
+        raise HTTPException(status_code=404, detail="Link not found")
+    email = doc.get("respondent_email")
+    if not email:
+        raise HTTPException(status_code=400, detail="This recipient has no email on file.")
+    title = doc.get("form_title") or doc.get("form_type")
+    period, link = doc.get("period"), doc.get("link")
+    html = (f'<div style="font-family:Arial,sans-serif;font-size:14px;color:#1e293b">'
+            f'<p>Hello {doc.get("respondent_name") or ""},</p>'
+            f'<p>Here is your <b>{title}</b> form link for <b>{period}</b>. It is personal to you '
+            f'and can be submitted once.</p>'
+            f'<p><a href="{link}" style="display:inline-block;background:#4f46e5;color:#fff;'
+            f'padding:10px 18px;border-radius:8px;text-decoration:none;font-weight:700">Open the form</a></p>'
+            f'<p style="font-size:12px;color:#6b7280">{link}</p></div>')
+    from app.services.notification_service import send_email_notification
+    try:
+        await send_email_notification(email, f"[{title}] Your form link – {period}", html,
+                                      user_id=doc.get("respondent_id"), slug=f"tpms_form_{doc.get('form_type')}_resend")
+        await mark_email_result(doc["_id"], EMAIL_SENT, None)
+        return {"ok": True, "email": email}
+    except Exception as e:
+        await mark_email_result(doc["_id"], EMAIL_FAILED, str(e))
+        raise HTTPException(status_code=500, detail=f"Send failed: {e}")
