@@ -138,6 +138,7 @@ const SessionDetails = () => {
     // Media Library States
     const [mediaItems, setMediaItems] = useState([]);
     const [selectedMediaId, setSelectedMediaId] = useState('');
+    const [mediaSearchText, setMediaSearchText] = useState('');
     const [loadingMedia, setLoadingMedia] = useState(false);
 
     const openUploadModal = (type) => {
@@ -145,6 +146,7 @@ const SessionDetails = () => {
         setUploadSource('upload');
         setUploadFile(null);
         setSelectedMediaId('');
+        setMediaSearchText('');
         setUploadProgress(0);
         if (mediaItems.length === 0) fetchMediaItems();
     };
@@ -180,6 +182,7 @@ const SessionDetails = () => {
                 showSuccess("Added from Media Library!");
                 setUploadModalType(null);
                 setSelectedMediaId('');
+                setMediaSearchText('');
                 fetchSessionData();
             } catch (err) {
                 console.error(err);
@@ -889,25 +892,38 @@ const SessionDetails = () => {
                                     ) : mediaItems.length === 0 ? (
                                         <p className="text-[12px] text-[var(--text-muted)] italic py-2">No files in the Media Library yet.</p>
                                     ) : (
-                                        <select
-                                            value={selectedMediaId}
-                                            onChange={e => {
-                                                setSelectedMediaId(e.target.value);
-                                                // For resources, default the format to the library file's type.
-                                                if (uploadModalType === 'resource') {
-                                                    const m = mediaItems.find(mi => mi._id === e.target.value);
-                                                    if (m?.media_type) setResourceType(m.media_type);
-                                                }
-                                            }}
-                                            className="w-full bg-[var(--input-bg)] px-4 py-3 border border-[var(--border)] rounded-[16px] text-sm font-bold text-[var(--text-main)] outline-none focus:border-[var(--accent-indigo)] transition-all"
-                                        >
-                                            <option value="">Choose a file…</option>
-                                            {mediaItems.map(m => (
-                                                <option key={m._id} value={m._id}>
-                                                    {m.name} ({m.media_type})
-                                                </option>
-                                            ))}
-                                        </select>
+                                        <div className="relative">
+                                            <input
+                                                list="media-library-options"
+                                                value={mediaSearchText}
+                                                onChange={e => {
+                                                    const val = e.target.value;
+                                                    setMediaSearchText(val);
+                                                    const match = mediaItems.find(m =>
+                                                        m.name === val ||
+                                                        `${m.name} (${m.media_type})` === val ||
+                                                        m._id === val
+                                                    );
+                                                    if (match) {
+                                                        setSelectedMediaId(match._id);
+                                                        if (uploadModalType === 'resource' && match.media_type) {
+                                                            setResourceType(match.media_type);
+                                                        }
+                                                    } else {
+                                                        setSelectedMediaId('');
+                                                    }
+                                                }}
+                                                placeholder="Choose a file or type to search…"
+                                                className="w-full bg-[var(--input-bg)] px-4 py-3 border border-[var(--border)] rounded-[16px] text-sm font-bold text-[var(--text-main)] outline-none focus:border-[var(--accent-indigo)] transition-all"
+                                            />
+                                            <datalist id="media-library-options">
+                                                {mediaItems.map(m => (
+                                                    <option key={m._id} value={`${m.name} (${m.media_type})`}>
+                                                        {m.name}
+                                                    </option>
+                                                ))}
+                                            </datalist>
+                                        </div>
                                     )}
                                 </div>
                             ) : (

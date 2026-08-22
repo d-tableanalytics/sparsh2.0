@@ -101,15 +101,7 @@ class UserEditRequest(BaseModel):
     designation: Optional[str] = None
     department: Optional[str] = None
     reporting_manager: Optional[str] = None  # admin Edit form must be able to save this
-    # Leadership Score eligibility (L4-L7). The Edit form has offered this field since
-    # Leadership Score shipped, but it was missing here — so the value was dropped before
-    # it reached the database and the field read back blank. A user who has never been
-    # given a level cannot be enrolled in a cycle.
-    #
-    # Empty string is a real value: it CLEARS the level ("Not a leader"). A page that does
-    # not send the key at all leaves the stored level untouched, because the handler drops
-    # None before writing.
-    leadership_level: Optional[str] = None
+    level: Optional[str] = None
     permissions: Optional[dict] = None
 
     @field_validator("leadership_level")
@@ -144,6 +136,7 @@ class SelfProfileUpdate(BaseModel):
     department: Optional[str] = None
     reporting_manager: Optional[str] = None
     joining_date: Optional[str] = None
+    level: Optional[str] = None
 
 # ─── Current User ───
 @router.get("/me", response_model=UserResponse)
@@ -261,7 +254,7 @@ async def update_user(user_id: str, updates: UserEditRequest, background_tasks: 
              raise HTTPException(status_code=403, detail="Not authorized")
 
         
-    update_data = {k: v for k, v in updates.model_dump().items() if v is not None}
+    update_data = updates.model_dump(exclude_unset=True)
     if not update_data:
         raise HTTPException(status_code=400, detail="No fields to update")
     

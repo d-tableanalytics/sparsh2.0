@@ -20,10 +20,12 @@ export const getCompanies = () => api.get('/companies');
 export const getFormAssignments = (params) => api.get('/forms/assignments', { params });
 // Re-email one recipient their existing link.
 export const resendFormAssignment = (id) => api.post(`/forms/assignments/${id}/resend`);
+// Delete a form link assignment.
+export const deleteFormAssignment = (id) => api.delete(`/forms/assignments/${id}`);
 
-// Candidate team members to rate for a company (optionally excluding the HOD).
-export const getFormMembers = (companyId, hodId) =>
-  api.get('/forms/members', { params: { company_id: companyId, hod_id: hodId || undefined } });
+// Candidate team members to rate for a company (optionally excluding the HOD and filtering by formType).
+export const getFormMembers = (companyId, hodId, formType) =>
+  api.get('/forms/members', { params: { company_id: companyId, hod_id: hodId || undefined, form_type: formType || undefined } });
 
 // ── Rating matrix (Ownership / Accountability / Culture) — cell-level partial submit ──
 // Existing ratings for (company, period, hod) so already-saved cells lock.

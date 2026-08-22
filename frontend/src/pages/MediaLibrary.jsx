@@ -119,6 +119,19 @@ const MediaLibrary = () => {
   const [file, setFile] = useState(null);
   const [selectedFileCount, setSelectedFileCount] = useState(0);
   const [isDraggingFiles, setIsDraggingFiles] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  // Active upload tracking
+  const activeCount = queue.filter(q => q.status === 'uploading' || q.status === 'queued' || q.status === 'processing').length;
+  const isUploadDisabled = isSubmitting || activeCount > 0 || (!file && (!fileInputRef.current || !fileInputRef.current._filesToProcess?.length));
+
+  const totalBytes = queue.reduce((acc, q) => acc + (q.size || 0), 0);
+  const uploadedBytes = queue.reduce((acc, q) => {
+    if (q.status === 'completed') return acc + (q.size || 0);
+    if (q.progress && q.size) return acc + (q.size * (q.progress / 100));
+    return acc;
+  }, 0);
+  const overallProgress = totalBytes > 0 ? Math.round((uploadedBytes / totalBytes) * 100) : (queue.length > 0 && queue.every(q => q.status === 'completed') ? 100 : 0);
 
   // New folder, tag, and insights dashboard states
   const [currentFolder, setCurrentFolder] = useState('/');
@@ -230,68 +243,93 @@ const MediaLibrary = () => {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    const filesToUpload = fileInputRef.current?._filesToProcess || (file ? [file] : []);
-    
-    if (filesToUpload.length === 0) return showError('Please choose a file to upload');
-    if (filesToUpload.length === 1 && !form.name.trim()) return showError('Please enter a name');
+    if (isUploadDisabled) return;
 
-    const invalidFile = filesToUpload.find((selected) => validateFileForMediaType(selected, form.media_type));
-    if (invalidFile) return showError(validateFileForMediaType(invalidFile, form.media_type));
-
-    const uploadBatch = [];
-
-    for (let i = 0; i < filesToUpload.length; i++) {
-        let fileToProcess = filesToUpload[i];
-        // Only use the form name for the first file if multiple selected
-        const formToUpload = i === 0 ? { ...form } : { media_type: form.media_type, name: fileToProcess.name, description: '' };
-
-        // Additive Duplicate Detection check before calling upload API
-        try {
-          const { data: dupCheck } = await api.get(`/media/ai/check-duplicate?filename=${encodeURIComponent(fileToProcess.name)}&size=${fileToProcess.size}`);
-          if (dupCheck.duplicate) {
-            const choice = await openConflictModal(fileToProcess, dupCheck.existing);
-            if (!choice || choice === 'skip') {
-              continue;
-            }
-
-            if (choice === 'replace') {
-              await api.delete(`/media/${dupCheck.existing.id}`);
-            } else {
-              const nameParts = fileToProcess.name.split('.');
-              const ext = nameParts.pop();
-              const baseName = nameParts.join('.');
-              const newFileName = `${baseName}_copy_${Date.now()}.${ext}`;
-              fileToProcess = new File([fileToProcess], newFileName, { type: fileToProcess.type });
-              formToUpload.name = `${formToUpload.name.trim()} (Copy)`;
-            }
-          }
-        } catch (err) {
-          console.warn("Duplicate check error:", err);
-        }
-
-        uploadBatch.push({ file: fileToProcess, form: formToUpload, currentFolder });
-    }
-
-    if (uploadBatch.length === 0) {
-      return showError('No files were added to the upload queue');
-    }
-
-    // Add the whole batch at once so the upload manager can start files in parallel.
+    setIsSubmitting(true);
     try {
-      await enqueueFiles(uploadBatch);
-    } catch {
-      return;
-    }
-    
-    showSuccess(`${uploadBatch.length} file(s) added to the background upload queue.`);
+      const filesToUpload = fileInputRef.current?._filesToProcess || (file ? [file] : []);
+      
+      if (filesToUpload.length === 0) {
+        showError('Please choose a file to upload');
+        setIsSubmitting(false);
+        return;
+      }
+      if (filesToUpload.length === 1 && !form.name.trim()) {
+        showError('Please enter a name');
+        setIsSubmitting(false);
+        return;
+      }
 
-    // Clear form state immediately for the next upload
-    setForm({ media_type: 'video', name: '', description: '' });
-    setFile(null);
-    setSelectedFileCount(0);
-    if (fileInputRef.current) {
-        fileInputRef.current.value = '';
-        fileInputRef.current._filesToProcess = [];
+      const invalidFile = filesToUpload.find((selected) => validateFileForMediaType(selected, form.media_type));
+      if (invalidFile) {
+        showError(validateFileForMediaType(invalidFile, form.media_type));
+        setIsSubmitting(false);
+        return;
+      }
+
+      const uploadBatch = [];
+
+      for (let i = 0; i < filesToUpload.length; i++) {
+          let fileToProcess = filesToUpload[i];
+          // Only use the form name for the first file if multiple selected
+          const formToUpload = i === 0 ? { ...form } : { media_type: form.media_type, name: fileToProcess.name, description: '' };
+
+          // Additive Duplicate Detection check before calling upload API
+          try {
+            const { data: dupCheck } = await api.get(`/media/ai/check-duplicate?filename=${encodeURIComponent(fileToProcess.name)}&size=${fileToProcess.size}`);
+            if (dupCheck.duplicate) {
+              const choice = await openConflictModal(fileToProcess, dupCheck.existing);
+              if (!choice || choice === 'skip') {
+                continue;
+              }
+
+              if (choice === 'replace') {
+                await api.delete(`/media/${dupCheck.existing.id}`);
+              } else {
+                const nameParts = fileToProcess.name.split('.');
+                const ext = nameParts.pop();
+                const baseName = nameParts.join('.');
+                const newFileName = `${baseName}_copy_${Date.now()}.${ext}`;
+                fileToProcess = new File([fileToProcess], newFileName, { type: fileToProcess.type });
+                formToUpload.name = `${formToUpload.name.trim()} (Copy)`;
+              }
+            }
+          } catch (err) {
+            console.warn("Duplicate check error:", err);
+          }
+
+          uploadBatch.push({ file: fileToProcess, form: formToUpload, currentFolder });
+      }
+
+      if (uploadBatch.length === 0) {
+        showError('No files were added to the upload queue');
+        setIsSubmitting(false);
+        return;
+      }
+
+      // Add the whole batch at once so the upload manager can start files in parallel.
+      try {
+        await enqueueFiles(uploadBatch);
+      } catch {
+        setIsSubmitting(false);
+        return;
+      }
+      
+      showSuccess(`${uploadBatch.length} file(s) added to the background upload queue.`);
+
+      // Clear form state immediately for the next upload
+      setForm({ media_type: 'video', name: '', description: '' });
+      setFile(null);
+      setSelectedFileCount(0);
+      if (fileInputRef.current) {
+          fileInputRef.current.value = '';
+          fileInputRef.current._filesToProcess = [];
+      }
+    } catch (err) {
+      console.error(err);
+      showError('Upload submission failed');
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -307,16 +345,18 @@ const MediaLibrary = () => {
     }
   };
 
-  const filtered = items.filter((i) => {
-    const matchesType = filter === 'all' || i.media_type === filter;
-    const matchesSearch =
-      !search.trim() ||
-      i.name?.toLowerCase().includes(search.toLowerCase()) ||
-      i.description?.toLowerCase().includes(search.toLowerCase());
-    const matchesFolder = (i.folder || '/') === currentFolder;
-    const matchesTag = !selectedTag || (i.tags && i.tags.includes(selectedTag));
-    return matchesType && matchesSearch && matchesFolder && matchesTag;
-  });
+  const filtered = items
+    .filter((i) => {
+      const matchesType = filter === 'all' || i.media_type === filter;
+      const matchesSearch =
+        !search.trim() ||
+        i.name?.toLowerCase().includes(search.toLowerCase()) ||
+        i.description?.toLowerCase().includes(search.toLowerCase());
+      const matchesFolder = (i.folder || '/') === currentFolder;
+      const matchesTag = !selectedTag || (i.tags && i.tags.includes(selectedTag));
+      return matchesType && matchesSearch && matchesFolder && matchesTag;
+    })
+    .sort((a, b) => new Date(b.created_at || b.updated_at || 0) - new Date(a.created_at || a.updated_at || 0));
 
   return (
     <div className="p-6 md:p-8 max-w-7xl mx-auto">
@@ -472,13 +512,61 @@ const MediaLibrary = () => {
               />
             </div>
 
+            {/* Batch Upload Progress Bar */}
+            {queue.length > 0 && (
+              <div className="p-3.5 bg-[var(--input-bg)] border border-[var(--border)] rounded-xl space-y-2.5">
+                <div className="flex items-center justify-between text-xs font-bold">
+                  <span className="text-[var(--text-main)] flex items-center gap-1.5 truncate">
+                    <UploadCloud size={14} className={activeCount > 0 ? "animate-bounce text-[var(--accent-indigo)]" : "text-emerald-500"} />
+                    {activeCount > 0 ? `Uploading (${queue.length - activeCount}/${queue.length})` : 'Upload Batch Complete'}
+                  </span>
+                  <span className="text-[var(--accent-indigo)] font-black">{overallProgress}%</span>
+                </div>
+
+                <div className="w-full bg-[var(--border)] rounded-full h-2 overflow-hidden">
+                  <div
+                    className="bg-[var(--accent-indigo)] h-full transition-all duration-300 ease-out"
+                    style={{ width: `${overallProgress}%` }}
+                  />
+                </div>
+
+                <div className="max-h-36 overflow-y-auto space-y-2 pt-1 scrollbar-thin pr-1">
+                  {queue.map((item) => (
+                    <div key={item.id} className="text-[11px] space-y-1">
+                      <div className="flex items-center justify-between font-semibold text-[var(--text-muted)]">
+                        <span className="truncate max-w-[170px]" title={item.name}>{item.name}</span>
+                        <span className={`font-bold ${item.status === 'completed' ? 'text-emerald-500' : item.status === 'failed' ? 'text-red-500' : 'text-[var(--accent-indigo)]'}`}>
+                          {item.status === 'completed' ? '✓ Done' : item.status === 'failed' ? 'Failed' : `${item.progress || 0}%`}
+                        </span>
+                      </div>
+                      <div className="w-full bg-[var(--border)] rounded-full h-1.5 overflow-hidden">
+                        <div
+                          className={`h-full transition-all duration-200 ${item.status === 'completed' ? 'bg-emerald-500' : item.status === 'failed' ? 'bg-red-500' : 'bg-[var(--accent-indigo)]'}`}
+                          style={{ width: `${item.status === 'completed' ? 100 : (item.progress || 0)}%` }}
+                        />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
             <button
               type="submit"
-              disabled={!file && (!fileInputRef.current || !fileInputRef.current._filesToProcess?.length)}
-              className="w-full flex items-center justify-center gap-2 py-2.5 rounded-lg bg-[var(--sidebar-active-bg)] text-[var(--sidebar-active-text)] font-semibold text-sm disabled:opacity-60 hover:opacity-90 transition-opacity"
+              disabled={isUploadDisabled}
+              className="w-full flex items-center justify-center gap-2 py-2.5 rounded-lg bg-[var(--sidebar-active-bg)] text-[var(--sidebar-active-text)] font-semibold text-sm disabled:opacity-50 hover:opacity-90 transition-all cursor-pointer disabled:cursor-not-allowed"
             >
-              <UploadCloud size={16} />
-              Upload
+              {isSubmitting || activeCount > 0 ? (
+                <>
+                  <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                  <span>Uploading ({activeCount} remaining)...</span>
+                </>
+              ) : (
+                <>
+                  <UploadCloud size={16} />
+                  <span>Upload</span>
+                </>
+              )}
             </button>
           </motion.form>
         </div>

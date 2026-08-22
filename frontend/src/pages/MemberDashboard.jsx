@@ -422,6 +422,7 @@ const MemberDashboard = () => {
               {[
                 { key: 'first_name', label: 'First Name' }, { key: 'last_name', label: 'Last Name' },
                 { key: 'mobile', label: 'Mobile' }, { key: 'designation', label: 'Designation' },
+                { key: 'level', label: 'Level' }
               ].map(f => (
                 <div key={f.key} className="space-y-1">
                   <label className="text-[10px] font-bold text-[var(--text-muted)] uppercase tracking-widest">{f.label}</label>
@@ -502,7 +503,8 @@ const MemberDashboard = () => {
                 <InfoCard icon={Briefcase} label="Designation" value={member.designation} color="yellow" />
                 <InfoCard icon={Building2} label="Department" value={member.department} color="green" />
                 <InfoCard icon={BookOpen} label="Session Type" value={member.session_type} color="orange" />
-                <InfoCard icon={User} label="Reporting Manager" value={(member.reporting_manager && managers.find(mg => mg._id === member.reporting_manager)?.full_name) || '—'} color="indigo" />
+                <InfoCard icon={Shield} label="Level" value={member.level} color="indigo" />
+                <InfoCard icon={User} label="Reporting Manager" value={(member.reporting_manager && (managers.find(mg => mg._id === member.reporting_manager || mg.email === member.reporting_manager)?.full_name || member.reporting_manager)) || '—'} color="indigo" />
                 <InfoCard icon={Building2} label="Company ID" value={member.company_id} color="indigo" />
               </div>
             </div>
