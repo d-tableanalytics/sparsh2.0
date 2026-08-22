@@ -38,8 +38,7 @@ from bson import ObjectId
 from app.db.mongodb import get_collection
 from app.models.leadership import (
     COLL_LS_ASSIGNMENTS, COLL_LS_BRIEFINGS, COLL_LS_CYCLES, COLL_LS_DISCUSSIONS,
-    COLL_LS_QUESTIONS, COLL_LS_RESPONSES, COLL_LS_SCORES,
-    COLL_LS_SIGNOFF, COLL_LS_SUBJECTS,
+    COLL_LS_QUESTIONS, COLL_LS_RESPONSES, COLL_LS_SCORES, COLL_LS_SUBJECTS,
     CYCLE_CLOSED, CYCLE_COLLECTING, CYCLE_COMPUTED, CYCLE_DRAFT, CYCLE_OPEN,
     CYCLE_PUBLISHED, CYCLE_STATUSES, CYCLE_TRANSITIONS, can_transition,
     DEFAULT_QUORUM, DEGREE_180, DEGREE_360, DEGREE_RELATIONS,
@@ -47,8 +46,8 @@ from app.models.leadership import (
     RECOMMENDED_PER_RELATION, REL_DIRECT_REPORT, REL_OTHER_DEPT, REL_PEER,
     REL_SUPERIOR, RELATIONS, RELATION_LABELS,
     SCALE_MAX, TOTAL_WEIGHTAGE, WEIGHTAGE_EPSILON,
-    all_seed_rows, cycle_label, cycle_period, current_cycle, level_review,
-    question_review, seed_rows_for_level, signoff_fingerprint, source_drift,
+    all_seed_rows, cycle_label, cycle_period, current_cycle,
+    rubric_fingerprint, seed_rows_for_level,
 )
 
 logger = logging.getLogger(__name__)
@@ -140,29 +139,10 @@ async def get_questions(level: Optional[str] = None, include_inactive: bool = Fa
 
     docs.sort(key=lambda d: (str(d.get("level") or ""), int(d.get("order") or 0)))
 
+    # Rows are returned exactly as configured. Nothing is flagged, compared against the
+    # seed or held back for confirmation — the document is used as it stands.
     for d in docs:
         d["_id"] = str(d["_id"])
-        # The source-document issue register is the authority, applied on READ. Rows
-        # seeded before the register existed therefore show their issue without anything
-        # being rewritten in the collection — no migration, and the flag cannot drift out
-        # of step with the register the way a stored copy would.
-        issue = question_review(d.get("item_id") or "") or {}
-        d["needs_review"] = bool(issue)
-        d["review_code"] = issue.get("code")
-        d["review_note"] = issue.get("note")
-        d["review_severity"] = issue.get("severity")
-
-    # Where the configured rows differ from the printed document. Reported, never
-    # repaired: rewriting a seeded record would change what leaders are scored on with
-    # nobody approving it. An admin edit shows up here too, which is the point — the
-    # screen should always be able to answer "does this still match the document?".
-    by_level: Dict[str, List[dict]] = {}
-    for d in docs:
-        by_level.setdefault(str(d.get("level") or "").upper(), []).append(d)
-    for lvl, rows in by_level.items():
-        drift = {x["item_id"]: x["differences"] for x in source_drift(lvl, rows)}
-        for d in rows:
-            d["source_drift"] = drift.get(d.get("item_id"), [])
     return docs
 
 
@@ -309,174 +289,6 @@ async def weightage_summary(company_id: Optional[str] = None) -> List[dict]:
             "company_owned": bool(rows and rows[0].get("company_id")),
         })
     return out
-
-
-# ─────────────────────────────────────────────────────────────
-# Source-document review and level sign-off
-#
-# The seeded rubric carries defects the business has to rule on (see QUESTION_REVIEW in
-# app/models/leadership.py). Rather than guess what was meant, the module records them,
-# shows them, and refuses to FREEZE a score computed from a level nobody has approved.
-#
-# Deliberately narrow: only closing a cycle is blocked. Creating a cycle, enrolling
-# leaders, assigning panels, mailing links and collecting feedback all stay open, so the
-# whole flow can be tested before anyone signs anything.
-# ─────────────────────────────────────────────────────────────
-async def level_signoff(company_id: str, level: str) -> dict:
-    """One level's approval state for one company.
-
-    `stale` is the important field. A sign-off stores the fingerprint of the exact rubric
-    that was approved; if a question has been retitled, an option restated or a weightage
-    moved since, the fingerprint no longer matches and the approval no longer applies.
-    Silently honouring it would let an unreviewed rubric ride in on an old approval.
-    """
-    level = str(level).upper()
-    questions = await get_questions(level, company_id=company_id)
-    current = signoff_fingerprint(questions)
-
-    row = await get_collection(COLL_LS_SIGNOFF).find_one(
-        {"company_id": str(company_id), "level": level})
-
-    if not row:
-        return {"level": level, "label": LEVEL_LABELS.get(level, level),
-                "signed_off": False, "stale": False, "fingerprint": current,
-                "signed_off_at": None, "signed_off_by": None, "note": ""}
-
-    stale = str(row.get("fingerprint") or "") != current
-    return {
-        "level": level,
-        "label": LEVEL_LABELS.get(level, level),
-        # A stale approval is reported as NOT signed off — it is the same thing for every
-        # decision that depends on it, and calling it "signed off (stale)" invites someone
-        # to read only the first half.
-        "signed_off": not stale,
-        "stale": stale,
-        "fingerprint": current,
-        "signed_off_fingerprint": row.get("fingerprint"),
-        "signed_off_at": row.get("signed_off_at"),
-        "signed_off_by": row.get("signed_off_by"),
-        "signed_off_by_id": row.get("signed_off_by_id"),
-        "note": row.get("note") or "",
-        "acknowledged_issues": row.get("acknowledged_issues") or [],
-    }
-
-
-async def set_level_signoff(company_id: str, level: str, note: str, user: dict) -> dict:
-    """Record HR + MD approval of a level's rubric as it stands right now.
-
-    The open issues are stored alongside, so the record says what was accepted rather than
-    merely that someone clicked a button.
-    """
-    level = str(level).upper()
-    if level not in LEVELS:
-        raise ValueError(f"level must be one of {', '.join(LEVELS)}")
-
-    questions = await get_questions(level, company_id=company_id)
-    if not questions:
-        raise ValueError(f"No active questions configured for {level}")
-
-    total = round(sum(float(q.get("weightage") or 0) for q in questions), 2)
-    if abs(total - TOTAL_WEIGHTAGE) > WEIGHTAGE_EPSILON:
-        # Approving a level whose weightages do not total 100 would certify a rubric that
-        # cannot produce a correct score.
-        raise ValueError(
-            f"{LEVEL_LABELS.get(level, level)} weightages total {total:g}%, not "
-            f"{TOTAL_WEIGHTAGE:g}%. Fix the weightage column before signing off.")
-
-    now = datetime.utcnow()
-    doc = {
-        "company_id": str(company_id),
-        "level": level,
-        "fingerprint": signoff_fingerprint(questions),
-        "note": (note or "").strip(),
-        "acknowledged_issues": [
-            {"scope": i["scope"], "item_id": i.get("item_id"), "code": i["code"]}
-            for i in level_review(level)
-        ],
-        "signed_off_by": _display_name(user),
-        "signed_off_by_id": str(user.get("_id") or ""),
-        "signed_off_at": now,
-        "updated_at": now,
-    }
-    await get_collection(COLL_LS_SIGNOFF).update_one(
-        {"company_id": str(company_id), "level": level},
-        {"$set": doc, "$setOnInsert": {"created_at": now}},
-        upsert=True,
-    )
-    logger.info("Leadership %s signed off by %s [company=%s]",
-                level, doc["signed_off_by"], company_id)
-    return await level_signoff(company_id, level)
-
-
-async def clear_level_signoff(company_id: str, level: str) -> dict:
-    """Withdraw an approval — for when HR decides the rubric needs another look."""
-    level = str(level).upper()
-    res = await get_collection(COLL_LS_SIGNOFF).delete_one(
-        {"company_id": str(company_id), "level": level})
-    if not res.deleted_count:
-        raise ValueError(f"{LEVEL_LABELS.get(level, level)} is not signed off")
-    return await level_signoff(company_id, level)
-
-
-async def review_summary(company_id: str) -> dict:
-    """Every level: its questions, its open source-document issues, its approval state.
-
-    This is what the admin question screen renders, and what tells HR why a cycle will not
-    close yet.
-    """
-    await seed_questions_if_empty()
-    levels = []
-    for level in LEVELS:
-        questions = await get_questions(level, company_id=company_id)
-        issues = level_review(level)
-        signoff = await level_signoff(company_id, level)
-        total = round(sum(float(q.get("weightage") or 0) for q in questions), 2)
-        levels.append({
-            **signoff,
-            "theme": LEVEL_THEMES.get(level, ""),
-            "questions": len(questions),
-            "total_weightage": total,
-            "weightage_valid": abs(total - TOTAL_WEIGHTAGE) <= WEIGHTAGE_EPSILON,
-            # Equal weight across a level is the seeded placeholder, not a business
-            # decision. Surfaced explicitly so nobody reads it as HR's intent.
-            "weightage_is_placeholder": len({round(float(q.get("weightage") or 0), 2)
-                                             for q in questions}) <= 1,
-            "issues": issues,
-            "issue_count": len(issues),
-            "blocking_count": len([i for i in issues if i.get("severity") == "blocking"]),
-            "flagged_questions": [q["item_id"] for q in questions if q.get("needs_review")],
-            "source_drift": source_drift(level, questions),
-        })
-    return {
-        "levels": levels,
-        "signed_off": [l["level"] for l in levels if l["signed_off"]],
-        "pending": [l["level"] for l in levels if not l["signed_off"]],
-    }
-
-
-async def unsigned_levels(company_id: str, cycle: str) -> List[dict]:
-    """Levels enrolled in this cycle whose rubric has no valid approval.
-
-    Only levels actually being scored are checked — an unapproved L7 does not block a
-    cycle that enrolled nobody at L7.
-    """
-    subjects = await get_collection(COLL_LS_SUBJECTS).find(
-        {"company_id": str(company_id), "cycle": str(cycle)}).to_list(500)
-    enrolled = sorted({str(s.get("level") or "").upper() for s in subjects if s.get("level")})
-
-    out = []
-    for level in enrolled:
-        state = await level_signoff(company_id, level)
-        if not state["signed_off"]:
-            out.append(state)
-    return out
-
-
-def describe_unsigned(states: List[dict]) -> str:
-    """'L-5 (Manager) (approval out of date), L7 & Above' — for an error a human reads."""
-    return ", ".join(
-        f"{s['label']}{' (approval out of date)' if s.get('stale') else ''}"
-        for s in states)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -701,19 +513,8 @@ async def update_cycle(company_id: str, cycle: str, updates: dict, user: dict) -
             "are fixed so that every response is scored under the rules it was collected "
             "under.")
 
-    if target == CYCLE_COMPUTED:
-        # A frozen score is what a leader is shown and a manager discusses at RRO. It must
-        # not be built from a rubric nobody has approved — the source document's question
-        # titles do not always match the parameter their options measure, so an unreviewed
-        # level produces a number filed under the wrong parameter name.
-        pending = await unsigned_levels(company_id, cycle)
-        if pending:
-            raise ValueError(
-                f"{cycle_label(cycle)} cannot be computed yet: "
-                f"{describe_unsigned(pending)} still needs HR + MD sign-off. "
-                "Review the question titles, option wording and weightages on the "
-                "Leadership Questions screen, then sign the level off.")
-
+    # Computing is not gated on any approval of the rubric: the seeded questions and
+    # options are the single source of truth and are scored exactly as they stand.
     now = datetime.utcnow()
     fields["updated_at"] = now
     if target == CYCLE_CLOSED:
@@ -775,7 +576,14 @@ async def _find_person(person_id: str, company_id: str) -> Optional[dict]:
 
 
 async def list_company_people(company_id: str) -> List[dict]:
-    """The company's active roster — the pool HR picks leaders and givers from."""
+    """The company's active roster — the pool HR picks leaders and givers from.
+
+    `leadership_level` is carried through deliberately. This projection is what
+    `list_eligible_people()` reads, and while the field was missing every levelled user
+    was reported as unlevelled: the level was stored correctly on the user, but the
+    eligible list was built from a dict that had already dropped it. It is copied from the
+    user record as-is and never inferred from `designation` — see `leadership_level_of`.
+    """
     people = []
     query = {"company_id": str(company_id), "is_active": {"$ne": False}}
     for coll in PERSON_COLLECTIONS:
@@ -787,6 +595,7 @@ async def list_company_people(company_id: str) -> List[dict]:
                 "designation": u.get("designation"),
                 "department": u.get("department"),
                 "reporting_manager": u.get("reporting_manager"),
+                "leadership_level": leadership_level_of(u) or None,
             })
     people.sort(key=lambda p: (p.get("name") or "").lower())
     return people
@@ -927,7 +736,7 @@ async def add_subject(company_id: str, cycle: str, subject_id: str, level: str,
             "weightage": float(q.get("weightage") or 0),
             "options": [dict(o) for o in (q.get("options") or [])],
         } for q in questions],
-        "rubric_fingerprint": signoff_fingerprint(questions),
+        "rubric_fingerprint": rubric_fingerprint(questions),
         "enrolled_by": _display_name(user),
         "enrolled_by_id": str(user.get("_id") or ""),
         "created_at": now,

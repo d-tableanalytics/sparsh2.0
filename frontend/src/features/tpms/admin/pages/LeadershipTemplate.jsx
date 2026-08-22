@@ -4,12 +4,14 @@ import {
   ShieldAlert, Link2, Code2,
 } from 'lucide-react';
 import {
-  DashboardHero, HeroButton, Section, TableShell, Th, Td,
+  DashboardHero, HeaderSelect, HeroButton, Section, TableShell, Th, Td,
 } from '../../common/dashboardKit';
 import {
   getLeadershipTemplate, saveLeadershipTemplate, previewLeadershipTemplate,
 } from '../../../../services/leadershipApi';
-import { canManagePanel, errText, useAsync } from '../../leadership/leadershipUtils';
+import {
+  canManage, errText, useAsync, useLeadershipCompany,
+} from '../../leadership/leadershipUtils';
 import { useAuth } from '../../../../context/AuthContext';
 
 /* ─────────────────────────────────────────────────────────────
@@ -28,7 +30,11 @@ const inputCls =
 
 const LeadershipTemplate = () => {
   const { user } = useAuth();
-  const allowed = canManagePanel(user);
+  // The template is stored per company, so staff pick one before reading or saving it.
+  const { staff, companyOptions, companyId, setCompanyId } = useLeadershipCompany();
+  // Mirrors `_require_manage`: staff, HR and the client admin. The narrower panel gate
+  // guards WHO GIVES FEEDBACK; a template carries no giver identity.
+  const allowed = canManage(user);
 
   const [subject, setSubject] = useState('');
   const [body, setBody] = useState('');
@@ -38,8 +44,9 @@ const LeadershipTemplate = () => {
   const [preview, setPreview] = useState(null);
   const [previewing, setPreviewing] = useState(false);
 
-  const load = useCallback(async () => (await getLeadershipTemplate()).data, []);
-  const { data, loading, error, reload } = useAsync(load, [], { skip: !allowed });
+  const load = useCallback(async () => (await getLeadershipTemplate(companyId)).data, [companyId]);
+  const { data, loading, error, reload } = useAsync(load, [companyId],
+    { skip: !allowed || (staff && !companyId) });
 
   useEffect(() => {
     if (!data) return;
@@ -63,7 +70,7 @@ const LeadershipTemplate = () => {
     setErr('');
     setSaved('');
     try {
-      const res = await saveLeadershipTemplate({ subject, body_html: body, active: true });
+      const res = await saveLeadershipTemplate(companyId, { subject, body_html: body, active: true });
       setSaved(res.data?.has_link_placeholder
         ? 'Template saved. Each giver will receive their own link.'
         : 'Template saved. It has no {{leadership_link}} placeholder, so the link will be '
@@ -114,7 +121,11 @@ const LeadershipTemplate = () => {
   return (
     <div className="space-y-5">
       <DashboardHero icon={Mail} title="Leadership Score — Invitation Email"
-        subtitle="One template, personalised per giver at dispatch">
+        subtitle="Per company, personalised per giver at dispatch">
+        {/* The template is stored per company — staff pick whose invitation they edit. */}
+        {staff && (
+          <HeaderSelect value={companyId} onChange={setCompanyId} options={companyOptions} />
+        )}
         <HeroButton icon={Eye} onClick={runPreview}>{previewing ? 'Rendering…' : 'Preview'}</HeroButton>
         <HeroButton icon={RefreshCw} onClick={reload}>Reload</HeroButton>
       </DashboardHero>

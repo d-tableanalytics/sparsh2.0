@@ -30,7 +30,7 @@ from typing import List, Optional
 from app.controllers.auth_controller import get_current_user
 from app.models.leadership import (
     BriefingCreate, CycleCreate, CycleUpdate, DiscussionAck, DiscussionCreate,
-    GiverAssignment, LevelSignOff, QuestionUpdate,
+    GiverAssignment, QuestionUpdate,
     ResponseSubmit, SubjectCreate, SubjectMode, WeightageUpdate,
     DEGREE_RELATIONS, DEGREES, LEVELS, LEVEL_LABELS, LEVEL_THEMES,
     RECOMMENDED_PANEL_SIZE, RECOMMENDED_PER_RELATION, RELATIONS, RELATION_LABELS,
@@ -38,7 +38,7 @@ from app.models.leadership import (
     SCALE_MAX, SCALE_MIN, TOTAL_WEIGHTAGE,
     DEFAULT_TEMPLATE_BODY, DEFAULT_TEMPLATE_SUBJECT,
     TEMPLATE_ACTIVITY, TEMPLATE_EVENT, TEMPLATE_PLACEHOLDERS, TEMPLATE_SIDE,
-    cycle_label, current_cycle, recent_cycles,
+    cycle_label, current_cycle, selectable_cycles,
 )
 from app.services import leadership_service as svc
 from app.services import leadership_link_service as links
@@ -164,21 +164,47 @@ def _bad(e: Exception) -> HTTPException:
 # other TPMS template is readable or writable through them — which is why editing is opened
 # to HR here without widening the generic /tpms/mail-templates endpoints, whose permissions
 # and behaviour are unchanged.
+#
+# WHO MAY EDIT IT: `_require_manage`, not `_require_panel`. The narrow panel gate exists
+# to protect WHO GIVES FEEDBACK — a template carries no giver identity, only wording and
+# placeholders, so gating it there conflated two different concerns and locked a client
+# admin out of their own invitation. `_company_for` pins a client-side user to their own
+# company whatever they pass, so a clientadmin can only ever read or write their own row.
 # ─────────────────────────────────────────────────────────────
-def _template_key() -> dict:
-    return {"activity": TEMPLATE_ACTIVITY, "side": TEMPLATE_SIDE, "event": TEMPLATE_EVENT}
+def _template_key(company_id: Optional[str] = None) -> dict:
+    """The row identifying ONE company's invitation template.
+
+    `company_id` is part of the key. Without it every client shared a single row, so one
+    company customising their invitation silently rewrote the mail every other company
+    sends. A row with `company_id: None` is the shared default and is still read as a
+    fallback, which is what keeps any already-authored template working.
+    """
+    key = {"activity": TEMPLATE_ACTIVITY, "side": TEMPLATE_SIDE, "event": TEMPLATE_EVENT}
+    return {**key, "company_id": str(company_id) if company_id else None}
 
 
 @router.get("/template")
-async def read_template(current_user: dict = Depends(get_current_user)):
-    """The invitation template, its placeholders, and the default used until one is saved."""
-    _require_panel(current_user)
+async def read_template(company_id: Optional[str] = Query(None),
+                        current_user: dict = Depends(get_current_user)):
+    """The invitation template, its placeholders, and the default used until one is saved.
+
+    Company-scoped: this company's own row if it has one, otherwise the shared default
+    row, otherwise the built-in text.
+    """
+    _require_manage(current_user)
+    cid = _company_for(current_user, company_id)
     from app.db.mongodb import get_collection
     from app.models.tpms import COLL_MAIL_TEMPLATES
 
-    doc = await get_collection(COLL_MAIL_TEMPLATES).find_one(_template_key())
+    col = get_collection(COLL_MAIL_TEMPLATES)
+    doc = await col.find_one(_template_key(cid))
+    inherited = False
+    if not doc:
+        doc = await col.find_one(_template_key(None))
+        inherited = bool(doc)
     return {
-        **_template_key(),
+        **_template_key(cid),
+        "inherited_from_default": inherited,
         "subject": (doc or {}).get("subject") or DEFAULT_TEMPLATE_SUBJECT,
         "body_html": (doc or {}).get("body_html") or DEFAULT_TEMPLATE_BODY,
         "active": (doc or {}).get("active", True) is not False,
@@ -193,14 +219,16 @@ async def read_template(current_user: dict = Depends(get_current_user)):
 
 
 @router.put("/template")
-async def save_template(payload: dict, current_user: dict = Depends(get_current_user)):
-    """Create or update the Leadership invitation template. HR / Admin only.
+async def save_template(payload: dict, company_id: Optional[str] = Query(None),
+                        current_user: dict = Depends(get_current_user)):
+    """Create or update THIS COMPANY's Leadership invitation template. HR / Admin only.
 
     Writes exactly one row, identified by the leadership-only (activity, side, event)
-    triple — an upsert here can neither create nor overwrite a template belonging to any
-    other activity or event.
+    triple plus the company — an upsert here can neither create nor overwrite a template
+    belonging to any other activity, event, or company.
     """
-    _require_panel(current_user)
+    _require_manage(current_user)
+    cid = _company_for(current_user, company_id)
     subject = str(payload.get("subject") or "").strip()
     body = str(payload.get("body_html") or "").strip()
     if not subject:
@@ -213,9 +241,9 @@ async def save_template(payload: dict, current_user: dict = Depends(get_current_
     from app.models.tpms import COLL_MAIL_TEMPLATES
 
     await get_collection(COLL_MAIL_TEMPLATES).update_one(
-        _template_key(),
+        _template_key(cid),
         {"$set": {
-            **_template_key(),
+            **_template_key(cid),
             "subject": subject,
             "body_html": body,
             "active": bool(payload.get("active", True)),
@@ -237,8 +265,9 @@ async def save_template(payload: dict, current_user: dict = Depends(get_current_
 @router.post("/template/preview")
 async def preview_template(payload: dict, current_user: dict = Depends(get_current_user)):
     """Render the draft against sample values, so an author can see the result before
-    saving. Uses a fake link — no real token is ever exposed by this endpoint."""
-    _require_panel(current_user)
+    saving. Uses a fake link and invented people — no real token, no real giver, and no
+    database read at all, so it exposes nothing whatever the caller's company."""
+    _require_manage(current_user)
     from app.services.tpms_notify_service import fill
 
     sample = {
@@ -273,7 +302,12 @@ async def read_config(current_user: dict = Depends(get_current_user)):
         "recommended_per_relation": RECOMMENDED_PER_RELATION,
         "required_total_weightage": TOTAL_WEIGHTAGE,
         "current_cycle": current_cycle(),
-        "cycles": [{"code": c, "label": cycle_label(c)} for c in recent_cycles(8)],
+        # Upcoming windows first, then the current one, then recent history. A cycle whose
+        # window has passed can be created but never dispatched — its links are born
+        # expired — so the picker must offer at least one window that can still collect.
+        "cycles": [{"code": c, "label": cycle_label(c),
+                    "expired": links.cycle_is_expired(c)}
+                   for c in selectable_cycles(back=6, ahead=3)],
         "can_manage": _can_manage(current_user),
         # Separate from can_manage: a clientadmin runs cycles and enrolment but must not
         # reach the panel. The UI hides panel controls on this flag; the endpoints enforce
@@ -355,68 +389,15 @@ async def restore_questions(level: str, company_id: Optional[str] = Query(None),
     return await svc.restore_level_questions(level, company_id=_company_for(current_user, company_id))
 
 
-# ─────────────────────────────────────────────────────────────
-# Source-document review and level sign-off
-#
-# "All parameters should have weightages to create scoring - HR and MD", so approving a
-# level is HR's and MD's call, not an administrator's. Internal staff keep access because
-# they seed and support the module.
-# ─────────────────────────────────────────────────────────────
+# There is no review or sign-off endpoint. The seeded questions and options are the
+# single source of truth and are used exactly as they stand — nothing asks HR, the MD or
+# anyone else to confirm them, and nothing is held back pending an approval.
 def _is_md(user: dict) -> bool:
     """The company's MD. `clientadmin` counts: it is the company's top-authority account
     and already maps to MD rank in auth_controller.client_rank, so the two routes into
     that authority behave the same here."""
     return _role(user) == "clientadmin" or (
         _role(user) == "clientuser" and _governance_role(user) == "md")
-
-
-def _require_signoff(user: dict) -> None:
-    if not (_is_staff(user) or _is_hr(user) or _is_md(user)):
-        raise HTTPException(
-            status_code=403,
-            detail="Only HR, MD or an administrator can sign off a level's questions.")
-
-
-@router.get("/questions/review")
-async def read_review(company_id: Optional[str] = Query(None),
-                      current_user: dict = Depends(get_current_user)):
-    """Every level's open source-document issues and its approval state.
-
-    Read-only and open to anyone who can manage the module, because it is the explanation
-    for why a cycle will not close — hiding it would leave HR with a refusal and no reason.
-    """
-    _require_manage(current_user)
-    cid = _company_for(current_user, company_id)
-    return await svc.review_summary(cid)
-
-
-@router.post("/questions/{level}/sign-off")
-async def sign_off_level(level: str, payload: LevelSignOff,
-                         company_id: Optional[str] = Query(None),
-                         current_user: dict = Depends(get_current_user)):
-    """Confirm this level's rubric is what leaders should be scored on.
-
-    Stores the fingerprint of the exact questions, options and weightages approved, so any
-    later edit invalidates the approval rather than inheriting it.
-    """
-    _require_signoff(current_user)
-    cid = _company_for(current_user, company_id)
-    try:
-        return await svc.set_level_signoff(cid, level, payload.note, current_user)
-    except ValueError as e:
-        raise _bad(e)
-
-
-@router.delete("/questions/{level}/sign-off")
-async def withdraw_sign_off(level: str, company_id: Optional[str] = Query(None),
-                            current_user: dict = Depends(get_current_user)):
-    """Withdraw an approval, putting the level back under review."""
-    _require_signoff(current_user)
-    cid = _company_for(current_user, company_id)
-    try:
-        return await svc.clear_level_signoff(cid, level)
-    except ValueError as e:
-        raise _bad(e)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -623,6 +604,28 @@ async def resend(assignment_id: str, current_user: dict = Depends(get_current_us
         await svc.assert_dispatchable(str(doc.get("company_id")), str(doc.get("cycle")))
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
+
+    # A FIRST invitation must respect the panel rule, exactly as dispatch does.
+    #
+    # `sent_at` is written only on a real delivery, so its absence means this giver has
+    # never actually been invited — sending now is a first invitation wearing a resend
+    # button, and it was the one route that could invite an incomplete panel one person
+    # at a time. Dispatch refuses that (409) precisely because the score that follows is
+    # labelled 360° whatever it was really built from.
+    #
+    # A giver who HAS been delivered to keeps the escape hatch unconditionally: chasing
+    # someone already invited must never be blocked by a panel that changed afterwards,
+    # or a non-submitter could be stranded with no way to reach them.
+    if not doc.get("sent_at"):
+        missing = await svc.panel_shortfall(
+            str(doc.get("company_id")), str(doc.get("cycle")), str(doc.get("subject_id")))
+        if missing:
+            raise HTTPException(
+                status_code=409,
+                detail=("This panel is not complete yet — it still needs "
+                        f"{svc.describe_shortfall(missing)}. The document asks for 2 givers "
+                        "per relation so no single person's rating decides the score."))
+
     # Deliberately NOT cooldown-checked: this is a single, explicit, per-person action —
     # the escape hatch that keeps "resend if needed" available while the bulk button waits.
     result = await links.send_assignment_email(doc)
@@ -888,7 +891,8 @@ async def read_quorum(cycle: str, company_id: Optional[str] = Query(None),
 @router.post("/cycles/{cycle}/compute")
 async def compute_cycle(cycle: str, company_id: Optional[str] = Query(None),
                         current_user: dict = Depends(get_current_user)):
-    """Freeze this cycle's scores. Refused until every level it scores is signed off."""
+    """Freeze this cycle's scores. Nothing gates this but the cycle's own state machine —
+    the rubric is used exactly as seeded and needs no approval."""
     _require_manage(current_user)
     cid = _company_for(current_user, company_id)
     try:

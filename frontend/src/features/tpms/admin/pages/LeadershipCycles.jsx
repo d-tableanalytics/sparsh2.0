@@ -3,7 +3,7 @@ import { Link, useLocation } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   CalendarRange, Plus, RefreshCw, AlertTriangle, CheckCircle2, X, ShieldAlert,
-  Users, Lock, Unlock, ArrowRight, Layers, Calculator, Send,
+  Users, Lock, Unlock, ArrowRight, Layers, Calculator, Send, Undo2,
 } from 'lucide-react';
 import {
   DashboardHero, HeaderSelect, HeroButton, Section, Th, Td, TableShell, KpiTile, FilterSelect,
@@ -12,6 +12,7 @@ import {
   getLeadershipConfig, getLeadershipCycles, createLeadershipCycle, updateLeadershipCycle,
   getLeadershipQuorum, computeLeadershipCycle, publishLeadershipCycle,
 } from '../../../../services/leadershipApi';
+import { cycleLabel, cycleHint, isScoreReady } from '../../leadership/leadershipStatus';
 import {
   canManage, errText, fmtNum, useAsync, useLeadershipCompany,
 } from '../../leadership/leadershipUtils';
@@ -65,7 +66,7 @@ const CycleModal = ({ config, existing, onClose, onSubmit }) => {
 
   const [cycle, setCycle] = useState(available[0]?.code || '');
   const [degree, setDegree] = useState('360');
-  const [minResponses, setMinResponses] = useState('1');
+  const [minResponses, setMinResponses] = useState('3');
   const [notes, setNotes] = useState('');
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState('');
@@ -79,7 +80,8 @@ const CycleModal = ({ config, existing, onClose, onSubmit }) => {
       await onSubmit({
         cycle,
         degree,
-        min_responses: Math.max(1, Number(minResponses) || 1),
+        // Mirrors MIN_RESPONSES_FLOOR on the server, which raises anything lower to 3.
+        min_responses: Math.max(3, Number(minResponses) || 3),
         notes: notes.trim(),
       });
     } catch (ex) {
@@ -115,7 +117,13 @@ const CycleModal = ({ config, existing, onClose, onSubmit }) => {
           <Field label="Cycle" hint="Leadership feedback runs once every 2 months.">
             <FilterSelect value={cycle} onChange={setCycle}
               options={available.length
-                ? available.map((c) => ({ id: c.code, name: c.label }))
+                ? available.map((c) => ({
+                    id: c.code,
+                    // A past window's feedback links are already expired, so such a cycle
+                    // can be created but never dispatched. Say so in the option rather
+                    // than letting HR find out at the dispatch step.
+                    name: c.expired ? `${c.label} — window closed, cannot collect` : c.label,
+                  }))
                 : [{ id: '', name: 'Every recent cycle already exists' }]} />
           </Field>
 
@@ -126,8 +134,8 @@ const CycleModal = ({ config, existing, onClose, onSubmit }) => {
                           { id: '180', name: '180° — superiors & peers' }]} />
             </Field>
             <Field label="Minimum responses"
-              hint="Responses needed before a score is shown. 1 = show as soon as any arrive.">
-              <input type="number" min={1} max={8} value={minResponses}
+              hint="Responses needed before any score is shown. 3 is the anonymity floor and cannot go lower.">
+              <input type="number" min={3} max={8} value={minResponses}
                 onChange={(e) => setMinResponses(e.target.value)} className={inputCls} />
             </Field>
           </div>
@@ -268,6 +276,8 @@ const LeadershipCycles = () => {
   }
 
   const open = cycles.filter((c) => c.status === 'open').length;
+  // Closed cycles whose scores are frozen. Surfaced as a count, not as a fifth status.
+  const ready = cycles.filter((c) => isScoreReady(c.status)).length;
   const leaders = cycles.reduce((s, c) => s + (c.subject_count || 0), 0);
   const responses = cycles.reduce((s, c) => s + (c.response_count || 0), 0);
 
@@ -294,6 +304,8 @@ const LeadershipCycles = () => {
       <div className="grid grid-cols-2 xl:grid-cols-4 gap-3">
         <KpiTile value={cycles.length} label="Cycles" sub="All time" tone="blue" icon={Layers} />
         <KpiTile value={open} label="Open" sub="Collecting feedback" tone={open ? 'green' : 'plain'} icon={Unlock} />
+        <KpiTile value={ready} label="Ready to publish" sub="Closed, scores calculated"
+          tone={ready ? 'indigo' : 'plain'} icon={Calculator} />
         <KpiTile value={leaders} label="Leaders" sub="Enrolled across cycles" tone="blue" icon={Users} />
         <KpiTile value={responses} label="Responses" sub="Feedback received" tone={responses ? 'green' : 'plain'} icon={CheckCircle2} />
       </div>
@@ -339,7 +351,16 @@ const LeadershipCycles = () => {
                   <Td align="center" className="tabular-nums text-[var(--text-muted)]">{fmtNum(c.min_responses)}</Td>
                   <Td align="center" className="tabular-nums font-bold">{c.subject_count ?? 0}</Td>
                   <Td align="center" className="tabular-nums font-bold">{c.response_count ?? 0}</Td>
-                  <Td align="center"><Pill label={c.status} tone={c.status} /></Td>
+                  {/* `computed` is not a user-facing state — it reads as Closed, and the
+                      action column is what says the scores are ready to release. */}
+                  <Td align="center" title={cycleHint(c.status)}>
+                    <Pill label={cycleLabel(c.status)} tone={c.status} />
+                    {isScoreReady(c.status) && (
+                      <span className="block text-[9.5px] font-bold text-[var(--accent-indigo)] mt-1 whitespace-nowrap">
+                        scores ready
+                      </span>
+                    )}
+                  </Td>
                   <Td align="right">
                     <div className="inline-flex items-center gap-1.5 justify-end flex-wrap">
                       <Link to={`${panelBase}/leadership/subjects?cycle=${c.cycle}`}
@@ -374,11 +395,21 @@ const LeadershipCycles = () => {
                         </>
                       )}
                       {c.status === 'computed' && (
-                        <button type="button" onClick={() => publish(c.cycle)} disabled={busy === c.cycle}
-                          title="Release the scores to leaders and their reporting managers"
-                          className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11.5px] font-bold text-[var(--accent-green)] bg-[var(--accent-green-bg)] border border-[var(--accent-green-border)] hover:opacity-90 transition-opacity disabled:opacity-50">
-                          <Send size={12} /> Publish
-                        </button>
+                        <>
+                          {/* Back to closed. The backend has always allowed this, but no
+                              control offered it — so a cycle computed too early could only
+                              go forward to Publish, which is terminal. */}
+                          <button type="button" onClick={() => setStatus(c.cycle, 'closed')} disabled={busy === c.cycle}
+                            title="Undo the freeze — reopen collection or recompute before releasing"
+                            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11.5px] font-bold text-[var(--text-muted)] border border-[var(--border)] hover:bg-[var(--input-bg)] transition-colors disabled:opacity-50">
+                            <Undo2 size={12} /> Un-compute
+                          </button>
+                          <button type="button" onClick={() => publish(c.cycle)} disabled={busy === c.cycle}
+                            title="Release the scores to leaders and their reporting managers. This cannot be undone."
+                            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11.5px] font-bold text-[var(--accent-green)] bg-[var(--accent-green-bg)] border border-[var(--accent-green-border)] hover:opacity-90 transition-opacity disabled:opacity-50">
+                            <Send size={12} /> Publish
+                          </button>
+                        </>
                       )}
                     </div>
                   </Td>

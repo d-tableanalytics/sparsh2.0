@@ -209,6 +209,12 @@ async def create_assignment(*, company_id: str, company_name: str, cycle: str,
         # without ever reading a response. Absent on rows created before this field
         # existed — leadership_notify_service falls back to a roster lookup for those.
         "giver_phone": giver.get("mobile") or "",
+        # The GIVER's own Leadership level, for the {{giver_level}} placeholder. Copied
+        # from their user record and never inferred from a designation. Distinct from
+        # `subject_level` above, which is the level of the LEADER being rated — the two
+        # must not be confused, since {{level_label}} renders the latter.
+        # Snapshotted so a later promotion cannot rewrite an invitation already sent.
+        "giver_level": str(giver.get("leadership_level") or "").strip().upper(),
         "assigned_by_id": str((assigned_by or {}).get("_id") or ""),
         "assigned_by_name": _display_name(assigned_by or {}),
         # Not "sent": nothing has been mailed yet. mark_email_result promotes it.
@@ -254,13 +260,22 @@ async def resolve_token(token: str) -> Optional[dict]:
     if not token:
         return None
     col = get_collection(COLL_LS_ASSIGNMENTS)
-    doc = await col.find_one({"token_hash": token_hash(token)})
+    hashed = token_hash(token)
+    doc = await col.find_one({"token_hash": hashed})
     if doc:
         return doc
     legacy = await col.find_one({"token": token})
     if legacy:
         legacy["legacy_token"] = True
-    return legacy
+        return legacy
+    # A token already spent by a successful submission. Resolving it grants nothing — the
+    # row's status is `submitted`, so every caller that requires an open link refuses it —
+    # but it lets the giver be told they have already submitted rather than that their link
+    # is invalid, which is the same reason expired rows are returned above.
+    spent = await col.find_one({"spent_token_hash": hashed})
+    if spent:
+        spent["spent_token"] = True
+    return spent
 
 
 async def rotate_token(doc: dict) -> str:
@@ -302,12 +317,23 @@ async def claim_for_submission(doc: dict) -> bool:
     If writing that response then fails, `release_claim` puts the row back.
     """
     now = datetime.now(timezone.utc)
+    changes = {"status": LINK_SUBMITTED, "submitted_at": now, "updated_at": now}
+    # Retire the live credential to `spent_token_hash`. It can no longer open or submit
+    # anything — `token_hash` is what resolve_token treats as live, and the status check
+    # refuses a submitted row regardless. Keeping the retired hash lets the giver's own
+    # link be RECOGNISED afterwards, so a second submit is answered "already submitted"
+    # instead of "not a valid link": without it the row became unfindable and an ordinary
+    # double click looked like a broken invitation.
+    #
+    # Written only when a hash actually exists, never as "": a blank would be stored on
+    # every tokenless row and collide the moment this field is indexed.
+    if doc.get("token_hash"):
+        changes["spent_token_hash"] = doc["token_hash"]
     res = await get_collection(COLL_LS_ASSIGNMENTS).update_one(
         {"_id": doc["_id"], "status": {"$in": [LINK_PENDING, LINK_SENT, LINK_OPENED]}},
-        {"$set": {"status": LINK_SUBMITTED, "submitted_at": now, "updated_at": now},
-         # The credential has done its job. Removing it here is what "single use" means:
-         # the link is dead in the database, not merely refused by a status check.
-         "$unset": {"token_hash": "", "token": "", "link": ""}},
+        # Still removed: single use means the working credential is gone from the
+        # database, not merely refused by a status check.
+        {"$set": changes, "$unset": {"token_hash": "", "token": "", "link": ""}},
     )
     return res.modified_count == 1
 
@@ -354,16 +380,27 @@ async def mark_email_result(assignment_id, status: str, error: Optional[str] = N
                              {"$set": {"status": LINK_SENT}})
 
 
-async def get_invite_template() -> Optional[dict]:
-    """The stored Leadership invitation template, or None when none has been authored.
+async def get_invite_template(company_id: Optional[str] = None) -> Optional[dict]:
+    """The stored Leadership invitation template for ONE company, or None.
 
-    Reads the existing `tpms_mail_templates` collection through the same helper the rest of
-    TPMS uses, so an inactive row is ignored and the "*" catch-all still applies — but only
-    within the leadership_invite event, which nothing else writes.
+    Most specific wins: this company's own row, then the shared default row
+    (`company_id: None`), then None so the built-in body is used.
+
+    The generic `tpms_notify_service.get_template` is deliberately NOT used here — it has
+    no company dimension at all, so it returned one row for every client and a template
+    authored by one company was mailed out by all of them. Only the leadership_invite
+    event is touched, which nothing else writes.
     """
-    from app.services.tpms_notify_service import get_template
+    from app.models.tpms import COLL_MAIL_TEMPLATES
+    base = {"activity": TEMPLATE_ACTIVITY, "side": TEMPLATE_SIDE,
+            "event": TEMPLATE_EVENT, "active": {"$ne": False}}
     try:
-        return await get_template(TEMPLATE_ACTIVITY, TEMPLATE_EVENT, TEMPLATE_SIDE)
+        col = get_collection(COLL_MAIL_TEMPLATES)
+        for scope in ([str(company_id)] if company_id else []) + [None]:
+            doc = await col.find_one({**base, "company_id": scope})
+            if doc:
+                return doc
+        return None
     except Exception as e:
         logger.error("Leadership template lookup failed (%s) — using the default body", e)
         return None
@@ -382,6 +419,10 @@ def template_map(doc: dict, link: str = "") -> dict:
     return {
         "leadership_link": link or "",
         "giver_name": doc.get("giver_name") or "",
+        # The GIVER's own level. Deliberately separate from `level_label` below, which is
+        # the level of the leader being rated — filling one from the other would print the
+        # wrong person's grade in the invitation.
+        "giver_level": doc.get("giver_level") or "",
         "subject_name": doc.get("subject_name") or "a colleague",
         "subject_designation": doc.get("subject_designation") or "",
         "level_label": LEVEL_LABELS.get(doc.get("subject_level") or "", doc.get("subject_level") or ""),
@@ -411,13 +452,41 @@ def _ensure_link_present(html: str, link: str) -> str:
     )
 
 
+async def _giver_level_fallback(doc: dict) -> str:
+    """The giver's level for an assignment minted before `giver_level` was snapshotted.
+
+    Read live from the user record, exactly as `create_assignment` would have. Rows that
+    predate the field would otherwise print an empty {{giver_level}} for the rest of their
+    life, and there is nothing to migrate: the value is derivable on demand.
+
+    An empty string is a real answer — that giver holds no level — and is returned as-is
+    rather than guessed at from their designation.
+    """
+    from bson import ObjectId
+    try:
+        oid = ObjectId(str(doc.get("giver_id")))
+    except Exception:
+        return ""
+    for coll in ("staff", "learners"):
+        person = await get_collection(coll).find_one({"_id": oid}, {"leadership_level": 1})
+        if person:
+            return str(person.get("leadership_level") or "").strip().upper()
+    return ""
+
+
 async def render_invite(doc: dict, template: Optional[dict] = None, link: str = "") -> tuple:
     """(subject, html) for one giver — template if configured, built-in default otherwise.
 
     Pass `template` when sending a batch so the row is fetched once rather than per
     recipient; the FILLING still happens per recipient, which is what personalises the link.
     """
-    tpl = template if template is not None else await get_invite_template()
+    # Scoped to the assignment's own company, so a single-row render (a resend, a preview)
+    # picks up the same template the batch dispatch would use.
+    tpl = template if template is not None else await get_invite_template(doc.get("company_id"))
+    # Only for rows minted before the snapshot existed. A row that HAS the key keeps its
+    # snapshotted value, including a deliberate empty one.
+    if "giver_level" not in doc:
+        doc = {**doc, "giver_level": await _giver_level_fallback(doc)}
     mapping = template_map(doc, link)
 
     from app.services.tpms_notify_service import fill
@@ -504,8 +573,9 @@ async def dispatch_pending(company_id: str, cycle: str,
     skipped_recent = len(rows) - len(due)
 
     # Fetch the template ONCE for the batch, then fill it separately for every recipient —
-    # each mail carries only that giver's own token URL.
-    template = await get_invite_template() if due else None
+    # each mail carries only that giver's own token URL. Scoped to the company being
+    # dispatched, so one client's wording can never go out under another's name.
+    template = await get_invite_template(company_id) if due else None
     sent = failed = 0
     for row in due:
         result = await send_assignment_email(row, template)

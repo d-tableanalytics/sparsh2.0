@@ -149,33 +149,36 @@ blocker.
 
 ---
 
-## 3. BLOCKER — the source rubric has defects
+## 3. The source rubric's internal inconsistencies — seeded as printed
 
-Found while reading the question tables. **Fix before seeding the question master.**
+**Decided: the document is the single source of truth and is used exactly as it stands.**
+The items below are recorded so nobody re-discovers them and assumes a bug. None of them is
+corrected, flagged on screen, or held back for confirmation — there is no review register and
+no sign-off gate, and no approval from HR, the MD or anyone else is required before a level is
+scored. Whatever the document prints is what leaders are scored on.
 
 1. **L5 Q3 and Q4 are swapped.** Q3 asks about communication skill but its options describe
    priority-setting ("Everything feels urgent", "Clear priorities aligned to goals"). Q4 asks
    about making the team accountable but its options describe communication ("Causes confusion
    or mixed messages"). Q5 then asks about priorities again with accountability options.
-2. ~~**L7+ Q6 scores are inverted.**~~ **FIXED in the seed.** "Goals are aligned and largely
-   executed" scored **1** while "Goals are unclear and execution is inconsistent" scored **4**,
-   so the worst answer earned the second-highest score and every L7 leader lost roughly a sixth
-   of their weightage for doing the right thing. The four statements are unchanged and each
-   keeps its printed letter; only the score attached to each is now in merit order (worst = 1,
-   best = 5). This is the one defect here with a single defensible reading, which is why it was
-   corrected rather than referred back. The remaining items still need the business to say what
-   was intended.
+2. **L7+ Q6 scores are inverted.** "Goals are aligned and largely executed" scores **1** while
+   "Goals are unclear and execution is inconsistent" scores **4**, so the worst answer earns the
+   second-highest score and an L7 leader loses roughly a sixth of their weightage for doing the
+   right thing. Invisible in the result — it simply reads as a low score. Seeded and scored
+   exactly as printed. If this is ever to change it is an ordinary edit through the admin
+   screen, not a code change.
 3. **L7+ Q1 and Q2 prompts don't match their options.** Q1 asks about measuring progress and
    counselling but the options describe team structure; Q2 asks about building a strong team
    but the options describe business impact — which is what Q3 then asks.
 4. **L4 Q5 option A is truncated** — "Loses accountability under scale" appears cut off, and
-   the same phrase reappears verbatim as L7+ Q4 option A.
+   echoes L7+ Q4 option A ("Loses control under scale"). "Under scale" is not a condition an
+   Asst. Manager operates in, so L4's worst-case option describes something that cannot happen.
 5. **L6 Q5 and Q6 overlap.** Q5 asks how the leader inspires the team but its options describe
    process and job redesign, which is what Q6 explicitly covers.
 
-Seeding verbatim would produce scores that are quietly wrong and hard to debug later. Question
-*text* is editable post-launch through the existing admin screen, but the **option-to-score
-mapping is what drives the number** — confirm it before the first cycle opens.
+All of it is seeded verbatim. Question text, option wording, option scores and weightages stay
+editable through the existing admin screen, so anything the business later wants changed is a
+runtime edit — but nothing waits on that, and no cycle is held up by it.
 
 ---
 
@@ -390,8 +393,8 @@ Ordered because each phase depends on the one before it — questions must exist
 can render, and responses must exist before a score means anything.
 
 1. **Foundations** — model file, index provisioning, the third form kind, and the L4–L7
-   question master seeded with options and equal weightages. *Gated on HR confirming the §3
-   rubric defects.* Nothing user-visible yet.
+   question master seeded with options and equal weightages. Not gated on anything: the
+   document is seeded as printed (§3). Nothing user-visible yet.
 2. **Cycles and subjects** — cycle CRUD, subject enrolment with levels, and the two admin
    screens. HR can set up a cycle end-to-end without anything being mailed.
 3. **Givers, links and the form** — giver assignment, the widened assignment key, dispatch, the
@@ -444,8 +447,9 @@ can render, and responses must exist before a score means anything.
 
 ## 12. Decisions needed before build starts
 
-1. **The rubric defects (§3).** Confirm the corrected question/option pairings and the L7+ Q6
-   score order. *Blocks phase 1.*
+1. ~~**The rubric defects (§3).**~~ **Settled — nothing to decide.** The document is the single
+   source of truth and its questions and options are used exactly as printed. No confirmation
+   is sought or required from HR, the MD or anyone else.
 2. **Minimum responses.** Recommend 3 of 8 before a score is visible. Lower means faster
    results and weaker anonymity.
 3. **Does the leader see their own score in-app?** The document says everyone gets their

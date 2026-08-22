@@ -8,6 +8,7 @@ import {
   DashboardHero, HeaderSelect, HeroButton, Section, Th, Td, TableShell, KpiTile,
 } from './dashboardKit';
 import { getLeadershipConfig, getLeadershipCycles, getLeadershipScores } from '../../../services/leadershipApi';
+import { scoreLabel, scoreHint } from '../leadership/leadershipStatus';
 import {
   canManage, fmtNum, fmtPct, scoreColor, scoreTone, useAsync, useLeadershipCompany,
 } from '../leadership/leadershipUtils';
@@ -247,9 +248,11 @@ const LeadershipReport = () => {
                         {scored
                           ? <Bar value={row.leadership_score} hasData />
                           : (
-                            <span className="inline-flex items-center gap-1.5 text-[11.5px] font-bold text-[var(--text-muted)]">
-                              <Clock size={12} /> Awaiting responses
-                              {row.min_responses > 1 && ` (needs ${row.min_responses})`}
+                            /* Three outcomes only, and the right one: a leader looking
+                               before publish is not short of responses. */
+                            <span className="inline-flex items-center gap-1.5 text-[11.5px] font-bold text-[var(--text-muted)]"
+                              title={scoreHint(row, row.min_responses ?? 3)}>
+                              <Clock size={12} /> {scoreLabel(row)}
                             </span>
                           )}
                       </Td>

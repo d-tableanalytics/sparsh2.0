@@ -231,6 +231,9 @@ const AppRoutes = () => {
             page itself keeps the wording and weightages editable by staff only. A cycle
             cannot be closed until every level it scores has been signed off. */}
         <Route path="leadership/questions" element={<LeadershipQuestions />} />
+        {/* Each company's own invitation wording. Scoped to the caller's company by
+            `_company_for`, so a client admin can only ever edit their own. */}
+        <Route path="leadership/template"  element={<LeadershipTemplate />} />
       </Route>
 
 

@@ -24,7 +24,7 @@ class UserBase(BaseModel):
     # Business specific fields
     session_type: Optional[str] = "None" # Core, Support, Both, None
     designation: Optional[str] = None
-    department: Optional[str] = "Other" # HOD, Implementor, EA, MD, HR, Other
+    department: Optional[str] = "Other" # HOD, Manager, Implementor, EA, MD, HR, Other
     # Leadership Score eligibility. "Applicable from L4 (Asst Managers) and above."
     #
     # Explicit, and deliberately NOT derived from `designation`: that field is free text,

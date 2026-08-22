@@ -458,9 +458,6 @@ async def main() -> int:
         aa = assignment(f"g{i}", rel)
         h8.collection("tpms_leadership_assignments").docs.append(aa)
         await svc.record_response(aa, answers_for(qs, 4))
-    for lv in M.LEVELS:
-        await svc.set_level_signoff("c1", lv, "", HR)
-
     await svc.update_cycle("c1", "2026-C1", {"status": M.CYCLE_COMPUTED}, HR)
     before = (await svc.subject_score("c1", "2026-C1", "s1"))["leadership_score"]
 
@@ -517,6 +514,75 @@ async def main() -> int:
     check("the level is never guessed from the designation",
           svc.leadership_level_of({"designation": "Senior Manager"}) == "",
           "'Sr. Manager' vs 'Senior Manager' would silently split the same job")
+
+    # ── resend is not a back door around the panel rule ───────
+    section("Resend cannot invite an incomplete panel")
+
+    # Found in production: a 360 cycle whose panel held two superiors and nothing else,
+    # yet both givers had been emailed. Dispatch refuses that (409) because a score built
+    # from two superiors is still labelled 360. Resend had no such check, so the panel
+    # could be invited one person at a time through the per-row button.
+    from app.routes import leadership as R
+    import app.db.mongodb as mongodb
+    from fastapi import HTTPException
+
+    HRU = {"_id": "hr", "role": "clientuser", "department": "HR", "company_id": "c1"}
+    CYC = {"company_id": "c1", "cycle": "2027-C1", "status": M.CYCLE_OPEN,
+           "degree": M.DEGREE_360, "min_responses": 3, "quorum": 5}
+    SUB = {"company_id": "c1", "cycle": "2027-C1", "subject_id": "s1", "level": "L6"}
+
+    def _row(gid, relation, sent_at=None, status=M.LINK_PENDING):
+        return {"_id": ObjectId(), "company_id": "c1", "cycle": "2027-C1",
+                "subject_id": "s1", "giver_id": gid, "giver_name": gid,
+                "giver_email": f"{gid}@x.invalid", "relation": relation, "status": status,
+                "email_status": M.EMAIL_PENDING, "sent_at": sent_at, "subject_level": "L6",
+                "expires_at": links.cycle_expiry_utc("2027-C1")}
+
+    def _mount(rows, degree=M.DEGREE_360):
+        harness = Harness(**{M.COLL_LS_CYCLES: [{**CYC, "degree": degree}],
+                             M.COLL_LS_SUBJECTS: [dict(SUB)],
+                             M.COLL_LS_ASSIGNMENTS: rows,
+                             M.COLL_LS_QUESTIONS: M.all_seed_rows()})
+        for mod in (svc, links, R, mongodb):
+            mod.get_collection = harness.collection
+        posted = []
+
+        async def _fake_send(doc, template=None):
+            posted.append(doc.get("giver_email"))
+            return {"ok": True, "email": doc.get("giver_email")}
+
+        links.send_assignment_email = _fake_send
+        R.links.send_assignment_email = _fake_send
+        return harness, posted
+
+    hh, posted = _mount([_row("g1", "superior"), _row("g2", "superior")])
+    try:
+        await R.resend(str(hh.collection(M.COLL_LS_ASSIGNMENTS).docs[0]["_id"]), HRU)
+        check("a first invitation on an incomplete panel is refused", False, "it sent")
+    except HTTPException as e:
+        check("a first invitation on an incomplete panel is refused", e.status_code == 409,
+              str(e.detail)[:52])
+    check("and no mail went out", posted == [])
+
+    # The escape hatch must survive: chasing someone already delivered to is the whole
+    # point of the button, and a panel that changed afterwards must not strand them.
+    hh, posted = _mount([_row("g1", "superior", sent_at=datetime.utcnow(), status=M.LINK_SENT),
+                         _row("g2", "superior")])
+    res = await R.resend(str(hh.collection(M.COLL_LS_ASSIGNMENTS).docs[0]["_id"]), HRU)
+    check("chasing an already-invited giver still works", res.get("ok") is True)
+    check("their mail went out", posted == ["g1@x.invalid"], str(posted))
+
+    full = []
+    for rel in M.RELATIONS:
+        full += [_row(f"{rel}-a", rel), _row(f"{rel}-b", rel)]
+    hh, posted = _mount(full)
+    res = await R.resend(str(hh.collection(M.COLL_LS_ASSIGNMENTS).docs[0]["_id"]), HRU)
+    check("a complete 360 panel invites normally", res.get("ok") is True and len(posted) == 1)
+
+    hh, posted = _mount([_row("s-a", "superior"), _row("s-b", "superior"),
+                         _row("p-a", "peer"), _row("p-b", "peer")], degree=M.DEGREE_180)
+    res = await R.resend(str(hh.collection(M.COLL_LS_ASSIGNMENTS).docs[0]["_id"]), HRU)
+    check("the rule follows the DEGREE - 4 completes a 180 panel", res.get("ok") is True)
 
     passed, total = sum(_results), len(_results)
     print(f"\n{'=' * 66}\n{passed}/{total} checks passed"

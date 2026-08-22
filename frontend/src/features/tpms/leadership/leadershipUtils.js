@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import api from '../../../services/api';
 import { useAuth } from '../../../context/AuthContext';
+import { inviteTone } from './leadershipStatus';
 
 /* Shared helpers for the Leadership Score screens. Plain .js (no JSX) so the
    react-refresh lint rule stays happy about the .jsx pages exporting only components. */
@@ -58,10 +59,10 @@ export const isMd = (user) =>
   user?.role === 'clientadmin' ||
   (user?.role === 'clientuser' && governanceRole(user) === 'md');
 
-/** May sign off a level's question set. "All parameters should have weightages to create
- *  scoring - HR and MD", so approving a rubric is HR's and MD's call; internal staff keep
- *  access because they seed and support the module. Mirrors `_require_signoff`. */
-export const canSignOff = (user) => isStaff(user) || isHr(user) || isMd(user);
+/** May set a level's weightage column. "All parameters should have weightages to create
+ *  scoring - HR and MD", so the weightages are HR's and MD's call; internal staff keep
+ *  access because they seed and support the module. Mirrors `put_weightages`. */
+export const canEditWeightages = (user) => isStaff(user) || isHr(user) || isMd(user);
 
 /** Runs the process — cycles, enrolling leaders, reading scores.
  *  Mirrors `_can_manage` in routes/leadership.py. */
@@ -102,13 +103,14 @@ export const scoreColor = (score) => ({
   plain: 'var(--text-muted)',
 }[scoreTone(score)]);
 
-/** Link-status → tone for the panel table. */
-export const linkTone = (status) => ({
-  submitted: 'green',
-  opened: 'blue',
-  sent: 'yellow',
-  expired: 'red',
-}[status] || 'plain');
+/** Link-status → tone.
+ *
+ *  DEPRECATED for display. `leadershipStatus.inviteTone(row)` is the one to use: it takes
+ *  the whole row, so it can fold `opened` into Sent and show a bounce as Send failed —
+ *  neither of which is visible from the status string alone. Kept, delegating, so any
+ *  caller still passing a bare status gets the same colours rather than a second scheme.
+ */
+export const linkTone = (status) => inviteTone({ status });
 
 /** Read `detail` off an axios error, falling back to a caller-supplied message. */
 export const errText = (e, fallback) => {

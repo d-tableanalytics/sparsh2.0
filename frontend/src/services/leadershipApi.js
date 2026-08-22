@@ -17,41 +17,32 @@ const withCompany = (companyId, extra = {}) => ({
 /** Levels, relations, degrees, cycle options and this user's permissions. */
 export const getLeadershipConfig = () => api.get('/leadership/config');
 
+// The question master is company-scoped: a company that has edited a level reads and
+// writes its own copy, everyone else the shared default. So every call below carries the
+// company, exactly like the review and sign-off calls further down.
+
 /** The level-specific question master, with per-level weightage totals. */
-export const getLeadershipQuestions = (level, includeInactive = false) =>
-  api.get('/leadership/questions', {
-    params: { level: level || undefined, include_inactive: includeInactive || undefined },
-  });
+export const getLeadershipQuestions = (companyId, level, includeInactive = false) =>
+  api.get('/leadership/questions', withCompany(companyId, {
+    level: level || undefined,
+    include_inactive: includeInactive || undefined,
+  }));
 
 /** Reword a question or restate its options. Level and item id are immutable. */
-export const updateLeadershipQuestion = (questionId, payload) =>
-  api.patch(`/leadership/questions/${questionId}`, payload);
+export const updateLeadershipQuestion = (companyId, questionId, payload) =>
+  api.patch(`/leadership/questions/${questionId}`, payload, withCompany(companyId));
 
 /** Set a level's weightage column. Rejected by the backend unless it totals exactly 100. */
-export const saveLeadershipWeightages = (level, weightages) =>
-  api.put('/leadership/questions/weightages', { level, weightages });
+export const saveLeadershipWeightages = (companyId, level, weightages) =>
+  api.put('/leadership/questions/weightages', { level, weightages }, withCompany(companyId));
 
 /** Re-insert any seeded question missing from a level (insert-only). */
-export const restoreLeadershipQuestions = (level) =>
-  api.post(`/leadership/questions/${level}/restore`);
+export const restoreLeadershipQuestions = (companyId, level) =>
+  api.post(`/leadership/questions/${level}/restore`, null, withCompany(companyId));
 
-// ── Source-document review & level sign-off ──
-// The seeded rubric carries defects from "Key insights of Leadership Score" that change
-// what a leader is scored on (see QUESTION_REVIEW in backend/app/models/leadership.py).
-// A cycle cannot be CLOSED until every level it scores has been signed off by HR + MD.
-
-/** Every level's open issues, weightage health and approval state. */
-export const getLeadershipReview = (companyId) =>
-  api.get('/leadership/questions/review', withCompany(companyId));
-
-/** Approve a level's rubric exactly as it stands. Any later edit invalidates it. */
-export const signOffLeadershipLevel = (companyId, level, note) =>
-  api.post(`/leadership/questions/${level}/sign-off`,
-    { acknowledge: true, note: note || '' }, withCompany(companyId));
-
-/** Withdraw an approval, putting the level back under review. */
-export const withdrawLeadershipSignOff = (companyId, level) =>
-  api.delete(`/leadership/questions/${level}/sign-off`, withCompany(companyId));
+// No review or sign-off client: the seeded questions and options are the single source
+// of truth and are used exactly as they stand. Nothing on this screen asks anyone to
+// confirm them, and no approval gates a cycle.
 
 // ── Cycles (the 2-month assessment window) ──
 export const getLeadershipCycles = (companyId) =>
@@ -97,12 +88,16 @@ export const getLeadershipAssignments = (companyId, cycle) =>
   api.get('/leadership/assignments', withCompany(companyId, { cycle: cycle || undefined }));
 
 /* ── Invitation email template (HR / Admin) ──
-   Stored in the shared tpms_mail_templates collection under a leadership-only key, so
-   these calls can only ever read or write that one row. `{{leadership_link}}` in the body
-   becomes each giver's own /lf/<token> URL at dispatch time — nobody types a token. */
-export const getLeadershipTemplate = () => api.get('/leadership/template');
+   Stored in the shared tpms_mail_templates collection under a leadership-only key that
+   now includes the COMPANY, so these calls read and write only that company's row.
+   Editing one company's invitation no longer changes what any other company sends.
+   `{{leadership_link}}` in the body becomes each giver's own /lf/<token> URL at dispatch
+   time — nobody types a token. */
+export const getLeadershipTemplate = (companyId) =>
+  api.get('/leadership/template', withCompany(companyId));
 
-export const saveLeadershipTemplate = (payload) => api.put('/leadership/template', payload);
+export const saveLeadershipTemplate = (companyId, payload) =>
+  api.put('/leadership/template', payload, withCompany(companyId));
 
 /** Render a draft against sample values. The link shown is a fake, never a real token. */
 export const previewLeadershipTemplate = (payload) =>

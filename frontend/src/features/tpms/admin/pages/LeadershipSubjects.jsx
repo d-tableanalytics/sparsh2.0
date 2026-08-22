@@ -14,8 +14,11 @@ import {
   dispatchLeadershipLinks, resendLeadershipLink,
 } from '../../../../services/leadershipApi';
 import {
-  canManage, canManagePanel, errText, linkTone, useAsync, useLeadershipCompany,
+  canManage, canManagePanel, errText, useAsync, useLeadershipCompany,
 } from '../../leadership/leadershipUtils';
+import {
+  inviteLabel, inviteTone, inviteError, canRetryInvite,
+} from '../../leadership/leadershipStatus';
 
 /* ─────────────────────────────────────────────────────────────
    Leadership Score ▸ Leaders & Feedback Givers.
@@ -66,13 +69,24 @@ const SubjectModal = ({ config, people, enrolled, onClose, onSubmit }) => {
   const available = (people || []).filter((p) => !taken.has(String(p.person_id)));
 
   const [personId, setPersonId] = useState(available[0]?.person_id || '');
-  const [level, setLevel] = useState(config?.levels?.[0]?.code || 'L4');
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState('');
+
+  // The level is a property of the PERSON, not a choice made at enrolment: the server
+  // enrols only at the level on the user's record and rejects anything else. Defaulting
+  // the field to L4 therefore guaranteed a mismatch error for every leader who is not L4.
+  const picked = available.find((p) => String(p.person_id) === String(personId));
+  const level = picked?.leadership_level || '';
+  const levelLabel = (config?.levels || []).find((l) => l.code === level)?.label || level;
 
   const submit = async (e) => {
     e.preventDefault();
     if (!personId) { setErr('Choose a leader.'); return; }
+    if (!level) {
+      setErr(`${picked?.name || 'This person'} has no Leadership level on their user record. `
+        + 'Set it to L4, L5, L6 or L7 on their profile first — it is never guessed from a designation.');
+      return;
+    }
     setSaving(true);
     setErr('');
     try {
@@ -109,13 +123,22 @@ const SubjectModal = ({ config, people, enrolled, onClose, onSubmit }) => {
               options={available.length
                 ? available.map((p) => ({
                     id: p.person_id,
-                    name: p.designation ? `${p.name} — ${p.designation}` : p.name,
+                    // The level rides along in the option, so someone with none is
+                    // visible before they are picked rather than after a failed enrol.
+                    name: `${p.designation ? `${p.name} — ${p.designation}` : p.name}`
+                      + (p.leadership_level ? ` · ${p.leadership_level}` : ' · no level set'),
                   }))
                 : [{ id: '', name: 'Everyone is already enrolled' }]} />
           </Field>
-          <Field label="Leadership level" hint="Decides which set of questions the givers answer.">
-            <FilterSelect value={level} onChange={setLevel}
-              options={(config?.levels || []).map((l) => ({ id: l.code, name: l.label }))} />
+          <Field label="Leadership level"
+            hint={level
+              ? 'Taken from their user record. Decides which set of questions the givers answer.'
+              : 'Set this on their user profile before enrolling them.'}>
+            <div className={`w-full px-3 py-2 rounded-lg border text-[13px] font-bold ${level
+              ? 'bg-[var(--input-bg)] border-[var(--input-border)] text-[var(--text-main)]'
+              : 'bg-[var(--accent-red-bg)] border-[var(--accent-red-border)] text-[var(--accent-red)]'}`}>
+              {level ? levelLabel : 'No Leadership level on record'}
+            </div>
           </Field>
           {err && (
             <div className="flex items-center gap-2 rounded-lg border border-[var(--accent-red-border)] bg-[var(--accent-red-bg)] px-3 py-2 text-[12px] font-bold text-[var(--accent-red)]">
@@ -127,7 +150,7 @@ const SubjectModal = ({ config, people, enrolled, onClose, onSubmit }) => {
               className="px-4 py-2 rounded-lg text-[13px] font-bold text-[var(--text-muted)] hover:bg-[var(--input-bg)] transition-colors disabled:opacity-50">
               Cancel
             </button>
-            <button type="submit" disabled={saving || !personId}
+            <button type="submit" disabled={saving || !personId || !level}
               className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-[var(--accent-indigo)] text-white text-[13px] font-bold shadow-sm hover:opacity-90 transition-opacity disabled:opacity-40">
               {saving ? <RefreshCw size={14} className="animate-spin" /> : <CheckCircle2 size={14} />}
               {saving ? 'Enrolling…' : 'Enrol Leader'}
@@ -341,15 +364,20 @@ const PanelModal = ({ companyId, cycle, subject, config, people, onClose, onChan
                         </Td>
                         <Td align="center">
                           {saved
-                            ? <Pill label={saved.status} tone={linkTone(saved.status)} />
-                            : <Pill label="not sent" tone="plain" />}
+                            ? (
+                              <span title={inviteError(saved)}>
+                                <Pill label={inviteLabel(saved)} tone={inviteTone(saved)} />
+                              </span>
+                            )
+                            : <Pill label="Pending" tone="yellow" />}
                         </Td>
                         <Td align="right">
                           <div className="inline-flex items-center gap-1.5 justify-end">
                             {saved && saved.status !== 'submitted' && (
                               <button type="button" onClick={() => resend(saved.id)} disabled={busyId === saved.id}
                                 className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11.5px] font-bold text-[var(--accent-indigo)] bg-[var(--accent-indigo-bg)] border border-[var(--accent-indigo-border)] hover:opacity-90 transition-opacity disabled:opacity-50">
-                                {busyId === saved.id ? <RefreshCw size={12} className="animate-spin" /> : <Mail size={12} />} Resend
+                                {busyId === saved.id ? <RefreshCw size={12} className="animate-spin" /> : <Mail size={12} />}
+                                {canRetryInvite(saved) ? 'Retry' : 'Resend'}
                               </button>
                             )}
                             {saved?.status !== 'submitted' && (
