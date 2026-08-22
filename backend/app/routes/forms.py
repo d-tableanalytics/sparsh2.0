@@ -32,6 +32,10 @@ from app.models.forms import (
     criteria_codes,
     form_kind,
     form_audience,
+    form_min_level,
+    eligible_by_level,
+    user_level,
+    user_level_number,
     question_map,
     RatingSubmissionCreate,
     FeedbackSubmissionCreate,
@@ -355,19 +359,6 @@ async def update_question(question_id: str, payload: dict, current_user: dict = 
     return {"ok": True}
 
 
-def _get_level_number(val) -> int:
-    if val is None:
-        return 0
-    if isinstance(val, (int, float)):
-        return int(val)
-    s = str(val).strip().upper()
-    import re
-    m = re.search(r'\d+', s)
-    if m:
-        return int(m.group())
-    return 0
-
-
 # ─────────────────────────────────────────────────────────────
 # Candidate members to rate (sourced from existing users)
 # ─────────────────────────────────────────────────────────────
@@ -400,9 +391,10 @@ async def list_members(
         (await get_collection("staff").find(base).to_list(1000))
         + (await get_collection("learners").find(base).to_list(1000)))
 
-    # For Ownership Rating form, only L4 and above level team members need to show
-    if form_type and "ownership" in form_type.lower():
-        pool = [u for u in pool if _get_level_number(u.get("level")) >= 4]
+    # Level gate (Ownership → L4 and above). The threshold comes from the form registry, so it
+    # is the same number the assigned-link roster, the submit validation and the UI use.
+    min_level = form_min_level(form_type or "")
+    pool = eligible_by_level(pool, form_type or "")
 
     members = []
     for u in pool:
@@ -417,10 +409,12 @@ async def list_members(
             "designation": u.get("designation"),
             "department": u.get("department"),
             "role": u.get("role"),
-            "level": u.get("level"),
+            "level": user_level(u),
         })
     members.sort(key=lambda m: (m.get("member_name") or "").lower())
-    return {"members": members, "scoped_to_team": scoped_to_team}
+    # `min_level` is echoed back so the form can say WHY a roster is short rather than just
+    # rendering fewer rows (or an empty table) with no explanation.
+    return {"members": members, "scoped_to_team": scoped_to_team, "min_level": min_level}
 
 
 # ─────────────────────────────────────────────────────────────
@@ -496,11 +490,17 @@ async def submit_ratings(
     # Valid members = the company's own roster (staff + learners). Criteria are validated
     # against the live master above; members must be validated too so a client can't inject
     # an arbitrary person into their company's ratings.
+    # A level-restricted form (Ownership → L4 and above) narrows this set too: the rule has to
+    # hold on the WRITE path, or a stale page left open before someone's level changed could
+    # still file ratings for a member the form no longer covers.
+    min_level = form_min_level(form_type)
     valid_members: set = set()
     for coll_name in ("staff", "learners"):
         for u in await get_collection(coll_name).find(
                 {"company_id": company_id, "is_active": {"$ne": False}},
-                {"_id": 1, "employee_id": 1}).to_list(2000):
+                {"_id": 1, "employee_id": 1, "level": 1, "leadership_level": 1}).to_list(2000):
+            if min_level and user_level_number(u) < min_level:
+                continue
             valid_members.add(str(u["_id"]))
             if u.get("employee_id"):
                 valid_members.add(str(u["employee_id"]))
@@ -519,7 +519,10 @@ async def submit_ratings(
         if cell.criterion_code not in valid_codes:
             raise HTTPException(status_code=400, detail=f"Unknown criterion '{cell.criterion_code}'")
         if valid_members and str(cell.member_id) not in valid_members:
-            raise HTTPException(status_code=400, detail=f"Unknown member '{cell.member_id}'")
+            detail = (f"'{cell.member_name}' is not rated on this form — it covers L{min_level} "
+                      f"and above only. Refresh the form to load the current team list."
+                      ) if min_level else f"Unknown member '{cell.member_id}'"
+            raise HTTPException(status_code=400, detail=detail)
         # Skip a cell that's already on file (append-only, no duplicates).
         if saved.get(cell.criterion_code, {}).get(cell.member_id) is not None:
             continue
@@ -1115,9 +1118,10 @@ async def assigned_form(token: str, current_user: dict = Depends(get_current_use
             (await get_collection("staff").find(base).to_list(1000))
             + (await get_collection("learners").find(base).to_list(1000)))
 
-        # For Ownership Rating form, only L4 and above level team members need to show
-        if form_type and "ownership" in form_type.lower():
-            pool = [u for u in pool if _get_level_number(u.get("level")) >= 4]
+        # Same level gate as the authenticated roster endpoint, from the same registry value.
+        # Resolved on every open, so a level corrected after the link was mailed takes effect
+        # on the next visit — the assignment stores no member list to go stale.
+        pool = eligible_by_level(pool, form_type)
 
         members = []
         for u in pool:
@@ -1130,11 +1134,12 @@ async def assigned_form(token: str, current_user: dict = Depends(get_current_use
                 "member_name": _user_display_name(u),
                 "designation": u.get("designation"),
                 "department": u.get("department"),
-                "level": u.get("level"),
+                "level": user_level(u),
             })
         members.sort(key=lambda m: (m.get("member_name") or "").lower())
         payload["members"] = members
         payload["scoped_to_team"] = bool(team)
+        payload["min_level"] = form_min_level(form_type)
 
     return payload
 

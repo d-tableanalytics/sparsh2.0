@@ -34,6 +34,16 @@ const periodFromParam = (raw) => {
   return v;
 };
 
+// A user's hierarchy level is free text ("L1" … "L10", sometimes "Level 4"), so it is parsed
+// rather than compared as a string — "L10" must rank above "L4", not sort before it.
+// 0 = unset/unparseable, which keeps a member without a level off a level-restricted form.
+const getLevelNum = (lvl) => {
+  if (lvl == null || lvl === '') return 0;
+  if (typeof lvl === 'number') return lvl;
+  const match = String(lvl).match(/\d+/);
+  return match ? parseInt(match[0], 10) : 0;
+};
+
 const ScaleRadio = ({ min, max, value, onChange, name, disabled }) => {
   const opts = [];
   for (let i = min; i <= max; i += 1) opts.push(i);
@@ -78,6 +88,9 @@ const ClientRatingForm = ({ formType, icon, lockedPeriod = '', onSubmitted }) =>
 
   const [rows, setRows] = useState([]);
   const [loadingMembers, setLoadingMembers] = useState(false);
+  // Lowest hierarchy level this form covers (Ownership → 4). Comes from the roster response,
+  // so the threshold is never duplicated here — the backend registry owns the number.
+  const [minLevel, setMinLevel] = useState(0);
 
   const [savedRatings, setSavedRatings] = useState({});   // { code: { member_id: {rating,...} } } (locked)
   const [picks, setPicks] = useState({});                 // { "code::member_id": rating } (draft)
@@ -106,13 +119,6 @@ const ClientRatingForm = ({ formType, icon, lockedPeriod = '', onSubmitted }) =>
     return () => { alive = false; };
   }, [formType, showError]);
 
-const getLevelNum = (lvl) => {
-  if (!lvl) return 0;
-  if (typeof lvl === 'number') return lvl;
-  const match = String(lvl).match(/\d+/);
-  return match ? parseInt(match[0], 10) : 0;
-};
-
   // ── Build the rows to rate: the team roster (HOD forms) ──
   useEffect(() => {
     if (!definition) return;
@@ -120,12 +126,14 @@ const getLevelNum = (lvl) => {
     (async () => {
       setLoadingMembers(true);
       try {
-        const res = await getFormMembers(companyId, selfId, formType);   // roster excludes the HOD (self) and applies formType filters
+        const res = await getFormMembers(companyId, selfId, formType);   // roster excludes the HOD (self) and applies the form's level gate
         if (!alive) return;
-        let fetchedMembers = res.data?.members || [];
-        if (formType && formType.toLowerCase().includes('ownership')) {
-          fetchedMembers = fetchedMembers.filter((m) => getLevelNum(m.level) >= 4);
-        }
+        const gate = Number(res.data?.min_level || 0);
+        setMinLevel(gate);
+        // The server has already applied `gate`; re-applying it here costs nothing and keeps
+        // the page correct against a backend that predates the level rule.
+        const fetchedMembers = (res.data?.members || [])
+          .filter((m) => !gate || getLevelNum(m.level) >= gate);
         setRows(fetchedMembers.map((m) => ({ ...m, key: m.member_id })));
         setPicks({});
       } catch (err) {
@@ -240,7 +248,9 @@ const getLevelNum = (lvl) => {
         icon={icon || ClipboardCheck}
         title={title}
         highlight={highlight}
-        subtitle="Rate each of your team members on every criterion (0–5)."
+        subtitle={minLevel
+          ? `Rate each L${minLevel}-and-above team member on every criterion (0–5).`
+          : 'Rate each of your team members on every criterion (0–5).'}
       >
         <button
           onClick={handleSubmit}
@@ -286,7 +296,9 @@ const getLevelNum = (lvl) => {
             </thead>
             <tbody>
               {rows.length === 0 && (
-                <tr><Td className="text-[var(--text-muted)]">{loadingMembers ? 'Loading…' : 'No members to rate.'}</Td></tr>
+                <tr><Td className="text-[var(--text-muted)]">{loadingMembers ? 'Loading…' : (minLevel
+                  ? `No members to rate — this form covers L${minLevel} and above, and nobody on your team is set to that level yet.`
+                  : 'No members to rate.')}</Td></tr>
               )}
               {rows.map((m) => {
                 const locked = savedCell(c.code, m.member_id) != null;
