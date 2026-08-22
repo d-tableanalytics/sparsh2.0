@@ -83,8 +83,24 @@ const MediaChatbot = ({
     setMessage(commandText);
   };
 
+  const isDraggingRef = useRef(false);
+
   return (
-    <div className="fixed bottom-6 right-6 z-50 flex flex-col items-end">
+    <motion.div
+      drag
+      dragMomentum={false}
+      dragElastic={0.05}
+      onDragStart={() => {
+        isDraggingRef.current = true;
+      }}
+      onDragEnd={() => {
+        setTimeout(() => {
+          isDraggingRef.current = false;
+        }, 150);
+      }}
+      className="fixed bottom-6 right-6 z-50 flex flex-col items-end cursor-grab active:cursor-grabbing select-none"
+      style={{ touchAction: 'none' }}
+    >
       <AnimatePresence>
         {isOpen && (
           <motion.div
@@ -215,14 +231,19 @@ const MediaChatbot = ({
 
       {/* Floating Button */}
       <button
-        onClick={() => setIsOpen(!isOpen)}
-        className="h-14 w-14 rounded-full bg-gradient-to-br from-indigo-500 to-purple-600 text-white shadow-[0_4px_20px_rgba(99,102,241,0.4)] hover:shadow-[0_6px_25px_rgba(99,102,241,0.6)] hover:scale-105 active:scale-95 transition-all duration-300 flex items-center justify-center relative overflow-hidden group"
+        onClick={() => {
+          if (!isDraggingRef.current) {
+            setIsOpen(!isOpen);
+          }
+        }}
+        title={isOpen ? 'Close assistant (Drag to move)' : 'Media AI Assistant (Drag to move)'}
+        className="h-14 w-14 rounded-full bg-gradient-to-br from-indigo-500 to-purple-600 text-white shadow-[0_4px_20px_rgba(99,102,241,0.4)] hover:shadow-[0_6px_25px_rgba(99,102,241,0.6)] hover:scale-105 active:scale-95 transition-all duration-300 flex items-center justify-center relative overflow-hidden group border-2 border-white/20"
       >
         <div className="absolute inset-0 bg-white/20 scale-0 group-hover:scale-150 transition-transform duration-500 rounded-full" />
         <Sparkles size={22} className="absolute inset-0 m-auto text-amber-200 opacity-0 group-hover:opacity-100 group-hover:rotate-12 transition-all duration-300" />
         <Bot size={24} className="group-hover:opacity-0 group-hover:-translate-y-2 transition-all duration-300 relative z-10" />
       </button>
-    </div>
+    </motion.div>
   );
 };
 

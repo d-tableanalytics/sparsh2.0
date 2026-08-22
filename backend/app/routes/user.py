@@ -101,6 +101,7 @@ class UserEditRequest(BaseModel):
     designation: Optional[str] = None
     department: Optional[str] = None
     reporting_manager: Optional[str] = None  # admin Edit form must be able to save this
+    level: Optional[str] = None
     permissions: Optional[dict] = None
 
 class UserStatusUpdate(BaseModel):
@@ -117,6 +118,7 @@ class SelfProfileUpdate(BaseModel):
     department: Optional[str] = None
     reporting_manager: Optional[str] = None
     joining_date: Optional[str] = None
+    level: Optional[str] = None
 
 # ─── Current User ───
 @router.get("/me", response_model=UserResponse)
@@ -234,7 +236,7 @@ async def update_user(user_id: str, updates: UserEditRequest, background_tasks: 
              raise HTTPException(status_code=403, detail="Not authorized")
 
         
-    update_data = {k: v for k, v in updates.model_dump().items() if v is not None}
+    update_data = updates.model_dump(exclude_unset=True)
     if not update_data:
         raise HTTPException(status_code=400, detail="No fields to update")
     

@@ -355,6 +355,19 @@ async def update_question(question_id: str, payload: dict, current_user: dict = 
     return {"ok": True}
 
 
+def _get_level_number(val) -> int:
+    if val is None:
+        return 0
+    if isinstance(val, (int, float)):
+        return int(val)
+    s = str(val).strip().upper()
+    import re
+    m = re.search(r'\d+', s)
+    if m:
+        return int(m.group())
+    return 0
+
+
 # ─────────────────────────────────────────────────────────────
 # Candidate members to rate (sourced from existing users)
 # ─────────────────────────────────────────────────────────────
@@ -362,6 +375,7 @@ async def update_question(question_id: str, payload: dict, current_user: dict = 
 async def list_members(
     company_id: str = Query(..., description="Company to load team members for"),
     hod_id: Optional[str] = Query(None, description="Exclude this HOD from the member list"),
+    form_type: Optional[str] = Query(None, description="Form type being generated/filled"),
     current_user: dict = Depends(get_current_user),
 ):
     if not _can_read(current_user):
@@ -386,6 +400,10 @@ async def list_members(
         (await get_collection("staff").find(base).to_list(1000))
         + (await get_collection("learners").find(base).to_list(1000)))
 
+    # For Ownership Rating form, only L4 and above level team members need to show
+    if form_type and "ownership" in form_type.lower():
+        pool = [u for u in pool if _get_level_number(u.get("level")) >= 4]
+
     members = []
     for u in pool:
         uid = str(u["_id"])
@@ -399,6 +417,7 @@ async def list_members(
             "designation": u.get("designation"),
             "department": u.get("department"),
             "role": u.get("role"),
+            "level": u.get("level"),
         })
     members.sort(key=lambda m: (m.get("member_name") or "").lower())
     return {"members": members, "scoped_to_team": scoped_to_team}
@@ -1095,6 +1114,11 @@ async def assigned_form(token: str, current_user: dict = Depends(get_current_use
         pool = team or (
             (await get_collection("staff").find(base).to_list(1000))
             + (await get_collection("learners").find(base).to_list(1000)))
+
+        # For Ownership Rating form, only L4 and above level team members need to show
+        if form_type and "ownership" in form_type.lower():
+            pool = [u for u in pool if _get_level_number(u.get("level")) >= 4]
+
         members = []
         for u in pool:
             uid = str(u["_id"])
@@ -1106,6 +1130,7 @@ async def assigned_form(token: str, current_user: dict = Depends(get_current_use
                 "member_name": _user_display_name(u),
                 "designation": u.get("designation"),
                 "department": u.get("department"),
+                "level": u.get("level"),
             })
         members.sort(key=lambda m: (m.get("member_name") or "").lower())
         payload["members"] = members
@@ -1203,3 +1228,19 @@ async def resend_form_assignment(assignment_id: str, current_user: dict = Depend
     except Exception as e:
         await mark_email_result(doc["_id"], EMAIL_FAILED, str(e))
         raise HTTPException(status_code=500, detail=f"Send failed: {e}")
+
+
+@router.delete("/assignments/{assignment_id}")
+async def delete_form_assignment(assignment_id: str, current_user: dict = Depends(get_current_user)):
+    """Delete a generated form link assignment. Admin only."""
+    if (current_user.get("role") or "").lower() not in STAFF_ROLES:
+        raise HTTPException(status_code=403, detail="Admin only")
+    from app.services.tpms_form_link_service import ASSIGNMENT_COLLECTION
+    try:
+        res = await get_collection(ASSIGNMENT_COLLECTION).delete_one({"_id": ObjectId(assignment_id)})
+    except (InvalidId, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid id")
+    if res.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Form link assignment not found")
+    return {"ok": True, "message": "Form link deleted"}
+

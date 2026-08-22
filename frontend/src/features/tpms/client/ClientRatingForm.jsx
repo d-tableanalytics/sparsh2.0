@@ -106,6 +106,13 @@ const ClientRatingForm = ({ formType, icon, lockedPeriod = '', onSubmitted }) =>
     return () => { alive = false; };
   }, [formType, showError]);
 
+const getLevelNum = (lvl) => {
+  if (!lvl) return 0;
+  if (typeof lvl === 'number') return lvl;
+  const match = String(lvl).match(/\d+/);
+  return match ? parseInt(match[0], 10) : 0;
+};
+
   // ── Build the rows to rate: the team roster (HOD forms) ──
   useEffect(() => {
     if (!definition) return;
@@ -113,9 +120,13 @@ const ClientRatingForm = ({ formType, icon, lockedPeriod = '', onSubmitted }) =>
     (async () => {
       setLoadingMembers(true);
       try {
-        const res = await getFormMembers(companyId, selfId);   // roster excludes the HOD (self)
+        const res = await getFormMembers(companyId, selfId, formType);   // roster excludes the HOD (self) and applies formType filters
         if (!alive) return;
-        setRows((res.data?.members || []).map((m) => ({ ...m, key: m.member_id })));
+        let fetchedMembers = res.data?.members || [];
+        if (formType && formType.toLowerCase().includes('ownership')) {
+          fetchedMembers = fetchedMembers.filter((m) => getLevelNum(m.level) >= 4);
+        }
+        setRows(fetchedMembers.map((m) => ({ ...m, key: m.member_id })));
         setPicks({});
       } catch (err) {
         if (alive) showError(err.response?.data?.detail || 'Failed to load your team members');
@@ -124,7 +135,7 @@ const ClientRatingForm = ({ formType, icon, lockedPeriod = '', onSubmitted }) =>
       }
     })();
     return () => { alive = false; };
-  }, [definition, companyId, selfId, selfName, user, showError]);
+  }, [definition, companyId, selfId, selfName, user, showError, formType]);
 
   // ── Load already-saved ratings (lock state) ──
   const refreshSaved = React.useCallback(async () => {

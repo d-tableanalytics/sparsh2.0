@@ -1,15 +1,15 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { RefreshCw, Link2 as LinkIcon, Copy, Check, ExternalLink, Send, AlertTriangle, Inbox } from 'lucide-react';
+import { RefreshCw, Link2 as LinkIcon, Copy, Check, ExternalLink, Send, AlertTriangle, Inbox, Trash2 } from 'lucide-react';
 import { DashboardHero, HeroButton, Section, TableShell, Th, Td, usePaged, Pager } from '../../common/dashboardKit';
-import { getCompanies, getFormAssignments, resendFormAssignment } from '../../../../services/tpmsFormsApi';
+import { getCompanies, getFormAssignments, resendFormAssignment, deleteFormAssignment } from '../../../../services/tpmsFormsApi';
 import { currentPeriod, periodLabel } from '../../../../services/tpmsApi';
 import { useNotification } from '../../../../context/NotificationContext';
 
 /* ─────────────────────────────────────────────────────────────
    TPMS ▸ Admin ▸ Form Links.
    Every unique, single-use form link (Accountability / Ownership / Culture /
-   Implementation Feedback) per company + month, with copy, open and resend.
-   Data: GET /forms/assignments  ·  resend: POST /forms/assignments/{id}/resend
+   Implementation Feedback) per company + month, with copy, open, resend and delete.
+   Data: GET /forms/assignments  ·  resend: POST /forms/assignments/{id}/resend  ·  delete: DELETE /forms/assignments/{id}
    ───────────────────────────────────────────────────────────── */
 
 const FORM_LABEL = {
@@ -65,6 +65,7 @@ const FormLinks = () => {
   const [error, setError] = useState('');
   const [copiedId, setCopiedId] = useState('');
   const [resending, setResending] = useState('');
+  const [deletingId, setDeletingId] = useState('');
 
   useEffect(() => {
     getCompanies()
@@ -117,9 +118,23 @@ const FormLinks = () => {
     }
   };
 
+  const handleDelete = async (row) => {
+    if (!window.confirm(`Are you sure you want to delete the form link for ${row.respondent_name || 'this respondent'}?`)) return;
+    setDeletingId(row.id);
+    try {
+      await deleteFormAssignment(row.id);
+      showSuccess('Form link deleted successfully');
+      load();
+    } catch (e) {
+      showError(e.response?.data?.detail || 'Delete failed.');
+    } finally {
+      setDeletingId('');
+    }
+  };
+
   return (
     <div className="space-y-5">
-      <DashboardHero icon={LinkIcon} title="Form Links" subtitle="Unique monthly form links per company & HOD — copy, open or resend">
+      <DashboardHero icon={LinkIcon} title="Form Links" subtitle="Unique monthly form links per company & HOD — copy, open, resend or delete">
         <select value={company} onChange={(e) => setCompany(e.target.value)} className={selectCls}>
           <option value="">All companies</option>
           {companies.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
@@ -188,6 +203,10 @@ const FormLinks = () => {
                         <button type="button" onClick={() => resend(r)} disabled={resending === r.id || !r.respondent_email} title="Email this link again"
                           className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11.5px] font-bold text-[var(--accent-green)] bg-[var(--accent-green-bg)] border border-[var(--accent-green-border)] hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed">
                           <Send size={12} /> {resending === r.id ? 'Sending…' : 'Resend'}
+                        </button>
+                        <button type="button" onClick={() => handleDelete(r)} disabled={deletingId === r.id} title="Delete form link"
+                          className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11.5px] font-bold text-[var(--accent-red)] bg-[var(--accent-red-bg)] border border-[var(--accent-red-border)] hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed">
+                          <Trash2 size={12} /> {deletingId === r.id ? 'Deleting…' : 'Delete'}
                         </button>
                       </div>
                     </Td>
