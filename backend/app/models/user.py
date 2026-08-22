@@ -30,6 +30,7 @@ class UserBase(BaseModel):
     emergency_mobile: Optional[str] = None
     reporting_manager: Optional[str] = None
     joining_date: Optional[str] = None  # ISO "YYYY-MM-DD"
+    level: Optional[str] = None
     
     # Highly Granular CRUD Permissions
     permissions: dict = {

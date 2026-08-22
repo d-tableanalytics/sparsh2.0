@@ -32,6 +32,9 @@ class CompanyEditRequest(BaseModel):
     name: Optional[str] = None
     domain: Optional[str] = None
     owner: Optional[str] = None
+    smop_id: Optional[str] = None
+    smop: Optional[str] = None
+    smops_ids: Optional[List[str]] = None
     email: Optional[str] = None
     contact: Optional[str] = None
     address: Optional[str] = None
@@ -115,6 +118,26 @@ async def list_companies(current_user: dict = Depends(get_current_user)):
         c["_id"] = str(c["_id"])
     return companies
 
+# ─── Get SMOP Options ───
+@router.get("/smop-options")
+async def get_smop_options(current_user: dict = Depends(get_current_user)):
+    """Fetch staff-side users for assigning SMOP to a company."""
+    staff_coll = get_collection("staff")
+    staff_users = await staff_coll.find({"is_active": {"$ne": False}}).to_list(1000)
+    
+    result = []
+    for u in staff_users:
+        uid = str(u["_id"])
+        full_name = u.get("full_name") or f"{u.get('first_name', '')} {u.get('last_name', '')}".strip() or u.get("email")
+        result.append({
+            "_id": uid,
+            "full_name": full_name,
+            "email": u.get("email"),
+            "role": u.get("role", "staff"),
+            "designation": u.get("designation")
+        })
+    return result
+
 # ─── Get Single Company ───
 @router.get("/{company_id}", response_model=CompanyResponse)
 async def get_company(company_id: str, current_user: dict = Depends(get_current_user)):
@@ -147,13 +170,25 @@ async def update_company(company_id: str, updates: CompanyEditRequest, current_u
     companies_collection = get_collection("companies")
     update_data = {k: v for k, v in updates.model_dump().items() if v is not None}
     
+    # Handle smop_id synchronization with smops_ids and smop
+    smop_val = updates.smop_id if updates.smop_id is not None else updates.smop
+    if smop_val is not None:
+        if smop_val:
+            update_data["smop_id"] = smop_val
+            update_data["smop"] = smop_val
+            update_data["smops_ids"] = [smop_val]
+        else:
+            update_data["smop_id"] = None
+            update_data["smop"] = None
+            update_data["smops_ids"] = []
+    
     if not update_data:
         raise HTTPException(status_code=400, detail="No fields to update")
     
     update_data["updated_at"] = datetime.now(timezone.utc)
     result = await companies_collection.update_one({"_id": ObjectId(company_id)}, {"$set": update_data})
     
-    if result.modified_count == 0:
+    if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Company not found")
     
     return {"message": "Company updated successfully"}
@@ -389,11 +424,45 @@ async def download_user_template(company_id: str, current_user: dict = Depends(g
     ws = wb.active
     ws.title = "Users"
     
-    headers = ["Work Email *", "Temp Password *", "First Name", "Last Name", "Mobile Number", "Designation", "Session Type", "Department"]
+    headers = [
+        "Work Email *", "Temp Password *", "First Name", "Last Name", 
+        "Mobile Number", "Designation", "Session Type", "Department", 
+        "Level", "Reporting Manager"
+    ]
     ws.append(headers)
     
-    # Sample row
-    ws.append(["user@example.com", "tempPass123", "John", "Doe", "9876543210", "Manager", "Both", "HOD"])
+    users_collection = get_collection("learners")
+    existing_users = await users_collection.find({"company_id": company_id}).to_list(2000)
+    
+    # Also fetch staff to resolve manager IDs to display emails/names
+    staff_collection = get_collection("staff")
+    all_staff = await staff_collection.find({"is_active": {"$ne": False}}).to_list(2000)
+    
+    user_map = {}
+    for u in existing_users:
+        user_map[str(u["_id"])] = u.get("email") or u.get("full_name") or str(u["_id"])
+    for s in all_staff:
+        user_map[str(s["_id"])] = s.get("email") or s.get("full_name") or str(s["_id"])
+
+    if existing_users:
+        for u in existing_users:
+            mgr_id = str(u.get("reporting_manager") or "").strip()
+            mgr_display = user_map.get(mgr_id, mgr_id)
+            ws.append([
+                u.get("email", ""),
+                "",  # Leave password blank for existing users
+                u.get("first_name", ""),
+                u.get("last_name", ""),
+                str(u.get("mobile") or ""),
+                u.get("designation", ""),
+                u.get("session_type", "Both"),
+                u.get("department", "Other"),
+                u.get("level", ""),
+                mgr_display
+            ])
+    else:
+        # Sample row if company has no users yet
+        ws.append(["user@example.com", "tempPass123", "John", "Doe", "9876543210", "Manager", "Both", "HOD", "L1", "manager@example.com"])
     
     # Style header
     from openpyxl.styles import Font, PatternFill
@@ -440,74 +509,146 @@ async def import_users_xlsx(company_id: str, background_tasks: BackgroundTasks, 
     wb = openpyxl.load_workbook(io.BytesIO(contents))
     ws = wb.active
     
-    headers = [cell.value for cell in ws[1]]
+    headers = [cell.value for cell in ws[1] if cell.value is not None]
     users_collection = get_collection("learners")
+    staff_collection = get_collection("staff")
+    
+    # Build lookup map for managers by email, full_name, and _id
+    company_learners = await users_collection.find({"company_id": company_id}).to_list(2000)
+    all_staff = await staff_collection.find({"is_active": {"$ne": False}}).to_list(2000)
+    
+    manager_lookup = {}
+    for u in company_learners + all_staff:
+        uid = str(u["_id"])
+        email = (u.get("email") or "").lower().strip()
+        fn = (u.get("first_name") or "").strip()
+        ln = (u.get("last_name") or "").strip()
+        full_name = (u.get("full_name") or f"{fn} {ln}").lower().strip()
+        if uid:
+            manager_lookup[uid.lower()] = uid
+        if email:
+            manager_lookup[email] = uid
+        if full_name:
+            manager_lookup[full_name] = uid
+
     from app.services.notification_service import send_notification_from_template
     created = 0
+    updated = 0
     skipped = 0
     errors = []
     
     for row_idx, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
+        if not row or not any(row):
+            continue
         row_data = dict(zip(headers, row))
-        # Mapping user-friendly headers to keys
-        email = row_data.get("Work Email *") or row_data.get("email")
-        password = row_data.get("Temp Password *") or row_data.get("password")
-        first_name = row_data.get("First Name") or row_data.get("first_name", "")
-        last_name = row_data.get("Last Name") or row_data.get("last_name", "")
+        
+        email = (row_data.get("Work Email *") or row_data.get("Work Email") or row_data.get("email") or "").strip()
+        password = row_data.get("Temp Password *") or row_data.get("Temp Password") or row_data.get("password")
+        first_name = (str(row_data.get("First Name") or row_data.get("first_name") or "")).strip()
+        last_name = (str(row_data.get("Last Name") or row_data.get("last_name") or "")).strip()
         mobile = row_data.get("Mobile Number") or row_data.get("mobile")
         designation = row_data.get("Designation") or row_data.get("designation")
-        session_type = row_data.get("Session Type") or row_data.get("session_type", "Both")
-        department = row_data.get("Department") or row_data.get("department", "Other")
+        session_type = row_data.get("Session Type") or row_data.get("session_type") or "Both"
+        department = row_data.get("Department") or row_data.get("department") or "Other"
+        level = row_data.get("Level") or row_data.get("level")
+        mgr_input = row_data.get("Reporting Manager") or row_data.get("reporting_manager")
 
-        if not email or not password:
-            errors.append(f"Row {row_idx}: Missing Work Email or Temp Password")
+        if not email:
+            errors.append(f"Row {row_idx}: Missing Work Email")
             continue
-        
+
+        # Resolve reporting manager ID
+        reporting_manager_id = None
+        if mgr_input is not None and str(mgr_input).strip():
+            mgr_key = str(mgr_input).lower().strip()
+            reporting_manager_id = manager_lookup.get(mgr_key, str(mgr_input).strip())
+
         existing = await users_collection.find_one({"email": email})
+        
         if existing:
-            skipped += 1
-            continue
-        
-        # Plain text password for email
-        raw_password = str(password)
-        
-        user_dict = {
-            "email": email,
-            "password": get_password_hash(raw_password),
-            "first_name": first_name,
-            "last_name": last_name,
-            "full_name": f"{(first_name or '')} {(last_name or '')}".strip(),
-            "mobile": str(mobile) if mobile else None,
-            "role": "clientuser",
-            "session_type": session_type,
-            "designation": designation,
-            "department": department,
-            "company_id": company_id,
-            "is_active": True,
-            "created_at": datetime.now(timezone.utc)
-        }
-        
-        res = await users_collection.insert_one(user_dict)
-        user_dict["_id"] = str(res.inserted_id)
-        
-        # Trigger Welcome Email
-        background_tasks.add_task(
-            send_notification_from_template,
-            user_obj=user_dict,
-            template_slug="user_creation",
-            context={
-                "name": user_dict.get("first_name", "Learner"),
-                "email": user_dict["email"],
-                "password": raw_password,
-                "role": "Learner",
-                "login_url": "http://localhost:5173/login"
-            },
-            delivery_type="email"
-        )
-        created += 1
+            # Update existing member
+            update_data = {
+                "first_name": first_name if first_name else existing.get("first_name", ""),
+                "last_name": last_name if last_name else existing.get("last_name", ""),
+                "full_name": f"{first_name or existing.get('first_name', '')} {last_name or existing.get('last_name', '')}".strip(),
+                "session_type": str(session_type) if session_type else existing.get("session_type", "Both"),
+                "department": str(department) if department else existing.get("department", "Other"),
+                "company_id": company_id
+            }
+            if mobile is not None and str(mobile).strip() != "":
+                update_data["mobile"] = str(mobile).strip()
+            if designation is not None and str(designation).strip() != "":
+                update_data["designation"] = str(designation).strip()
+            if level is not None and str(level).strip() != "":
+                update_data["level"] = str(level).strip()
+            if reporting_manager_id is not None:
+                update_data["reporting_manager"] = reporting_manager_id
+            
+            if password is not None and str(password).strip() and str(password).strip() != "***":
+                update_data["password"] = get_password_hash(str(password).strip())
+            
+            await users_collection.update_one({"_id": existing["_id"]}, {"$set": update_data})
+            updated += 1
+        else:
+            # Create new user
+            if password is None or not str(password).strip():
+                errors.append(f"Row {row_idx}: Missing Temp Password for new user {email}")
+                continue
+            
+            raw_password = str(password).strip()
+            user_dict = {
+                "email": email,
+                "password": get_password_hash(raw_password),
+                "first_name": first_name,
+                "last_name": last_name,
+                "full_name": f"{first_name} {last_name}".strip(),
+                "mobile": str(mobile).strip() if mobile else None,
+                "role": "clientuser",
+                "session_type": str(session_type) if session_type else "Both",
+                "designation": str(designation).strip() if designation else None,
+                "department": str(department) if department else "Other",
+                "level": str(level).strip() if level else None,
+                "reporting_manager": reporting_manager_id,
+                "company_id": company_id,
+                "is_active": True,
+                "created_at": datetime.now(timezone.utc)
+            }
+            
+            res = await users_collection.insert_one(user_dict)
+            new_uid = str(res.inserted_id)
+            user_dict["_id"] = new_uid
+            
+            # Register newly created user in manager_lookup map for subsequent rows
+            manager_lookup[new_uid.lower()] = new_uid
+            if email:
+                manager_lookup[email.lower()] = new_uid
+            if user_dict["full_name"]:
+                manager_lookup[user_dict["full_name"].lower()] = new_uid
+
+            # Trigger Welcome Email
+            background_tasks.add_task(
+                send_notification_from_template,
+                user_obj=user_dict,
+                template_slug="user_creation",
+                context={
+                    "name": user_dict.get("first_name", "Learner"),
+                    "email": user_dict["email"],
+                    "password": raw_password,
+                    "role": "Learner",
+                    "login_url": "http://localhost:5173/login"
+                },
+                delivery_type="email"
+            )
+            created += 1
     
-    await log_activity(current_user, "XLSX Import Users", "Company", f"Imported {created} users for company {company_id}")
-    return {"created": created, "skipped": skipped, "errors": errors}
+    await log_activity(current_user, "XLSX Import Users", "Company", f"Imported: {created} created, {updated} updated for company {company_id}")
+    return {
+        "created": created, 
+        "updated": updated, 
+        "skipped": skipped, 
+        "errors": errors,
+        "message": f"Import completed: {created} user(s) created, {updated} user(s) updated"
+    }
 
 # ─── Training Path & Session Progress ───
 

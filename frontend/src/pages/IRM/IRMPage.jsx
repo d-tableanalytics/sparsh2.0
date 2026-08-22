@@ -93,6 +93,13 @@ const Breakdown = ({ row, columns }) => (
               </dt>
               <dd className="font-bold tabular-nums">
                 {fmtNum(p.achieved, '0')} / {fmtNum(p.assigned, '0')}
+                {/* A part-finished checklist earns part of a task, so `achieved` can read
+                    3.9 of 5. Spell out the split rather than leaving a puzzling decimal. */}
+                {p.source === 'task' && p.partial > 0 && (
+                  <span className="text-[10px] font-medium text-[var(--text-muted)]">
+                    {' '}({p.completed} done + {p.partial} part-done)
+                  </span>
+                )}
                 {p.source === 'form' && p.ratings > 0 && (
                   <span className="text-[10px] font-medium text-[var(--text-muted)]">
                     {' '}({p.ratings} × {p.scale_max})

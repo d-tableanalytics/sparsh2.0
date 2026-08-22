@@ -27,7 +27,7 @@ const TeamManagement = () => {
     const initialMemberForm = {
         first_name: '', last_name: '', email: '', password: '',
         mobile: '', role: 'clientuser', is_active: true,
-        designation: '', department: '', session_type: 'Both'
+        designation: '', department: '', session_type: 'Both', level: ''
     };
     const [memberForm, setMemberForm] = useState(initialMemberForm);
 
@@ -187,6 +187,7 @@ const TeamManagement = () => {
                                 <div className="flex items-center gap-1.5 flex-wrap">
                                     <span className="px-2 py-0.5 bg-gray-50 text-[var(--text-muted)] border border-gray-100 rounded text-[8px] font-black uppercase tracking-widest">{u.department || 'General'}</span>
                                     <span className="px-2 py-0.5 bg-indigo-50 text-[var(--accent-indigo)] border border-indigo-100 rounded text-[8px] font-black uppercase tracking-widest">{u.session_type || 'Both'}</span>
+                                    <span className="px-2 py-0.5 bg-purple-50 text-purple-600 border border-purple-100 rounded text-[8px] font-black uppercase tracking-widest">{u.level ? `L: ${u.level}` : 'L: —'}</span>
                                 </div>
                             </div>
 
@@ -292,6 +293,11 @@ const TeamManagement = () => {
                                              <option value="Other">Other</option>
                                          </select>
                                      </div>
+                                 </div>
+
+                                 <div className="space-y-1.5">
+                                     <label className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest px-1">Level</label>
+                                     <input className="w-full bg-[var(--input-bg)] px-5 py-2.5 rounded-2xl border border-[var(--border)] text-[14px] font-black focus:border-[var(--accent-indigo)] outline-none" placeholder="e.g. L1, L2, Manager" value={memberForm.level} onChange={e => setMemberForm({...memberForm, level: e.target.value})} />
                                  </div>
 
                                  <div className="flex items-center justify-between pt-6 border-t border-[var(--border)]">

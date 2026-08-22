@@ -347,7 +347,7 @@ const ScheduleCalendarModal = ({ isOpen, onClose, onSaved, mode = 'erp', event =
     const matchIds = companyUsers.filter((u) => inDept(u, dept)).map(uid);
     const nextDoers = has
       ? form.doerIds.filter((id) => !matchIds.includes(id))       // removing dept → drop its doers
-      : [...new Set([...form.doerIds, ...matchIds])];             // adding dept → pre-select its doers
+      : form.doerIds;                                             // adding dept → filter pool, allow user to pick doers
     set({ departments: nextDepts, doerIds: nextDoers });
   };
 

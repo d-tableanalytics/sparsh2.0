@@ -180,8 +180,35 @@ async def load_people(company_id: str) -> Dict[str, dict]:
     return people
 
 
+def task_credit(doc: dict) -> float:
+    """How much of ONE task counts as achieved, between 0 and 1.
+
+    A task cannot be completed until every check point on it is ticked (routes/tasks.py
+    enforces that on the complete call). So a task carrying a checklist already reports
+    its own progress, and counting the task all-or-nothing threw that away: nine of ten
+    check points done scored exactly the same as a task nobody had opened — zero — which
+    made a genuinely productive month read as a failed one and gave the person no reason
+    to tick anything until the last item landed.
+
+    Completed → 1.0. Otherwise the share of check points done. A task with no checklist
+    has nothing partial to measure and stays all-or-nothing, exactly as before.
+    """
+    if _resolve_workflow_status(doc) == "completed":
+        return 1.0
+    items = [c for c in (doc.get("checklist") or []) if isinstance(c, dict)]
+    if not items:
+        return 0.0
+    done = sum(1 for c in items if c.get("completed"))
+    return done / len(items)
+
+
 async def _task_totals(company_id: str, period: str, people: Dict[str, dict]) -> Dict[str, dict]:
-    """{person_id: {"task": {assigned, achieved}, "delegation": {assigned, achieved}}}
+    """{person_id: {"task": {...}, "delegation": {...}}} — per bucket:
+
+        assigned   how many tasks
+        achieved   credit earned, fractional (see `task_credit`)
+        completed  how many finished outright
+        partial    how many contributed part of a task through their checklist
 
     A task counts for whoever DOES it (`doer_ids`), split by how it reached them:
     delegated to them by someone else → Delegation Score; their own → Task.
@@ -190,21 +217,27 @@ async def _task_totals(company_id: str, period: str, people: Dict[str, dict]) ->
     tasks = await fetch_tasks(start_iso, end_iso)
     cid = str(company_id)
 
-    totals = {pid: {"task": {"assigned": 0, "achieved": 0},
-                    "delegation": {"assigned": 0, "achieved": 0}} for pid in people}
+    def _bucket():
+        return {"assigned": 0, "achieved": 0.0, "completed": 0, "partial": 0}
+
+    totals = {pid: {"task": _bucket(), "delegation": _bucket()} for pid in people}
 
     for doc in tasks:
         if str(doc.get("company_id") or "") != cid:
             continue  # a company's IRM only counts that company's tasks
         bucket = "delegation" if is_delegated(doc) else "task"
-        completed = _resolve_workflow_status(doc) == "completed"
+        credit = task_credit(doc)
         for pid in doer_ids(doc):
             row = totals.get(pid)
             if row is None:
                 continue  # doer is not on this company's active roster
-            row[bucket]["assigned"] += 1
-            if completed:
-                row[bucket]["achieved"] += 1
+            cell = row[bucket]
+            cell["assigned"] += 1
+            cell["achieved"] += credit
+            if credit >= 1.0:
+                cell["completed"] += 1
+            elif credit > 0:
+                cell["partial"] += 1
     return totals
 
 
@@ -260,10 +293,19 @@ def _build_row(person: dict, weights: Dict[str, float],
         weightage = float(weights.get(code, 0.0))
 
         if p["source"] == SOURCE_TASK:
-            counts = (task_totals or {}).get(code) or {"assigned": 0, "achieved": 0}
-            achieved, assigned = counts["achieved"], counts["assigned"]
+            counts = (task_totals or {}).get(code) or {}
+            assigned = counts.get("assigned", 0)
+            achieved = counts.get("achieved", 0.0)
             achievement = _pct(achieved, assigned)
-            detail = {"achieved": achieved, "assigned": assigned}
+            # `achieved` is credit, not a headcount — a part-finished checklist contributes
+            # a fraction — so the whole/part split is sent alongside it and the screen can
+            # say "3 done + 2 in progress" instead of showing a puzzling 3.6.
+            detail = {
+                "achieved": round(achieved, 2),
+                "assigned": assigned,
+                "completed": counts.get("completed", 0),
+                "partial": counts.get("partial", 0),
+            }
         else:
             f = (form_totals.get(code) or {})
             achievement = _pct(f.get("points", 0.0), f.get("max_points", 0.0))
