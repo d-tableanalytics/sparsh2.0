@@ -3,7 +3,7 @@ import { Link, useLocation } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   CalendarRange, Plus, RefreshCw, AlertTriangle, CheckCircle2, X, ShieldAlert,
-  Users, Lock, Unlock, ArrowRight, Layers, Calculator, Send, Undo2,
+  Users, Lock, Unlock, ArrowRight, Layers, Calculator, Send, Undo2, Trash2,
 } from 'lucide-react';
 import {
   DashboardHero, HeaderSelect, HeroButton, Section, Th, Td, TableShell, KpiTile, FilterSelect,
@@ -11,6 +11,7 @@ import {
 import {
   getLeadershipConfig, getLeadershipCycles, createLeadershipCycle, updateLeadershipCycle,
   getLeadershipQuorum, computeLeadershipCycle, publishLeadershipCycle,
+  deleteLeadershipCycle,
 } from '../../../../services/leadershipApi';
 import { cycleLabel, cycleHint, isScoreReady } from '../../leadership/leadershipStatus';
 import {
@@ -217,6 +218,38 @@ const LeadershipCycles = () => {
     }
   };
 
+  // Delete a cycle opened by mistake. The server refuses once any feedback exists, or
+  // once the cycle is published, so the confirm here is about intent rather than safety —
+  // the panel links it invalidates are the part worth naming before it happens.
+  const removeCycle = async (row) => {
+    const enrolled = row.subject_count || 0;
+    const warn = enrolled
+      ? `
+
+This also un-enrols ${enrolled} leader(s) and invalidates any feedback links `
+        + 'already emailed to their panels.'
+      : '';
+    if (!window.confirm(`Delete ${row.label || row.cycle}?${warn}
+
+This cannot be undone.`)) return;
+    setBusy(row.cycle);
+    setError('');
+    setNotice('');
+    try {
+      const res = await deleteLeadershipCycle(companyId, row.cycle);
+      const r = res.data?.removed || {};
+      setNotice(`${res.data?.label || row.cycle} deleted`
+        + (r.subjects || r.links
+          ? ` — ${r.subjects || 0} leader(s) and ${r.links || 0} feedback link(s) removed.`
+          : '.'));
+      await reload();
+    } catch (e) {
+      setError(errText(e, 'Could not delete this cycle.'));
+    } finally {
+      setBusy('');
+    }
+  };
+
   // Freeze the scores. Refused until every level this cycle scores has been signed off by
   // HR + MD — a frozen number is what a leader is shown and a manager discusses at RRO, so
   // it must not come from a rubric nobody has approved.
@@ -410,6 +443,16 @@ const LeadershipCycles = () => {
                             <Send size={12} /> Publish
                           </button>
                         </>
+                      )}
+                      {/* Offered only while it can actually succeed: the server refuses a
+                          cycle holding feedback or one already published, and a button
+                          that always errors is worse than no button. */}
+                      {!c.response_count && c.status !== 'published' && (
+                        <button type="button" onClick={() => removeCycle(c)} disabled={busy === c.cycle}
+                          title="Delete this cycle and anything set up under it"
+                          className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11.5px] font-bold text-[var(--accent-red)] bg-[var(--accent-red-bg)] border border-[var(--accent-red-border)] hover:opacity-90 transition-opacity disabled:opacity-50">
+                          <Trash2 size={12} />
+                        </button>
                       )}
                     </div>
                   </Td>

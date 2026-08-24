@@ -533,6 +533,56 @@ async def update_cycle(company_id: str, cycle: str, updates: dict, user: dict) -
     return await get_cycle(company_id, cycle)
 
 
+async def delete_cycle(company_id: str, cycle: str) -> dict:
+    """Delete a cycle that has collected nothing, and everything set up under it.
+
+    For the cycle opened by mistake — wrong window, wrong degree, duplicate. Two things
+    stop it, both for the same reason: something exists that deleting would destroy and
+    nobody could reconstruct.
+
+      • ANY FEEDBACK — responses carry no giver identity by design, so a deleted response
+        cannot be traced back and asked for again. This mirrors `remove_subject`, which
+        refuses to un-enrol a leader for exactly the same reason.
+      • PUBLISHED — leaders and their reporting managers have been emailed that a score
+        is ready, and RRO conversations may already reference it. Deleting it would erase
+        a number people were shown.
+
+    Otherwise the cycle and everything scaffolded under it goes: subjects, panel links,
+    any frozen score rows and any discussion or briefing tracking. The counts come back so
+    the caller can say what was removed — invalidating eight already-emailed links is
+    worth reporting rather than doing quietly.
+    """
+    cyc = await get_cycle(company_id, cycle)
+    if not cyc:
+        raise ValueError("This cycle does not exist")
+
+    responses = await get_collection(COLL_LS_RESPONSES).count_documents({
+        "company_id": str(company_id), "cycle": str(cycle)})
+    if responses:
+        raise ValueError(
+            f"{cycle_label(cycle)} already holds {responses} submitted "
+            f"response{'' if responses == 1 else 's'}. Feedback is anonymous and cannot be "
+            "collected again, so the cycle cannot be deleted.")
+    if cyc.get("status") == CYCLE_PUBLISHED:
+        raise ValueError(
+            f"{cycle_label(cycle)} has been published — its leaders and their managers "
+            "were told their scores were ready, so it stays as a record.")
+
+    removed = {}
+    for key, coll in (("subjects", COLL_LS_SUBJECTS), ("links", COLL_LS_ASSIGNMENTS),
+                      ("scores", COLL_LS_SCORES), ("discussions", COLL_LS_DISCUSSIONS),
+                      ("briefings", COLL_LS_BRIEFINGS)):
+        res = await get_collection(coll).delete_many({
+            "company_id": str(company_id), "cycle": str(cycle)})
+        removed[key] = res.deleted_count
+
+    res = await get_collection(COLL_LS_CYCLES).delete_one({
+        "company_id": str(company_id), "cycle": str(cycle)})
+    removed["cycle"] = res.deleted_count
+    logger.info("Leadership cycle %s deleted [company=%s] %s", cycle, company_id, removed)
+    return {"deleted": True, "cycle": cycle, "label": cycle_label(cycle), "removed": removed}
+
+
 async def quorum_report(company_id: str, cycle: str) -> dict:
     """Who is short of quorum, so HR can extend the window instead of publishing a thin score.
 

@@ -138,9 +138,12 @@ class Harness:
         self.mailed.append(to)
         return True
 
-    async def no_template(self):
+    async def no_template(self, company_id=None):
         """No stored template — dispatch falls back to the built-in body. Stubbed so the
-        test never reaches for the real tpms_mail_templates collection."""
+        test never reaches for the real tpms_mail_templates collection.
+
+        Takes `company_id` because the real lookup is company-scoped: a template authored
+        by one client must never be mailed out by another."""
         return None
 
     def __enter__(self):

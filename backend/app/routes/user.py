@@ -102,6 +102,7 @@ class UserEditRequest(BaseModel):
     department: Optional[str] = None
     reporting_manager: Optional[str] = None  # admin Edit form must be able to save this
     level: Optional[str] = None
+    leadership_level: Optional[str] = None  # "L4" | "L5" | "L6" | "L7"; gates Leadership Score enrolment
     permissions: Optional[dict] = None
 
     @field_validator("leadership_level")

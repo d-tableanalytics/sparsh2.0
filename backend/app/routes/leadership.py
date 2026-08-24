@@ -434,6 +434,29 @@ async def patch_cycle(cycle: str, payload: CycleUpdate,
         raise _bad(e)
 
 
+@router.delete("/cycles/{cycle}")
+async def delete_cycle(cycle: str, company_id: Optional[str] = Query(None),
+                       current_user: dict = Depends(get_current_user)):
+    """Delete a cycle opened by mistake, with everything scaffolded under it.
+
+    Refused once ANY feedback has been submitted — responses are anonymous and cannot be
+    collected again — and refused for a published cycle, whose scores leaders have already
+    been told about. Both refusals come back as 400 with the reason.
+    """
+    _require_manage(current_user)
+    cid = _company_for(current_user, company_id)
+    try:
+        result = await svc.delete_cycle(cid, cycle)
+    except ValueError as e:
+        raise _bad(e)
+    # Audited like every other cycle transition: a deletion is the one action that leaves
+    # nothing behind to inspect afterwards, so the trail is the only record it happened.
+    await svc.audit(current_user, "cycle.delete",
+                    f"Deleted {result['label']} and everything set up under it",
+                    company_id=cid, cycle=cycle, removed=result["removed"])
+    return result
+
+
 # ─────────────────────────────────────────────────────────────
 # Subjects — the leaders being rated
 # ─────────────────────────────────────────────────────────────

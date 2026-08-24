@@ -54,6 +54,11 @@ export const createLeadershipCycle = (companyId, payload) =>
 export const updateLeadershipCycle = (companyId, cycle, payload) =>
   api.patch(`/leadership/cycles/${cycle}`, payload, withCompany(companyId));
 
+/** Delete a cycle opened by mistake, with its subjects and panel links.
+ *  Refused (400) once any feedback exists, or once the cycle has been published. */
+export const deleteLeadershipCycle = (companyId, cycle) =>
+  api.delete(`/leadership/cycles/${cycle}`, withCompany(companyId));
+
 // ── Subjects (the leaders being rated) ──
 /** The company roster HR picks leaders and feedback givers from. */
 export const getLeadershipPeople = (companyId) =>
