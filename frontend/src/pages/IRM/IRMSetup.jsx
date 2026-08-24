@@ -34,19 +34,16 @@ const numOrZero = (v) => {
 
 /** The editable weightage cell. Kept as a string so a half-typed value isn't clobbered. */
 const WeightageInput = ({ value, onChange, disabled }) => (
-  <div className="inline-flex items-center gap-1.5">
-    <input
-      type="number"
-      min={0}
-      max={100}
-      step="0.01"
-      value={value}
-      disabled={disabled}
-      onChange={(e) => onChange(e.target.value)}
-      className="w-24 px-3 py-2 rounded-lg bg-[var(--input-bg)] border border-[var(--input-border)] text-[13px] font-bold tabular-nums text-right outline-none focus:border-[var(--accent-indigo)] transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
-    />
-    <span className="text-[12px] font-bold text-[var(--text-muted)]">%</span>
-  </div>
+  <input
+    type="number"
+    min={0}
+    max={100}
+    step="0.01"
+    value={value}
+    disabled={disabled}
+    onChange={(e) => onChange(e.target.value)}
+    className="w-24 px-3 py-2 rounded-lg bg-[var(--input-bg)] border border-[var(--input-border)] text-[13px] font-bold tabular-nums text-right outline-none focus:border-[var(--accent-indigo)] transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
+  />
 );
 
 const IRMSetup = () => {
