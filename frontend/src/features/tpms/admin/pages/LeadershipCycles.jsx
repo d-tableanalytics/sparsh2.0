@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
@@ -169,6 +169,97 @@ const CycleModal = ({ config, existing, onClose, onSubmit }) => {
   );
 };
 
+/** Destructive confirm for a cycle. Mounted only while a row is pending, so it seeds from
+    that row and needs no reset. The server refuses a cycle holding feedback or one already
+    published — that failure is shown in here rather than behind the overlay. */
+const ConfirmDeleteModal = ({ row, onClose, onConfirm }) => {
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState('');
+  const enrolled = row.subject_count || 0;
+
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape' && !saving) onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [saving, onClose]);
+
+  const go = async () => {
+    setSaving(true);
+    setErr('');
+    try {
+      await onConfirm(row);
+    } catch (e) {
+      setErr(errText(e, 'Could not delete this cycle.'));
+      setSaving(false);
+    }
+  };
+
+  return (
+    <MotionDiv className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={saving ? undefined : onClose} />
+      <MotionDiv role="alertdialog" aria-modal="true"
+        initial={{ opacity: 0, y: 14, scale: 0.98 }}
+        animate={{ opacity: 1, y: 0, scale: 1 }}
+        exit={{ opacity: 0, y: 14, scale: 0.98 }}
+        transition={{ duration: 0.22, ease: [0.4, 0, 0.2, 1] }}
+        className="relative w-full max-w-md rounded-2xl border border-[var(--border)] bg-[var(--bg-card)] shadow-xl overflow-hidden">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-[var(--border)]">
+          <div className="flex items-center gap-2.5">
+            <span className="w-8 h-8 rounded-lg flex items-center justify-center bg-[var(--accent-red-bg)] text-[var(--accent-red)]">
+              <Trash2 size={16} />
+            </span>
+            <h3 className="text-[15px] font-extrabold tracking-tight">Delete this cycle?</h3>
+          </div>
+          <button type="button" onClick={onClose} disabled={saving}
+            className="w-8 h-8 rounded-lg flex items-center justify-center text-[var(--text-muted)] hover:bg-[var(--input-bg)] transition-colors disabled:opacity-50">
+            <X size={16} />
+          </button>
+        </div>
+
+        <div className="px-5 py-4 space-y-3">
+          <div className="rounded-xl border border-[var(--border)] bg-[var(--input-bg)] px-3.5 py-2.5">
+            <span className="block text-[13.5px] font-bold">{row.label || row.cycle}</span>
+            <span className="block text-[10.5px] font-mono text-[var(--text-muted)]">{row.cycle}</span>
+          </div>
+
+          {enrolled > 0 && (
+            <div className="flex items-start gap-2 rounded-xl border border-[var(--accent-yellow-border)] bg-[var(--accent-yellow-bg)] px-3.5 py-2.5 text-[12px] font-semibold text-[var(--accent-yellow)]">
+              <AlertTriangle size={14} className="mt-[1px] shrink-0" />
+              <span>
+                This also un-enrols <b>{enrolled}</b> leader{enrolled === 1 ? '' : 's'} and invalidates
+                any feedback links already emailed to their panels.
+              </span>
+            </div>
+          )}
+
+          <p className="text-[12.5px] font-medium text-[var(--text-muted)]">
+            The cycle and everything set up under it are removed. This cannot be undone.
+          </p>
+
+          {err && (
+            <div className="flex items-center gap-2 rounded-lg border border-[var(--accent-red-border)] bg-[var(--accent-red-bg)] px-3 py-2 text-[12px] font-bold text-[var(--accent-red)]">
+              <AlertTriangle size={14} /> {err}
+            </div>
+          )}
+        </div>
+
+        <div className="flex items-center justify-end gap-2 px-5 py-4 border-t border-[var(--border)]">
+          <button type="button" onClick={onClose} disabled={saving}
+            className="px-4 py-2 rounded-lg text-[13px] font-bold text-[var(--text-muted)] hover:bg-[var(--input-bg)] transition-colors disabled:opacity-50">
+            Cancel
+          </button>
+          <button type="button" onClick={go} disabled={saving} autoFocus
+            className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-[var(--accent-red)] text-white text-[13px] font-bold shadow-sm hover:opacity-90 transition-opacity disabled:opacity-40">
+            {saving ? <RefreshCw size={14} className="animate-spin" /> : <Trash2 size={14} />}
+            {saving ? 'Deleting…' : 'Delete Cycle'}
+          </button>
+        </div>
+      </MotionDiv>
+    </MotionDiv>
+  );
+};
+
 const LeadershipCycles = () => {
   const { user, staff, companyOptions, companyId, setCompanyId } = useLeadershipCompany();
   const manage = canManage(user);
@@ -178,6 +269,7 @@ const LeadershipCycles = () => {
   // into a route guarded by `RequireTpms admin`, which bounced them to their dashboard.
   const panelBase = useLocation().pathname.startsWith('/tpms/admin') ? '/tpms/admin' : '/tpms/smops';
   const [adding, setAdding] = useState(false);
+  const [pendingDelete, setPendingDelete] = useState(null);
   const [busy, setBusy] = useState('');
   const [notice, setNotice] = useState('');
 
@@ -219,19 +311,10 @@ const LeadershipCycles = () => {
   };
 
   // Delete a cycle opened by mistake. The server refuses once any feedback exists, or
-  // once the cycle is published, so the confirm here is about intent rather than safety —
-  // the panel links it invalidates are the part worth naming before it happens.
+  // once the cycle is published, so the dialog is about intent rather than safety — the
+  // panel links it invalidates are the part worth naming before it happens. Failures are
+  // left to throw: ConfirmDeleteModal reports them without dismissing itself.
   const removeCycle = async (row) => {
-    const enrolled = row.subject_count || 0;
-    const warn = enrolled
-      ? `
-
-This also un-enrols ${enrolled} leader(s) and invalidates any feedback links `
-        + 'already emailed to their panels.'
-      : '';
-    if (!window.confirm(`Delete ${row.label || row.cycle}?${warn}
-
-This cannot be undone.`)) return;
     setBusy(row.cycle);
     setError('');
     setNotice('');
@@ -242,9 +325,8 @@ This cannot be undone.`)) return;
         + (r.subjects || r.links
           ? ` — ${r.subjects || 0} leader(s) and ${r.links || 0} feedback link(s) removed.`
           : '.'));
+      setPendingDelete(null);
       await reload();
-    } catch (e) {
-      setError(errText(e, 'Could not delete this cycle.'));
     } finally {
       setBusy('');
     }
@@ -448,7 +530,7 @@ This cannot be undone.`)) return;
                           cycle holding feedback or one already published, and a button
                           that always errors is worse than no button. */}
                       {!c.response_count && c.status !== 'published' && (
-                        <button type="button" onClick={() => removeCycle(c)} disabled={busy === c.cycle}
+                        <button type="button" onClick={() => setPendingDelete(c)} disabled={busy === c.cycle}
                           title="Delete this cycle and anything set up under it"
                           className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11.5px] font-bold text-[var(--accent-red)] bg-[var(--accent-red-bg)] border border-[var(--accent-red-border)] hover:opacity-90 transition-opacity disabled:opacity-50">
                           <Trash2 size={12} />
@@ -467,6 +549,10 @@ This cannot be undone.`)) return;
         {adding && (
           <CycleModal key="add-cycle" config={cfg.data} existing={cycles}
             onClose={() => setAdding(false)} onSubmit={create} />
+        )}
+        {pendingDelete && (
+          <ConfirmDeleteModal key="delete-cycle" row={pendingDelete}
+            onClose={() => setPendingDelete(null)} onConfirm={removeCycle} />
         )}
       </AnimatePresence>
     </div>
