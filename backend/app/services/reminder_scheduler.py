@@ -290,26 +290,50 @@ async def _send_tpms_reminder_email(user_data, event) -> bool:
     NOTHING is sent (no _default_body fallback). Returns True only when an email was sent.
     """
     from app.services.tpms_notify_service import (
-        EVENT_REMINDER, SIDE_COMPANY, SIDE_STAFF,
+        EVENT_REMINDER, SIDE_COMPANY, SIDE_STAFF, SEND_FORM_LINKS,
         build_map, fill, get_template, log_context, _default_body,
+        _link_block, _strip_bare_form_urls, _strip_form_links,
+        _ensure_links_delivered, _template_wires_own_button,
     )
+    from app.services.tpms_form_link_service import existing_links_for
     from app.services.notification_service import send_email_notification
 
     side = SIDE_COMPANY if user_data.get("company_id") else SIDE_STAFF
     tpl = await get_template(event.get("activity") or "", EVENT_REMINDER, side)
     mapping = await build_map(event)
+
+    # The reminder for a form-scored activity is the natural place to re-send the link, and
+    # reminder templates are written expecting one ({{Form_Links}} / {{Form_Link}}). These are
+    # LOOKED UP, never created — see existing_links_for — so the recipient keeps the single URL
+    # the schedule mail issued and the log is not double-counted.
+    my_links = await existing_links_for(event, str(user_data.get("_id") or ""))
     mapping["Recipient_Name"] = (user_data.get("full_name")
                                  or " ".join(filter(None, [user_data.get("first_name"),
                                                            user_data.get("last_name")])).strip()
                                  or user_data.get("email") or "")
     # Spec parity — when no Active reminder template is configured, send a branded default body
     # rather than silently dropping the reminder (matches the schedule/status mail fallback).
-    if tpl and tpl.get("body_html"):
+    body_tpl = (tpl or {}).get("body_html")
+    if my_links and SEND_FORM_LINKS:
+        # A template that builds its own button keeps the raw URL; one that drops a bare
+        # placeholder in gets the labelled block, placed where the placeholder already sits.
+        mapping["Form_Link"] = (my_links[0]["link"] if _template_wires_own_button(body_tpl or "")
+                                else _link_block(my_links))
+        mapping["Form_Link_2"] = my_links[1]["link"] if len(my_links) > 1 else ""
+        mapping["Form_Links"] = _link_block(my_links)
+
+    if body_tpl:
         subject_tpl = tpl.get("subject") or "[Reminder] {{Title}} – {{Activity}}"
-        html = fill(tpl["body_html"], mapping)
+        html = fill(body_tpl, mapping)
     else:
         subject_tpl = "[Reminder] {{Title}} – {{Activity}}"
         html = _default_body(mapping, "Reminder")
+
+    if my_links and SEND_FORM_LINKS:
+        html = _strip_bare_form_urls(html)
+        html = _ensure_links_delivered(html, my_links)
+    # Same scrub the schedule mail gets: no legacy Google-Form URL, no dead empty-href button.
+    html = _strip_form_links(html)
     await send_email_notification(
         user_data.get("email"), fill(subject_tpl, mapping), html,
         user_id=str(user_data.get("_id")), slug=f"tpms_reminder_{side}",

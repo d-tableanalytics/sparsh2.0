@@ -244,6 +244,14 @@ DEFAULT_TEMPLATES = {
     # Separate triggers from the Calendar's. task_created/updated/deleted are the
     # pre-existing slugs (they only ever fired for delegation tasks); the rest are new.
     # See app/services/task_notifications.py for the recipients and context of each.
+    # A todo is private, so its create mail has exactly one recipient: the owner. It gets a
+    # DEFAULT here (unlike the upcoming_* reminder slugs) because the trigger is a user action
+    # rather than a scheduler sweep — the mail must go out on a fresh install, before anyone
+    # has visited Settings, and an admin can still override or deactivate it there.
+    "todo_created_email": {
+        "subject": "To-do added: {{todo_title}}",
+        "body": "Hello {{user_name}},\n\nYour to-do '{{todo_title}}' has been added to your calendar.\n\nDue Date: {{todo_due_date}}\nDue Time: {{todo_due_time}}\nPriority: {{priority}}\n{{occurrence_note}}\nNotes: {{description}}\n\nRegards,\nSparsh Notifications"
+    },
     "task_updated_email": {
         "subject": "Task Updated: {{task_name}}",
         "body": "Hello {{name}},\n\nThe task '{{task_name}}' was updated by {{actor_name}}.\n\nDeadline: {{deadline}}\nPriority: {{critical_level}}\nStatus: {{task_status}}\n\nRegards,\nSparsh Notifications"
@@ -768,6 +776,49 @@ async def send_company_registration_email(admin_obj: dict, company_name: str, ra
         "login_url": "https://sparsh.app/login"
     }
     return await send_notification_from_template(admin_obj, "company_registration", context, "email")
+
+async def send_todo_created_email(user_obj: dict, todo: dict, occurrences: int = 1,
+                                 delivery_type: str = "email"):
+    """Confirm a newly created calendar To-do to the person who owns it.
+
+    A todo has no attendees and is never delegated, so the owner is the only recipient there
+    can be — which is why this does not go through notify_users_instant (that resolves a
+    session's attendee list and renders the session templates; a todo passing through it mailed
+    its author "session created"). Reusing send_notification_from_template keeps the todo mail
+    on the same template/override/kill-switch machinery as every other notification.
+
+    A repeating todo writes its whole series at once; `occurrences` lets the single mail say so
+    instead of one mail landing per generated date.
+    """
+    try:
+        due = todo.get("start") or ""
+        due_date, due_time = "-", "-"
+        if due:
+            dt = datetime.fromisoformat(str(due).replace("Z", "+00:00"))
+            dt = to_ist(dt)
+            due_date = dt.strftime("%d %b %Y")
+            # A todo with no chosen time is stored due at 23:59:59 IST — that is an end-of-day
+            # marker, not a time the user picked, so it is not shown back to them as one.
+            due_time = "End of day" if dt.strftime("%H:%M") == "23:59" else dt.strftime("%I:%M %p")
+
+        context = {
+            "user_name": user_obj.get("full_name") or user_obj.get("first_name") or "there",
+            "name": user_obj.get("full_name") or user_obj.get("first_name") or "there",
+            "todo_title": todo.get("title") or "Untitled to-do",
+            "title": todo.get("title") or "Untitled to-do",
+            "todo_due_date": due_date,
+            "todo_due_time": due_time,
+            "priority": todo.get("priority") or "Normal",
+            "description": todo.get("description") or todo.get("additional_details") or "-",
+            "occurrence_note": (f"This is a repeating to-do — {occurrences} dates were added."
+                                if occurrences > 1 else ""),
+        }
+        return await send_notification_from_template(
+            user_obj, "todo_created", context, delivery_type=delivery_type, scope_override="staff")
+    except Exception as e:
+        logger.error(f"Failed to send todo created email: {e}")
+        return {}
+
 
 async def send_event_created_email(user_obj: dict, event_data: dict, creator_name: str, batch_name: str = "TBD", quarter: str = "TBD", delivery_type: str = "email"):
     try:

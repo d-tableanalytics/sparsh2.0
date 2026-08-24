@@ -173,6 +173,22 @@ _FORBIDDEN_LINK_PATTERNS = (
 
 _ANCHOR_RE = re.compile(r"<a(?:\s[^>]*)?>.*?</a>", re.IGNORECASE | re.DOTALL)
 _HREF_RE = re.compile(r"""href\s*=\s*["']([^"']*)["']""", re.IGNORECASE)
+# A generated form link sitting in the body as plain text — what a template that writes a bare
+# {{Form_Link}} (rather than <a href="{{Form_Link}}">) leaves behind once it is filled.
+_BARE_FORM_URL_RE = re.compile(r"https?://\S*/f/[A-Za-z0-9_\-]+")
+# {{Form_Link}} wired into the template's OWN anchor, e.g. <a href="{{Form_Link}}">Fill it</a>.
+_FORM_LINK_AS_HREF_RE = re.compile(
+    r"""href\s*=\s*["']\s*\{\{\s*Form_Link\s*\}\}\s*["']""", re.IGNORECASE)
+
+
+def _template_wires_own_button(body_tpl: str) -> bool:
+    """True when the template builds its own link around {{Form_Link}}.
+
+    Such a template wants the raw URL and supplies its own label. A template that merely drops
+    {{Form_Link}} into the body as text wants a link it does not have to build — and gets the
+    labelled block, placed exactly where the placeholder sits.
+    """
+    return bool(_FORM_LINK_AS_HREF_RE.search(body_tpl or ""))
 
 
 def _is_form_link(url: str) -> bool:
@@ -226,16 +242,48 @@ def _link_block(entries: List[dict]) -> str:
     )
 
 
-def _ensure_links_delivered(html: str, entries: List[dict]) -> str:
-    """Append any form link the rendered body does not already contain.
+def _linked_hrefs(html: str) -> set:
+    """Every URL the rendered body exposes as a real, clickable anchor."""
+    return {(m.group(1) or "").strip() for m in _HREF_RE.finditer(html or "")}
 
-    A template that uses {{Form_Link}} already carries the primary link, so nothing is appended
-    for it and the mail looks exactly as the admin designed it. Anything missing — because the
-    template has no placeholder, or because this activity has a second form — is added below,
-    so "the assignee receives the email with their unique link" cannot depend on how the
-    template happens to be written.
+
+def _strip_bare_form_urls(html: str) -> str:
+    """Drop naked form URLs from the body, leaving anchors untouched.
+
+    A template that writes `{{Form_Link}}` on its own — as the Accountability & Ownership one
+    does — renders the raw https://…/f/<token> string into the mail as text. Some clients
+    auto-link it, most show an unlabelled URL, and the recipient cannot tell WHICH form it
+    opens. The link is not lost: _ensure_links_delivered puts it back below, named after the
+    form it belongs to. Only text outside <a>…</a> is cleaned, so a template that wraps the
+    placeholder in its own button keeps that button exactly as authored.
     """
-    missing = [e for e in entries if e["link"] not in html]
+    body = html or ""
+    out, last = [], 0
+    for m in _ANCHOR_RE.finditer(body):
+        out.append(_BARE_FORM_URL_RE.sub("", body[last:m.start()]))
+        out.append(m.group(0))
+        last = m.end()
+    out.append(_BARE_FORM_URL_RE.sub("", body[last:]))
+    return "".join(out)
+
+
+def _ensure_links_delivered(html: str, entries: List[dict]) -> str:
+    """Append every form link the rendered body does not already offer as a labelled anchor.
+
+    A template that uses <a href="{{Form_Link}}">…</a> already carries that link, so nothing is
+    appended for it and the mail looks exactly as the admin designed it. Anything else is added
+    below, so "the assignee receives the email with their unique link" cannot depend on how the
+    template happens to be written.
+
+    Membership is judged on ANCHOR HREFS, not on the raw text. "Accountability & Ownership
+    Rating" carries two forms and the stored template has a single bare {{Form_Link}}: the
+    accountability URL was therefore present as plain text, counted as already delivered, and
+    only the ownership link got a label — which is the reported "no link for ownership form in
+    template, only accountability". Judged by href, neither is linked, so both are appended,
+    each named after its own form.
+    """
+    linked = _linked_hrefs(html)
+    missing = [e for e in entries if e["link"] not in linked]
     return html + _link_block(missing) if missing else html
 
 
@@ -258,7 +306,19 @@ async def build_map(event: dict, extra: Optional[dict] = None) -> Dict[str, str]
         "Staff_Assigner": await _resolve_names(event.get("coach_ids"), "staff"),
         "Company_Assigners": await _resolve_names(event.get("assigned_member_ids"), "learners"),
         "Session_Type": (str(meta.get("scope") or "").upper() or (event.get("activity") or "")),
+        # The stored templates read "A new {{Calendar_Type}} has been scheduled for …", so this
+        # is the NOUN for the calendar entry, not a code. It was never in this mapping, and
+        # fill() leaves an unknown placeholder untouched by design — so 22 templates delivered
+        # the literal text "{{Calendar_Type}}" to recipients. Anything carrying an `activity`
+        # is a TPMS activity; any other calendar row keeps its own word.
+        "Calendar_Type": "activity" if event.get("activity") else (event.get("type") or "event"),
         "Form_Link": _form_link(event),
+        # Overridden per-recipient by _dispatch and by the reminder sender, which are the only
+        # places a personal link exists. They default to EMPTY rather than being absent: fill()
+        # leaves an unknown placeholder untouched, so a template written with {{Form_Links}}
+        # delivered the literal text "{{Form_Links}}" to the recipient.
+        "Form_Link_2": "",
+        "Form_Links": "",
     }
     if extra:
         mapping.update({k: v for k, v in extra.items() if v is not None})
@@ -596,7 +656,15 @@ async def _dispatch(event: dict, event_kind: str, heading: str,
             # respondents. Staff-side recipients and non-form activities keep the empty default.
             my_links = form_links.get(str(person.get("id") or "")) or []
             if my_links and SEND_FORM_LINKS:
-                person_map["Form_Link"] = my_links[0]["link"]
+                # Where the links LAND matters as much as whether they are sent. A template that
+                # writes a bare {{Form_Link}} gets the labelled block substituted at that exact
+                # spot — inside the body, above the sign-off. Appending it after the template
+                # instead put it below the "Sparsh Magic Automation" footer, where the mail looks
+                # finished: on a phone the links were off-screen and read as missing.
+                # A template that wires its own <a href="{{Form_Link}}"> still gets the raw URL.
+                person_map["Form_Link"] = (my_links[0]["link"]
+                                           if _template_wires_own_button(body_tpl)
+                                           else _link_block(my_links))
                 # Second form's link — e.g. "Accountability & Ownership Rating" carries TWO forms
                 # (accountability + ownership), so each HOD needs both. Empty when there is only one.
                 person_map["Form_Link_2"] = my_links[1]["link"] if len(my_links) > 1 else ""
@@ -605,6 +673,10 @@ async def _dispatch(event: dict, event_kind: str, heading: str,
             subject = fill(subject_tpl, person_map)
             html = fill(body_tpl, person_map)
             if my_links and SEND_FORM_LINKS:
+                # Clean first, then guarantee: a bare {{Form_Link}} leaves an unlabelled URL
+                # that hides which form it opens, and would also mask the link from the
+                # completeness check below.
+                html = _strip_bare_form_urls(html)
                 html = _ensure_links_delivered(html, my_links)
             # Stage 1 guarantee: whatever the stored template contained — a legacy Google Form
             # URL, an old /tpms/forms deep link, or a now-empty {{Form_Link}} button — no form

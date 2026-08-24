@@ -246,6 +246,38 @@ async def assignments_for_event(event: dict, actor: Optional[dict] = None) -> li
     return out
 
 
+async def existing_links_for(event: dict, respondent_id: str) -> list:
+    """This respondent's ALREADY-ISSUED links for the event's forms, in the activity's order.
+
+    Strictly read-only — it never mints a link. That distinction is the whole point: a reminder
+    that created assignments would hand the recipient a SECOND live URL for the same form and
+    double-count them in Form Mail Logs. It re-sends exactly what the schedule mail issued.
+
+    Empty for a non-form activity, and empty when the schedule mail never ran, which is what
+    leaves an unconfigured reminder looking exactly as it did before.
+    """
+    from app.models.forms import ACTIVITY_FORM_MAP
+
+    forms = ACTIVITY_FORM_MAP.get(event.get("activity") or "")
+    company_id = str(event.get("company_id") or "")
+    period = str(event.get("start") or "")[:7]
+    if not forms or not company_id or len(period) != 7 or not respondent_id:
+        return []
+
+    rows = await get_collection(ASSIGNMENT_COLLECTION).find({
+        "company_id": company_id,
+        "period": period,
+        "form_type": {"$in": list(forms)},
+        "respondent_id": str(respondent_id),
+    }).to_list(10)
+
+    # Accountability before Ownership — the catalogue's order, not Mongo's insertion order.
+    rank = {f: i for i, f in enumerate(forms)}
+    rows.sort(key=lambda r: rank.get(r.get("form_type"), 99))
+    return [{"link": r["link"], "title": r.get("form_title") or r.get("form_type") or "Form"}
+            for r in rows if r.get("link")]
+
+
 async def mark_email_result(assignment_id, status: str, error: Optional[str] = None) -> None:
     """Record what happened when the link was mailed, for the Form Mail Logs status column."""
     now = datetime.now(timezone.utc)

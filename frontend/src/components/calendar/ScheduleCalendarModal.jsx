@@ -338,8 +338,41 @@ const ScheduleCalendarModal = ({ isOpen, onClose, onSaved, mode = 'erp', event =
     return companyUsers.filter((u) => form.departments.some((d) => inDept(u, d)));
   }, [companyUsers, form.departments]);
 
+  // How much of the VISIBLE pool is ticked — drives the counter and disables the bulk
+  // buttons when they would be no-ops.
+  const selectedInPool = useMemo(
+    () => doerPool.filter((u) => form.doerIds.includes(uid(u))).length,
+    [doerPool, form.doerIds],
+  );
+  const allPoolSelected = doerPool.length > 0 && selectedInPool === doerPool.length;
+
+  /* Whether the Title is still the one we auto-filled from the Activity, rather than a name
+     the user typed. Only an auto-filled title is rewritten when the Activity changes.
+
+     This is what stops the mail from naming two different activities. Title is free text and
+     is what every TPMS mail is HEADED with ("Scheduled - {{Title}}", "[LAPSED] {{Title}} ...")
+     while the BODY comes from the template keyed on Activity. The old rule only seeded the
+     title while it was empty, so picking "Action Closure Review" and then switching to
+     "Accountability & Ownership Rating" left the first name in the title for good — and the
+     recipient got a mail headed "Action Closure Review" whose content was the Accountability
+     & Ownership template. A hand-written title ("WRM- KEPL") is still never touched. */
+  const titleFollowsActivity = () => {
+    const t = (form.title || '').trim();
+    return !t || t === (form.activity || '').trim();
+  };
+
   const toggleStaff = (id) => set({ staffIds: form.staffIds.includes(id) ? form.staffIds.filter((s) => s !== id) : [...form.staffIds, id] });
   const toggleDoer = (id) => set({ doerIds: form.doerIds.includes(id) ? form.doerIds.filter((s) => s !== id) : [...form.doerIds, id] });
+
+  /* Bulk selection over the visible pool. Selecting a department deliberately does NOT
+     pre-tick its people (that is what made every HOD a recipient by default) — picking them
+     is an explicit act, which is what these two controls are for. */
+  const poolIds = () => doerPool.map(uid);
+  const selectAllDoers = () => set({ doerIds: [...new Set([...form.doerIds, ...poolIds()])] });
+  const clearDoers = () => {
+    const shown = new Set(poolIds());
+    set({ doerIds: form.doerIds.filter((id) => !shown.has(id)) });
+  };
 
   const toggleDept = (dept) => {
     const has = form.departments.includes(dept);
@@ -550,7 +583,7 @@ const ScheduleCalendarModal = ({ isOpen, onClose, onSaved, mode = 'erp', event =
                 <SearchableSelect
                   options={activityOptions.map((a) => ({ id: a, label: a }))}
                   value={form.activity}
-                  onChange={(a) => set({ activity: a, ...(form.title.trim() ? {} : { title: a }) })}
+                  onChange={(a) => set({ activity: a, ...(titleFollowsActivity() ? { title: a } : {}) })}
                   placeholder="— Select —"
                 />
               </div>
@@ -651,7 +684,24 @@ const ScheduleCalendarModal = ({ isOpen, onClose, onSaved, mode = 'erp', event =
 
             {/* Company Assigners (doers) */}
             <div>
-              <Label>Company Assigners (doers) (multi-select)</Label>
+              <div className="flex items-end justify-between gap-3 mb-1.5">
+                <Label>Company Assigners (doers) (multi-select)</Label>
+                {doerPool.length > 0 && (
+                  <div className="flex items-center gap-2 pb-1.5">
+                    <span className="text-[10px] font-black text-gray-400 tabular-nums">
+                      {selectedInPool} / {doerPool.length} selected
+                    </span>
+                    <button type="button" onClick={selectAllDoers} disabled={allPoolSelected}
+                      className="px-2.5 py-1 rounded-lg text-[10px] font-black uppercase tracking-wide border border-indigo-200 text-indigo-600 bg-indigo-50 hover:bg-indigo-600 hover:text-white disabled:opacity-40 disabled:hover:bg-indigo-50 disabled:hover:text-indigo-600 transition-all">
+                      Select all
+                    </button>
+                    <button type="button" onClick={clearDoers} disabled={selectedInPool === 0}
+                      className="px-2.5 py-1 rounded-lg text-[10px] font-black uppercase tracking-wide border border-gray-200 text-gray-500 bg-white hover:border-gray-400 disabled:opacity-40 transition-all">
+                      Clear
+                    </button>
+                  </div>
+                )}
+              </div>
               <div className="max-h-56 overflow-y-auto rounded-xl border border-gray-200 divide-y divide-gray-100">
                 {!form.companyId ? (
                   <div className="px-3 py-3 text-[12px] text-gray-400">Select a company &amp; departments first.</div>

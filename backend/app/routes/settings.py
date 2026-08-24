@@ -253,6 +253,14 @@ TEMPLATE_SEEDS = [
      UPCOMING_REMINDER_HTML_TEMPLATE,
      "Reminder: your todo '{{title}}' is due {{task_deadline}}."),
 
+    # ─── Calendar To-do ───
+    # Fired once when a To-do is created (the series counts as one). Separate from the Session
+    # triggers above: a todo is private and self-owned, so it must never render a session mail.
+    ("todo_created", "Todo Created",
+     "To-do added: {{todo_title}}",
+     "Hello {{user_name}},\n\nYour to-do '{{todo_title}}' has been added to your calendar.\n\nDue Date: {{todo_due_date}}\nDue Time: {{todo_due_time}}\nPriority: {{priority}}\n{{occurrence_note}}\nNotes: {{description}}\n\nRegards,\nSparsh Notifications",
+     "Your to-do '{{todo_title}}' was added. Due {{todo_due_date}} {{todo_due_time}}."),
+
     # ─── Task Management (Delegation) ───
     ("task_created", "Task Created",
      "New Task Assigned: {{task_name}}",
