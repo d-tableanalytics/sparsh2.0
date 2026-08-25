@@ -42,7 +42,9 @@ from app.models.leadership import (
     CYCLE_CLOSED, CYCLE_COLLECTING, CYCLE_COMPUTED, CYCLE_DRAFT, CYCLE_OPEN,
     CYCLE_PUBLISHED, CYCLE_STATUSES, CYCLE_TRANSITIONS, can_transition,
     DEFAULT_QUORUM, DEGREE_180, DEGREE_360, DEGREE_RELATIONS,
+    EMAIL_FAILED, EMAIL_SENT, LINK_SUBMITTED,
     LEVEL_L4, LEVELS, LEVEL_LABELS, LEVEL_THEMES, MIN_RESPONSES_FLOOR,
+    panel_size_for,
     RECOMMENDED_PER_RELATION, REL_DIRECT_REPORT, REL_OTHER_DEPT, REL_PEER,
     REL_SUPERIOR, RELATIONS, RELATION_LABELS,
     SCALE_MAX, TOTAL_WEIGHTAGE, WEIGHTAGE_EPSILON,
@@ -311,6 +313,17 @@ async def list_cycles(company_id: str, limit: int = 50) -> List[dict]:
         # mirrors exactly what assert_dispatchable enforces server-side.
         d["expired"] = cycle_is_expired(d.get("cycle") or "")
         d["can_dispatch"] = d.get("status") != CYCLE_CLOSED and not d["expired"]
+        # Opening is gated on the set-up before it (enrol -> panel -> mail), so the button
+        # can say why rather than failing on click. Computed for DRAFTS only: that is the
+        # only status the gate applies to, and it costs two queries per cycle.
+        if d.get("status") == CYCLE_DRAFT:
+            readiness = await open_readiness(company_id, d.get("cycle") or "")
+            d["open_readiness"] = readiness
+            d["can_open"] = readiness["ready"]
+            d["open_blocked_reason"] = readiness["reason"]
+        else:
+            d["can_open"] = True
+            d["open_blocked_reason"] = ""
         out.append(d)
     return out
 
@@ -353,6 +366,98 @@ async def assert_dispatchable(company_id: str, cycle: str) -> dict:
             f"{expiry.strftime('%d %b %Y') if expiry else 'its closing date'}. "
             "Feedback links have expired, so nothing further can be sent.")
     return cyc
+
+
+
+def _name_list(rows: List[dict], limit: int = 4) -> str:
+    """'Asha, Bilal, Chen and 2 more' — for an error a human reads."""
+    names = [str(r.get("subject_name") or r.get("subject_id") or "") for r in rows]
+    if len(names) <= limit:
+        return ", ".join(names)
+    return ", ".join(names[:limit]) + f" and {len(names) - limit} more"
+
+
+async def open_readiness(company_id: str, cycle: str) -> dict:
+    """Whether a draft cycle has finished the set-up that has to precede collection.
+
+    The module's order of work is Create -> enrol the leaders -> mail their panels -> Open.
+    Enrolment and dispatch each live on the Leaders screen, neither of them visible from the
+    Cycles page, so nothing stopped a cycle being opened with nobody enrolled or with every
+    invitation still sitting unmailed in the database. Such a cycle reads as collecting while
+    no form exists that anyone could fill.
+
+    Reported as structure rather than a bare boolean, so the button and the refusal can both
+    name WHO is missing instead of only saying no.
+
+    A submitted link counts as delivered whatever its mail row says — the giver evidently
+    received it. Only pending and failed rows hold a cycle back, and each has a remedy on the
+    Leaders screen: resend it, or drop that giver and pick another.
+    """
+    subjects = await get_collection(COLL_LS_SUBJECTS).find(
+        {"company_id": str(company_id), "cycle": str(cycle)}).to_list(500)
+
+    rows = await get_collection(COLL_LS_ASSIGNMENTS).find(
+        {"company_id": str(company_id), "cycle": str(cycle)}).to_list(2000)
+    panels: Dict[str, List[dict]] = {}
+    for r in rows:
+        panels.setdefault(str(r.get("subject_id")), []).append(r)
+
+    no_panel: List[dict] = []
+    unmailed: List[dict] = []
+    for s in subjects:
+        sid = str(s.get("subject_id"))
+        head = {"subject_id": sid, "subject_name": s.get("subject_name") or sid}
+        panel = panels.get(sid) or []
+        if not panel:
+            no_panel.append(head)
+            continue
+        waiting = [r for r in panel
+                   if r.get("status") != LINK_SUBMITTED
+                   and r.get("email_status") != EMAIL_SENT]
+        if waiting:
+            unmailed.append({
+                **head,
+                "panel_size": len(panel),
+                "failed": sum(1 for r in waiting if r.get("email_status") == EMAIL_FAILED),
+                "pending": sum(1 for r in waiting if r.get("email_status") != EMAIL_FAILED),
+            })
+
+    if not subjects:
+        reason = ("no leaders are enrolled in it yet. Enrol at least one on the Leaders "
+                  "screen first.")
+    elif no_panel:
+        reason = (f"{len(no_panel)} enrolled leader(s) have no feedback panel yet "
+                  f"({_name_list(no_panel)}). Assign each a panel and mail their "
+                  "invitations first.")
+    elif unmailed:
+        failed = sum(r["failed"] for r in unmailed)
+        reason = (f"feedback invitations have not gone out for {len(unmailed)} leader(s) "
+                  f"({_name_list(unmailed)}). "
+                  + (f"{failed} send(s) failed — resend them, or replace those givers."
+                     if failed else "Send them from the Leaders screen first."))
+    else:
+        reason = ""
+
+    return {
+        "subjects": len(subjects),
+        "panels_missing": no_panel,
+        "mail_pending": unmailed,
+        "ready": bool(subjects) and not no_panel and not unmailed,
+        "reason": reason,
+    }
+
+
+async def assert_openable(company_id: str, cycle: str) -> dict:
+    """Raise unless a draft cycle is ready to start collecting.
+
+    Server-side for the same reason assert_dispatchable is: a stale browser tab or a direct
+    PATCH must not be able to open a cycle nobody has been invited to. Returns the report so
+    callers do not compute it twice.
+    """
+    report = await open_readiness(company_id, cycle)
+    if not report["ready"]:
+        raise ValueError(f"{cycle_label(cycle)} cannot be opened yet — {report['reason']}")
+    return report
 
 
 async def panel_shortfall(company_id: str, cycle: str, subject_id: str) -> Dict[str, int]:
@@ -430,6 +535,37 @@ def effective_degree(cyc: dict, subject: Optional[dict] = None) -> str:
     return str((cyc or {}).get("degree") or DEGREE_360)
 
 
+def effective_quorum(cyc: dict, subject: Optional[dict] = None) -> int:
+    """The quorum that can actually be met — for a cycle, or for one leader inside it.
+
+    `quorum` is stored per cycle and defaults to DEFAULT_QUORUM (5), but a 180 degree panel
+    is four people: two superiors and two same-department peers. A stored five is then
+    unreachable by arithmetic, so every leader on 180 read as below quorum however many of
+    their panel replied — and the freeze warning named them all, every time.
+
+    Capped rather than corrected in the database, so cycles already carrying a five start
+    behaving without their stored settings being rewritten underneath HR.
+
+    Per SUBJECT as well as per cycle: a leader overridden to 180 inside a 360 cycle has a
+    four-person panel and must not be held to the cycle's eight.
+    """
+    stored = int((cyc or {}).get("quorum") or DEFAULT_QUORUM)
+    capped = min(stored, panel_size_for(effective_degree(cyc, subject)))
+    return max(MIN_RESPONSES_FLOOR, capped)
+
+
+def effective_min_responses(cyc: dict, subject: Optional[dict] = None) -> int:
+    """The anonymity floor that can actually be met. Same cap, same reason as
+    effective_quorum — a stored threshold above the panel means no score is ever computed.
+
+    Never drops below MIN_RESPONSES_FLOOR: the cap protects reachability, and must not be
+    allowed to trade anonymity away for it.
+    """
+    stored = int((cyc or {}).get("min_responses") or MIN_RESPONSES_FLOOR)
+    capped = min(stored, panel_size_for(effective_degree(cyc, subject)))
+    return max(MIN_RESPONSES_FLOOR, capped)
+
+
 async def create_cycle(company_id: str, payload, user: dict) -> dict:
     cycle = str(payload.cycle or current_cycle())
     cycle_label(cycle)  # validates the code shape; raises ValueError on nonsense
@@ -449,8 +585,11 @@ async def create_cycle(company_id: str, payload, user: dict) -> dict:
                              MIN_RESPONSES_FLOOR),
         # Confidence floor: fewest responses before a score may be FROZEN and released.
         # The document's panel is 8; a result from three of them is not the 360° view its
-        # label claims.
-        "quorum": int(getattr(payload, "quorum", None) or DEFAULT_QUORUM),
+        # label claims. Capped at the panel the DEGREE collects from — a 180° cycle has
+        # four givers, so the default of five would be unreachable from the moment the
+        # cycle was created.
+        "quorum": min(int(getattr(payload, "quorum", None) or DEFAULT_QUORUM),
+                      panel_size_for(payload.degree)),
         # Empty = equal across the groups in play. Stored empty rather than filled in, so
         # the screen can honestly say "default" instead of showing invented numbers.
         "group_weightages": getattr(payload, "group_weightages", None) or {},
@@ -502,6 +641,34 @@ async def update_cycle(company_id: str, cycle: str, updates: dict, user: dict) -
                 f"{cycle_label(cycle)} is {current} and cannot become {target}"
                 + (f" — it can only move to {', '.join(allowed)}." if allowed else
                    ". A published cycle is final."))
+
+    # Both thresholds count REPLIES, so neither may exceed the panel the degree collects
+    # from — four at 180°, eight at 360°. Checked here rather than on CycleUpdate because
+    # the degree in play may be the stored one or may be changing in this same PATCH.
+    degree = str(fields.get("degree") or cyc.get("degree") or DEGREE_360)
+    panel = panel_size_for(degree)
+    for key in ("min_responses", "quorum"):
+        if key in fields and int(fields[key]) > panel:
+            raise ValueError(
+                f"A {degree}° cycle collects from {panel} givers "
+                f"({RECOMMENDED_PER_RELATION} per relation), so {key} cannot be "
+                f"{fields[key]}.")
+    if "degree" in fields:
+        # Narrowing 360° to 180° shrinks the panel from eight to four, which can strand a
+        # threshold that was legal under the old degree. Bring the stored ones down with it
+        # rather than leaving a cycle that can never be scored.
+        for key in ("min_responses", "quorum"):
+            if key not in fields and int(cyc.get(key) or MIN_RESPONSES_FLOOR) > panel:
+                fields[key] = panel
+
+    # Create -> enrol -> mail the panels -> Open. Opening is what declares the cycle to be
+    # collecting, so it is gated on that set-up having actually happened: a cycle opened with
+    # nobody enrolled, or with every invitation unmailed, is collecting from no one.
+    #
+    # Scoped deliberately to draft -> open. Re-opening a CLOSED cycle is the documented
+    # remedy for a quorum shortfall and has to stay a single click, so that path is untouched.
+    if target == CYCLE_OPEN and current == CYCLE_DRAFT:
+        await assert_openable(company_id, cycle)
 
     # Settings are frozen once collection starts: changing a weightage, the degree or the
     # quorum midway would score the responses already in hand against different rules from
@@ -590,7 +757,7 @@ async def quorum_report(company_id: str, cycle: str) -> dict:
     three.
     """
     cyc = await get_cycle(company_id, cycle) or {}
-    quorum = int(cyc.get("quorum") or DEFAULT_QUORUM)
+    quorum = effective_quorum(cyc)
     subjects = await get_collection(COLL_LS_SUBJECTS).find({
         "company_id": str(company_id), "cycle": str(cycle)}).to_list(500)
 
@@ -602,11 +769,20 @@ async def quorum_report(company_id: str, cycle: str) -> dict:
         panel = await get_collection(COLL_LS_ASSIGNMENTS).count_documents({
             "company_id": str(company_id), "cycle": str(cycle),
             "subject_id": str(s.get("subject_id"))})
-        if n < quorum:
+        # Per subject, not per cycle: a leader overridden to 180° inside a 360° cycle has
+        # four givers, and holding them to the cycle's eight would keep them below quorum
+        # even with a full panel.
+        want = effective_quorum(cyc, s)
+        if n < want:
             short.append({"subject_id": str(s.get("subject_id")),
                           "subject_name": s.get("subject_name"),
-                          "responses": n, "panel_size": panel, "short_by": quorum - n})
+                          "responses": n, "panel_size": panel,
+                          "quorum": want, "short_by": want - n})
+    # The anonymity floor travels with the report: below it no score exists at all, which
+    # is a different warning from a thin one, and the caller cannot derive it from the
+    # stored value once the degree has capped it.
     return {"quorum": quorum, "subjects": len(subjects),
+            "min_responses": effective_min_responses(cyc),
             "below_quorum": short, "all_met": not short}
 
 
@@ -663,12 +839,19 @@ async def list_subjects(company_id: str, cycle: str) -> List[dict]:
     for a in assignments:
         by_subject.setdefault(str(a.get("subject_id")), []).append(a)
 
+    # The cycle's own degree, so each row can say what its panel SHOULD hold.
+    cyc = await get_cycle(company_id, cycle) or {}
+
     now = datetime.now(timezone.utc)
     out = []
     for s in subjects:
         s["_id"] = str(s["_id"])
         panel = by_subject.get(str(s.get("subject_id")), [])
         s["panel_size"] = len(panel)
+        # What the panel SHOULD hold, for THIS leader's degree. Additive: the column used
+        # to print "/ 8" whatever the cycle collected, so a full 180° panel of four
+        # read as half-built.
+        s["panel_target"] = panel_size_for(effective_degree(cyc, s))
         s["submitted_count"] = len([p for p in panel if p.get("status") == "submitted"])
         s["pending_count"] = len([p for p in panel
                                   if effective_status(p, now) in ("sent", "opened")])
@@ -1230,9 +1413,8 @@ async def _score_head(company_id: str, cycle: str, subject: dict, cyc: dict) -> 
 async def _compute_subject_score(company_id: str, cycle: str, subject: dict, cyc: dict,
                                  head: dict, *, include_relations: bool) -> dict:
     subject_id = str(subject.get("subject_id"))
-    min_responses = max(int(cyc.get("min_responses") or MIN_RESPONSES_FLOOR),
-                        MIN_RESPONSES_FLOOR)
-    quorum = int(cyc.get("quorum") or DEFAULT_QUORUM)
+    min_responses = effective_min_responses(cyc, subject)
+    quorum = effective_quorum(cyc, subject)
 
     live = await get_questions(subject.get("level"), company_id=company_id)
     questions = _rubric_for(subject, live)

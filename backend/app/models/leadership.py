@@ -36,7 +36,7 @@ whoever chooses to change them.
 import hashlib
 import json
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import Dict, List, Optional
 from datetime import datetime
 
@@ -146,6 +146,19 @@ DEGREE_RELATIONS: Dict[str, List[str]] = {
     DEGREE_180: [REL_SUPERIOR, REL_PEER],
     DEGREE_360: list(RELATIONS),
 }
+
+
+def panel_size_for(degree) -> int:
+    """How many givers a degree actually collects from: 4 at 180 degrees, 8 at 360.
+
+    RECOMMENDED_PANEL_SIZE is the 360 figure, and it was read as though it were universal.
+    It is not: 180 collects from superiors and same-department peers only, so its panel is
+    two relations x RECOMMENDED_PER_RELATION = four people. Treating it as eight let a 180
+    cycle be created needing more replies than it has givers, and left DEFAULT_QUORUM (5)
+    permanently out of reach of a four-person panel.
+    """
+    rels = DEGREE_RELATIONS.get(str(degree or DEGREE_360), RELATIONS)
+    return RECOMMENDED_PER_RELATION * len(rels)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -799,6 +812,30 @@ class CycleCreate(BaseModel):
         if d not in DEGREES:
             raise ValueError(f"degree must be one of {', '.join(DEGREES)}")
         return d
+
+    @model_validator(mode="after")
+    def _fits_the_panel(self):
+        """Both thresholds count REPLIES, so neither can exceed the panel the degree
+        collects from. A field validator cannot see `degree`, which is how a 180 cycle came
+        to be creatable needing eight responses from four givers.
+
+        An explicitly chosen value over the cap is refused. The DEFAULT quorum is clamped
+        instead: DEFAULT_QUORUM is 5, which already exceeds a 180 panel, so refusing it
+        would make every 180 cycle impossible to create.
+        """
+        panel = panel_size_for(self.degree)
+        if self.min_responses > panel:
+            raise ValueError(
+                f"A {self.degree} degree cycle collects from {panel} givers "
+                f"({RECOMMENDED_PER_RELATION} per relation), so min_responses cannot be "
+                f"{self.min_responses}.")
+        if self.quorum > panel:
+            if "quorum" in self.model_fields_set:
+                raise ValueError(
+                    f"A {self.degree} degree cycle collects from {panel} givers, so quorum "
+                    f"cannot be {self.quorum}.")
+            self.quorum = panel
+        return self
 
     @field_validator("min_responses")
     @classmethod

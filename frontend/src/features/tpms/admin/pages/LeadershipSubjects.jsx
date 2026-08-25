@@ -658,8 +658,11 @@ const LeadershipSubjects = () => {
                     )}
                   </Td>
                   <Td><Pill label={s.level} tone="blue" /></Td>
+                  {/* Against THIS leader's own degree. A complete 180° panel is four
+                      people, and printing "/ 8" made it read as half-built. */}
                   <Td align="center" className="tabular-nums font-bold">
-                    {s.panel_size ?? 0}<span className="text-[10px] text-[var(--text-muted)]"> / 8</span>
+                    {s.panel_size ?? 0}
+                    <span className="text-[10px] text-[var(--text-muted)]"> / {s.panel_target ?? 8}</span>
                   </Td>
                   <Td align="center" className="tabular-nums font-bold"
                     style={{ color: s.submitted_count ? 'var(--accent-green)' : 'var(--text-muted)' }}>

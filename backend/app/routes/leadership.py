@@ -33,6 +33,7 @@ from app.models.leadership import (
     GiverAssignment, QuestionUpdate,
     ResponseSubmit, SubjectCreate, SubjectMode, WeightageUpdate,
     DEGREE_RELATIONS, DEGREES, LEVELS, LEVEL_LABELS, LEVEL_THEMES,
+    panel_size_for,
     RECOMMENDED_PANEL_SIZE, RECOMMENDED_PER_RELATION, RELATIONS, RELATION_LABELS,
     LINK_EXPIRED, LINK_SUBMITTED,
     SCALE_MAX, SCALE_MIN, TOTAL_WEIGHTAGE,
@@ -296,7 +297,10 @@ async def read_config(current_user: dict = Depends(get_current_user)):
         "levels": [{"code": lv, "label": LEVEL_LABELS[lv], "theme": LEVEL_THEMES[lv]}
                    for lv in LEVELS],
         "relations": [{"code": r, "label": RELATION_LABELS[r]} for r in RELATIONS],
-        "degrees": [{"code": d, "relations": DEGREE_RELATIONS[d]} for d in DEGREES],
+        # `panel_size` is carried per degree so the UI stops treating 8 as universal:
+        # 180° collects from four givers, 360° from eight.
+        "degrees": [{"code": d, "relations": DEGREE_RELATIONS[d],
+                     "panel_size": panel_size_for(d)} for d in DEGREES],
         "scale": {"min": SCALE_MIN, "max": SCALE_MAX},
         "recommended_panel_size": RECOMMENDED_PANEL_SIZE,
         "recommended_per_relation": RECOMMENDED_PER_RELATION,
@@ -529,7 +533,10 @@ async def read_panel(subject_id: str, cycle: str = Query(...),
         "cycle": cycle,
         "subject_id": subject_id,
         "panel": [links.panel_row(r) for r in rows],
-        "recommended_panel_size": RECOMMENDED_PANEL_SIZE,
+        # For THIS leader's degree, not the 360° figure — a 180° panel is complete at four.
+        "recommended_panel_size": panel_size_for(
+            svc.effective_degree(await svc.get_cycle(cid, cycle) or {},
+                                 await svc.get_subject(cid, cycle, subject_id) or {})),
     }
 
 

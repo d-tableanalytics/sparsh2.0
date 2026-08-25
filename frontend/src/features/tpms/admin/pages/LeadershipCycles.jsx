@@ -3,7 +3,7 @@ import { Link, useLocation } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   CalendarRange, Plus, RefreshCw, AlertTriangle, CheckCircle2, X, ShieldAlert,
-  Users, Lock, Unlock, ArrowRight, Layers, Calculator, Send, Undo2, Trash2,
+  Users, Lock, Unlock, ArrowRight, Layers, Calculator, Send, Undo2, Trash2, Mail,
 } from 'lucide-react';
 import {
   DashboardHero, HeaderSelect, HeroButton, Section, Th, Td, TableShell, KpiTile, FilterSelect,
@@ -65,6 +65,14 @@ const CycleModal = ({ config, existing, onClose, onSubmit }) => {
   const taken = new Set((existing || []).map((c) => c.cycle));
   const available = (config?.cycles || []).filter((c) => !taken.has(c.code));
 
+  // RECOMMENDED_PER_RELATION givers for every relation the degree collects: four at
+  // 180° (superiors + same-department peers), eight at 360°. Read from /config so the panel
+  // composition stays owned by the server; the literal is only the moment before it lands.
+  const panelSizeOf = (code) => {
+    const d = (config?.degrees || []).find((x) => String(x.code) === String(code));
+    return d?.panel_size || (String(code) === '180' ? 4 : 8);
+  };
+
   const [cycle, setCycle] = useState(available[0]?.code || '');
   const [degree, setDegree] = useState('360');
   const [minResponses, setMinResponses] = useState('3');
@@ -81,8 +89,10 @@ const CycleModal = ({ config, existing, onClose, onSubmit }) => {
       await onSubmit({
         cycle,
         degree,
-        // Mirrors MIN_RESPONSES_FLOOR on the server, which raises anything lower to 3.
-        min_responses: Math.max(3, Number(minResponses) || 3),
+        // Mirrors both server bounds: MIN_RESPONSES_FLOOR, which raises anything lower
+        // to 3, and the degree's panel size, which is the most replies that can ever
+        // arrive. Asking 8 of a 180° panel of four is a threshold nobody could reach.
+        min_responses: Math.min(Math.max(3, Number(minResponses) || 3), panelSizeOf(degree)),
         notes: notes.trim(),
       });
     } catch (ex) {
@@ -129,14 +139,22 @@ const CycleModal = ({ config, existing, onClose, onSubmit }) => {
           </Field>
 
           <div className="grid grid-cols-2 gap-4">
-            <Field label="Feedback degree" hint="360° adds other-department peers and juniors.">
-              <FilterSelect value={degree} onChange={setDegree}
-                options={[{ id: '360', name: '360° — all relations' },
-                          { id: '180', name: '180° — superiors & peers' }]} />
+            <Field label="Feedback degree"
+              hint={`360° adds other-department peers and juniors — ${panelSizeOf('360')} givers against ${panelSizeOf('180')}.`}>
+              <FilterSelect value={degree}
+                onChange={(v) => {
+                  setDegree(v);
+                  // Narrowing to 180° halves the panel, so a threshold picked under 360°
+                  // can be left asking for more replies than the cycle now collects.
+                  // Bring it down with the degree rather than failing on submit.
+                  setMinResponses((m) => String(Math.min(Number(m) || 3, panelSizeOf(v))));
+                }}
+                options={[{ id: '360', name: `360° — all relations (${panelSizeOf('360')} givers)` },
+                          { id: '180', name: `180° — superiors & peers (${panelSizeOf('180')} givers)` }]} />
             </Field>
             <Field label="Minimum responses"
-              hint="Responses needed before any score is shown. 3 is the anonymity floor and cannot go lower.">
-              <input type="number" min={3} max={8} value={minResponses}
+              hint={`3 is the anonymity floor and cannot go lower. A ${degree}° panel is ${panelSizeOf(degree)} givers, so it cannot go higher than that either.`}>
+              <input type="number" min={3} max={panelSizeOf(degree)} value={minResponses}
                 onChange={(e) => setMinResponses(e.target.value)} className={inputCls} />
             </Field>
           </div>
@@ -260,6 +278,285 @@ const ConfirmDeleteModal = ({ row, onClose, onConfirm }) => {
   );
 };
 
+/** Quorum shortfall, raised before a freeze. A warning rather than a block — the document
+    sets no threshold, so HR is the one who decides whether a thin result is still worth
+    freezing. What the browser confirm could not do is offer the remedy it described:
+    re-opening the cycle to extend the window is a button here, not a sentence. Mounted only
+    while a shortfall is pending, so it seeds from that report and needs no reset. */
+const QuorumConfirmModal = ({ report, onClose, onReopen, onConfirm }) => {
+  const [saving, setSaving] = useState('');   // '' | 'reopen' | 'freeze'
+  const [err, setErr] = useState('');
+
+  const rows = report.rows || [];
+  const floor = report.minResponses || 3;
+  // Two thresholds sit behind one warning. Below `quorum` a score is still computed, just
+  // thin; below the anonymity floor the server computes nothing at all, so "freeze anyway"
+  // leaves those leaders with no number rather than a weak one. Worth saying apart.
+  const noScore = rows.filter((r) => (r.responses || 0) < floor).length;
+
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape' && !saving) onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [saving, onClose]);
+
+  // Both actions belong to the caller and either may throw. A failure is reported in here
+  // rather than behind the overlay, so the dialog stays put and the choice can be retried.
+  const run = (kind, fn, fallback) => async () => {
+    setSaving(kind);
+    setErr('');
+    try {
+      await fn(report);
+    } catch (e) {
+      setErr(errText(e, fallback));
+      setSaving('');
+    }
+  };
+
+  return (
+    <MotionDiv className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={saving ? undefined : onClose} />
+      <MotionDiv role="alertdialog" aria-modal="true"
+        initial={{ opacity: 0, y: 14, scale: 0.98 }}
+        animate={{ opacity: 1, y: 0, scale: 1 }}
+        exit={{ opacity: 0, y: 14, scale: 0.98 }}
+        transition={{ duration: 0.22, ease: [0.4, 0, 0.2, 1] }}
+        className="relative w-full max-w-lg rounded-2xl border border-[var(--border)] bg-[var(--bg-card)] shadow-xl overflow-hidden">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-[var(--border)]">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <span className="w-8 h-8 rounded-lg flex items-center justify-center bg-[var(--accent-yellow-bg)] text-[var(--accent-yellow)] shrink-0">
+              <AlertTriangle size={16} />
+            </span>
+            <div className="min-w-0">
+              <h3 className="text-[15px] font-extrabold tracking-tight">Quorum not met</h3>
+              <span className="block text-[10.5px] font-bold text-[var(--text-muted)] truncate">
+                {report.label || report.cycle}
+              </span>
+            </div>
+          </div>
+          <button type="button" onClick={onClose} disabled={!!saving}
+            className="w-8 h-8 rounded-lg flex items-center justify-center text-[var(--text-muted)] hover:bg-[var(--input-bg)] transition-colors disabled:opacity-50">
+            <X size={16} />
+          </button>
+        </div>
+
+        <div className="px-5 py-4 space-y-3">
+          <p className="text-[12.5px] font-semibold text-[var(--text-muted)]">
+            <b className="text-[var(--text-main)]">
+              {rows.length} of {report.subjects || rows.length} leader{(report.subjects || rows.length) === 1 ? '' : 's'}
+            </b>{' '}
+            {rows.length === 1 ? 'is' : 'are'} under this cycle&rsquo;s quorum of {report.quorum} responses.
+          </p>
+
+          <div className="rounded-xl border border-[var(--border)] overflow-hidden max-h-56 overflow-y-auto">
+            {rows.map((r, i) => {
+              const thin = (r.responses || 0) < floor;
+              return (
+                <div key={r.subject_id || `${r.subject_name}-${i}`}
+                  className="flex items-center justify-between gap-3 bg-[var(--input-bg)] px-3.5 py-2.5 border-b border-[var(--border)] last:border-0">
+                  <div className="min-w-0">
+                    <span className="block text-[13px] font-bold truncate">{r.subject_name}</span>
+                    <span className="block text-[10.5px] font-semibold text-[var(--text-muted)] tabular-nums">
+                      {r.responses} of {r.panel_size} panel member{r.panel_size === 1 ? '' : 's'} replied
+                    </span>
+                  </div>
+                  <span className="shrink-0 text-[10px] font-bold uppercase tracking-wide px-2 py-1 rounded-full border whitespace-nowrap"
+                    style={thin
+                      ? { color: 'var(--accent-red)', background: 'var(--accent-red-bg)', borderColor: 'var(--accent-red-border)' }
+                      : { color: 'var(--accent-yellow)', background: 'var(--accent-yellow-bg)', borderColor: 'var(--accent-yellow-border)' }}>
+                    {thin ? 'no score' : `${r.short_by ?? Math.max(0, report.quorum - r.responses)} more needed`}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+
+          {noScore > 0 && (
+            <div className="flex items-start gap-2 rounded-xl border border-[var(--accent-yellow-border)] bg-[var(--accent-yellow-bg)] px-3.5 py-2.5 text-[12px] font-semibold text-[var(--accent-yellow)]">
+              <AlertTriangle size={14} className="mt-[1px] shrink-0" />
+              <span>
+                <b>{noScore}</b> of them {noScore === 1 ? 'is' : 'are'} also below the {floor}-response
+                anonymity floor, so freezing leaves {noScore === 1 ? 'that leader' : 'them'} with no
+                score at all &mdash; not a thin one.
+              </span>
+            </div>
+          )}
+
+          <p className="text-[12.5px] font-medium text-[var(--text-muted)]">
+            Re-open the cycle to extend the window and chase the missing responses, or freeze
+            these scores as they stand. A freeze can still be undone until you publish.
+          </p>
+
+          {err && (
+            <div className="flex items-center gap-2 rounded-lg border border-[var(--accent-red-border)] bg-[var(--accent-red-bg)] px-3 py-2 text-[12px] font-bold text-[var(--accent-red)]">
+              <AlertTriangle size={14} /> {err}
+            </div>
+          )}
+        </div>
+
+        <div className="flex items-center justify-end gap-2 flex-wrap px-5 py-4 border-t border-[var(--border)]">
+          <button type="button" onClick={onClose} disabled={!!saving}
+            className="px-4 py-2 rounded-lg text-[13px] font-bold text-[var(--text-muted)] hover:bg-[var(--input-bg)] transition-colors disabled:opacity-50">
+            Cancel
+          </button>
+          <button type="button" onClick={run('reopen', onReopen, 'Could not re-open this cycle.')} disabled={!!saving}
+            title="Extend the window so the missing panel members can still reply"
+            className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-[13px] font-bold text-[var(--text-muted)] border border-[var(--border)] hover:bg-[var(--input-bg)] transition-colors disabled:opacity-50">
+            {saving === 'reopen' ? <RefreshCw size={14} className="animate-spin" /> : <Unlock size={14} />}
+            {saving === 'reopen' ? 'Re-opening…' : 'Re-open Cycle'}
+          </button>
+          <button type="button" onClick={run('freeze', onConfirm, 'Could not compute this cycle.')} disabled={!!saving} autoFocus
+            className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-[var(--accent-indigo)] text-white text-[13px] font-bold shadow-sm hover:opacity-90 transition-opacity disabled:opacity-40">
+            {saving === 'freeze' ? <RefreshCw size={14} className="animate-spin" /> : <Calculator size={14} />}
+            {saving === 'freeze' ? 'Freezing…' : 'Freeze Anyway'}
+          </button>
+        </div>
+      </MotionDiv>
+    </MotionDiv>
+  );
+};
+
+/** Named rather than counted. "3 leaders are missing a panel" sends HR hunting; the names
+    are what they act on, and the list is short by construction. */
+const BlockedNames = ({ title, rows, render }) => !rows.length ? null : (
+  <div className="space-y-1.5">
+    <span className="block text-[10.5px] font-bold uppercase tracking-wide text-[var(--text-muted)]">
+      {title}
+    </span>
+    <div className="rounded-xl border border-[var(--border)] overflow-hidden max-h-40 overflow-y-auto">
+      {rows.map((r) => (
+        <div key={r.subject_id}
+          className="flex items-center justify-between gap-3 bg-[var(--input-bg)] px-3.5 py-2 border-b border-[var(--border)] last:border-0">
+          <span className="text-[12.5px] font-bold truncate">{r.subject_name}</span>
+          <span className="shrink-0 text-[10.5px] font-semibold text-[var(--text-muted)] tabular-nums">
+            {render(r)}
+          </span>
+        </div>
+      ))}
+    </div>
+  </div>
+);
+
+/** Why a draft cycle cannot be opened yet.
+    A greyed-out button would be a dead end here: enrolment and dispatch both happen on the
+    Leaders screen, which is not visible from this page, so the reason has to name the step
+    and offer the way to it. The three steps are the module's actual order of work, shown as
+    a checklist so it is obvious which one is outstanding rather than only that something is.
+    Mounted only while a row is blocked, so it seeds from that row's readiness report. */
+const OpenBlockedModal = ({ row, panelBase, onClose }) => {
+  const rd = row.open_readiness || {};
+  const enrolled = rd.subjects || 0;
+  const noPanel = rd.panels_missing || [];
+  const unmailed = rd.mail_pending || [];
+
+  const steps = [
+    { icon: Users, label: 'Leaders enrolled', done: enrolled > 0,
+      detail: enrolled > 0
+        ? `${enrolled} leader${enrolled === 1 ? '' : 's'} in this cycle`
+        : 'Nobody is enrolled yet' },
+    { icon: Layers, label: 'Feedback panels assigned', done: enrolled > 0 && !noPanel.length,
+      detail: noPanel.length
+        ? `${noPanel.length} still without a panel`
+        : (enrolled > 0 ? 'Every leader has a panel' : 'Enrol a leader first') },
+    { icon: Mail, label: 'Invitations sent to feedback givers',
+      done: enrolled > 0 && !noPanel.length && !unmailed.length,
+      detail: unmailed.length
+        ? `${unmailed.length} leader${unmailed.length === 1 ? '' : 's'} still have unsent invitations`
+        : (enrolled > 0 && !noPanel.length ? 'All invitations delivered' : 'Not reached yet') },
+  ];
+
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  return (
+    <MotionDiv className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={onClose} />
+      <MotionDiv role="alertdialog" aria-modal="true"
+        initial={{ opacity: 0, y: 14, scale: 0.98 }}
+        animate={{ opacity: 1, y: 0, scale: 1 }}
+        exit={{ opacity: 0, y: 14, scale: 0.98 }}
+        transition={{ duration: 0.22, ease: [0.4, 0, 0.2, 1] }}
+        className="relative w-full max-w-lg rounded-2xl border border-[var(--border)] bg-[var(--bg-card)] shadow-xl overflow-hidden">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-[var(--border)]">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <span className="w-8 h-8 rounded-lg flex items-center justify-center bg-[var(--accent-yellow-bg)] text-[var(--accent-yellow)] shrink-0">
+              <Lock size={16} />
+            </span>
+            <div className="min-w-0">
+              <h3 className="text-[15px] font-extrabold tracking-tight">Not ready to open</h3>
+              <span className="block text-[10.5px] font-bold text-[var(--text-muted)] truncate">
+                {row.label || row.cycle}
+              </span>
+            </div>
+          </div>
+          <button type="button" onClick={onClose}
+            className="w-8 h-8 rounded-lg flex items-center justify-center text-[var(--text-muted)] hover:bg-[var(--input-bg)] transition-colors">
+            <X size={16} />
+          </button>
+        </div>
+
+        <div className="px-5 py-4 space-y-3.5">
+          <p className="text-[12.5px] font-semibold text-[var(--text-muted)]">
+            Opening a cycle is what declares it to be collecting. Until the invitations are
+            out, it would be collecting from nobody.
+          </p>
+
+          <div className="space-y-2">
+            {steps.map((s, i) => (
+              <div key={s.label} className="flex items-start gap-2.5">
+                <span className="w-6 h-6 rounded-lg shrink-0 flex items-center justify-center border"
+                  style={s.done
+                    ? { color: 'var(--accent-green)', background: 'var(--accent-green-bg)', borderColor: 'var(--accent-green-border)' }
+                    : { color: 'var(--text-muted)', background: 'var(--input-bg)', borderColor: 'var(--border)' }}>
+                  {s.done ? <CheckCircle2 size={13} /> : <s.icon size={13} />}
+                </span>
+                <div className="min-w-0 pt-[2px]">
+                  <span className={`block text-[12.5px] font-bold ${s.done ? 'text-[var(--text-muted)] line-through' : ''}`}>
+                    {i + 1}. {s.label}
+                  </span>
+                  <span className="block text-[11px] font-semibold text-[var(--text-muted)]">{s.detail}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <BlockedNames title="No panel yet" rows={noPanel} render={() => 'panel not assigned'} />
+          <BlockedNames title="Invitations not sent" rows={unmailed}
+            render={(r) => (r.failed
+              ? `${r.failed} failed of ${r.panel_size}`
+              : `${r.pending} unsent of ${r.panel_size}`)} />
+
+          {unmailed.some((r) => r.failed) && (
+            <div className="flex items-start gap-2 rounded-xl border border-[var(--accent-red-border)] bg-[var(--accent-red-bg)] px-3.5 py-2.5 text-[12px] font-semibold text-[var(--accent-red)]">
+              <AlertTriangle size={14} className="mt-[1px] shrink-0" />
+              <span>
+                Some invitations failed to send. Resend them from the leader&rsquo;s panel, or
+                swap in a different giver if the address is wrong.
+              </span>
+            </div>
+          )}
+        </div>
+
+        <div className="flex items-center justify-end gap-2 flex-wrap px-5 py-4 border-t border-[var(--border)]">
+          <button type="button" onClick={onClose}
+            className="px-4 py-2 rounded-lg text-[13px] font-bold text-[var(--text-muted)] hover:bg-[var(--input-bg)] transition-colors">
+            Close
+          </button>
+          <Link to={`${panelBase}/leadership/subjects?cycle=${row.cycle}`} onClick={onClose}
+            className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-[var(--accent-indigo)] text-white text-[13px] font-bold shadow-sm hover:opacity-90 transition-opacity">
+            Go to Leaders <ArrowRight size={14} />
+          </Link>
+        </div>
+      </MotionDiv>
+    </MotionDiv>
+  );
+};
+
 const LeadershipCycles = () => {
   const { user, staff, companyOptions, companyId, setCompanyId } = useLeadershipCompany();
   const manage = canManage(user);
@@ -270,6 +567,8 @@ const LeadershipCycles = () => {
   const panelBase = useLocation().pathname.startsWith('/tpms/admin') ? '/tpms/admin' : '/tpms/smops';
   const [adding, setAdding] = useState(false);
   const [pendingDelete, setPendingDelete] = useState(null);
+  const [quorumWarn, setQuorumWarn] = useState(null);
+  const [openBlocked, setOpenBlocked] = useState(null);
   const [busy, setBusy] = useState('');
   const [notice, setNotice] = useState('');
 
@@ -337,23 +636,53 @@ const LeadershipCycles = () => {
   // it must not come from a rubric nobody has approved.
   //
   // Quorum is a warning, not a block: the document sets no threshold, so HR decides
-  // whether a thin result is still worth freezing. They just should not do it unknowingly.
-  const compute = async (cycle) => {
-    setBusy(cycle); setError(''); setNotice('');
+  // whether a thin result is still worth freezing. They just should not do it unknowingly,
+  // which is why a shortfall opens QuorumConfirmModal instead of freezing straight away.
+  const compute = async (row) => {
+    setBusy(row.cycle); setError(''); setNotice('');
     try {
-      const q = await getLeadershipQuorum(companyId, cycle);
+      const q = await getLeadershipQuorum(companyId, row.cycle);
       const short = q.data?.below_quorum || [];
-      if (short.length && !window.confirm(
-        `${short.length} leader(s) are below the quorum of ${q.data.quorum}:\n\n`
-        + short.map((r) => `  ${r.subject_name} — ${r.responses} of ${r.panel_size}`).join('\n')
-        + `\n\nRe-open the cycle to extend the window, or continue and freeze these scores as they stand?`)) {
-        setBusy(''); return;
+      if (short.length) {
+        setQuorumWarn({
+          cycle: row.cycle,
+          label: row.label,
+          quorum: q.data?.quorum,
+          subjects: q.data?.subjects,
+          // The quorum and the anonymity floor say different things about what a freeze
+          // produces, so both travel with the report. Preferred over the row's stored
+          // value, which the degree may have capped: a 180° cycle holding 6 collects
+          // from four people and is scored against 4.
+          minResponses: q.data?.min_responses || row.min_responses,
+          rows: short,
+        });
+        return;
       }
-      await computeLeadershipCycle(companyId, cycle);
-      setNotice('Scores frozen. Review them, then publish to release them to leaders.');
-      await reload();
+      await freeze(row.cycle);
     } catch (e) {
       setError(errText(e, 'Could not compute this cycle.'));
+    } finally { setBusy(''); }
+  };
+
+  // The freeze itself, split out so QuorumConfirmModal can invoke it after HR has seen who
+  // is short. Left to throw: the modal reports the failure without dismissing itself.
+  const freeze = async (cycle) => {
+    await computeLeadershipCycle(companyId, cycle);
+    setQuorumWarn(null);
+    setNotice('Scores frozen. Review them, then publish to release them to leaders.');
+    await reload();
+  };
+
+  // The other way out of a quorum shortfall — extend the window rather than freeze a thin
+  // result. Same transition as the Re-open button on a closed row, offered where the
+  // shortfall is actually being read.
+  const reopenForQuorum = async ({ cycle }) => {
+    setBusy(cycle); setError(''); setNotice('');
+    try {
+      await updateLeadershipCycle(companyId, cycle, { status: 'open' });
+      setQuorumWarn(null);
+      setNotice('Cycle re-opened — feedback links work again until you close it.');
+      await reload();
     } finally { setBusy(''); }
   };
 
@@ -482,11 +811,26 @@ const LeadershipCycles = () => {
                         className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11.5px] font-bold text-[var(--accent-indigo)] bg-[var(--accent-indigo-bg)] border border-[var(--accent-indigo-border)] hover:opacity-90 transition-opacity">
                         Leaders <ArrowRight size={12} />
                       </Link>
+                      {/* Create -> enrol -> assign panels -> mail -> Open. `can_open` is
+                          server-computed (leadership_service.open_readiness) and mirrors
+                          exactly what assert_openable enforces, so the button and the API
+                          cannot disagree. Blocked draws as its own control rather than a
+                          greyed Open: the remedy is on another screen, and a dead button
+                          would not say which one. */}
                       {c.status === 'draft' && (
-                        <button type="button" onClick={() => setStatus(c.cycle, 'open')} disabled={busy === c.cycle}
-                          className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11.5px] font-bold text-[var(--accent-green)] bg-[var(--accent-green-bg)] border border-[var(--accent-green-border)] hover:opacity-90 transition-opacity disabled:opacity-50">
-                          <Unlock size={12} /> Open
-                        </button>
+                        c.can_open === false ? (
+                          <button type="button" onClick={() => setOpenBlocked(c)} disabled={busy === c.cycle}
+                            title={c.open_blocked_reason || 'Enrol leaders and send their invitations first'}
+                            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11.5px] font-bold text-[var(--accent-yellow)] bg-[var(--accent-yellow-bg)] border border-[var(--accent-yellow-border)] hover:opacity-90 transition-opacity disabled:opacity-50">
+                            <Lock size={12} /> Set-up incomplete
+                          </button>
+                        ) : (
+                          <button type="button" onClick={() => setStatus(c.cycle, 'open')} disabled={busy === c.cycle}
+                            title="Start collecting — the feedback links already mailed go live"
+                            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11.5px] font-bold text-[var(--accent-green)] bg-[var(--accent-green-bg)] border border-[var(--accent-green-border)] hover:opacity-90 transition-opacity disabled:opacity-50">
+                            <Unlock size={12} /> Open
+                          </button>
+                        )
                       )}
                       {c.status === 'open' && (
                         <button type="button" onClick={() => setStatus(c.cycle, 'closed')} disabled={busy === c.cycle}
@@ -503,7 +847,7 @@ const LeadershipCycles = () => {
                             className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11.5px] font-bold text-[var(--text-muted)] border border-[var(--border)] hover:bg-[var(--input-bg)] transition-colors disabled:opacity-50">
                             <Unlock size={12} /> Re-open
                           </button>
-                          <button type="button" onClick={() => compute(c.cycle)} disabled={busy === c.cycle}
+                          <button type="button" onClick={() => compute(c)} disabled={busy === c.cycle}
                             className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11.5px] font-bold text-[var(--accent-indigo)] bg-[var(--accent-indigo-bg)] border border-[var(--accent-indigo-border)] hover:opacity-90 transition-opacity disabled:opacity-50">
                             <Calculator size={12} /> Compute
                           </button>
@@ -553,6 +897,16 @@ const LeadershipCycles = () => {
         {pendingDelete && (
           <ConfirmDeleteModal key="delete-cycle" row={pendingDelete}
             onClose={() => setPendingDelete(null)} onConfirm={removeCycle} />
+        )}
+        {quorumWarn && (
+          <QuorumConfirmModal key="quorum-warning" report={quorumWarn}
+            onClose={() => setQuorumWarn(null)}
+            onReopen={reopenForQuorum}
+            onConfirm={({ cycle }) => freeze(cycle)} />
+        )}
+        {openBlocked && (
+          <OpenBlockedModal key="open-blocked" row={openBlocked} panelBase={panelBase}
+            onClose={() => setOpenBlocked(null)} />
         )}
       </AnimatePresence>
     </div>
