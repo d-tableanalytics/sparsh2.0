@@ -420,6 +420,66 @@ def _validate_jd(jd: dict, *, partial: bool = False) -> dict:
     return out
 
 
+# JD field  <-  requisition field it inherits from when left blank.
+#
+# The same facts are entered once, on the requisition, and the JD is what a candidate is
+# eventually shown. Asking for them twice is how the two drift apart, so the JD inherits
+# the requisition's answer at raise time and the JD document is complete AT REST -- which
+# is what every reader needs, because only the public advert ever fell back to the
+# requisition and the JD library, the requisition drawer and the printable forms all read
+# the stored document directly.
+#
+# `benefits`, `responsibilities` and `attachments` are absent deliberately: they have no
+# requisition counterpart and are authored on the JD itself.
+JD_FROM_REQUISITION = (
+    ("experience",      "experience_required"),
+    ("qualifications",  "qualification"),
+    ("skills",          "essential_skills"),
+    ("location",        "work_location"),
+    ("employment_type", "employment_type"),
+)
+
+
+def _jd_ctc_from(requisition: dict) -> Optional[str]:
+    """The requisition's numeric CTC as the JD's free-text one.
+
+    Formatted with the module's own money convention (hrms_offer_service._money): grouped
+    digits and NO currency symbol, because HRMS never asks which currency a company works
+    in and inventing one would be worse than omitting it.
+    """
+    value = requisition.get("offering_ctc")
+    if value is None or value == "":
+        return None
+    try:
+        return f"{float(value):,.0f}"
+    except (TypeError, ValueError):
+        return None
+
+
+def _seed_jd_from_requisition(jd: dict, requisition: dict) -> dict:
+    """Fill the JD's blank fields from the requisition it was raised with.
+
+    Only ever fills a field that is BLANK -- a JD authored with its own wording keeps every
+    word of it, so this can never overwrite something a person typed. That is what makes it
+    safe to run unconditionally on create.
+
+    Returns a new dict rather than mutating, so the caller's validated JD stays the record
+    of what was actually submitted.
+    """
+    out = dict(jd)
+    for jd_field, req_field in JD_FROM_REQUISITION:
+        if out.get(jd_field):
+            continue
+        inherited = requisition.get(req_field)
+        if inherited not in (None, ""):
+            out[jd_field] = getattr(inherited, "value", inherited)
+    if not out.get("ctc"):
+        ctc = _jd_ctc_from(requisition)
+        if ctc:
+            out["ctc"] = ctc
+    return out
+
+
 # -------------------------------------------------------------
 # Read
 # -------------------------------------------------------------
@@ -535,6 +595,10 @@ async def create_requisition(actor: dict, company_id: str, payload: dict) -> dic
 
     jd_clean = _validate_jd(jd_payload, partial=False)
     jd_clean.setdefault("title", clean.get("designation_name"))
+    # Everything the requisition already knows, carried onto the JD that will be published
+    # from it. Runs after both are validated, so it inherits CLEANED values (the resolved
+    # enum strings, the checked CTC) rather than whatever arrived on the wire.
+    jd_clean = _seed_jd_from_requisition(jd_clean, clean)
 
     year = datetime.now(timezone.utc).year
     request_no = await next_business_id("requisition", str(company_id), year)
@@ -1337,9 +1401,26 @@ async def close_requisition(actor: dict, company_id: str, request_no: str,
             status_code=422,
             detail=f"Status must be one of: {', '.join(s.value for s in ReqClosing)}.")
 
+    now = datetime.now(timezone.utc)
+    updates = {"closing_status": value, "updated_at": now}
+    # SOP §13: "requisition and budget approval -- 3 years from requisition closure". The
+    # anchor is the CLOSURE, so the floor can only be computed here, and only when the
+    # requisition is actually leaving the Open state. Re-opening one clears it again, so a
+    # requisition back in the market is not carrying a disposal date from a previous life.
+    if value == ReqClosing.OPEN.value:
+        updates["retention_until"] = None
+        updates["closed_at"] = None
+    else:
+        from app.services.hrms_candidate_service import _add_years
+        from app.services.hrms_config_service import retention_years_for
+        updates["retention_until"] = _add_years(
+            now.strftime("%Y-%m-%d"),
+            await retention_years_for(company_id, "requisition"))
+        updates.setdefault("closed_at", now)
+
     result = await get_collection(COLL_REQUISITIONS).update_one(
         {"request_no": request_no, "company_id": str(company_id)},
-        {"$set": {"closing_status": value, "updated_at": datetime.now(timezone.utc)}})
+        {"$set": updates})
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Requisition not found.")
 

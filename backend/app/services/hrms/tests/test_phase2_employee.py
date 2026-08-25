@@ -162,8 +162,12 @@ def _matches(doc, query):
                 if not re.search(cond["$regex"], str(val or ""), flags):
                     return False
         elif isinstance(val, list):
-            # Array-contains, per the note above.
-            if cond not in val:
+            # Mongo matches {field: <literal>} against an ARRAY field two ways: the array
+            # CONTAINS the literal, or the array EQUALS it outright. The equality arm was
+            # added for the INT-9 compare-and-swap on the scorecard's approvals list -- a
+            # fake with only the contains arm made every equality-CAS on a list field
+            # match nothing, which reads as a phantom write conflict.
+            if val != cond and cond not in val:
                 return False
         elif val != cond:
             return False

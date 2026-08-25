@@ -39,11 +39,13 @@ from fastapi import HTTPException
 from app.db.mongodb import get_collection
 from app.models.hrms import (
     AUDIT_COMM_SENT, AUDIT_COMM_TEMPLATE_UPDATED, AUTO_COMM_EVENTS, COLL_CANDIDATES,
+    MANUAL_COMM_TEMPLATES,
     COLL_COMM_LOG, COLL_COMM_TEMPLATES, COLL_OFFERS, COLL_REQUISITIONS,
     CONSENT_TEMPLATES, DEFAULT_COMM_TEMPLATES, ENTITY_CANDIDATE, ENTITY_COMM,
-    RETENTION_YEARS, CommChannel, CommStatus, render_comm_body,
+    RETENTION_YEARS, CommChannel, CommStatus, render_comm_body,  # noqa: F401
 )
 from app.services.hrms_audit_service import audit
+from app.services.hrms_config_service import retention_years_for
 from app.utils.hrms_public_guard import clean_text
 
 
@@ -97,7 +99,15 @@ async def list_templates(company_id: str, *, include_inactive: bool = False) -> 
     if not include_inactive:
         query["active"] = True
     rows = await coll.find(query).sort("key", 1).to_list(200)
-    return [_out(r) for r in rows]
+    # Classified HERE, from the tables that decide it, so the screen cannot drift from the
+    # wiring -- it did once, labelling interview_scheduled "manual" after it went automatic.
+    automatic = set(AUTO_COMM_EVENTS.values())
+    consent = {t[0] for t in CONSENT_TEMPLATES}
+    return [{**_out(r),
+             "automatic": r.get("key") in automatic,
+             "manual": r.get("key") in MANUAL_COMM_TEMPLATES,
+             "consent": r.get("key") in consent}
+            for r in rows]
 
 
 async def _seed_templates(company_id: str) -> None:
@@ -291,7 +301,8 @@ async def send_template(actor: Optional[dict], company_id: str, uk: str,
         # SOP §13: a message about an application is part of that application's record, so
         # it inherits the candidate's own retention floor rather than a rule of its own.
         "retention_until": _add_years(
-            now.strftime("%Y-%m-%d"), RETENTION_YEARS["candidate_unselected"]),
+            now.strftime("%Y-%m-%d"),
+            await retention_years_for(company_id, "candidate_unselected")),
         "created_at": now,
     }
 
@@ -359,11 +370,15 @@ async def fire_event(actor: Optional[dict], company_id: str, uk: str,
     """
     template_key = AUTO_COMM_EVENTS.get(event)
     if not template_key:
-        return
+        return None
     try:
-        await send_template(actor, company_id, uk, template_key,
-                            variables=variables, automatic=True)
+        # Returned so a caller can SAY what happened ("the candidate has been emailed" is a
+        # claim, and a claim nobody checked is how a warning becomes a lie) -- while the
+        # never-raise contract below is untouched.
+        return await send_template(actor, company_id, uk, template_key,
+                                   variables=variables, automatic=True)
     except Exception as e:
         # Deliberately swallowed. An acknowledgement that cannot be sent must never fail
         # somebody's job application, and a rejection email must never fail the rejection.
         print(f"[WARN] HRMS auto-communication '{event}' failed for {uk}: {e}")
+        return None

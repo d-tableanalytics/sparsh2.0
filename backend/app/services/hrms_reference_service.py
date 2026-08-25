@@ -37,6 +37,7 @@ from app.models.hrms import (
     RequisitionTrack, is_iso_date,
 )
 from app.services.hrms_audit_service import audit
+from app.services.hrms_config_service import retention_years_for
 from app.services.hrms_id_service import next_business_id
 from app.utils.hrms_public_guard import clean_text
 
@@ -51,7 +52,7 @@ def _today() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
-def _retention_until(checked_on: str) -> str:
+def _retention_until(checked_on: str, years: int = None) -> str:
     """SOP §13: reference reports are kept for employment + 3 years.
 
     Employment end is unknowable at the time of the check, so the date stored here is the
@@ -68,7 +69,8 @@ def _retention_until(checked_on: str) -> str:
     # 29 February plus N years is not a date in a common year; the 28th is the honest floor.
     if month == 2 and day == 29:
         day = 28
-    return f"{year + RETENTION_YEARS['reference']:04d}-{month:02d}-{day:02d}"
+    keep = RETENTION_YEARS["reference"] if years is None else int(years)
+    return f"{year + keep:04d}-{month:02d}-{day:02d}"
 
 
 def _validate(payload: dict, *, partial: bool) -> dict:
@@ -214,6 +216,38 @@ async def assert_reference_cleared(company_id: str, candidate: dict, req: dict) 
     raise HTTPException(status_code=409, detail=detail)
 
 
+async def _notify_if_not_cleared(company_id: str, doc: dict) -> None:
+    """Warn HR when a recorded reference is not a clearance (Phase INT-9, spec §38).
+
+    A Positive reference is silent: the recorder is HR and the gate opens without
+    ceremony. A Negative or Unable-to-Verify one is what makes an offer REFUSE later, and
+    that refusal should never be the first anybody else on the HR team hears of it.
+    In-app only -- it is a heads-up about work already recorded, not a decision awaited.
+    """
+    if (doc or {}).get("outcome") in REFERENCE_CLEARS_OFFER:
+        return
+    # INTERNAL track only, resolved the way the offer gate resolves it (an absent track
+    # reads as client). A reference on a client-track candidate is legal and OPTIONAL --
+    # no internal offer gate applies to them, and the waiver this message recommends
+    # would be refused outright by raise_exception. Warning HR about a consequence that
+    # does not exist, with a remedy the system rejects, is worse than silence.
+    req = await get_collection(COLL_REQUISITIONS).find_one(
+        {"request_no": (doc or {}).get("request_no"), "company_id": str(company_id)},
+        {"requisition_track": 1})
+    track = (req or {}).get("requisition_track") or RequisitionTrack.CLIENT.value
+    if track != RequisitionTrack.INTERNAL.value:
+        return
+    from app.services.hrms_notify_service import notify_hrms_role
+    name = doc.get("candidate_name") or doc.get("uk")
+    await notify_hrms_role(
+        company_id, ["HR"],
+        f'Reference for {name} did not clear',
+        f'{doc.get("ref_no")} was recorded as "{doc.get("outcome")}". An internal offer '
+        f"for {name} will need a positive reference from another referee, or an approved "
+        f'"Reference Check Waived" exception.',
+        kind="warning", link="/hrms/reference-checks", email=False)
+
+
 # -------------------------------------------------------------
 # Write
 # -------------------------------------------------------------
@@ -241,7 +275,9 @@ async def create_reference_check(actor: dict, company_id: str, payload: dict) ->
         "request_no": candidate.get("request_no"),
         "conducted_by": str(actor.get("_id") or ""),
         "conducted_by_name": actor.get("full_name") or actor.get("email"),
-        "retention_until": _retention_until(clean.get("checked_on")),
+        "retention_until": _retention_until(
+            clean.get("checked_on"),
+            await retention_years_for(company_id, "reference")),
         "created_at": now,
         **clean,
     }
@@ -249,6 +285,7 @@ async def create_reference_check(actor: dict, company_id: str, payload: dict) ->
     await audit(actor, AUDIT_REFERENCE_RECORDED, ENTITY_REFERENCE, ref_no,
                 f'{clean.get("outcome")} for {uk} from {clean.get("referee_name")}',
                 company_id)
+    await _notify_if_not_cleared(company_id, doc)
     return _out(doc)
 
 
@@ -259,6 +296,9 @@ async def update_reference_check(actor: dict, company_id: str, ref_no: str,
     if not current:
         raise HTTPException(status_code=404, detail="Reference check not found.")
 
+    # Read BEFORE the write, for the same reason the telephonic service does.
+    previous_outcome = current.get("outcome")
+
     # Cross-field rules are checked against the MERGED record: flipping the outcome to
     # Negative in an edit must demand a note just as it does on creation.
     merged = {**current, **{k: v for k, v in (payload or {}).items() if v is not None}}
@@ -267,10 +307,18 @@ async def update_reference_check(actor: dict, company_id: str, ref_no: str,
         raise HTTPException(status_code=400, detail="No fields to update.")
 
     if "checked_on" in clean:
-        clean["retention_until"] = _retention_until(clean["checked_on"])
+        clean["retention_until"] = _retention_until(
+            clean["checked_on"], await retention_years_for(company_id, "reference"))
     clean["updated_at"] = datetime.now(timezone.utc)
     await coll.update_one({"ref_no": ref_no, "company_id": str(company_id)},
                           {"$set": clean})
     await audit(actor, AUDIT_REFERENCE_UPDATED, ENTITY_REFERENCE, ref_no,
                 ", ".join(sorted(k for k in clean if k != "updated_at")), company_id)
+
+    # ── Phase INT-9 ── fired only when the OUTCOME moved to a non-clearing one, so
+    # editing remarks on an already-negative reference does not nag anybody twice.
+    # `previous_outcome` was captured before the write -- see the telephonic service for
+    # why reading `current` afterwards is the wrong side of the driver's copy semantics.
+    if ("outcome" in clean and clean["outcome"] != previous_outcome):
+        await _notify_if_not_cleared(company_id, {**current, **clean})
     return await get_reference_check(company_id, ref_no)

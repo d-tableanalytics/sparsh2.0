@@ -38,6 +38,7 @@ from app.models.hrms import (
     AppStatus, PreboardingMode, PreboardingSentiment, RequisitionTrack, is_iso_date,
 )
 from app.services.hrms_audit_service import audit
+from app.services.hrms_config_service import retention_years_for
 from app.services.hrms_id_service import next_business_id
 from app.services.hrms_notify_service import notify_user, notify_users
 from app.utils.hrms_public_guard import clean_text
@@ -250,8 +251,9 @@ async def record_touchpoint(actor: dict, company_id: str, payload: dict) -> dict
         "notes": notes,
         # SOP §13. A touchpoint is part of the selected candidate's file, so it keeps the
         # selected-candidate floor rather than the shorter unselected one.
-        "retention_until": _add_years(contacted_at,
-                                      RETENTION_YEARS["candidate_selected"]),
+        "retention_until": _add_years(
+            contacted_at,
+            await retention_years_for(company_id, "candidate_selected")),
         "created_at": now,
     }
     await get_collection(COLL_PREBOARDING).insert_one(dict(doc))

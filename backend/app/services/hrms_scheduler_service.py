@@ -55,7 +55,7 @@ from app.models.hrms import (
     COLL_DESIGNATIONS, COLL_JOB_RUNS, COLL_PROBATION_REVIEWS, COLL_PURGE_BATCHES,
     COLL_REQUISITIONS, JOB_CADENCE_WEEKLY, JOB_POLICY_REVIEW, JOB_PREBOARDING,
     JOB_PROBATION, JOB_RETENTION, JOB_SLA_SWEEP, MANAGERIAL_LEVELS,
-    PROBATION_REMINDED_FIELD, PROBATION_REMINDER_DAYS, ProbationOutcome,
+    PROBATION_REMINDED_FIELD, ProbationOutcome,
     PurgeBatchStatus, SCHEDULED_JOBS,
 )
 
@@ -151,9 +151,13 @@ async def run_sla_sweep(company_id: str) -> dict:
     Idempotent without help from the ledger: `escalate_if_breached` guards on
     `sla_escalated`, so a milestone already announced is never announced twice.
     """
+    from app.services.hrms_config_service import config_for
     from app.services.hrms_sla_service import sweep_open_breaches
 
-    result = await sweep_open_breaches(None, company_id, notify=True)
+    # Resolved here and handed down, so one sweep judges every requisition against the same
+    # targets even if somebody edits the settings while it runs.
+    result = await sweep_open_breaches(None, company_id, notify=True,
+                                       config=await config_for(company_id))
     return {"checked": result.get("checked", 0),
             "breaches": len(result.get("breaches") or []),
             "notified": result.get("notified", 0)}
@@ -186,7 +190,8 @@ async def _managerial_request_nos(company_id: str, request_nos: list) -> set:
 async def run_probation_reminders(company_id: str) -> dict:
     """Remind the reviewer and HR that a probation review is coming due.
 
-    Fires at each tier in `PROBATION_REMINDER_DAYS` that the end date has reached, once per
+    Fires at each tier in this company's configured reminder table (Phase INT-5;
+    `PROBATION_REMINDER_DAYS` is the default) that the end date has reached, once per
     tier per record. The tier is recorded on the probation row itself, so a job that runs
     twice — or is rewritten entirely — still cannot send the same reminder twice.
 
@@ -197,7 +202,12 @@ async def run_probation_reminders(company_id: str) -> dict:
     Overdue reviews are deliberately absent. `probation_review_due` in SLA_MILESTONES already
     reports those and `sweep_open_breaches` already escalates them.
     """
+    from app.services.hrms_config_service import probation_reminder_tiers
     from app.services.hrms_notify_service import notify_hrms_role, notify_user
+
+    # ── Phase INT-5 ── this company's tiers. A company that wants a single 7-day nudge
+    # instead of four reminders says so here rather than in a code change.
+    tiers = await probation_reminder_tiers(company_id)
 
     coll = get_collection(COLL_PROBATION_REVIEWS)
     rows = await coll.find({"company_id": str(company_id),
@@ -212,7 +222,7 @@ async def run_probation_reminders(company_id: str) -> dict:
         days_left = (ends_on - today).days
         if days_left < 0:
             continue                      # the SLA sweep owns overdue
-        reached = [t for t in PROBATION_REMINDER_DAYS if days_left <= t]
+        reached = [t for t in tiers if days_left <= t]
         if not reached:
             continue
         already = set(row.get(PROBATION_REMINDED_FIELD) or [])
@@ -251,8 +261,15 @@ async def run_probation_reminders(company_id: str) -> dict:
         # Every tier the end date has already passed is marked fired, not just the one sent.
         # Without this a record found late would send the remaining tiers on consecutive
         # days, turning one missed sweep into a burst.
+        # Conditioned on the end date and the Pending state the sweep computed FROM: an
+        # extension (which moves ends_on and re-arms the tiers) or a decision landing
+        # between this sweep's read and this write makes the burn match nothing, so the
+        # re-armed field survives. The next sweep re-evaluates against the new date; a
+        # duplicate send is impossible because the tier only burns with its notification.
         await coll.update_one(
-            {"prb_no": prb_no, "company_id": str(company_id)},
+            {"prb_no": prb_no, "company_id": str(company_id),
+             "ends_on": row.get("ends_on"),
+             "outcome": ProbationOutcome.PENDING.value},
             {"$addToSet": {PROBATION_REMINDED_FIELD: {"$each": reached}}})
         reminded += 1
 

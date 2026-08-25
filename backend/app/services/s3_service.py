@@ -1,6 +1,7 @@
 import boto3
 import uuid
 from app.config.settings import settings
+from app.services import local_upload_store as local_store
 
 def get_s3_client():
     return boto3.client(
@@ -14,6 +15,12 @@ def get_signed_url(s3_key: str, expires_in: int = 3600) -> str:
     """
     Generate a pre-signed URL for an S3 object to allow secure temporary access.
     """
+    # A `local/` key belongs to the temporary on-disk fallback, not to S3. Checked here so
+    # every existing caller keeps working unchanged: they persisted a key and asked for a
+    # URL, and where the bytes actually live is this layer's business.
+    if local_store.is_local_key(s3_key):
+        return local_store.signed_url(s3_key, expires_in)
+
     s3_client = get_s3_client()
     try:
         url = s3_client.generate_presigned_url(
@@ -51,17 +58,40 @@ def upload_file_to_s3_with_key(file_obj, filename: str, content_type: str) -> di
     Use this when the caller needs to store a long-lived reference: signed URLs
     expire, so persist the key and regenerate URLs on demand via get_signed_url.
     """
-    s3_client = get_s3_client()
-    bucket_name = settings.S3_BUCKET_NAME
-
     unique_filename = f"{uuid.uuid4()}_{filename}"
 
-    s3_client.upload_fileobj(
-        file_obj,
-        bucket_name,
-        unique_filename,
-        ExtraArgs={"ContentType": content_type},
-    )
+    # `upload_fileobj` consumes and CLOSES the stream it is given, including when the call
+    # fails -- so a fallback handed the same object finds it closed and empty. When the
+    # fallback is armed we therefore keep the bytes ourselves and give S3 a throwaway view
+    # of them. With the fallback off nothing is buffered and the stream goes straight to
+    # S3, exactly as it always did.
+    buffered = None
+    if local_store.is_enabled():
+        import io
+        try:
+            file_obj.seek(0)
+        except Exception:
+            pass
+        buffered = file_obj.read()
+        file_obj = io.BytesIO(buffered)
+
+    try:
+        get_s3_client().upload_fileobj(
+            file_obj,
+            settings.S3_BUCKET_NAME,
+            unique_filename,
+            ExtraArgs={"ContentType": content_type},
+        )
+    except Exception as e:
+        # S3 first, always. The fallback is reached only once S3 has actually refused, and
+        # only when it is switched on -- otherwise the exception propagates exactly as it
+        # did before, and the caller turns it into the 503 it always did.
+        if buffered is None:
+            raise
+        print(f"[WARN] S3 upload failed ({type(e).__name__}: {e}); "
+              f"falling back to local disk.")
+        import io
+        return local_store.store(io.BytesIO(buffered), filename, content_type)
 
     return {"key": unique_filename, "url": get_signed_url(unique_filename)}
 
@@ -69,6 +99,17 @@ def upload_file_to_s3_with_key(file_obj, filename: str, content_type: str) -> di
 def download_file_from_s3(s3_key: str, local_path: str) -> bool:
     """Download an S3 object to a local path. Used when we need the raw bytes
     of a media-library file (e.g. to transcribe audio/video already in S3)."""
+    if local_store.is_local_key(s3_key):
+        # Already on this disk: copy it to where the caller expects it rather than reaching
+        # for a bucket that does not hold it.
+        try:
+            with open(local_path, "wb") as handle:
+                handle.write(local_store.read(s3_key))
+            return True
+        except Exception as e:
+            print(f"Error reading local upload {s3_key}: {e}")
+            return False
+
     s3_client = get_s3_client()
     try:
         s3_client.download_file(settings.S3_BUCKET_NAME, s3_key, local_path)
@@ -82,6 +123,8 @@ def delete_file_from_s3(s3_key: str) -> bool:
     """Delete an object from S3 by its key. Returns True on success."""
     if not s3_key:
         return False
+    if local_store.is_local_key(s3_key):
+        return local_store.delete(s3_key)
     s3_client = get_s3_client()
     try:
         s3_client.delete_object(Bucket=settings.S3_BUCKET_NAME, Key=s3_key)

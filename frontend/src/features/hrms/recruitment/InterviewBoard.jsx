@@ -93,12 +93,15 @@ const ScheduleModal = ({ onClose, onScheduled }) => {
     e.preventDefault();
     setSaving(true);
     try {
-      await scheduleInterview({
+      const { data } = await scheduleInterview({
         ...form,
         duration_min: Number(form.duration_min) || 45,
         meeting_link: form.mode === 'Virtual' ? form.meeting_link : null,
         location: form.mode === 'Offline' ? form.location : null,
       }, scope);
+      // The server WARNS and never blocks (short notice, an interview outside the
+      // department's window). A warning the screen swallows is one nobody acts on.
+      if (data?.warning) showError(data.warning);
       showSuccess('Interview scheduled');
       onScheduled();
     } catch (err) {

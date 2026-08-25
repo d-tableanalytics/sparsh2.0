@@ -60,6 +60,11 @@ async def main() -> None:
 
     import app.services.hrms_scheduler_service as SCH
     SCH.get_collection = mongo.get_collection
+    # Phase INT-5: the jobs resolve this company's rule set before they run, so the config
+    # service reads through the same fake store. With no settings row it returns the module
+    # defaults, which is what every assertion below is written against.
+    import app.services.hrms_config_service as CFG
+    CFG.get_collection = mongo.get_collection
     # Freeze the clock. Every tier boundary in this file is stated relative to NOW, so a run
     # at midnight on a real machine must not shift them by a day.
     SCH._now = lambda: NOW
@@ -323,8 +328,10 @@ async def main() -> None:
 
     calls: list = []
 
-    async def fake_sweep(actor, company_id, *, notify=True):
-        calls.append(("sla", company_id))
+    async def fake_sweep(actor, company_id, *, notify=True, config=None):
+        # `config` is accepted and asserted on below: the job is supposed to resolve the
+        # rule set ONCE and hand it down, not let the sweep read it per requisition.
+        calls.append(("sla", company_id, config))
         return {"checked": 2, "breaches": [], "notified": 0}
 
     async def fake_policy(actor, company_id):
@@ -354,7 +361,12 @@ async def main() -> None:
     check("only the HRMS-enabled company was swept",
           all(r["company_id"] == C1 for r in first["ran"]))
     check("the disabled company was never touched",
-          not any(cid == C2 for _, cid in calls))
+          not any(call[1] == C2 for call in calls))
+    sla_call = next(c for c in calls if c[0] == "sla")
+    check("the SLA job resolved the rule set ONCE and passed it down, rather than letting "
+          "the sweep read the settings row per requisition",
+          isinstance(sla_call[2], dict)
+          and M.CONFIG_SLA_TARGET_DAYS in sla_call[2])
 
     # -- The next tick, one minute later, repeats nothing --
     calls.clear()
@@ -387,7 +399,7 @@ async def main() -> None:
     store[M.COLL_JOB_RUNS].docs.clear()
     boom_calls: list = []
 
-    async def boom(actor, company_id, *, notify=True):
+    async def boom(actor, company_id, *, notify=True, config=None):
         boom_calls.append(company_id)
         raise RuntimeError("the SLA sweep exploded")
 

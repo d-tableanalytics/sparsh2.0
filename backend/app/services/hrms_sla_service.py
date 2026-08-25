@@ -3,19 +3,23 @@
 SOP §8 gives six milestones and a target for each. This module answers two questions about
 them: how long did it take, and is anything late.
 
--- Working days, and what that deliberately does NOT include -------------------------------
-Targets are in WORKING days, so weekends are excluded. Public holidays are NOT, and that is a
-decision rather than an oversight.
+-- Working days, and which days those are ---------------------------------------------------
+Targets are in WORKING days. Weekends are ALWAYS excluded. Public holidays are excluded only
+for a company that has opted in and keeps a calendar (Phase INT-6, `honour_holidays`).
 
-The ERP does hold a holidays master (app/models/holiday.py), and honouring it is a small
-change. But holidays are per-company and per-region, so two companies looking at the same
-three-day gap would disagree about whether a requisition breached -- and a compliance figure
-that means different things to different readers is worse than a slightly conservative one
-that means the same thing to everybody. Excluding only weekends makes the number reproducible
-and always errs towards reporting a breach rather than hiding one.
+The opt-in is the design, not a hedge. Holidays are per-company and per-region, so two
+entities looking at the same three-day gap can legitimately disagree about whether a
+requisition breached -- and the answer is to let each say which days it does not work, not to
+force one answer on both. It ships OFF because turning it on CHANGES WHETHER EXISTING
+REQUISITIONS READ AS BREACHED, which is a business decision with a visible date rather than
+something that should arrive with a deploy.
 
-`GET /requisitions/{no}/sla` says so in its response, so nobody has to read this comment to
-know what the figure counts.
+The calendar is HRMS's own (`hrms_holidays`), never the ERP's global `holidays` master --
+that collection has no company_id, so one admin's edit would move every entity's due dates.
+See hrms_holiday_service.
+
+`GET /requisitions/{no}/sla` reports `counts_holidays` and a plain-English `basis`, so nobody
+has to read this comment to know what the figure in front of them counts.
 
 -- Computed on read, never stored --------------------------------------------------------
 Only the ACTUAL timestamps are stored, stamped by the services at the moment each milestone
@@ -57,6 +61,11 @@ from app.services.hrms_audit_service import audit
 # it should not have to remember which end of the week Python's weekday() starts at.
 WEEKEND = {5, 6}
 
+# The furthest either working-day walk will step before giving up. A real target is days or
+# weeks; this only bites if a calendar marks so much of the year non-working that the walk
+# cannot finish, which is a data error rather than a case to support.
+MAX_CALENDAR_SPAN_DAYS = 2000
+
 
 def _as_date(value):
     """A UTC date from a datetime, an ISO string, or None."""
@@ -70,13 +79,31 @@ def _as_date(value):
         return None
 
 
-def working_days_between(start, end) -> Optional[int]:
+def _is_working(day, holidays: Optional[set]) -> bool:
+    """Whether one date is time somebody had to work with.
+
+    `holidays` of None means this company does not honour a calendar -- weekends only, which
+    is the pre-INT-6 answer and the default. An EMPTY SET is a different answer: it honours a
+    calendar that happens to have no dates in it. See `holiday_set` for why those must not
+    collapse into one.
+    """
+    if day.weekday() in WEEKEND:
+        return False
+    return not (holidays and day.isoformat() in holidays)
+
+
+def working_days_between(start, end, holidays: Optional[set] = None) -> Optional[int]:
     """Working days from `start` to `end`, counting neither endpoint twice.
 
     Same-day is 0. A Friday to the following Monday is 1, not 3 -- the weekend is not time
     anybody had to work with. Returns None if either end is unreadable, and a NEGATIVE count
     if `end` precedes `start`, which is a data problem the caller should see rather than one
     this function should quietly clamp to zero.
+
+    ── Phase INT-6 ── `holidays` is a set of ISO dates this company does not work. It is an
+    ARGUMENT rather than a lookup because this function is PURE and a great deal depends on
+    that: the tests walk it directly, and a version that reached into the database for a
+    company row could not be called from a report or a test without one.
     """
     first, last = _as_date(start), _as_date(end)
     if first is None or last is None:
@@ -89,40 +116,51 @@ def working_days_between(start, end) -> Optional[int]:
     cursor = first
     while cursor < last:
         cursor += timedelta(days=1)
-        if cursor.weekday() not in WEEKEND:
+        if _is_working(cursor, holidays):
             days += 1
     return days * sign
 
 
-def add_working_days(start, count: int):
-    """The date `count` working days after `start`. Weekends are skipped, not consumed."""
+def add_working_days(start, count: int, holidays: Optional[set] = None):
+    """The date `count` working days after `start`. Non-working days are skipped, not consumed.
+
+    Bounded rather than unbounded: a calendar that somehow marked every day non-working would
+    otherwise spin forever. `MAX_CALENDAR_SPAN_DAYS` is far past any real target, so hitting
+    it means the calendar is wrong, and returning the date reached is more useful than
+    hanging.
+    """
     cursor = _as_date(start)
     if cursor is None:
         return None
     remaining = max(0, int(count))
-    while remaining:
+    guard = 0
+    while remaining and guard < MAX_CALENDAR_SPAN_DAYS:
         cursor += timedelta(days=1)
-        if cursor.weekday() not in WEEKEND:
+        guard += 1
+        if _is_working(cursor, holidays):
             remaining -= 1
-    # A target landing on a weekend is pulled forward to the Friday, so "due Saturday" -- a
-    # day nobody works -- never appears on a report.
-    while cursor.weekday() in WEEKEND:
+    # A target landing on a non-working day is pulled BACK to the previous working one, so
+    # "due Saturday" -- or due on a holiday -- never appears on a report.
+    guard = 0
+    while not _is_working(cursor, holidays) and guard < MAX_CALENDAR_SPAN_DAYS:
         cursor -= timedelta(days=1)
+        guard += 1
     return cursor
 
 
-def _status(target_days: int, started, actual, today) -> tuple:
+def _status(target_days: int, started, actual, today,
+            holidays: Optional[set] = None) -> tuple:
     """(status, working_days_taken, days_over) for one milestone."""
     if started is None:
         # The clock has not begun: the milestone this one is measured from has not happened.
         return "not_started", None, None
     if actual is not None:
-        taken = working_days_between(started, actual)
+        taken = working_days_between(started, actual, holidays)
         if taken is None:
             return "unknown", None, None
         return ("met" if taken <= target_days else "breached",
                 taken, max(0, taken - target_days))
-    elapsed = working_days_between(started, today)
+    elapsed = working_days_between(started, today, holidays)
     if elapsed is None:
         return "unknown", None, None
     if elapsed > target_days:
@@ -130,7 +168,8 @@ def _status(target_days: int, started, actual, today) -> tuple:
     return "pending", elapsed, 0
 
 
-async def sla_for(company_id: str, req: dict) -> dict:
+async def sla_for(company_id: str, req: dict, *, config: dict = None,
+                  calendar: Optional[set] = None) -> dict:
     """Every milestone for one requisition: target, actual, and whether it was met.
 
     Returns a `not_applicable` payload for a client requisition rather than raising -- the
@@ -149,13 +188,27 @@ async def sla_for(company_id: str, req: dict) -> dict:
     raised_at = req.get("created_at")
     today = datetime.now(timezone.utc)
 
+    # ── Phase INT-5 ── this company's targets, which are the shipped ones unless it has
+    # said otherwise. `config` is accepted pre-resolved so a caller sweeping hundreds of
+    # requisitions reads the settings row ONCE rather than once per requisition.
+    from app.services.hrms_config_service import sla_target_days
+    from app.services.hrms_holiday_service import holiday_set
+    resolved = config if config is not None else company_id
+    targets = await sla_target_days(resolved)
+    # ── Phase INT-6 ── None means this company does not honour a calendar (weekends only,
+    # the default); a SET means it does, even when the set is empty. Accepted pre-resolved
+    # for the same reason `targets` is: a sweep reads it once, not once per requisition.
+    holidays = (calendar if calendar is not None
+                else await holiday_set(resolved, company_id))
+
     # One loop over ONE table. The discriminator picks the evaluator; nothing here knows
     # which milestones happen to be of which kind, which is what keeps a seventh one a data
     # change rather than a third branch.
     rows = []
     for spec in SLA_MILESTONES:
         if spec["anchor"] == ANCHOR_MILESTONE:
-            rows.append(_milestone_row(spec, actuals, raised_at, today))
+            rows.append(_milestone_row(spec, actuals, raised_at, today, targets,
+                                       holidays))
         elif spec["anchor"] == ANCHOR_DATE:
             rows += await _date_rows(company_id, req, spec, today)
         else:
@@ -171,9 +224,15 @@ async def sla_for(company_id: str, req: dict) -> dict:
     return {
         "request_no": req.get("request_no"),
         "applicable": True,
-        "counts_holidays": False,
-        "basis": ("Working days, excluding weekends. Public holidays are not excluded -- "
-                  "see hrms_sla_service for why."),
+        # Reported rather than assumed. A reader must never have to guess which basis
+        # produced the number in front of them, and the two bases give different answers
+        # about the same three-day gap.
+        "counts_holidays": holidays is not None,
+        "holidays_in_calendar": (len(holidays) if holidays is not None else None),
+        "basis": ("Working days, excluding weekends and this company's own holiday calendar."
+                  if holidays is not None else
+                  "Working days, excluding weekends. This company does not honour a holiday "
+                  "calendar -- see HRMS settings."),
         "milestones": rows,
         "breached": [r["key"] for r in breached],
         "on_track": not breached,
@@ -181,17 +240,22 @@ async def sla_for(company_id: str, req: dict) -> dict:
     }
 
 
-def _milestone_row(spec: dict, actuals: dict, raised_at, today: datetime) -> dict:
+def _milestone_row(spec: dict, actuals: dict, raised_at, today: datetime,
+                   targets: dict = None, holidays: Optional[set] = None) -> dict:
     """Evaluate a MILESTONE-anchored row: N working days after a preceding stamp.
 
     `measured_from` of None means the clock starts at the requisition itself, which is the
     only case where the start is not another milestone.
+
+    `targets` is this company's target table (Phase INT-5). Falling back to the spec's own
+    number when a key is absent keeps this function callable with no config at all, which is
+    what every pre-INT-5 test does and what the module default is.
     """
     measured_from = spec.get("measured_from")
-    target_days = spec["target_days"]
+    target_days = (targets or {}).get(spec["key"], spec["target_days"])
     started = raised_at if measured_from is None else actuals.get(measured_from)
     actual = actuals.get(spec["key"])
-    status, taken, over = _status(target_days, started, actual, today)
+    status, taken, over = _status(target_days, started, actual, today, holidays)
     return {
         "key": spec["key"],
         "label": spec["label"],
@@ -199,7 +263,7 @@ def _milestone_row(spec: dict, actuals: dict, raised_at, today: datetime) -> dic
         "target_working_days": target_days,
         "measured_from": measured_from or "requisition raised",
         "started_at": started,
-        "due_on": (add_working_days(started, target_days).isoformat()
+        "due_on": (add_working_days(started, target_days, holidays).isoformat()
                    if started is not None else None),
         "actual_at": actual,
         "status": status,
@@ -351,13 +415,14 @@ async def stamp_if_internal(actor: Optional[dict], company_id: str, request_no: 
 
 
 async def escalate_if_breached(actor: Optional[dict], company_id: str, req: dict,
-                               key: str) -> bool:
+                               key: str, *, config: dict = None,
+                               calendar: Optional[set] = None) -> bool:
     """Notify HR and Management when a milestone is recorded late. Returns True if it fired.
 
     Fires ONCE per milestone, guarded by `sla_escalated`. An alert that repeats every time a
     figure is recomputed trains people to ignore it, which is worse than not alerting at all.
     """
-    report = await sla_for(company_id, req)
+    report = await sla_for(company_id, req, config=config, calendar=calendar)
     row = next((r for r in report.get("milestones", []) if r["key"] == key), None)
     if not row or row["status"] not in ("breached", "overdue"):
         return False
@@ -393,7 +458,7 @@ async def escalate_if_breached(actor: Optional[dict], company_id: str, req: dict
 
 
 async def sweep_open_breaches(actor: Optional[dict], company_id: str, *,
-                              notify: bool = True) -> dict:
+                              notify: bool = True, config: dict = None) -> dict:
     """Find internal requisitions with an OVERDUE, still-incomplete milestone.
 
     The other half of breach detection. `escalate_if_breached` catches a milestone recorded
@@ -412,9 +477,19 @@ async def sweep_open_breaches(actor: Optional[dict], company_id: str, *,
          "requisition_track": RequisitionTrack.INTERNAL.value,
          "closing_status": "Open"}).to_list(1000)
 
+    # Resolved ONCE for the whole sweep. Reading it inside the loop would be one settings
+    # read per open requisition, and would also let a mid-sweep edit judge the first half of
+    # the run against different targets from the second.
+    from app.services.hrms_config_service import config_for
+    from app.services.hrms_holiday_service import holiday_set
+    resolved = config if config is not None else await config_for(company_id)
+    # The calendar is read ONCE for the whole sweep, for the same two reasons the config is:
+    # one read instead of one per requisition, and one basis for the whole run.
+    calendar = await holiday_set(resolved, company_id)
+
     breaches, notified = [], 0
     for req in reqs:
-        report = await sla_for(company_id, req)
+        report = await sla_for(company_id, req, config=resolved, calendar=calendar)
         for row in report.get("milestones", []):
             if row["status"] != "overdue":
                 continue
@@ -423,7 +498,8 @@ async def sweep_open_breaches(actor: Optional[dict], company_id: str, *,
                              "milestone": row["key"], "label": row["label"],
                              "due_on": row["due_on"],
                              "working_days_over": row["working_days_over"]})
-            if notify and await escalate_if_breached(actor, company_id, req, row["key"]):
+            if notify and await escalate_if_breached(actor, company_id, req, row["key"],
+                                                     config=resolved, calendar=calendar):
                 notified += 1
 
     return {"checked": len(reqs), "breaches": breaches, "notified": notified,

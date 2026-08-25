@@ -48,6 +48,7 @@ from fastapi import HTTPException
 
 from app.db.mongodb import get_collection
 from app.models.hrms import (
+    INTERVIEW_NOTICE_HOURS,
     AUDIT_INTERVIEW_CANCELLED, AUDIT_INTERVIEW_EVALUATED, AUDIT_INTERVIEW_RESCHEDULED,
     AUDIT_INTERVIEW_SCHEDULED, AUDIT_INTERVIEW_UPDATED, AUDIT_STAGE_CHANGED,
     COLL_CANDIDATES, COLL_INTERVIEWS, COLL_REQUISITIONS, COMPETENCY_KEYS,
@@ -582,6 +583,13 @@ async def schedule_interview(actor: dict, company_id: str, payload: dict) -> dic
         "created_by": str(actor.get("_id") or ""),
         "created_at": now,
     }
+    # ── Phase INT-10 ── Annexure C asks for logistics at least 24 hours ahead. Recorded
+    # rather than enforced (a hard refusal would push a Friday-for-Monday booking
+    # off-system), so it can be warned about now and measured later. INTERNAL TRACK ONLY,
+    # like every other Annexure control: a client-track booking carries no new keys.
+    if _is_internal(req):
+        doc["notice_hours"] = _notice_hours(when, now)
+        doc["short_notice"] = doc["notice_hours"] < INTERVIEW_NOTICE_HOURS
     await get_collection(COLL_INTERVIEWS).insert_one(dict(doc))
 
     if can_transition(status, AppStatus.INTERVIEW_SCHEDULED.value):
@@ -597,18 +605,94 @@ async def schedule_interview(actor: dict, company_id: str, payload: dict) -> dic
     await audit(actor, AUDIT_INTERVIEW_SCHEDULED, ENTITY_CANDIDATE, uk,
                 f"{interview_no}: {round_name}", company_id)
     await _notify_scheduled(doc, rescheduled=False)
+    told = None
+    if _is_internal(req):
+        told = await _tell_candidate(actor, company_id, doc)
+        await get_collection(COLL_INTERVIEWS).update_one(
+            {"interview_no": interview_no, "company_id": str(company_id)},
+            {"$set": {"candidate_notified": told}})
+        doc["candidate_notified"] = told
     out = _out(doc)
     # Surfaced, not enforced. Present only when there IS one, so a caller can render it
     # without first deciding whether an empty string means "fine" or "unchecked".
-    if window_warning:
-        out["warning"] = window_warning
+    warnings = [w for w in (window_warning, _short_notice_warning(doc, told)) if w]
+    if warnings:
+        out["warning"] = " ".join(warnings)
     return out
+
+
+def _as_utc(value) -> Optional[datetime]:
+    """A datetime as aware UTC. Mongo hands back NAIVE UTC through this client; the API
+    hands in AWARE IST -- compared raw, the same instant reads as two different times."""
+    if not isinstance(value, datetime):
+        return None
+    return (value.replace(tzinfo=timezone.utc) if value.tzinfo is None
+            else value.astimezone(timezone.utc))
+
+
+def _moment_changed(when: datetime, stored) -> bool:
+    """Whether `when` is a different instant from the stored time, to the millisecond.
+
+    Without normalising, a PATCH that merely echoed the unchanged time was a "reschedule":
+    the ICS sequence bumped, the interviewer was re-notified and the candidate re-emailed.
+    """
+    previous = _as_utc(stored)
+    if previous is None:
+        return True
+    return int(_as_utc(when).timestamp() * 1000) != int(previous.timestamp() * 1000)
+
+
+def _when_text(when) -> str:
+    """The interview time in the ERP's operating zone, labelled as such."""
+    from app.services.hrms_ics import IST
+    moment = _as_utc(when)
+    if moment is None:
+        return str(when)
+    return moment.astimezone(IST).strftime("%d %b %Y, %H:%M IST")
+
+
+def _notice_hours(when, now) -> float:
+    """Hours between booking and interview, to one decimal. Negative if already past."""
+    try:
+        return round((_as_utc(when) - _as_utc(now)).total_seconds() / 3600.0, 1)
+    except (TypeError, AttributeError):
+        return 0.0
+
+
+def _short_notice_warning(doc: dict, told: Optional[str] = None) -> Optional[str]:
+    """The warning, worded by what actually happened rather than by what was attempted."""
+    if not doc.get("short_notice"):
+        return None
+    head = (f"Short notice: this interview is {doc.get('notice_hours')} hours away. Annexure "
+            f"C asks for logistics to be confirmed at least {INTERVIEW_NOTICE_HOURS} hours "
+            f"ahead. ")
+    if told == "Sent":
+        return head + "A confirmation has been emailed to the candidate."
+    return (head + f"The candidate has NOT been emailed"
+            + (f" ({told.lower()})" if told else "")
+            + " -- confirm the logistics by phone.")
+
+
+async def _tell_candidate(actor: dict, company_id: str, doc: dict) -> Optional[str]:
+    """The candidate's own confirmation (Annexure C), through the communications log.
+
+    Returns the log row's status (`Sent` / `Skipped` / `Failed`) or None, so the caller can
+    SAY what happened. `fire_event` swallows every delivery problem -- a failed email must
+    never fail a booking -- and logs the attempt, so "did we tell them" is answerable later
+    from one place.
+    """
+    from app.services.hrms_comm_service import fire_event
+    where = doc.get("meeting_link") or doc.get("location") or doc.get("mode") or ""
+    row = await fire_event(actor, company_id, doc.get("uk"), "interview_scheduled",
+                           variables={"round": doc.get("round"),
+                                      "when": _when_text(doc.get("scheduled_at")),
+                                      "where": where})
+    return (row or {}).get("status")
 
 
 async def _notify_scheduled(doc: dict, *, rescheduled: bool) -> None:
     verb = "rescheduled" if rescheduled else "scheduled"
-    when = doc["scheduled_at"]
-    when_text = when.strftime("%d %b %Y, %H:%M UTC") if isinstance(when, datetime) else str(when)
+    when_text = _when_text(doc["scheduled_at"])
     where = doc.get("meeting_link") or doc.get("location") or ""
     await notify_user(
         doc["interviewer_id"],
@@ -662,7 +746,7 @@ async def update_interview(actor: dict, company_id: str, interview_no: str,
         if when < datetime.now(timezone.utc) - timedelta(minutes=1):
             raise HTTPException(
                 status_code=422, detail="An interview cannot be moved into the past.")
-        if when != current.get("scheduled_at"):
+        if _moment_changed(when, current.get("scheduled_at")):
             updates["scheduled_at"] = when
             updates["ics_sequence"] = int(current.get("ics_sequence") or 0) + 1
             updates["status"] = InterviewStatus.SCHEDULED.value
@@ -721,9 +805,28 @@ async def update_interview(actor: dict, company_id: str, interview_no: str,
                 ", ".join(sorted(k for k in updates if k != "updated_at")), company_id)
 
     fresh = await get_collection(COLL_INTERVIEWS).find_one({"interview_no": interview_no})
+    told = None
     if rescheduled:
         await _notify_scheduled(fresh, rescheduled=True)
-    return _out(fresh)
+        # ── Phase INT-10 ── a moved interview is a new notice period and a new set of
+        # logistics the candidate has not been told. Internal track only, as at booking.
+        req = await _requisition_for(company_id, current.get("request_no"))
+        if _is_internal(req):
+            moved_at = datetime.now(timezone.utc)
+            stamps = {"notice_hours": _notice_hours(fresh.get("scheduled_at"), moved_at)}
+            stamps["short_notice"] = stamps["notice_hours"] < INTERVIEW_NOTICE_HOURS
+            fresh.update(stamps)
+            told = await _tell_candidate(actor, company_id, fresh)
+            stamps["candidate_notified"] = told
+            fresh["candidate_notified"] = told
+            await get_collection(COLL_INTERVIEWS).update_one(
+                {"interview_no": interview_no, "company_id": str(company_id)},
+                {"$set": stamps})
+    out = _out(fresh)
+    warning = _short_notice_warning(fresh, told) if rescheduled else None
+    if warning:
+        out["warning"] = warning
+    return out
 
 
 async def cancel_interview(actor: dict, company_id: str, interview_no: str) -> dict:

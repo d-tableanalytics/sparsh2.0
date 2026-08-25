@@ -9,7 +9,7 @@ import {
   Gauge, GitBranch, AlertTriangle, UserCog, ListChecks, ScrollText, ClipboardList, ClipboardCheck,
   FolderOpen, FileCog, CalendarClock, ShieldAlert,
   // ── Phase INT-2 ── the remaining Internal Recruitment SOP surfaces.
-  HeartHandshake, Bookmark, Scale, Mail, BookMarked
+  HeartHandshake, Bookmark, Scale, Mail, BookMarked, SlidersHorizontal
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { canAccessTaskManagement } from '../../utils/taskAccess';
@@ -117,7 +117,9 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
     // Phase INT-4: the telephonic screen sits between CV screening and the panel, and
     // gates interview scheduling. A stage, so it belongs in the strip — which means it
     // belongs in THIS list, so "Recruitment" stays lit while somebody is on it.
-    '/hrms/telephonic-screening'];
+    '/hrms/telephonic-screening',
+    // Phase INT-10: the salary negotiation record is a hiring stage (SOP step 9).
+    '/hrms/negotiations'];
 
   const hrmsSubmodules = [
     { name: 'Dashboard', path: '/hrms/dashboard', icon: BarChart3 },
@@ -155,6 +157,11 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
       { name: 'Salary Bands', path: '/hrms/salary-bands', icon: Scale },
       { name: 'Communications', path: '/hrms/communications', icon: Mail },
       { name: 'Policy Register', path: '/hrms/policies', icon: BookMarked },
+      // ── Phase INT-5 ── the per-company rule set: SLA targets, retention periods,
+      // probation duration, reminder tiers and score bands. Governance, not a hiring
+      // stage, so it stays out of the workspace tab strip. The `settings.write`
+      // capability is the real control -- this list only decides visibility.
+      { name: 'HRMS Settings', path: '/hrms/settings', icon: SlidersHorizontal },
     ] : []),
   ];
 

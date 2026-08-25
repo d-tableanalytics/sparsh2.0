@@ -114,16 +114,40 @@ async def _advance_candidate(actor: Optional[dict], company_id: str, uk: str,
     onboarding step the operator actually asked for.
     """
     candidate = await get_collection(COLL_CANDIDATES).find_one(
-        {"uk": uk, "company_id": str(company_id)}, {"application_status": 1})
+        {"uk": uk, "company_id": str(company_id)},
+        # `applied_at` / `created_at` come back because the JOINED branch below recomputes
+        # the retention floor from the merged record; a status-only projection would leave
+        # it computing against a document with no anchor in it.
+        {"application_status": 1, "applied_at": 1, "created_at": 1, "joined_at": 1})
     current = (candidate or {}).get("application_status")
     if not current or current == target.value:
         return
     if not can_transition(current, target.value):
         return
+    now = datetime.now(timezone.utc)
+    updates = {"application_status": target.value, "updated_at": now}
+
+    # ── SOP §13 ── joining is the anchor the SELECTED retention period runs from, and it
+    # is written HERE because this is the only place a candidate becomes Joined.
+    #
+    # `candidate_retention_until` has always preferred `joined_at` over `applied_at` and
+    # nothing ever wrote it, so a joiner was silently kept on the one-year unselected floor
+    # measured from their application instead of three years from joining -- the retention
+    # rule inverted for exactly the people the personnel file is about.
+    if target is AppStatus.JOINED:
+        from app.services.hrms_candidate_service import (
+            _retention_map, candidate_retention_until)
+        updates["joined_at"] = now
+        merged = {**(candidate or {}), "application_status": target.value,
+                  "joined_at": now}
+        recomputed = candidate_retention_until(
+            merged, await _retention_map(company_id))
+        if recomputed:
+            updates["retention_until"] = recomputed
+
     await get_collection(COLL_CANDIDATES).update_one(
         {"uk": uk, "company_id": str(company_id)},
-        {"$set": {"application_status": target.value,
-                  "updated_at": datetime.now(timezone.utc)}})
+        {"$set": updates})
     await audit(actor, AUDIT_STAGE_CHANGED, ENTITY_CANDIDATE, uk,
                 f"{current} -> {target.value}", company_id)
 

@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Building, Plus, Timer } from 'lucide-react';
+import { Building, Plus, Timer, Table2, ListTodo } from 'lucide-react';
 import { useHrms } from '../HrmsContext';
 import { CAP } from '../access';
 import HrmsPageHeader from '../common/HrmsPageHeader';
@@ -8,6 +8,7 @@ import { HrmsLoading, HrmsError, HrmsEmpty } from '../common/HrmsStates';
 import { useNotification } from '../../../context/NotificationContext';
 import ApprovalDialog from '../recruitment/ApprovalDialog';
 import RequisitionFormModal from '../recruitment/RequisitionFormModal';
+import InternalTracker from './InternalTracker';
 import {
   getRequisitions, actOnRequisition, getRequisitionSla,
 } from '../../../services/hrmsApi';
@@ -62,6 +63,10 @@ const InternalRequisitionList = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [raising, setRaising] = useState(false);
+  // Two views of one screen. The QUEUE offers actions (verify, approve budget, clear
+  // escalation); the TRACKER answers "where has everything got to, and what is late"
+  // (Phase INT-7, Annexure C). Same route, so neither navigation list changes.
+  const [view, setView] = useState('queue');
   const [deciding, setDeciding] = useState(null);
   const [busy, setBusy] = useState(false);
   const [slaFor, setSlaFor] = useState(null);
@@ -215,10 +220,33 @@ const InternalRequisitionList = () => {
       />
       <HrmsScopeBar />
 
-      {loading && <HrmsLoading label="Loading internal requisitions…" />}
-      {error && !loading && <HrmsError message={error} onRetry={load} />}
+      <div className="flex items-center gap-2" role="tablist" aria-label="View">
+        {[
+          { key: 'queue', label: 'Action queue', icon: <ListTodo size={14} /> },
+          { key: 'tracker', label: 'Tracker', icon: <Table2 size={14} /> },
+        ].map((tab) => (
+          <button
+            key={tab.key}
+            type="button"
+            role="tab"
+            aria-selected={view === tab.key}
+            onClick={() => setView(tab.key)}
+            className={`flex items-center gap-1.5 h-9 px-3 rounded-lg border
+              text-[12.5px] ${view === tab.key
+              ? 'border-[var(--accent)] text-[var(--text-main)] font-semibold'
+              : 'border-[var(--border)] text-[var(--text-muted)]'}`}
+          >
+            {tab.icon} {tab.label}
+          </button>
+        ))}
+      </div>
 
-      {!loading && !error && (
+      {view === 'tracker' && <InternalTracker />}
+
+      {view === 'queue' && loading && <HrmsLoading label="Loading internal requisitions…" />}
+      {view === 'queue' && error && !loading && <HrmsError message={error} onRetry={load} />}
+
+      {view === 'queue' && !loading && !error && (
         <RecordList
           rows={rows} columns={columns} renderCard={renderCard}
           keyOf={(r) => r.request_no}

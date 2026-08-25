@@ -64,7 +64,7 @@ def _today() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
-def _retention_until(screened_on: str) -> str:
+def _retention_until(screened_on: str, years: int = None) -> str:
     """SOP §13: an unselected candidate's records are kept for one year.
 
     A phone screen follows the CANDIDATE, not the employee — a record of a call is not worth
@@ -80,7 +80,8 @@ def _retention_until(screened_on: str) -> str:
         year, month, day = (int(p) for p in _today().split("-"))
     if month == 2 and day == 29:
         day = 28
-    return f"{year + RETENTION_YEARS['telephonic']:04d}-{month:02d}-{day:02d}"
+    keep = RETENTION_YEARS["telephonic"] if years is None else int(years)
+    return f"{year + keep:04d}-{month:02d}-{day:02d}"
 
 
 def _rating(value, *, label: str) -> Optional[float]:
@@ -364,6 +365,9 @@ async def create_screening(actor: dict, company_id: str, payload: dict) -> dict:
     tel_no = await next_business_id("telephonic", str(company_id), year)
     now = datetime.now(timezone.utc)
 
+    # ── Phase INT-5 ── one settings read, used for BOTH the retention floor and the band.
+    from app.services.hrms_config_service import config_for, retention_years_for, score_bands_for
+    config = await config_for(company_id)
     score = weighted_score(clean)
     doc = {
         "tel_no": tel_no,
@@ -377,8 +381,10 @@ async def create_screening(actor: dict, company_id: str, payload: dict) -> dict:
         "score": score,
         # Surfaced, never auto-applied -- the same rule the position scorecard follows. A
         # rubric that silently rejects people is one nobody will trust or correct.
-        "band": score_band(score),
-        "retention_until": _retention_until(clean.get("screened_on")),
+        "band": score_band(score, await score_bands_for(config)),
+        "retention_until": _retention_until(
+            clean.get("screened_on"),
+            await retention_years_for(config, "telephonic")),
         "created_at": now,
         **clean,
     }
@@ -415,13 +421,16 @@ async def update_screening(actor: dict, company_id: str, tel_no: str,
     if not clean:
         raise HTTPException(status_code=400, detail="No fields to update.")
 
+    from app.services.hrms_config_service import config_for, retention_years_for, score_bands_for
+    config = await config_for(company_id)
     if "screened_on" in clean:
-        clean["retention_until"] = _retention_until(clean["screened_on"])
+        clean["retention_until"] = _retention_until(
+            clean["screened_on"], await retention_years_for(config, "telephonic"))
     # Recomputed from the merged record, so editing one rating rescores the whole screen
     # rather than leaving a score that no longer matches the numbers beside it.
     rescored = {**merged, **clean}
     clean["score"] = weighted_score(rescored)
-    clean["band"] = score_band(clean["score"])
+    clean["band"] = score_band(clean["score"], await score_bands_for(config))
     clean["updated_at"] = datetime.now(timezone.utc)
     await coll.update_one({"tel_no": tel_no, "company_id": str(company_id)},
                           {"$set": clean})

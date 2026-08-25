@@ -251,6 +251,28 @@ async def assert_scorecard_approved(company_id: str, request_no: str) -> dict:
 # -------------------------------------------------------------
 # Write
 # -------------------------------------------------------------
+async def _can_approve_scorecards(user_id: str) -> bool:
+    """Whether this user resolves to a role that may approve scorecards (MANAGER or MD).
+
+    The requisition's raiser is usually the hiring manager, but any employee may raise one
+    -- and an approval request sent to somebody who cannot approve is a dead letter while
+    the real approvers hear nothing.
+    """
+    if not user_id:
+        return False
+    from bson import ObjectId
+    from app.utils.hrms_access import hrms_role
+    try:
+        oid = ObjectId(user_id)
+    except Exception:
+        return False
+    for coll_name in ("learners", "staff"):
+        user = await get_collection(coll_name).find_one({"_id": oid})
+        if user:
+            return hrms_role(user) in (HrmsRole.MANAGER, HrmsRole.MD)
+    return False
+
+
 async def create_scorecard(actor: dict, company_id: str, payload: dict) -> dict:
     request_no = (payload.get("request_no") or "").strip()
     if not request_no:
@@ -290,6 +312,31 @@ async def create_scorecard(actor: dict, company_id: str, payload: dict) -> dict:
     await audit(actor, AUDIT_SCORECARD_CREATED, ENTITY_SCORECARD, scr_no,
                 f"{len(criteria)} criteria for {request_no}", company_id)
 
+    # ── Phase INT-9 (spec §38) ── the scorecard is now WAITING on somebody, and nobody
+    # watches a queue they were not told about -- the same rule the requisition chain
+    # follows. The HOD is the requisition's raiser, addressed directly; Management is a
+    # role, because "the MD" is whoever holds that governance role when the letter lands.
+    from app.services.hrms_notify_service import notify_hrms_role, notify_user
+    link = "/hrms/scorecards"
+    title = f"Scorecard {scr_no} needs approval"
+    detail = (f'{doc["created_by_name"]} drafted the position scorecard for '
+              f'{req.get("designation_name") or request_no}. Sourcing cannot begin '
+              f"until it is approved.")
+    # The raiser is USUALLY the hiring manager -- but any employee may raise a requisition
+    # (the module's documented design), and a raiser who cannot approve must not be the
+    # only person asked to. When they cannot, every hiring manager is asked instead.
+    if await _can_approve_scorecards(str(req.get("created_by") or "")):
+        await notify_user(str(req["created_by"]), title, detail,
+                          kind="info", link=link, email=True)
+    else:
+        await notify_hrms_role(company_id, ["HOD"], title, detail,
+                               kind="info", link=link, email=True)
+    if doc["managerial"]:
+        await notify_hrms_role(company_id, ["MD"], title,
+                               detail + " This is a managerial role, so Management must "
+                                        "approve it as well as the hiring manager.",
+                               kind="info", link=link, email=True)
+
     out = _out(doc)
     out["approval_state"] = _approval_state(doc)
     return out
@@ -327,7 +374,10 @@ async def update_scorecard(actor: dict, company_id: str, scr_no: str,
 
     # Changing the bar, or who must approve it, invalidates approvals already given -- they
     # are cleared rather than silently carried over onto different criteria.
+    requeued = False
     if {"criteria", "managerial"} & set(updates):
+        requeued = bool(current.get("approvals")) \
+            or current.get("status") == ScorecardStatus.REJECTED.value
         updates["approvals"] = []
         updates["status"] = ScorecardStatus.PENDING_APPROVAL.value
     elif current.get("status") == ScorecardStatus.REJECTED.value:
@@ -335,12 +385,38 @@ async def update_scorecard(actor: dict, company_id: str, scr_no: str,
         # into the queue. Leaving it Rejected would strand it: nobody looks at a rejected
         # document again, and the approver is never asked a second time.
         updates["status"] = ScorecardStatus.PENDING_APPROVAL.value
+        requeued = True
 
     updates["updated_at"] = datetime.now(timezone.utc)
     await coll.update_one({"scr_no": scr_no, "company_id": str(company_id)},
                           {"$set": updates})
     await audit(actor, AUDIT_SCORECARD_UPDATED, ENTITY_SCORECARD, scr_no,
                 ", ".join(sorted(k for k in updates if k != "updated_at")), company_id)
+
+    # ── Phase INT-9 ── a card that went BACK into the queue is waiting on somebody again,
+    # and re-queueing it silently strands it exactly the way leaving it Rejected would
+    # have: the approver is never asked a second time. Same recipients as creation.
+    if requeued:
+        from app.services.hrms_notify_service import notify_hrms_role, notify_user
+        req = await get_collection(COLL_REQUISITIONS).find_one(
+            {"request_no": current.get("request_no"), "company_id": str(company_id)},
+            {"created_by": 1, "designation_name": 1})
+        link = "/hrms/scorecards"
+        title = f"Scorecard {scr_no} needs approval again"
+        name = (req or {}).get("designation_name") or current.get("request_no")
+        detail = (f"The scorecard for {name} was revised"
+                  + (" and its earlier signatures were cleared."
+                     if updates.get("approvals") == [] else " after being sent back.")
+                  + " It is back in the approval queue.")
+        raiser = str((req or {}).get("created_by") or "")
+        if await _can_approve_scorecards(raiser):
+            await notify_user(raiser, title, detail, kind="info", link=link, email=True)
+        else:
+            await notify_hrms_role(company_id, ["HOD"], title, detail,
+                                   kind="info", link=link, email=True)
+        if bool(updates.get("managerial", current.get("managerial"))):
+            await notify_hrms_role(company_id, ["MD"], title, detail,
+                                   kind="info", link=link, email=True)
     return await get_scorecard(company_id, scr_no)
 
 
@@ -357,6 +433,7 @@ async def approve_scorecard(actor: dict, company_id: str, scr_no: str,
         raise HTTPException(status_code=404, detail="Scorecard not found.")
     if current.get("status") == ScorecardStatus.APPROVED.value:
         raise HTTPException(status_code=409, detail=f"{scr_no} is already approved.")
+    already_rejected = current.get("status") == ScorecardStatus.REJECTED.value
 
     signature = clean_text(payload.get("signature"), limit=140)
     if not signature:
@@ -376,6 +453,13 @@ async def approve_scorecard(actor: dict, company_id: str, scr_no: str,
     now = datetime.now(timezone.utc)
 
     if decision is Decision.FAIL:
+        # A card that is already sent back cannot be sent back again -- the second Fail
+        # would repeat the write, the audit row and both notifications for a state that
+        # did not change. Mirrors the APPROVED guard above.
+        if already_rejected:
+            raise HTTPException(
+                status_code=409,
+                detail=f"{scr_no} was already sent back. Edit it to answer the feedback.")
         if not remarks:
             raise HTTPException(
                 status_code=422,
@@ -387,6 +471,22 @@ async def approve_scorecard(actor: dict, company_id: str, scr_no: str,
                       "rejection_remarks": remarks, "updated_at": now}})
         await audit(actor, AUDIT_SCORECARD_APPROVED, ENTITY_SCORECARD, scr_no,
                     f"sent back: {remarks}", company_id)
+
+        # ── Phase INT-9 ── sent back is a decision somebody must ACT on. The drafter is
+        # told directly; HR as a role, because they own redrafting even when the original
+        # author is away.
+        from app.services.hrms_notify_service import notify_hrms_role, notify_user
+        title = f"Scorecard {scr_no} was sent back"
+        detail = f"Reason: {remarks}"
+        drafter = str(current.get("created_by") or "")
+        if drafter:
+            await notify_user(drafter, title, detail,
+                              kind="warning", link="/hrms/scorecards", email=True)
+        # HR drafts most scorecards, so without the exclusion the drafter -- already told
+        # by name above -- would be told again by their own role's fan-out.
+        await notify_hrms_role(company_id, ["HR"], title, detail,
+                               kind="warning", link="/hrms/scorecards", email=True,
+                               exclude_user_ids=[drafter] if drafter else None)
         return await get_scorecard(company_id, scr_no)
 
     approvals = [a for a in (current.get("approvals") or [])
@@ -403,24 +503,75 @@ async def approve_scorecard(actor: dict, company_id: str, scr_no: str,
 
     merged = {**current, "approvals": approvals}
     state = _approval_state(merged)
+    # The state BEFORE this signature, so the notifications below fire only when the
+    # signature actually moved something -- a re-sign recomputes an identical state and
+    # must say nothing (this is the property the comment below promises).
+    prev_state = _approval_state(current)
     updates = {"approvals": approvals, "updated_at": now}
     if state["complete"]:
         updates.update({"status": ScorecardStatus.APPROVED.value, "approved_at": now})
 
-    await coll.update_one({"scr_no": scr_no, "company_id": str(company_id)},
-                          {"$set": updates})
+    # Compare-and-swap on the approvals array the merge was BUILT from: two approvers
+    # signing at the same moment would otherwise each persist an array containing only
+    # themselves, and the loser's signature would silently vanish. The loser here gets a
+    # 409 and retries against the state that actually landed.
+    result = await coll.update_one(
+        {"scr_no": scr_no, "company_id": str(company_id),
+         "approvals": current.get("approvals") or []},
+        {"$set": updates})
+    if result.matched_count == 0:
+        raise HTTPException(
+            status_code=409,
+            detail="Someone else signed this scorecard at the same moment. Reload to see "
+                   "the current state, then sign again.")
     await audit(actor, AUDIT_SCORECARD_APPROVED, ENTITY_SCORECARD, scr_no,
                 (f"approved by {role.value if role else 'unknown role'}"
                  + ("" if state["complete"]
                     else f"; still needed: {', '.join(state['outstanding_roles'])}")),
                 company_id)
+
+    # ── Phase INT-9 (spec §38) ── "Scorecard approval completed" goes to HR, who own the
+    # next step (sourcing). A PARTIAL approval instead chases whoever is still owed: the
+    # MD role if Management has not signed, the requisition's raiser if the hiring manager
+    # has not. Fired only on the signature that changes the state, so signing twice cannot
+    # notify twice.
+    from app.services.hrms_notify_service import notify_hrms_role, notify_user
+    link = "/hrms/scorecards"
+    name = current.get("designation_name") or current.get("request_no")
+    if state["complete"]:
+        await notify_hrms_role(
+            company_id, ["HR"], f"Scorecard {scr_no} is fully approved",
+            f"The bar for {name} is set. Sourcing can begin once the budget gate is "
+            f"cleared.", kind="success", link=link, email=True)
+    elif state["outstanding_roles"] == prev_state["outstanding_roles"]:
+        # The signature satisfied nothing new -- a re-sign. The chase already went out
+        # when the state first moved; repeating it is how an alert becomes noise.
+        pass
+    else:
+        outstanding = set(state["outstanding_roles"])
+        if HrmsRole.MD.value in outstanding:
+            await notify_hrms_role(
+                company_id, ["MD"], f"Scorecard {scr_no} still needs Management",
+                f"{name} is a managerial role; the hiring manager has signed and "
+                f"Management's approval is the one outstanding.",
+                kind="info", link=link, email=True)
+        if HrmsRole.MANAGER.value in outstanding:
+            req = await get_collection(COLL_REQUISITIONS).find_one(
+                {"request_no": current.get("request_no"),
+                 "company_id": str(company_id)}, {"created_by": 1})
+            if req and req.get("created_by"):
+                await notify_user(
+                    str(req["created_by"]),
+                    f"Scorecard {scr_no} still needs the hiring manager",
+                    f"Management has signed the scorecard for {name}; your approval is "
+                    f"the one outstanding.", kind="info", link=link, email=True)
     return await get_scorecard(company_id, scr_no)
 
 
 # -------------------------------------------------------------
 # Evaluation
 # -------------------------------------------------------------
-def compute_weighted(criteria: list, scores: dict) -> dict:
+def compute_weighted(criteria: list, scores: dict, bands: dict = None) -> dict:
     """Weighted 1-5 score for one candidate against one scorecard.
 
     Each criterion is normalised to the 1-5 scale before weighting, so a criterion marked
@@ -477,7 +628,7 @@ def compute_weighted(criteria: list, scores: dict) -> dict:
                           "weight": weight, "normalised": round(normalised, 2)})
 
     weighted = round(accumulated / total_weight, 2) if total_weight else None
-    return {"weighted_score": weighted, "band": score_band(weighted),
+    return {"weighted_score": weighted, "band": score_band(weighted, bands),
             "breakdown": breakdown}
 
 
@@ -514,7 +665,11 @@ async def evaluate_candidate(actor: dict, company_id: str, uk: str,
             status_code=422,
             detail="Type your name to sign this evaluation.")
 
-    result = compute_weighted(scorecard.get("criteria") or [], payload.get("scores"))
+    # ── Phase INT-5 ── banded against THIS company's floors. The number is the fact; the
+    # band is its reading, and a company that moved its bar reads its own scores by it.
+    from app.services.hrms_config_service import score_bands_for
+    result = compute_weighted(scorecard.get("criteria") or [], payload.get("scores"),
+                              await score_bands_for(company_id))
     now = datetime.now(timezone.utc)
     evaluation = {
         "scr_no": scorecard.get("scr_no"),

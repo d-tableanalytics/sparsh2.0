@@ -38,7 +38,8 @@ from app.models.hrms import (
     ClientResponseIn,
     ScorecardApproveIn, ScorecardEvaluateIn, ScorecardIn, ScorecardUpdate,
     ReferenceCheckIn, ReferenceCheckUpdate, OfferApproveIn,
-    TelephonicScreeningIn, TelephonicScreeningUpdate,
+    TelephonicScreeningIn, TelephonicScreeningUpdate, NegotiationRoundIn,
+    ConfigUpdateIn, ConfigResetIn, HolidayIn, HolidayImportIn,
     PersonnelFileCloseIn, ProbationConfirmIn, ProbationIn, ProbationUpdate,
     ExceptionDecisionIn, ExceptionIn,
     ClientEngagementIn, ClientEngagementUpdate, EngagementMemberIn,
@@ -64,6 +65,10 @@ from app.services import hrms_probation_service as probation
 from app.services import hrms_reference_service as references
 from app.services import hrms_scorecard_service as scorecards
 from app.services import hrms_telephonic_service as telephonic
+from app.services import hrms_negotiation_service as negotiation
+from app.services import hrms_config_service as config_svc
+from app.services import hrms_holiday_service as holidays_svc
+from app.services import hrms_tracker_service as tracker_svc
 from app.services import hrms_sla_service as sla
 from app.services import hrms_onboarding_service as onboarding
 from app.services import hrms_posting_service as postings
@@ -2052,6 +2057,190 @@ async def update_reference_check(
 
 
 # ─────────────────────────────────────────────────────────────
+# Per-company configuration (Phase INT-5, spec §42)
+# ─────────────────────────────────────────────────────────────
+# The rules this company runs by: SLA targets, retention periods, probation duration,
+# reminder tiers and score band floors. READ is wide because a target you cannot see is one
+# you cannot plan against; WRITE is Management's and Finance's, because Annexure B makes
+# them "A" on policy review and these numbers are that policy expressed as data.
+#
+# No setting here turns a GATE off. The budget gate, the reference check, the scorecard
+# approval and the telephonic screen are the controls the SOP is made of; a deviation goes
+# through the exception log, where it is attributable.
+@router.get("/settings")
+async def get_hrms_settings(
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.SETTINGS_READ)
+    return await config_svc.describe(_company(current_user, company_id))
+
+
+@router.patch("/settings")
+async def update_hrms_settings(
+    body: ConfigUpdateIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.SETTINGS_WRITE)
+    return await config_svc.update_config(
+        current_user, _company(current_user, company_id),
+        body.model_dump(exclude_unset=True, exclude_none=True))
+
+
+@router.post("/settings/reset")
+async def reset_hrms_settings(
+    body: ConfigResetIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Follow the module defaults again. Distinct from setting a value that HAPPENS to equal
+    the default -- a stored value stays where it was put if the default ever moves."""
+    _require(current_user, Cap.SETTINGS_WRITE)
+    return await config_svc.reset_config(
+        current_user, _company(current_user, company_id), body.keys)
+
+
+# ─────────────────────────────────────────────────────────────
+# The internal requisition tracker (Phase INT-7, Annexure C)
+# ─────────────────────────────────────────────────────────────
+# "Maintain a shared internal requisition tracker (status, scores, budget approval date)
+# visible to HR, Department Head, and Management." One row per internal requisition, every
+# stage rolled up, computed entirely server-side.
+#
+# Gated on `requisition.read` and scoped by the SAME visibility rule the requisition list
+# uses, so a user never sees a row here they could not open there. Read-only by
+# construction -- see hrms_tracker_service.
+@router.get("/internal-requisitions/tracker")
+async def internal_requisition_tracker(
+    status: Optional[str] = Query(None),
+    department_id: Optional[str] = Query(None),
+    sla: Optional[str] = Query(None, description="breached | on_track | met | not_started"),
+    limit: int = Query(100, ge=1, le=200),
+    skip: int = Query(0, ge=0),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.REQUISITION_READ)
+    return await tracker_svc.tracker(
+        current_user, _company(current_user, company_id),
+        status=status, department_id=department_id, sla=sla, limit=limit, skip=skip)
+
+
+# ─────────────────────────────────────────────────────────────
+# The working calendar (Phase INT-6, spec §26)
+# ─────────────────────────────────────────────────────────────
+# The dates SLA maths skips, for THIS company. Gated on the same capabilities as the rest of
+# the rule set: a holiday moves a compliance due date, so it belongs with the numbers it
+# moves rather than with the operational screens.
+#
+# HRMS's own calendar, never the ERP's global `holidays` master -- that collection has no
+# company_id, so pointing per-company figures at it would let one admin's edit move every
+# entity's due dates. `/import` ADOPTS dates from it as a copy.
+@router.get("/holidays")
+async def list_hrms_holidays(
+    year: Optional[int] = Query(None, ge=1970, le=2200),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.SETTINGS_READ)
+    return await holidays_svc.list_holidays(
+        _company(current_user, company_id), year=year)
+
+
+@router.post("/holidays", status_code=201)
+async def add_hrms_holiday(
+    body: HolidayIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.SETTINGS_WRITE)
+    return await holidays_svc.add_holiday(
+        current_user, _company(current_user, company_id), body.model_dump())
+
+
+@router.post("/holidays/import")
+async def import_hrms_holidays(
+    body: HolidayImportIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Adopt one year of the ERP's global calendar. Safe to run twice — dates already on
+    this calendar are reported as skipped rather than refused."""
+    _require(current_user, Cap.SETTINGS_WRITE)
+    return await holidays_svc.import_from_erp(
+        current_user, _company(current_user, company_id), year=body.year)
+
+
+@router.delete("/holidays/{holiday_date}")
+async def remove_hrms_holiday(
+    holiday_date: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.SETTINGS_WRITE)
+    return await holidays_svc.remove_holiday(
+        current_user, _company(current_user, company_id), holiday_date)
+
+
+# ─────────────────────────────────────────────────────────────
+# Internal track — salary negotiation (SOP step 9, spec §16)
+# ─────────────────────────────────────────────────────────────
+# The RECORD of the rounds. The RULE lives on the offer (`assert_within_band`) and does not
+# move: recording an above-band round is allowed, issuing an offer at it is not, until the
+# budget is re-approved or an Offer Outside Budget exception is approved.
+@router.get("/negotiations")
+async def list_negotiation_rounds(
+    uk: Optional[str] = Query(None),
+    request_no: Optional[str] = Query(None),
+    limit: int = Query(100, ge=1, le=500),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.NEGOTIATION_READ)
+    return await negotiation.list_rounds(
+        current_user, _company(current_user, company_id),
+        uk=uk, request_no=request_no, limit=limit)
+
+
+@router.post("/negotiations", status_code=201)
+async def record_negotiation_round(
+    body: NegotiationRoundIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.NEGOTIATION_WRITE)
+    return await negotiation.record_round(
+        current_user, _company(current_user, company_id), body.model_dump())
+
+
+@router.get("/negotiations/{neg_no}")
+async def get_negotiation_round(
+    neg_no: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.NEGOTIATION_READ)
+    doc = await negotiation.get_round(_company(current_user, company_id), neg_no)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Negotiation round not found.")
+    return doc
+
+
+@router.get("/candidates/{uk}/negotiation")
+async def candidate_negotiation(
+    uk: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """The spec §16 comparison surface: band, latest round, within/above/below, and whether
+    an offer at the latest figure would pass the band gate today."""
+    _require(current_user, Cap.NEGOTIATION_READ)
+    return await negotiation.negotiation_for(
+        current_user, _company(current_user, company_id), uk)
+
+
+# ─────────────────────────────────────────────────────────────
 # Internal track — telephonic screening (SOP step 5)
 # ─────────────────────────────────────────────────────────────
 # The brief call HR makes between CV screening and the panel. `telephonic.write` is HR's
@@ -2805,6 +2994,13 @@ async def survey_results(
 async def analytics_internal_kpis(
     date_from: Optional[str] = Query(None),
     date_to: Optional[str] = Query(None),
+    department_id: Optional[str] = Query(None),
+    designation_id: Optional[str] = Query(None),
+    designation_level: Optional[str] = Query(
+        None, description="junior | mid | senior | managerial"),
+    hr_user_id: Optional[str] = Query(None, description="the assigned HR owner"),
+    hod_user_id: Optional[str] = Query(None, description="whoever raised the requisition"),
+    status: Optional[str] = Query(None, description="a ReqApproval value"),
     company_id: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user),
 ):
@@ -2815,11 +3011,19 @@ async def analytics_internal_kpis(
     `eligible_n` and, where records were left out, `excluded_n` with the reason -- a joiner
     whose 90-day window has not matured is excluded from the denominator, never counted as
     retained.
+
+    ── Phase INT-8 (spec §29) ── the six filters narrow the requisition set, and every
+    figure downstream flows from it -- so a filtered KPI can never mix a filtered numerator
+    with an unfiltered denominator. The response echoes `filters` so the UI can say what
+    the figures cover.
     """
     _require(current_user, Cap.ANALYTICS_READ)
     return await analytics.internal_kpis(
         current_user, _company(current_user, company_id),
-        date_from=date_from, date_to=date_to)
+        date_from=date_from, date_to=date_to,
+        department_id=department_id, designation_id=designation_id,
+        designation_level=designation_level, hr_user_id=hr_user_id,
+        hod_user_id=hod_user_id, status=status)
 
 
 # ─────────────────────────────────────────────────────────────

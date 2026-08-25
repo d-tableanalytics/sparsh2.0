@@ -72,16 +72,24 @@ def _add_months(iso_date: str, months: int) -> str:
     return f"{year:04d}-{month:02d}-{min(day, last_day):02d}"
 
 
-def _validate_duration(months) -> int:
+def _validate_duration(months, low: int = None, high: int = None) -> int:
+    """One probation duration, against this company's bounds.
+
+    ── Phase INT-5 ── `low`/`high` come from the company configuration. They are ARGUMENTS
+    with the module constants as defaults, so this stays a pure function the tests can walk
+    directly and a caller with no config still gets exactly the pre-INT-5 answer.
+    """
+    low = MIN_PROBATION_MONTHS if low is None else low
+    high = MAX_PROBATION_MONTHS if high is None else high
     try:
         value = int(months)
     except (TypeError, ValueError):
         raise HTTPException(status_code=422, detail="Probation duration must be a number.")
-    if not (MIN_PROBATION_MONTHS <= value <= MAX_PROBATION_MONTHS):
+    if not (low <= value <= high):
         raise HTTPException(
             status_code=422,
-            detail=(f"Probation must be between {MIN_PROBATION_MONTHS} and "
-                    f"{MAX_PROBATION_MONTHS} months. The SOP's usual range is 3 to 6."))
+            detail=(f"Probation must be between {low} and {high} months. "
+                    f"The SOP's usual range is 3 to 6."))
     return value
 
 
@@ -97,6 +105,29 @@ def _validate_rating(value) -> Optional[float]:
             status_code=422,
             detail="The rating is on the same 1-5 scale as the position scorecard.")
     return rating
+
+
+async def _is_managerial(company_id: str, request_no: str) -> bool:
+    """Whether this review's requisition is for a managerial-and-above role.
+
+    The band lives on the designation MASTER (a requisition carries only
+    `designation_id`), resolved the way the scheduler resolves it -- by banded ids, so an
+    unbanded designation reads as the default (mid) and is not managerial.
+    """
+    if not request_no:
+        return False
+    from app.models.hrms import COLL_DESIGNATIONS, MANAGERIAL_LEVELS
+    req = await get_collection(COLL_REQUISITIONS).find_one(
+        {"request_no": request_no, "company_id": str(company_id)},
+        {"designation_id": 1})
+    designation_id = str((req or {}).get("designation_id") or "")
+    if not designation_id:
+        return False
+    rows = await get_collection(COLL_DESIGNATIONS).find(
+        {"company_id": str(company_id),
+         "designation_level": {"$in": [l.value for l in MANAGERIAL_LEVELS]}},
+        {"_id": 1}).to_list(2000)
+    return designation_id in {str(r["_id"]) for r in rows}
 
 
 # -------------------------------------------------------------
@@ -179,7 +210,10 @@ async def open_probation(actor: dict, company_id: str, payload: dict,
         raise HTTPException(
             status_code=422,
             detail="The probation start must be a valid date in YYYY-MM-DD format.")
-    months = _validate_duration(payload.get("duration_months") or DEFAULT_PROBATION_MONTHS)
+    # ── Phase INT-5 ── the duration and its bounds are this company's, not the module's.
+    from app.services.hrms_config_service import probation_bounds, retention_years_for
+    default_months, low, high = await probation_bounds(company_id)
+    months = _validate_duration(payload.get("duration_months") or default_months, low, high)
 
     year = datetime.now(timezone.utc).year
     prb_no = await next_business_id("probation", str(company_id), year)
@@ -206,13 +240,26 @@ async def open_probation(actor: dict, company_id: str, payload: dict,
         "confirmed_at": None,
         # SOP §13: employment + 3 years. The floor is computed from the probation end; it is
         # a FLOOR, not a purge date -- nothing in this module ever deletes a record.
-        "retention_until": _add_months(ends_on, 12 * RETENTION_YEARS["probation"]),
+        "retention_until": _add_months(
+            ends_on, 12 * await retention_years_for(company_id, "probation")),
         "created_at": now,
         "created_by": str(actor.get("_id") or "") if actor else None,
     }
     await coll.insert_one(dict(doc))
     await audit(actor, AUDIT_PROBATION_STARTED, ENTITY_PROBATION, prb_no,
                 f"{employee_code}, ends {ends_on}", company_id)
+
+    # ── Phase INT-9 ── the reviewer owns this from day one, and should not first hear of
+    # it from a 30-days-left reminder. In-app only: the scheduler's tiered reminders are
+    # the ones that email, and two mails about one review is one too many.
+    if doc.get("reviewer_id"):
+        from app.services.hrms_notify_service import notify_user
+        await notify_user(
+            str(doc["reviewer_id"]),
+            f"Probation review {prb_no} opened",
+            f'{doc.get("employee_name") or employee_code} is on probation until '
+            f"{ends_on}. The confirmation decision will be yours before that date.",
+            kind="info", link="/hrms/probation", email=False)
     return _out(doc)
 
 
@@ -235,7 +282,10 @@ async def update_probation(actor: dict, company_id: str, prb_no: str,
                 status_code=422, detail="The start must be a valid YYYY-MM-DD date.")
         updates["started_on"] = payload["started_on"]
     if payload.get("duration_months") is not None:
-        updates["duration_months"] = _validate_duration(payload["duration_months"])
+        from app.services.hrms_config_service import probation_bounds
+        _default, low, high = await probation_bounds(company_id)
+        updates["duration_months"] = _validate_duration(
+            payload["duration_months"], low, high)
     if payload.get("reviewer_id") is not None:
         updates["reviewer_id"] = clean_text(payload["reviewer_id"], limit=40)
     if payload.get("rating") is not None:
@@ -251,14 +301,43 @@ async def update_probation(actor: dict, company_id: str, prb_no: str,
         started = updates.get("started_on") or current.get("started_on")
         months = updates.get("duration_months") or current.get("duration_months")
         updates["ends_on"] = _add_months(started, int(months))
+        from app.services.hrms_config_service import retention_years_for
         updates["retention_until"] = _add_months(
-            updates["ends_on"], 12 * RETENTION_YEARS["probation"])
+            updates["ends_on"], 12 * await retention_years_for(company_id, "probation"))
+
+    # Read BEFORE the write: the driver may hand back a live reference, and the update
+    # below would then mutate `current` under us -- trap 36's lesson, applied again.
+    previous_reviewer = current.get("reviewer_id") or ""
+    previous_ends_on = current.get("ends_on")
+
+    # ── Phase INT-9 ── an end date moved through PATCH is the same fact as an extension:
+    # the scheduler's tiers for the OLD date have burned, and without re-arming them the
+    # new date is never reminded about. Reset on any real change, in either direction --
+    # the scheduler marks every reached tier in one sweep, so a shortened date cannot
+    # burst.
+    if "ends_on" in updates and updates["ends_on"] != previous_ends_on:
+        from app.models.hrms import PROBATION_REMINDED_FIELD
+        updates[PROBATION_REMINDED_FIELD] = []
 
     updates["updated_at"] = datetime.now(timezone.utc)
     await coll.update_one({"prb_no": prb_no, "company_id": str(company_id)},
                           {"$set": updates})
     await audit(actor, AUDIT_PROBATION_UPDATED, ENTITY_PROBATION, prb_no,
                 ", ".join(sorted(k for k in updates if k != "updated_at")), company_id)
+
+    # ── Phase INT-9 ── a review handed to a NEW reviewer must tell them, or their first
+    # notice is a 7-days-left tier -- or nothing at all, if the early tiers burned while
+    # the review still belonged to somebody else.
+    new_reviewer = updates.get("reviewer_id")
+    if new_reviewer and new_reviewer != previous_reviewer:
+        from app.services.hrms_notify_service import notify_user
+        await notify_user(
+            str(new_reviewer),
+            f"Probation review {prb_no} is now yours",
+            f'{current.get("employee_name") or current.get("employee_code")} is on '
+            f'probation until {updates.get("ends_on") or current.get("ends_on")}. The '
+            f"confirmation decision will be yours before that date.",
+            kind="info", link="/hrms/probation", email=False)
     return await get_probation(company_id, prb_no)
 
 
@@ -432,6 +511,13 @@ async def confirm_probation(actor: dict, company_id: str, prb_no: str,
         updates["confirmed_at"] = None
         updates["last_extended_at"] = now
         updates["last_extended_by"] = str(actor.get("_id") or "")
+        # ── Phase INT-9 ── re-arm the scheduler's reminder tiers. They are recorded as
+        # fired on the RECORD (PROBATION_REMINDED_FIELD), so without this an extended
+        # probation would never be reminded about its NEW end date -- the tiers for the old
+        # one already burned. An extension is a second review, and it deserves its own
+        # 30/15/7/1.
+        from app.models.hrms import PROBATION_REMINDED_FIELD
+        updates[PROBATION_REMINDED_FIELD] = []
 
     if outcome in (ProbationOutcome.TERMINATED, ProbationOutcome.EXTENDED) and not remarks:
         raise HTTPException(
@@ -451,8 +537,18 @@ async def confirm_probation(actor: dict, company_id: str, prb_no: str,
             company_id, {"employee_code": current.get("employee_code"),
                          "request_no": current.get("request_no")})
 
-    await coll.update_one({"prb_no": prb_no, "company_id": str(company_id)},
-                          {"$set": updates})
+    # Compare-and-swap on the Pending state, the same rule the exception log follows:
+    # two deciders clicking at once must not both land -- the loser would re-close the
+    # requisition, re-issue the survey and re-notify everybody about a decision already
+    # taken (and possibly a DIFFERENT one).
+    result = await coll.update_one(
+        {"prb_no": prb_no, "company_id": str(company_id),
+         "outcome": ProbationOutcome.PENDING.value},
+        {"$set": updates})
+    if result.matched_count == 0:
+        raise HTTPException(
+            status_code=409,
+            detail="This probation was decided by someone else. Reload and try again.")
     await audit(actor, AUDIT_PROBATION_CONFIRMED, ENTITY_PROBATION, prb_no,
                 f"{outcome.value}"
                 + (f" to {updates.get('extended_to')}"
@@ -469,8 +565,10 @@ async def confirm_probation(actor: dict, company_id: str, prb_no: str,
                   "probation_confirmed_at": updates.get("confirmed_at"),
                   "updated_at": now}})
 
+    requisition_closed = False
     if outcome is ProbationOutcome.CONFIRMED:
-        await _close_requisition_on_confirmation(actor, company_id, current)
+        requisition_closed = await _close_requisition_on_confirmation(
+            actor, company_id, current)
         # ── Phase INT-2 (SOP §10) ── the second experience survey, at the moment the SOP
         # itself names. Best-effort and idempotent per employee, so it can never be the
         # reason a confirmation fails.
@@ -481,11 +579,58 @@ async def confirm_probation(actor: dict, company_id: str, prb_no: str,
                            request_no=current.get("request_no"),
                            employee_name=current.get("employee_name"))
 
+    # ── Phase INT-9 (spec §38, Annexure B) ── the decision is announced to the people the
+    # RACI names. HR runs the next step in every branch -- the personnel file on a
+    # confirmation, a second review diary on an extension, an exit on a termination.
+    # Management is INFORMED, managerial+ only, and only for the decisions that stand
+    # (an extension returns to Pending and will be decided again).
+    from app.services.hrms_notify_service import notify_hrms_role
+    who = current.get("employee_name") or current.get("employee_code")
+    link = "/hrms/probation"
+    if outcome is ProbationOutcome.CONFIRMED:
+        # The message states only what actually happened: the closer silently declines
+        # when the requisition is missing, client-track, or already closed another way,
+        # and a notification describing a write that never landed is exactly the failure
+        # the notify-after-write rule exists to prevent.
+        await notify_hrms_role(
+            company_id, ["HR"], f"Probation confirmed: {who}",
+            f"{prb_no} is confirmed."
+            + (" The requisition is closed." if requisition_closed else "")
+            + " The personnel file can now be closed.",
+            kind="success", link=link, email=True)
+        if await _is_managerial(company_id, current.get("request_no")):
+            await notify_hrms_role(
+                company_id, ["MD"], f"Probation confirmed: {who}",
+                f"{prb_no} was confirmed by "
+                f'{updates.get("confirmed_by_name") or "the hiring manager"}.',
+                kind="info", link=link, email=False)
+    elif outcome is ProbationOutcome.EXTENDED:
+        await notify_hrms_role(
+            company_id, ["HR"], f"Probation extended: {who}",
+            f'{prb_no} now ends on {updates.get("extended_to")}. Reason: '
+            f'{remarks or "not recorded"}. The review returns to Pending and will be '
+            f"reminded about again.", kind="warning", link=link, email=False)
+    elif outcome is ProbationOutcome.TERMINATED:
+        await notify_hrms_role(
+            company_id, ["HR"], f"Probation not confirmed: {who}",
+            f"{prb_no} was ended. Reason: {remarks}. HR owns the exit steps.",
+            kind="warning", link=link, email=True)
+        # A termination STANDS just as a confirmation does, and Annexure B informs
+        # Management of managerial+ probation decisions -- ending a managerial hire is
+        # not less their business than confirming one.
+        if await _is_managerial(company_id, current.get("request_no")):
+            await notify_hrms_role(
+                company_id, ["MD"], f"Probation not confirmed: {who}",
+                f'{prb_no} was ended by '
+                f'{updates.get("confirmed_by_name") or "the hiring manager"}. '
+                f"Reason: {remarks}",
+                kind="warning", link=link, email=False)
+
     return await get_probation(company_id, prb_no)
 
 
 async def _close_requisition_on_confirmation(actor: dict, company_id: str,
-                                             probation: dict) -> None:
+                                             probation: dict) -> bool:
     """SOP §7: with no client handover, the requisition closes once probation is confirmed.
 
     Only ever closes an INTERNAL requisition that is still Open, and only to Hired. A
@@ -494,24 +639,54 @@ async def _close_requisition_on_confirmation(actor: dict, company_id: str,
     """
     request_no = probation.get("request_no")
     if not request_no:
-        return
+        return False
     req = await get_collection(COLL_REQUISITIONS).find_one(
         {"request_no": request_no, "company_id": str(company_id)})
     if not req:
-        return
+        return False
     track = req.get("requisition_track") or RequisitionTrack.CLIENT.value
     if track != RequisitionTrack.INTERNAL.value:
-        return
+        return False
     if req.get("closing_status") != ReqClosing.OPEN.value:
-        return
+        return False
 
-    await get_collection(COLL_REQUISITIONS).update_one(
-        {"request_no": request_no, "company_id": str(company_id)},
+    # Every seat, not just this one. A requisition raised for three people is not filled
+    # because the first of them cleared probation, and closing it here would retire a role
+    # still two hires short -- which then reads as "Hired" on the tracker and the KPIs while
+    # recruitment is visibly still running.
+    vacancy = int(req.get("vacancy") or 1)
+    confirmed = await get_collection(COLL_PROBATION_REVIEWS).count_documents({
+        "company_id": str(company_id), "request_no": request_no,
+        "outcome": ProbationOutcome.CONFIRMED.value})
+    if confirmed < vacancy:
+        return False
+
+    now = datetime.now(timezone.utc)
+    # Conditioned on the state it was read in, so two confirmations landing together cannot
+    # both close it and write two audit rows for one event.
+    # SOP §13: retention runs from closure, so it is stamped by whoever closes.
+    from app.services.hrms_candidate_service import _add_years
+    from app.services.hrms_config_service import retention_years_for
+    retention_until = _add_years(
+        now.strftime("%Y-%m-%d"),
+        await retention_years_for(company_id, "requisition"))
+
+    result = await get_collection(COLL_REQUISITIONS).update_one(
+        {"request_no": request_no, "company_id": str(company_id),
+         "closing_status": ReqClosing.OPEN.value},
         {"$set": {"closing_status": ReqClosing.HIRED.value,
                   "closed_on_probation_confirmation": probation.get("prb_no"),
-                  "updated_at": datetime.now(timezone.utc)}})
+                  # The same field the client track stamps, so "when did this close" has
+                  # one answer whatever closed it. The prb_no above says WHY.
+                  "closed_at": now,
+                  "retention_until": retention_until,
+                  "updated_at": now}})
+    if not (result.modified_count or 0):
+        return False
     await audit(actor, AUDIT_REQ_CLOSED, ENTITY_REQUISITION, request_no,
-                f"Hired -- probation confirmed ({probation.get('prb_no')})", company_id)
+                f"Hired -- {confirmed}/{vacancy} probation(s) confirmed "
+                f"({probation.get('prb_no')})", company_id)
+    return True
 
 
 async def close_personnel_file(actor: dict, company_id: str, payload: dict) -> dict:

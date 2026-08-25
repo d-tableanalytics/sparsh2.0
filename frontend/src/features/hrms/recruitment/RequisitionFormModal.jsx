@@ -73,13 +73,14 @@ const RequisitionFormModal = ({ existing, onClose, onSaved }) => {
   const [clients, setClients] = useState([]);
   // The live sanctioned/actual/available readout for the chosen position.
   const [sanction, setSanction] = useState(null);
+  // Only the fields this form actually asks for. Experience, CTC, skills, qualifications
+  // and employment type are entered once above, on the requisition, and the server carries
+  // them onto the JD (hrms_requisition_service.JD_FROM_REQUISITION). They were previously
+  // declared here with no input bound to them, so the JD was saved with them empty.
+  // The JD library is where a published JD gets its own wording, after it is raised.
   const [jd, setJd] = useState({
     title: existing?.jd?.title || '',
     responsibilities: existing?.jd?.responsibilities || '',
-    skills: existing?.jd?.skills || '',
-    qualifications: existing?.jd?.qualifications || '',
-    experience: existing?.jd?.experience || '',
-    ctc: existing?.jd?.ctc || '',
     location: existing?.jd?.location || '',
     benefits: existing?.jd?.benefits || '',
   });
@@ -496,7 +497,9 @@ const RequisitionFormModal = ({ existing, onClose, onSaved }) => {
                 <p className="text-[13px] font-bold text-[var(--text-main)]">Job description</p>
                 <p className="text-[11.5px] text-[var(--text-muted)]">
                   Authored with the requisition and approved together — it is what candidates
-                  will see once the role is published.
+                  will see once the role is published. Experience, CTC, skills,
+                  qualifications, work location and employment type carry over from the
+                  details above; edit them per-JD in the JD library once this is raised.
                 </p>
               </div>
               <div>

@@ -363,6 +363,50 @@ export const createTelephonicScreening = (payload, params) =>
 export const updateTelephonicScreening = (telNo, payload, params) =>
   api.patch(`/hrms/telephonic-screenings/${telNo}`, payload, { params });
 
+/**
+ * Per-company configuration (Phase INT-5) — SLA targets, retention periods, probation
+ * duration, reminder tiers and score band floors. A company with no settings row follows
+ * the module defaults, so `describe` always returns a complete, renderable table.
+ */
+export const getHrmsSettings = (params) => api.get('/hrms/settings', { params });
+export const updateHrmsSettings = (payload, params) =>
+  api.patch('/hrms/settings', payload, { params });
+/** Stop overriding — distinct from setting a value that happens to equal the default. */
+export const resetHrmsSettings = (keys, params) =>
+  api.post('/hrms/settings/reset', { keys }, { params });
+
+/**
+ * The working calendar (Phase INT-6) — the dates SLA maths skips, for THIS company.
+ * HRMS's own, never the ERP's global holidays master; `importHrmsHolidays` adopts a year
+ * of that master as a copy, and is safe to run twice.
+ */
+export const getHrmsHolidays = (params) => api.get('/hrms/holidays', { params });
+export const addHrmsHoliday = (payload, params) =>
+  api.post('/hrms/holidays', payload, { params });
+export const importHrmsHolidays = (year, params) =>
+  api.post('/hrms/holidays/import', { year }, { params });
+export const removeHrmsHoliday = (date, params) =>
+  api.delete(`/hrms/holidays/${date}`, { params });
+
+/**
+ * The internal requisition tracker (Phase INT-7, Annexure C) — one row per internal
+ * requisition with every stage rolled up server-side. Scoped exactly as the requisition
+ * list is; `sla` filters by health: breached | on_track | met | not_started.
+ */
+export const getInternalTracker = (params) =>
+  api.get('/hrms/internal-requisitions/tracker', { params });
+
+/**
+ * Salary negotiation (SOP step 9, spec §16) — the record of the rounds. The band gate on
+ * the offer is unchanged; `getCandidateNegotiation` previews whether an offer at the latest
+ * figure would pass it today.
+ */
+export const getNegotiationRounds = (params) => api.get('/hrms/negotiations', { params });
+export const recordNegotiationRound = (payload, params) =>
+  api.post('/hrms/negotiations', payload, { params });
+export const getCandidateNegotiation = (uk, params) =>
+  api.get(`/hrms/candidates/${uk}/negotiation`, { params });
+
 /** Management's sign-off on an internal offer, mandatory before it can be sent. */
 export const approveOffer = (offerNo, payload, params) =>
   api.post(`/hrms/offers/${offerNo}/approve`, payload, { params });

@@ -422,6 +422,19 @@ async def create_offer(actor: dict, company_id: str, payload: dict) -> dict:
         "created_by": str(actor.get("_id") or ""),
         "created_at": now,
     }
+    # SOP §13. `COLL_OFFERS` has been a purge target since INT-2, but nothing ever stamped
+    # the field the purge selects on -- so the target could never match a single row.
+    # Anchored on the offer date: the SOP's "employment duration + 3 years" needs a
+    # separation date, and no separation workflow exists to supply one (see the module
+    # note in hrms_purge_service). This is the honest floor available today, and it is a
+    # floor rather than a deadline -- the purge proposes, a person decides.
+    # Imported rather than re-implemented: five services already carry a private copy of
+    # this, and one of them shipped a leap-year bug the others did not. A sixth copy is a
+    # sixth chance to get February wrong.
+    from app.services.hrms_candidate_service import _add_years
+    from app.services.hrms_config_service import retention_years_for
+    doc["retention_until"] = _add_years(
+        now.strftime("%Y-%m-%d"), await retention_years_for(company_id, "offer"))
     await get_collection(COLL_OFFERS).insert_one(dict(doc))
 
     # Phase 11-R, Item 1: register the offer link at MINT time, not send time, so a draft's
@@ -677,6 +690,22 @@ async def reconcile_requisition_closure(actor: Optional[dict], company_id: str,
     if not req or req.get("closing_status") != ReqClosing.OPEN.value:
         return None
 
+    # ── Internal track ── an accepted offer does NOT close the requisition.
+    #
+    # SOP §7 closes an internal requisition on PROBATION CONFIRMATION, because with no
+    # client handover the hire is not final until the person is confirmed. Closing here
+    # would beat that by the whole probation period and leave
+    # hrms_probation_service._close_requisition_on_confirmation with nothing to close --
+    # which is exactly what it did before this guard existed.
+    #
+    # The vacancy is still visibly spoken for: the candidate sits at Offer Accepted or
+    # later, and the tracker reports the funnel per requisition. What stays open is the
+    # REQUISITION, which is the honest state -- a joiner who leaves in month two puts this
+    # role back in the market, and a requisition already closed as Hired cannot say so.
+    if (req.get("requisition_track") or RequisitionTrack.CLIENT.value) \
+            == RequisitionTrack.INTERNAL.value:
+        return None
+
     filled = await get_collection(COLL_CANDIDATES).count_documents({
         "company_id": str(company_id), "request_no": request_no,
         "application_status": {"$in": [s.value for s in FILLED_STATUSES]},
@@ -685,11 +714,18 @@ async def reconcile_requisition_closure(actor: Optional[dict], company_id: str,
     if filled < vacancy:
         return None
 
+    closed_at = datetime.now(timezone.utc)
+    # SOP §13: retention runs from closure, so it is stamped by whoever closes.
+    from app.services.hrms_candidate_service import _add_years
+    from app.services.hrms_config_service import retention_years_for
     await get_collection(COLL_REQUISITIONS).update_one(
         {"request_no": request_no, "company_id": str(company_id),
          "closing_status": ReqClosing.OPEN.value},
         {"$set": {"closing_status": ReqClosing.HIRED.value,
-                  "closed_at": datetime.now(timezone.utc)}})
+                  "closed_at": closed_at,
+                  "retention_until": _add_years(
+                      closed_at.strftime("%Y-%m-%d"),
+                      await retention_years_for(company_id, "requisition"))}})
     await audit(actor, AUDIT_REQ_AUTO_CLOSED, ENTITY_REQUISITION, request_no,
                 f"{filled}/{vacancy} vacancies filled", company_id)
     await notify_hrms_role(

@@ -34,16 +34,19 @@ import { Btn, Chip, Facts, Modal, RecordList } from './internalKit.jsx';
  * the past.
  */
 
+// Descriptions only. WHICH templates are automatic comes from the server (`t.automatic`,
+// stamped from AUTO_COMM_EVENTS), because a local list drifted once: interview_scheduled
+// went automatic in Phase INT-10 and this screen kept calling it manual.
 const AUTOMATIC = {
   application_acknowledged: 'Fires automatically when an application arrives.',
   rejection_closure: 'Fires automatically on the reject screening action.',
+  interview_scheduled: 'Fires automatically when an interview is scheduled or moved.',
 };
 
 const MANUAL = {
   offer_summary: 'Sent by hand from the offer board, before the formal letter.',
   stage_update: 'Sent by hand when there is something worth saying.',
   preboarding_checkin: 'Sent by hand during pre-boarding.',
-  interview_scheduled: 'Sent by hand alongside the calendar invite.',
 };
 
 const CONSENT = {
@@ -127,9 +130,9 @@ const CommTemplates = () => {
                       <Chip tone={t.active ? 'good' : 'neutral'}>
                         {t.active ? 'active' : 'off'}
                       </Chip>
-                      {CONSENT[t.key]
+                      {t.consent
                         ? <Chip tone="accent">consent wording</Chip>
-                        : AUTOMATIC[t.key]
+                        : t.automatic
                           ? <Chip tone="accent">automatic</Chip>
                           : <Chip>manual</Chip>}
                     </div>

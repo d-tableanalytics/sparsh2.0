@@ -88,14 +88,14 @@ review**, and confirmation is what **closes the personnel file** and the requisi
 | | Count |
 |---|---|
 | Backend HRMS code (models + routes + services + utils) | **~25,650 lines** |
-| Backend tests | **55 files, ~20,620 lines** |
+| Backend tests | **61 files, ~23,300 lines** |
 | Frontend HRMS code (feature + public pages) | **~17,200 lines** |
-| Authenticated API endpoints | **178** |
+| Authenticated API endpoints | **190** |
 | Public (unauthenticated) endpoints | **12** (6 surfaces × GET/POST) |
-| Live MongoDB collections | **35** |
-| Capabilities in the `Cap` enum | **86** |
+| Live MongoDB collections | **38** |
+| Capabilities in the `Cap` enum | **90** |
 | HRMS roles | **8** |
-| Backend services | **36** |
+| Backend services | **40** |
 | Frontend screens (routes under `/hrms`) | **30** + 6 public pages |
 
 ### 2.2 By roadmap phase
@@ -119,6 +119,12 @@ The roadmap in `docs/HRMS_IMPLEMENTATION_ROADMAP.md` defines 15 phases. Current 
 | — | **Phase INT-2** — the remaining SOP gaps (see [§2.4](#24-phase-int-2--closing-the-sop)) | ✅ **Built** |
 | — | **Phase INT-3** — scheduler wiring (see [§8.11](#811-the-scheduled-jobs-phase-int-3)) | ✅ **Built** |
 | — | **Phase INT-4** — telephonic screening (see [§8.12](#812-telephonic-screening-phase-int-4)) | ✅ **Built** |
+| — | **Phase INT-5** — per-company configuration (see [§8.13](#813-per-company-configuration-phase-int-5)) | ✅ **Built** |
+| — | **Phase INT-6** — the working calendar (see [§8.14](#814-the-working-calendar-phase-int-6)) | ✅ **Built** |
+| — | **Phase INT-7** — the requisition tracker (see [§8.15](#815-the-requisition-tracker-phase-int-7)) | ✅ **Built** |
+| — | **Phase INT-8** — KPI dashboard filters (see [§8.16](#816-kpi-dashboard-filters-phase-int-8)) | ✅ **Built** |
+| — | **Phase INT-9** — record-level notifications (see [§8.17](#817-record-level-notifications-phase-int-9)) | ✅ **Built** |
+| — | **Phase INT-10** — negotiation record, interview notice, optional score band (see [§8.18](#818-salary-negotiation-interview-notice-and-the-three-band-reading-phase-int-10)) | ✅ **Built** |
 | 11 | HRMS settings + per-user RBAC console | ❌ **Not built** (role matrix *is* the model) |
 | 12 | Holidays + leave management | ❌ **Not built** |
 | 13 | Attendance | ❌ **Not built** |
@@ -146,6 +152,14 @@ payroll are not started.**
 | Record-retention **purge** — proposal, MD approval, redaction | ✅ (Phase INT-2) |
 | Automated reminders, escalations and the purge proposal | ✅ (Phase INT-3) |
 | Telephonic screening + its gate on interview scheduling | ✅ (Phase INT-4) |
+| Per-company SLA targets, retention, probation, tiers and score bands | ✅ (Phase INT-5) |
+| Holiday-aware working days, opted into per company | ✅ (Phase INT-6) |
+| The Annexure C shared requisition tracker | ✅ (Phase INT-7) |
+| KPI dashboard filters (department / position / level / owner / HOD / status) | ✅ (Phase INT-8) |
+| Record-level notifications: scorecard, reference, probation, exceptions | ✅ (Phase INT-9) |
+| Salary negotiation record + the spec §16 comparison surface | ✅ (Phase INT-10) |
+| Automatic interview confirmation to the candidate; short notice recorded | ✅ (Phase INT-10) |
+| Three-band score reading, per company | ✅ (Phase INT-10) |
 
 ### 2.4 Phase INT-2 — closing the SOP
 
@@ -222,6 +236,18 @@ backend/app/
 
     ── Phase INT-4 ──
     hrms_telephonic_service.py          489   the SOP's step 5 phone screen + its gate
+
+    ── Phase INT-5 ──
+    hrms_config_service.py              357   the per-company rule set, as an overlay
+
+    ── Phase INT-6 ──
+    hrms_holiday_service.py             210   this company's working calendar + import
+
+    ── Phase INT-7 ──
+    hrms_tracker_service.py             337   the internal tracker: one row, every stage
+
+    ── Phase INT-10 ──
+    hrms_negotiation_service.py         ~330  the salary negotiation record (SOP step 9)
     hrms_id_service.py                   65   atomic business-id counters
 
     ── Phase INT-2 ──
@@ -235,7 +261,7 @@ backend/app/
     hrms_preboarding_service.py         303   pre-boarding engagement (SOP 6)
     hrms_interview_window_service.py    229   batch interview windows (Annexure C)
 
-  services/hrms/tests/                  55 test files
+  services/hrms/tests/                  61 test files
 scripts/
   seed_hrms_recruitment_demo.py         one requisition end to end (marker: recruitment-demo)
   seed_hrms_realistic_ops.py            a full book of work      (marker: realistic-ops)
@@ -263,6 +289,8 @@ frontend/src/
                  OfferPaper, AppointmentBoard, AppointmentPaper, OnboardingBoard
     internal/    InternalRequisitionList, ScorecardLibrary, ReferenceCheckBoard,
                  TelephonicBoard                                       (Phase INT-4)
+                 NegotiationBoard                                      (Phase INT-10)
+                 HrmsSettings                                          (Phase INT-5)
                  ProbationBoard, ExceptionLog, internalKit(.js/.jsx)
                  ── Phase INT-2 ──
                  ShortlistCommittee, PreboardingBoard, TalentPool,
@@ -448,6 +476,9 @@ Break any of these and something downstream silently corrupts.
 | `hrms_purge_batches` | retention-purge proposals awaiting approval |
 | `hrms_job_runs` | the scheduled-job ledger — last successful run per (company, job) |
 | `hrms_telephonic_screenings` | the SOP step 5 phone screen, its ratings and its outcome |
+| `hrms_settings` | one row per company: the rules it has adopted in place of the defaults |
+| `hrms_salary_negotiations` | one row per negotiation round, with the band it was judged against |
+| `hrms_holidays` | this company's working calendar — the dates SLA maths skips |
 
 **There is no `hrms_clients` collection.** A client *is* a company (`client_id` = a
 `companies._id`) — see [§11.1](#111-the-client-dimension).
@@ -473,6 +504,7 @@ company** so one tenant cannot infer another's hiring volume:
 | engagement | `CLI-ENG-2026-001` | yes |
 | scorecard / reference / probation / exception | `SCR-` / `REF-` / `PRB-` / `EXC-` | yes |
 | telephonic screening | `TEL-2026-001` | yes |
+| negotiation round | `NEG-2026-001` | yes |
 | shortlist sitting | `SLR-2026-001` | yes |
 | pre-boarding touchpoint | `PBT-2026-001` | yes |
 | salary band | `SAL-2026-001` | yes |
@@ -900,6 +932,270 @@ shortlisted candidate, not a further stage, the same reasoning the client-share 
 `Shortlisted → Interview Scheduled` edge is **kept**, so the graph never forces a client-track
 candidate through a stage their process does not have.
 
+### 8.13 Per-company configuration (Phase INT-5)
+
+The module was multi-company for its **data** from Phase 1 — every collection keyed on
+`company_id`, ids sequenced per company, salary bands and communication templates already per
+company. It was not multi-company for its **rules**: the SLA targets, retention periods,
+probation duration, reminder tiers and score bands were module constants, so a second Sparsh
+entity would have shared one hard-coded rule set with the first. `COLL_SETTINGS` had been
+declared and read by nothing since Phase 1. This is the phase that reads it.
+
+`hrms_config_service.config_for(company_id)` returns **the shipped defaults with a company's
+overrides laid on top**. Every default is read from the constant that already shipped — so a
+company with no settings row reproduces pre-INT-5 behaviour key for key, with **no migration
+and nothing to backfill**.
+
+| Setting | Default | Bounds |
+|---|---|---|
+| `sla_target_days` | the four milestone targets from `SLA_MILESTONES` | 1–260 working days |
+| `retention_years` | `RETENTION_YEARS` | 1–50 years |
+| `probation_months` | default 6, min 1, max 12 | 1–24, and `min ≤ default ≤ max` |
+| `probation_reminder_days` | `[30, 15, 7, 1]` | 1–365, descending, ≤ 6 entries |
+| `score_bands` | Strong 4.0 · Consider 3.5 · Hold 3.0 | 1.0–5.0, strictly descending |
+
+**Maps merge per name; lists replace whole.** Overriding one SLA target keeps the shipped
+value for the other three — replacing the map would mean changing one number silently dropped
+the rest, and a missing target reads as *no target* rather than as the omission it was. A
+reminder-tier list, by contrast, **is** the setting: merging it would make removing a tier
+impossible.
+
+**What is stored is what somebody chose.** A value equal to the default is stored anyway
+rather than pruned — a company that deliberately set retention to 3 years must not silently
+move if the module default later changes. `POST /settings/reset` is how a company goes back
+to *following* the default, and that distinction is the reason the endpoint exists.
+
+**Cross-field rules are judged on the merged result**, not the payload: setting `min: 6`
+against an in-force default of 3 is refused, because the group would be inconsistent even
+though the number sent was fine on its own.
+
+**No caching, deliberately.** The module has no caching layer anywhere else, and a stale rule
+is worse than an indexed read. Callers that resolve config inside a loop resolve it **once**
+and pass the dict down — `sla_for`, `sweep_open_breaches` and the scheduler all take an
+optional `config`, so the read count is per request, not per record. That also means one sweep
+judges every requisition against the same targets even if somebody edits the settings while it
+runs.
+
+**Capabilities.** `settings.read` is wide (INTERNAL, MD, HR, MANAGER, FINANCE) because a target
+you cannot see is one you cannot plan against. `settings.write` is **MD and FINANCE only** —
+Annexure B makes Management/Finance *accountable* for policy review, and these numbers are that
+policy expressed as data. HR runs the process; it does not rewrite the policy behind it.
+
+#### What is deliberately NOT configurable
+
+- **The gates.** No setting turns off the budget gate, the reference check, the scorecard
+  approval or the telephonic screen. Those are the controls the SOP is made of, and a
+  deviation goes through the **exception log**, where it is attributable — not through a
+  settings screen, where it would be silent. A test asserts the configurable set is exactly
+  the five numeric tables.
+- **The managerial threshold.** Moving it means `REQUIRED_PANEL_ROLES` must move with it: a
+  company that made `mid` managerial would get a mandatory Management final round while the
+  panel table still said a mid role needs only HR and the HOD. Two tables that must agree, so
+  making one per-company is a design change rather than a config key.
+- **Whether an assessment is required.** Already per *posting* (`requires_assessment`), which
+  is finer-grained than per company.
+- **The holiday calendar.** It belongs to the phase that teaches the working-day maths to read
+  it. Declaring a flag nothing reads is precisely the mistake this phase exists to correct.
+
+### 8.14 The working calendar (Phase INT-6)
+
+SOP §8 states its targets in **working days**. Weekends were always excluded; public holidays
+never were, and the deferral note gave a real reason — two companies looking at the same
+three-day gap would disagree about whether a requisition breached. Phase INT-5 is what made
+the answer available: let each entity say which days *it* does not work, rather than forcing
+one answer on both.
+
+**The calendar is HRMS's own (`hrms_holidays`), never the ERP's global `holidays` master.**
+That collection carries **no `company_id`** — not on read, not on write, not even in its
+duplicate check. Pointing per-company compliance figures at one global list would let an admin
+adding a regional festival for one entity silently move every other entity's SLA due dates,
+and nobody would see the change on the requisition that breached because of it. So the ERP
+master is available as an **import** — a company *adopts* a year of dates, as an act with an
+audit row — rather than as a live dependency.
+
+**It ships OFF, per company** (`honour_holidays`). Turning it on **changes whether existing
+requisitions read as breached**, which is a business decision with a visible date rather than
+something that should arrive with a deploy.
+
+| Setting | Behaviour |
+|---|---|
+| flag off (default) | weekends only — byte-for-byte the pre-INT-6 answer |
+| flag on, calendar empty | honours a calendar that has no dates in it |
+| flag on, calendar populated | weekends **and** those dates are skipped |
+
+**`None` and an empty set are different answers**, and `holiday_set()` keeps them apart — the
+same three-way distinction `scope_client_ids` draws. `None` means *this company does not
+honour a calendar*; `set()` means *it does, and has no dates recorded*. Collapsing them makes
+"no holidays this quarter" indistinguishable from "nobody set this up".
+
+**The basis is reported, never assumed.** `GET /requisitions/{no}/sla` returns
+`counts_holidays`, `holidays_in_calendar` (null when not honouring, so the two states stay
+distinguishable on the wire) and a plain-English `basis`, so a reader never has to guess which
+of the two bases produced the number in front of them.
+
+`working_days_between()` and `add_working_days()` take the calendar as an **argument**, not a
+lookup — they stay pure, the tests walk them directly, and a report or a template can still
+call them. `sla_for`, `sweep_open_breaches` and `escalate_if_breached` accept a pre-resolved
+`calendar` alongside `config`, so one sweep reads it **once** and judges every requisition on
+the same basis even if somebody edits the calendar mid-run.
+
+Also corrected here: `internal_kpis` measured "shortlist within Day 15" against a **hard-coded
+15** while the SLA screen measured against the configured target. It now reads both the
+company's target and its calendar, so the KPI and the SLA report cannot give two answers to
+one question.
+
+### 8.15 The requisition tracker (Phase INT-7)
+
+Annexure C's first efficiency item: *"maintain a shared internal requisition tracker (status,
+scores, budget approval date) visible to HR, Department Head, and Management."* The screen
+existed and showed five columns; `GET /internal-requisitions/tracker` now returns the row the
+annexure describes — identity, budget (with its approval date), scorecard, sourcing, pipeline
+counts by stage rank, shortlist, offer, joining date, probation end, SLA health and
+exceptions — one row per internal requisition, all computed server-side.
+
+**Read-only, structurally.** `test_int7_tracker` greps the module source for the three write
+prefixes, the same guarantee the analytics service carries — so those tokens must not appear
+anywhere in `hrms_tracker_service.py`, comments included.
+
+**Batched, because the obvious implementation is quadratic.** Every collection is read once
+for the page with `request_no: {"$in": [...]}` — eight reads however many rows — and the test
+proves the read count does not grow when the requisition count quadruples. The `$in` list is
+built from the already-scoped requisition page, so it can never widen scope; an empty page
+short-circuits rather than issuing eight `$in: []` reads.
+
+**Scoped exactly as the requisition list is** — same company filter, same
+`_visibility_filter` — so nobody sees a tracker row they could not open as a requisition. A
+plain EMPLOYEE sees only what they raised.
+
+**The SLA cell covers the milestone-anchored rows only**, and the payload's `sla_basis` says
+so. The two date-anchored milestones are per-joiner (one requisition with three hires owes
+three inductions) and cannot honestly collapse into one requisition-level cell; the
+requisition's own SLA view remains the full picture. Counts follow the company's INT-5
+targets and INT-6 calendar — the row leads with what is breached, or the next thing owed.
+
+**Candidate counts are by `STAGE_RANK`**, not status lists, so a rejected candidate counts
+where they entered and a stage added later cannot silently stop counting. The offer cell shows
+the **live** offer (accepted beats sent beats draft beats declined/revoked); history is real
+but a tracker cell shows what is in play.
+
+The frontend adds a **view toggle on the existing internal-requisitions screen** — "Action
+queue" (the five-column screen with its verify/approve buttons) and "Tracker" — same route,
+so neither navigation list changes and the two-list disjointness rule is untouched.
+
+### 8.16 KPI dashboard filters (Phase INT-8)
+
+`internal_kpis` computed all eight SOP KPIs but took only a date range; spec §29 asks for
+filtering by company, department, position, recruitment period, HR user, HOD, position level
+and status. Company was always the scope and the period was the date range, so this phase
+added the remaining six: `department_id`, `designation_id`, `designation_level`,
+`hr_user_id` (the assignee), `hod_user_id` (the raiser — the module's documented design makes
+whoever raises a requisition its hiring manager) and `status` (a `ReqApproval` value).
+
+**One narrowing point.** Every filter narrows the *requisition* query, and every figure
+downstream — candidates, offers, references, probations, onboardings — already flows from
+`request_nos`. That is the whole design: a filtered KPI can never mix a filtered numerator
+with an unfiltered denominator, and the test proves the budget KPI's denominator moves with
+the department filter.
+
+**The level filter reads the designation master** with the model's own `designation_level()`
+reading, so an unbanded designation counts as `mid` here exactly as it does in the panel
+rules — one answer everywhere to "what level is this role". A level with no designations
+matches nothing (`$in: []`), never everything; a `designation_id` outside the requested
+level is a contradiction and honestly returns the empty set.
+
+**Garbage is refused (422), not matched against nothing.** A typo'd status silently
+returning an all-zero dashboard reads as "hiring stopped", not "you misspelt it".
+
+**The response echoes `filters`** (empty object when none), so a filtered dashboard can say
+what its figures cover. No filters reproduces the pre-INT-8 answer figure for figure — the
+dashboard's own `track=internal` call passes none.
+
+On the dashboard, the filter bar applies to the SOP KPI block **only** — the hiring funnel
+and breakdowns below keep their own scope, and the bar says so. The HR/HOD filters are
+API-only for now: the module has no light "users by governance role" listing to feed a
+dropdown, and a free-text id field is a worse UI than none.
+
+Fixed on the way past: the INT-7 tracker's `designation_level` cell read a field
+requisitions never carry (always null on real documents). It now resolves through the
+designation master as a ninth batched read, with the same default-mid reading.
+
+### 8.17 Record-level notifications (Phase INT-9)
+
+The requisition approval chain always notified (25 call sites); the scorecard, reference,
+probation and exception services emitted **nothing** — so "scorecard approval required",
+"probation confirmation required" and "exception approval required" never reached anybody,
+and a gate could stay shut with no visible reason (spec §38).
+
+| Event | Told | Channel |
+|---|---|---|
+| Scorecard drafted | the requisition's raiser (HOD), + MD role when managerial | |
+| Scorecard sent back | the drafter + HR role, with the reason | email |
+| Scorecard partially approved | whoever is still owed — MD role, or the raiser | email |
+| Scorecard fully approved | HR role ("sourcing can begin once budget clears") | email |
+| Reference recorded, not clearing | HR role, naming the way forward (new referee or waiver) | in-app |
+| Probation opened | the reviewer, as a heads-up | in-app |
+| Probation confirmed | HR role; + MD role **informed**, managerial+ only | email / in-app |
+| Probation extended | HR role — the review returns to Pending | in-app |
+| Probation terminated | HR role, with the reason | email |
+| Exception raised | MD **and** FINANCE roles — both hold `exception.approve` | email |
+| Exception decided | the raiser — an approval names the gate it lifts | email |
+
+Three rules the wiring follows:
+
+- **"I" in the RACI is in-app; a decision somebody is waiting on is email.** Management's
+  informed-only line on a managerial confirmation is a bell, not a mail.
+- **One event, one notification.** Fired only on the signature/edit that *changes* state:
+  editing remarks on a negative reference, or re-signing a scorecard, says nothing again.
+- **The facade is imported late** (inside functions, the SLA service's pattern), so seed
+  scripts and tests that patch `hrms_notify_service` attributes silence everything.
+
+**A latent INT-3 bug fixed on the way past:** a probation **extension** returns the review
+to `Pending` with a later end date — but the scheduler's reminder tiers are recorded as
+fired on the record (`reminders_sent`), so the extended period would never have been
+reminded about: its tiers had already burned on the old end date. The extension path now
+resets the field, and the test pins it.
+
+### 8.18 Salary negotiation, interview notice, and the three-band reading (Phase INT-10)
+
+Three items closed together.
+
+**Salary negotiation — the record (SOP step 9, spec §16).** The *rule* has been enforced since
+the internal track shipped: `assert_within_band` refuses an offer outside the band stamped on
+the requisition at its budget gate. What was missing was the *record*: the rounds, what the
+candidate asked for, what was proposed, and how each sat against the band. `hrms_salary_
+negotiations` holds one row per round, carrying `request_no` and `uk`, with **the band
+stamped as it stood** — a later budget re-approval changes the requisition's band but does
+not rewrite what round 2 was judged against.
+
+**The gate does not move.** Recording a round decides nothing; an above-band round is
+recorded (and Management + Finance are told — spec §38's "salary deviation"), not refused,
+because the conversation is allowed to happen. The *offer* is what the band gate refuses,
+until the budget is re-approved or an *Offer Outside Budget* exception is approved. The
+verdict on a round (`negotiation_verdict`) and the refusal at the offer read the same numbers
+the same way; the test calls both on the same figures to prove they agree.
+
+`GET /candidates/{uk}/negotiation` is the comparison surface: band, latest round,
+within/above/below against the band **now**, the approved waiver if any, and
+`offer_would_pass` — a preview computed from the same facts the gate reads, not a promise.
+A round needs an internal requisition with an approved band, or it is 409: a number against
+no band has no meaning. `negotiation.write` is HR's (and the MD's); `negotiation.read`
+reaches the HOD (consulted) and **FINANCE** (accountable for the figure — the one
+candidate-level record it sees, because it is about money and nothing else).
+
+**Interview notice (Annexure C).** "Confirm interview logistics at least 24 hours in
+advance." Every schedule and reschedule now tells the candidate through the communications
+log (`interview_scheduled` joined `AUTO_COMM_EVENTS`), so "did we tell them" is answerable
+from one place; and `notice_hours` / `short_notice` are stamped on the booking. Short notice
+**warns and never blocks** — the rule interview windows already follow, for the same reason:
+a hard refusal for a Friday-for-Monday booking pushes it off-system where nothing sees it.
+
+**The three-band reading (Gap 10).** The signed SOP has four bands (Strong / Consider / Hold /
+Reject); the implementation brief describes three (4.0+ / 3.0–3.99 / below 3.0). Both are
+real readings, so which one a company uses is that company's call: the `Hold` floor is
+**optional** in `score_bands` — set it to `null` and the scale is Strong / Consider / Reject.
+Strong and Consider cannot be switched off; a scale with no bar is not a scale. The default
+stays the signed SOP's four.
+
 ---
 
 ## 9. Candidate lifecycle
@@ -1177,6 +1473,8 @@ endpoint is a DoS waiting for the first client with real volume.
   /hrms/scorecards              ScorecardLibrary
   /hrms/reference-checks        ReferenceCheckBoard
   /hrms/telephonic-screening    TelephonicBoard                        (Phase INT-4)
+  /hrms/negotiations            NegotiationBoard                       (Phase INT-10)
+  /hrms/settings                HrmsSettings                           (Phase INT-5)
   /hrms/probation               ProbationBoard
   /hrms/exceptions              ExceptionLog
   ── Phase INT-2 ──
@@ -1313,6 +1611,14 @@ GET    /reference-checks/{ref_no}       PATCH /reference-checks/{ref_no}
 GET    /telephonic-screenings           POST /telephonic-screenings
 GET    /telephonic-screenings/screenable    the work queue: who to ring today
 GET    /telephonic-screenings/{tel_no}  PATCH /telephonic-screenings/{tel_no}
+GET    /negotiations                    POST /negotiations
+GET    /negotiations/{neg_no}           GET  /candidates/{uk}/negotiation   the §16 comparison surface
+GET    /settings                        the company rule set + the shipped defaults
+PATCH  /settings                        override; validated against what is in force
+POST   /settings/reset                  follow the defaults again (optional `keys`)
+GET    /internal-requisitions/tracker   one row per internal requisition, every stage
+GET    /holidays                        this company's working calendar (optional `year`)
+POST   /holidays                        POST /holidays/import   DELETE /holidays/{date}
 GET    /probation                       GET /probation/due
 POST   /probation                       GET/PATCH /probation/{prb_no}
 POST   /probation/{prb_no}/confirm      Confirmed | Extended | Terminated (signature required)
@@ -1398,13 +1704,14 @@ are storage and access control only — nothing computes a payslip.
 Also absent:
 
 - **A per-user RBAC console** (roadmap Phase 11). The `ROLE_CAPABILITIES` matrix *is* the
-  permission model today; there are no per-user grants on top.
+  permission model today; there are no per-user grants on top. (Phase INT-5 implemented
+  `hrms_settings` for the module's *rules*; per-user *permissions* remain unbuilt.)
 - **A public client portal.** Client verdicts are recorded by an HRMS user on the client's
   behalf; a portal would mean a second unauthenticated surface with its own threat model.
-- **Public-holiday awareness in SLA maths.** Working days exclude weekends only. Honouring
-  the ERP's holidays master silently would make two companies with different holiday lists
-  disagree about whether the same requisition breached, so it stays a decision to take
-  deliberately rather than by default.
+- ~~**Public-holiday awareness in SLA maths.**~~ **Built in Phase INT-6** — see
+  [§8.14](#814-the-working-calendar-phase-int-6). It is still a decision taken
+  deliberately rather than by default: the flag ships OFF per company, and the calendar
+  is HRMS's own rather than the ERP's global master.
 - **A separation WORKFLOW.** Phase INT-2 added `separation_date` to the employee profile so
   the 90-day retention KPI has something honest to read, and stopped there. A manually set
   date is enough to make the figure true; resignation, notice periods and exit interviews are
@@ -1471,7 +1778,7 @@ keeps one source of truth, and cannot drift.
 
 ## 17. Testing
 
-**55 self-contained test files** in `backend/app/services/hrms/tests/`, ~20,620 lines.
+**61 self-contained test files** in `backend/app/services/hrms/tests/`, ~23,300 lines.
 
 **House convention:** no pytest, no live database. Fake collections, ASCII output, exit 1 on
 failure.
@@ -1660,6 +1967,167 @@ In rough order of likelihood:
     the previous outcome is captured *before* the write for that reason. A status move that
     works against real Mongo and silently does nothing against a fake is the worst kind of
     bug to own.
+
+### Phase INT-5 additions
+
+37. **A settings row is stored MERGED, not sparse.** `validate()` returns the whole map with
+    the change applied, so the row reads as "the rules this company adopted". A caller that
+    "optimises" it to store only the changed name makes the row unreviewable without holding
+    the defaults in your head — and makes `reset` ambiguous.
+
+38. **A stored value equal to the default is NOT the same as following the default.** The
+    stored one stays put if the module default ever moves. Pruning equal values would make a
+    deliberately-chosen compliance number drift silently. `POST /settings/reset` is the only
+    way back to tracking.
+
+39. **`sla_for`, `sweep_open_breaches` and `escalate_if_breached` take an optional `config`.**
+    Any new caller inside a LOOP must resolve once and pass it down, or it reads the settings
+    row per record — and a mid-sweep edit would judge half the run against different targets.
+
+40. **`score_band(value)` with no second argument is still the module default**, and every
+    pre-INT-5 caller and test relies on that. It accepts either `[(floor, label)]` or the
+    config's `{label: floor}` and sorts descending regardless, so a JSON round-trip cannot
+    reorder somebody into the wrong band.
+
+41. **`bool` is a subclass of `int`.** `_number()` rejects booleans *before* the cast, or
+    `True` would sail through as an SLA target of 1 day.
+
+42. **Adding a config key means adding it to `CONFIG_SPEC` AND to `ConfigUpdateIn`.** The
+    Pydantic model is what lets the field through the route at all; the spec is what validates
+    it. A key in one and not the other is silently unsettable or silently unvalidated.
+
+### Phase INT-6 additions
+
+43. **`holiday_set()` returns `None` OR a set, and they mean different things.** `None` =
+    this company does not honour a calendar. `set()` = it does, and has no dates. Collapsing
+    them makes a company that opted in but never filled the calendar in indistinguishable
+    from one that opted out. Same three-way rule as `scope_client_ids`.
+
+44. **Never read the ERP's `holidays` collection from HRMS.** It has no `company_id`, so one
+    admin's edit would move every entity's SLA due dates. `hrms_holiday_service.import_from_erp`
+    is the ONE place that touches it, and it COPIES. A test greps the SLA and config services
+    to prove they do not.
+
+45. **`working_days_between` / `add_working_days` take the calendar as an argument.** They are
+    pure and a lot depends on that. A caller inside a LOOP must resolve the calendar once and
+    pass it down — `sla_for`, `sweep_open_breaches` and `escalate_if_breached` all accept a
+    pre-resolved `calendar` for exactly this.
+
+46. **Turning `honour_holidays` on moves existing breach figures.** That is why it ships off
+    and why the SLA response reports `counts_holidays` and a `basis` string. Anything that
+    flips it silently — a migration, a default change — turns a compliance report into a
+    different report with no notice.
+
+47. **`add_working_days` counts forward and then pulls BACK.** Forward counting already skips
+    non-working days, so the pull-back loop only bites on a zero-day target measured from a
+    weekend or a holiday. Both walks are bounded by `MAX_CALENDAR_SPAN_DAYS`, or a calendar
+    that marked everything non-working would spin forever.
+
+48. **A KPI that measures a target must read the CONFIGURED one.** `internal_kpis` had a
+    hard-coded `<= 15` while the SLA screen read the company's setting. Two answers to one
+    question. Any new KPI with a threshold in it needs the same treatment.
+
+### Phase INT-7 additions
+
+49. **`hrms_tracker_service.py` is under the same source-text grep as analytics.** The three
+    write prefixes must not appear in the file, comments and docstrings included — the INT-7
+    test greps the text, not the behaviour. (The first draft of the module failed its own
+    test by *naming* the tokens in the docstring.)
+
+50. **Do not add a per-row query to the tracker.** The whole design is eight reads per page;
+    the test counts `find()` calls and fails if the count grows with the row count. New data
+    on a row means a ninth batched read, never a read inside `_row()`.
+
+51. **`FakeCursor.sort()` is a no-op in the shared test harness.** An ordering assertion
+    through the fake proves nothing either way — pin the sort the service *asks for* (by
+    grepping the source) rather than the order the fake returns.
+
+52. **Tracker fixtures need `_source_collection` + `role` on fake users**, or `hrms_role`
+    resolves them to None, `_visibility_filter` returns `{}`, and a scoping test passes for
+    the wrong reason.
+
+53. **Two SLA clocks start at the raise date** — budget approval AND shortlist-ready. A test
+    (or a company) that moves one target and expects the requisition to stop reading as
+    breached will be corrected by the other clock. That is the tracker being right.
+
+### Phase INT-8 additions
+
+54. **KPI filters narrow the requisition query and NOTHING else.** Every downstream read
+    flows from `request_nos`; filtering any of them separately is how a filtered numerator
+    meets an unfiltered denominator. New filter = one more clause on the requisition query.
+
+55. **`_ratio` tiles carry `numerator`/`denominator`/`eligible_n` — there is no `actual_n`.**
+    Asserting on a field name that does not exist fails as a KeyError, not a clean FAIL.
+
+56. **The requisition does not carry `designation_level`.** Anything reporting a level must
+    resolve it through the designation master (`designation_level()` — unbanded reads as
+    mid). The INT-7 tracker shipped reading the nonexistent field and was corrected here.
+
+### Phase INT-9 additions
+
+57. **Scorecard criteria use `label`, not `name`.** `_validate_criteria` 422s on a missing
+    label; a fixture written with `name` fails before anything interesting runs.
+
+58. **A probation EXTENSION must clear `reminders_sent`.** The INT-3 tiers are recorded on
+    the record; without the reset an extended probation is never reminded about its new end
+    date. If you add another path that moves `ends_on` forward, reset the field there too.
+
+59. **Notify calls go AFTER the business write, and are imported late.** After: so a
+    notification can never describe a write that then failed. Late: so seeds and tests
+    patching `hrms_notify_service` attributes still silence everything — a module-top
+    `from … import notify_user` binds early and escapes the patch.
+
+60. **Three decisive writes are compare-and-swaps; keep them that way.** The scorecard
+    signature CASes on the approvals array it merged from, the probation decision on the
+    Pending state, and the scheduler's tier burn on `(ends_on, Pending)`. Each exists
+    because the race it closes produced duplicate emails or a silently lost signature —
+    found by the INT-9 adversarial verification, not by the unit tests.
+
+61. **`FakeCollection._matches` now has Mongo's array-EQUALITY arm.** `{field: <list>}`
+    matches an array field that equals the literal, not only one that contains it. Without
+    it, every equality-CAS on a list field reads as a phantom write conflict in tests.
+
+62. **A FakeCollection `find_one` may hand back a live reference.** Any value compared
+    after an `update_one` on the same doc must be captured BEFORE the write — this bit
+    `update_screening` (trap 36), then the probation reviewer handover, in the same phase
+    that documented the trap. Read-before-write is the rule, not a per-site fix.
+
+63. **The scorecard "sent back" and "needs approval" flows resolve the raiser's ROLE.**
+    A raiser who cannot approve (any employee may raise a requisition) is not asked to;
+    the HOD governance role is broadcast instead. `notify_hrms_role` also grew
+    `exclude_user_ids` so a person addressed by name is not re-addressed by their role's
+    fan-out.
+
+### Phase INT-10 additions
+
+64. **A `float` Pydantic field accepts `NaN`.** It passes every `<`/`>` test, reads as
+    "within", and is not JSON — one crafted request leaves a row that 500s every read of its
+    collection. Declare money fields `Field(..., gt=0, allow_inf_nan=False)` AND check
+    `math.isfinite` in the service; neither alone is enough for direct callers.
+
+65. **Business ids are minted per company and rendered without one.** Any unique index on a
+    bare `*_no` refuses the second tenant's first record of the year. Always composite with
+    `company_id` — `uniq_company_neg_no` is the pattern.
+
+66. **A new candidate-level collection needs row scoping on day one.** Import the candidate
+    pipeline's `_scope_filter` / `_require_visible`; an `actor` parameter that is accepted
+    and never read is the tell.
+
+67. **Mongo hands back naive UTC; the API hands in aware IST.** Compare instants through
+    `_as_utc()`, never raw — a raw compare turned an unchanged time into a reschedule with
+    a re-notify and a re-email. Label rendered times with the zone they are shown in.
+
+68. **A warning must be worded by what happened, not what was attempted.** `fire_event`
+    returns the comm-log status for exactly this; "the candidate has been told" is a claim,
+    and a claim nobody checked is how a warning becomes a lie.
+
+69. **Every new Annexure control is keyed on `_is_internal(req)` at every entry point** —
+    including the reschedule path, which must re-resolve the requisition. Gap 9 shipped
+    running on the client track and was caught by verification, not by the suite.
+
+70. **The settings screen renders from `describe()`, so anything the UI must know about a
+    setting — `optional_names` included — has to be in that payload.** A server-side
+    capability the payload does not mention is one the screen cannot offer.
 
 ---
 

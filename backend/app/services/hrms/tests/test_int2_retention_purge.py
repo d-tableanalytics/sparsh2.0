@@ -160,10 +160,12 @@ async def main() -> None:
         check("and every one names the exact fields it clears",
               all(fields for *_rest, fields in M.PURGE_TARGETS))
         check("the candidate CV, the reference, the offer, the message log, the "
-              "pre-boarding notes and the phone screen are all covered",
+              "pre-boarding notes, the phone screen and the negotiation rounds are all "
+              "covered",
               {c for c, *_ in M.PURGE_TARGETS}
               == {M.COLL_CANDIDATES, M.COLL_REFERENCE_CHECKS, M.COLL_OFFERS,
-                  M.COLL_COMM_LOG, M.COLL_PREBOARDING, M.COLL_TELEPHONIC})
+                  M.COLL_COMM_LOG, M.COLL_PREBOARDING, M.COLL_TELEPHONIC,
+                  M.COLL_NEGOTIATIONS})
 
         # =================================================================
         section("A dry run writes NOTHING -- not even the proposal")

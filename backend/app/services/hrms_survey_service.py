@@ -44,6 +44,7 @@ from app.models.hrms import (
     LinkKind, SurveyKind,
 )
 from app.services.hrms_audit_service import audit
+from app.services.hrms_config_service import retention_years_for
 from app.services.hrms_id_service import next_business_id
 from app.utils.hrms_public_guard import INVALID_LINK, clean_text, new_access_code
 
@@ -162,8 +163,9 @@ async def issue_survey(actor: Optional[dict], company_id: str, kind, *,
             "average": None,
             "comment": None,
             # SOP §13. A survey response belongs to the employment record it is about.
-            "retention_until": _add_years(now.strftime("%Y-%m-%d"),
-                                          RETENTION_YEARS["probation"]),
+            "retention_until": _add_years(
+                now.strftime("%Y-%m-%d"),
+                await retention_years_for(company_id, "probation")),
             "created_at": now,
         }
         await responses.insert_one(dict(row))

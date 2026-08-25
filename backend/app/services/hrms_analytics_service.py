@@ -42,7 +42,8 @@ from fastapi import HTTPException
 
 from app.db.mongodb import get_collection
 from app.models.hrms import (
-    BREAKDOWN_FIELDS, COLL_ASSESSMENTS, COLL_CANDIDATES, COLL_INTERVIEWS,
+    BREAKDOWN_FIELDS, COLL_ASSESSMENTS, COLL_CANDIDATES, COLL_DESIGNATIONS,
+    COLL_INTERVIEWS,
     COLL_JOB_POSTINGS, COLL_OFFERS, COLL_ONBOARDING, COLL_REQUISITIONS,
     FUNNEL_STAGES, MAX_BREAKDOWN_ROWS, MAX_EXPORT_ROWS, MAX_RANGE_DAYS,
     MAX_REPORT_PAGE_SIZE, RANK_IF_ACCEPTED, RANK_IF_ASSESSED, RANK_IF_INTERVIEWED,
@@ -578,25 +579,102 @@ def _ratio(key: str, label: str, hits: int, total: int, target,
 
 
 async def internal_kpis(actor: dict, company_id: str, *, date_from: str = None,
-                        date_to: str = None) -> dict:
-    """The internal recruitment KPI dashboard (SOP §10).
+                        date_to: str = None, department_id: str = None,
+                        designation_id: str = None, designation_level: str = None,
+                        hr_user_id: str = None, hod_user_id: str = None,
+                        status: str = None) -> dict:
+    """The internal recruitment KPI dashboard (SOP §10), filterable (Phase INT-8, spec §29).
 
     Read-only, like everything else here, and behind the same `_scope`, the same SCAN_CAP and
     the same window validation. Nothing in this function is derived in the browser.
+
+    Every filter narrows the REQUISITION set, and everything downstream -- candidates,
+    offers, references, probations, onboardings -- already flows from `request_nos`. That is
+    the whole design: one narrowing point, so a filtered KPI can never mix a filtered
+    numerator with an unfiltered denominator.
+
+    `hod_user_id` is the raiser (`created_by` -- the module's documented design makes whoever
+    raises a requisition its hiring manager); `hr_user_id` is the assigned owner
+    (`assignee_id`). `designation_level` resolves through the designation MASTER with the
+    model's own `designation_level()` reading, so an unbanded designation counts as `mid`
+    here exactly as it does in the panel rules -- two answers to "what level is this role"
+    would be worse than either.
     """
+    from app.services.hrms_config_service import config_for, sla_target_days
+    from app.services.hrms_holiday_service import holiday_set
     from app.services.hrms_sla_service import working_days_between
+
+    # ── Phase INT-5/INT-6 ── this company's target and its working calendar, resolved ONCE
+    # for the whole report. A KPI that measured against the module default while the SLA
+    # screen measured against the company's own would be two answers to one question.
+    company_config = await config_for(company_id)
+    shortlist_target = (await sla_target_days(company_config)).get("shortlist_ready", 15)
+    calendar = await holiday_set(company_config, company_id)
 
     start, end = parse_range(date_from, date_to)
     scope = await _scope(actor, company_id)
 
+    req_query = {**scope, "requisition_track": RequisitionTrack.INTERNAL.value}
+    filters = {}
+    if department_id:
+        req_query["department_id"] = str(department_id)
+        filters["department_id"] = str(department_id)
+    if designation_id:
+        req_query["designation_id"] = str(designation_id)
+        filters["designation_id"] = str(designation_id)
+    if hr_user_id:
+        req_query["assignee_id"] = str(hr_user_id)
+        filters["hr_user_id"] = str(hr_user_id)
+    if hod_user_id:
+        req_query["created_by"] = str(hod_user_id)
+        filters["hod_user_id"] = str(hod_user_id)
+    if status:
+        # Refused loudly rather than matched against nothing: a typo'd status silently
+        # returning an all-zero dashboard reads as "hiring stopped", not "you misspelt it".
+        if status not in {a.value for a in ReqApproval}:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Status must be one of: "
+                       f"{', '.join(a.value for a in ReqApproval)}.")
+        req_query["approval_status"] = status
+        filters["status"] = status
+    if designation_level:
+        from app.models.hrms import DesignationLevel
+        from app.models.hrms import designation_level as _level_of
+        try:
+            wanted = DesignationLevel(designation_level)
+        except ValueError:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Level must be one of: "
+                       f"{', '.join(l.value for l in DesignationLevel)}.")
+        # Resolved through the MASTER with the model's own reading, so an unbanded
+        # designation counts as the default (mid) here exactly as the panel rules count it.
+        rows = await get_collection(COLL_DESIGNATIONS).find(
+            {"company_id": str(company_id)},
+            {"_id": 1, "designation_level": 1}).to_list(2000)
+        wanted_ids = [str(r["_id"]) for r in rows if _level_of(r) is wanted]
+        # Fails CLOSED: no designation at this level is `$in: []` -- matching nothing,
+        # never everything.
+        req_query["designation_id"] = {"$in": wanted_ids}
+        filters["designation_level"] = wanted.value
+        if designation_id:
+            # Both narrowings must hold. A designation_id outside the level's set is a
+            # contradiction, and an empty intersection is the honest answer to one.
+            req_query["designation_id"] = {
+                "$in": [i for i in wanted_ids if i == str(designation_id)]}
+
     reqs = await get_collection(COLL_REQUISITIONS).find(
-        {**scope, "requisition_track": RequisitionTrack.INTERNAL.value},
+        req_query,
         {"request_no": 1, "created_at": 1, "sla_actuals": 1,
          "approval_status": 1, "designation_name": 1}).to_list(SCAN_CAP)
     request_nos = [r["request_no"] for r in reqs if r.get("request_no")]
     if not request_nos:
         return {"applicable": False,
-                "reason": "No internal requisitions have been raised yet.",
+                "reason": ("No internal requisitions match these filters."
+                           if filters else
+                           "No internal requisitions have been raised yet."),
+                "filters": filters,
                 "range": {"from": start.strftime("%Y-%m-%d"),
                           "to": end.strftime("%Y-%m-%d")},
                 "kpis": []}
@@ -639,19 +717,20 @@ async def internal_kpis(actor: dict, company_id: str, *, date_from: str = None,
         compliant, len(sourced), 100,
         hint="Of internal requisitions that received a CV."))
 
-    # ── 2. Shortlist ready within 15 working days (target 95%) ──
+    # ── 2. Shortlist ready within the configured TAT (target 95%) ──
     shortlisted_reqs = [r for r in reqs
                         if (r.get("sla_actuals") or {}).get("shortlist_ready")]
     within = 0
     for r in shortlisted_reqs:
         taken = working_days_between(r.get("created_at"),
-                                     r["sla_actuals"]["shortlist_ready"])
-        if taken is not None and taken <= 15:
+                                     r["sla_actuals"]["shortlist_ready"], calendar)
+        if taken is not None and taken <= shortlist_target:
             within += 1
     kpis.append(_ratio(
-        "shortlist_within_tat", "Shortlist ready within Day 15",
+        "shortlist_within_tat", f"Shortlist ready within Day {shortlist_target}",
         within, len(shortlisted_reqs), 95,
-        hint="Working days from the requisition being raised."))
+        hint=("Working days from the requisition being raised, excluding weekends"
+              + (" and this company's holidays." if calendar is not None else "."))))
 
     # ── 3. Offer-to-joining conversion (tracked, no fixed target) ──
     joined_uks = {c["uk"] for c in candidates
@@ -840,6 +919,9 @@ async def internal_kpis(actor: dict, company_id: str, *, date_from: str = None,
 
     return {
         "applicable": True,
+        # Echoed so the UI can show what the figures cover -- a filtered dashboard that
+        # does not say so reads as the whole company having a bad quarter.
+        "filters": filters,
         "range": {"from": start.strftime("%Y-%m-%d"), "to": end.strftime("%Y-%m-%d")},
         "requisitions": len(reqs),
         "candidates": len(candidates),

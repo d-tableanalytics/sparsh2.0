@@ -220,6 +220,19 @@ async def raise_exception(actor: dict, company_id: str, payload: dict) -> dict:
     await audit(actor, AUDIT_EXCEPTION_RAISED, ENTITY_EXCEPTION, exc_no,
                 f'{exception_type.value} on {request_no}'
                 + (f" for {uk}" if uk else " (all candidates)"), company_id)
+
+    # ── Phase INT-9 (spec §38) ── "Exception approval" is Management's line in the
+    # notification table, and an exception nobody is told about is a gate that stays shut
+    # with no visible reason. MD and FINANCE are the two roles holding
+    # `exception.approve`; both are told, whichever acts first decides.
+    from app.services.hrms_notify_service import notify_hrms_role
+    await notify_hrms_role(
+        company_id, ["MD", "FINANCE"],
+        f"Exception {exc_no} needs a decision",
+        f'{doc["raised_by_name"]} requests "{exception_type.value}" on {request_no}'
+        + (f' for {doc.get("candidate_name") or uk}. ' if uk else " (all candidates). ")
+        + f"Reason: {reason}",
+        kind="warning", link="/hrms/exceptions", email=True)
     return _out(doc)
 
 
@@ -292,4 +305,27 @@ async def decide_exception(actor: dict, company_id: str, exc_no: str,
 
     await audit(actor, AUDIT_EXCEPTION_DECIDED, ENTITY_EXCEPTION, exc_no,
                 f'{decision.value}: {remarks or "no remarks"}', company_id)
+
+    # ── Phase INT-9 ── the raiser is waiting on this answer; an approval names the gate
+    # it lifts so they know what to do next, and a rejection carries the reason the
+    # validation above insisted on.
+    from app.services.hrms_notify_service import notify_user
+    raiser = str(current.get("raised_by") or "")
+    if raiser:
+        if decision is ExceptionStatus.APPROVED:
+            gate = current.get("gate")
+            await notify_user(
+                raiser, f"Exception {exc_no} approved",
+                f'"{current.get("exception_type")}" on '
+                f'{current.get("request_no")} was approved by '
+                f'{updates["approved_by_name"]}.'
+                + (f" The {gate.replace('_', ' ')} gate will now accept it."
+                   if gate else ""),
+                kind="success", link="/hrms/exceptions", email=True)
+        else:
+            await notify_user(
+                raiser, f"Exception {exc_no} rejected",
+                f'"{current.get("exception_type")}" on '
+                f'{current.get("request_no")} was refused. Reason: {remarks}',
+                kind="warning", link="/hrms/exceptions", email=True)
     return await get_exception(company_id, exc_no)

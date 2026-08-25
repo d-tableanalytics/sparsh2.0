@@ -258,6 +258,12 @@ async def create_candidate(actor: dict, company_id: str, payload: dict) -> dict:
         "created_at": now,
         "applied_at": now,
     }
+    # SOP §13: the disposal floor is stamped WHEN THE RECORD IS CREATED, not when somebody
+    # later remembers. The purge proposes nothing for a row with no `retention_until`
+    # (deliberately -- an absent date means nobody computed one), so a CV that never gets
+    # this stamp is a CV kept forever.
+    doc["retention_until"] = candidate_retention_until(
+        doc, await _retention_map(company_id))
     for field, limit in (("current_location", 120), ("total_experience", 60),
                          ("qualification", 180), ("current_company", 140),
                          ("current_ctc", 40), ("expected_ctc", 40),
@@ -447,7 +453,25 @@ def _add_years(iso_date: str, years: int) -> str:
     return f"{y + years:04d}-{m:02d}-{d:02d}"
 
 
-def candidate_retention_until(candidate: dict) -> Optional[str]:
+async def _retention_map(company_id: str) -> dict:
+    """This company's retention table (INT-5 overlay over RETENTION_YEARS).
+
+    Never raises: a settings row that cannot be read must not stop a CV being saved, and the
+    module defaults are the correct answer when there are no overrides. Returning None here
+    instead would leave `candidate_retention_until` to fall back on its own default, which
+    is the same table -- but silently, and this is a rule worth failing loudly about only in
+    the logs.
+    """
+    try:
+        from app.services.hrms_config_service import config_for
+        return (await config_for(company_id))["retention_years"]
+    except Exception as e:
+        from app.models.hrms import RETENTION_YEARS
+        print(f"[WARN] HRMS retention config unavailable for {company_id}: {e}")
+        return RETENTION_YEARS
+
+
+def candidate_retention_until(candidate: dict, years_map: dict = None) -> Optional[str]:
     """The date this CV may be considered for disposal (SOP §13). Pure.
 
     A FLOOR, not a purge date -- nothing in this function deletes anything, and the purge
@@ -459,6 +483,7 @@ def candidate_retention_until(candidate: dict) -> Optional[str]:
     module, because it is the ceiling the talent pool's consent may not exceed.
     """
     from app.models.hrms import RETENTION_YEARS
+    years_map = RETENTION_YEARS if years_map is None else years_map
     status = (candidate or {}).get("application_status")
     selected = status in (AppStatus.JOINED.value, AppStatus.EMPLOYEE_CREATED.value)
     anchor = (candidate.get("joined_at") if selected else None) \
@@ -467,7 +492,7 @@ def candidate_retention_until(candidate: dict) -> Optional[str]:
         anchor = anchor.strftime("%Y-%m-%d")
     if not anchor:
         return None
-    years = RETENTION_YEARS["candidate_selected" if selected else "candidate_unselected"]
+    years = years_map["candidate_selected" if selected else "candidate_unselected"]
     return _add_years(str(anchor)[:10], years)
 
 
@@ -518,7 +543,9 @@ async def set_talent_pool(actor: dict, company_id: str, uk: str, payload: dict) 
                     f"keeping a CV to consider later is a different thing from keeping it "
                     f"to process one application."))
 
-    retention_until = candidate_retention_until(current)
+    from app.services.hrms_config_service import config_for
+    retention_until = candidate_retention_until(
+        current, (await config_for(company_id))["retention_years"])
     expires = payload.get("consent_expires_at") or retention_until
     if expires and not is_iso_date(expires):
         raise HTTPException(
@@ -654,7 +681,9 @@ async def create_from_pool(actor: dict, company_id: str, uk: str,
         "created_at": now,
         "created_by": str(actor.get("_id") or ""),
     }
-    doc["retention_until"] = candidate_retention_until(doc)
+    from app.services.hrms_config_service import config_for
+    doc["retention_until"] = candidate_retention_until(
+        doc, (await config_for(company_id))["retention_years"])
     await get_collection(COLL_CANDIDATES).insert_one(dict(doc))
     await audit(actor, AUDIT_CANDIDATE_ADDED, ENTITY_CANDIDATE, new_uk,
                 f"brought forward from the talent pool ({uk}) onto {request_no}",

@@ -356,6 +356,18 @@ async def delete_posting(actor: dict, company_id: str, code: str) -> dict:
 # -------------------------------------------------------------
 # Public side (NO authentication -- treat every input as hostile)
 # -------------------------------------------------------------
+def _ctc_from_requisition(req: dict) -> Optional[str]:
+    """The requisition's numeric CTC as advert text, for a JD stored before JDs inherited
+    it. Same money convention as the rest of the module: grouped digits, no symbol."""
+    value = req.get("offering_ctc")
+    if value is None or value == "":
+        return None
+    try:
+        return f"{float(value):,.0f}"
+    except (TypeError, ValueError):
+        return None
+
+
 async def get_public_posting(code: str) -> dict:
     """The job ad behind a public link.
 
@@ -390,14 +402,18 @@ async def get_public_posting(code: str) -> dict:
         "expiry_date": posting.get("expiry_date"),
         "department": req.get("department_name"),
         "designation": req.get("designation_name"),
-        "employment_type": jd.get("employment_type"),
+        # A JD raised today inherits all of these from its requisition, so `jd.get(...)`
+        # answers on its own. The fallbacks stay for JDs raised BEFORE that inheritance
+        # existed, which were stored with these fields empty -- see
+        # scripts/backfill_jd_from_requisition.py for filling them in permanently.
+        "employment_type": jd.get("employment_type") or req.get("employment_type"),
         "location": jd.get("location") or req.get("work_location"),
         "experience": jd.get("experience") or req.get("experience_required"),
         "qualifications": jd.get("qualifications") or req.get("qualification"),
         "responsibilities": jd.get("responsibilities"),
         "skills": jd.get("skills") or req.get("essential_skills"),
         "benefits": jd.get("benefits"),
-        "ctc": jd.get("ctc"),
+        "ctc": jd.get("ctc") or _ctc_from_requisition(req),
         "vacancies": req.get("vacancy"),
         # ── Phase INT-2 (SOP §11) ── the equal-opportunity and data-use statements the form
         # must show, and the optional talent-pool consent.
@@ -642,6 +658,14 @@ async def submit_application(code: str, payload: dict) -> dict:
         "applied_at": now,
         "created_at": now,
     }
+    # SOP §13, same rule as a hand-added CV: the disposal floor is stamped at creation.
+    # This is the highest-volume way a CV enters the system, so a missing stamp here is the
+    # difference between the retention policy applying to most candidates and to almost
+    # none of them.
+    from app.services.hrms_candidate_service import (
+        _retention_map, candidate_retention_until)
+    doc["retention_until"] = candidate_retention_until(
+        doc, await _retention_map(company_id))
     # Applied AFTER the base document, and this is what sets `source`: the channel the
     # applicant named, or "Referral" when they declared one -- a referral that arrived
     # through a LinkedIn post is a referral, and filing it under LinkedIn would overstate

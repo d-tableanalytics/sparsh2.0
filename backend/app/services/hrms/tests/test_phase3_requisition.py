@@ -130,6 +130,11 @@ async def main() -> None:
             "experience_required": "3-5 years", "qualification": "B.Com",
             "essential_skills": "Excel, Tally", "required_date": "2026-12-01",
             "assignee_id": U_HR, "offering_ctc": 600000,
+            # The route hands the service `RequisitionIn.model_dump()` WITHOUT
+            # exclude_unset, so these two always arrive carrying at least their model
+            # default. Spelling them out here keeps the fixture the same shape as the wire.
+            "work_location": M.WorkLocation.OFFICE.value,
+            "employment_type": M.EmploymentType.FULL_TIME.value,
             "jd": {"responsibilities": "Own the ledger.", "benefits": "PF"},
         }
         p.update(over)
@@ -175,6 +180,61 @@ async def main() -> None:
         check("raiser recorded as hiring manager", r1["created_by"] == U_HOD)
         check("create audited", any(a["action"] == M.AUDIT_REQ_CREATED for a in audit_log.docs))
         check("HR notified on raise", any(s[0] == "role" and "HR" in s[1] for s in sent))
+
+        # =================================================================
+        section("The JD inherits the requisition's facts")
+        # =================================================================
+        # The form asks for experience, CTC, skills and qualifications ONCE, on the
+        # requisition. Before this mapping existed the JD half was stored empty and every
+        # reader that did not fall back to the requisition -- the JD library, the drawer,
+        # the printable forms -- showed blanks.
+        check("experience inherited", r1["jd"]["experience"] == "3-5 years")
+        check("qualifications inherited", r1["jd"]["qualifications"] == "B.Com")
+        check("skills inherited", r1["jd"]["skills"] == "Excel, Tally")
+        check("CTC inherited, formatted, no currency symbol", r1["jd"]["ctc"] == "600,000")
+        check("work location inherited as the JD location",
+              r1["jd"]["location"] == M.WorkLocation.OFFICE.value)
+        check("employment type inherited from the requisition",
+              r1["jd"]["employment_type"] == M.EmploymentType.FULL_TIME.value)
+        check("JD-only content is untouched by the mapping",
+              r1["jd"]["benefits"] == "PF" and r1["jd"]["responsibilities"] == "Own the ledger.")
+
+        # The mapping fills BLANKS. It must never overwrite wording somebody chose.
+        authored = await RS.create_requisition(HOD, COMPANY, base_payload(jd={
+            "responsibilities": "Run the close.",
+            "experience": "5+ years in audit practice",
+            "skills": "IFRS, consolidation",
+            "qualifications": "CA",
+            "ctc": "Negotiable for the right person",
+            "location": "Pune - Kharadi",
+        }))
+        check("an authored experience survives",
+              authored["jd"]["experience"] == "5+ years in audit practice")
+        check("an authored skills list survives",
+              authored["jd"]["skills"] == "IFRS, consolidation")
+        check("an authored qualification survives", authored["jd"]["qualifications"] == "CA")
+        check("an authored CTC survives",
+              authored["jd"]["ctc"] == "Negotiable for the right person")
+        check("an authored location survives", authored["jd"]["location"] == "Pune - Kharadi")
+
+        # employment_type is the field that used to default to Full-time on the JD model and
+        # so outranked the requisition's own answer -- a Contract role published as Full-time.
+        contract = await RS.create_requisition(HOD, COMPANY, base_payload(
+            employment_type=M.EmploymentType.CONTRACT.value,
+            work_location=M.WorkLocation.REMOTE.value,
+            offering_ctc=None))
+        check("a contract requisition yields a contract JD",
+              contract["jd"]["employment_type"] == M.EmploymentType.CONTRACT.value)
+        check("a remote requisition yields a remote JD location",
+              contract["jd"]["location"] == M.WorkLocation.REMOTE.value)
+        check("no CTC on the requisition leaves the JD CTC empty",
+              contract["jd"].get("ctc") is None)
+        explicit = await RS.create_requisition(HOD, COMPANY, base_payload(
+            employment_type=M.EmploymentType.CONTRACT.value,
+            jd={"responsibilities": "Six-month engagement.",
+                "employment_type": M.EmploymentType.CONSULTANT.value}))
+        check("an explicit JD employment type still wins",
+              explicit["jd"]["employment_type"] == M.EmploymentType.CONSULTANT.value)
 
         section("Separation of duties: the no-HR-reviewer deadlock is made visible")
         # Option (a) was chosen deliberately: MD cannot clear the HR stage. The cost is that a

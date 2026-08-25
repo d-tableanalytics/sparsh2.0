@@ -118,6 +118,7 @@ async def notify_hrms_role(
     kind: str = KIND_INFO,
     link: Optional[str] = None,
     email: bool = False,
+    exclude_user_ids: Optional[List[str]] = None,
 ) -> None:
     """Notify everyone in a company holding one of the given governance roles.
 
@@ -140,8 +141,14 @@ async def notify_hrms_role(
                 ],
             }
         rows = await get_collection("learners").find(query, {"_id": 1}).to_list(500)
+        # `exclude_user_ids` exists for the caller that has ALREADY addressed somebody
+        # directly and is now broadcasting to their role: without it, an HR drafter told
+        # "your scorecard was sent back" by name is told again by the HR fan-out --
+        # two bells and two mails for one event.
+        skip = {str(u) for u in (exclude_user_ids or []) if u}
         await notify_users(
-            [str(r["_id"]) for r in rows], title, message, kind=kind, link=link, email=email
+            [str(r["_id"]) for r in rows if str(r["_id"]) not in skip],
+            title, message, kind=kind, link=link, email=email
         )
     except Exception as e:
         print(f"[WARN] HRMS role notify failed for company {company_id}: {e}")

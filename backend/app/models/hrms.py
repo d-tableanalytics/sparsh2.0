@@ -75,6 +75,9 @@ COLL_POSITION_SCORECARDS = "hrms_position_scorecards"
 # ── Phase INT-4 ── the SOP's step 5 telephonic screen. Carries `request_no` AND `uk`: it
 # describes work done on one candidate against one vacancy.
 COLL_TELEPHONIC          = "hrms_telephonic_screenings"
+# ── Phase INT-10 ── SOP step 9, salary negotiation within the approved band. One row per
+# ROUND, carrying `request_no` AND `uk`: it is work done on one candidate for one vacancy.
+COLL_NEGOTIATIONS        = "hrms_salary_negotiations"
 COLL_REFERENCE_CHECKS    = "hrms_reference_checks"
 COLL_PROBATION_REVIEWS   = "hrms_probation_reviews"
 COLL_EXCEPTIONS          = "hrms_exceptions"
@@ -114,12 +117,27 @@ COLL_PURGE_BATCHES       = "hrms_purge_batches"          # SOP §13 retention pu
 # reading the stale one runs a second time.
 COLL_JOB_RUNS            = "hrms_job_runs"
 
+# ── Phase INT-6 ── this company's working calendar: the dates SLA maths skips.
+#
+# HRMS'S OWN, NOT THE ERP'S. The ERP has a `holidays` master, and reading it directly was
+# the obvious implementation and the wrong one: that collection carries NO `company_id` --
+# not on read, not on write, not even in its duplicate check -- so it is one global list.
+# Pointing per-company compliance figures at it would mean an admin adding a regional
+# festival for one entity silently moved every other entity's SLA due dates, which is the
+# objection the original deferral raised and a worse answer than counting weekends only.
+#
+# So the calendar is per company, opted into per company, and the ERP master is available
+# as an IMPORT rather than a live dependency -- a company ADOPTS those dates, which is an
+# act somebody takes and the audit trail records.
+#
+# CONFIGURATION, not work, so no `request_no` -- the same reason `hrms_settings` has none.
+COLL_HOLIDAYS            = "hrms_holidays"
+
 # Phase 11-14 — settings, HR operations, payroll
 COLL_SETTINGS         = "hrms_settings"
 COLL_PERMISSIONS      = "hrms_permissions"
 COLL_LEAVES           = "hrms_leaves"
 COLL_LEAVE_BALANCES   = "hrms_leave_balances"
-COLL_HOLIDAYS         = "hrms_holidays"
 COLL_ATTENDANCE       = "hrms_attendance"
 COLL_PUNCH_SEGMENTS   = "hrms_punch_segments"
 COLL_ATTENDANCE_CORRECTIONS = "hrms_attendance_corrections"
@@ -406,6 +424,32 @@ HRMS_INDEXES = [
     (COLL_TELEPHONIC, [("company_id", 1), ("uk", 1)],        {"name": "by_candidate"}),
     (COLL_TELEPHONIC, [("company_id", 1), ("outcome", 1)],   {"name": "by_company_outcome"}),
     (COLL_TELEPHONIC, [("request_no", 1)],                   {"name": "by_request"}),
+
+    # ── Phase INT-10: salary negotiation rounds ──
+    # COMPOSITE with company_id: sequences are minted per company and rendered without
+    # one, so two tenants' first round of a year both read NEG-2026-001 -- a bare unique
+    # index would refuse the second tenant's first round.
+    (COLL_NEGOTIATIONS, [("company_id", 1), ("neg_no", 1)],  {"unique": True,
+                                                              "name": "uniq_company_neg_no"}),
+    # UNIQUE: round numbers are allocated read-then-insert, and this is what turns two
+    # concurrent "round 3"s into one winner and one retry instead of two round 3s.
+    (COLL_NEGOTIATIONS, [("company_id", 1), ("uk", 1), ("round", 1)],
+                                                             {"unique": True,
+                                                              "name": "uniq_candidate_round"}),
+    (COLL_NEGOTIATIONS, [("request_no", 1)],                 {"name": "by_request"}),
+
+    # ── Phase INT-5: the per-company rule set ──
+    # UNIQUE, and load-bearing: `config_for` reads ONE row per company and lays it over the
+    # defaults. Two rows for one company would mean whichever the planner returned first
+    # decided that company's SLA targets, which is a rule that changes when nobody changed it.
+    (COLL_SETTINGS, [("company_id", 1)],                     {"unique": True,
+                                                              "name": "uniq_company"}),
+
+    # ── Phase INT-6: the working calendar ──
+    # UNIQUE on (company, date): one date is either a holiday for this company or it is not.
+    # Two rows for the same day would be counted once by the maths and twice by the screen.
+    (COLL_HOLIDAYS, [("company_id", 1), ("holiday_date", 1)], {"unique": True,
+                                                               "name": "uniq_company_date"}),
     # ── Later phases append their indexes here, one phase at a time. ──
 ]
 
@@ -589,6 +633,19 @@ class Cap(str, Enum):
     # because they interview off the back of it.
     TELEPHONIC_READ  = "telephonic.read"
     TELEPHONIC_WRITE = "telephonic.write"
+    # ── Phase INT-10 ── the salary negotiation record (SOP step 9). Annexure B: HR is
+    # Responsible, the HOD Consulted, Management Accountable. WRITE is HR's (and the MD's,
+    # as the top of every ladder); READ reaches the HOD who is consulted and FINANCE who is
+    # accountable for the figure -- the one candidate-level record Finance does see,
+    # because it is about money and nothing else.
+    NEGOTIATION_READ  = "negotiation.read"
+    NEGOTIATION_WRITE = "negotiation.write"
+    # ── Phase INT-5 ── the per-company rule set. READ is wide, because a target you cannot
+    # see is one you cannot plan against; WRITE is the MD's and Finance's, because these are
+    # the numbers the SOP's own review cycle governs and HR is "R" on running the process,
+    # not on rewriting the policy behind it (Annexure B, "Policy review": Management is "A").
+    SETTINGS_READ  = "settings.read"
+    SETTINGS_WRITE = "settings.write"
     # Offer approval. Annexure B marks this "A" for Management/Finance and Table 2 calls it
     # mandatory, so it is a real act and not merely a band check on the CTC.
     OFFER_APPROVE = "offer.approve"
@@ -704,6 +761,10 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
         Cap.SCORECARD_READ,
         Cap.REFERENCE_READ,
         Cap.TELEPHONIC_READ,
+        # NO NEGOTIATION_READ: a negotiation round is per-candidate pay, the same class as
+        # the offer CTC this role already has stripped and the salary bands it is withheld
+        # -- "a client's pay structure is not support-staff business".
+        Cap.SETTINGS_READ,
         Cap.PROBATION_READ,
         Cap.INDUCTION_READ,
         Cap.EXCEPTION_READ,
@@ -751,6 +812,8 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
         Cap.SCORECARD_READ, Cap.SCORECARD_WRITE, Cap.SCORECARD_APPROVE,
         Cap.REFERENCE_READ, Cap.REFERENCE_WRITE,
         Cap.TELEPHONIC_READ, Cap.TELEPHONIC_WRITE,
+        Cap.NEGOTIATION_READ, Cap.NEGOTIATION_WRITE,
+        Cap.SETTINGS_READ, Cap.SETTINGS_WRITE,
         Cap.OFFER_APPROVE,
         Cap.PROBATION_READ, Cap.PROBATION_REVIEW, Cap.PROBATION_CONFIRM,
         Cap.INDUCTION_READ, Cap.INDUCTION_WRITE,
@@ -799,6 +862,8 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
         Cap.SCORECARD_READ, Cap.SCORECARD_WRITE,
         Cap.REFERENCE_READ, Cap.REFERENCE_WRITE,
         Cap.TELEPHONIC_READ, Cap.TELEPHONIC_WRITE,
+        Cap.NEGOTIATION_READ, Cap.NEGOTIATION_WRITE,
+        Cap.SETTINGS_READ,
         Cap.PROBATION_READ, Cap.PROBATION_REVIEW,
         Cap.INDUCTION_READ, Cap.INDUCTION_WRITE,
         Cap.EXCEPTION_READ, Cap.EXCEPTION_WRITE,
@@ -867,6 +932,13 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
         # "I" on telephonic screening (Annexure B) -- the HOD interviews off the back of
         # the call, so they read it; recording one is HR's act alone.
         Cap.TELEPHONIC_READ,
+        # "C" on salary negotiation (Annexure B): consulted, so the HOD reads the rounds
+        # and never records one.
+        Cap.NEGOTIATION_READ,
+        # ── Phase INT-5 ── reads the rule set, never edits it. A hiring manager plans
+        # against the SLA and the probation duration, so a target they cannot see is one
+        # they cannot plan against; changing it is Management's act.
+        Cap.SETTINGS_READ,
         Cap.PROBATION_READ, Cap.PROBATION_REVIEW, Cap.PROBATION_CONFIRM,
         Cap.INDUCTION_READ,
         # May RAISE an exception, never approve one -- Annexure B puts exception approval
@@ -949,6 +1021,13 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
         # The two mandatory gates, and the offer read that makes the second one meaningful.
         Cap.REQUISITION_APPROVE_BUDGET,
         Cap.OFFER_READ, Cap.OFFER_APPROVE,
+        # "A" on salary negotiation: Finance reads every round, because whether a proposal
+        # sits inside the band it approved is exactly its question. Still no hiring
+        # judgement -- it never writes a round.
+        Cap.NEGOTIATION_READ,
+        # Annexure B makes Management/Finance "A" on policy review, and these numbers are
+        # that policy expressed as data.
+        Cap.SETTINGS_READ, Cap.SETTINGS_WRITE,
         Cap.SCORECARD_READ,
         Cap.EXCEPTION_READ, Cap.EXCEPTION_APPROVE,
         # ── Phase INT-2 ── the standing salary bands are Finance's own artifact: Annexure C
@@ -1006,6 +1085,7 @@ ID_FORMATS = {
     "scorecard":   ("SCR",    True,  3),   # SCR-2026-001
     "reference":   ("REF",    True,  3),   # REF-2026-001
     "telephonic":  ("TEL",    True,  3),   # TEL-2026-001
+    "negotiation": ("NEG",    True,  3),   # NEG-2026-001
     "probation":   ("PRB",    True,  3),   # PRB-2026-001
     "exception":   ("EXC",    True,  3),   # EXC-2026-001
     # ── Client engagements ──
@@ -1688,6 +1768,9 @@ class JobDescriptionIn(BaseModel):
     service, because it is a cross-field rule Pydantic cannot express cleanly.
     """
     title: Optional[str] = None          # defaults to the designation name
+    # Every field below that has a counterpart on the requisition INHERITS it when left
+    # blank -- see hrms_requisition_service.JD_FROM_REQUISITION. The form asks for these
+    # facts once, on the requisition; a JD that wants its own wording overrides them here.
     responsibilities: Optional[str] = None
     skills: Optional[str] = None
     qualifications: Optional[str] = None
@@ -1695,7 +1778,11 @@ class JobDescriptionIn(BaseModel):
     ctc: Optional[str] = None
     location: Optional[str] = None
     benefits: Optional[str] = None
-    employment_type: EmploymentType = EmploymentType.FULL_TIME
+    # None rather than FULL_TIME so "the caller said nothing" stays distinguishable from
+    # "the caller chose full-time". Defaulting here silently published every Contract and
+    # Intern requisition as Full-time, because the JD default outranked the requisition's
+    # own answer and nothing downstream looked past it.
+    employment_type: Optional[EmploymentType] = None
     attachments: List[dict] = Field(default_factory=list)   # [{name, url}]
 
 
@@ -3608,6 +3695,9 @@ RETENTION_YEARS = {
     # year for somebody who was not hired. A record of a call is not worth keeping for three
     # years about a person who never joined.
     "telephonic":           1,
+    # A negotiation round is part of the OFFER record (SOP §13: "offer & acceptance --
+    # employment + 3"), so it keeps the offer's floor rather than the candidate's.
+    "negotiation":          3,
     "probation":            3,   # employment + 3
 }
 
@@ -3663,11 +3753,22 @@ SCORE_BAND_GUIDE = [
 ]
 
 
-def score_band(weighted: Optional[float]) -> Optional[str]:
+def score_band(weighted: Optional[float], bands=None) -> Optional[str]:
     """Strong / Consider / Hold / Reject for a weighted 1-5 score, or None if unscored.
 
-    Read from SCORE_BANDS rather than branched, so the four boundaries live in one table the
+    Read from a table rather than branched, so the four boundaries live in one place the
     tests walk directly. Anything below the lowest floor is Reject.
+
+    `bands` lets a company supply its own floors (Phase INT-5). It is an optional argument
+    rather than a global lookup because this function is PURE and a lot of code depends on
+    that -- the tests walk it directly, and a version that reached into the database for a
+    company row could not be called from a template, a report or a test without one.
+    Callers that hold a company config pass `config[CONFIG_SCORE_BANDS]`; everybody else
+    gets the module defaults, which is exactly the pre-INT-5 behaviour.
+
+    Accepts either the table's own [(floor, label)] shape or the config's {label: floor}
+    map, and sorts descending regardless -- a caller that hands over a dict in whatever
+    order JSON happened to preserve must not silently get the wrong band.
     """
     if weighted is None:
         return None
@@ -3675,7 +3776,18 @@ def score_band(weighted: Optional[float]) -> Optional[str]:
         value = float(weighted)
     except (TypeError, ValueError):
         return None
-    for floor, label in SCORE_BANDS:
+
+    if bands is None:
+        table = SCORE_BANDS
+    elif isinstance(bands, dict):
+        # A None floor is a band a company has switched off (Phase INT-10: the optional
+        # Hold band). Skipped, not treated as zero -- a zero floor would catch everything.
+        table = sorted(((float(f), l) for l, f in bands.items() if f is not None),
+                       reverse=True)
+    else:
+        table = sorted(((float(f), l) for f, l in bands if f is not None), reverse=True)
+
+    for floor, label in table:
         if value >= floor:
             return label
     return SCORE_BAND_REJECT
@@ -3946,6 +4058,112 @@ class TelephonicScreeningUpdate(BaseModel):
     suitability: Optional[float] = None
     outcome: Optional[TelephonicOutcome] = None
     comments: Optional[str] = None
+
+
+class HolidayIn(BaseModel):
+    """One non-working day on this company's HRMS calendar (Phase INT-6)."""
+    holiday_date: str                              # YYYY-MM-DD
+    holiday_name: str
+
+
+class HolidayImportIn(BaseModel):
+    """Adopt dates from the ERP's global holidays master into THIS company's calendar.
+
+    A copy, deliberately, not a live read: the ERP master carries no company_id, so a live
+    dependency would let one admin's edit move another entity's SLA due dates.
+    """
+    year: Optional[int] = None                     # defaults to the current year
+
+
+class ConfigUpdateIn(BaseModel):
+    """A PATCH of the company rule set (Phase INT-5).
+
+    Every field optional, and a map is merged per name rather than replacing the group --
+    overriding one SLA target must not silently drop the other three. Validated against
+    CONFIG_SPEC in hrms_config_service, not here: the bounds and the cross-field rules live
+    with the table that declares them.
+    """
+    sla_target_days: Optional[dict] = None
+    retention_years: Optional[dict] = None
+    probation_months: Optional[dict] = None
+    probation_reminder_days: Optional[list] = None
+    score_bands: Optional[dict] = None
+    honour_holidays: Optional[bool] = None
+
+
+class ConfigResetIn(BaseModel):
+    """Stop overriding some settings, or all of them when `keys` is omitted."""
+    keys: Optional[list] = None
+
+
+# -- Phase INT-10  Salary negotiation (SOP step 9, spec §16) --------------------------------
+# The RULE was always enforced: `assert_within_band` refuses an offer outside the band
+# stamped at the budget gate. What was missing was the RECORD -- the rounds, what the
+# candidate asked for, what was proposed, and how each proposal sat against the band -- which
+# is what spec §16 asks to *display*, and what an auditor asks to *see*.
+#
+# THE GATE DOES NOT MOVE. Recording a round decides nothing; `assert_within_band` at the offer
+# remains the control, and an above-band round still needs a fresh approval (an approved
+# Offer Outside Budget exception, or a re-approved budget). The record is the history.
+NEGOTIATION_WITHIN = "within"
+NEGOTIATION_ABOVE  = "above"
+NEGOTIATION_BELOW  = "below"
+NEGOTIATION_VERDICTS = (NEGOTIATION_WITHIN, NEGOTIATION_ABOVE, NEGOTIATION_BELOW)
+
+# Enough rounds that a real negotiation never hits it, few enough that a loop cannot fill
+# the collection.
+MAX_NEGOTIATION_ROUNDS = 12
+
+AUDIT_NEGOTIATION_RECORDED = "salary negotiation round recorded"
+ENTITY_NEGOTIATION = "negotiation"
+
+
+def negotiation_verdict(proposed, band_min, band_max) -> Optional[str]:
+    """within / above / below for a proposed figure against a band, or None if unbanded.
+
+    Pure, and the ONE reading of "is this inside the budget" the record uses. It deliberately
+    mirrors the comparison `assert_within_band` makes, so the verdict on a round and the
+    refusal at the offer can never disagree about the same number.
+    """
+    if proposed is None or band_min is None or band_max is None:
+        return None
+    try:
+        value, low, high = float(proposed), float(band_min), float(band_max)
+    except (TypeError, ValueError):
+        return None
+    # NaN compares False to everything, so without this it would fall through every test
+    # below and read as "within" -- the one input on which this and the offer gate would
+    # disagree. Not a verdict, and never "within".
+    import math
+    if not (math.isfinite(value) and math.isfinite(low) and math.isfinite(high)):
+        return None
+    if value < low:
+        return NEGOTIATION_BELOW
+    if value > high:
+        return NEGOTIATION_ABOVE
+    return NEGOTIATION_WITHIN
+
+
+class NegotiationRoundIn(BaseModel):
+    """One round of salary negotiation with one candidate.
+
+    `allow_inf_nan=False` at the boundary: a NaN is accepted by a bare `float` field, reads
+    as "within" every comparison, and is unserialisable -- one crafted request would leave a
+    document that 500s every read of the board. Refused here AND in the service.
+    """
+    uk: str
+    proposed_ctc: float = Field(..., gt=0, allow_inf_nan=False)
+    candidate_expectation: Optional[float] = Field(None, gt=0, allow_inf_nan=False)
+    notes: Optional[str] = None
+
+
+# -- Phase INT-10  Interview notice (Annexure C: "Confirm interview logistics ... at least
+# 24 hours in advance") -----------------------------------------------------------------
+# WARN, NEVER BLOCK -- the same rule interview windows follow. A hard refusal at 4pm on a
+# Friday for a Monday-morning interview would push the booking off-system, where nothing
+# sees it. So short notice is recorded on the interview (`notice_hours`, `short_notice`),
+# warned about in the response, and measurable afterwards.
+INTERVIEW_NOTICE_HOURS = 24
 
 
 class OfferApproveIn(BaseModel):
@@ -4289,6 +4507,10 @@ CONSENT_TEMPLATES = [
 AUTO_COMM_EVENTS = {
     "application_received": "application_acknowledged",
     "screening_rejected":   "rejection_closure",
+    # ── Phase INT-10 ── Annexure C: "Confirm interview logistics (panel, duration, mode) at
+    # least 24 hours in advance." Fired on every schedule AND reschedule, because a moved
+    # interview is a new set of logistics the candidate has not been told.
+    "interview_scheduled":  "interview_scheduled",
 }
 
 # Templates that are only ever sent by hand. `offer_summary` is here deliberately: writing to
@@ -4439,18 +4661,23 @@ PURGE_TARGETS = [
       "talent_pool_tags"]),
     (COLL_REFERENCE_CHECKS, "ref_no", "retention_until", PURGE_REDACT,
      ["referee_name", "referee_contact", "referee_organisation", "referee_designation",
-      "responses", "remarks"]),
+      "responses", "remarks", "candidate_name"]),
     (COLL_OFFERS, "offer_no", "retention_until", PURGE_REDACT,
-     ["candidate_email", "content", "history", "candidate_signature", "response_note"]),
+     ["candidate_email", "content", "history", "candidate_signature", "response_note",
+      "candidate_name"]),
     (COLL_COMM_LOG, "candidate_uk", "retention_until", PURGE_REDACT,
-     ["subject", "body", "recipient"]),
+     ["subject", "body", "recipient", "candidate_name"]),
     (COLL_PREBOARDING, "pbt_no", "retention_until", PURGE_REDACT,
-     ["notes"]),
+     ["notes", "candidate_name"]),
     # What a candidate said about their salary, their notice period and why they want the
     # job is exactly the kind of detail retention exists to stop us keeping forever.
+    # A negotiation round is what somebody asked for and what we offered back -- salary
+    # detail about a named person, the kind of thing retention exists to stop us keeping.
+    (COLL_NEGOTIATIONS, "neg_no", "retention_until", PURGE_REDACT,
+     ["candidate_expectation", "proposed_ctc", "notes", "candidate_name"]),
     (COLL_TELEPHONIC, "tel_no", "retention_until", PURGE_REDACT,
      ["comments", "expected_ctc", "notice_period_days", "current_location",
-      "availability"]),
+      "availability", "candidate_name"]),
 ]
 
 # What is stamped on a redacted row, so a reader never mistakes an emptied record for one
@@ -4763,3 +4990,176 @@ class EngagementMemberIn(BaseModel):
     inside it rather than reaching across it.
     """
     user_id: str
+
+
+# =============================================================================
+# Phase INT-5 — per-company configuration (spec §42, "configuration over hard-coding")
+# =============================================================================
+# Sparsh Magic runs several entities. Until this phase the module was multi-company for its
+# DATA -- every collection is keyed on `company_id`, ids are sequenced per company, salary
+# bands and communication templates are per company -- but NOT for its RULES. The SLA
+# targets, the retention periods, the probation duration, the reminder tiers and the score
+# bands were module constants, so a second entity under the group would have shared one
+# hard-coded rule set with the first.
+#
+# The design is an OVERLAY, not a replacement. Every default below is READ FROM THE CONSTANT
+# THAT ALREADY SHIPPED, so a company with no settings row behaves exactly as it did before
+# this phase existed -- byte for byte, with no migration and nothing to backfill. A company
+# overrides only the keys it actually disagrees with.
+#
+# WHAT IS DELIBERATELY NOT CONFIGURABLE, and why:
+#
+#   * The MANAGERIAL THRESHOLD. Moving it means `REQUIRED_PANEL_ROLES` has to move with it --
+#     a company that made `mid` managerial would get a mandatory Management final round while
+#     the panel table still said a mid role needs only HR and the HOD. Those are two tables
+#     that must agree, so making one of them per-company is a design change, not a config
+#     key, and it is not one this phase is entitled to make quietly.
+#   * WHETHER AN ASSESSMENT IS REQUIRED. Already per POSTING (`requires_assessment`), which
+#     is finer-grained than per company. A company-level default for a field that is always
+#     stated explicitly would only add a second place to look.
+#   * (Phase INT-6 added THE HOLIDAY CALENDAR, once the working-day maths could read it.
+#     It was withheld in INT-5 on the principle that declaring a flag nothing reads is the
+#     mistake that phase existed to correct.)
+#
+# The gates themselves are NOT configurable and never will be: no setting turns off the
+# budget gate, the reference check, the scorecard approval or the telephonic screen. Those
+# are the controls the SOP is made of. A deviation goes through the exception log, where it
+# is attributable, and not through a settings screen where it is silent.
+
+CONFIG_SLA_TARGET_DAYS     = "sla_target_days"
+CONFIG_RETENTION_YEARS     = "retention_years"
+CONFIG_PROBATION_MONTHS    = "probation_months"
+CONFIG_PROBATION_REMINDERS = "probation_reminder_days"
+CONFIG_SCORE_BANDS         = "score_bands"
+CONFIG_HONOUR_HOLIDAYS     = "honour_holidays"
+
+# How a value is shaped, which decides how it is validated and merged.
+CONFIG_KIND_INT_MAP   = "int_map"      # {name: whole number}
+CONFIG_KIND_INT_LIST  = "int_list"     # [whole numbers], strictly descending
+CONFIG_KIND_FLOAT_MAP = "float_map"    # {name: number}, strictly descending by value
+CONFIG_KIND_FLAG      = "flag"         # a plain on/off
+
+# Probation duration is one setting with three parts rather than three settings: they
+# constrain each other (min <= default <= max), and a company that could save one without
+# the others could leave itself a default outside its own bounds.
+CONFIG_PROBATION_KEYS = ("default", "min", "max")
+
+
+def _default_sla_target_days() -> dict:
+    """Today's SLA targets, read from the table rather than re-typed.
+
+    Milestone-anchored rows ONLY. A date-anchored milestone has no elapsed-time target --
+    its due date IS a field on another record -- so offering one for edit would invite
+    somebody to set a number nothing reads.
+    """
+    return {m["key"]: m["target_days"] for m in SLA_MILESTONES
+            if m["anchor"] == ANCHOR_MILESTONE}
+
+
+def _default_score_bands() -> dict:
+    """Today's band floors as {label: floor}. `Reject` is absent on purpose: it is the floor
+    of last resort, not a boundary anybody sets."""
+    return {label: floor for floor, label in SCORE_BANDS}
+
+
+# (key, label, kind, default factory, per-value bounds, permitted names)
+#
+# Declared as data for the same reason SLA_MILESTONES is: the table is the specification, so
+# a reader can see everything a company may change without reading the service that changes
+# it, and the settings API can validate and render from one place.
+CONFIG_SPEC = [
+    {"key": CONFIG_SLA_TARGET_DAYS,
+     "label": "SLA targets (working days)",
+     "kind": CONFIG_KIND_INT_MAP,
+     "default": _default_sla_target_days,
+     "min": 1, "max": 260,
+     "names": sorted(STAMPABLE_MILESTONES),
+     "note": "Measured in working days. A target of 0 would be breached the moment it was "
+             "set, so 1 is the floor."},
+
+    {"key": CONFIG_RETENTION_YEARS,
+     "label": "Record retention (years)",
+     "kind": CONFIG_KIND_INT_MAP,
+     "default": lambda: dict(RETENTION_YEARS),
+     "min": 1, "max": 50,
+     "names": sorted(RETENTION_YEARS),
+     "note": "Statutory minimums are a floor, not a ceiling -- shortening one is a decision "
+             "for the business and its auditors."},
+
+    {"key": CONFIG_PROBATION_MONTHS,
+     "label": "Probation duration (months)",
+     "kind": CONFIG_KIND_INT_MAP,
+     "default": lambda: {"default": DEFAULT_PROBATION_MONTHS,
+                         "min": MIN_PROBATION_MONTHS,
+                         "max": MAX_PROBATION_MONTHS},
+     "min": 1, "max": 24,
+     "names": list(CONFIG_PROBATION_KEYS),
+     "note": "The SOP's usual range is 3 to 6 months. `min` and `max` bound what a single "
+             "probation record may be opened with."},
+
+    {"key": CONFIG_PROBATION_REMINDERS,
+     "label": "Probation reminder tiers (days before the end date)",
+     "kind": CONFIG_KIND_INT_LIST,
+     "default": lambda: list(PROBATION_REMINDER_DAYS),
+     "min": 1, "max": 365,
+     "max_entries": 6,
+     "note": "Calendar days, strictly descending. Each tier fires once per review, at that "
+             "distance OR CLOSER -- see hrms_scheduler_service."},
+
+    {"key": CONFIG_HONOUR_HOLIDAYS,
+     "label": "Skip this company's holidays in SLA maths",
+     "kind": CONFIG_KIND_FLAG,
+     "default": lambda: False,
+     "note": "OFF by default, and deliberately so: turning it on CHANGES WHETHER EXISTING "
+             "REQUISITIONS READ AS BREACHED, which is a business decision with a visible "
+             "date rather than something that should arrive with a deploy. Weekends are "
+             "always excluded either way. Holidays come from this company's own HRMS "
+             "calendar, never from the ERP's global master."},
+
+    {"key": CONFIG_SCORE_BANDS,
+     "label": "Score band floors (1-5)",
+     "kind": CONFIG_KIND_FLOAT_MAP,
+     "default": _default_score_bands,
+     "min": 1.0, "max": 5.0,
+     "names": [label for _floor, label in SCORE_BANDS],
+     # ── Phase INT-10 (Gap 10) ── the SOP signed FOUR bands (Strong / Consider / Hold /
+     # Reject); the implementation brief describes THREE (4.0+ / 3.0-3.99 / below 3.0).
+     # Both are real readings, and which one a company uses is that company's call -- so
+     # the middle band is OPTIONAL. Set `Hold` to null and the scale is three bands:
+     # Strong, Consider, Reject. Strong and Consider cannot be switched off; a scale with
+     # no bar at all is not a scale.
+     "optional_names": ["Hold"],
+     "note": "Strictly descending. Applies to the position scorecard, the shortlisting "
+             "guide and the telephonic screen alike -- one vocabulary, so a '3' means the "
+             "same thing everywhere in one company. Set Hold to null for the three-band "
+             "reading (Strong / Consider / Reject)."},
+]
+
+
+def config_spec(key: str) -> Optional[dict]:
+    """One row of the configuration table by key, or None. Pure."""
+    return next((c for c in CONFIG_SPEC if c["key"] == key), None)
+
+
+def default_config() -> dict:
+    """The module's shipped defaults, freshly built.
+
+    Built by CALLING each factory rather than holding one shared dict, so a caller that
+    mutates what it gets back cannot alter the defaults every other company falls through
+    to. That is a whole class of tenant-bleed bug not to have.
+    """
+    return {spec["key"]: spec["default"]() for spec in CONFIG_SPEC}
+
+
+AUDIT_HOLIDAY_ADDED    = "holiday added to the working calendar"
+AUDIT_HOLIDAY_REMOVED  = "holiday removed from the working calendar"
+AUDIT_HOLIDAY_IMPORTED = "holidays imported from the ERP calendar"
+ENTITY_HOLIDAY = "holiday"
+
+# A working calendar is a year or two of dates, not a data set. The cap is what stops a bad
+# import turning every SLA computation into a scan.
+MAX_HOLIDAYS = 500
+
+AUDIT_CONFIG_UPDATED = "company configuration updated"
+AUDIT_CONFIG_RESET   = "company configuration reset to defaults"
+ENTITY_CONFIG = "configuration"

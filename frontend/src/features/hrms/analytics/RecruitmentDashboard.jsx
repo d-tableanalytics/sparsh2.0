@@ -6,6 +6,7 @@ import HrmsScopeBar from '../common/HrmsScopeBar';
 import { HrmsLoading, HrmsError } from '../common/HrmsStates';
 import {
   getHrmsDashboard, getHrmsFunnel, getHrmsBreakdown, getHrmsPositions, getClients,
+  getInternalKpis, getDepartments, getDesignations,
 } from '../../../services/hrmsApi';
 import { CARD, GRID_TWO, SECTION_TITLE, nf } from './analyticsKit';
 import {
@@ -82,6 +83,13 @@ const RecruitmentDashboard = () => {
   // ── Internal track ── the SOP §10 KPI block is opt-in: asking for it changes what the
   // dashboard IS about, so it is a deliberate switch rather than something always on.
   const [track, setTrack] = useState('');
+  // Phase INT-8: filters on the internal KPI block (spec S29). They narrow ONLY that
+  // block: the rest of the dashboard keeps its own scope, so a department filter on the
+  // SOP KPIs cannot silently reshape the hiring funnel below it. `kpiBlock` overrides
+  // `data.internal_kpis` whenever a filter is active; the server echoes `filters` back.
+  const [kpiFilters, setKpiFilters] = useState({});
+  const [kpiBlock, setKpiBlock] = useState(null);
+  const [masters, setMasters] = useState({ departments: [], designations: [] });
 
   useEffect(() => {
     if (!companyId) return;
@@ -138,6 +146,38 @@ const RecruitmentDashboard = () => {
   }, [companyId, range.from, range.to, clientId, track]);
 
   useEffect(() => { load(); }, [load]);
+
+  // The masters feed the KPI filter dropdowns. Fetched once, only when the internal view
+  // is opened -- a client-track reader never pays for them.
+  useEffect(() => {
+    if (track !== 'internal' || !companyId) return;
+    Promise.all([getDepartments(scope), getDesignations(scope)])
+      .then(([dep, des]) => setMasters({
+        departments: dep.data?.departments || [],
+        designations: des.data?.designations || [],
+      }))
+      .catch(() => setMasters({ departments: [], designations: [] }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [track, companyId]);
+
+  // Re-fetch ONLY the KPI block when its filters change. With no filters the dashboard's
+  // own copy is rendered untouched, so the no-filter answer stays byte-for-byte the same.
+  useEffect(() => {
+    const active = Object.values(kpiFilters).some(Boolean);
+    if (track !== 'internal' || !companyId || !active) { setKpiBlock(null); return; }
+    getInternalKpis({
+      ...scope,
+      date_from: range.from || undefined,
+      date_to: range.to || undefined,
+      department_id: kpiFilters.department_id || undefined,
+      designation_id: kpiFilters.designation_id || undefined,
+      designation_level: kpiFilters.designation_level || undefined,
+      status: kpiFilters.status || undefined,
+    })
+      .then((r) => setKpiBlock(r.data))
+      .catch(() => setKpiBlock(null));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [track, companyId, kpiFilters, range.from, range.to]);
 
   const tth = data?.time_to_hire;
 
@@ -221,7 +261,18 @@ const RecruitmentDashboard = () => {
                 Against the Internal Recruitment SOP&rsquo;s own targets. Each figure shows
                 the ratio behind it — a percentage with no denominator is not a score.
               </p>
-              <KpiGrid block={data.internal_kpis} />
+              <KpiFilterBar
+                filters={kpiFilters}
+                onChange={setKpiFilters}
+                masters={masters}
+              />
+              {(kpiBlock || data.internal_kpis).applicable === false ? (
+                <p className="text-[12px] text-[var(--text-muted)]">
+                  {(kpiBlock || data.internal_kpis).reason}
+                </p>
+              ) : (
+                <KpiGrid block={kpiBlock || data.internal_kpis} />
+              )}
             </section>
           )}
 
@@ -444,6 +495,72 @@ const RecruitmentDashboard = () => {
             ))}
           </div>
         </>
+      )}
+    </div>
+  );
+};
+
+/**
+ * Filters on the SOP KPI block (Phase INT-8). Selects only — every option list is a master
+ * the module already owns, and the server validates whatever is sent, so this bar is a
+ * convenience over the API rather than a gatekeeper.
+ *
+ * HR-owner and HOD filters exist on the API (`hr_user_id` / `hod_user_id`) but have no
+ * dropdown here yet: the module has no light "users by governance role" listing to feed
+ * one, and a free-text id field is a worse UI than none.
+ */
+const LEVELS = ['junior', 'mid', 'senior', 'managerial'];
+const KPI_STATUSES = [
+  'Pending HR Verification', 'Pending Budget Approval', 'Pending Escalation',
+  'Pending Scorecard Approval', 'Approved', 'Rejected',
+];
+
+const KpiFilterBar = ({ filters, onChange, masters }) => {
+  const set = (key) => (e) => onChange({ ...filters, [key]: e.target.value });
+  const active = Object.values(filters).some(Boolean);
+  const select = 'h-9 px-2 rounded-lg border border-[var(--border)] '
+    + 'bg-[var(--input-bg)] text-[12.5px] text-[var(--text-main)]';
+  return (
+    <div className="mb-4 flex items-center gap-2 flex-wrap">
+      <select aria-label="Department" className={select}
+        value={filters.department_id || ''} onChange={set('department_id')}>
+        <option value="">All departments</option>
+        {masters.departments.map((d) => (
+          <option key={d.id} value={d.id}>{d.name}</option>
+        ))}
+      </select>
+      <select aria-label="Position" className={select}
+        value={filters.designation_id || ''} onChange={set('designation_id')}>
+        <option value="">All positions</option>
+        {masters.designations.map((d) => (
+          <option key={d.id} value={d.id}>{d.name}</option>
+        ))}
+      </select>
+      <select aria-label="Level" className={select}
+        value={filters.designation_level || ''} onChange={set('designation_level')}>
+        <option value="">All levels</option>
+        {LEVELS.map((l) => <option key={l} value={l}>{l}</option>)}
+      </select>
+      <select aria-label="Status" className={select}
+        value={filters.status || ''} onChange={set('status')}>
+        <option value="">All statuses</option>
+        {KPI_STATUSES.map((st) => <option key={st} value={st}>{st}</option>)}
+      </select>
+      {active && (
+        <button
+          type="button"
+          onClick={() => onChange({})}
+          className="h-9 px-3 rounded-lg border border-[var(--border)] text-[12.5px]
+            text-[var(--text-muted)]"
+        >
+          Clear
+        </button>
+      )}
+      {active && (
+        <p className="basis-full text-[11px] text-[var(--text-muted)]">
+          Filters apply to this KPI block only — the rest of the dashboard keeps its own
+          scope.
+        </p>
       )}
     </div>
   );

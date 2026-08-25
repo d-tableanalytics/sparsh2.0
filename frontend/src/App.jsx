@@ -103,6 +103,8 @@ import InternalRequisitionList from './features/hrms/internal/InternalRequisitio
 import ScorecardLibrary from './features/hrms/internal/ScorecardLibrary';
 import ReferenceCheckBoard from './features/hrms/internal/ReferenceCheckBoard';
 import TelephonicBoard from './features/hrms/internal/TelephonicBoard';
+import NegotiationBoard from './features/hrms/internal/NegotiationBoard';
+import HrmsSettings from './features/hrms/internal/HrmsSettings';
 import ProbationBoard from './features/hrms/internal/ProbationBoard';
 import ExceptionLog from './features/hrms/internal/ExceptionLog';
 import AppointmentPage from './pages/hrms/public/AppointmentPage';
@@ -307,6 +309,9 @@ const AppRoutes = () => {
         {/* Phase INT-4 — the SOP's step 5 telephonic screen, between CV screening and
             the panel. A hiring stage, so it lives in the workspace tab strip. */}
         <Route path="telephonic-screening" element={<TelephonicBoard />} />
+        {/* Phase INT-10 — the SOP's step 9 salary negotiation record. A hiring stage, so
+            it lives in the workspace tab strip. */}
+        <Route path="negotiations"         element={<NegotiationBoard />} />
         <Route path="probation"            element={<ProbationBoard />} />
         <Route path="exceptions"           element={<ExceptionLog />} />
         {/* ── Phase INT-2 ── the remaining SOP controls. `shortlist-reviews` is a hiring
@@ -318,6 +323,9 @@ const AppRoutes = () => {
         <Route path="salary-bands"         element={<SalaryBandManager />} />
         <Route path="communications"       element={<CommTemplates />} />
         <Route path="policies"             element={<PolicyRegister />} />
+        {/* Phase INT-5 — the per-company rule set. Governance, not a hiring stage, so
+            it lives in the sidebar and NOT in the workspace tab strip. */}
+        <Route path="settings"             element={<HrmsSettings />} />
       </Route>
 
       <Route path="/admin/settings" element={<Navigate to="/settings" />} />

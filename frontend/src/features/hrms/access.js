@@ -136,6 +136,14 @@ export const CAP = {
   // READ because they interview off the back of the call.
   TELEPHONIC_READ: 'telephonic.read',
   TELEPHONIC_WRITE: 'telephonic.write',
+  // Phase INT-10 — the salary negotiation record (SOP step 9). HR writes; the HOD
+  // (consulted) and Finance (accountable for the figure) read.
+  NEGOTIATION_READ: 'negotiation.read',
+  NEGOTIATION_WRITE: 'negotiation.write',
+  // Phase INT-5 — the per-company rule set (SLA targets, retention, probation, score
+  // bands). READ is wide; WRITE is Management's and Finance's.
+  SETTINGS_READ: 'settings.read',
+  SETTINGS_WRITE: 'settings.write',
   // Separate from offer.send: the SOP makes Management approval of the offer mandatory.
   OFFER_APPROVE: 'offer.approve',
   PROBATION_READ: 'probation.read',

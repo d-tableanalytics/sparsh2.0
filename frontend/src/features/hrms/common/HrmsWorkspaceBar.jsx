@@ -3,7 +3,7 @@ import { NavLink, useLocation } from 'react-router-dom';
 import {
   UserCog, ClipboardList, ScrollText, Megaphone, UserCircle,
   ClipboardCheck, ListChecks, CalendarDays, FileSignature, UserPlus, PieChart,
-  BadgeCheck, Building, Target, PhoneCall, Users2, Phone,
+  BadgeCheck, Building, Target, PhoneCall, Users2, Phone, Scale,
 } from 'lucide-react';
 
 /**
@@ -50,6 +50,9 @@ const TABS = [
   // Phase INT-4: the telephonic screen (SOP step 5). A hiring STAGE -- it sits between CV
   // screening and the panel, and gates interview scheduling -- so it belongs in the strip.
   { label: 'Phone screen',     to: '/hrms/telephonic-screening', icon: Phone },
+  // Phase INT-10: salary negotiation (SOP step 9) sits between the final interview and the
+  // offer -- a hiring stage, so it belongs in the strip.
+  { label: 'Negotiation',      to: '/hrms/negotiations', icon: Scale },
 ];
 
 // Prefix match, so a detail route under a stage keeps that stage's tab lit. Anything added

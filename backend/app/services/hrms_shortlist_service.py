@@ -320,7 +320,19 @@ async def _resolve_candidates(company_id: str, request_no: str, uks) -> list:
     return resolved
 
 
-def _decision_guide(candidates: list) -> list:
+async def _retention_years(company_id: str, record_type: str) -> int:
+    """This company's retention floor for `record_type` (Phase INT-5)."""
+    from app.services.hrms_config_service import retention_years_for
+    return await retention_years_for(company_id, record_type)
+
+
+async def _bands(company_id: str) -> dict:
+    """This company's band floors (Phase INT-5)."""
+    from app.services.hrms_config_service import score_bands_for
+    return await score_bands_for(company_id)
+
+
+def _decision_guide(candidates: list, bands: dict = None) -> list:
     """The scoring band beside each candidate, so the committee decides on the evidence.
 
     Read from the candidate's stored scorecard evaluation and re-banded through
@@ -332,7 +344,7 @@ def _decision_guide(candidates: list) -> list:
         "uk": c.get("uk"),
         "candidate_name": c.get("candidate_name"),
         "weighted_score": c.get("scorecard_score"),
-        "decision_guide_band": score_band(c.get("scorecard_score")),
+        "decision_guide_band": score_band(c.get("scorecard_score"), bands),
     } for c in candidates]
 
 
@@ -376,7 +388,7 @@ async def create_shortlist_review(actor: dict, company_id: str, payload: dict) -
         "request_no": request_no,
         "candidate_uks": [c["uk"] for c in candidates],
         "committee_members": members,
-        "decision_guide": _decision_guide(candidates),
+        "decision_guide": _decision_guide(candidates, await _bands(company_id)),
         "outcome": outcome.value,
         "notes": clean_text(payload.get("notes"), limit=4000),
         "decided_at": decided_at,
@@ -384,8 +396,9 @@ async def create_shortlist_review(actor: dict, company_id: str, payload: dict) -
         "convened_by_name": _actor_name(actor),
         # SOP §13. Selection records live with the requisition, so the requisition's own
         # retention floor is the right one. A floor, not a purge date.
-        "retention_until": _add_years(now.strftime("%Y-%m-%d"),
-                                      RETENTION_YEARS["requisition"]),
+        "retention_until": _add_years(
+            now.strftime("%Y-%m-%d"),
+            await _retention_years(company_id, "requisition")),
         "created_at": now,
     }
     await get_collection(COLL_SHORTLIST_REVIEWS).insert_one(dict(doc))
@@ -424,7 +437,8 @@ async def update_shortlist_review(actor: dict, company_id: str, slr_no: str,
         candidates = await _resolve_candidates(
             company_id, current.get("request_no"), payload["candidate_uks"])
         updates["candidate_uks"] = [c["uk"] for c in candidates]
-        updates["decision_guide"] = _decision_guide(candidates)
+        updates["decision_guide"] = _decision_guide(candidates,
+                                                    await _bands(company_id))
     if payload.get("notes") is not None:
         updates["notes"] = clean_text(payload["notes"], limit=4000)
 
