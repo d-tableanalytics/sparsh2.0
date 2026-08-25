@@ -31,7 +31,6 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import os
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
@@ -55,8 +54,11 @@ logger = logging.getLogger(__name__)
 # IST — the zone every TPMS date decision is made in.
 IST = timezone(timedelta(hours=5, minutes=30))
 
-# Matches the fallback origin used elsewhere in the backend; FRONTEND_URL overrides it.
-LOCAL_FRONTEND_URL = "http://localhost:5173"
+# The base URL is NOT resolved here. It comes from the one place that owns it —
+# tpms_form_link_service.configured_base_url() — which reads the Application URL set in
+# Settings, then FRONTEND_URL, then the local origin. Leadership used to carry its own copy of
+# that chain minus the Settings lookup, so a deployment could correct its TPMS links from the
+# UI and still mail leadership invites pointing at http://localhost:5173.
 
 
 def new_token() -> str:
@@ -74,14 +76,18 @@ def token_hash(token: str) -> str:
     return hashlib.sha256(str(token or "").encode("utf-8")).hexdigest()
 
 
-def public_link(token: str) -> str:
+async def public_link(token: str) -> str:
     """The in-app URL mailed to the giver: /lf/<token>.
 
     Always absolute. A relative href has no base document in an email, so the mail client
     would resolve it against its own origin and the recipient would land on a dead page.
+
+    Async because the origin is a stored setting rather than a constant — an administrator can
+    correct it from Settings on a running server, and the next invite goes out on the new host.
     """
-    base = (os.getenv("FRONTEND_URL") or LOCAL_FRONTEND_URL).rstrip("/")
-    return f"{base}/lf/{token}"
+    from app.services.tpms_form_link_service import configured_base_url
+
+    return f"{await configured_base_url()}/lf/{token}"
 
 
 def cycle_expiry_utc(cycle: str) -> Optional[datetime]:
@@ -511,7 +517,7 @@ async def send_assignment_email(doc: dict, template: Optional[dict] = None) -> d
     # dies the moment the real recipient is chased again. A row already submitted never
     # reaches here (dispatch_pending filters it out), so nothing completed is reopened.
     link = doc.get("_issued_token")
-    link = public_link(link) if link else public_link(await rotate_token(doc))
+    link = await public_link(link if link else await rotate_token(doc))
 
     from app.services.notification_service import send_email_notification
     try:

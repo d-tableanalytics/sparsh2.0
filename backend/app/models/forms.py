@@ -63,7 +63,8 @@ FORM_DEFINITIONS: Dict[str, dict] = {
         "description": "Monthly HOD ownership rating for each team member.",
         "available": True,
         "audience": "hod",
-        # Ownership is only rated for senior members: L4 and above on the L1–L10 hierarchy.
+        # Ownership is only rated for senior members: L4 and above on the client's L1–L12
+        # hierarchy (L1 = lower level … L12 = MD), so L3 and below never appear on this form.
         # This is the ONE place the rule lives — the roster endpoints, the assigned-link
         # payload, the submit validation and the client UI all read it from here, so
         # changing the number here changes the form everywhere.
@@ -214,9 +215,9 @@ ACTIVITY_FORM_MAP = {
 # ─────────────────────────────────────────────────────────────
 # Hierarchy-level eligibility (`min_level` on a form definition).
 #
-# A member's hierarchy level is free text — "L1" … "L10" in practice, occasionally written
-# "Level 4" or as a bare number. It is parsed rather than compared as a string so "L10" ranks
-# above "L4" instead of sorting before it.
+# A member's hierarchy level is free text — "L1" … "L12" in practice (L1 = lower level …
+# L12 = MD), occasionally written "Level 4" or as a bare number. It is parsed rather than
+# compared as a string so "L10"/"L12" rank above "L4" instead of sorting before them.
 #
 # TWO fields carry it. `leadership_level` is the one the org-structure tooling writes and it
 # WINS wherever it is set; `level` is the original field and remains the fallback for users

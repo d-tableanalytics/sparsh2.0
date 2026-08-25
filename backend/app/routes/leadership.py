@@ -271,7 +271,7 @@ async def preview_template(payload: dict, current_user: dict = Depends(get_curre
     from app.services.tpms_notify_service import fill
 
     sample = {
-        "leadership_link": f"{links.public_link('SAMPLE-TOKEN-NOT-REAL')}",
+        "leadership_link": await links.public_link("SAMPLE-TOKEN-NOT-REAL"),
         "giver_name": "Priya Sharma",
         "subject_name": "Rahul Mehta",
         "subject_designation": "Senior Manager - Operations",

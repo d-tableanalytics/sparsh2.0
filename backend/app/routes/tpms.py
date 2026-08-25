@@ -991,7 +991,7 @@ async def upsert_whatsapp_template(payload: dict, current_user: dict = Depends(g
 # The data fields a WhatsApp template's {{1}}, {{2}}, … parameters can map to. These are exactly
 # the keys build_map produces, so a mapped field is guaranteed to resolve at send time.
 _WHATSAPP_VARIABLE_FIELDS = [
-    "Title", "Activity", "Company_Name", "Event_Date", "Event_Time",
+    "Title", "Activity", "Calendar_Type", "Company_Name", "Event_Date", "Event_Time",
     "Status", "Departments", "Comment", "Recipient_Name",
     "Form_Link", "Form_Link_2", "Form_Links",
 ]
