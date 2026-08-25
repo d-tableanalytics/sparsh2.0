@@ -404,11 +404,13 @@ const CompanyDetails = () => {
       const url = window.URL.createObjectURL(new Blob([response.data]));
       const link = document.createElement('a');
       link.href = url;
-      link.download = `user_template_${companyId}.xlsx`;
+      link.setAttribute('download', `user_template_${companyId}.xlsx`);
+      document.body.appendChild(link);
       link.click();
+      link.remove();
       window.URL.revokeObjectURL(url);
       showSuccess('Template downloaded');
-    } catch (err) { showError('Template download failed'); }
+    } catch (err) { showError(err.response?.data?.detail || 'Template download failed'); }
   };
 
   const handleImportFile = async (e) => {
@@ -422,7 +424,7 @@ const CompanyDetails = () => {
       const msg = res.data.message || `Import completed: ${res.data.created || 0} created, ${res.data.updated || 0} updated`;
       showSuccess(msg);
       fetchData();
-    } catch (err) { showError('Import failed'); }
+    } catch (err) { showError(err.response?.data?.detail || 'Import failed'); }
     e.target.value = '';
   };
 
@@ -816,6 +818,7 @@ const CompanyDetails = () => {
                 <div className="flex items-center gap-2">
                   {canUpdate && (
                     <>
+                      <input type="file" ref={fileInputRef} onChange={handleImportFile} accept=".xlsx, .xls, .csv" className="hidden" />
                       <button onClick={handleExportTemplate} className="h-8 px-3 bg-[var(--accent-green-bg)] border border-[var(--accent-green-border)] text-[var(--accent-green)] rounded-lg text-[11px] font-bold flex items-center gap-1.5 hover:opacity-80 transition-all">
                         <Download size={12} /> Template
                       </button>
