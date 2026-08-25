@@ -1,7 +1,9 @@
 from fastapi import APIRouter, Depends, HTTPException, Body
 from app.db.mongodb import get_collection
 from app.controllers.auth_controller import get_current_user
-from app.models.system_settings import SystemSettings, SystemSettingsUpdate
+from app.models.system_settings import (
+    SystemSettings, SystemSettingsUpdate, AppUrlUpdate,
+)
 from app.models.notification import NotificationTemplate
 from app.services.notification_service import UPCOMING_REMINDER_HTML_TEMPLATE
 from datetime import datetime
@@ -46,6 +48,58 @@ async def update_backdate_settings(updates: SystemSettingsUpdate = Body(...), cu
         upsert=True
     )
     return {"message": "Backdate settings updated successfully"}
+
+# ─────────────────────────────────────────────────────────────
+# Application URL — the base every mailed link is built on.
+# ─────────────────────────────────────────────────────────────
+@router.get("/app-url", response_model=dict)
+async def get_app_url(current_user: dict = Depends(get_current_user)):
+    """The configured base URL plus the one actually in effect.
+
+    `effective_url` and `source` are returned so the screen can show what links are being built
+    with RIGHT NOW — which is the question being asked when someone reports a localhost link,
+    and it is not answerable from the stored value alone (it falls back to the environment).
+    """
+    from app.services.tpms_form_link_service import (
+        configured_base_url, base_url_source, LOCAL_FRONTEND_URL,
+    )
+    doc = await get_collection("system_settings").find_one({"setting_name": "app_url"})
+    return {
+        "frontend_url": (doc or {}).get("frontend_url") or "",
+        "effective_url": await configured_base_url(),
+        "source": await base_url_source(),
+        "default_url": LOCAL_FRONTEND_URL,
+        "updated_at": (doc or {}).get("updated_at"),
+    }
+
+
+@router.put("/app-url")
+async def update_app_url(payload: AppUrlUpdate = Body(...),
+                         current_user: dict = Depends(get_current_user)):
+    """Set the base URL used to build mailed links. Superadmin / settings-update only."""
+    permissions = current_user.get("permissions", {})
+    can_update = permissions.get("settings", {}).get("update", False)
+    if current_user.get("role") != "superadmin" and not can_update:
+        raise HTTPException(status_code=403, detail="Only authorized personnel can update the application URL")
+
+    url = (payload.frontend_url or "").strip().rstrip("/")
+    if url and not url.lower().startswith(("http://", "https://")):
+        raise HTTPException(status_code=400,
+                            detail="Enter the full address including http:// or https://")
+    if url and " " in url:
+        raise HTTPException(status_code=400, detail="The application URL cannot contain spaces")
+
+    await get_collection("system_settings").update_one(
+        {"setting_name": "app_url"},
+        {"$set": {"frontend_url": url, "updated_by": str(current_user["_id"]),
+                  "updated_at": datetime.utcnow()}},
+        upsert=True,
+    )
+    from app.services.tpms_form_link_service import configured_base_url, base_url_source
+    return {"message": "Application URL updated",
+            "effective_url": await configured_base_url(),
+            "source": await base_url_source()}
+
 
 @router.get("/templates", response_model=List[dict])
 async def get_templates(scope: Optional[str] = None, company_id: Optional[str] = None, current_user: dict = Depends(get_current_user)):

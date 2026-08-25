@@ -79,13 +79,62 @@ def new_token() -> str:
 LOCAL_FRONTEND_URL = "http://localhost:5173"
 
 
-def public_link(token: str) -> str:
+SETTINGS_COLLECTION = "system_settings"
+APP_URL_SETTING = "app_url"
+
+
+async def _settings_base_url() -> str:
+    """The base URL an administrator set in Settings, or "" when they have not."""
+    try:
+        doc = await get_collection(SETTINGS_COLLECTION).find_one({"setting_name": APP_URL_SETTING})
+        return str((doc or {}).get("frontend_url") or "").strip().rstrip("/")
+    except Exception as e:
+        # A settings lookup must never be the reason a link cannot be built.
+        logger.warning("Could not read the configured application URL: %s", e)
+        return ""
+
+
+async def configured_base_url() -> str:
+    """The origin every mailed link is built on.
+
+    Order: the value set in Settings, then the FRONTEND_URL environment variable, then the
+    local development origin. Settings wins so a wrong URL can be corrected from the UI on a
+    running server — the environment variable stays honoured for deployments that already set
+    it, and nothing has to be migrated.
+    """
+    return (await _settings_base_url()
+            or (os.getenv("FRONTEND_URL") or "").strip().rstrip("/")
+            or LOCAL_FRONTEND_URL)
+
+
+async def base_url_source() -> str:
+    """Which of the three sources is currently supplying the base URL — for the Settings screen."""
+    if await _settings_base_url():
+        return "settings"
+    if (os.getenv("FRONTEND_URL") or "").strip():
+        return "environment"
+    return "default"
+
+
+def link_on(base: str, token: str) -> str:
+    """The assigned-form URL for `token` on `base`.
+
+    Links are REBUILT from the token whenever one is mailed rather than read back from the
+    `link` field frozen at creation time. That is what lets a corrected Application URL repair
+    links that were already issued — the token is the credential, the origin is just where it
+    is redeemed.
+    """
+    return f"{str(base or '').rstrip('/')}/f/{token}"
+
+
+async def public_link(token: str) -> str:
     """The in-app URL mailed to the recipient: /f/<token>, the assigned-form route.
 
-    Always absolute: FRONTEND_URL when set, otherwise the local development origin.
+    Always absolute. A relative href has no base document in an email, so the mail client
+    resolves it against its OWN origin — in Gmail the recipient lands on
+    https://mail.google.com/f/<token> and sees Google's "Request access" page.
     """
-    base = (os.getenv("FRONTEND_URL") or LOCAL_FRONTEND_URL).rstrip("/")
-    return f"{base}/f/{token}"
+    return link_on(await configured_base_url(), token)
 
 
 def _governance_role(user: dict) -> str:
@@ -164,7 +213,7 @@ async def create_assignment(*, form_type: str, form_title: str, activity: str, p
     doc = {
         **key,
         "token": token,
-        "link": public_link(token),
+        "link": await public_link(token),
         "form_title": form_title,
         "activity": activity,
         "company_name": company_name or "",
@@ -274,8 +323,12 @@ async def existing_links_for(event: dict, respondent_id: str) -> list:
     # Accountability before Ownership — the catalogue's order, not Mongo's insertion order.
     rank = {f: i for i, f in enumerate(forms)}
     rows.sort(key=lambda r: rank.get(r.get("form_type"), 99))
-    return [{"link": r["link"], "title": r.get("form_title") or r.get("form_type") or "Form"}
-            for r in rows if r.get("link")]
+    # Built from the token against the CURRENT base URL, so a link issued before the
+    # Application URL was corrected is still mailed correctly.
+    base = await configured_base_url()
+    return [{"link": link_on(base, r["token"]),
+             "title": r.get("form_title") or r.get("form_type") or "Form"}
+            for r in rows if r.get("token")]
 
 
 async def mark_email_result(assignment_id, status: str, error: Optional[str] = None) -> None:

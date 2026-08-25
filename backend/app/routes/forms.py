@@ -1215,6 +1215,43 @@ async def mark_assigned_form_submitted(token: str, current_user: dict = Depends(
 # ─────────────────────────────────────────────────────────────
 # Admin: form-link viewer (list + resend)
 # ─────────────────────────────────────────────────────────────
+def _last_sent(doc: dict):
+    """When this link was last put in front of its recipient.
+
+    `sent_at` is the honest answer and is what the column means; it is absent only for a link
+    that was never mailed (notifications off, or no template), so the row still sorts sensibly
+    on when it was last touched, then on when it was created.
+    """
+    return doc.get("sent_at") or doc.get("updated_at") or doc.get("created_at")
+
+
+def _as_utc(value):
+    """A timestamp the client cannot misread.
+
+    Mongo returns these NAIVE (no tzinfo) even though every writer stores UTC, and a naive
+    value serialises as "2026-08-25T07:16:38" — no offset. `new Date()` parses an ISO string
+    without an offset as LOCAL time, so in IST a link mailed three minutes ago rendered as
+    "5h ago", exactly the +05:30 skew. Stamping UTC explicitly makes the wire value
+    unambiguous for any client and any zone.
+    """
+    if not isinstance(value, datetime):
+        return value
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
+
+
+def _sort_ts(value) -> float:
+    """Sortable epoch for a timestamp that may be missing, naive, or timezone-aware.
+
+    Mongo hands back naive UTC while anything constructed in-process is aware; comparing the
+    two raises, so both are normalised to UTC before sorting.
+    """
+    if not isinstance(value, datetime):
+        return float("-inf")
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.timestamp()
+
+
 @router.get("/assignments")
 async def list_form_assignments(
     company_id: Optional[str] = Query(None),
@@ -1224,14 +1261,20 @@ async def list_form_assignments(
     """Every unique form link (tpms_form_assignments), newest first. Admin only."""
     if (current_user.get("role") or "").lower() not in STAFF_ROLES:
         raise HTTPException(status_code=403, detail="Admin only")
-    from app.services.tpms_form_link_service import ASSIGNMENT_COLLECTION, effective_status
+    from app.services.tpms_form_link_service import (
+        ASSIGNMENT_COLLECTION, effective_status, configured_base_url, link_on,
+    )
     query: dict = {}
     if company_id:
         query["company_id"] = str(company_id)
     if period:
         query["period"] = str(period)
-    docs = await get_collection(ASSIGNMENT_COLLECTION).find(query).sort("created_at", -1).to_list(2000)
+    docs = await get_collection(ASSIGNMENT_COLLECTION).find(query).to_list(2000)
     now = datetime.now(timezone.utc)
+    # The link is REBUILT from the token against the current Application URL, exactly as the
+    # mail does. The stored `link` is frozen at creation, so a row minted before the URL was
+    # configured would otherwise hand out a localhost address through Copy and Open.
+    base = await configured_base_url()
     out = [{
         "id": str(d["_id"]),
         "form_type": d.get("form_type"),
@@ -1242,10 +1285,25 @@ async def list_form_assignments(
         "respondent_name": d.get("respondent_name"),
         "respondent_email": d.get("respondent_email"),
         "respondent_role": d.get("respondent_role"),
-        "link": d.get("link"),
+        "link": link_on(base, d["token"]) if d.get("token") else d.get("link"),
         "status": effective_status(d, now),
         "email_status": d.get("email_status"),
+        "created_at": _as_utc(d.get("created_at")),
+        # When this link was last issued or re-sent — the column that tells an admin their
+        # latest schedule really did go out, even though no new row appeared.
+        "last_sent": _as_utc(_last_sent(d)),
     } for d in docs]
+
+    # Ordered by LAST SENT — the same value the column shows, which is why it is sorted here
+    # rather than in the query: `sent_at` falls back through `updated_at` to `created_at`, and
+    # sorting Mongo on any one of those disagrees with what the reader sees (a row touched at
+    # 07:00 but last mailed at 06:58 sorted above one mailed at 06:58:37).
+    #
+    # It matters because a monthly form issues ONE link per person: re-scheduling an activity
+    # reuses the existing row instead of minting a second URL, so ordering by creation left a
+    # row that had just been re-sent wherever its birthday put it, and made a fresh schedule
+    # look as though it had produced nothing at all.
+    out.sort(key=lambda r: _sort_ts(r["last_sent"]), reverse=True)
     return {"assignments": out}
 
 
@@ -1267,7 +1325,11 @@ async def resend_form_assignment(assignment_id: str, current_user: dict = Depend
     if not email:
         raise HTTPException(status_code=400, detail="This recipient has no email on file.")
     title = doc.get("form_title") or doc.get("form_type")
-    period, link = doc.get("period"), doc.get("link")
+    # Rebuilt from the token like every other send — resending a row created before the
+    # Application URL was set must not re-mail the stale localhost address.
+    from app.services.tpms_form_link_service import configured_base_url, link_on
+    period = doc.get("period")
+    link = link_on(await configured_base_url(), doc["token"]) if doc.get("token") else doc.get("link")
     html = (f'<div style="font-family:Arial,sans-serif;font-size:14px;color:#1e293b">'
             f'<p>Hello {doc.get("respondent_name") or ""},</p>'
             f'<p>Here is your <b>{title}</b> form link for <b>{period}</b>. It is personal to you '

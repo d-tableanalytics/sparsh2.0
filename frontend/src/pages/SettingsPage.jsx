@@ -14,6 +14,12 @@ const SettingsPage = () => {
     const { user } = useAuth();
     const { showSuccess, showError } = useNotification();
     const [config, setConfig] = useState({ allow_backdate: false, exception_users: [] });
+    /* Base URL every mailed link is built on. `effective_url`/`source` are what the server is
+       ACTUALLY using right now — the stored value can be blank and still resolve, through the
+       FRONTEND_URL environment variable or the local default, and that gap is exactly why a
+       live deployment was mailing http://localhost:5173 links. */
+    const [appUrl, setAppUrl] = useState({ frontend_url: '', effective_url: '', source: '', default_url: '' });
+    const [savingUrl, setSavingUrl] = useState(false);
     const [newEmail, setNewEmail] = useState('');
     const [loading, setLoading] = useState(true);
 
@@ -113,6 +119,7 @@ const SettingsPage = () => {
                 const readCompanies = user?.role === 'superadmin' || user?.permissions?.companies?.read;
 
                 if (readSettings) requests.push(api.get('/settings/backdate-control'));
+                if (readSettings) requests.push(api.get('/settings/app-url'));
                 if (readCompanies) requests.push(api.get('/companies'));
 
                 if (requests.length > 0) {
@@ -120,6 +127,8 @@ const SettingsPage = () => {
                     let index = 0;
                     if (readSettings) {
                         setConfig(responses[index].data);
+                        index++;
+                        setAppUrl(responses[index].data);
                         index++;
                     }
                     if (readCompanies) {
@@ -154,6 +163,19 @@ const SettingsPage = () => {
             await api.put('/settings/backdate-control', config);
             showSuccess("Workflow settings deployed successfully.");
         } catch (error) { showError("Failed to deploy config."); }
+    };
+
+    const handleSaveAppUrl = async () => {
+        setSavingUrl(true);
+        try {
+            const { data } = await api.put('/settings/app-url', { frontend_url: appUrl.frontend_url || '' });
+            setAppUrl((prev) => ({ ...prev, effective_url: data.effective_url, source: data.source }));
+            showSuccess('Application URL saved — new emails will use it.');
+        } catch (error) {
+            showError(error.response?.data?.detail || 'Could not save the application URL.');
+        } finally {
+            setSavingUrl(false);
+        }
     };
 
     const handleTemplateSave = async () => {
@@ -601,7 +623,70 @@ const SettingsPage = () => {
 
                                 {isSuperadmin && (
                                     <div className="space-y-4">
-                                        <div className="flex items-center justify-between">
+                                        <div>
+                                            <h2 className="text-[15px] font-bold text-[var(--text-main)] tracking-tight">Application URL</h2>
+                                            <p className="text-[11px] font-medium text-[var(--text-muted)] italic">
+                                                The address emailed links point to — form links, reminders and invites.
+                                            </p>
+                                        </div>
+
+                                        <div className="p-6 bg-[var(--bg-card)] border border-[var(--border)] rounded-[24px] space-y-4 shadow-sm">
+                                            <div className="space-y-1.5">
+                                                <label className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest">
+                                                    Public address of this site
+                                                </label>
+                                                <div className="flex gap-2">
+                                                    <input
+                                                        value={appUrl.frontend_url || ''}
+                                                        onChange={(e) => setAppUrl({ ...appUrl, frontend_url: e.target.value })}
+                                                        disabled={!canUpdateSettings || savingUrl}
+                                                        placeholder="https://erp.example.com"
+                                                        className="flex-1 bg-[var(--input-bg)] border border-[var(--border)] px-3 py-2 rounded-xl text-[12px] font-medium outline-none focus:bg-[var(--bg-card)] focus:border-[var(--accent-indigo)] disabled:opacity-50"
+                                                    />
+                                                    {canUpdateSettings && (
+                                                        <button
+                                                            onClick={handleSaveAppUrl}
+                                                            disabled={savingUrl}
+                                                            className="bg-[var(--accent-indigo)] text-white px-6 rounded-xl font-black text-[10px] uppercase tracking-widest disabled:opacity-50"
+                                                        >
+                                                            {savingUrl ? 'Saving…' : 'Save URL'}
+                                                        </button>
+                                                    )}
+                                                </div>
+                                                <p className="text-[10px] font-medium text-[var(--text-muted)]">
+                                                    Include http:// or https:// and no trailing slash. Leave blank to fall back to
+                                                    the server's FRONTEND_URL environment variable.
+                                                </p>
+                                            </div>
+
+                                            <div className="flex flex-wrap items-center gap-2 pt-1 border-t border-[var(--border)]">
+                                                <span className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest mt-3">
+                                                    Links are being built as
+                                                </span>
+                                                <code className="mt-3 text-[11px] font-bold text-[var(--text-main)] bg-[var(--input-bg)] border border-[var(--border)] px-2 py-1 rounded-lg break-all">
+                                                    {appUrl.effective_url || '—'}/f/&lt;token&gt;
+                                                </code>
+                                                <span className={`mt-3 text-[9px] font-black uppercase tracking-widest px-2 py-1 rounded-full border ${
+                                                    appUrl.source === 'settings'
+                                                        ? 'text-[var(--accent-green)] bg-[var(--accent-green-bg)] border-[var(--accent-green-border)]'
+                                                        : 'text-amber-600 bg-amber-50 border-amber-200'}`}>
+                                                    {appUrl.source === 'settings' ? 'from settings'
+                                                        : appUrl.source === 'environment' ? 'from environment'
+                                                        : 'development default'}
+                                                </span>
+                                            </div>
+
+                                            {appUrl.source !== 'settings' && appUrl.effective_url === appUrl.default_url && (
+                                                <div className="flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-[10.5px] font-bold text-amber-700">
+                                                    <span>
+                                                        Emails are going out with a localhost address, which only opens on the
+                                                        machine running this server. Set the public address above.
+                                                    </span>
+                                                </div>
+                                            )}
+                                        </div>
+
+                                        <div className="flex items-center justify-between pt-2">
                                             <div>
                                                 <h2 className="text-[15px] font-bold text-[var(--text-main)] tracking-tight">System Permissions</h2>
                                                 <p className="text-[11px] font-medium text-[var(--text-muted)] italic">Global overrides and security exception logic.</p>

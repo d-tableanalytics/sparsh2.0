@@ -123,14 +123,20 @@ async def _recipient_form_links(event: dict, actor: Optional[dict] = None) -> Di
     except Exception as e:
         logger.error(f"TPMS form link generation failed for '{event.get('activity')}': {e}")
         return {}, {}
+    from app.services.tpms_form_link_service import configured_base_url, link_on
+
+    # Rebuilt from the token against the CURRENT Application URL rather than read from the
+    # `link` frozen at creation — an assignment minted while the URL was wrong is still mailed
+    # with a working address once Settings is corrected.
+    base = await configured_base_url()
     links: Dict[str, List[dict]] = {}
     respondents: Dict[str, dict] = {}
     for row in rows:
-        if not row.get("link"):
+        if not row.get("token"):
             continue
         rid = str(row.get("respondent_id"))
         links.setdefault(rid, []).append({
-            "link": row["link"],
+            "link": link_on(base, row["token"]),
             "title": row.get("form_title") or row.get("form_type") or "Form",
         })
         if row.get("respondent_email"):
