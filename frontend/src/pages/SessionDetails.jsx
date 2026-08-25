@@ -151,14 +151,10 @@ const SessionDetails = () => {
         if (mediaItems.length === 0) fetchMediaItems();
     };
 
-    const fetchMediaItems = async (type = null) => {
+    const fetchMediaItems = async () => {
         setLoadingMedia(true);
         try {
-            const params = { include_url: false };
-            if (type && type !== 'all') {
-                params.media_type = type === 'excel' ? 'document' : type;
-            }
-            const { data } = await api.get('/media', { params });
+            const { data } = await api.get('/media', { params: { include_url: false } });
             setMediaItems(data);
         } catch (err) {
             console.error('Failed to load media library', err);
@@ -169,10 +165,9 @@ const SessionDetails = () => {
 
     useEffect(() => {
         if (uploadModalType && uploadSource === 'library') {
-            const typeFilter = uploadModalType === 'resource' ? resourceType : null;
-            fetchMediaItems(typeFilter);
+            fetchMediaItems();
         }
-    }, [uploadModalType, uploadSource, resourceType]);
+    }, [uploadModalType, uploadSource]);
 
     const handleUploadSubmit = async () => {
         // ─── Add by reference from the Media Library ───

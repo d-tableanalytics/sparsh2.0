@@ -209,7 +209,13 @@ async def list_media(
     col = get_collection("media_library")
     query = {}
     if media_type and media_type.lower() != "all":
-        query["media_type"] = media_type.lower()
+        mt = media_type.lower()
+        if mt in ["pdf", "document"]:
+            query["media_type"] = {"$in": ["pdf", "document"]}
+        elif mt in ["excel", "doc"]:
+            query["media_type"] = {"$in": ["document", "pdf", "other"]}
+        else:
+            query["media_type"] = mt
 
     items = await col.find(query).sort("created_at", -1).to_list(500)
     return [_serialize(i, with_url=include_url) for i in items]
