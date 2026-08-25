@@ -203,6 +203,7 @@ async def upload_media(
 @router.get("")
 async def list_media(
     media_type: Optional[str] = None,
+    include_url: bool = True,
     current_user: dict = Depends(get_current_user),
 ):
     col = get_collection("media_library")
@@ -211,7 +212,7 @@ async def list_media(
         query["media_type"] = media_type.lower()
 
     items = await col.find(query).sort("created_at", -1).to_list(500)
-    return [_serialize(i) for i in items]
+    return [_serialize(i, with_url=include_url) for i in items]
 
 
 @router.get("/{media_id}")
