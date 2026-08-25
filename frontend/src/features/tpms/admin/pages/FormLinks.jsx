@@ -43,6 +43,34 @@ const monthOptions = () => {
 
 const fullUrl = (link) => (!link ? '' : link.startsWith('http') ? link : window.location.origin + link);
 
+/* "Last sent" reads as an age, because the question it answers is "did my schedule just go
+   out?" — and a date alone makes the reader do that subtraction. The exact timestamp stays on
+   the title attribute for anyone who needs it. */
+/* A timestamp with no offset is UTC, not local. The API stamps one now, but an older
+   deployment (or any other endpoint reusing this helper) can still send a bare
+   "2026-08-25T07:16:38" — read as local that is 5h30m off in IST, which is precisely how a
+   link mailed minutes ago came to read "5h ago". */
+const asDate = (value) => {
+  if (!value) return null;
+  const s = String(value).trim().replace(' ', 'T');
+  const hasZone = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(s);
+  const d = new Date(hasZone ? s : `${s}Z`);
+  return Number.isNaN(d.getTime()) ? null : d;
+};
+
+const sentAgo = (value) => {
+  const then = asDate(value);
+  if (!then) return '—';
+  const mins = Math.floor((Date.now() - then.getTime()) / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  const days = Math.floor(hrs / 24);
+  if (days < 30) return `${days}d ago`;
+  return then.toLocaleDateString();
+};
+
 const StatusPill = ({ status }) => {
   const t = STATUS_TONE[status] || STATUS_TONE.sent;
   return (
@@ -174,7 +202,8 @@ const FormLinks = () => {
               <thead>
                 <tr className="bg-[var(--table-header-bg)] border-b border-[var(--border)]">
                   <Th>Form</Th><Th>HOD / MD</Th><Th>Company</Th>
-                  <Th align="center">Status</Th><Th>Link</Th><Th align="right">Actions</Th>
+                  <Th align="center">Status</Th><Th align="center">Last sent</Th>
+                  <Th>Link</Th><Th align="right">Actions</Th>
                 </tr>
               </thead>
               <tbody>
@@ -187,6 +216,10 @@ const FormLinks = () => {
                     </Td>
                     <Td className="text-[var(--text-muted)] whitespace-nowrap">{r.company_name || r.company_id}</Td>
                     <Td align="center"><StatusPill status={r.status} /></Td>
+                    <Td align="center" className="whitespace-nowrap text-[11px] font-semibold text-[var(--text-muted)]"
+                      title={asDate(r.last_sent)?.toLocaleString() || ''}>
+                      {sentAgo(r.last_sent)}
+                    </Td>
                     <Td>
                       <code className="text-[11px] text-[var(--text-muted)] font-mono truncate inline-block max-w-[260px] align-middle">{r.link}</code>
                     </Td>

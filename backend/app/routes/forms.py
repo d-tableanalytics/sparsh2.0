@@ -359,6 +359,64 @@ async def update_question(question_id: str, payload: dict, current_user: dict = 
     return {"ok": True}
 
 
+
+# ─────────────────────────────────────────────────────────────
+# Reporting hierarchy — who a rater may actually rate.
+#
+# The rating forms ask an HOD to score THEIR OWN TEAM, so the roster is the set of users whose
+# `reporting_manager` points at that HOD. It used to fall back to the entire company roster
+# whenever that produced nothing, which is what put every employee — the MD included — on a
+# form headed "rate each of your team members".
+#
+# The fallback is gone. An unmapped reporting line is a data gap to close in Company Users, and
+# a form that quietly lists people the rater does not manage is worse than one that says the
+# team is not mapped yet: the ratings it collects are meaningless and cannot be told apart from
+# real ones afterwards.
+# ─────────────────────────────────────────────────────────────
+async def _manager_identities(manager_id: str) -> List[str]:
+    """Every value a subordinate's `reporting_manager` might legitimately hold for this manager.
+
+    Normally it is the manager's `_id` as a string — that is what the picker in Company Users
+    stores. The bulk user upload, however, writes whatever the spreadsheet's "Reporting Manager"
+    column said when it cannot resolve it to a user (routes/company.py), so an email or an
+    employee code can be sitting there instead. Matching all of them means an existing, correct
+    mapping is honoured whichever way it was entered, and only a genuinely absent one reads as
+    "no team".
+    """
+    keys = {str(manager_id).strip()}
+    doc = None
+    try:
+        oid = ObjectId(str(manager_id))
+        doc = (await get_collection("learners").find_one({"_id": oid})
+               or await get_collection("staff").find_one({"_id": oid}))
+    except (InvalidId, TypeError):
+        doc = None
+    for field in ("email", "employee_id", "emp_id", "emp_code"):
+        value = (doc or {}).get(field)
+        if value is not None and str(value).strip():
+            keys.add(str(value).strip())
+    return [k for k in keys if k]
+
+
+async def _reporting_team(company_id: str, manager_id: str) -> List[dict]:
+    """This manager's direct reports in this company, across both user collections.
+
+    `staff` is searched as well as `learners` because an internal user can sit under a client
+    manager; reading only `learners` silently dropped them from the roster.
+    """
+    if not manager_id or not company_id:
+        return []
+    query = {
+        "company_id": str(company_id),
+        "is_active": {"$ne": False},
+        "reporting_manager": {"$in": await _manager_identities(manager_id)},
+    }
+    team = await get_collection("learners").find(query).to_list(1000)
+    team += await get_collection("staff").find(query).to_list(1000)
+    # A self-referential mapping would otherwise ask someone to rate themselves.
+    return [u for u in team if str(u.get("_id")) != str(manager_id)]
+
+
 # ─────────────────────────────────────────────────────────────
 # Candidate members to rate (sourced from existing users)
 # ─────────────────────────────────────────────────────────────
@@ -377,19 +435,12 @@ async def list_members(
     if not company_id:
         raise HTTPException(status_code=400, detail="company_id is required")
 
-    base = {"company_id": company_id, "is_active": {"$ne": False}}
-    # AppScript flow: an HOD rates only THEIR OWN TEAM — the learners whose `reporting_manager`
-    # is this HOD (the ERP equivalent of the source's HOD_IDs mapping). Until that mapping is
-    # populated an HOD has no team, so we fall back to the full company roster to keep the form
-    # usable; `scoped_to_team` tells the UI which mode is in effect.
-    team = []
-    if hod_id:
-        team = await get_collection("learners").find(
-            {**base, "reporting_manager": hod_id}).to_list(1000)
-    scoped_to_team = bool(team)
-    pool = team if scoped_to_team else (
-        (await get_collection("staff").find(base).to_list(1000))
-        + (await get_collection("learners").find(base).to_list(1000)))
+    # An HOD rates only their own reporting subordinates — never the whole company (see
+    # _reporting_team). Without an HOD there is no team to resolve, so the roster is empty
+    # rather than "everybody".
+    team = await _reporting_team(company_id, hod_id) if hod_id else []
+    team_size = len(team)
+    pool = team
 
     # Level gate (Ownership → L4 and above). The threshold comes from the form registry, so it
     # is the same number the assigned-link roster, the submit validation and the UI use.
@@ -412,9 +463,12 @@ async def list_members(
             "level": user_level(u),
         })
     members.sort(key=lambda m: (m.get("member_name") or "").lower())
-    # `min_level` is echoed back so the form can say WHY a roster is short rather than just
-    # rendering fewer rows (or an empty table) with no explanation.
-    return {"members": members, "scoped_to_team": scoped_to_team, "min_level": min_level}
+    # `min_level` and `team_size` are echoed back so the form can say WHY a roster is short
+    # rather than just rendering fewer rows (or an empty table) with no explanation:
+    # team_size 0 means no reporting line is mapped, while team_size > 0 with no members means
+    # the team exists but nobody in it meets the form's level gate.
+    return {"members": members, "scoped_to_team": True, "min_level": min_level,
+            "team_size": team_size}
 
 
 # ─────────────────────────────────────────────────────────────
@@ -1108,15 +1162,11 @@ async def assigned_form(token: str, current_user: dict = Depends(get_current_use
 
     # A rating matrix needs the people being rated; the Yes/No checklist does not.
     if definition.get("kind") == KIND_RATING_MATRIX:
-        base = {"company_id": str(doc.get("company_id")), "is_active": {"$ne": False}}
         hod_id = str(doc.get("respondent_id"))
-        team = await get_collection("learners").find(
-            {**base, "reporting_manager": hod_id}).to_list(1000)
-        # Same fallback the authenticated members endpoint uses: until reporting lines are
-        # mapped an HOD has no team, so the company roster keeps the form usable.
-        pool = team or (
-            (await get_collection("staff").find(base).to_list(1000))
-            + (await get_collection("learners").find(base).to_list(1000)))
+        # Same rule as the authenticated members endpoint, from the same helper: this
+        # respondent's reporting subordinates and nobody else.
+        team = await _reporting_team(str(doc.get("company_id")), hod_id)
+        pool = team
 
         # Same level gate as the authenticated roster endpoint, from the same registry value.
         # Resolved on every open, so a level corrected after the link was mailed takes effect
@@ -1138,8 +1188,9 @@ async def assigned_form(token: str, current_user: dict = Depends(get_current_use
             })
         members.sort(key=lambda m: (m.get("member_name") or "").lower())
         payload["members"] = members
-        payload["scoped_to_team"] = bool(team)
+        payload["scoped_to_team"] = True
         payload["min_level"] = form_min_level(form_type)
+        payload["team_size"] = len(team)
 
     return payload
 
@@ -1164,6 +1215,43 @@ async def mark_assigned_form_submitted(token: str, current_user: dict = Depends(
 # ─────────────────────────────────────────────────────────────
 # Admin: form-link viewer (list + resend)
 # ─────────────────────────────────────────────────────────────
+def _last_sent(doc: dict):
+    """When this link was last put in front of its recipient.
+
+    `sent_at` is the honest answer and is what the column means; it is absent only for a link
+    that was never mailed (notifications off, or no template), so the row still sorts sensibly
+    on when it was last touched, then on when it was created.
+    """
+    return doc.get("sent_at") or doc.get("updated_at") or doc.get("created_at")
+
+
+def _as_utc(value):
+    """A timestamp the client cannot misread.
+
+    Mongo returns these NAIVE (no tzinfo) even though every writer stores UTC, and a naive
+    value serialises as "2026-08-25T07:16:38" — no offset. `new Date()` parses an ISO string
+    without an offset as LOCAL time, so in IST a link mailed three minutes ago rendered as
+    "5h ago", exactly the +05:30 skew. Stamping UTC explicitly makes the wire value
+    unambiguous for any client and any zone.
+    """
+    if not isinstance(value, datetime):
+        return value
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
+
+
+def _sort_ts(value) -> float:
+    """Sortable epoch for a timestamp that may be missing, naive, or timezone-aware.
+
+    Mongo hands back naive UTC while anything constructed in-process is aware; comparing the
+    two raises, so both are normalised to UTC before sorting.
+    """
+    if not isinstance(value, datetime):
+        return float("-inf")
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.timestamp()
+
+
 @router.get("/assignments")
 async def list_form_assignments(
     company_id: Optional[str] = Query(None),
@@ -1173,14 +1261,20 @@ async def list_form_assignments(
     """Every unique form link (tpms_form_assignments), newest first. Admin only."""
     if (current_user.get("role") or "").lower() not in STAFF_ROLES:
         raise HTTPException(status_code=403, detail="Admin only")
-    from app.services.tpms_form_link_service import ASSIGNMENT_COLLECTION, effective_status
+    from app.services.tpms_form_link_service import (
+        ASSIGNMENT_COLLECTION, effective_status, configured_base_url, link_on,
+    )
     query: dict = {}
     if company_id:
         query["company_id"] = str(company_id)
     if period:
         query["period"] = str(period)
-    docs = await get_collection(ASSIGNMENT_COLLECTION).find(query).sort("created_at", -1).to_list(2000)
+    docs = await get_collection(ASSIGNMENT_COLLECTION).find(query).to_list(2000)
     now = datetime.now(timezone.utc)
+    # The link is REBUILT from the token against the current Application URL, exactly as the
+    # mail does. The stored `link` is frozen at creation, so a row minted before the URL was
+    # configured would otherwise hand out a localhost address through Copy and Open.
+    base = await configured_base_url()
     out = [{
         "id": str(d["_id"]),
         "form_type": d.get("form_type"),
@@ -1191,10 +1285,25 @@ async def list_form_assignments(
         "respondent_name": d.get("respondent_name"),
         "respondent_email": d.get("respondent_email"),
         "respondent_role": d.get("respondent_role"),
-        "link": d.get("link"),
+        "link": link_on(base, d["token"]) if d.get("token") else d.get("link"),
         "status": effective_status(d, now),
         "email_status": d.get("email_status"),
+        "created_at": _as_utc(d.get("created_at")),
+        # When this link was last issued or re-sent — the column that tells an admin their
+        # latest schedule really did go out, even though no new row appeared.
+        "last_sent": _as_utc(_last_sent(d)),
     } for d in docs]
+
+    # Ordered by LAST SENT — the same value the column shows, which is why it is sorted here
+    # rather than in the query: `sent_at` falls back through `updated_at` to `created_at`, and
+    # sorting Mongo on any one of those disagrees with what the reader sees (a row touched at
+    # 07:00 but last mailed at 06:58 sorted above one mailed at 06:58:37).
+    #
+    # It matters because a monthly form issues ONE link per person: re-scheduling an activity
+    # reuses the existing row instead of minting a second URL, so ordering by creation left a
+    # row that had just been re-sent wherever its birthday put it, and made a fresh schedule
+    # look as though it had produced nothing at all.
+    out.sort(key=lambda r: _sort_ts(r["last_sent"]), reverse=True)
     return {"assignments": out}
 
 
@@ -1216,7 +1325,11 @@ async def resend_form_assignment(assignment_id: str, current_user: dict = Depend
     if not email:
         raise HTTPException(status_code=400, detail="This recipient has no email on file.")
     title = doc.get("form_title") or doc.get("form_type")
-    period, link = doc.get("period"), doc.get("link")
+    # Rebuilt from the token like every other send — resending a row created before the
+    # Application URL was set must not re-mail the stale localhost address.
+    from app.services.tpms_form_link_service import configured_base_url, link_on
+    period = doc.get("period")
+    link = link_on(await configured_base_url(), doc["token"]) if doc.get("token") else doc.get("link")
     html = (f'<div style="font-family:Arial,sans-serif;font-size:14px;color:#1e293b">'
             f'<p>Hello {doc.get("respondent_name") or ""},</p>'
             f'<p>Here is your <b>{title}</b> form link for <b>{period}</b>. It is personal to you '
