@@ -6,11 +6,13 @@ import {
   Settings, Building2,
   PieChart, MessageSquare, LogOut, Layers, Copy, Calendar, Sparkles, PlayCircle, Target, BarChart3, Library, X,
   Forward, Bell, Trash2, ChevronDown, Activity, CalendarDays, Database, LayoutGrid,
-  Gauge, GitBranch, AlertTriangle, UserCog, ListChecks, ScrollText, UserCircle, ClipboardList, ClipboardCheck, Link2
+  Gauge, GitBranch, AlertTriangle, UserCog, ListChecks, ScrollText, UserCircle, ClipboardList, ClipboardCheck, Link2,
+  Award
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { canAccessTaskManagement } from '../../utils/taskAccess';
 import { canAccessTpms } from '../../features/tpms/access';
+import { canManage as canManageLeadershipCycle } from '../../features/tpms/leadership/leadershipUtils';
 
 import logo1 from '../../assets/Sparsh Magic  Logo PNG1.png';
 import logo2 from '../../assets/Sparsh Magic  Logo PNG2.png';
@@ -43,6 +45,10 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
   // panel a user lands on: superadmin/admin → Admin panel, every other internal → SMOPS.
   const isTpmsAdminUser = ['superadmin', 'admin'].includes(user?.role);
   const isTpmsClientUser = ['clientadmin', 'clientuser'].includes(user?.role);
+  // Who may run a Leadership Score cycle from the client side — HR or the client admin.
+  // Reuses the same predicate the Leadership pages use, so the menu can never offer a page
+  // the page itself will refuse.
+  const canManageLeadership = canManageLeadershipCycle(user);
   // Client-side users share the SMOPS submodules (Dashboard, HOD Activity, Employee Task,
   // Review Report, My Profile).
   //
@@ -56,6 +62,25 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
     { name: 'HOD Activity', path: '/tpms/smops/hod-activity', icon: Activity },
     { name: 'Employee Task', path: '/tpms/smops/tasks', icon: ClipboardList },
     { name: 'Review Report', path: '/tpms/smops/reviews', icon: BarChart3 },
+    // Leadership Score — every client-side user gets the result view; the page itself
+    // scopes what they see (HR: all leaders, manager: direct reports, leader: their own).
+    //
+    // HR and the client admin also RUN the cycle, and those pages had no entry here at all —
+    // the routes existed and the API allowed them, so the work was reachable only by typing
+    // the URL. They are listed for whoever `canManage` admits (mirrors _can_manage on the
+    // server: HR + clientadmin), and no wider: choosing the feedback panel is HR-only, which
+    // the Leaders & Givers page and the API both still enforce on their own.
+    canManageLeadership
+      ? {
+        name: 'Leadership Score', path: '/tpms/smops/leadership', icon: Award,
+        children: [
+          { name: 'Results', path: '/tpms/smops/leadership', icon: BarChart3, end: true },
+          { name: 'Cycles', path: '/tpms/smops/leadership/cycles', icon: CalendarDays },
+          { name: 'Leaders & Givers', path: '/tpms/smops/leadership/subjects', icon: UserCog },
+          { name: 'Invitation Email', path: '/tpms/smops/leadership/template', icon: ScrollText },
+        ],
+      }
+      : { name: 'Leadership Score', path: '/tpms/smops/leadership', icon: Award, end: true },
   ];
   const tpmsSubmodules = isTpmsClientUser
     ? tpmsClientForms
@@ -75,6 +100,17 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
         { name: 'Reminder Rules', path: '/tpms/admin/reminder-rules', icon: AlertTriangle },
         { name: 'Form Questions', path: '/tpms/admin/form-questions', icon: ClipboardCheck },
         { name: 'Form Links', path: '/tpms/admin/form-links', icon: Link2 },
+        // Leadership Score (additive group — the entries above are unchanged).
+        {
+          name: 'Leadership Score', path: '/tpms/admin/leadership', icon: Award,
+          children: [
+            { name: 'Cycles', path: '/tpms/admin/leadership', icon: CalendarDays, end: true },
+            { name: 'Leaders & Givers', path: '/tpms/admin/leadership/subjects', icon: UserCog },
+            { name: 'Questions', path: '/tpms/admin/leadership/questions', icon: ClipboardCheck },
+            { name: 'Invitation Email', path: '/tpms/admin/leadership/template', icon: ScrollText },
+            { name: 'Results', path: '/tpms/admin/leadership/report', icon: BarChart3 },
+          ],
+        },
         { name: 'Logs Report', path: '/tpms/admin/logs', icon: ScrollText },
         { name: 'Review Report', path: '/tpms/admin/reviews', icon: BarChart3 },
       ]
@@ -84,6 +120,7 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
         { name: 'HOD Activity', path: '/tpms/smops/hod-activity', icon: Activity },
         { name: 'Employee Task', path: '/tpms/smops/tasks', icon: ClipboardList },
         { name: 'Review Report', path: '/tpms/smops/reviews', icon: BarChart3 },
+        { name: 'Leadership Score', path: '/tpms/smops/leadership', icon: Award, end: true },
       ];
 
   const links = [

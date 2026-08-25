@@ -557,6 +557,9 @@ async def send_whatsapp(event: dict, event_kind: str, side: str) -> dict:
     # "accountability" is rejected as a non-existent template, per recipient, in the log only —
     # so normalise here and let rows written before this keep working without a data migration.
     tpl_name = str(tpl.get("meta_template_name") or tpl.get("name") or "").strip().lower()
+    # Same Activity / Company context the mail path records, so the Logs Report can fill its
+    # ACTIVITY and COMPANY columns for a WhatsApp row instead of showing a dash.
+    context = log_context(event)
     sent = failed = no_phone = 0
     for person in recipients:
         phone = normalize_phone(person.get("phone"))
@@ -568,7 +571,7 @@ async def send_whatsapp(event: dict, event_kind: str, side: str) -> dict:
                                               tpl.get("language") or "en", params,
                                               user_id=person.get("id"),
                                               slug=f"tpms_wa_{event_kind}_{side}",
-                                              components=components)
+                                              components=components, meta=context)
         except Exception as e:
             ok = False
             logger.error(f"TPMS WhatsApp to {phone} failed: {e}")
@@ -689,14 +692,25 @@ async def _dispatch(event: dict, event_kind: str, heading: str,
             # link leaves in this mail.
             html = _strip_form_links(html)
             try:
-                await send_email_notification(
+                # send_email_notification returns False on failure and NEVER raises, so this
+                # except block could not see a delivery failure: every send counted as `sent`
+                # and every form link was stamped delivered. Capture the result instead.
+                delivered = await send_email_notification(
                     person["email"], subject, html,
                     user_id=person.get("id"), slug=f"tpms_{event_kind}_{side}",
                     meta=log_context(event),
                 )
-                sent += 1
+                if delivered:
+                    sent += 1
+                else:
+                    failed += 1
+                    logger.warning(f"TPMS {event_kind} mail to {person['email']} was not delivered")
                 if my_links and SEND_FORM_LINKS:
-                    await _record_form_link_delivery(event, person, "sent", None)
+                    await _record_form_link_delivery(
+                        event, person,
+                        "sent" if delivered else "failed",
+                        None if delivered else "Delivery failed",
+                    )
             except Exception as e:
                 failed += 1
                 logger.error(f"TPMS {event_kind} mail to {person['email']} failed: {e}")
@@ -808,9 +822,12 @@ async def notify_learner_done(event: dict, doer_name: str) -> dict:
     sent = 0
     for person in people.get(SIDE_STAFF) or []:
         try:
-            await send_email_notification(person["email"], subject, html,
-                                          user_id=person.get("id"), slug="tpms_learner_done")
-            sent += 1
+            # Result captured: a False return means the mail did not go out.
+            if await send_email_notification(person["email"], subject, html,
+                                             user_id=person.get("id"), slug="tpms_learner_done"):
+                sent += 1
+            else:
+                logger.warning(f"TPMS learner-done mail to {person['email']} was not delivered")
         except Exception as e:
             logger.error(f"TPMS learner-done mail to {person['email']} failed: {e}")
     return {"sent": sent}
@@ -835,9 +852,12 @@ async def notify_reschedule_request(event: dict, requester_name: str, new_date: 
     sent = 0
     for person in people.get(SIDE_STAFF) or []:
         try:
-            await send_email_notification(person["email"], subject, html,
-                                          user_id=person.get("id"), slug="tpms_reschedule_request")
-            sent += 1
+            # Result captured: a False return means the mail did not go out.
+            if await send_email_notification(person["email"], subject, html,
+                                             user_id=person.get("id"), slug="tpms_reschedule_request"):
+                sent += 1
+            else:
+                logger.warning(f"TPMS reschedule-request mail to {person['email']} was not delivered")
         except Exception as e:
             logger.error(f"TPMS reschedule-request mail to {person['email']} failed: {e}")
     return {"sent": sent}
@@ -865,9 +885,12 @@ async def notify_reschedule_decision(event: dict, approved: bool, note: str = ""
     sent = 0
     for person in people.get(SIDE_COMPANY) or []:
         try:
-            await send_email_notification(person["email"], subject, html,
-                                          user_id=person.get("id"), slug=f"tpms_reschedule_{verdict}")
-            sent += 1
+            # Result captured: a False return means the mail did not go out.
+            if await send_email_notification(person["email"], subject, html,
+                                             user_id=person.get("id"), slug=f"tpms_reschedule_{verdict}"):
+                sent += 1
+            else:
+                logger.warning(f"TPMS reschedule-decision mail to {person['email']} was not delivered")
         except Exception as e:
             logger.error(f"TPMS reschedule-decision mail to {person['email']} failed: {e}")
     return {"sent": sent}
@@ -977,9 +1000,12 @@ async def notify_form_submission(*, form_type: str, title: str, company_id: str,
                          f"<p>Your <b>{title}</b> submission for <b>{period}</b> has been received. Thank you.</p>"
                          + (ctx["Response_Table"] or ""))
         try:
-            await send_email_notification(respondent["email"], subject, html,
-                                          user_id=str(respondent["_id"]), slug=f"tpms_form_{form_type}_summary")
-            summary_sent += 1
+            if await send_email_notification(respondent["email"], subject, html,
+                                             user_id=str(respondent["_id"]),
+                                             slug=f"tpms_form_{form_type}_summary"):
+                summary_sent += 1
+            else:
+                logger.warning("TPMS form summary mail was not delivered")
         except Exception as e:
             logger.error(f"TPMS form summary mail failed: {e}")
 
@@ -1009,9 +1035,12 @@ async def notify_form_submission(*, form_type: str, title: str, company_id: str,
                              f'<p>Hello {ctx["Employee_Name"]}, your ratings for <b>{period}</b>:</p>'
                              + ctx["Score_Table"])
             try:
-                await send_email_notification(member["email"], subject, html,
-                                              user_id=str(member["_id"]), slug=f"tpms_form_{form_type}_scorecard")
-                employee_sent += 1
+                if await send_email_notification(member["email"], subject, html,
+                                                 user_id=str(member["_id"]),
+                                                 slug=f"tpms_form_{form_type}_scorecard"):
+                    employee_sent += 1
+                else:
+                    logger.warning("TPMS form scorecard mail was not delivered")
             except Exception as e:
                 logger.error(f"TPMS form scorecard mail failed: {e}")
 

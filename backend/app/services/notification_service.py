@@ -5,7 +5,6 @@ from typing import Optional, Dict, Any
 from app.db.mongodb import get_collection
 from datetime import datetime, timedelta, timezone
 from bson import ObjectId
-import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import asyncio
@@ -458,7 +457,17 @@ async def log_notification(user_id: str, contact: str, channel: str, slug: str, 
 async def send_email_notification(to_email: str, subject: str, message: str, user_id: str = None, slug: str = "manual", cc: list = None, meta: dict = None):
     """`cc` and `meta` are optional and default to None, so existing callers are unaffected.
     `cc` exists for the TPMS escalation ladder, which addresses owners/HODs directly and
-    copies SMOps; `meta` records which activity a send belonged to, for the Logs Report."""
+    copies SMOps; `meta` records which activity a send belonged to, for the Logs Report.
+
+    The message is built exactly as before — same From/To/Cc/Subject headers and HTML body.
+    What changed is underneath: delivery goes through app.services.smtp_delivery, which
+    reuses one SMTP session across consecutive sends, paces them, retries a dropped socket
+    with backoff, and stops calling out entirely once too many sends fail in a row. Opening
+    a fresh authenticated connection per email is what got the Gmail account throttled.
+
+    The contract here is unchanged: returns True/False, never raises, and writes exactly one
+    `notifications` row per call with the same fields and statuses as before.
+    """
     if not settings.SMTP_USERNAME or not settings.SMTP_PASSWORD:
         logger.warning("SMTP credentials not configured")
         return False
@@ -473,13 +482,15 @@ async def send_email_notification(to_email: str, subject: str, message: str, use
         msg['Subject'] = subject
         msg.attach(MIMEText(message, 'html'))
 
-        server = smtplib.SMTP(settings.SMTP_SERVER, settings.SMTP_PORT)
-        server.starttls()
-        server.login(settings.SMTP_USERNAME, settings.SMTP_PASSWORD)
-        server.send_message(msg, to_addrs=[to_email] + cc_list)
-        server.quit()
-        await log_notification(user_id, to_email, "email", slug, message, "sent", meta=meta)
-        return True
+        from app.services import smtp_delivery
+        sent, error = await smtp_delivery.send_message(msg, [to_email] + cc_list)
+        if sent:
+            await log_notification(user_id, to_email, "email", slug, message, "sent", meta=meta)
+            return True
+
+        logger.error(f"Failed to send email: {error}")
+        await log_notification(user_id, to_email, "email", slug, message, "failed", error, meta=meta)
+        return False
     except Exception as e:
         logger.error(f"Failed to send email: {e}")
         await log_notification(user_id, to_email, "email", slug, message, "failed", str(e), meta=meta)
@@ -542,14 +553,18 @@ async def send_whatsapp_notification(phone: str, message: str, user_id: str = No
 
 async def send_whatsapp_template(phone: str, template_name: str, language: str, params: list,
                                  user_id: str = None, slug: str = "manual",
-                                 components: list = None):
+                                 components: list = None, meta: dict = None):
     """Business-initiated WhatsApp via a Meta-approved template.
     `params` are positional body values mapped to {{1}}, {{2}}, ... in the
     approved template.
 
     `components` overrides that body-only structure for templates whose header or buttons also
     take variables — pass the full Cloud API components array and `params` is used only for the
-    delivery log. Omit it and behaviour is exactly as before."""
+    delivery log. Omit it and behaviour is exactly as before.
+
+    `meta` is the same optional log context send_email_notification takes — TPMS passes the
+    activity and company so the Logs Report can show them next to a WhatsApp row instead of
+    the blank dashes it showed while only the mail path recorded them."""
     if not _wa_configured():
         logger.warning("WhatsApp Cloud API credentials not configured")
         return False
@@ -582,15 +597,15 @@ async def send_whatsapp_template(phone: str, template_name: str, language: str, 
         }
         response = requests.post(_wa_endpoint(), json=payload, headers=_wa_headers(), timeout=20)
         if response.status_code == 200:
-            await log_notification(user_id, to, "whatsapp", slug, log_text, "sent")
+            await log_notification(user_id, to, "whatsapp", slug, log_text, "sent", meta=meta)
             return True
         error = f"WhatsApp template error: {response.status_code} - {response.text}"
         logger.error(error)
-        await log_notification(user_id, to, "whatsapp", slug, log_text, "failed", error)
+        await log_notification(user_id, to, "whatsapp", slug, log_text, "failed", error, meta=meta)
         return False
     except Exception as e:
         logger.error(f"Failed to send WhatsApp template: {e}")
-        await log_notification(user_id, to, "whatsapp", slug, log_text, "failed", str(e))
+        await log_notification(user_id, to, "whatsapp", slug, log_text, "failed", str(e), meta=meta)
         return False
 
 async def send_notification_from_template(user_obj: dict, template_slug: str, context: Dict[str, Any], delivery_type: str = "both", scope_override: str = None):

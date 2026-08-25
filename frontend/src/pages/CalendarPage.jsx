@@ -415,7 +415,7 @@ const CalendarPage = () => {
 
     const [eventForm, setEventForm] = useState(initialForm);
 
-    const departments = ['HOD', 'EA', 'MD', 'Implementor', 'HR', 'Other'];
+    const departments = ['HOD', 'Manager', 'EA', 'MD', 'Implementor', 'HR', 'Other'];
 
     const fetchData = async () => {
         setLoading(true);

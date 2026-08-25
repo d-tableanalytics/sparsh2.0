@@ -33,6 +33,8 @@ class CompanyBase(BaseModel):
     tpms_enabled: bool = False
     # Task Management (Delegation) module — opt-in per company, gates client-side access.
     delegation_enabled: bool = False
+    # Leadership Score (OD Matrix) has NO flag of its own — it follows `tpms_enabled`.
+    # One switch governs both, so the two can never disagree.
 
 class CompanyCreate(CompanyBase):
     pass
