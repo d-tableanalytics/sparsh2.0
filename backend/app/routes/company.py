@@ -294,6 +294,7 @@ async def update_company_delegation_access(company_id: str, body: CompanyDelegat
     await log_activity(current_user, "Toggle Task Management Access", "Company", f"{'Enabled' if body.enabled else 'Disabled'} Task Management for company {company_id}")
     return {"message": f"Task Management access {'enabled' if body.enabled else 'disabled'}", "delegation_enabled": body.enabled}
 
+
 # ─── Delete Company ───
 @router.delete("/{company_id}")
 async def delete_company(company_id: str, current_user: dict = Depends(get_current_user)):
@@ -344,7 +345,7 @@ async def bulk_create_users(company_id: str, users: List[UserCreate], background
     permissions = current_user.get("permissions", {})
     can_update = permissions.get("companies", {}).get("update", False)
     
-    is_admin = current_user.get("role") == "superadmin" or current_user.get("role") == "clientadmin"
+    is_admin = current_user.get("role") in ["superadmin", "admin", "clientadmin"]
     is_authorized = is_admin or can_update
     
     if not is_authorized:
@@ -406,7 +407,7 @@ async def download_user_template(company_id: str, current_user: dict = Depends(g
     permissions = current_user.get("permissions", {})
     can_update = permissions.get("companies", {}).get("update", False)
     
-    is_admin = current_user.get("role") == "superadmin" or current_user.get("role") == "clientadmin"
+    is_admin = current_user.get("role") in ["superadmin", "admin", "clientadmin"]
     is_authorized = is_admin or can_update
 
     if not is_authorized:
@@ -491,7 +492,7 @@ async def import_users_xlsx(company_id: str, background_tasks: BackgroundTasks, 
     permissions = current_user.get("permissions", {})
     can_update = permissions.get("companies", {}).get("update", False)
     
-    is_admin = current_user.get("role") == "superadmin" or current_user.get("role") == "clientadmin"
+    is_admin = current_user.get("role") in ["superadmin", "admin", "clientadmin"]
     is_authorized = is_admin or can_update
     
     if not is_authorized:

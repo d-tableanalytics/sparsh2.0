@@ -19,7 +19,21 @@ class Settings(BaseSettings):
     SMTP_PORT: int = 587
     SMTP_USERNAME: Optional[str] = None
     SMTP_PASSWORD: Optional[str] = None
-    
+
+    # ── SMTP delivery reliability (app/services/smtp_delivery.py) ──
+    # Additive tunables only; none of them change the server, port, STARTTLS or credentials
+    # above. Defaults are chosen to sit well inside Gmail's limits, which the previous
+    # connection-per-email behaviour blew through (~130 handshakes/minute, 4.8k in one day).
+    SMTP_TIMEOUT_SECONDS: int = 30          # socket timeout for connect/login/send
+    SMTP_MAX_PER_MINUTE: int = 30           # burst ceiling; 0 disables rate limiting
+    SMTP_MAX_PER_DAY: int = 1500            # daily ceiling, under Gmail's ~2000; 0 disables
+    SMTP_MAX_RETRIES: int = 3               # attempts per message (1 = no retry)
+    SMTP_BACKOFF_BASE_SECONDS: float = 2.0  # delay = base * 2**(attempt-1)
+    SMTP_BACKOFF_MAX_SECONDS: float = 30.0  # ceiling for a single backoff wait
+    SMTP_MAX_CONSECUTIVE_FAILURES: int = 10 # trip the breaker after this many in a row
+    SMTP_FAILURE_COOLDOWN_SECONDS: int = 900  # how long the breaker stays open
+    SMTP_IDLE_TIMEOUT_SECONDS: int = 60     # close (and re-probe) a connection idle this long
+
     # Maytapi (deprecated — replaced by Meta WhatsApp Cloud API below)
     MAYTAPI_PRODUCT_ID: Optional[str] = None
     MAYTAPI_PHONE_ID: Optional[str] = None

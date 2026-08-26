@@ -33,8 +33,8 @@ from app.models.tpms import (
     META_CATEGORIES, META_CATEGORY_AUTHENTICATION, META_HEADER_FORMATS, META_HEADER_NONE,
     META_HEADER_TEXT, META_LIMIT_BODY, META_LIMIT_BUTTON_TEXT, META_LIMIT_FOOTER,
     META_LIMIT_HEADER, META_LIMIT_NAME, META_MAX_BUTTONS, META_MAX_PHONE_BUTTONS,
-    META_MAX_URL_BUTTONS, META_MEDIA_HEADERS, META_STATUS_APPROVED, META_VAR_NAMED,
-    META_VAR_NUMBERED, META_VAR_STYLES,
+    META_MAX_URL_BUTTONS, META_MEDIA_HEADERS, META_STATUS_APPROVED, META_STATUS_PENDING,
+    META_VAR_NAMED, META_VAR_NUMBERED, META_VAR_STYLES,
 )
 
 logger = logging.getLogger(__name__)
@@ -593,11 +593,19 @@ def render_preview_text(doc: dict) -> str:
 
 def build_create_payload(doc: dict) -> dict:
     """The complete JSON body sent to Meta. This is what the modal's "Check payload" shows —
-    what you review is byte-for-byte what gets submitted."""
+    what you review is byte-for-byte what gets submitted.
+
+    `parameter_format` declares which placeholder syntax the template uses, and Meta defaults it
+    to POSITIONAL when it is absent. Leaving it off meant a {{named}} template was reviewed as if
+    it were {{1}}-style, where `{{date}}` is not a valid placeholder at all: Meta created the
+    template, discarded the body_text_named_params examples it could not parse, and rejected it
+    immediately with INVALID_FORMAT."""
+    style = str(doc.get("variable_style") or META_VAR_NUMBERED).strip().lower()
     return {
         "name": str(doc.get("name") or "").strip(),
         "language": str(doc.get("language") or "en").strip(),
         "category": str(doc.get("category") or "").strip().upper(),
+        "parameter_format": "NAMED" if style == META_VAR_NAMED else "POSITIONAL",
         "components": build_components(doc),
     }
 
@@ -624,6 +632,42 @@ async def create_message_template(doc: dict) -> dict:
     logger.info("Submitted WhatsApp template '%s' (%s) to Meta — id=%s status=%s",
                 payload["name"], payload["language"], result.get("id"), result.get("status"))
     return result
+
+
+def _post_template_edit(template_id: str, payload: dict) -> dict:
+    response = requests.post(
+        f"https://graph.facebook.com/{settings.WHATSAPP_API_VERSION}/{template_id}",
+        json=payload, headers=_headers(), timeout=GRAPH_TIMEOUT)
+    if response.status_code not in (200, 201):
+        raise _graph_error(response)
+    return response.json() or {}
+
+
+async def edit_message_template(template_id: str, doc: dict) -> dict:
+    """Correct a template Meta already holds and put it back into review.
+
+    Creating is not an option once the name exists on the WABA — Meta answers a second create
+    with 2388024 "Content in this language already exists" — so a REJECTED template can only be
+    fixed in place. Name and language are immutable and are dropped from the payload; everything
+    else (category, parameter_format, components) is what gets re-reviewed.
+
+    Returns the same `{id, status, category}` shape as create_message_template, read back from
+    Meta, because the edit call itself answers only `{"success": true}`."""
+    _require_config()
+    payload = build_create_payload(doc)
+    name = payload.pop("name", "")
+    payload.pop("language", None)
+    await asyncio.to_thread(_post_template_edit, template_id, payload)
+
+    rows = await fetch_templates(name=name) if name else []
+    current = next((r for r in rows if str(r.get("id")) == str(template_id)), None)
+    status = str((current or {}).get("status") or META_STATUS_PENDING).upper()
+    logger.info("Edited WhatsApp template '%s' at Meta — id=%s status=%s", name, template_id, status)
+    return {
+        "id": template_id,
+        "status": status,
+        "category": (current or {}).get("category") or payload.get("category"),
+    }
 
 
 def _get_templates(params: dict) -> dict:
