@@ -367,6 +367,8 @@ const TodoRepeatSection = ({ form, setForm, minEndDate: _minEndDate }) => {
 
 const CalendarPage = () => {
     const calendarRef = useRef(null);
+    // The card the grid is drawn inside. Watched for width changes — see the observer below.
+    const calendarShellRef = useRef(null);
     const { user } = useAuth();
     const { showSuccess, showError } = useNotification();
     // Show task-related stat cards only when the user has access to the Delegation module.
@@ -435,6 +437,42 @@ const CalendarPage = () => {
         } catch (err) { console.error(err); }
         finally { setLoading(false); }
     };
+    // Re-measure the grid whenever this column's width changes.
+    //
+    // The sidebar expands on hover, and the rail reserving its space (components/common/
+    // PrivateRoute.jsx) follows it with a spring from 72px to 240px. The main column is
+    // `flex-1 min-w-0`, so its width moves with that spring — but the WINDOW never resizes,
+    // and a window resize is the only thing that makes FullCalendar re-measure after mount.
+    //
+    // That is exactly why the gap appeared on the way IN: clicking "Calendar" means the
+    // cursor is on the sidebar, so it is expanded to 240px at the moment the grid measures
+    // itself. Move the mouse onto the page, the sidebar collapses back to 72px, the column
+    // grows 168px wider — and the table stays the width it was born at, leaving a dead band
+    // down the right-hand side.
+    //
+    // Observing the container rather than hooking the sidebar keeps the two unaware of each
+    // other, and covers the notification drawer, browser zoom and split-screen for free.
+    useEffect(() => {
+        const shell = calendarShellRef.current;
+        if (!shell || typeof ResizeObserver === 'undefined') return undefined;
+
+        let frame = 0;
+        let lastWidth = 0;
+        const observer = new ResizeObserver(([entry]) => {
+            // Width only: this box also grows taller as events load and as day cells fill,
+            // and re-laying out the grid for that would be work with nothing to show for it.
+            const width = Math.round(entry.contentRect.width);
+            if (width === lastWidth) return;
+            lastWidth = width;
+            // The spring reports a new width every frame; coalesce so the grid is measured
+            // once per paint instead of sixty times per collapse.
+            cancelAnimationFrame(frame);
+            frame = requestAnimationFrame(() => calendarRef.current?.getApi?.().updateSize());
+        });
+        observer.observe(shell);
+        return () => { cancelAnimationFrame(frame); observer.disconnect(); };
+    }, []);
+
     useEffect(() => { fetchData(); }, [viewMode]); // eslint-disable-line react-hooks/exhaustive-deps
 
     const formatIST = (dateStr) => {
@@ -1124,7 +1162,8 @@ const CalendarPage = () => {
                 </div>
             </div>
 
-            <div className="flex-1 bg-[var(--bg-card)] border border-[var(--border)] rounded-[24px] md:rounded-[40px] overflow-hidden shadow-2xl p-3 md:p-6 fc-theme-orlando relative">
+            <div ref={calendarShellRef}
+                className="flex-1 bg-[var(--bg-card)] border border-[var(--border)] rounded-[24px] md:rounded-[40px] overflow-hidden shadow-2xl p-3 md:p-6 fc-theme-orlando relative">
                 {loading && (<div className="absolute inset-0 flex items-center justify-center bg-[var(--bg-card)]/80 backdrop-blur-sm z-[100]"> <div className="w-12 h-12 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin"></div> </div>)}
                 {/* ─── Stats Dashboard — one container per module, side by side ─── */}
                 {/* flex-wrap + flex-1 (rather than a fixed grid) is what keeps the row gap-free:
