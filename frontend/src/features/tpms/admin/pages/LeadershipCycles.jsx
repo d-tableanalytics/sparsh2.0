@@ -557,6 +557,101 @@ const OpenBlockedModal = ({ row, panelBase, onClose }) => {
   );
 };
 
+/** Confirm releasing a cycle's scores.
+    The most consequential button on this page and the last one still behind a browser
+    confirm: it mails every enrolled leader and their reporting manager, and the cycle can
+    never be re-opened afterwards. A native box could not show who is about to be told, nor
+    name the one state transition on this page that has no way back. Mounted only while a
+    row is pending, so it seeds from that row and needs no reset. */
+const PublishConfirmModal = ({ row, onClose, onConfirm }) => {
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState('');
+  const leaders = row.subject_count || 0;
+
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape' && !saving) onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [saving, onClose]);
+
+  const go = async () => {
+    setSaving(true);
+    setErr('');
+    try {
+      await onConfirm(row);
+    } catch (e) {
+      setErr(errText(e, 'Could not publish this cycle.'));
+      setSaving(false);
+    }
+  };
+
+  return (
+    <MotionDiv className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={saving ? undefined : onClose} />
+      <MotionDiv role="alertdialog" aria-modal="true"
+        initial={{ opacity: 0, y: 14, scale: 0.98 }}
+        animate={{ opacity: 1, y: 0, scale: 1 }}
+        exit={{ opacity: 0, y: 14, scale: 0.98 }}
+        transition={{ duration: 0.22, ease: [0.4, 0, 0.2, 1] }}
+        className="relative w-full max-w-md rounded-2xl border border-[var(--border)] bg-[var(--bg-card)] shadow-xl overflow-hidden">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-[var(--border)]">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <span className="w-8 h-8 rounded-lg flex items-center justify-center bg-[var(--accent-green-bg)] text-[var(--accent-green)] shrink-0">
+              <Send size={16} />
+            </span>
+            <div className="min-w-0">
+              <h3 className="text-[15px] font-extrabold tracking-tight">Publish these scores?</h3>
+              <span className="block text-[10.5px] font-bold text-[var(--text-muted)] truncate">
+                {row.label || row.cycle}
+              </span>
+            </div>
+          </div>
+          <button type="button" onClick={onClose} disabled={saving}
+            className="w-8 h-8 rounded-lg flex items-center justify-center text-[var(--text-muted)] hover:bg-[var(--input-bg)] transition-colors disabled:opacity-50">
+            <X size={16} />
+          </button>
+        </div>
+
+        <div className="px-5 py-4 space-y-3">
+          <p className="text-[12.5px] font-semibold text-[var(--text-muted)]">
+            Each of <b className="text-[var(--text-main)]">{leaders} leader{leaders === 1 ? '' : 's'}</b> and
+            their reporting manager is emailed, and the score becomes visible on the leader&rsquo;s
+            own Leadership Report.
+          </p>
+
+          <div className="flex items-start gap-2 rounded-xl border border-[var(--accent-yellow-border)] bg-[var(--accent-yellow-bg)] px-3.5 py-2.5 text-[12px] font-semibold text-[var(--accent-yellow)]">
+            <AlertTriangle size={14} className="mt-[1px] shrink-0" />
+            <span>
+              A published cycle <b>cannot be re-opened</b>. Once people have been shown a
+              number, changing the inputs behind it would rewrite a conversation that has
+              already happened. Un-compute first if anything still needs checking.
+            </span>
+          </div>
+
+          {err && (
+            <div className="flex items-center gap-2 rounded-lg border border-[var(--accent-red-border)] bg-[var(--accent-red-bg)] px-3 py-2 text-[12px] font-bold text-[var(--accent-red)]">
+              <AlertTriangle size={14} /> {err}
+            </div>
+          )}
+        </div>
+
+        <div className="flex items-center justify-end gap-2 px-5 py-4 border-t border-[var(--border)]">
+          <button type="button" onClick={onClose} disabled={saving}
+            className="px-4 py-2 rounded-lg text-[13px] font-bold text-[var(--text-muted)] hover:bg-[var(--input-bg)] transition-colors disabled:opacity-50">
+            Not yet
+          </button>
+          <button type="button" onClick={go} disabled={saving} autoFocus
+            className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-[var(--accent-green)] text-white text-[13px] font-bold shadow-sm hover:opacity-90 transition-opacity disabled:opacity-40">
+            {saving ? <RefreshCw size={14} className="animate-spin" /> : <Send size={14} />}
+            {saving ? 'Publishing…' : 'Publish & Notify'}
+          </button>
+        </div>
+      </MotionDiv>
+    </MotionDiv>
+  );
+};
+
 const LeadershipCycles = () => {
   const { user, staff, companyOptions, companyId, setCompanyId } = useLeadershipCompany();
   const manage = canManage(user);
@@ -569,6 +664,7 @@ const LeadershipCycles = () => {
   const [pendingDelete, setPendingDelete] = useState(null);
   const [quorumWarn, setQuorumWarn] = useState(null);
   const [openBlocked, setOpenBlocked] = useState(null);
+  const [pendingPublish, setPendingPublish] = useState(null);
   const [busy, setBusy] = useState('');
   const [notice, setNotice] = useState('');
 
@@ -689,18 +785,15 @@ const LeadershipCycles = () => {
   // The moment a leader can first see their own score. Irreversible for collection: once
   // people have been shown a number, changing the inputs behind it would rewrite a
   // conversation that has already happened.
-  const publish = async (cycle) => {
-    if (!window.confirm(
-      'Publishing releases these scores to every leader and their reporting manager, and sends the notification.'
-      + `\n\nA published cycle cannot be re-opened. Continue?`
-    )) return;
-    setBusy(cycle); setError(''); setNotice('');
+  // Left to throw: PublishConfirmModal reports the failure in place rather than dismissing
+  // itself, so a cycle that could not be released does not look released.
+  const publish = async (row) => {
+    setBusy(row.cycle); setError(''); setNotice('');
     try {
-      await publishLeadershipCycle(companyId, cycle);
+      await publishLeadershipCycle(companyId, row.cycle);
+      setPendingPublish(null);
       setNotice('Published. Leaders and their managers have been notified.');
       await reload();
-    } catch (e) {
-      setError(errText(e, 'Could not publish this cycle.'));
     } finally { setBusy(''); }
   };
 
@@ -863,7 +956,7 @@ const LeadershipCycles = () => {
                             className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11.5px] font-bold text-[var(--text-muted)] border border-[var(--border)] hover:bg-[var(--input-bg)] transition-colors disabled:opacity-50">
                             <Undo2 size={12} /> Un-compute
                           </button>
-                          <button type="button" onClick={() => publish(c.cycle)} disabled={busy === c.cycle}
+                          <button type="button" onClick={() => setPendingPublish(c)} disabled={busy === c.cycle}
                             title="Release the scores to leaders and their reporting managers. This cannot be undone."
                             className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11.5px] font-bold text-[var(--accent-green)] bg-[var(--accent-green-bg)] border border-[var(--accent-green-border)] hover:opacity-90 transition-opacity disabled:opacity-50">
                             <Send size={12} /> Publish
@@ -907,6 +1000,10 @@ const LeadershipCycles = () => {
         {openBlocked && (
           <OpenBlockedModal key="open-blocked" row={openBlocked} panelBase={panelBase}
             onClose={() => setOpenBlocked(null)} />
+        )}
+        {pendingPublish && (
+          <PublishConfirmModal key="publish-cycle" row={pendingPublish}
+            onClose={() => setPendingPublish(null)} onConfirm={publish} />
         )}
       </AnimatePresence>
     </div>

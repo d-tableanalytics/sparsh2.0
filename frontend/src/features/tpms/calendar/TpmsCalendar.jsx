@@ -223,6 +223,14 @@ const TpmsCalendar = () => {
   const [exporting, setExporting] = useState(false);
   const [importing, setImporting] = useState(false);
   const [report, setReport] = useState(null);   // import result, shown in a dialog
+  // Confirmation for an action that notifies people or cannot be undone. One state object
+  // drives one dialog, so Cancel, Delete and Reject all read the same way instead of each
+  // reaching for window.confirm — which renders as a bare "localhost:5173 says" box that
+  // carries none of the page's wording and cannot say what the action will actually do.
+  // Shape: { title, lead, detail, confirmLabel, keepLabel, withNote, notePlaceholder, run }
+  const [confirmBox, setConfirmBox] = useState(null);
+  const [confirmNote, setConfirmNote] = useState('');
+  const [confirmBusy, setConfirmBusy] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -341,6 +349,24 @@ const TpmsCalendar = () => {
     if (m < 1) { m = 12; y -= 1; }
     if (m > 12) { m = 1; y += 1; }
     setMonth(m); setYear(y);
+  };
+
+  // Seeding the note here (rather than in the dialog) keeps a previous rejection's reason
+  // from reappearing in the next one.
+  const askConfirm = (box) => { setConfirmNote(''); setConfirmBox(box); };
+
+  const runConfirm = async () => {
+    if (!confirmBox || confirmBusy) return;
+    setConfirmBusy(true);
+    try {
+      // `run` goes through act(), which reports its own failures as a toast — so the dialog
+      // closes either way and never strands the user in front of a spinner.
+      await confirmBox.run(confirmNote.trim());
+    } finally {
+      setConfirmBusy(false);
+      setConfirmBox(null);
+      setConfirmNote('');
+    }
   };
 
   const act = async (fn, okMsg) => {
@@ -549,18 +575,28 @@ const TpmsCalendar = () => {
                     <Btn onClick={() => act(() => confirmCompletion(e.id), 'Completed')}>✔ Confirm Complete</Btn>
                   )}
                   {isStaffSide && canAct && (
-                    <Btn danger ghost onClick={() => {
-                      if (window.confirm('Cancel this activity? Its pending reminders stop and both sides are notified.')) {
-                        act(() => updateSchedule(e.id, { status: 'Cancelled' }), 'Activity cancelled');
-                      }
-                    }}><Ban size={12} /> Cancel</Btn>
+                    <Btn danger ghost onClick={() => askConfirm({
+                      title: 'Cancel this activity?',
+                      lead: e.title,
+                      detail: 'Its pending reminders stop immediately, and both the doer and the staff '
+                            + 'side are notified that it was cancelled. The activity stays on the '
+                            + 'calendar marked Cancelled — it is not deleted.',
+                      confirmLabel: 'Cancel Activity',
+                      keepLabel: 'Keep it',
+                      run: () => act(() => updateSchedule(e.id, { status: 'Cancelled' }), 'Activity cancelled'),
+                    })}><Ban size={12} /> Cancel</Btn>
                   )}
                   {isAdmin && (
-                    <Btn danger ghost onClick={() => {
-                      if (window.confirm('Delete this activity and everything derived from it?')) {
-                        act(() => deleteSchedule(e.id), 'Deleted');
-                      }
-                    }}><Trash2 size={12} /> Delete</Btn>
+                    <Btn danger ghost onClick={() => askConfirm({
+                      title: 'Delete this activity?',
+                      lead: e.title,
+                      detail: 'The activity and everything derived from it go with it — its pending '
+                            + 'reminders, tracker rows and any form links already issued. Unlike '
+                            + 'Cancel, this leaves no record on the calendar and cannot be undone.',
+                      confirmLabel: 'Delete Activity',
+                      keepLabel: 'Keep it',
+                      run: () => act(() => deleteSchedule(e.id), 'Deleted'),
+                    })}><Trash2 size={12} /> Delete</Btn>
                   )}
                 </div>
               </div>
@@ -610,13 +646,55 @@ const TpmsCalendar = () => {
                 </div>
                 <div className="flex gap-2 mt-2.5">
                   <Btn onClick={() => act(() => decideRescheduleRequest(r._id, true), 'Approved')}>✔ Approve</Btn>
-                  <Btn danger ghost onClick={() => {
-                    const note = window.prompt('Reason for rejection (optional):') || '';
-                    act(() => decideRescheduleRequest(r._id, false, note), 'Rejected');
-                  }}>✕ Reject</Btn>
+                  {/* window.prompt was the worst of the three: an unstyled input whose text
+                      is mailed to the requester, with no way to say so and no cancel that
+                      reads as a cancel — dismissing it returned '' and rejected anyway. */}
+                  <Btn danger ghost onClick={() => askConfirm({
+                    title: 'Reject this reschedule request?',
+                    lead: r.title || r.activity,
+                    detail: `The activity stays on ${r.old_date}${r.old_time ? ` ${r.old_time}` : ''} and `
+                          + `${r.requested_by_name || 'the requester'} is notified. A reason is optional, `
+                          + 'but whatever you write here is included in what they receive.',
+                    confirmLabel: 'Reject Request',
+                    keepLabel: 'Go Back',
+                    withNote: true,
+                    notePlaceholder: 'Why is this being rejected?',
+                    run: (note) => act(() => decideRescheduleRequest(r._id, false, note), 'Rejected'),
+                  })}>✕ Reject</Btn>
                 </div>
               </div>
             ))}
+        </Overlay>
+      )}
+
+      {/* ── Confirmation ──
+          Rendered last, and therefore above the day list and the requests overlay it is
+          opened from: Overlay pins every dialog at z-50, so paint order is what decides.
+          It also lives outside those blocks deliberately — act() closes the day list on
+          success, and a dialog nested inside it would unmount mid-action. */}
+      {confirmBox && (
+        <Overlay narrow title={confirmBox.title}
+          onClose={() => { if (!confirmBusy) setConfirmBox(null); }}>
+          {confirmBox.lead && (
+            <p className="text-[12.5px] font-black text-[var(--text-main)] mb-2">{confirmBox.lead}</p>
+          )}
+          <p className="text-[12px] font-semibold text-[var(--text-muted)] mb-3 leading-relaxed">
+            {confirmBox.detail}
+          </p>
+          {confirmBox.withNote && (
+            <Field label="Reason">
+              <textarea rows={3} value={confirmNote} onChange={(ev) => setConfirmNote(ev.target.value)}
+                placeholder={confirmBox.notePlaceholder} className={inputCls} />
+            </Field>
+          )}
+          <div className="flex justify-end gap-2">
+            <Btn ghost disabled={confirmBusy} onClick={() => setConfirmBox(null)}>
+              {confirmBox.keepLabel || 'Go Back'}
+            </Btn>
+            <Btn danger disabled={confirmBusy} onClick={runConfirm}>
+              {confirmBusy ? 'Working…' : confirmBox.confirmLabel}
+            </Btn>
+          </div>
         </Overlay>
       )}
 
@@ -707,13 +785,18 @@ const Field = ({ label, children }) => (
   </div>
 );
 
-const Btn = ({ children, onClick, ghost, danger }) => (
-  <button onClick={onClick}
-    className={`inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-[11.5px] font-black transition-all active:scale-95 ${
+const Btn = ({ children, onClick, ghost, danger, disabled }) => (
+  <button onClick={onClick} disabled={disabled}
+    className={`inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-[11.5px] font-black transition-all active:scale-95 disabled:opacity-50 disabled:pointer-events-none ${
       ghost
         ? `border ${danger ? 'border-[var(--accent-red-border)] text-[var(--accent-red)] hover:bg-[var(--accent-red-bg)]'
                           : 'border-[var(--border)] text-[var(--text-muted)] hover:bg-[var(--table-hover)]'}`
-        : 'bg-[var(--accent-indigo)] text-white hover:opacity-90'}`}>
+        // Solid red for the confirm button of a destructive dialog. Every pre-existing
+        // `danger` call site also passes `ghost`, so this branch is additional, not a
+        // restyle of anything that already renders.
+        : danger
+          ? 'bg-[var(--accent-red)] text-white hover:opacity-90'
+          : 'bg-[var(--accent-indigo)] text-white hover:opacity-90'}`}>
     {children}
   </button>
 );

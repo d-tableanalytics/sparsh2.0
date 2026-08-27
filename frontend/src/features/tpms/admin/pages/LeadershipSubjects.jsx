@@ -448,6 +448,95 @@ const PanelModal = ({ companyId, cycle, subject, config, people, onClose, onChan
   );
 };
 
+/** The two actions on this page that could not be taken back quietly, and until now fired
+    straight off a click: un-enrolling a leader (which destroys the panel built for them and
+    kills links already in inboxes) and mailing every pending invitation at once.
+
+    One component for both, driven by props, so a third such action has somewhere to go
+    rather than reaching for a browser confirm. */
+const ConfirmModal = ({ icon, tone, title, subtitle, children,
+                       confirmLabel, busyLabel, onClose, onConfirm }) => {
+  // Bound as a local rather than renamed in the destructure: no-unused-vars exempts
+  // capitalised VARS here but holds destructured ARGS to the `^_` pattern, and it does not
+  // count a JSX element name as a use. Same reason this file aliases MotionDiv.
+  const Icon = icon;
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState('');
+
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape' && !saving) onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [saving, onClose]);
+
+  const go = async () => {
+    setSaving(true);
+    setErr('');
+    try {
+      await onConfirm();
+    } catch (e) {
+      // Reported in here rather than behind the overlay, so the dialog stays put and the
+      // action can be retried without finding the row again.
+      setErr(errText(e, 'That did not work.'));
+      setSaving(false);
+    }
+  };
+
+  return (
+    <MotionDiv className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={saving ? undefined : onClose} />
+      <MotionDiv role="alertdialog" aria-modal="true"
+        initial={{ opacity: 0, y: 14, scale: 0.98 }}
+        animate={{ opacity: 1, y: 0, scale: 1 }}
+        exit={{ opacity: 0, y: 14, scale: 0.98 }}
+        transition={{ duration: 0.22, ease: [0.4, 0, 0.2, 1] }}
+        className="relative w-full max-w-md rounded-2xl border border-[var(--border)] bg-[var(--bg-card)] shadow-xl overflow-hidden">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-[var(--border)]">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <span className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0"
+              style={{ color: `var(--accent-${tone})`, background: `var(--accent-${tone}-bg)` }}>
+              <Icon size={16} />
+            </span>
+            <div className="min-w-0">
+              <h3 className="text-[15px] font-extrabold tracking-tight">{title}</h3>
+              {subtitle && (
+                <span className="block text-[10.5px] font-bold text-[var(--text-muted)] truncate">{subtitle}</span>
+              )}
+            </div>
+          </div>
+          <button type="button" onClick={onClose} disabled={saving}
+            className="w-8 h-8 rounded-lg flex items-center justify-center text-[var(--text-muted)] hover:bg-[var(--input-bg)] transition-colors disabled:opacity-50">
+            <X size={16} />
+          </button>
+        </div>
+
+        <div className="px-5 py-4 space-y-3">
+          {children}
+          {err && (
+            <div className="flex items-center gap-2 rounded-lg border border-[var(--accent-red-border)] bg-[var(--accent-red-bg)] px-3 py-2 text-[12px] font-bold text-[var(--accent-red)]">
+              <AlertTriangle size={14} /> {err}
+            </div>
+          )}
+        </div>
+
+        <div className="flex items-center justify-end gap-2 px-5 py-4 border-t border-[var(--border)]">
+          <button type="button" onClick={onClose} disabled={saving}
+            className="px-4 py-2 rounded-lg text-[13px] font-bold text-[var(--text-muted)] hover:bg-[var(--input-bg)] transition-colors disabled:opacity-50">
+            Cancel
+          </button>
+          <button type="button" onClick={go} disabled={saving} autoFocus
+            className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-white text-[13px] font-bold shadow-sm hover:opacity-90 transition-opacity disabled:opacity-40"
+            style={{ background: `var(--accent-${tone})` }}>
+            {saving ? <RefreshCw size={14} className="animate-spin" /> : <Icon size={14} />}
+            {saving ? busyLabel : confirmLabel}
+          </button>
+        </div>
+      </MotionDiv>
+    </MotionDiv>
+  );
+};
+
 const LeadershipSubjects = () => {
   const { user, staff, companyOptions, companyId, setCompanyId } = useLeadershipCompany();
   const manage = canManage(user);
@@ -457,6 +546,8 @@ const LeadershipSubjects = () => {
   const [cycle, setCycle] = useState(params.get('cycle') || '');
   const [adding, setAdding] = useState(false);
   const [panelFor, setPanelFor] = useState(null);
+  const [pendingUnenrol, setPendingUnenrol] = useState(null);
+  const [confirmDispatch, setConfirmDispatch] = useState(false);
   const [notice, setNotice] = useState('');
   const [busy, setBusy] = useState('');
 
@@ -504,22 +595,24 @@ const LeadershipSubjects = () => {
     await reload();
   };
 
+  // Left to throw: ConfirmModal reports the failure in place. The row is only dropped
+  // from the dialog once the server has actually removed it.
   const unenrol = async (subjectId) => {
     setBusy(subjectId);
     setError('');
     setNotice('');
     try {
       await removeLeadershipSubject(companyId, cycle, subjectId);
+      setPendingUnenrol(null);
       setNotice('Leader removed from this cycle.');
       await reload();
-    } catch (e) {
-      setError(errText(e, 'Could not remove this leader.'));
     } finally {
       setBusy('');
     }
   };
 
   const dispatchAll = async () => {
+    setConfirmDispatch(false);
     setBusy('all');
     setError('');
     setNotice('');
@@ -580,7 +673,7 @@ const LeadershipSubjects = () => {
             for a closed or elapsed cycle — the API refuses it either way (409), so showing
             a button that cannot work would only invite the error. */}
         {managePanel && canDispatch && (
-          <HeroButton icon={Send} onClick={dispatchAll}>
+          <HeroButton icon={Send} onClick={() => setConfirmDispatch(true)}>
             {busy === 'all' ? 'Sending…' : 'Email All Pending'}
           </HeroButton>
         )}
@@ -680,7 +773,7 @@ const LeadershipSubjects = () => {
                         </button>
                       )}
                       {!s.submitted_count && (
-                        <button type="button" onClick={() => unenrol(s.subject_id)} disabled={busy === s.subject_id}
+                        <button type="button" onClick={() => setPendingUnenrol(s)} disabled={busy === s.subject_id}
                           className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11.5px] font-bold text-[var(--accent-red)] bg-[var(--accent-red-bg)] border border-[var(--accent-red-border)] hover:opacity-90 transition-opacity disabled:opacity-50">
                           <Trash2 size={12} />
                         </button>
@@ -703,6 +796,52 @@ const LeadershipSubjects = () => {
           <PanelModal key={`panel-${panelFor.subject_id}`} companyId={companyId} cycle={cycle}
             subject={panelFor} config={cfg.data} people={people.data?.people}
             onClose={() => setPanelFor(null)} onChanged={reload} />
+        )}
+        {pendingUnenrol && (
+          <ConfirmModal key="unenrol" icon={Trash2} tone="red"
+            title="Remove this leader from the cycle?"
+            subtitle={pendingUnenrol.subject_name}
+            confirmLabel="Remove Leader" busyLabel="Removing…"
+            onClose={() => setPendingUnenrol(null)}
+            onConfirm={() => unenrol(pendingUnenrol.subject_id)}>
+            {pendingUnenrol.panel_size > 0 ? (
+              <div className="flex items-start gap-2 rounded-xl border border-[var(--accent-yellow-border)] bg-[var(--accent-yellow-bg)] px-3.5 py-2.5 text-[12px] font-semibold text-[var(--accent-yellow)]">
+                <AlertTriangle size={14} className="mt-[1px] shrink-0" />
+                <span>
+                  The panel of <b>{pendingUnenrol.panel_size}</b> feedback
+                  giver{pendingUnenrol.panel_size === 1 ? '' : 's'} built for them is deleted with
+                  them, and any invitation already emailed stops working.
+                </span>
+              </div>
+            ) : (
+              <p className="text-[12.5px] font-medium text-[var(--text-muted)]">
+                No panel has been assigned yet, so nothing else goes with them.
+              </p>
+            )}
+            <p className="text-[12.5px] font-medium text-[var(--text-muted)]">
+              They can be enrolled again while the cycle is still collecting.
+            </p>
+          </ConfirmModal>
+        )}
+        {confirmDispatch && (
+          <ConfirmModal key="dispatch-all" icon={Send} tone="indigo"
+            title="Email every pending invitation?"
+            subtitle={activeCycle?.label || cycle}
+            confirmLabel="Send Invitations" busyLabel="Sending…"
+            onClose={() => setConfirmDispatch(false)}
+            onConfirm={dispatchAll}>
+            <p className="text-[12.5px] font-semibold text-[var(--text-muted)]">
+              Every feedback giver across
+              this cycle&rsquo;s <b className="text-[var(--text-main)]">{subjects.length} enrolled
+              leader{subjects.length === 1 ? '' : 's'}</b> who has not yet submitted is emailed
+              their own link. These go to real inboxes and cannot be recalled.
+            </p>
+            <p className="text-[12.5px] font-medium text-[var(--text-muted)]">
+              Anyone already emailed recently is held back by the resend cooldown, and leaders
+              whose panel is not yet complete are skipped and named in the result — so pressing
+              this again to chase is safe.
+            </p>
+          </ConfirmModal>
         )}
       </AnimatePresence>
     </div>
