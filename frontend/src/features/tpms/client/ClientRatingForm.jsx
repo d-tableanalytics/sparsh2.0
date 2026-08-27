@@ -92,6 +92,7 @@ const ClientRatingForm = ({ formType, icon, lockedPeriod = '', onSubmitted }) =>
   // so the threshold is never duplicated here — the backend registry owns the number.
   const [minLevel, setMinLevel] = useState(0);
 
+  const [teamSize, setTeamSize] = useState(null);
   const [savedRatings, setSavedRatings] = useState({});   // { code: { member_id: {rating,...} } } (locked)
   const [picks, setPicks] = useState({});                 // { "code::member_id": rating } (draft)
   const [loadingSaved, setLoadingSaved] = useState(false);
@@ -130,6 +131,10 @@ const ClientRatingForm = ({ formType, icon, lockedPeriod = '', onSubmitted }) =>
         if (!alive) return;
         const gate = Number(res.data?.min_level || 0);
         setMinLevel(gate);
+        // How many people report to this rater BEFORE the level gate. 0 means no reporting
+        // line is mapped to them at all, which reads very differently from "your team exists
+        // but nobody in it is senior enough for this form".
+        setTeamSize(Number(res.data?.team_size ?? 0));
         // The server has already applied `gate`; re-applying it here costs nothing and keeps
         // the page correct against a backend that predates the level rule.
         const fetchedMembers = (res.data?.members || [])
@@ -296,9 +301,12 @@ const ClientRatingForm = ({ formType, icon, lockedPeriod = '', onSubmitted }) =>
             </thead>
             <tbody>
               {rows.length === 0 && (
-                <tr><Td className="text-[var(--text-muted)]">{loadingMembers ? 'Loading…' : (minLevel
-                  ? `No members to rate — this form covers L${minLevel} and above, and nobody on your team is set to that level yet.`
-                  : 'No members to rate.')}</Td></tr>
+                <tr><Td className="text-[var(--text-muted)]">{loadingMembers ? 'Loading…' : (
+                  teamSize === 0
+                    ? 'No members to rate — nobody is mapped as reporting to you yet. Ask HR to set you as the Reporting Manager for your team in Company Users, then reopen this form.'
+                    : minLevel
+                      ? `No members to rate — this form covers L${minLevel} and above, and nobody on your team is set to that level yet.`
+                      : 'No members to rate.')}</Td></tr>
               )}
               {rows.map((m) => {
                 const locked = savedCell(c.code, m.member_id) != null;

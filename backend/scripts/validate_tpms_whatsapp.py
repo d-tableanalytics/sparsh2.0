@@ -167,7 +167,7 @@ class _Harness:
         self.whatsapps.append({
             "phone": phone, "template": template_name, "language": language,
             "params": list(params or []), "slug": kw.get("slug"),
-            "components": kw.get("components"),
+            "components": kw.get("components"), "meta": kw.get("meta"),
         })
         return self.wa_result
 
@@ -220,6 +220,14 @@ async def self_test() -> None:
           (by_slug.get("tpms_wa_schedule_staff") or {}).get("phone") == "919000011111")
     check("body-only template sends no components override",
           company.get("components") is None)
+    # The Logs Report reads activity / company_name straight off the log row, so the send must
+    # carry them the way the mail path does — otherwise the WhatsApp rows render as dashes.
+    meta = company.get("meta") or {}
+    check("log context recorded on the send",
+          meta.get("activity") == ACTIVITY and meta.get("company_name") == "Acme Pvt Ltd",
+          str(meta))
+    check("log context carries the event id",
+          meta.get("event_id") == "665f000000000000000000aa", str(meta.get("event_id")))
 
     # 2 ─ the wiring row's activity is free text; the lookup must survive case and stray space.
     print("\n2. Activity matching is tolerant of case and surrounding space")

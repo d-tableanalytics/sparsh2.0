@@ -154,7 +154,7 @@ const SessionDetails = () => {
     const fetchMediaItems = async () => {
         setLoadingMedia(true);
         try {
-            const { data } = await api.get('/media');
+            const { data } = await api.get('/media', { params: { include_url: false } });
             setMediaItems(data);
         } catch (err) {
             console.error('Failed to load media library', err);
@@ -162,6 +162,12 @@ const SessionDetails = () => {
             setLoadingMedia(false);
         }
     };
+
+    useEffect(() => {
+        if (uploadModalType && uploadSource === 'library') {
+            fetchMediaItems();
+        }
+    }, [uploadModalType, uploadSource]);
 
     const handleUploadSubmit = async () => {
         // ─── Add by reference from the Media Library ───

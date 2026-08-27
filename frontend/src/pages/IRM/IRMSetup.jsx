@@ -2,12 +2,14 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import {
   SlidersHorizontal, Save, RotateCcw, AlertTriangle, CheckCircle2, RefreshCw,
-  Percent, ShieldAlert, Gauge, Calculator, ArrowLeft,
+  Percent, ShieldAlert, Gauge, Calculator, ArrowLeft, Clock, Undo2,
 } from 'lucide-react';
 import {
   DashboardHero, HeaderSelect, HeroButton, Section, Th, Td, TableShell,
 } from '../../features/tpms/common/dashboardKit';
-import { getIrmConfig, saveIrmConfig } from '../../services/irmApi';
+import {
+  getIrmConfig, saveIrmConfig, saveIrmShift, getIrmPeople, clearIrmPersonConfig,
+} from '../../services/irmApi';
 import {
   canEditWeightages, errText, fmtNum, scoreColor, useAsync, useIrmCompany,
 } from './irmUtils';
@@ -25,7 +27,16 @@ import {
    ───────────────────────────────────────────────────────────── */
 
 /** Sample achievement %s used only to illustrate the draft weightages. */
-const PREVIEW_ACHIEVEMENT = { task: 80, delegation: 50, culture: 90, accountability: 75 };
+// Illustrative achievement per parameter, used only to show what the weightages would
+// produce. `punctuality` joins the others here so the worked example stays complete —
+// without it a company that has given punctuality weightage would see the preview quietly
+// exclude it and disagree with the real score.
+const PREVIEW_ACHIEVEMENT = {
+  task: 80, delegation: 50, culture: 90, accountability: 75, punctuality: 95,
+};
+
+// Shift defaults mirror app/models/irm.py. Only used before the config lands.
+const SHIFT_FALLBACK = { start: '09:30', end: '18:30', grace_minutes: 10 };
 
 const numOrZero = (v) => {
   const n = Number(v);
@@ -52,6 +63,11 @@ const IRMSetup = () => {
   const canEdit = canEditWeightages(user);
 
   const [draft, setDraft] = useState({});      // {code: string} — raw input values
+  // '' = the company default column. A person id = that person's own column, which falls
+  // back to the company one wherever it says nothing.
+  const [personId, setPersonId] = useState('');
+  const [shift, setShift] = useState(SHIFT_FALLBACK);
+  const [shiftSaving, setShiftSaving] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState('');
   const [saved, setSaved] = useState('');
@@ -62,18 +78,61 @@ const IRMSetup = () => {
     [companies],
   );
 
-  const load = useCallback(async () => (await getIrmConfig(companyId)).data, [companyId]);
-  const { data: config, loading, error, reload } = useAsync(load, [companyId], {
+  const load = useCallback(
+    async () => (await getIrmConfig(companyId, personId)).data,
+    [companyId, personId],
+  );
+  const { data: config, loading, error, reload } = useAsync(load, [companyId, personId], {
     skip: waitingForCompany,
   });
+
+  const loadPeople = useCallback(async () => (await getIrmPeople(companyId)).data, [companyId]);
+  const { data: roster, reload: reloadPeople } = useAsync(loadPeople, [companyId], {
+    skip: waitingForCompany,
+  });
+
+  // "Company default" first, then everyone, with a mark against anyone already on their own
+  // column — otherwise the only way to find out who is customised is to click through them.
+  const scopeOptions = useMemo(() => ([
+    { id: '', name: 'Company default — everyone' },
+    ...(roster?.people || []).map((p) => ({
+      id: p.person_id,
+      name: p.has_override ? `${p.name} ✓ own column` : p.name,
+    })),
+  ]), [roster]);
+
+  const person = (roster?.people || []).find((p) => p.person_id === personId);
 
   // Seed the draft from whatever the server currently holds.
   useEffect(() => {
     if (!config) return;
     setDraft(Object.fromEntries(config.parameters.map((p) => [p.code, String(p.weightage)])));
+    setShift({ ...SHIFT_FALLBACK, ...(config.shift || {}) });
     setSaveError('');
     setSaved('');
   }, [config]);
+
+  // Saved on its own, not with the weightage column: the shift decides what punctuality
+  // MEANS, while the column decides how much it counts for. Tying them together would make
+  // fixing a shift time require re-saving a column that was already correct.
+  const saveShift = async () => {
+    setShiftSaving(true);
+    setSaveError('');
+    setSaved('');
+    try {
+      await saveIrmShift(companyId, {
+        start: shift.start,
+        end: shift.end,
+        grace_minutes: Number(shift.grace_minutes) || 0,
+      });
+      setSaved('Shift saved. Punctuality is recalculated from it on the next read.');
+      await reload();
+    } catch (e) {
+      setSaveError(errText(e, 'Could not save the shift.'));
+    } finally {
+      setShiftSaving(false);
+    }
+  };
 
   const parameters = useMemo(() => config?.parameters || [], [config]);
   const total = useMemo(
@@ -95,6 +154,24 @@ const IRMSetup = () => {
     setSaveError('');
   };
 
+  // Removing an override is not the same as zeroing it: the person goes back to whatever
+  // the company column says, and keeps tracking it as it changes.
+  const removeOverride = async () => {
+    setSaving(true);
+    setSaveError('');
+    setSaved('');
+    try {
+      await clearIrmPersonConfig(companyId, personId);
+      setSaved(`${person?.name || 'This person'} is back on the company column.`);
+      await reload();
+      await reloadPeople();
+    } catch (e) {
+      setSaveError(errText(e, 'Could not remove the override.'));
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const resetToDefaults = () => {
     setDraft(Object.fromEntries(parameters.map((p) => [p.code, String(p.default_weightage)])));
     setSaved('');
@@ -110,9 +187,12 @@ const IRMSetup = () => {
         code: p.code,
         weightage: numOrZero(draft[p.code]),
       }));
-      await saveIrmConfig(companyId, payload);
-      setSaved('Weightages saved. IRM scores now use the updated values.');
+      await saveIrmConfig(companyId, payload, personId);
+      setSaved(personId
+        ? `Saved for ${person?.name || 'this person'}. Everyone else stays on the company default.`
+        : 'Weightages saved. IRM scores now use the updated values.');
       await reload();
+      await reloadPeople();
     } catch (e) {
       setSaveError(errText(e, 'Could not save weightages.'));
     } finally {
@@ -158,6 +238,11 @@ const IRMSetup = () => {
         {staff && (
           <HeaderSelect value={companyId} onChange={setCompanyId} options={companyOptions} />
         )}
+        {/* Which column is being edited. The whole screen follows this — the sheet, the
+            worked example and Save all act on the scope chosen here. */}
+        {!waitingForCompany && (
+          <HeaderSelect value={personId} onChange={setPersonId} options={scopeOptions} />
+        )}
         <HeroButton icon={ArrowLeft} onClick={() => navigate('/irm')}>Back to IRM</HeroButton>
       </DashboardHero>
 
@@ -186,6 +271,31 @@ const IRMSetup = () => {
         </Section>
       ) : (
         <>
+          {/* Says whose column is on screen, and whether it is theirs or inherited — the
+              numbers alone cannot tell those apart, since an inherited column shows the
+              company's figures. */}
+          {personId && (
+            <div className="flex items-start gap-2 rounded-2xl border border-[var(--accent-indigo-border)] bg-[var(--accent-indigo-bg)] px-4 py-3">
+              <Percent size={15} className="mt-[1px] shrink-0 text-[var(--accent-indigo)]" />
+              <div className="min-w-0 flex-1">
+                <span className="block text-[12.5px] font-bold text-[var(--accent-indigo)]">
+                  Editing {person?.name || 'this person'}&rsquo;s own column
+                </span>
+                <span className="block text-[11.5px] font-semibold text-[var(--text-muted)]">
+                  {config?.inherited
+                    ? 'They are on the company default right now — saving here gives them a column of their own.'
+                    : 'They already have their own column. Everyone else stays on the company default.'}
+                </span>
+              </div>
+              {canEdit && !config?.inherited && (
+                <button type="button" onClick={removeOverride} disabled={saving}
+                  className="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11.5px] font-bold text-[var(--text-muted)] border border-[var(--border)] bg-[var(--bg-card)] hover:bg-[var(--input-bg)] transition-colors disabled:opacity-50">
+                  <Undo2 size={12} /> Use company default
+                </button>
+              )}
+            </div>
+          )}
+
           <Section
             title="Evaluation Parameters"
             subtitle={config?.is_customised
@@ -317,6 +427,78 @@ const IRMSetup = () => {
                 style={{ color: scoreColor(preview.final) }}>
                 {fmtNum(preview.final)}%
               </span>
+            </div>
+          </Section>
+
+          {/* ─── Shift rule ───
+              Punctuality cannot be derived from punch times alone: 09:41 is early for one
+              company and late for another. It lives here rather than on the dashboard
+              because it is configuration that changes how people are scored, which is
+              exactly what this screen is for. */}
+          {/* COMPANY-WIDE, always — unlike the weightage column above, which the person
+              picker scopes. One office has one set of hours; per-person shifts would mean
+              a different definition of "on time" for each row of the same report. The
+              controls are therefore locked while a person is selected, so this section can
+              never read as part of that person's column. */}
+          <Section title="Shift & Punctuality" icon={Clock}
+            subtitle="Company-wide — one rule for everyone, whoever is selected above">
+            <div className="px-5 py-4 space-y-4">
+              <p className="text-[12.5px] font-semibold text-[var(--text-muted)]">
+                A day counts as punctual when the person punched in by{' '}
+                <b className="text-[var(--text-main)]">{shift.start}</b> plus the grace below,
+                and punched out no earlier than{' '}
+                <b className="text-[var(--text-main)]">{shift.end}</b> minus it. A day with no
+                out-punch counts as present but not punctual — a half-recorded day cannot be
+                shown to have been worked in full.
+              </p>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                {[
+                  { key: 'start', label: 'Shift start', type: 'time' },
+                  { key: 'end', label: 'Shift end', type: 'time' },
+                  { key: 'grace_minutes', label: 'Grace (minutes)', type: 'number' },
+                ].map((f) => (
+                  <label key={f.key} className="flex flex-col gap-1.5">
+                    <span className="text-[11px] font-black uppercase tracking-wide text-[var(--text-muted)]">
+                      {f.label}
+                    </span>
+                    <input
+                      type={f.type}
+                      min={f.type === 'number' ? 0 : undefined}
+                      max={f.type === 'number' ? 240 : undefined}
+                      value={shift[f.key] ?? ''}
+                      disabled={!canEdit || !!personId}
+                      onChange={(e) => setShift((s) => ({ ...s, [f.key]: e.target.value }))}
+                      className="w-full px-3 py-2 rounded-lg bg-[var(--input-bg)] border border-[var(--input-border)] text-[13px] font-bold outline-none focus:border-[var(--accent-indigo)] transition-colors disabled:opacity-60"
+                    />
+                  </label>
+                ))}
+              </div>
+
+              {personId && (
+                <div className="flex items-start gap-2 rounded-xl border border-[var(--border)] bg-[var(--input-bg)] px-3.5 py-2.5 text-[12px] font-semibold text-[var(--text-muted)]">
+                  <Clock size={14} className="mt-[1px] shrink-0" />
+                  <span>
+                    Shown for context — these hours apply to everyone, not just{' '}
+                    {person?.name || 'this person'}. Switch the picker back to{' '}
+                    <b className="text-[var(--text-main)]">Company default</b> to change them.
+                  </span>
+                </div>
+              )}
+
+              <div className="flex items-center justify-between gap-3 flex-wrap">
+                <span className="text-[11.5px] font-semibold text-[var(--text-muted)]">
+                  Changing this re-scores past months on the next read — the verdict comes
+                  from the stored punches, so nothing needs re-importing.
+                </span>
+                {canEdit && !personId && (
+                  <button type="button" onClick={saveShift} disabled={shiftSaving}
+                    className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-[var(--accent-indigo)] text-white text-[13px] font-bold shadow-sm hover:opacity-90 transition-opacity disabled:opacity-40">
+                    {shiftSaving ? <RefreshCw size={14} className="animate-spin" /> : <Save size={14} />}
+                    {shiftSaving ? 'Saving…' : 'Save Shift'}
+                  </button>
+                )}
+              </div>
             </div>
           </Section>
         </>

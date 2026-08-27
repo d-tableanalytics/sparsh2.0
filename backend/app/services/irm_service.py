@@ -30,9 +30,11 @@ from typing import Dict, List, Optional
 from app.db.mongodb import get_collection
 from app.models.forms import SCALE_MAX, submission_collection
 from app.models.irm import (
-    COLL_IRM_CONFIG, COLL_IRM_SCORES,
+    COLL_IRM_CONFIG, COLL_IRM_PERSON_CONFIG, COLL_IRM_SCORES,
     IRM_PARAMETERS,
-    SOURCE_FORM, SOURCE_TASK,
+    SCOPE_COMPANY, SCOPE_DEFAULT, SCOPE_PERSON,
+    SOURCE_ATTENDANCE, SOURCE_FORM, SOURCE_TASK,
+    TASK_WEIGHT_DEFAULT, TASK_WEIGHT_MAX, TASK_WEIGHT_MIN,
     TOTAL_WEIGHTAGE, WEIGHTAGE_EPSILON,
     default_weightages,
 )
@@ -88,15 +90,14 @@ def _display_name(u: dict) -> str:
 # ─────────────────────────────────────────────────────────────
 # Weightage config — the editable cells from the sheet
 # ─────────────────────────────────────────────────────────────
-async def get_weightages(company_id: str) -> Dict[str, float]:
-    """The company's weightage map, seeded from the registry for anything unset.
+def _merge_weightages(base: Dict[str, float], stored: Optional[dict]) -> Dict[str, float]:
+    """Overlay a stored weightage map onto `base`, ignoring unknown or unparseable codes.
 
-    A parameter added to the registry later inherits its default rather than scoring
-    0 for every company that saved a config before it existed.
+    A parameter added to the registry later inherits its default rather than scoring 0 for
+    every config saved before it existed.
     """
-    doc = await get_collection(COLL_IRM_CONFIG).find_one({"company_id": str(company_id)})
-    weights = default_weightages()
-    for code, value in ((doc or {}).get("weightages") or {}).items():
+    weights = dict(base)
+    for code, value in (stored or {}).items():
         if code in weights:
             try:
                 weights[code] = round(float(value), 2)
@@ -105,10 +106,62 @@ async def get_weightages(company_id: str) -> Dict[str, float]:
     return weights
 
 
-async def get_config(company_id: str) -> dict:
-    """Weightages plus the parameter metadata the UI renders the sheet from."""
-    doc = await get_collection(COLL_IRM_CONFIG).find_one({"company_id": str(company_id)})
-    weights = await get_weightages(company_id)
+async def get_weightages(company_id: str, person_id: Optional[str] = None) -> Dict[str, float]:
+    """The weightage map in force — for one person, or for the company as a whole.
+
+    Resolution is most-specific-first: the person's own override, then the company
+    default, then the registry seeds. Passing no `person_id` asks for the company row,
+    which is exactly what the old single-argument call meant, so every existing caller
+    keeps its behaviour.
+    """
+    weights, _scope = await resolve_weightages(company_id, person_id)
+    return weights
+
+
+async def resolve_weightages(company_id: str,
+                             person_id: Optional[str] = None) -> tuple:
+    """(weights, scope) — scope names which row actually supplied them.
+
+    Reported rather than inferred so the screen can say "own mix" vs "company default"
+    without re-querying, and so a snapshot records what a score was actually built from.
+    """
+    company_doc = await get_collection(COLL_IRM_CONFIG).find_one({"company_id": str(company_id)})
+    weights = _merge_weightages(default_weightages(), (company_doc or {}).get("weightages"))
+    scope = SCOPE_COMPANY if company_doc else SCOPE_DEFAULT
+
+    if person_id:
+        person_doc = await get_collection(COLL_IRM_PERSON_CONFIG).find_one({
+            "company_id": str(company_id), "person_id": str(person_id)})
+        if person_doc:
+            weights = _merge_weightages(weights, person_doc.get("weightages"))
+            scope = SCOPE_PERSON
+    return weights, scope
+
+
+async def load_person_weightages(company_id: str) -> Dict[str, dict]:
+    """{person_id: stored_weightage_map} for every override in one company.
+
+    Fetched in a single query so scoring a roster costs one read rather than one per
+    person — compute_company_irm runs this once and resolves each row from it.
+    """
+    rows = await get_collection(COLL_IRM_PERSON_CONFIG).find(
+        {"company_id": str(company_id)}).to_list(5000)
+    return {str(r.get("person_id")): (r.get("weightages") or {}) for r in rows}
+
+
+async def get_config(company_id: str, person_id: Optional[str] = None) -> dict:
+    """Weightages plus the parameter metadata the UI renders the sheet from.
+
+    With `person_id` this is that person's effective sheet — their override if they have
+    one, otherwise the company column they inherit. `is_customised` keeps meaning "a row
+    exists at the scope being read", which is what the screen's subtitle is driven from.
+    """
+    if person_id:
+        doc = await get_collection(COLL_IRM_PERSON_CONFIG).find_one({
+            "company_id": str(company_id), "person_id": str(person_id)})
+    else:
+        doc = await get_collection(COLL_IRM_CONFIG).find_one({"company_id": str(company_id)})
+    weights, scope = await resolve_weightages(company_id, person_id)
     parameters = [{
         "code": p["code"],
         "name": p["name"],
@@ -118,39 +171,77 @@ async def get_config(company_id: str) -> dict:
         "weightage": weights[p["code"]],
     } for p in IRM_PARAMETERS]
     total = round(sum(weights.values()), 2)
+    # The shift rule travels with the config because the punctuality parameter is
+    # meaningless without it — one call gives Setup both halves of the same screen.
+    from app.services.irm_attendance_service import get_shift
     return {
         "company_id": str(company_id),
+        "person_id": str(person_id) if person_id else None,
+        "scope": scope,
+        "shift": await get_shift(company_id),
         "parameters": parameters,
         "weightages": weights,
         "total_weightage": total,
         "required_total": TOTAL_WEIGHTAGE,
         "is_valid": abs(total - TOTAL_WEIGHTAGE) <= WEIGHTAGE_EPSILON,
         "is_customised": bool(doc),
+        # True only when a person is being read and is riding the company column, so the
+        # screen can offer "customise for this person" rather than implying they have one.
+        "inherited": bool(person_id) and scope != SCOPE_PERSON,
         "updated_at": (doc or {}).get("updated_at"),
         "updated_by": (doc or {}).get("updated_by"),
     }
 
 
-async def save_weightages(company_id: str, weightages: Dict[str, float], user: dict) -> dict:
-    """Persist the weightage column. The 100% rule is enforced by IRMConfigUpdate before
-    this is reached; it is re-checked here so a direct service call can't bypass it."""
+async def save_weightages(company_id: str, weightages: Dict[str, float], user: dict,
+                          person_id: Optional[str] = None) -> dict:
+    """Persist a weightage column — the company default, or one person's override.
+
+    The 100% rule is enforced by IRMConfigUpdate before this is reached; it is re-checked
+    here so a direct service call can't bypass it. It applies identically at both scopes:
+    a person's sheet is still a sheet, and a column that does not total 100 cannot be read
+    as a percentage of anything.
+    """
     total = round(sum(weightages.values()), 2)
     if abs(total - TOTAL_WEIGHTAGE) > WEIGHTAGE_EPSILON:
         raise ValueError(
             f"Total weightage must be exactly {TOTAL_WEIGHTAGE:g}% (currently {total:g}%)"
         )
-    await get_collection(COLL_IRM_CONFIG).update_one(
-        {"company_id": str(company_id)},
-        {"$set": {
-            "company_id": str(company_id),
-            "weightages": {c: round(float(w), 2) for c, w in weightages.items()},
-            "updated_by": (user or {}).get("full_name") or (user or {}).get("email"),
-            "updated_at": datetime.utcnow(),
-        },
-         "$setOnInsert": {"created_at": datetime.utcnow()}},
-        upsert=True,
-    )
-    return await get_config(company_id)
+    cleaned = {c: round(float(w), 2) for c, w in weightages.items()}
+    stamp = {
+        "weightages": cleaned,
+        "updated_by": (user or {}).get("full_name") or (user or {}).get("email"),
+        "updated_at": datetime.utcnow(),
+    }
+
+    if person_id:
+        await get_collection(COLL_IRM_PERSON_CONFIG).update_one(
+            {"company_id": str(company_id), "person_id": str(person_id)},
+            {"$set": {"company_id": str(company_id), "person_id": str(person_id), **stamp},
+             "$setOnInsert": {"created_at": datetime.utcnow()}},
+            upsert=True,
+        )
+    else:
+        await get_collection(COLL_IRM_CONFIG).update_one(
+            {"company_id": str(company_id)},
+            {"$set": {"company_id": str(company_id), **stamp},
+             "$setOnInsert": {"created_at": datetime.utcnow()}},
+            upsert=True,
+        )
+    return await get_config(company_id, person_id)
+
+
+async def clear_person_weightages(company_id: str, person_id: str) -> dict:
+    """Drop one person's override so they fall back to the company column.
+
+    Without this an override could be changed but never undone, which would make the
+    company default unreachable for anyone who had ever been customised.
+    """
+    res = await get_collection(COLL_IRM_PERSON_CONFIG).delete_one({
+        "company_id": str(company_id), "person_id": str(person_id)})
+    config = await get_config(company_id, person_id)
+    config["removed"] = res.deleted_count
+    return config
 
 
 # ─────────────────────────────────────────────────────────────
@@ -202,6 +293,24 @@ def task_credit(doc: dict) -> float:
     return done / len(items)
 
 
+def task_weight(doc: dict) -> float:
+    """How many units of "assigned" ONE task is worth. 1.0 unless it says otherwise.
+
+    Every task used to count the same, so a fortnight's project scored exactly as much as
+    a five-minute errand and a month of small tasks could outscore a month of hard ones.
+    `irm_weight` lets the person setting the task say what it is worth; absent or
+    unreadable it stays 1.0, which is precisely the old behaviour — so nothing already in
+    the database scores differently than it did.
+    """
+    try:
+        w = float(doc.get("irm_weight"))
+    except (TypeError, ValueError):
+        return TASK_WEIGHT_DEFAULT
+    if w != w:                              # NaN
+        return TASK_WEIGHT_DEFAULT
+    return max(TASK_WEIGHT_MIN, min(TASK_WEIGHT_MAX, round(w, 2)))
+
+
 async def _task_totals(company_id: str, period: str, people: Dict[str, dict]) -> Dict[str, dict]:
     """{person_id: {"task": {...}, "delegation": {...}}} — per bucket:
 
@@ -218,7 +327,9 @@ async def _task_totals(company_id: str, period: str, people: Dict[str, dict]) ->
     cid = str(company_id)
 
     def _bucket():
-        return {"assigned": 0, "achieved": 0.0, "completed": 0, "partial": 0}
+        # `assigned` is a sum of WEIGHTS, not a headcount, so `count` is carried alongside
+        # it — the screen still wants to say "5 tasks", and 5 tasks can weigh 7.5.
+        return {"assigned": 0.0, "achieved": 0.0, "completed": 0, "partial": 0, "count": 0}
 
     totals = {pid: {"task": _bucket(), "delegation": _bucket()} for pid in people}
 
@@ -227,13 +338,17 @@ async def _task_totals(company_id: str, period: str, people: Dict[str, dict]) ->
             continue  # a company's IRM only counts that company's tasks
         bucket = "delegation" if is_delegated(doc) else "task"
         credit = task_credit(doc)
+        weight = task_weight(doc)
         for pid in doer_ids(doc):
             row = totals.get(pid)
             if row is None:
                 continue  # doer is not on this company's active roster
             cell = row[bucket]
-            cell["assigned"] += 1
-            cell["achieved"] += credit
+            # Both sides scale together, so the ratio is unchanged for a weight of 1 and a
+            # heavier task simply counts for more of the month on both halves of it.
+            cell["assigned"] += weight
+            cell["achieved"] += credit * weight
+            cell["count"] += 1
             if credit >= 1.0:
                 cell["completed"] += 1
             elif credit > 0:
@@ -282,8 +397,15 @@ async def _form_totals(company_id: str, period: str, form_type: str,
 # The calculation
 # ─────────────────────────────────────────────────────────────
 def _build_row(person: dict, weights: Dict[str, float],
-               task_totals: dict, form_totals: Dict[str, dict]) -> dict:
-    """One person's IRM — every intermediate value kept so the maths stays auditable."""
+               task_totals: dict, form_totals: Dict[str, dict],
+               scope: str = SCOPE_COMPANY,
+               attendance: Optional[dict] = None) -> dict:
+    """One person's IRM — every intermediate value kept so the maths stays auditable.
+
+    `weights` is THIS person's map, which may be their own override or the company
+    column. It is echoed back on the row (with the scope that produced it) so a score can
+    be read without guessing which sheet it was built from.
+    """
     breakdown: List[dict] = []
     final_irm = 0.0
     applicable_weightage = 0.0
@@ -292,7 +414,19 @@ def _build_row(person: dict, weights: Dict[str, float],
         code = p["code"]
         weightage = float(weights.get(code, 0.0))
 
-        if p["source"] == SOURCE_TASK:
+        if p["source"] == SOURCE_ATTENDANCE:
+            a = attendance or {}
+            present = a.get("present", 0)
+            punctual = a.get("punctual", 0)
+            achievement = _pct(punctual, present)
+            detail = {
+                "achieved": punctual,
+                "assigned": present,
+                "late_in": a.get("late_in", 0),
+                "early_out": a.get("early_out", 0),
+                "missing_out": a.get("missing_out", 0),
+            }
+        elif p["source"] == SOURCE_TASK:
             counts = (task_totals or {}).get(code) or {}
             assigned = counts.get("assigned", 0)
             achieved = counts.get("achieved", 0.0)
@@ -302,9 +436,13 @@ def _build_row(person: dict, weights: Dict[str, float],
             # say "3 done + 2 in progress" instead of showing a puzzling 3.6.
             detail = {
                 "achieved": round(achieved, 2),
-                "assigned": assigned,
+                "assigned": round(assigned, 2),
+                "count": counts.get("count", 0),
                 "completed": counts.get("completed", 0),
                 "partial": counts.get("partial", 0),
+                # True when the tasks in this bucket did not all weigh 1, so the screen can
+                # explain why "3 of 5 tasks" is not the same as the percentage shown.
+                "weighted": round(assigned, 2) != counts.get("count", 0),
             }
         else:
             f = (form_totals.get(code) or {})
@@ -341,6 +479,8 @@ def _build_row(person: dict, weights: Dict[str, float],
         **person,
         "parameters": breakdown,
         "final_irm": final_irm,
+        "weightages": {c: round(float(w), 2) for c, w in weights.items()},
+        "weightage_scope": scope,
         "total_weightage": round(sum(weights.values()), 2),
         # Rebased onto only the parameters that had data — None when nothing did.
         "applicable_weightage": applicable_weightage,
@@ -360,37 +500,62 @@ async def compute_company_irm(company_id: str, period: Optional[str] = None,
     period = period or current_period()
     period_bounds(period)  # validate early — a bad period should 400, not score 0
 
-    weights = await get_weightages(company_id)
+    # The company column, plus every per-person override in one read. Resolving each row
+    # from these two rather than querying per person keeps a 500-person roster at two
+    # config reads, exactly as it was when the column was company-wide.
+    company_weights, company_scope = await resolve_weightages(company_id)
+    overrides = await load_person_weightages(company_id)
+
     people = await load_people(company_id)
     if person_id:
         people = {pid: p for pid, p in people.items() if pid == str(person_id)}
+
+    def _weights_for(pid: str) -> tuple:
+        stored = overrides.get(str(pid))
+        if stored:
+            return _merge_weightages(company_weights, stored), SCOPE_PERSON
+        return company_weights, company_scope
 
     tasks = await _task_totals(company_id, period, people)
     forms = {p["code"]: await _form_totals(company_id, period, p["form_type"], people)
              for p in IRM_PARAMETERS if p["source"] == SOURCE_FORM}
 
-    rows = [
-        _build_row(
+    # Imported punches, scored against the company's shift rule. A month with nothing
+    # imported yields no `present` days, so punctuality reports achievement None and
+    # contributes nothing — the same "missing data" path every other parameter uses.
+    attendance: Dict[str, dict] = {}
+    if any(p["source"] == SOURCE_ATTENDANCE for p in IRM_PARAMETERS):
+        from app.services.irm_attendance_service import attendance_totals
+        attendance = await attendance_totals(company_id, period, people)
+
+    rows = []
+    for pid, person in people.items():
+        person_weights, scope = _weights_for(pid)
+        rows.append(_build_row(
             person,
-            weights,
+            person_weights,
             tasks.get(pid, {}),
             {code: totals.get(pid, {}) for code, totals in forms.items()},
-        )
-        for pid, person in people.items()
-    ]
+            scope,
+            attendance.get(pid, {}),
+        ))
     # Highest IRM first; people with no data at all sink to the bottom.
     rows.sort(key=lambda r: (r["has_data"], r["final_irm"]), reverse=True)
 
     scored = [r for r in rows if r["has_data"]]
-    total_weightage = round(sum(weights.values()), 2)
+    total_weightage = round(sum(company_weights.values()), 2)
+    # The top-level column stays the COMPANY default — it is the sheet header, and each
+    # row now carries its own `weightages` for anyone on a different mix.
     return {
         "company_id": str(company_id),
         "period": period,
-        "weightages": weights,
+        "weightages": company_weights,
         "total_weightage": total_weightage,
         "is_valid_weightage": abs(total_weightage - TOTAL_WEIGHTAGE) <= WEIGHTAGE_EPSILON,
+        "customised_people": sum(1 for r in rows if r.get("weightage_scope") == SCOPE_PERSON),
         "parameters": [{"code": p["code"], "name": p["name"], "source": p["source"],
-                        "weightage": weights.get(p["code"], 0.0)} for p in IRM_PARAMETERS],
+                        "weightage": company_weights.get(p["code"], 0.0)}
+                       for p in IRM_PARAMETERS],
         "rows": rows,
         "summary": {
             "people": len(rows),
@@ -421,7 +586,10 @@ async def recalculate_and_store(company_id: str, period: Optional[str] = None) -
                 "period": result["period"],
                 "person_id": row["person_id"],
                 "person_name": row.get("name"),
-                "weightages": result["weightages"],
+                # The row's OWN map, not the company column — a snapshot has to record
+                # what the score was actually built from or it cannot be audited.
+                "weightages": row.get("weightages") or result["weightages"],
+                "weightage_scope": row.get("weightage_scope"),
                 "parameters": row["parameters"],
                 "final_irm": row["final_irm"],
                 "final_irm_applicable": row["final_irm_applicable"],

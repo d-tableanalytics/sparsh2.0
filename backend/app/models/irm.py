@@ -32,12 +32,53 @@ from datetime import datetime
 # ─────────────────────────────────────────────────────────────
 # Collections
 # ─────────────────────────────────────────────────────────────
-COLL_IRM_CONFIG = "irm_configs"   # one row per company — the editable weightages
+COLL_IRM_CONFIG = "irm_configs"   # one row per company — the DEFAULT weightages
 COLL_IRM_SCORES = "irm_scores"    # optional per (company, period, person) snapshot
+# One row per (company, person) — an override for people whose mix differs from the
+# company default. Deliberately a SEPARATE collection rather than a field on irm_configs:
+# the company row keeps its exact meaning and existing documents are never rewritten, so a
+# company that never sets an override behaves precisely as it did before.
+COLL_IRM_PERSON_CONFIG = "irm_person_configs"
+# Imported attendance — one row per (company, person, date) carrying the day's punches.
+# Import is the ONLY writer: there is deliberately no endpoint that marks a day by hand,
+# so the punch times always trace back to whatever the biometric/HR export said.
+COLL_IRM_ATTENDANCE = "irm_attendance"
 
 # Parameter source kinds — decides how the achievement % is derived.
 SOURCE_TASK = "task"   # counted:  achieved ÷ assigned
 SOURCE_FORM = "form"   # rated:    rating sum ÷ max possible
+SOURCE_ATTENDANCE = "attendance"   # punched: punctual days ÷ days present
+
+# ─────────────────────────────────────────────────────────────
+# Shift rule — what "punctual" means for a company.
+#
+# Punctuality cannot be derived from punch times alone: 09:41 is early for one company and
+# late for another. The shift is therefore configuration, stored on the company's own
+# irm_configs row (additive — a company that never sets one uses these values), and the
+# grace period is separate from the shift so "we start at 9:30, 10 minutes is fine" can be
+# said directly instead of being smuggled into the start time.
+# ─────────────────────────────────────────────────────────────
+SHIFT_START_DEFAULT = "09:30"
+SHIFT_END_DEFAULT = "18:30"
+SHIFT_GRACE_DEFAULT = 10        # minutes
+
+
+def default_shift() -> Dict[str, object]:
+    return {"start": SHIFT_START_DEFAULT, "end": SHIFT_END_DEFAULT,
+            "grace_minutes": SHIFT_GRACE_DEFAULT}
+
+
+# ─────────────────────────────────────────────────────────────
+# Per-task weight — how much ONE task counts for inside the Task / Delegation parameters.
+#
+# Distinct from the parameter weightages above, which decide how the five parameters trade
+# off against each other. This decides how two tasks trade off against each other INSIDE
+# one of them. 1.0 is the neutral value and the default, so every task already in the
+# database keeps counting exactly as it always did.
+# ─────────────────────────────────────────────────────────────
+TASK_WEIGHT_DEFAULT = 1.0
+TASK_WEIGHT_MIN = 0.1
+TASK_WEIGHT_MAX = 10.0
 
 # The weightages must add up to exactly this.
 TOTAL_WEIGHTAGE = 100.0
@@ -81,6 +122,18 @@ IRM_PARAMETERS: List[dict] = [
         "source": SOURCE_FORM,
         "form_type": "accountability",
         "description": "Monthly Accountability rating submitted by the person's HOD.",
+    },
+    {
+        "code": "punctuality",
+        "name": "Punctuality",
+        # Seeded at ZERO on purpose. The four parameters above already total 100, and every
+        # company that has saved a column saved those four. A non-zero seed would push each
+        # of those existing columns to more than 100 the moment this parameter shipped,
+        # which IRMConfigUpdate would then refuse to re-save. At zero the arithmetic is
+        # unchanged for everyone, and a company opts in by taking weightage from the others.
+        "default_weightage": 0.0,
+        "source": SOURCE_ATTENDANCE,
+        "description": "On-time arrival and full-shift departure, from imported punch times.",
     },
 ]
 
@@ -152,6 +205,59 @@ class IRMConfigUpdate(BaseModel):
         return {i.code: i.weightage for i in self.weightages}
 
 
+# Where a resolved weightage map came from. Reported alongside every score so the screen
+# can say whether a person is on their own mix or the company's.
+SCOPE_PERSON = "person"
+SCOPE_COMPANY = "company"
+SCOPE_DEFAULT = "default"   # neither row exists — the registry seeds are in force
+
+
+def _hhmm(value, field: str) -> str:
+    """'9:5' → '09:05'. Raises on anything that is not a 24-hour clock time."""
+    raw = str(value or "").strip()
+    parts = raw.split(":")
+    if len(parts) != 2:
+        raise ValueError(f"{field} must be a 24-hour time like 09:30")
+    try:
+        hh, mm = int(parts[0]), int(parts[1])
+    except ValueError:
+        raise ValueError(f"{field} must be a 24-hour time like 09:30")
+    if not (0 <= hh <= 23 and 0 <= mm <= 59):
+        raise ValueError(f"{field} must be a 24-hour time like 09:30")
+    return f"{hh:02d}:{mm:02d}"
+
+
+class IRMShiftUpdate(BaseModel):
+    """The company's shift rule. Saved from IRM Setup, read by the punctuality parameter."""
+    start: str = SHIFT_START_DEFAULT
+    end: str = SHIFT_END_DEFAULT
+    grace_minutes: int = SHIFT_GRACE_DEFAULT
+
+    @field_validator("start")
+    @classmethod
+    def _start(cls, v):
+        return _hhmm(v, "Shift start")
+
+    @field_validator("end")
+    @classmethod
+    def _end(cls, v):
+        return _hhmm(v, "Shift end")
+
+    @field_validator("grace_minutes")
+    @classmethod
+    def _grace(cls, v):
+        try:
+            g = int(v)
+        except (TypeError, ValueError):
+            raise ValueError("Grace must be a whole number of minutes")
+        if g < 0 or g > 240:
+            raise ValueError("Grace must be between 0 and 240 minutes")
+        return g
+
+    def as_map(self) -> Dict[str, object]:
+        return {"start": self.start, "end": self.end, "grace_minutes": self.grace_minutes}
+
+
 class IRMConfig(BaseModel):
     company_id: str
     weightages: Dict[str, float] = Field(default_factory=default_weightages)
@@ -162,6 +268,14 @@ class IRMConfig(BaseModel):
 # Indexes provisioned at startup (mirrors TPMS_INDEXES in app/models/tpms.py).
 IRM_INDEXES = [
     (COLL_IRM_CONFIG, [("company_id", 1)], {"unique": True, "name": "uniq_company"}),
+    (COLL_IRM_PERSON_CONFIG, [("company_id", 1), ("person_id", 1)],
+     {"unique": True, "name": "uniq_company_person"}),
+    (COLL_IRM_PERSON_CONFIG, [("company_id", 1)], {"name": "by_company"}),
+    # One row per person per day: a re-import of the same day updates rather than
+    # duplicating, which is what makes re-importing a corrected file safe.
+    (COLL_IRM_ATTENDANCE, [("company_id", 1), ("person_id", 1), ("date", 1)],
+     {"unique": True, "name": "uniq_company_person_date"}),
+    (COLL_IRM_ATTENDANCE, [("company_id", 1), ("period", 1)], {"name": "by_company_period"}),
     (COLL_IRM_SCORES, [("company_id", 1), ("period", 1), ("person_id", 1)],
      {"unique": True, "name": "uniq_company_period_person"}),
     (COLL_IRM_SCORES, [("company_id", 1), ("period", 1)], {"name": "by_company_period"}),

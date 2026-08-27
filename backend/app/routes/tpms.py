@@ -629,7 +629,8 @@ async def submit_meta_template(template_id: str, current_user: dict = Depends(ge
     resubmitted."""
     _meta_admin(current_user)
     from app.services.meta_whatsapp_service import (
-        MetaTemplateError, create_message_template, resolve_header_handle, validate_template,
+        MetaTemplateError, create_message_template, edit_message_template, resolve_header_handle,
+        validate_template,
     )
 
     coll = get_collection(COLL_META_TEMPLATES)
@@ -648,12 +649,18 @@ async def submit_meta_template(template_id: str, current_user: dict = Depends(ge
         raise HTTPException(status_code=400, detail="; ".join(errors))
 
     now = datetime.utcnow()
+    existing_id = str(doc.get("meta_template_id") or "").strip()
     try:
         handle = await resolve_header_handle(doc)
         if handle and handle != doc.get("header_handle"):
             doc["header_handle"] = handle
             await coll.update_one({"_id": oid}, {"$set": {"header_handle": handle}})
-        result = await create_message_template(doc)
+        # A REJECTED template still occupies its name on the WABA, and Meta answers a second
+        # create for that name with 2388024 "Content in this language already exists". The only
+        # way to act on a rejection is to correct the template Meta already holds, which keeps
+        # its id and puts it back into review. A DRAFT has no id yet, so it is created.
+        result = (await edit_message_template(existing_id, doc) if existing_id
+                  else await create_message_template(doc))
     except MetaTemplateError as e:
         # The definition is untouched and still editable — record why the attempt failed so the
         # admin sees it on the row rather than only in a toast that disappears.
@@ -984,7 +991,7 @@ async def upsert_whatsapp_template(payload: dict, current_user: dict = Depends(g
 # The data fields a WhatsApp template's {{1}}, {{2}}, … parameters can map to. These are exactly
 # the keys build_map produces, so a mapped field is guaranteed to resolve at send time.
 _WHATSAPP_VARIABLE_FIELDS = [
-    "Title", "Activity", "Company_Name", "Event_Date", "Event_Time",
+    "Title", "Activity", "Calendar_Type", "Company_Name", "Event_Date", "Event_Time",
     "Status", "Departments", "Comment", "Recipient_Name",
     "Form_Link", "Form_Link_2", "Form_Links",
 ]

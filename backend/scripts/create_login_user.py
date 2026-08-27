@@ -6,19 +6,17 @@ an existing superadmin.
 Writes ONE document into `staff` (superadmin/admin/coach/staff) or `learners` (everything
 else), matching exactly what routes/auth.register builds: bcrypt hash in `password`,
 `tag`, `full_name`, `created_at`, plus the permission block from models/user.UserBase so
-RBAC checks and GET /users/me behave the same as a UI-created user. No other document or
-collection is read or modified.
+the RBAC checks and GET /users/me behave the same as a UI-created user. No other document
+or collection is read or modified.
 
-Emails are checked across BOTH collections: /auth/token searches `staff` first and returns
-on the first hit, so a `learners` row sharing an email with a `staff` row is dead weight —
-it can never authenticate. Re-running for an existing email updates only that account's
-password/role/is_active (opt in with --force), so it doubles as a password reset.
+Re-running for an email that already exists updates only that account's password/role/
+is_active (opt in with --force), so it doubles as a password reset.
 
 Usage (from backend/):
-    python -m scripts.create_login_user --email admin@sparsh.app --password 'Admin@123'
+    python -m scripts.create_login_user --email admin@sparsh.local --password 'Admin@123'
     python -m scripts.create_login_user --email x@y.com --password 'p' --role clientadmin \
         --company-id 665f... --first-name X --last-name Y
-    python -m scripts.create_login_user --email admin@sparsh.app --password 'New@123' --force
+    python -m scripts.create_login_user --email admin@sparsh.local --password 'New@123' --force
     python -m scripts.create_login_user --list
 """
 import argparse
@@ -39,64 +37,54 @@ def collection_for(role: str) -> str:
 
 
 async def list_users():
-    seen = {}
     for coll in ("staff", "learners"):
         rows = await get_collection(coll).find(
-            {}, {"email": 1, "role": 1, "is_active": 1, "company_id": 1}
+            {}, {"email": 1, "role": 1, "is_active": 1, "full_name": 1, "company_id": 1}
         ).to_list(length=500)
         print(f"\n{coll}: {len(rows)} account(s)")
         for r in rows:
-            email = r.get("email") or "?"
-            print(f"  {email:34s} role={str(r.get('role')):12s} "
+            print(f"  {r.get('email'):40s} role={r.get('role'):12s} "
                   f"active={r.get('is_active')} company={r.get('company_id')}")
-            seen.setdefault(email, []).append(coll)
-
-    shadowed = {e: c for e, c in seen.items() if len(c) > 1}
-    if shadowed:
-        print("\n[WARN] These emails exist in both collections. /auth/token checks `staff`"
-              "\n       first, so the `learners` row can never log in:")
-        for e in shadowed:
-            print(f"         {e}")
 
 
-async def ensure_user(email, password, role, company_id=None,
-                      first_name=None, last_name=None, force=False):
-    """Insert the account, or reset it when --force. Returns 0 on success, 1 on skip."""
-    role = (role or "clientuser").lower().strip()
-    email = email.lower().strip()
+async def upsert_user(args):
+    role = args.role.lower().strip()
+    email = args.email.lower().strip()
+    coll_name = collection_for(role)
 
+    # An email must be unique across BOTH collections: /auth/token searches staff first and
+    # would never reach a same-email learner.
     for other in ("staff", "learners"):
         existing = await get_collection(other).find_one({"email": email})
         if not existing:
             continue
-        if not force:
+        if not args.force:
             print(f"[SKIP] {email} already exists in `{other}` "
                   f"(role={existing.get('role')}). Re-run with --force to reset it.")
             return 1
         await get_collection(other).update_one(
             {"_id": existing["_id"]},
-            {"$set": {"password": get_password_hash(password),
+            {"$set": {"password": get_password_hash(args.password),
                       "role": role,
                       "is_active": True}},
         )
         print(f"[OK] Reset password for {email} in `{other}` (role={role}, active=True)")
         return 0
 
-    first = first_name or email.split("@")[0].title()
+    first = args.first_name or email.split("@")[0].title()
     doc = UserBase(
         email=email,
         first_name=first,
-        last_name=last_name,
+        last_name=args.last_name,
         role=role,
-        company_id=company_id,
+        company_id=args.company_id,
         is_active=True,
     ).model_dump()
-    doc["password"] = get_password_hash(password)
+    doc["password"] = get_password_hash(args.password)
     doc["tag"] = "staff" if role in STAFF_ROLES else "learner"
-    doc["full_name"] = f"{first} {last_name or ''}".strip()
+    doc["full_name"] = f"{first} {args.last_name or ''}".strip()
     doc["created_at"] = datetime.utcnow()
 
-    coll_name = collection_for(role)
     result = await get_collection(coll_name).insert_one(doc)
     print(f"[OK] Created {email} in `{coll_name}` (role={role}, _id={result.inserted_id})")
     return 0
@@ -130,8 +118,7 @@ async def main():
             return 0
         if not args.email or not args.password:
             p.error("--email and --password are required (or use --list)")
-        return await ensure_user(args.email, args.password, args.role, args.company_id,
-                                 args.first_name, args.last_name, args.force)
+        return await upsert_user(args)
     finally:
         await close_mongo_connection()
 

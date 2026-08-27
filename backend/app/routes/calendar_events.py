@@ -215,6 +215,26 @@ async def notify_users_instant(event_dict: dict, action: str, creator_name: str)
         except Exception as e:
             print(f"Conflict Notification Error: {e}")
 
+
+async def notify_todo_created(todo: dict, occurrences: int = 1):
+    """Confirm a new calendar To-do to the one person it belongs to.
+
+    This is the todo's OWN trigger, deliberately separate from notify_users_instant above:
+    that function resolves a session's attendee list and renders the Calendar session
+    templates, neither of which a private todo has — which is exactly why todos are excluded
+    there, and why they were left with no email at all. Recipient is the owner (`user_id`),
+    template is `todo_created`, and it fires once per create, so nothing double-sends.
+    """
+    try:
+        owner = await find_user_by_id(todo.get("user_id"))
+        if not owner or not owner.get("email"):
+            return
+        from app.services.notification_service import send_todo_created_email
+        await send_todo_created_email(owner, todo, occurrences=occurrences)
+    except Exception as e:
+        print(f"Todo notification error: {e}")
+
+
 def _days_in_month(year, month):
     return calendar.monthrange(year, month)[1]
 
@@ -671,7 +691,9 @@ async def create_event(event: CalendarEventCreate, background_tasks: BackgroundT
             ids = [str(_id) for _id in insert_res.inserted_ids]
             await log_activity(current_user, "Create Recurring", col_name,
                                f"Generated {len(ids)} todos for {event_dict['title']}")
-            # No notification: a todo is private and has no attendees by design.
+            # One mail for the whole series. The owner asked for a repeating todo once, so
+            # a message per generated date would be the duplicate notification to avoid.
+            background_tasks.add_task(notify_todo_created, {**event_dict, "id": ids[0]}, len(ids))
             message = f"Created {len(ids)} todos"
             if truncated:
                 message += " (series capped — shorten the Repeat End Date for the remaining dates)"
@@ -803,6 +825,10 @@ async def create_event(event: CalendarEventCreate, background_tasks: BackgroundT
         else:
             background_tasks.add_task(notify_task_event, "created", event_dict, current_user)
         background_tasks.add_task(sync_task_meta, event_dict.get("category"), event_dict.get("tags"), str(current_user["_id"]))
+    elif event_dict.get("type") == TODO_TYPE:
+        # notify_users_instant ignores todos by design, so this is the only place a calendar
+        # To-do can be announced — without it, creating one sent nothing at all.
+        background_tasks.add_task(notify_todo_created, event_dict, 1)
     else:
         background_tasks.add_task(notify_users_instant, event_dict, "created", creator_name)
     await log_activity(current_user, "Create Task" if is_task else "Create Event", col_name, f"{'Task' if is_task else 'Event'} created: {event_dict['title']}",

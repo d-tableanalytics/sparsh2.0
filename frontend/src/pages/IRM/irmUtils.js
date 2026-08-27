@@ -10,11 +10,12 @@ export const CLIENT_ROLES = ['clientadmin', 'clientuser'];
 /* Mirrors CONFIG_ROLES / RECALC_ROLES in backend/app/routes/irm.py. The backend is the
    real gate — these only decide what the UI offers, so a hidden control and a rejected
    request can never disagree. */
-export const CONFIG_ROLES = [...STAFF_ROLES];
+export const CONFIG_ROLES = [...STAFF_ROLES, 'clientadmin'];
 export const RECALC_ROLES = [...STAFF_ROLES, 'clientadmin'];
 
 export const isStaff = (user) => STAFF_ROLES.includes(user?.role);
-/** Editing the weightage column is internal staff only — a clientadmin only reads it. */
+/** Internal staff, plus a company's own clientadmin for their own people. A clientuser
+    never edits: they are the ones being scored. */
 export const canEditWeightages = (user) => CONFIG_ROLES.includes(user?.role);
 export const canRecalculate = (user) => RECALC_ROLES.includes(user?.role);
 
@@ -111,9 +112,17 @@ export const useIrmCompany = () => {
 export const errText = (e, fallback) => {
   const detail = e?.response?.data?.detail;
   if (typeof detail === 'string' && detail.trim()) return detail;
-  // Pydantic validation errors arrive as a list of {msg, loc, …}.
+  // Pydantic validation errors arrive as a list of {msg, loc, …}. `loc` is what names the
+  // offending field — without it a missing-field 422 renders as a bare "Field required",
+  // which says nothing about WHICH field and sends you looking in the wrong place.
   if (Array.isArray(detail) && detail.length) {
-    return detail.map((d) => String(d?.msg || '').replace(/^Value error,\s*/, '')).join(' ');
+    return detail.map((d) => {
+      const msg = String(d?.msg || '').replace(/^Value error,\s*/, '');
+      const field = (Array.isArray(d?.loc) ? d.loc : [])
+        .filter((part) => typeof part === 'string' && part !== 'body')
+        .pop();
+      return field ? `${field}: ${msg}` : msg;
+    }).join(' ');
   }
   return fallback;
 };

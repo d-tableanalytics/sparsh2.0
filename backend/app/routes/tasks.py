@@ -1110,13 +1110,30 @@ async def update_checklist_item(task_id: str, item_id: str, body: dict, current_
     if not item:
         raise HTTPException(status_code=404, detail="Checklist item not found")
 
+    # Update ONLY this element, via the positional operator.
+    #
+    # This used to mutate the in-memory list and write the WHOLE `checklist` array back. The
+    # Check Points panel saves every tick at once (Promise.all), so two PATCHes for two items
+    # ran concurrently: both read the same original array, each flipped its own item, and
+    # whichever wrote last replaced the other's work — tick two boxes, save, and only one came
+    # back ticked. Writing `checklist.$.field` touches the matched element alone, so concurrent
+    # updates to different items no longer overwrite one another.
+    updates = {}
     if "completed" in body:
-        item["completed"] = bool(body["completed"])
-        item["completed_at"] = datetime.now(timezone.utc).isoformat() if item["completed"] else None
-    if "title" in body and body["title"].strip():
-        item["title"] = body["title"].strip()
+        completed = bool(body["completed"])
+        updates["checklist.$.completed"] = completed
+        updates["checklist.$.completed_at"] = (
+            datetime.now(timezone.utc).isoformat() if completed else None)
+        item["completed"] = completed
+        item["completed_at"] = updates["checklist.$.completed_at"]
+    if "title" in body and str(body.get("title") or "").strip():
+        title = str(body["title"]).strip()
+        updates["checklist.$.title"] = title
+        item["title"] = title
 
-    await get_collection(col_name).update_one({"_id": ObjectId(task_id)}, {"$set": {"checklist": checklist}})
+    if updates:
+        await get_collection(col_name).update_one(
+            {"_id": ObjectId(task_id), "checklist.id": item_id}, {"$set": updates})
     return item
 
 

@@ -1,15 +1,20 @@
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Gauge, RefreshCw, SlidersHorizontal, Users, Target, TrendingUp,
   AlertTriangle, ChevronDown, Percent, Info, Calculator,
+  Clock, Upload, Download, X, Plus,
 } from 'lucide-react';
 import {
   DashboardHero, HeaderSelect, HeroButton, Section, Th, Td, TableShell,
   KpiTile, usePaged, Pager,
 } from '../../features/tpms/common/dashboardKit';
-import { getIrmScores, recalculateIrm } from '../../services/irmApi';
+import {
+  getIrmScores, recalculateIrm,
+  importIrmAttendance, exportIrmAttendance, getIrmAttendanceTemplate, saveIrmConfig,
+} from '../../services/irmApi';
+import { createTask } from '../../services/taskApi';
 import {
   canEditWeightages, canRecalculate, currentPeriod, errText, fmtNum, fmtPct, periodLabel,
   periodOptions, scoreColor, scoreTone, useAsync, useIrmCompany,
@@ -158,12 +163,403 @@ const Breakdown = ({ row, columns }) => (
   </div>
 );
 
+/** Import punch times, then say exactly what landed.
+    A bulk load that half-worked is the worst outcome, so unmatched identifiers are named
+    rather than counted — a file whose employee codes are wrong has to fail visibly, not
+    score the wrong people. */
+const AttendanceModal = ({ companyId, period, onClose, onImported }) => {
+  const [file, setFile] = useState(null);
+  const [busy, setBusy] = useState('');
+  const [err, setErr] = useState('');
+  const [result, setResult] = useState(null);
+
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape' && !busy) onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [busy, onClose]);
+
+  const doImport = async () => {
+    if (!file) { setErr('Choose a file first.'); return; }
+    setBusy('import'); setErr(''); setResult(null);
+    try {
+      const res = await importIrmAttendance(companyId, file);
+      setResult(res.data);
+      onImported?.();
+    } catch (e) {
+      setErr(errText(e, 'Could not import that file.'));
+    } finally { setBusy(''); }
+  };
+
+  // The blob is turned into a click here rather than a plain link: the request needs the
+  // auth header the axios instance carries, which an <a href> would not send.
+  const download = async (kind, request, filename, failure) => {
+    setBusy(kind); setErr('');
+    try {
+      const res = await request();
+      const url = URL.createObjectURL(new Blob([res.data]));
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      setErr(errText(e, failure));
+    } finally { setBusy(''); }
+  };
+
+  const doTemplate = () => download(
+    'template',
+    () => getIrmAttendanceTemplate(companyId),
+    'irm-attendance-template.xlsx',
+    'Could not download the template.',
+  );
+
+  const doExport = () => download(
+    'export',
+    () => exportIrmAttendance(companyId, period),
+    `irm-attendance-${period || 'all'}.xlsx`,
+    'Could not export attendance.',
+  );
+
+  return (
+    <MotionDiv className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={busy ? undefined : onClose} />
+      <MotionDiv role="dialog" aria-modal="true"
+        initial={{ opacity: 0, y: 14, scale: 0.98 }}
+        animate={{ opacity: 1, y: 0, scale: 1 }}
+        exit={{ opacity: 0, y: 14, scale: 0.98 }}
+        transition={{ duration: 0.22, ease: [0.4, 0, 0.2, 1] }}
+        className="relative w-full max-w-lg rounded-2xl border border-[var(--border)] bg-[var(--bg-card)] shadow-xl overflow-hidden">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-[var(--border)]">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <span className="w-8 h-8 rounded-lg flex items-center justify-center bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] shrink-0">
+              <Clock size={16} />
+            </span>
+            <div className="min-w-0">
+              <h3 className="text-[15px] font-extrabold tracking-tight">Attendance</h3>
+              <span className="block text-[10.5px] font-bold text-[var(--text-muted)]">
+                {periodLabel(period)} · punch times feed Punctuality
+              </span>
+            </div>
+          </div>
+          <button type="button" onClick={onClose} disabled={!!busy}
+            className="w-8 h-8 rounded-lg flex items-center justify-center text-[var(--text-muted)] hover:bg-[var(--input-bg)] transition-colors disabled:opacity-50">
+            <X size={16} />
+          </button>
+        </div>
+
+        <div className="px-5 py-4 space-y-3.5">
+          <p className="text-[12.5px] font-semibold text-[var(--text-muted)]">
+            The file needs a <b className="text-[var(--text-main)]">Date</b> column, an{' '}
+            <b className="text-[var(--text-main)]">In Time</b> column, and one of Employee ID,
+            Email or Name to match people. Out Time is optional but a day without it cannot
+            count as punctual. Re-importing a day replaces it.
+          </p>
+
+          {/* Offered before the file picker on purpose: the template carries the roster's
+              own Employee IDs, which are exactly what the importer matches on. Starting
+              from it is what stops a whole file landing in `unmatched`. */}
+          <button type="button" onClick={doTemplate} disabled={!!busy}
+            className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl border border-dashed border-[var(--accent-indigo-border)] bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] text-[12.5px] font-bold hover:opacity-90 transition-opacity disabled:opacity-50">
+            {busy === 'template' ? <RefreshCw size={14} className="animate-spin" /> : <Download size={14} />}
+            {busy === 'template' ? 'Preparing…' : 'Download template (with your roster)'}
+          </button>
+
+          <label className="flex flex-col gap-1.5">
+            <span className="text-[11px] font-black uppercase tracking-wide text-[var(--text-muted)]">
+              Attendance file (.xlsx / .csv)
+            </span>
+            <input type="file" accept=".xlsx,.xls,.csv" disabled={!!busy}
+              onChange={(e) => { setFile(e.target.files?.[0] || null); setResult(null); setErr(''); }}
+              className="w-full text-[12px] font-semibold file:mr-3 file:px-3 file:py-1.5 file:rounded-lg file:border-0 file:bg-[var(--accent-indigo-bg)] file:text-[var(--accent-indigo)] file:font-bold" />
+          </label>
+
+          {result && (
+            <div className="rounded-xl border border-[var(--border)] overflow-hidden">
+              <div className="grid grid-cols-3 divide-x divide-[var(--border)]">
+                {[
+                  { label: 'New', value: result.imported, tone: 'var(--accent-green)' },
+                  { label: 'Updated', value: result.updated, tone: 'var(--accent-indigo)' },
+                  { label: 'Skipped', value: result.skipped, tone: 'var(--text-muted)' },
+                ].map((s) => (
+                  <div key={s.label} className="px-3 py-2.5 text-center bg-[var(--input-bg)]">
+                    <div className="text-[17px] font-black tabular-nums" style={{ color: s.tone }}>{s.value ?? 0}</div>
+                    <div className="text-[10px] font-black uppercase tracking-wide text-[var(--text-muted)]">{s.label}</div>
+                  </div>
+                ))}
+              </div>
+              {!!result.unmatched_count && (
+                <div className="flex items-start gap-2 px-3.5 py-2.5 border-t border-[var(--border)] bg-[var(--accent-yellow-bg)] text-[11.5px] font-semibold text-[var(--accent-yellow)]">
+                  <AlertTriangle size={14} className="mt-[1px] shrink-0" />
+                  <span>
+                    {result.unmatched_count} identifier{result.unmatched_count === 1 ? '' : 's'} matched
+                    nobody on the roster: {(result.unmatched || []).map((u) => u.identifier).join(', ')}
+                    {result.unmatched_count > (result.unmatched || []).length ? '…' : ''}
+                  </span>
+                </div>
+              )}
+            </div>
+          )}
+
+          {err && (
+            <div className="flex items-center gap-2 rounded-lg border border-[var(--accent-red-border)] bg-[var(--accent-red-bg)] px-3 py-2 text-[12px] font-bold text-[var(--accent-red)]">
+              <AlertTriangle size={14} /> {err}
+            </div>
+          )}
+        </div>
+
+        <div className="flex items-center justify-between gap-2 flex-wrap px-5 py-4 border-t border-[var(--border)]">
+          <button type="button" onClick={doExport} disabled={!!busy}
+            title="Download what is stored — same columns the importer reads, so it can be corrected and re-loaded"
+            className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-[13px] font-bold text-[var(--text-muted)] border border-[var(--border)] hover:bg-[var(--input-bg)] transition-colors disabled:opacity-50">
+            {busy === 'export' ? <RefreshCw size={14} className="animate-spin" /> : <Download size={14} />}
+            {busy === 'export' ? 'Exporting…' : 'Export'}
+          </button>
+          <div className="flex items-center gap-2">
+            <button type="button" onClick={onClose} disabled={!!busy}
+              className="px-4 py-2 rounded-lg text-[13px] font-bold text-[var(--text-muted)] hover:bg-[var(--input-bg)] transition-colors disabled:opacity-50">
+              Close
+            </button>
+            <button type="button" onClick={doImport} disabled={!!busy || !file}
+              className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-[var(--accent-indigo)] text-white text-[13px] font-bold shadow-sm hover:opacity-90 transition-opacity disabled:opacity-40">
+              {busy === 'import' ? <RefreshCw size={14} className="animate-spin" /> : <Upload size={14} />}
+              {busy === 'import' ? 'Importing…' : 'Import'}
+            </button>
+          </div>
+        </div>
+      </MotionDiv>
+    </MotionDiv>
+  );
+};
+
+/** Create a task from the scoreboard, weighted.
+    Two different weights meet on this form and are kept visibly apart:
+      • the TASK weight — how much this one task counts inside the Task parameter;
+      • the PERSON column — how the five parameters trade off for this person.
+    The second is optional and edits the same per-person override IRM Setup writes, so
+    nothing here is a second source of truth for it. */
+/** The `start` a task created from this board should carry.
+    IRM buckets a task by the month its `start` falls in (report_service.fetch_tasks filters
+    on exactly that field), so it is anchored to the period being VIEWED rather than to the
+    clock: a task created while looking at August must not land in September and vanish from
+    the board that made it. Midday UTC on the 1st keeps it inside the month whichever way the
+    viewer's timezone leans. */
+const startForPeriod = (period) => {
+  const now = new Date();
+  const thisMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  if (!period || period === thisMonth) return now.toISOString();
+  const [year, month] = String(period).split('-').map(Number);
+  if (!year || !month) return now.toISOString();
+  return new Date(Date.UTC(year, month - 1, 1, 12, 0, 0)).toISOString();
+};
+
+const CreateTaskModal = ({ companyId, period, people, columns, onClose, onCreated }) => {
+  const [form, setForm] = useState({ title: '', person: '', end: '', weight: '1' });
+  const [tuning, setTuning] = useState(false);
+  // Edits are stored PER PERSON rather than as one column reset by an effect: switching
+  // person then reads its own seed straight away, and nobody's typed figures leak onto
+  // somebody else's sheet.
+  const [edits, setEdits] = useState({});
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState('');
+
+  const person = people.find((p) => p.person_id === form.person);
+
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape' && !saving) onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [saving, onClose]);
+
+  // Seeded from the person's CURRENT weightages, so opening the editor shows what they are
+  // on today rather than an empty form that would silently reset them. Derived, not stored:
+  // a state seeded from an effect re-renders twice and drifts when the scores reload.
+  const column = useMemo(() => {
+    const stored = person?.weightages || {};
+    const seed = Object.fromEntries(
+      columns.map((c) => [c.code, String(stored[c.code] ?? c.weightage ?? 0)]));
+    return { ...seed, ...(edits[form.person] || {}) };
+  }, [person, columns, edits, form.person]);
+
+  const setCell = (code, value) => setEdits((prev) => ({
+    ...prev, [form.person]: { ...(prev[form.person] || {}), [code]: value },
+  }));
+
+  const columnTotal = Math.round(
+    columns.reduce((s, c) => s + (Number(column[c.code]) || 0), 0) * 100) / 100;
+  const columnValid = Math.abs(columnTotal - 100) < 0.01;
+
+  const submit = async (e) => {
+    e.preventDefault();
+    if (!form.title.trim()) { setErr('Give the task a title.'); return; }
+    if (!form.person) { setErr('Choose who it is for.'); return; }
+    if (tuning && !columnValid) { setErr(`This person's column must total 100% (currently ${columnTotal}%).`); return; }
+
+    setSaving(true);
+    setErr('');
+    try {
+      // The ordinary task API — deliberately not a new endpoint, so a task made here is
+      // the same object Task & Delegation manages, notifications and all.
+      await createTask({
+        title: form.title.trim(),
+        // Required by CalendarEventBase, and it is what decides the task's IRM month.
+        start: startForPeriod(period),
+        end: form.end ? new Date(form.end).toISOString() : null,
+        priority: 'Normal',
+        assigned_to: 'other',
+        target_staff_id: [form.person],
+        irm_weight: Number(form.weight) || 1,
+      });
+      if (tuning) {
+        await saveIrmConfig(
+          companyId,
+          columns.map((c) => ({ code: c.code, weightage: Number(column[c.code]) || 0 })),
+          form.person,
+        );
+      }
+      onCreated?.(person?.name || 'that person', tuning);
+    } catch (ex) {
+      setErr(errText(ex, 'Could not create the task.'));
+      setSaving(false);
+    }
+  };
+
+  const field = 'w-full px-3 py-2 rounded-lg bg-[var(--input-bg)] border border-[var(--input-border)] text-[13px] font-semibold outline-none focus:border-[var(--accent-indigo)] transition-colors';
+
+  return (
+    <MotionDiv className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={saving ? undefined : onClose} />
+      <MotionDiv role="dialog" aria-modal="true"
+        initial={{ opacity: 0, y: 14, scale: 0.98 }}
+        animate={{ opacity: 1, y: 0, scale: 1 }}
+        exit={{ opacity: 0, y: 14, scale: 0.98 }}
+        transition={{ duration: 0.22, ease: [0.4, 0, 0.2, 1] }}
+        className="relative w-full max-w-lg rounded-2xl border border-[var(--border)] bg-[var(--bg-card)] shadow-xl overflow-hidden max-h-[90vh] flex flex-col">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-[var(--border)] shrink-0">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <span className="w-8 h-8 rounded-lg flex items-center justify-center bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] shrink-0">
+              <Plus size={16} />
+            </span>
+            <h3 className="text-[15px] font-extrabold tracking-tight">Create Task</h3>
+          </div>
+          <button type="button" onClick={onClose} disabled={saving}
+            className="w-8 h-8 rounded-lg flex items-center justify-center text-[var(--text-muted)] hover:bg-[var(--input-bg)] transition-colors disabled:opacity-50">
+            <X size={16} />
+          </button>
+        </div>
+
+        <form onSubmit={submit} className="px-5 py-4 space-y-3.5 overflow-y-auto">
+          <label className="flex flex-col gap-1.5">
+            <span className="text-[11px] font-black uppercase tracking-wide text-[var(--text-muted)]">Title</span>
+            <input value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })}
+              placeholder="What needs doing?" className={field} />
+          </label>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+            <label className="flex flex-col gap-1.5">
+              <span className="text-[11px] font-black uppercase tracking-wide text-[var(--text-muted)]">For</span>
+              <select value={form.person} onChange={(e) => setForm({ ...form, person: e.target.value })}
+                className={field}>
+                <option value="">Choose a person…</option>
+                {people.map((p) => (
+                  <option key={p.person_id} value={p.person_id}>{p.name}</option>
+                ))}
+              </select>
+            </label>
+            <label className="flex flex-col gap-1.5">
+              <span className="text-[11px] font-black uppercase tracking-wide text-[var(--text-muted)]">Deadline</span>
+              <input type="date" value={form.end} onChange={(e) => setForm({ ...form, end: e.target.value })}
+                className={field} />
+            </label>
+          </div>
+
+          <label className="flex flex-col gap-1.5">
+            <span className="text-[11px] font-black uppercase tracking-wide text-[var(--text-muted)]">
+              Task weight
+            </span>
+            <input type="number" min={0.1} max={10} step={0.1} value={form.weight}
+              onChange={(e) => setForm({ ...form, weight: e.target.value })} className={field} />
+            <span className="text-[10.5px] font-semibold text-[var(--text-muted)]">
+              How much this one task counts inside the Task parameter. 1 is normal; 3 counts
+              for three ordinary tasks. It does not change the person&rsquo;s IRM column.
+            </span>
+          </label>
+
+          <p className="text-[11px] font-semibold text-[var(--text-muted)]">
+            Counts toward <b className="text-[var(--text-main)]">{periodLabel(period)}</b> — the
+            period this board is showing.
+          </p>
+
+          {/* The other kind of weight, kept behind a toggle so the two are never confused. */}
+          <div className="rounded-xl border border-[var(--border)] overflow-hidden">
+            <button type="button" onClick={() => setTuning((t) => !t)} disabled={!form.person}
+              className="w-full flex items-center justify-between gap-2 px-3.5 py-2.5 bg-[var(--input-bg)] text-left disabled:opacity-50">
+              <span className="text-[12px] font-bold">
+                Also adjust {person?.name || 'this person'}&rsquo;s IRM column
+              </span>
+              <ChevronDown size={14} className={`transition-transform ${tuning ? 'rotate-180' : ''}`} />
+            </button>
+            {tuning && form.person && (
+              <div className="px-3.5 py-3 space-y-2.5">
+                <p className="text-[11px] font-semibold text-[var(--text-muted)]">
+                  Saved as this person&rsquo;s own column — everyone else stays on the company
+                  default. Must total 100%.
+                </p>
+                {columns.map((c) => (
+                  <div key={c.code} className="flex items-center justify-between gap-3">
+                    <span className="text-[12px] font-bold truncate">{c.name}</span>
+                    <input type="number" min={0} max={100} step={1} value={column[c.code] ?? ''}
+                      onChange={(e) => setCell(c.code, e.target.value)}
+                      className="w-24 px-2.5 py-1.5 rounded-lg bg-[var(--input-bg)] border border-[var(--input-border)] text-[13px] font-bold text-right tabular-nums outline-none focus:border-[var(--accent-indigo)]" />
+                  </div>
+                ))}
+                <div className="flex items-center justify-between pt-1.5 border-t border-[var(--border)]">
+                  <span className="text-[11px] font-black uppercase tracking-wide text-[var(--text-muted)]">Total</span>
+                  <span className="text-[14px] font-extrabold tabular-nums"
+                    style={{ color: columnValid ? 'var(--accent-green)' : 'var(--accent-red)' }}>
+                    {columnTotal}%
+                  </span>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {err && (
+            <div className="flex items-center gap-2 rounded-lg border border-[var(--accent-red-border)] bg-[var(--accent-red-bg)] px-3 py-2 text-[12px] font-bold text-[var(--accent-red)]">
+              <AlertTriangle size={14} /> {err}
+            </div>
+          )}
+
+          <div className="flex items-center justify-end gap-2 pt-1">
+            <button type="button" onClick={onClose} disabled={saving}
+              className="px-4 py-2 rounded-lg text-[13px] font-bold text-[var(--text-muted)] hover:bg-[var(--input-bg)] transition-colors disabled:opacity-50">
+              Cancel
+            </button>
+            <button type="submit" disabled={saving}
+              className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-[var(--accent-indigo)] text-white text-[13px] font-bold shadow-sm hover:opacity-90 transition-opacity disabled:opacity-40">
+              {saving ? <RefreshCw size={14} className="animate-spin" /> : <Plus size={14} />}
+              {saving ? 'Creating…' : 'Create Task'}
+            </button>
+          </div>
+        </form>
+      </MotionDiv>
+    </MotionDiv>
+  );
+};
+
 const IRMPage = () => {
   const { user, staff, companies, companyId, setCompanyId } = useIrmCompany();
   const [period, setPeriod] = useState(currentPeriod());
   const [expanded, setExpanded] = useState(null);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState('');
+  const [showAttendance, setShowAttendance] = useState(false);
+  const [showCreateTask, setShowCreateTask] = useState(false);
 
   // Editing weightages is Super Admin only; refreshing the snapshot is not an edit.
   const canEdit = canEditWeightages(user);
@@ -222,6 +618,14 @@ const IRMPage = () => {
           <HeaderSelect value={companyId} onChange={setCompanyId} options={companyOptions} />
         )}
         <HeaderSelect value={period} onChange={setPeriod} options={periods} />
+        {/* Attendance is the Punctuality parameter's only input, and a task is what the
+            Task parameter counts — both belong beside the scoreboard they move. */}
+        {canRefresh && !waitingForCompany && (
+          <HeroButton icon={Clock} onClick={() => setShowAttendance(true)}>Attendance</HeroButton>
+        )}
+        {canRefresh && !waitingForCompany && (
+          <HeroButton icon={Plus} onClick={() => setShowCreateTask(true)}>Create Task</HeroButton>
+        )}
         {canRefresh && <HeroButton icon={RefreshCw} onClick={recalc}>{busy ? 'Working…' : 'Recalculate'}</HeroButton>}
         <HeroButton icon={RefreshCw} onClick={reload}>Refresh</HeroButton>
       </DashboardHero>
@@ -383,6 +787,24 @@ const IRMPage = () => {
           </>
         )}
       </Section>
+
+      <AnimatePresence>
+        {showAttendance && (
+          <AttendanceModal key="attendance" companyId={companyId} period={period}
+            onClose={() => setShowAttendance(false)}
+            onImported={() => { setNotice('Attendance imported. Punctuality is recomputed on the next read.'); reload(); }} />
+        )}
+        {showCreateTask && (
+          <CreateTaskModal key="create-task" companyId={companyId} period={period}
+            people={rows} columns={columns}
+            onClose={() => setShowCreateTask(false)}
+            onCreated={(name, tuned) => {
+              setShowCreateTask(false);
+              setNotice(`Task created for ${name}${tuned ? ', and their IRM column saved' : ''}.`);
+              reload();
+            }} />
+        )}
+      </AnimatePresence>
     </div>
   );
 };
