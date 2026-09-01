@@ -1,6 +1,5 @@
 import motor.motor_asyncio
 import certifi
-import ssl
 from fastapi import HTTPException, status
 from app.config.settings import settings
 
@@ -12,15 +11,17 @@ db_connection = Database()
 
 async def connect_to_mongo():
     try:
-        # Configuration for stability on Windows
-        ssl_context = ssl.create_default_context(cafile=certifi.where())
-        
+        # Atlas (mongodb+srv) requires TLS; a typical local MongoDB instance does not.
+        client_options = {
+            "serverSelectionTimeoutMS": 20000,
+            "connectTimeoutMS": 20000,
+        }
+        if settings.MONGODB_URI.startswith("mongodb+srv://"):
+            client_options.update(tls=True, tlsCAFile=certifi.where())
+
         db_connection.client = motor.motor_asyncio.AsyncIOMotorClient(
             settings.MONGODB_URI,
-            tls=True,
-            tlsCAFile=certifi.where(),
-            serverSelectionTimeoutMS=20000,
-            connectTimeoutMS=20000
+            **client_options,
         )
         
         # Test connection with a ping
@@ -38,7 +39,10 @@ async def connect_to_mongo():
         # Provision the TPMS core collections (activities, escalations, scores, …).
         await _ensure_tpms_collections(db_connection.db)
 
-        print(f"[OK] Successfully connected to MongoDB Atlas (Database: {settings.DATABASE_NAME})")
+        # Provision the TPMS Leadership Score collections (all new; nothing existing touched).
+        await _ensure_leadership_collections(db_connection.db)
+
+        print(f"[OK] Successfully connected to MongoDB (Database: {settings.DATABASE_NAME})")
         
     except Exception as e:
         print(f"[FAILED] connect to MongoDB: {e}")
@@ -109,6 +113,45 @@ async def _ensure_tpms_collections(db):
         print(f"[WARN] Could not provision TPMS core collections: {e}")
 
 
+async def _ensure_leadership_collections(db):
+    """Idempotently create the TPMS Leadership Score collections and their indexes.
+
+    Every collection in LEADERSHIP_INDEXES is new to this module, so no existing TPMS
+    collection, document or index is read, altered or migrated here. The question master
+    is NOT seeded at startup — it is seeded lazily on first use (insert-only, and skipped
+    once any row exists), so an admin's edited questions are never overwritten. As with
+    the two provisioners above, failures must never block startup."""
+    try:
+        from app.models.leadership import LEADERSHIP_INDEXES, LEADERSHIP_OBSOLETE_INDEXES
+        existing = set(await db.list_collection_names())
+
+        # Drop indexes an earlier build created that are now wrong. This removes an INDEX,
+        # never a document — see LEADERSHIP_OBSOLETE_INDEXES for why each one has to go.
+        # The response index in particular would reject every second response now that
+        # responses carry no giver identity.
+        for coll_name, index_name in LEADERSHIP_OBSOLETE_INDEXES:
+            if coll_name not in existing:
+                continue
+            try:
+                await db[coll_name].drop_index(index_name)
+                print(f"[OK] Dropped obsolete index {index_name} on {coll_name}")
+            except Exception:
+                pass  # never created, or already gone
+        for coll_name, keys, options in LEADERSHIP_INDEXES:
+            if coll_name not in existing:
+                try:
+                    await db.create_collection(coll_name)
+                    existing.add(coll_name)
+                except Exception:
+                    pass  # created concurrently or already present
+            try:
+                await db[coll_name].create_index(keys, **options)
+            except Exception as ie:
+                print(f"[WARN] Leadership index {options.get('name')} on {coll_name}: {ie}")
+    except Exception as e:
+        print(f"[WARN] Could not provision TPMS Leadership Score collections: {e}")
+
+
 async def close_mongo_connection():
     if db_connection.client:
         db_connection.client.close()
@@ -118,7 +161,7 @@ def get_db():
     if db_connection.db is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Database connection is not available. Please ensure your IP is whitelisted in MongoDB Atlas dashboard."
+            detail="Database connection is not available. Check that MongoDB is running and that MONGODB_URI is correct."
         )
     return db_connection.db
 

@@ -287,9 +287,11 @@ const TeamManagement = () => {
                                          <select className="w-full bg-[var(--input-bg)] px-5 py-2.5 rounded-2xl border border-[var(--border)] text-[14px] font-black focus:border-[var(--accent-indigo)] outline-none" value={memberForm.department} onChange={e => setMemberForm({...memberForm, department: e.target.value})}>
                                              <option value="">Select Department</option>
                                              <option value="HOD">HOD</option>
+                                             <option value="Manager">Manager</option>
                                              <option value="Implementor">Implementor</option>
                                              <option value="EA">EA</option>
                                              <option value="MD">MD</option>
+                                             <option value="HR">HR</option>
                                              <option value="Other">Other</option>
                                          </select>
                                      </div>
