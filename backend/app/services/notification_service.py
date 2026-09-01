@@ -3,6 +3,7 @@ import requests
 import logging
 from typing import Optional, Dict, Any
 from app.db.mongodb import get_collection
+from app.services.whatsapp_components import build_send_components, resolve_params
 from datetime import datetime, timedelta, timezone
 from bson import ObjectId
 import smtplib
@@ -613,9 +614,21 @@ async def send_notification_from_template(user_obj: dict, template_slug: str, co
         meta_name = whatsapp_t.get("meta_template_name")
         if meta_name:
             # Business-initiated → must use a Meta-approved template with positional params.
-            params = [str(context.get(k, "")) for k in whatsapp_t.get("meta_params", [])]
+            # meta_params fills the body's {{1}}, {{2}}, … in order; meta_header_params and
+            # meta_button_params do the same for a text header and any variable URL button.
+            # A template with neither produces components=None, which leaves send_whatsapp_template
+            # on its original body-only payload — so a row saved before header/button mapping
+            # existed sends exactly what it always did.
+            params = resolve_params(whatsapp_t.get("meta_params"), context)
+            components = build_send_components(
+                params,
+                header_keys=whatsapp_t.get("meta_header_params"),
+                button_keys=whatsapp_t.get("meta_button_params"),
+                mapping=context,
+            )
             results["whatsapp"] = await send_whatsapp_template(
-                phone, meta_name, whatsapp_t.get("meta_lang", "en"), params, user_id, wa_slug)
+                phone, meta_name, whatsapp_t.get("meta_lang", "en"), params, user_id, wa_slug,
+                components=components)
         else:
             # Fallback: free-form text (only delivered within the 24h window).
             rendered_body = render_template(whatsapp_t["body"], context)

@@ -7,8 +7,8 @@ import {
 import {
   DashboardHero, HeroButton, HeaderSelect, Section, Th, Td, TableShell, usePaged, Pager,
 } from '../../common/dashboardKit';
-import TemplateComposer from '../whatsapp/TemplateComposer';
-import { EDITABLE_STATUSES, STATUS_TONE } from '../whatsapp/constants';
+import TemplateComposer from '../../../../components/whatsapp/TemplateComposer';
+import { EDITABLE_STATUSES, STATUS_TONE } from '../../../../components/whatsapp/constants';
 import {
   getMailTemplates, upsertMailTemplate, getActivities,
   getWhatsappTemplates, upsertWhatsappTemplate, getWhatsappVariables, setTemplateStatus,

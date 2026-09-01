@@ -26,6 +26,7 @@ from datetime import datetime
 from typing import Dict, List, Optional
 
 from app.db.mongodb import get_collection
+from app.services.whatsapp_components import build_send_components, resolve_params
 from app.models.tpms import COLL_MAIL_TEMPLATES, TPMS_NOTIFICATIONS_ENABLED
 
 logger = logging.getLogger(__name__)
@@ -424,45 +425,22 @@ def _resolve_params(keys, mapping: Dict[str, str]) -> list:
     """Data-field names → the values Meta will substitute. A key that doesn't name a known
     field falls back to the heuristic guesser (spec §11); "-" is the last resort because Meta
     rejects a blank parameter outright."""
-    return [str(mapping.get(k) or wa_guess_field(k, mapping) or "-") for k in (keys or [])]
+    return resolve_params(keys, mapping, wa_guess_field)
 
 
 def _build_send_components(tpl: dict, mapping: Dict[str, str], body_params: list) -> Optional[list]:
-    """The Cloud API `components` array for one send.
+    """The Cloud API `components` array for one send — see services/whatsapp_components.
 
-    Returns None when the template only takes body parameters, so the send layer keeps using
-    its own body-only shape and nothing about the existing path changes. Header and button
-    parameters are only produced for templates authored with them — the mapping row stores
-    which data field fills each slot."""
-    header_keys = tpl.get("header_variables") or []
-    button_keys = tpl.get("button_variables") or []
-    if not header_keys and not button_keys:
-        return None
-
-    components = []
-    if header_keys:
-        components.append({
-            "type": "header",
-            "parameters": [{"type": "text", "text": v}
-                           for v in _resolve_params(header_keys, mapping)],
-        })
-    if body_params:
-        components.append({
-            "type": "body",
-            "parameters": [{"type": "text", "text": str(p)} for p in body_params],
-        })
-    # Meta addresses button parameters by the button's own position in the template, one
-    # component per button — hence the stored index rather than the loop counter. Rows written
-    # before that was recorded stored bare field names; those fall back to their list position.
-    for position, entry in enumerate(button_keys):
-        field = entry.get("field") if isinstance(entry, dict) else entry
-        index = entry.get("index", position) if isinstance(entry, dict) else position
-        value = _resolve_params([field], mapping)[0]
-        components.append({
-            "type": "button", "sub_type": "url", "index": str(index),
-            "parameters": [{"type": "text", "text": value}],
-        })
-    return components
+    The structure is shared with Task & Delegation and the Checklist repeat-task triggers, so it
+    lives in one place; this wrapper only supplies the TPMS wiring row's own key names and the
+    spec §11 guesser."""
+    return build_send_components(
+        body_params,
+        header_keys=tpl.get("header_variables"),
+        button_keys=tpl.get("button_variables"),
+        mapping=mapping,
+        guess=wa_guess_field,
+    )
 
 
 async def send_whatsapp(event: dict, event_kind: str, side: str) -> dict:
