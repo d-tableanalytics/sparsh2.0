@@ -261,9 +261,14 @@ async def generate_due_recurring_tasks():
     # Lazy import avoids any import-order coupling with the calendar_events route module.
     from app.routes.calendar_events import _next_occurrence
 
+    from app.services.checklist_notifications import (
+        SERIES_DONE_FLAG, notify_occurrence_created, notify_series_completed,
+    )
+
     now = datetime.now(timezone.utc)
     today = _ist_date(now)  # "today" in IST — the boundary the next occurrence is created on
     created = 0
+    notified = 0
     skipped_holidays = 0
     skipped_weekly_offs = 0
     shifted_occurrences = 0
@@ -321,6 +326,17 @@ async def generate_due_recurring_tasks():
                 if nxt.tzinfo is None:
                     nxt = nxt.replace(tzinfo=timezone.utc)
                 if end_dt and _ist_date(nxt) > _ist_date(end_dt):
+                    # The cadence has stepped past the Repeat End Date: this series is finished
+                    # and will never generate again. Announce it ONCE — the flag is what stops
+                    # the nightly run re-announcing every finished series every night — and only
+                    # after the end date has actually passed, so a series whose last occurrence
+                    # is still ahead of us is not declared over early.
+                    if not head.get(SERIES_DONE_FLAG) and _ist_date(end_dt) <= today:
+                        total = await col.count_documents({"recurring_group_id": gid,
+                                                           "deleted_at": None})
+                        notified += await notify_series_completed(head, total)
+                        await col.update_many({"recurring_group_id": gid},
+                                              {"$set": {SERIES_DONE_FLAG: True}})
                     break
                 if _ist_date(nxt) > today:
                     break  # future occurrence — created at 12 AM IST on its own day
@@ -355,14 +371,23 @@ async def generate_due_recurring_tasks():
                 if not exists:
                     # Same builder the up-front series generator uses, so a rolled-forward
                     # occurrence and a bulk-generated one are byte-for-byte the same shape.
-                    await col.insert_one(_fresh_occurrence(head, target, nxt, anchor_day))
+                    occurrence = _fresh_occurrence(head, target, nxt, anchor_day)
+                    result = await col.insert_one(occurrence)
                     created += 1
+                    # Tell the doers a new period of work exists. Until now this job created
+                    # tasks in total silence — the occurrence simply appeared on someone's list
+                    # overnight with nothing to announce it. Silent unless an admin has made an
+                    # Active "Repeat Task Generated" template (see checklist_notifications), so
+                    # this cannot start mailing anyone on its own.
+                    occurrence["_id"] = result.inserted_id
+                    notified += await notify_occurrence_created(occurrence)
                 curr = nxt
 
     if created or skipped_holidays or skipped_weekly_offs or shifted_occurrences:
         logger.info(
             f"Recurring engine: created {created} task/todo occurrence(s); "
             f"skipped {skipped_holidays} holiday and {skipped_weekly_offs} weekly-off date(s); "
-            f"shifted {shifted_occurrences} occurrence(s) to the next working day."
+            f"shifted {shifted_occurrences} occurrence(s) to the next working day; "
+            f"notified {notified} recipient(s)."
         )
     return created

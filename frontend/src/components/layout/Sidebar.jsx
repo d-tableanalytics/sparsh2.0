@@ -150,6 +150,7 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
         { name: 'Holiday', path: '/tasks/holiday', icon: CalendarDays, roles: ['superadmin', 'admin'] },
         { name: 'Activity', path: '/tasks/activity', icon: Activity },
         { name: 'Deleted Tasks', path: '/tasks/deleted', icon: Trash2 },
+        { name: 'Templates', path: '/tasks/templates', icon: ScrollText, roles: ['superadmin', 'admin'] },
       ],
     },
     {
