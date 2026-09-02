@@ -110,6 +110,10 @@ const TaskFormModal = ({ isOpen, onClose, onSaved, task = null, categories = [],
   const [holidayDates, setHolidayDates] = useState([]);
   const WEEKLY_OFFS = [0];
   const [repeatDropdownOpen, setRepeatDropdownOpen] = useState(false);
+
+  // Repeat ON turns the task into a Recurring Checklist: it renews itself every day at
+  // 12:00 AM, each occurrence is live until 11:59 PM, and it carries no deadline at all.
+  const isRecurring = form.repeat !== 'Does not repeat';
   const [customIntervalOpen, setCustomIntervalOpen] = useState(false);
   const [customUnitOpen, setCustomUnitOpen] = useState(false);
   const [tagsModalOpen, setTagsModalOpen] = useState(false);
@@ -299,10 +303,14 @@ const TaskFormModal = ({ isOpen, onClose, onSaved, task = null, categories = [],
     if (!form.title.trim()) return 'Task title is required';
     if (!form.category.trim()) return 'Category is required';
     // A deadline is mandatory when delegating (assigning to others) so every assignee has a due date.
-    if (form.target_staff_id.length && !form.end) return 'Deadline is required when delegating a task';
+    // Only a one-time task has a deadline to require. A Recurring Checklist is due at the
+    // end of each of its own days, so there is nothing for the user to set.
+    if (!isRecurring && form.target_staff_id.length && !form.end) {
+      return 'Deadline is required when delegating a task';
+    }
     // Due date can't be in the past. Only enforced on create — editing an already-overdue
     // task (a normal, common state) must still be possible without forcing a date change.
-    if (!task && form.end) {
+    if (!isRecurring && !task && form.end) {
       const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
       if (new Date(form.end) < todayStart) return 'Due date cannot be in the past';
     }
@@ -549,10 +557,14 @@ const TaskFormModal = ({ isOpen, onClose, onSaved, task = null, categories = [],
                 <Users size={12} /> {assigneeNames.length ? assigneeNames.join(', ') : 'Assignee *'}
               </button>
 
-              <button type="button" onClick={() => setDeadlinePickerOpen(true)}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[10px] font-black uppercase tracking-wider border transition-all ${form.end ? 'border-[var(--accent-indigo)] text-[var(--accent-indigo)]' : 'border-[var(--border)] text-[var(--text-muted)]'}`}>
-                <CalendarClock size={12} /> {form.end ? formatDateTime(form.end) : (form.target_staff_id.length ? 'Set Deadline *' : 'Set Deadline')}
-              </button>
+{/* A Recurring Checklist has no deadline — each occurrence owns its own day and
+                  closes at 11:59 PM — so the control is hidden rather than shown disabled. */}
+              {!isRecurring && (
+                <button type="button" onClick={() => setDeadlinePickerOpen(true)}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[10px] font-black uppercase tracking-wider border transition-all ${form.end ? 'border-[var(--accent-indigo)] text-[var(--accent-indigo)]' : 'border-[var(--border)] text-[var(--text-muted)]'}`}>
+                  <CalendarClock size={12} /> {form.end ? formatDateTime(form.end) : (form.target_staff_id.length ? 'Set Deadline *' : 'Set Deadline')}
+                </button>
+              )}
 
               <button type="button" onClick={() => setForm(f => ({ ...f, priority: PRIORITY_CYCLE[(PRIORITY_CYCLE.indexOf(f.priority) + 1) % 3] }))}
                 className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[10px] font-black uppercase tracking-wider border border-[var(--accent-indigo)] text-[var(--accent-indigo)]">
@@ -620,14 +632,23 @@ const TaskFormModal = ({ isOpen, onClose, onSaved, task = null, categories = [],
               </div>
             )}
 
-            {/* Checkpoint / Repeat */}
+            {/* Repeat — a Recurring Checklist */}
             <div className="px-6 pt-4">
               <div className="flex items-center gap-2 flex-wrap p-3 bg-[var(--input-bg)] rounded-xl">
-                <button type="button" onClick={() => setForm(f => ({ ...f, repeat: f.repeat === 'Does not repeat' ? 'Daily' : 'Does not repeat' }))}
+                <button type="button" onClick={() => setForm(f => (f.repeat === 'Does not repeat'
+                  // Switching to a Recurring Checklist drops the deadline: the backend
+                  // discards it anyway, so leaving it in the form would only mislead.
+                  ? { ...f, repeat: 'Daily', end: '' }
+                  : { ...f, repeat: 'Does not repeat' }))}
                   className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[10px] font-black uppercase tracking-wider border transition-all ${form.repeat !== 'Does not repeat' ? 'bg-[var(--accent-indigo)] text-white border-[var(--accent-indigo)]' : 'border-[var(--border)] text-[var(--text-muted)]'}`}>
-                  {form.repeat !== 'Does not repeat' ? <CheckCircle2 size={12} /> : <Circle size={12} />} Repeat
+                  {isRecurring ? <CheckCircle2 size={12} /> : <Circle size={12} />} Repeat
                 </button>
-                {form.repeat !== 'Does not repeat' && (
+                {isRecurring && (
+                  <span className="text-[10px] font-black uppercase tracking-wider text-[var(--accent-indigo)]">
+                    Recurring checklist
+                  </span>
+                )}
+                {isRecurring && (
                   <>
                     <div className="relative" onClick={e => e.stopPropagation()}>
                       <button type="button" onClick={() => setRepeatDropdownOpen(o => !o)}

@@ -34,6 +34,8 @@ import MyReports from './pages/MyReports';
 import ORMPage from './pages/ORM/ORMPage';
 import ORMSetup from './pages/ORM/ORMSetup';
 import ORMSheet from './pages/ORM/ORMSheet';
+import IRMPage from './pages/IRM/IRMPage';
+import IRMSetup from './pages/IRM/IRMSetup';
 import MediaLibrary from './pages/MediaLibrary';
 import TaskDashboard from './pages/TaskDashboard';
 import MyTasks from './pages/MyTasks';
@@ -172,7 +174,13 @@ const AppRoutes = () => {
       <Route path="/orm" element={<PrivateRoute><OrmGuard><ORMPage /></OrmGuard></PrivateRoute>} />
       <Route path="/orm/setup" element={<PrivateRoute><OrmGuard><ORMSetup /></OrmGuard></PrivateRoute>} />
       <Route path="/orm/sheet" element={<PrivateRoute><OrmGuard><ORMSheet /></OrmGuard></PrivateRoute>} />
-      
+
+      {/* IRM — Individual Result Matrix. Scores are per person; the weightage setup is
+          role-guarded inside the page (staff + clientadmin). */}
+      <Route path="/irm" element={<PrivateRoute><IRMPage /></PrivateRoute>} />
+      <Route path="/irm/setup" element={<PrivateRoute><IRMSetup /></PrivateRoute>} />
+
+
       <Route path="/media" element={<PrivateRoute><MediaLibrary /></PrivateRoute>} />
 
       {/* Admin Side: Staff Management */}

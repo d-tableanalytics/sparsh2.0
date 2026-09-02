@@ -7,7 +7,7 @@ import {
   PieChart, MessageSquare, LogOut, Layers, Copy, Calendar, Sparkles, PlayCircle, Target, BarChart3, Library, X,
   Forward, Bell, Trash2, ChevronDown, Activity, CalendarDays, Database, LayoutGrid,
   Gauge, GitBranch, AlertTriangle, UserCog, ListChecks, ScrollText, UserCircle, ClipboardList, ClipboardCheck, Link2,
-  Award
+  Award, SlidersHorizontal
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { canAccessTaskManagement } from '../../utils/taskAccess';
@@ -134,6 +134,17 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
     { name: 'My Progress', path: '/my-reports', icon: BarChart3, roles: ['clientadmin', 'clientuser'] },
     { name: 'Organization Result Matrix (ORM)', path: '/orm', icon: Database, roles: ['clientadmin'], requiresOrm: true },
     { name: 'ORM Sheet', path: '/orm/sheet', icon: CheckSquare, roles: ['clientadmin', 'clientuser'], requiresOrm: true },
+    {
+      // IRM — Individual Result Matrix. Internal staff pick a company; a clientadmin sees
+      // their own roster, a clientuser only their own score. Setup (the weightage column)
+      // is internal staff only — client-side users read the weightages on the scoreboard.
+      name: 'Individual Result Matrix (IRM)', path: '/irm', icon: Gauge,
+      roles: ['superadmin', 'admin', 'clientadmin', 'clientuser'],
+      submodules: [
+        { name: 'Scores', path: '/irm', icon: Gauge, end: true },
+        { name: 'Setup', path: '/irm/setup', icon: SlidersHorizontal, roles: ['superadmin', 'admin'] },
+      ],
+    },
     { name: 'Team', path: '/team', icon: Users, roles: ['clientadmin'] },
     { name: 'Calendar', path: '/calendar', icon: Calendar, roles: ['superadmin', 'admin', 'clientadmin', 'clientuser', 'coach', 'staff'], permissionKey: 'calendar' },
     {

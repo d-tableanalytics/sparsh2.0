@@ -157,9 +157,23 @@ def _fresh_occurrence(head: dict, target, natural, anchor_day) -> dict:
     doc["recurrence_anchor"] = natural.isoformat()
     if anchor_day:
         doc["recurrence_day"] = anchor_day
-    # Preserve the original start→end offset (zero for a todo, which keeps start == end).
+    # A Recurring Checklist has no deadline: every occurrence is live for its OWN calendar
+    # day and closes at 23:59:59 IST.
+    #
+    # Computed from the target date rather than carried forward as a start→end offset. A
+    # series created before that rule still holds a real deadline on its head — often weeks
+    # out — and the offset would clone that gap onto every occurrence forever, so the
+    # checklist generated tonight would be "due" a month from now. Deriving it here fixes
+    # those series from their next occurrence on, without rewriting a single stored row.
+    #
+    # Stored in UTC: Task & Delegation reads `end` with a parser that drops the offset
+    # without converting (tasks._parse_iso), so an IST-marked string would read 5h30m late.
     orig_end, orig_start = _parse(head.get("end")), _parse(head.get("start"))
-    if orig_end and orig_start:
+    if head.get("type") == "task" and str(head.get("repeat") or "").strip() not in ("", "Does not repeat"):
+        close_ist = target.astimezone(IST).replace(hour=23, minute=59, second=59, microsecond=0)
+        doc["end"] = close_ist.astimezone(timezone.utc).isoformat()
+    elif orig_end and orig_start:
+        # Preserve the original start→end offset (zero for a todo, which keeps start == end).
         doc["end"] = (target + (orig_end - orig_start)).isoformat()
     doc["created_at"] = datetime.utcnow()
     doc["updated_at"] = None
