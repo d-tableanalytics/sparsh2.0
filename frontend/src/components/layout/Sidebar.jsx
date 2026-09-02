@@ -12,7 +12,10 @@ import {
 import { useAuth } from '../../context/AuthContext';
 import { canAccessTaskManagement } from '../../utils/taskAccess';
 import { canAccessTpms } from '../../features/tpms/access';
-import { canManage as canManageLeadershipCycle } from '../../features/tpms/leadership/leadershipUtils';
+import {
+  canManage as canManageLeadershipCycle,
+  canManageTemplate as canManageLeadershipTemplate,
+} from '../../features/tpms/leadership/leadershipUtils';
 
 import logo1 from '../../assets/Sparsh Magic  Logo PNG1.png';
 import logo2 from '../../assets/Sparsh Magic  Logo PNG2.png';
@@ -49,6 +52,9 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
   // Reuses the same predicate the Leadership pages use, so the menu can never offer a page
   // the page itself will refuse.
   const canManageLeadership = canManageLeadershipCycle(user);
+  // Narrower than the line above: HR runs cycles and panels but does not author the
+  // WhatsApp template, so that one child is listed for administrators only.
+  const canWriteLeadershipTemplate = canManageLeadershipTemplate(user);
   // Client-side users share the SMOPS submodules (Dashboard, HOD Activity, Employee Task,
   // Review Report, My Profile).
   //
@@ -77,8 +83,9 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
           { name: 'Results', path: '/tpms/smops/leadership', icon: BarChart3, end: true },
           { name: 'Cycles', path: '/tpms/smops/leadership/cycles', icon: CalendarDays },
           { name: 'Leaders & Givers', path: '/tpms/smops/leadership/subjects', icon: UserCog },
-          { name: 'WhatsApp', path: '/tpms/smops/leadership/whatsapp', icon: MessageSquare },
-        ],
+          canWriteLeadershipTemplate
+            && { name: 'WhatsApp', path: '/tpms/smops/leadership/whatsapp', icon: MessageSquare },
+        ].filter(Boolean),
       }
       : { name: 'Leadership Score', path: '/tpms/smops/leadership', icon: Award, end: true },
   ];

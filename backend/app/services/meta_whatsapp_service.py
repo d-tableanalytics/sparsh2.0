@@ -643,13 +643,21 @@ def _post_template_edit(template_id: str, payload: dict) -> dict:
     return response.json() or {}
 
 
-async def edit_message_template(template_id: str, doc: dict) -> dict:
+async def edit_message_template(template_id: str, doc: dict, *,
+                                include_category: bool = True) -> dict:
     """Correct a template Meta already holds and put it back into review.
 
     Creating is not an option once the name exists on the WABA — Meta answers a second create
     with 2388024 "Content in this language already exists" — so a REJECTED template can only be
-    fixed in place. Name and language are immutable and are dropped from the payload; everything
-    else (category, parameter_format, components) is what gets re-reviewed.
+    fixed in place. Name and language are immutable and are dropped from the payload; the rest
+    (parameter_format, components, and optionally category) is what gets re-reviewed.
+
+    `include_category=False` omits the category. Meta REFUSES a category on a template it has
+    already approved — "Cannot update an approved template category" — which a caller hits
+    whenever it edits approved wording, because the template is approved at Meta even while
+    the caller's own copy has gone back to draft. Callers whose category is fixed and can
+    never change should pass False; there is nothing to send and it is the only way the edit
+    succeeds. Defaults to True so existing callers submit exactly the payload they always did.
 
     Returns the same `{id, status, category}` shape as create_message_template, read back from
     Meta, because the edit call itself answers only `{"success": true}`."""
@@ -657,6 +665,8 @@ async def edit_message_template(template_id: str, doc: dict) -> dict:
     payload = build_create_payload(doc)
     name = payload.pop("name", "")
     payload.pop("language", None)
+    if not include_category:
+        payload.pop("category", None)
     await asyncio.to_thread(_post_template_edit, template_id, payload)
 
     rows = await fetch_templates(name=name) if name else []

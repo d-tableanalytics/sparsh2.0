@@ -60,6 +60,11 @@ SYSTEM_VARIABLES = {
     # be rated. Offered because it was asked for, but it is the one variable that costs
     # something to use.
     "leader_name":   "the leader they are rating",
+    # Filled from the cycle's own collection window — HR's Open/Close dates when they set
+    # them, the cycle's calendar months when they did not. The same window the form
+    # enforces, so a message can never state a deadline the form disagrees with.
+    "opens_at":      "when the feedback window opens",
+    "closes_at":     "the last date to give feedback",
 }
 
 # Meta's own rule for a named parameter, mirrored so a bad name is refused while it can
@@ -74,6 +79,8 @@ SAMPLE_VALUES = {
     "giver_name": "Asha Rao",
     "feedback_link": "https://example.com/f/sample-link",
     "leader_name": "Rahul Mehta",
+    "opens_at": "12 Sep 2026, 10:00 AM IST",
+    "closes_at": "30 Sep 2026, 6:00 PM IST",
 }
 
 
@@ -169,24 +176,55 @@ def _now() -> datetime:
 
 
 # ─────────────────────────────────────────────────────────────
-# Template — one row per company, plus a shared default
+# Template — one per company, and never shared
 # ─────────────────────────────────────────────────────────────
-async def get_template(company_id: Optional[str] = None) -> dict:
-    """This company's template, else the shared default row, else the built-in shape.
+async def suggest_template_name(company_id: str) -> str:
+    """A Meta template name for this company that no other company is using.
 
-    Most specific first: this company's row, then the shared default, then the built-in
-    shape — the same resolution every other per-company setting in the module uses.
+    Built from the company's own name so it stays readable on the Meta dashboard, where
+    every client's templates sit in one list and "leadership_invitation" tells nobody which
+    company it belongs to. Falls back to the id when the name yields nothing usable — an
+    ugly name is recoverable, a collision is not.
+    """
+    slug = ""
+    try:
+        oid = ObjectId(str(company_id))
+    except Exception:
+        oid = None
+    if oid is not None:
+        co = await get_collection("companies").find_one({"_id": oid}, {"name": 1})
+        slug = re.sub(r"[^a-z0-9]+", "_", str((co or {}).get("name") or "").lower()).strip("_")
+    # Meta allows lowercase, digits and underscores, starting with a letter.
+    slug = re.sub(r"^[^a-z]+", "", slug)[:40].strip("_")
+    base = f"{slug}_leadership_invite" if slug else "leadership_invite"
+
+    col = get_collection(COLL_LS_WA_TEMPLATES)
+    candidate, tail = base, str(company_id)[-6:].lower()
+    # Two clients with the same trading name would otherwise collide on the slug alone.
+    if await col.find_one({"meta_template_name": candidate,
+                           "company_id": {"$ne": str(company_id)}}):
+        candidate = f"{base}_{re.sub(r'[^a-z0-9]', '', tail) or 'x'}"
+    return candidate[:60]
+
+
+async def get_template(company_id: Optional[str] = None) -> dict:
+    """This company's own template, or the empty built-in shape.
+
+    There is deliberately no fall back to any other row. Every company writes its own
+    invitation and gets it approved, so a company that has not written one yet has nothing
+    to send — which the screen says plainly — rather than quietly borrowing wording, and a
+    Meta template name, belonging to a different client.
     """
     col = get_collection(COLL_LS_WA_TEMPLATES)
-    doc = None
-    if company_id:
-        doc = await col.find_one({"company_id": str(company_id)})
-    if doc is None:
-        doc = await col.find_one({"company_id": None})
+    doc = await col.find_one({"company_id": str(company_id)}) if company_id else None
 
     return {
         "company_id": str(company_id) if company_id else None,
         "meta_template_name": (doc or {}).get("meta_template_name") or "",
+        # Offered only when nothing is written yet, so it never overwrites a chosen name.
+        "suggested_name": ("" if (doc or {}).get("meta_template_name")
+                           else await suggest_template_name(str(company_id))
+                           if company_id else ""),
         "language": (doc or {}).get("language") or "en",
         "category": (doc or {}).get("category") or "UTILITY",
         "system_variables": dict(SYSTEM_VARIABLES),
@@ -196,7 +234,8 @@ async def get_template(company_id: Optional[str] = None) -> dict:
         "active": bool((doc or {}).get("active", True)),
         "fields": list(WA_VARIABLE_FIELDS),
         "body": (doc or {}).get("body") or "",
-        "is_customised": bool(doc and doc.get("company_id")),
+        # Every row belongs to a company now, so having one IS being customised.
+        "is_customised": bool(doc),
         # Where the template stands with Meta. DRAFT means it has never been submitted.
         "status": str((doc or {}).get("status") or WA_TPL_DRAFT).upper(),
         "meta_template_id": (doc or {}).get("meta_template_id"),
@@ -234,6 +273,27 @@ async def save_authored_template(company_id: str, doc: dict, user: dict) -> dict
     """
     col = get_collection(COLL_LS_WA_TEMPLATES)
     existing = await col.find_one({"company_id": str(company_id)}) or {}
+
+    # A Meta template NAME is global to the WhatsApp Business Account rather than scoped to
+    # a company, so two clients choosing the same obvious name are ONE template to Meta.
+    # Refused here, while it can still be typed differently. Letting it through would fail
+    # at submit with Meta's "Content in this language already exists", and — worse — a
+    # later Refresh matches on name, so this company would adopt the other client's
+    # approval and send its invitations with their wording.
+    #
+    # Checked on the name alone, not name + language: to Meta a name is one template that
+    # may carry several language versions, so a shared name collides whatever the language.
+    # The other company is never identified — that a name is taken is all one client may
+    # learn about another.
+    name = str(doc.get("name") or "").strip().lower()
+    if name:
+        clash = await col.find_one({"meta_template_name": name,
+                                    "company_id": {"$ne": str(company_id)}})
+        if clash:
+            raise ValueError(
+                f"The template name '{name}' is already used by another company. Meta "
+                "template names are shared across the whole WhatsApp Business Account, so "
+                "please choose a different one.")
 
     await col.update_one(
         {"company_id": str(company_id)},
@@ -296,8 +356,12 @@ async def submit_template(company_id: str, user: dict) -> dict:
     now = _now()
     existing_id = str(doc.get("meta_template_id") or "").strip()
     try:
-        result = (await edit_message_template(existing_id, meta_doc) if existing_id
-                  else await create_message_template(meta_doc))
+        # The category is never sent on an edit. `authored_doc` fixes it at UTILITY for every
+        # Leadership template, so there is nothing a re-submission could be changing it to —
+        # and once Meta has approved a template it refuses the field outright, which is what
+        # made "edit an approved invitation and send it back for review" impossible.
+        result = (await edit_message_template(existing_id, meta_doc, include_category=False)
+                  if existing_id else await create_message_template(meta_doc))
     except MetaTemplateError as e:
         # The template stays editable — record why so it shows on the row rather than only
         # in a toast that disappears.
@@ -346,10 +410,18 @@ async def sync_template_status(company_id: str) -> dict:
         logger.warning("Leadership template sync failed for %s: %s", company_id, e)
         return await get_template(company_id)
 
+    # Bind to the template this company actually submitted. Once Meta has issued an id,
+    # that id IS the identity — matching on name alone would let one company pick up
+    # another's verdict, because the name lives on the shared Business Account. The name
+    # match survives only for a row that has never been submitted, and cross-company name
+    # reuse is refused on save, so it can no longer resolve to somebody else's template.
     language = str(doc.get("language") or "en")
-    match = next((r for r in (rows or [])
-                  if str(r.get("name") or "") == name
-                  and str(r.get("language") or "") == language), None)
+    tpl_id = str(doc.get("meta_template_id") or "").strip()
+    match = next((r for r in (rows or []) if tpl_id and str(r.get("id") or "") == tpl_id), None)
+    if match is None and not tpl_id:
+        match = next((r for r in (rows or [])
+                      if str(r.get("name") or "") == name
+                      and str(r.get("language") or "") == language), None)
     if not match:
         return await get_template(company_id)
 
@@ -589,10 +661,21 @@ async def send_invitation(assignment: dict, link: str) -> dict:
         return {"ok": False, "status": WA_FAILED, "entry_id": entry, "error": reason}
 
     entry = await open_entry(assignment, phone, WA_PENDING)
+
+    # The window this giver is actually held to. Read from the cycle at SEND time rather
+    # than copied onto the assignment when it was created, so an Open or Close date HR
+    # edits afterwards is the one the next message states.
+    from app.services.leadership_link_service import format_window_dt, message_window
+    from app.services.leadership_service import get_cycle
+    cyc = await get_cycle(company_id, str(assignment.get("cycle") or "")) or {}
+    opens, closes = message_window(cyc)
+
     context = {
         "giver_name": assignment.get("giver_name") or "there",
         "leader_name": assignment.get("subject_name") or "your colleague",
         "feedback_link": link,
+        "opens_at": format_window_dt(opens),
+        "closes_at": format_window_dt(closes),
     }
 
     components = build_components(template, context)

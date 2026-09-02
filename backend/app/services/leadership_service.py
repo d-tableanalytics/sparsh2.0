@@ -297,7 +297,7 @@ async def weightage_summary(company_id: Optional[str] = None) -> List[dict]:
 # Cycles
 # ─────────────────────────────────────────────────────────────
 async def list_cycles(company_id: str, limit: int = 50) -> List[dict]:
-    from app.services.leadership_link_service import cycle_is_expired
+    from app.services.leadership_link_service import window_is_closed
 
     docs = await get_collection(COLL_LS_CYCLES).find(
         {"company_id": str(company_id)}).sort("cycle", -1).to_list(limit)
@@ -310,8 +310,10 @@ async def list_cycles(company_id: str, limit: int = 50) -> List[dict]:
         d["response_count"] = await get_collection(COLL_LS_RESPONSES).count_documents(
             {"company_id": str(company_id), "cycle": d.get("cycle")})
         # Additive: lets the UI disable dispatch without re-deriving the window in JS, and
-        # mirrors exactly what assert_dispatchable enforces server-side.
-        d["expired"] = cycle_is_expired(d.get("cycle") or "")
+        # mirrors exactly what assert_dispatchable enforces server-side — including HR's
+        # own Close date, so the button greys out on the date they set rather than at the
+        # end of the calendar month.
+        d["expired"] = window_is_closed(d)
         d["can_dispatch"] = d.get("status") != CYCLE_CLOSED and not d["expired"]
         # Opening is gated on the set-up before it (enrol -> panel -> mail), so the button
         # can say why rather than failing on click. Computed for DRAFTS only: that is the
@@ -345,12 +347,19 @@ async def assert_dispatchable(company_id: str, cycle: str) -> dict:
 
       • the cycle is CLOSED — its scores are frozen, so collecting more feedback would
         change nothing and would invite people to a form that no longer counts;
-      • the cycle's window has ELAPSED — every link expires with the window, so the mail
+      • the collection WINDOW has shut — every link dies with the window, so the message
         would deliver a URL that answers 410 the moment it is clicked.
+
+    The window is HR's configured Close date when they set one, and the cycle's calendar
+    months when they did not. It is the same test the giver's form applies, so an
+    invitation can never be sent to a form that would refuse it.
+
+    Sending BEFORE the Open date is deliberately allowed: inviting people ahead of a window
+    is normal, and the form tells whoever arrives early exactly when to come back.
 
     Returns the cycle document, so callers do not fetch it twice.
     """
-    from app.services.leadership_link_service import cycle_expiry_utc, cycle_is_expired
+    from app.services.leadership_link_service import survey_window, window_is_closed
 
     cyc = await get_cycle(company_id, cycle)
     if not cyc:
@@ -359,11 +368,11 @@ async def assert_dispatchable(company_id: str, cycle: str) -> dict:
         raise ValueError(
             f"{cycle_label(cycle)} is closed. Its scores are final, so invitations and "
             "reminders can no longer be sent.")
-    if cycle_is_expired(cycle):
-        expiry = cycle_expiry_utc(cycle)
+    if window_is_closed(cyc):
+        closes = survey_window(cyc)[1]
         raise ValueError(
-            f"The {cycle_label(cycle)} window ended on "
-            f"{expiry.strftime('%d %b %Y') if expiry else 'its closing date'}. "
+            f"The {cycle_label(cycle)} feedback window closed on "
+            f"{closes.strftime('%d %b %Y, %H:%M UTC') if closes else 'its closing date'}. "
             "Feedback links have expired, so nothing further can be sent.")
     return cyc
 
@@ -869,7 +878,7 @@ async def list_subjects(company_id: str, cycle: str) -> List[dict]:
         s["panel_target"] = panel_size_for(effective_degree(cyc, s))
         s["submitted_count"] = len([p for p in panel if p.get("status") == "submitted"])
         s["pending_count"] = len([p for p in panel
-                                  if effective_status(p, now) in ("sent", "opened")])
+                                  if effective_status(p, now, cyc) in ("sent", "opened")])
         s["level_label"] = LEVEL_LABELS.get(s.get("level") or "", s.get("level") or "")
         out.append(s)
     out.sort(key=lambda x: (x.get("subject_name") or "").lower())

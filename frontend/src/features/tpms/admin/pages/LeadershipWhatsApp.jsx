@@ -13,7 +13,7 @@ import {
   syncLeadershipWhatsAppTemplate, checkLeadershipWaTemplate, saveLeadershipWaDraft,
 } from '../../../../services/leadershipApi';
 import {
-  canManage, errText, parseUtc, useAsync, useLeadershipCompany,
+  canManageTemplate, errText, parseUtc, useAsync, useLeadershipCompany,
 } from '../../leadership/leadershipUtils';
 
 /* ─────────────────────────────────────────────────────────────
@@ -59,7 +59,9 @@ const stamp = (value) => {
 
 const LeadershipWhatsApp = () => {
   const { user, staff, companyOptions, companyId, setCompanyId } = useLeadershipCompany();
-  const manage = canManage(user);
+  // Administrators only — superadmin, admin, client admin. Writing the invitation is an
+  // administrative decision, and HR does not need the screen to send links.
+  const manage = canManageTemplate(user);
 
   const [composerOpen, setComposerOpen] = useState(false);
   const [busy, setBusy] = useState('');
@@ -74,6 +76,9 @@ const LeadershipWhatsApp = () => {
     useAsync(loadTemplate, [companyId], { skip: waiting || !manage });
 
   const status = template?.status || 'DRAFT';
+  // `can_edit` from the server is the authority; the same rule is applied locally so the
+  // authoring controls are never rendered and then refused.
+  const mayEdit = manage && template?.can_edit !== false;
 
   // Company scoping is closed over here, so the modal only ever deals in a message.
   const templateApi = useMemo(() => ({
@@ -109,7 +114,7 @@ const LeadershipWhatsApp = () => {
         <span className="w-12 h-12 rounded-2xl bg-[var(--accent-red-bg)] text-[var(--accent-red)] flex items-center justify-center">
           <ShieldAlert size={22} />
         </span>
-        <p className="text-[14px] font-bold">HR and administrators only</p>
+        <p className="text-[14px] font-bold">Administrators only</p>
       </div>
     );
   }
@@ -125,7 +130,7 @@ const LeadershipWhatsApp = () => {
         {/* The page's primary action, so it sits with the other page-level controls rather
             than at the bottom of a section — writing the message is the first thing anyone
             comes here to do, and the only thing that has to happen before anything else can. */}
-        {!waiting && (
+        {!waiting && mayEdit && (
           <HeroButton icon={template?.meta_template_name ? Pencil : Plus}
             onClick={() => setComposerOpen(true)}>
             {template?.meta_template_name ? 'Edit Template' : 'Create Template'}
@@ -174,7 +179,7 @@ const LeadershipWhatsApp = () => {
                       <RefreshCw size={14} className={busy === 'sync' ? 'animate-spin' : ''} />
                       Check with Meta
                     </button>
-                    {template?.can_submit && (
+                    {template?.can_submit && mayEdit && (
                       <button type="button" onClick={submit} disabled={!!busy}
                         title="Send this template to Meta for review"
                         className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-[var(--accent-indigo)] text-white text-[13px] font-bold shadow-sm hover:opacity-90 transition-opacity disabled:opacity-40">

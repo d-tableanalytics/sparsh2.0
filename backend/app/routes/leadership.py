@@ -156,6 +156,29 @@ def _company_for(user: dict, company_id: Optional[str]) -> str:
     raise HTTPException(status_code=403, detail="Not authorized to access Leadership Score")
 
 
+def _can_manage_template(user: dict) -> bool:
+    """Who may WRITE the WhatsApp invitation template: internal staff and the client admin.
+
+    Deliberately narrower than `_can_manage`, which HR passes. The template is the wording
+    that goes to employees' personal phones under the company's name, and it is submitted
+    to Meta for review against a Business Account shared by every client — so authoring it
+    is the company's administrative decision rather than part of running a cycle.
+
+    This gates the WHOLE screen, read included — HR has no use for it. When no approved
+    template exists the refusal is reported on the giver's own row in Leaders & Givers,
+    which is where HR is already working, so nothing they need is behind this page.
+    """
+    return _is_staff(user) or _role(user) == "clientadmin"
+
+
+def _require_template_manage(user: dict) -> None:
+    if not _can_manage_template(user):
+        raise HTTPException(
+            status_code=403,
+            detail="Only an administrator can write the WhatsApp invitation template. "
+                   "HR sends the invitations but does not author them.")
+
+
 def _require_manage(user: dict) -> None:
     if not _can_manage(user):
         raise HTTPException(
@@ -174,40 +197,6 @@ def _require_panel(user: dict) -> None:
 
 def _bad(e: Exception) -> HTTPException:
     return HTTPException(status_code=400, detail=str(e))
-
-
-# ─────────────────────────────────────────────────────────────
-# Questions
-#
-# Stored in the EXISTING `tpms_mail_templates` collection under a triple that nothing else
-# uses (see app/models/leadership.py). These endpoints only ever touch that one row, so no
-# other TPMS template is readable or writable through them — which is why editing is opened
-# to HR here without widening the generic /tpms/mail-templates endpoints, whose permissions
-# and behaviour are unchanged.
-#
-# WHO MAY EDIT IT: `_require_manage`, not `_require_panel`. The narrow panel gate exists
-# to protect WHO GIVES FEEDBACK — a template carries no giver identity, only wording and
-# placeholders, so gating it there conflated two different concerns and locked a client
-# admin out of their own invitation. `_company_for` pins a client-side user to their own
-# company whatever they pass, so a clientadmin can only ever read or write their own row.
-# ─────────────────────────────────────────────────────────────
-def _template_key(company_id: Optional[str] = None) -> dict:
-    """The row identifying ONE company's invitation template.
-
-    `company_id` is part of the key. Without it every client shared a single row, so one
-    company customising their invitation silently rewrote the mail every other company
-    sends. A row with `company_id: None` is the shared default and is still read as a
-    fallback, which is what keeps any already-authored template working.
-    """
-    key = {"activity": TEMPLATE_ACTIVITY, "side": TEMPLATE_SIDE, "event": TEMPLATE_EVENT}
-    return {**key, "company_id": str(company_id) if company_id else None}
-
-
-
-
-# ─────────────────────────────────────────────────────────────
-# Configuration — levels, questions, weightages
-# ─────────────────────────────────────────────────────────────
 @router.get("/config")
 async def read_config(current_user: dict = Depends(get_current_user)):
     """Levels, relations, degrees and cycle options — so the UI hardcodes nothing."""
@@ -338,7 +327,7 @@ async def read_wa_template(company_id: Optional[str] = Query(None),
     wording and a Meta template NAME — it carries no giver identity — so it sits behind the
     manage gate rather than the narrower panel one.
     """
-    _require_manage(current_user)
+    _require_template_manage(current_user)
     cid = _company_for(current_user, company_id)
     tpl = await ls_wa.get_template(cid)
     tpl["can_edit"] = True
@@ -458,7 +447,7 @@ async def check_wa_template(payload: dict, current_user: dict = Depends(get_curr
     Meta's review takes hours and a rejection has to be read, corrected and resubmitted, so
     the rules it will apply are worth applying here first.
     """
-    _require_manage(current_user)
+    _require_template_manage(current_user)
     from app.services.meta_whatsapp_service import validate_template
 
     body, variables = payload.get("body"), payload.get("variables")
@@ -479,7 +468,7 @@ async def save_wa_draft(payload: dict, company_id: Optional[str] = Query(None),
     invitation has one shape, and offering those choices would be asking questions with only
     one right answer.
     """
-    _require_manage(current_user)
+    _require_template_manage(current_user)
     from app.services.meta_whatsapp_service import validate_template
 
     cid = _company_for(current_user, company_id)
@@ -493,7 +482,11 @@ async def save_wa_draft(payload: dict, company_id: Optional[str] = Query(None),
     if errors:
         raise HTTPException(status_code=400, detail=" ".join(errors))
 
-    return await ls_wa.save_authored_template(cid, doc, current_user)
+    try:
+        return await ls_wa.save_authored_template(cid, doc, current_user)
+    except ValueError as e:
+        # A name another company already holds. Recoverable, and the message says how.
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.post("/whatsapp-template/test")
@@ -504,7 +497,7 @@ async def test_wa_template(payload: dict, current_user: dict = Depends(get_curre
     real thing, and anything else goes as free-form text — which Meta only delivers if that
     number messaged this business in the last 24 hours. The response says which happened.
     """
-    _require_manage(current_user)
+    _require_template_manage(current_user)
     from app.services.meta_whatsapp_service import (
         build_sample_send_components, render_preview_text,
     )
@@ -549,7 +542,7 @@ async def submit_wa_template(company_id: Optional[str] = Query(None),
     the verdict — the screen's Refresh calls the sync below, which is why approval appears
     when somebody looks rather than on a timer.
     """
-    _require_manage(current_user)
+    _require_template_manage(current_user)
     cid = _company_for(current_user, company_id)
     try:
         tpl = await ls_wa.submit_template(cid, current_user)
@@ -569,7 +562,7 @@ async def sync_wa_template(company_id: Optional[str] = Query(None),
     Safe to repeat, and safe when Meta is unreachable: an unanswered call leaves the stored
     status alone rather than reading as "your approved template disappeared".
     """
-    _require_manage(current_user)
+    _require_template_manage(current_user)
     cid = _company_for(current_user, company_id)
     tpl = await ls_wa.sync_template_status(cid)
     tpl["can_edit"] = True
@@ -946,8 +939,11 @@ async def list_assignments(cycle: Optional[str] = Query(None),
     if cycle:
         query["cycle"] = cycle
     docs = await get_collection(COLL_LS_ASSIGNMENTS).find(query).sort("created_at", -1).to_list(2000)
+    # The log spans cycles, so their windows are resolved in one query rather than one per
+    # row — every Expired here means the same thing it means on the panel.
+    cycles = await links.cycles_for(docs)
     return {"assignments": [{
-        **links.panel_row(d),
+        **links.panel_row(d, None, cycles.get(links.cycle_key(d))),
         "cycle": d.get("cycle"),
         "cycle_label": cycle_label(d.get("cycle") or ""),
         "subject_id": d.get("subject_id"),
@@ -973,27 +969,31 @@ async def _assignment_for(token: str, current_user: dict, *, must_be_open: bool)
             detail="This feedback form was assigned to a different user. Please sign in with "
                    "the account the link was sent to.")
     if must_be_open:
-        state = links.effective_status(doc)
+        # The cycle drives both tests, so a link cannot read as live while the window it
+        # belongs to has shut. Fetched once and passed down rather than looked up twice.
+        cyc = await svc.get_cycle(doc.get("company_id"), doc.get("cycle")) or {}
+        state = links.effective_status(doc, None, cyc)
         if state == LINK_SUBMITTED:
             raise HTTPException(status_code=409, detail="This feedback has already been submitted.")
         if state == LINK_EXPIRED:
             raise HTTPException(status_code=410, detail="This feedback link has expired.")
-        # The cycle's OWN collection window, which is separate from the link's expiry: HR
-        # can open a cycle for a fortnight inside a two-month period, and a link that is
-        # otherwise valid must not be usable outside it. Checked at submit as well as at
-        # read, so a page left open across the closing moment cannot post through it.
-        await _assert_window_open(doc)
+        # Said separately from expiry because "not open yet" is not "too late" — a giver
+        # who arrives early has to be told to come back, not that their link is dead.
+        # Checked at submit as well as at read, so a page left open across the closing
+        # moment cannot post through it.
+        await _assert_window_open(doc, cyc)
     return doc
 
 
-async def _assert_window_open(doc: dict) -> None:
+async def _assert_window_open(doc: dict, cyc: Optional[dict] = None) -> None:
     """Refuse a submission outside the cycle's configured Open/Close window.
 
     `pending` and `closed` get different codes and different words on purpose — "not yet"
     and "no longer" are opposite problems for the person holding the link, and one of them
     means come back later.
     """
-    cyc = await svc.get_cycle(doc.get("company_id"), doc.get("cycle")) or {}
+    if cyc is None:
+        cyc = await svc.get_cycle(doc.get("company_id"), doc.get("cycle")) or {}
     state = links.window_state(cyc)
     if state == links.WINDOW_OPEN:
         return
@@ -1017,12 +1017,14 @@ async def assigned_form(token: str, current_user: dict = Depends(get_current_use
     anyone else's answers.
     """
     doc = await _assignment_for(token, current_user, must_be_open=False)
-    state = links.effective_status(doc)
 
     # The window is reported alongside the link's own status so the page can say "opens on
     # the 5th" rather than a bare refusal — and so a giver who arrives early knows to come
-    # back rather than assuming their link is broken.
+    # back rather than assuming their link is broken. It also DECIDES that status: a link
+    # is expired when its cycle's window has shut, not when a stamp written on the day it
+    # was created happens to have passed.
     cyc = await svc.get_cycle(doc.get("company_id"), doc.get("cycle")) or {}
+    state = links.effective_status(doc, None, cyc)
     window = links.window_state(cyc)
     opens_at, closes_at = links.survey_window(cyc)
 
@@ -1189,14 +1191,19 @@ async def my_feedback(current_user: dict = Depends(get_current_user)):
     from app.models.leadership import COLL_LS_ASSIGNMENTS
     rows = await get_collection(COLL_LS_ASSIGNMENTS).find(
         {"giver_id": _self_id(current_user)}).sort("created_at", -1).to_list(200)
+    cycles = await links.cycles_for(rows)
     return {"forms": [{
         "cycle": r.get("cycle"),
         "cycle_label": cycle_label(r.get("cycle") or ""),
         "subject_name": r.get("subject_name"),
         "level_label": LEVEL_LABELS.get(r.get("subject_level") or "", ""),
-        "status": links.effective_status(r),
+        "status": links.effective_status(r, None, cycles.get(links.cycle_key(r))),
         "link": r.get("link"),
-        "expires_at": r.get("expires_at"),
+        # The date the giver is actually held to: HR's Close date when there is one, the
+        # cycle's own closing month when there is not. Reporting the stored stamp here
+        # would print a deadline the form does not enforce.
+        "expires_at": (links.survey_window(cycles.get(links.cycle_key(r)))[1]
+                       if cycles.get(links.cycle_key(r)) else r.get("expires_at")),
     } for r in rows]}
 
 

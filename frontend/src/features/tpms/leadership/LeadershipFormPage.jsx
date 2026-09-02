@@ -4,7 +4,7 @@ import {
   CheckCircle2, Clock, AlertTriangle, Loader2, ShieldAlert, Award, Lock, Send,
 } from 'lucide-react';
 import { getAssignedLeadershipForm, submitLeadershipFeedback } from '../../../services/leadershipApi';
-import { errText } from './leadershipUtils';
+import { errText, parseUtc } from './leadershipUtils';
 
 /* ─────────────────────────────────────────────────────────────
    Leadership Score ▸ the feedback giver's form (/lf/:token).
@@ -158,6 +158,23 @@ const LeadershipFormPage = () => {
     return <Notice icon={Clock} tone="bg-amber-50 text-amber-600"
       title="This feedback link has expired."
       detail="The cycle this feedback belonged to has closed. Please contact your HR team if you still need to submit it." />;
+  }
+
+  // Arriving before the window opens is the expected consequence of inviting people
+  // early, so it gets its own state rather than a refusal. Placed above the form: the
+  // questions must not render at all, or a giver answers all of them and loses the answers
+  // to a 403 on Submit. Deliberately NOT 'expired' — "not yet" and "too late" are opposite
+  // problems, and only one of them means come back.
+  if (d?.window === 'pending') {
+    const opensOn = parseUtc(d.window_opens_at);
+    return <Notice icon={Clock} tone="bg-sky-50 text-sky-600"
+      title="This feedback form has not opened yet."
+      detail={opensOn
+        ? `It opens on ${opensOn.toLocaleString(undefined, {
+          day: 'numeric', month: 'long', year: 'numeric',
+          hour: '2-digit', minute: '2-digit',
+        })}. Your link stays valid — please come back then and it will be ready.`
+        : 'Your link stays valid. Please come back once your HR team opens the window.'} />;
   }
 
   if (state.code === 403) {
