@@ -77,7 +77,7 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
           { name: 'Results', path: '/tpms/smops/leadership', icon: BarChart3, end: true },
           { name: 'Cycles', path: '/tpms/smops/leadership/cycles', icon: CalendarDays },
           { name: 'Leaders & Givers', path: '/tpms/smops/leadership/subjects', icon: UserCog },
-          { name: 'Invitation Email', path: '/tpms/smops/leadership/template', icon: ScrollText },
+          { name: 'WhatsApp', path: '/tpms/smops/leadership/whatsapp', icon: MessageSquare },
         ],
       }
       : { name: 'Leadership Score', path: '/tpms/smops/leadership', icon: Award, end: true },
@@ -107,7 +107,7 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
             { name: 'Cycles', path: '/tpms/admin/leadership', icon: CalendarDays, end: true },
             { name: 'Leaders & Givers', path: '/tpms/admin/leadership/subjects', icon: UserCog },
             { name: 'Questions', path: '/tpms/admin/leadership/questions', icon: ClipboardCheck },
-            { name: 'Invitation Email', path: '/tpms/admin/leadership/template', icon: ScrollText },
+            { name: 'WhatsApp', path: '/tpms/admin/leadership/whatsapp', icon: MessageSquare },
             { name: 'Results', path: '/tpms/admin/leadership/report', icon: BarChart3 },
           ],
         },

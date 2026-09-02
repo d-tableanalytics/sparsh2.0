@@ -24,11 +24,23 @@ Every score endpoint returns aggregates built by `leadership_service.subject_sco
 which never carries a giver id, a giver name or an individual response. A leader reading
 their own score therefore cannot learn who said what, regardless of what the UI does.
 """
-from fastapi import APIRouter, Depends, HTTPException, Query
+import hashlib
+import hmac
+import json
+import logging
+from datetime import datetime
 from typing import List, Optional
 
+from bson import ObjectId
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
+from fastapi.responses import PlainTextResponse
+
+from app.config.settings import settings
+
 from app.controllers.auth_controller import get_current_user
+from app.db.mongodb import get_collection
 from app.models.leadership import (
+    COLL_LS_DOCUMENTS,
     BriefingCreate, CycleCreate, CycleUpdate, DiscussionAck, DiscussionCreate,
     GiverAssignment, QuestionUpdate,
     ResponseSubmit, SubjectCreate, SubjectMode, WeightageUpdate,
@@ -37,12 +49,19 @@ from app.models.leadership import (
     RECOMMENDED_PANEL_SIZE, RECOMMENDED_PER_RELATION, RELATIONS, RELATION_LABELS,
     LINK_EXPIRED, LINK_SUBMITTED,
     SCALE_MAX, SCALE_MIN, TOTAL_WEIGHTAGE,
-    DEFAULT_TEMPLATE_BODY, DEFAULT_TEMPLATE_SUBJECT,
-    TEMPLATE_ACTIVITY, TEMPLATE_EVENT, TEMPLATE_PLACEHOLDERS, TEMPLATE_SIDE,
     cycle_label, current_cycle, selectable_cycles,
 )
 from app.services import leadership_service as svc
 from app.services import leadership_link_service as links
+from app.services import leadership_wa_service as ls_wa
+
+logger = logging.getLogger(__name__)
+
+
+def _display_name(user: dict) -> str:
+    return (user.get("full_name")
+            or " ".join(filter(None, [user.get("first_name"), user.get("last_name")])).strip()
+            or user.get("email") or "")
 
 
 async def _leadership_company_gate(current_user: dict = Depends(get_current_user)) -> None:
@@ -158,7 +177,7 @@ def _bad(e: Exception) -> HTTPException:
 
 
 # ─────────────────────────────────────────────────────────────
-# Invitation email template
+# Questions
 #
 # Stored in the EXISTING `tpms_mail_templates` collection under a triple that nothing else
 # uses (see app/models/leadership.py). These endpoints only ever touch that one row, so no
@@ -184,107 +203,6 @@ def _template_key(company_id: Optional[str] = None) -> dict:
     return {**key, "company_id": str(company_id) if company_id else None}
 
 
-@router.get("/template")
-async def read_template(company_id: Optional[str] = Query(None),
-                        current_user: dict = Depends(get_current_user)):
-    """The invitation template, its placeholders, and the default used until one is saved.
-
-    Company-scoped: this company's own row if it has one, otherwise the shared default
-    row, otherwise the built-in text.
-    """
-    _require_manage(current_user)
-    cid = _company_for(current_user, company_id)
-    from app.db.mongodb import get_collection
-    from app.models.tpms import COLL_MAIL_TEMPLATES
-
-    col = get_collection(COLL_MAIL_TEMPLATES)
-    doc = await col.find_one(_template_key(cid))
-    inherited = False
-    if not doc:
-        doc = await col.find_one(_template_key(None))
-        inherited = bool(doc)
-    return {
-        **_template_key(cid),
-        "inherited_from_default": inherited,
-        "subject": (doc or {}).get("subject") or DEFAULT_TEMPLATE_SUBJECT,
-        "body_html": (doc or {}).get("body_html") or DEFAULT_TEMPLATE_BODY,
-        "active": (doc or {}).get("active", True) is not False,
-        "is_customised": bool(doc),
-        "updated_at": (doc or {}).get("updated_at"),
-        "updated_by": (doc or {}).get("updated_by"),
-        "placeholders": TEMPLATE_PLACEHOLDERS,
-        "link_placeholder": "{{leadership_link}}",
-        "default_subject": DEFAULT_TEMPLATE_SUBJECT,
-        "default_body_html": DEFAULT_TEMPLATE_BODY,
-    }
-
-
-@router.put("/template")
-async def save_template(payload: dict, company_id: Optional[str] = Query(None),
-                        current_user: dict = Depends(get_current_user)):
-    """Create or update THIS COMPANY's Leadership invitation template. HR / Admin only.
-
-    Writes exactly one row, identified by the leadership-only (activity, side, event)
-    triple plus the company — an upsert here can neither create nor overwrite a template
-    belonging to any other activity, event, or company.
-    """
-    _require_manage(current_user)
-    cid = _company_for(current_user, company_id)
-    subject = str(payload.get("subject") or "").strip()
-    body = str(payload.get("body_html") or "").strip()
-    if not subject:
-        raise HTTPException(status_code=400, detail="A subject line is required.")
-    if not body:
-        raise HTTPException(status_code=400, detail="A message body is required.")
-
-    from datetime import datetime
-    from app.db.mongodb import get_collection
-    from app.models.tpms import COLL_MAIL_TEMPLATES
-
-    await get_collection(COLL_MAIL_TEMPLATES).update_one(
-        _template_key(cid),
-        {"$set": {
-            **_template_key(cid),
-            "subject": subject,
-            "body_html": body,
-            "active": bool(payload.get("active", True)),
-            "updated_by": current_user.get("full_name") or current_user.get("email"),
-            "updated_at": datetime.utcnow(),
-        },
-         "$setOnInsert": {"created_at": datetime.utcnow()}},
-        upsert=True,
-    )
-    # A body with no link placeholder still delivers — the link is appended at send time —
-    # but the author should know their layout was not honoured.
-    return {
-        "ok": True,
-        "has_link_placeholder": "{{leadership_link}}" in body or "{{ leadership_link }}" in body,
-        "message": "Leadership invitation template saved.",
-    }
-
-
-@router.post("/template/preview")
-async def preview_template(payload: dict, current_user: dict = Depends(get_current_user)):
-    """Render the draft against sample values, so an author can see the result before
-    saving. Uses a fake link and invented people — no real token, no real giver, and no
-    database read at all, so it exposes nothing whatever the caller's company."""
-    _require_manage(current_user)
-    from app.services.tpms_notify_service import fill
-
-    sample = {
-        "leadership_link": await links.public_link("SAMPLE-TOKEN-NOT-REAL"),
-        "giver_name": "Priya Sharma",
-        "subject_name": "Rahul Mehta",
-        "subject_designation": "Senior Manager - Operations",
-        "level_label": LEVEL_LABELS.get("L6", "L6"),
-        "cycle_label": cycle_label(current_cycle()),
-        "company_name": "Sample Company",
-        "expires_on": "2026-12-31",
-    }
-    subject = str(payload.get("subject") or DEFAULT_TEMPLATE_SUBJECT)
-    body = str(payload.get("body_html") or DEFAULT_TEMPLATE_BODY)
-    rendered = links._ensure_link_present(fill(body, sample), sample["leadership_link"])
-    return {"subject": fill(subject, sample), "body_html": rendered, "sample": sample}
 
 
 # ─────────────────────────────────────────────────────────────
@@ -407,6 +325,353 @@ def _is_md(user: dict) -> bool:
 # ─────────────────────────────────────────────────────────────
 # Cycles — the 2-month assessment window
 # ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
+# WhatsApp — Leadership's own template, ledger and callbacks
+# ─────────────────────────────────────────────────────────────
+@router.get("/whatsapp-template")
+async def read_wa_template(company_id: Optional[str] = Query(None),
+                           current_user: dict = Depends(get_current_user)):
+    """The WhatsApp invitation template for one company.
+
+    `_require_manage` + `_company_for` give exactly the rule asked for: internal staff name
+    any company, a clientadmin is pinned to their own whatever they pass. The template is
+    wording and a Meta template NAME — it carries no giver identity — so it sits behind the
+    manage gate rather than the narrower panel one.
+    """
+    _require_manage(current_user)
+    cid = _company_for(current_user, company_id)
+    tpl = await ls_wa.get_template(cid)
+    tpl["can_edit"] = True
+    return tpl
+
+
+# ─────────────────────────────────────────────────────────────
+# Meta delivery callbacks
+#
+# Meta calls this, so it CANNOT sit on `router` — that router carries a global
+# get_current_user dependency and Meta has no session. It gets its own router with no
+# dependencies, mounted alongside in main.py, and pays for that openness with a signature
+# check on every request.
+#
+# Delivery state is no longer shown anywhere in the UI; this keeps writing to the ledger so
+# a failed send still leaves a record with a reason, which is the only durable answer to
+# "why did this person never get their link?".
+# ─────────────────────────────────────────────────────────────
+public_router = APIRouter(prefix="/leadership", tags=["Leadership Score"])
+
+
+def _verify_meta_signature(raw: bytes, header: Optional[str]) -> None:
+    """Reject anything not signed by Meta with our app secret.
+
+    The HMAC is computed over the RAW request body — re-serialising the parsed JSON would
+    change whitespace and key order and never match. Compared with `compare_digest` so the
+    comparison cannot be timed to leak the expected value byte by byte.
+
+    With no app secret configured this refuses everything rather than waving traffic
+    through: an unauthenticated endpoint that writes to the ledger is worse than a webhook
+    that is not wired up yet, because the failure is silent.
+    """
+    secret = (settings.WHATSAPP_APP_SECRET or "").strip()
+    if not secret:
+        raise HTTPException(
+            status_code=503,
+            detail="WHATSAPP_APP_SECRET is not configured, so callbacks cannot be verified.")
+    if not header or not header.startswith("sha256="):
+        raise HTTPException(status_code=401, detail="Missing X-Hub-Signature-256")
+
+    expected = hmac.new(secret.encode("utf-8"), raw, hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected, header.split("=", 1)[1].strip()):
+        raise HTTPException(status_code=401, detail="Signature does not match")
+
+
+@public_router.get("/whatsapp-status")
+async def verify_wa_webhook(request: Request):
+    """Meta's one-time subscription handshake.
+
+    Meta GETs the same URL it will later POST to and expects `hub.challenge` echoed back as
+    PLAIN TEXT — a JSON-wrapped body fails verification, which is why this returns a
+    PlainTextResponse rather than the usual dict.
+    """
+    params = request.query_params
+    expected = (settings.WHATSAPP_WEBHOOK_VERIFY_TOKEN or "").strip()
+    if not expected:
+        raise HTTPException(status_code=503,
+                            detail="WHATSAPP_WEBHOOK_VERIFY_TOKEN is not configured.")
+    if params.get("hub.mode") == "subscribe" and params.get("hub.verify_token") == expected:
+        return PlainTextResponse(params.get("hub.challenge") or "")
+    raise HTTPException(status_code=403, detail="Verification failed")
+
+
+@public_router.post("/whatsapp-status")
+async def record_wa_status(request: Request):
+    """Meta delivery callbacks: sent / delivered / read / failed.
+
+    Always answers 200 once the signature checks out, even for payloads it does nothing
+    with. Meta retries anything non-2xx with escalating backoff and eventually disables the
+    subscription, so a status we do not model must be accepted and ignored rather than
+    rejected. Progress only ever moves forward — see leadership_wa_service.apply_status —
+    because these callbacks arrive out of order.
+    """
+    raw = await request.body()
+    _verify_meta_signature(raw, request.headers.get("X-Hub-Signature-256"))
+
+    try:
+        payload = json.loads(raw or b"{}")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Body is not valid JSON")
+
+    updated = seen = 0
+    for entry in (payload.get("entry") or []):
+        for change in (entry.get("changes") or []):
+            for st in ((change.get("value") or {}).get("statuses") or []):
+                seen += 1
+                message_id = str(st.get("id") or "").strip()
+                status = str(st.get("status") or "").strip().lower()
+                if not message_id or not status:
+                    continue
+                errors = st.get("errors") or []
+                reason = None
+                if errors:
+                    first = errors[0] or {}
+                    reason = (first.get("title") or first.get("message")
+                              or str(first.get("code") or "")) or None
+                if await ls_wa.apply_status(message_id, status, reason):
+                    updated += 1
+
+    logger.info("Leadership WhatsApp webhook: %d status update(s) of %d applied", updated, seen)
+    return {"received": seen, "updated": updated}
+
+
+# ─────────────────────────────────────────────────────────────
+# Template composer — check / save draft / test
+#
+# The SAME modal TPMS and Notifications use (components/whatsapp/TemplateComposer), which
+# takes its four calls as a prop. Reusing the component means Leadership gets the live
+# preview, the Meta validation rules and the payload review for free, while every record it
+# writes lands in Leadership's own collection. What is shared is the composer and the Meta
+# helpers; no TPMS template row is read or written.
+# ─────────────────────────────────────────────────────────────
+@router.post("/whatsapp-template/check")
+async def check_wa_template(payload: dict, current_user: dict = Depends(get_current_user)):
+    """Check the message against Meta's rules, without saving or sending anything.
+
+    Meta's review takes hours and a rejection has to be read, corrected and resubmitted, so
+    the rules it will apply are worth applying here first.
+    """
+    _require_manage(current_user)
+    from app.services.meta_whatsapp_service import validate_template
+
+    body, variables = payload.get("body"), payload.get("variables")
+    doc = ls_wa.authored_doc(payload.get("name"), payload.get("language"), body, variables)
+    # Ours first — an unfillable variable is a clearer complaint than whatever Meta's rules
+    # make of the same template.
+    errors = ls_wa.validate_variables(body, variables) + validate_template(doc)
+    return {"valid": not errors, "errors": errors}
+
+
+@router.post("/whatsapp-template/draft")
+async def save_wa_draft(payload: dict, company_id: Optional[str] = Query(None),
+                        current_user: dict = Depends(get_current_user)):
+    """Save this company's invitation message as a DRAFT.
+
+    One template per company, so this upserts on company rather than creating rows. Category,
+    variable style, header, footer and buttons are all fixed by `authored_doc` — a feedback
+    invitation has one shape, and offering those choices would be asking questions with only
+    one right answer.
+    """
+    _require_manage(current_user)
+    from app.services.meta_whatsapp_service import validate_template
+
+    cid = _company_for(current_user, company_id)
+    body, variables = payload.get("body"), payload.get("variables")
+    doc = ls_wa.authored_doc(payload.get("name"), payload.get("language"), body, variables)
+
+    # Refused while it can still be fixed. Meta would reject it on review anyway, hours
+    # later, with a reason that has to be gone and looked up — and it cannot catch a
+    # variable nothing fills, because to Meta that is just a parameter.
+    errors = ls_wa.validate_variables(body, variables) + validate_template(doc)
+    if errors:
+        raise HTTPException(status_code=400, detail=" ".join(errors))
+
+    return await ls_wa.save_authored_template(cid, doc, current_user)
+
+
+@router.post("/whatsapp-template/test")
+async def test_wa_template(payload: dict, current_user: dict = Depends(get_current_user)):
+    """Send the template to one number so it can be read on a real handset.
+
+    Two modes, because WhatsApp allows exactly two things: an APPROVED template goes as the
+    real thing, and anything else goes as free-form text — which Meta only delivers if that
+    number messaged this business in the last 24 hours. The response says which happened.
+    """
+    _require_manage(current_user)
+    from app.services.meta_whatsapp_service import (
+        build_sample_send_components, render_preview_text,
+    )
+    from app.services.notification_service import (
+        _normalize_wa_phone, send_whatsapp_notification, send_whatsapp_template,
+    )
+
+    phone = _normalize_wa_phone(str(payload.get("phone") or "").strip())
+    if not phone:
+        raise HTTPException(status_code=400, detail="Enter a valid phone number.")
+
+    doc = ls_wa.authored_doc(payload.get("name"), payload.get("language"),
+                             payload.get("body"), payload.get("variables"))
+    status = str(payload.get("status") or "DRAFT").upper()
+
+    if status == "APPROVED":
+        components, _ = build_sample_send_components(doc)
+        ok = await send_whatsapp_template(
+            phone, doc["name"], doc.get("language") or "en", [],
+            None, "leadership_template_test", components)
+        return {"ok": bool(ok), "mode": "template",
+                "message": ("Sent as the approved template — exactly what recipients receive."
+                            if ok else "Meta refused the send. Check the number and the template.")}
+
+    ok = await send_whatsapp_notification(
+        phone, render_preview_text(doc), None, "leadership_template_test")
+    return {"ok": bool(ok), "mode": "freeform",
+            "message": ("Sent as a free-form message, because the template is not approved yet. "
+                        "It only arrives if that number messaged this business in the last 24 "
+                        "hours." if ok else
+                        "Not delivered. An unapproved template can only go as free-form text, "
+                        "which needs that number to have messaged this business in the last 24 "
+                        "hours.")}
+
+
+@router.post("/whatsapp-template/submit")
+async def submit_wa_template(company_id: Optional[str] = Query(None),
+                             current_user: dict = Depends(get_current_user)):
+    """Send this company's template to Meta for review.
+
+    It enters PENDING and Meta usually answers within minutes to hours. Nothing polls for
+    the verdict — the screen's Refresh calls the sync below, which is why approval appears
+    when somebody looks rather than on a timer.
+    """
+    _require_manage(current_user)
+    cid = _company_for(current_user, company_id)
+    try:
+        tpl = await ls_wa.submit_template(cid, current_user)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    tpl["can_edit"] = True
+    tpl["message"] = ("Submitted to Meta. It is PENDING review — refresh to pick up the "
+                      "verdict.")
+    return tpl
+
+
+@router.post("/whatsapp-template/sync")
+async def sync_wa_template(company_id: Optional[str] = Query(None),
+                           current_user: dict = Depends(get_current_user)):
+    """Ask Meta where this company's template stands and mirror the verdict locally.
+
+    Safe to repeat, and safe when Meta is unreachable: an unanswered call leaves the stored
+    status alone rather than reading as "your approved template disappeared".
+    """
+    _require_manage(current_user)
+    cid = _company_for(current_user, company_id)
+    tpl = await ls_wa.sync_template_status(cid)
+    tpl["can_edit"] = True
+    return tpl
+
+
+# ─────────────────────────────────────────────────────────────
+# Documents
+# ─────────────────────────────────────────────────────────────
+@router.post("/documents")
+async def upload_document(file: UploadFile = File(...),
+                          cycle: Optional[str] = Query(None),
+                          note: Optional[str] = Query(None),
+                          company_id: Optional[str] = Query(None),
+                          current_user: dict = Depends(get_current_user)):
+    """Attach a file to the module, optionally against one cycle.
+
+    Same S3 path every other upload in the project uses, so storage, signing and retention
+    behave identically. `cycle` is optional: a rubric or a policy belongs to the module,
+    while a signed-off score sheet belongs to one cycle.
+    """
+    from app.services.s3_service import upload_file_to_s3_with_key
+
+    _require_manage(current_user)
+    cid = _company_for(current_user, company_id)
+    try:
+        uploaded = upload_file_to_s3_with_key(file.file, file.filename, file.content_type)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Could not store that file: {e}")
+
+    doc = {
+        "company_id": cid,
+        "cycle": str(cycle) if cycle else None,
+        "name": file.filename,
+        "content_type": file.content_type,
+        "size": getattr(file, "size", None),
+        "key": uploaded["key"],
+        "url": uploaded["url"],
+        "note": (note or "").strip(),
+        "uploaded_by": _display_name(current_user),
+        "uploaded_by_id": _self_id(current_user),
+        "uploaded_at": datetime.utcnow(),
+    }
+    res = await get_collection(COLL_LS_DOCUMENTS).insert_one(doc)
+    return {**{k: v for k, v in doc.items() if k != "_id"}, "id": str(res.inserted_id)}
+
+
+@router.get("/documents")
+async def list_documents(cycle: Optional[str] = Query(None),
+                         company_id: Optional[str] = Query(None),
+                         current_user: dict = Depends(get_current_user)):
+    """This company's documents, newest first. `cycle` narrows to one cycle's own files."""
+    _require_manage(current_user)
+    cid = _company_for(current_user, company_id)
+    query = {"company_id": cid}
+    if cycle:
+        query["cycle"] = str(cycle)
+    rows = await get_collection(COLL_LS_DOCUMENTS).find(query).sort("uploaded_at", -1).to_list(500)
+    return {"company_id": cid, "documents": [{
+        "id": str(r["_id"]),
+        "cycle": r.get("cycle"),
+        "name": r.get("name"),
+        "content_type": r.get("content_type"),
+        "size": r.get("size"),
+        "url": r.get("url"),
+        "note": r.get("note"),
+        "uploaded_by": r.get("uploaded_by"),
+        "uploaded_at": r.get("uploaded_at"),
+    } for r in rows]}
+
+
+@router.delete("/documents/{document_id}")
+async def delete_document(document_id: str,
+                          company_id: Optional[str] = Query(None),
+                          current_user: dict = Depends(get_current_user)):
+    """Remove a document, from S3 as well as from the index.
+
+    The company filter is part of the query rather than a check afterwards, so a document
+    id from another company simply matches nothing instead of being deleted.
+    """
+    from app.services.s3_service import delete_file_from_s3
+
+    _require_manage(current_user)
+    cid = _company_for(current_user, company_id)
+    try:
+        oid = ObjectId(str(document_id))
+    except Exception:
+        raise HTTPException(status_code=404, detail="No such document")
+
+    doc = await get_collection(COLL_LS_DOCUMENTS).find_one({"_id": oid, "company_id": cid})
+    if not doc:
+        raise HTTPException(status_code=404, detail="No such document")
+    try:
+        delete_file_from_s3(doc.get("key"))
+    except Exception as e:                                        # pragma: no cover
+        # The index row still goes: a file left in the bucket is tidier than a listed
+        # document that cannot be opened.
+        logger.warning("Leadership document %s left in S3: %s", document_id, e)
+    await get_collection(COLL_LS_DOCUMENTS).delete_one({"_id": oid})
+    return {"deleted": 1, "name": doc.get("name")}
+
+
 @router.get("/cycles")
 async def list_cycles(company_id: Optional[str] = Query(None),
                       current_user: dict = Depends(get_current_user)):
@@ -532,7 +797,7 @@ async def read_panel(subject_id: str, cycle: str = Query(...),
     return {
         "cycle": cycle,
         "subject_id": subject_id,
-        "panel": [links.panel_row(r) for r in rows],
+        "panel": await links.panel_rows(rows),
         # For THIS leader's degree, not the 360° figure — a 180° panel is complete at four.
         "recommended_panel_size": panel_size_for(
             svc.effective_degree(await svc.get_cycle(cid, cycle) or {},
@@ -658,9 +923,13 @@ async def resend(assignment_id: str, current_user: dict = Depends(get_current_us
 
     # Deliberately NOT cooldown-checked: this is a single, explicit, per-person action —
     # the escape hatch that keeps "resend if needed" available while the bulk button waits.
-    result = await links.send_assignment_email(doc)
+    result = await links.send_assignment_whatsapp(doc)
     if not result.get("ok"):
-        raise HTTPException(status_code=500, detail=result.get("error") or "Send failed")
+        # 422 for a missing number: that is a fixable data problem on the person's record,
+        # not a server fault, and telling the two apart is what stops HR retrying forever
+        # against a row that can never send.
+        code = 422 if result.get("status") == "unreachable" else 502
+        raise HTTPException(status_code=code, detail=result.get("error") or "Send failed")
     return result
 
 
@@ -709,7 +978,35 @@ async def _assignment_for(token: str, current_user: dict, *, must_be_open: bool)
             raise HTTPException(status_code=409, detail="This feedback has already been submitted.")
         if state == LINK_EXPIRED:
             raise HTTPException(status_code=410, detail="This feedback link has expired.")
+        # The cycle's OWN collection window, which is separate from the link's expiry: HR
+        # can open a cycle for a fortnight inside a two-month period, and a link that is
+        # otherwise valid must not be usable outside it. Checked at submit as well as at
+        # read, so a page left open across the closing moment cannot post through it.
+        await _assert_window_open(doc)
     return doc
+
+
+async def _assert_window_open(doc: dict) -> None:
+    """Refuse a submission outside the cycle's configured Open/Close window.
+
+    `pending` and `closed` get different codes and different words on purpose — "not yet"
+    and "no longer" are opposite problems for the person holding the link, and one of them
+    means come back later.
+    """
+    cyc = await svc.get_cycle(doc.get("company_id"), doc.get("cycle")) or {}
+    state = links.window_state(cyc)
+    if state == links.WINDOW_OPEN:
+        return
+    opens, closes = links.survey_window(cyc)
+    if state == links.WINDOW_PENDING:
+        raise HTTPException(
+            status_code=403,
+            detail=("This feedback window has not opened yet"
+                    + (f" — it opens on {opens.strftime('%d %b %Y, %H:%M UTC')}." if opens else ".")))
+    raise HTTPException(
+        status_code=410,
+        detail=("This feedback window has closed"
+                + (f" — it closed on {closes.strftime('%d %b %Y, %H:%M UTC')}." if closes else ".")))
 
 
 @router.get("/assigned/{token}")
@@ -722,8 +1019,18 @@ async def assigned_form(token: str, current_user: dict = Depends(get_current_use
     doc = await _assignment_for(token, current_user, must_be_open=False)
     state = links.effective_status(doc)
 
+    # The window is reported alongside the link's own status so the page can say "opens on
+    # the 5th" rather than a bare refusal — and so a giver who arrives early knows to come
+    # back rather than assuming their link is broken.
+    cyc = await svc.get_cycle(doc.get("company_id"), doc.get("cycle")) or {}
+    window = links.window_state(cyc)
+    opens_at, closes_at = links.survey_window(cyc)
+
     head = {
         "state": state,
+        "window": window,
+        "window_opens_at": opens_at,
+        "window_closes_at": closes_at,
         "cycle": doc.get("cycle"),
         "cycle_label": cycle_label(doc.get("cycle") or ""),
         "subject_name": doc.get("subject_name"),
@@ -737,6 +1044,11 @@ async def assigned_form(token: str, current_user: dict = Depends(get_current_use
     }
     if state in (LINK_SUBMITTED, LINK_EXPIRED):
         return head
+    # Outside the window there is nothing to fill in, so the questions are not sent and the
+    # link is NOT marked opened — arriving early must not consume the "unopened" state HR
+    # chases on.
+    if window != links.WINDOW_OPEN:
+        return {**head, "state": window}
 
     await links.mark_opened(doc)
     questions = await svc.get_questions(doc.get("subject_level"),

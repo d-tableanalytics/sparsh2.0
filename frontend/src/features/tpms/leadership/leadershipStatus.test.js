@@ -49,43 +49,43 @@ test('opened is not a user-facing invitation status', () => {
 
 test('the four normal invitation states map straight through', () => {
   assert.equal(inviteLabel({ status: 'pending' }), 'Pending');
-  assert.equal(inviteLabel({ status: 'sent', email_status: 'sent' }), 'Sent');
+  assert.equal(inviteLabel({ status: 'sent', wa_status: 'sent' }), 'Sent');
   assert.equal(inviteLabel({ status: 'submitted' }), 'Submitted');
   assert.equal(inviteLabel({ status: 'expired' }), 'Expired');
 });
 
 test('a failed send is never shown as Sent', () => {
-  const failed = { status: 'pending', email_status: 'failed', email_error: 'Delivery failed' };
+  const failed = { status: 'pending', wa_status: 'failed', wa_error: 'Delivery failed' };
   assert.equal(inviteState(failed), 'failed');
   assert.equal(inviteLabel(failed), 'Send failed');
   assert.notEqual(inviteLabel(failed), 'Sent');
 });
 
 test('a failed send offers Retry and surfaces the reason', () => {
-  const failed = { status: 'pending', email_status: 'failed', email_error: 'Mailbox full' };
+  const failed = { status: 'pending', wa_status: 'failed', wa_error: 'Mailbox full' };
   assert.equal(canRetryInvite(failed), true);
   assert.equal(inviteError(failed), 'Mailbox full');
 });
 
 test('a successful send offers no Retry and no error text', () => {
-  const sent = { status: 'sent', email_status: 'sent' };
+  const sent = { status: 'sent', wa_status: 'sent' };
   assert.equal(canRetryInvite(sent), false);
   assert.equal(inviteError(sent), '');
 });
 
 test('submitted outranks a stale failure - finished business is never Send failed', () => {
-  const row = { status: 'submitted', email_status: 'failed', email_error: 'old bounce' };
+  const row = { status: 'submitted', wa_status: 'failed', wa_error: 'old bounce' };
   assert.equal(inviteLabel(row), 'Submitted');
   assert.equal(canRetryInvite(row), false);
 });
 
 test('expired outranks a failure too', () => {
-  assert.equal(inviteLabel({ status: 'expired', email_status: 'failed' }), 'Expired');
+  assert.equal(inviteLabel({ status: 'expired', wa_status: 'failed' }), 'Expired');
 });
 
-test('email status is not a separate family - it only colours the invitation', () => {
-  assert.equal(inviteTone({ status: 'pending', email_status: 'failed' }), 'red');
-  assert.equal(inviteTone({ status: 'sent', email_status: 'sent' }), 'blue');
+test('delivery status is not a separate family - it only colours the invitation', () => {
+  assert.equal(inviteTone({ status: 'pending', wa_status: 'failed' }), 'red');
+  assert.equal(inviteTone({ status: 'sent', wa_status: 'sent' }), 'blue');
   assert.equal(inviteTone({ status: 'submitted' }), 'green');
 });
 

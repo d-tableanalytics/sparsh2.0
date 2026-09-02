@@ -7,7 +7,7 @@ they gave, because a response carries no rater identity to join on.
 
 The ladder the plan calls for:
 
-    day 3 · day 7 · the day before close      → non-submitters, email + WhatsApp
+    day 3 · day 7 · the day before close      → non-submitters, over WhatsApp
     window closing today                      → HR
     quorum not met at close                   → HR, so the window can be extended
     score published                           → the leader and their reporting manager
@@ -55,25 +55,27 @@ def _days_since(dt) -> Optional[int]:
     return None if not dt else (_now() - dt).days
 
 
-async def _send(user_id: str, email: str, phone: str, subject: str, html: str,
-                text: str, slug: str) -> None:
-    """Email always; WhatsApp as well when the recipient has a number on file.
+async def _send(user_id: str, phone: str, text: str, slug: str) -> None:
+    """Send one WhatsApp message. Leadership has no other channel.
+
+    A feedback invitation or chase names the leader being rated. An inbox is shared,
+    forwarded and auto-archived in ways a phone is not, so the module that promises "ye
+    feedback completely confidential hoga" does not put that name in one.
 
     Best-effort and never raises. A chase that fails is a chase that fails — it must not
     take down the tick that also closes windows and freezes scores.
     """
-    from app.services.notification_service import (
-        send_email_notification, send_whatsapp_notification)
-    if email:
-        try:
-            await send_email_notification(email, subject, html, user_id=user_id, slug=slug)
-        except Exception as e:                                   # pragma: no cover
-            logger.warning("Leadership %s email to %s failed: %s", slug, email, e)
-    if phone:
-        try:
-            await send_whatsapp_notification(phone, text, user_id=user_id, slug=slug)
-        except Exception as e:                                   # pragma: no cover
-            logger.warning("Leadership %s WhatsApp to %s failed: %s", slug, phone, e)
+    from app.services.notification_service import send_whatsapp_notification
+    if not phone:
+        # Said out loud rather than returning in silence: with email gone, no number on
+        # file means this person is now genuinely unreachable, which is a data problem
+        # somebody has to fix on their user record.
+        logger.info("Leadership %s not sent: no mobile number for user %s", slug, user_id)
+        return
+    try:
+        await send_whatsapp_notification(phone, text, user_id=user_id, slug=slug)
+    except Exception as e:                                       # pragma: no cover
+        logger.warning("Leadership %s WhatsApp to %s failed: %s", slug, phone, e)
 
 
 def _wrap(title: str, body: str) -> str:
@@ -129,11 +131,11 @@ async def chase_non_submitters() -> dict:
                 f"You were asked for confidential feedback on "
                 f"<b>{row.get('subject_name') or 'a colleague'}</b> for {label}."
                 + ("<p>The window closes tomorrow.</p>" if stage == "final" else "")
-                + "<p>Your last invitation email has the link. If you cannot find it, ask "
+                + "<p>Your last invitation has the link. If you cannot find it, ask "
                   "HR to resend — a fresh link will be issued.</p>")
             text = (f"Reminder: your confidential leadership feedback for "
                     f"{row.get('subject_name') or 'a colleague'} ({label}) is still "
-                    f"pending. Check your email for the link.")
+                    f"pending. Your invitation message has the link.")
 
             # Rows minted before `giver_phone` existed carry no number, so fall back to
             # the roster. Without this the WhatsApp half of the ladder is silently dead

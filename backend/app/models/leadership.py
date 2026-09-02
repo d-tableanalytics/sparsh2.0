@@ -46,7 +46,19 @@ from datetime import datetime
 # ─────────────────────────────────────────────────────────────
 COLL_LS_CYCLES      = "tpms_leadership_cycles"       # one per (company, cycle)
 COLL_LS_SUBJECTS    = "tpms_leadership_subjects"     # leaders enrolled into a cycle
-COLL_LS_ASSIGNMENTS = "tpms_leadership_assignments"  # one mailed link per (subject, giver)
+COLL_LS_ASSIGNMENTS = "tpms_leadership_assignments"  # one link per (subject, giver)
+# ─────────────────────────────────────────────────────────────
+# Leadership owns its WhatsApp stack outright — template, delivery log and all.
+#
+# Deliberately NOT the TPMS tables. TPMS keys its templates on (activity, event kind, side)
+# and its log on an activity id; a Leadership invitation has none of those, and squeezing it
+# in would have meant either inventing fake activity codes or widening TPMS's schema for a
+# module that is not TPMS. Separate collections also mean a TPMS retention sweep can never
+# reach feedback-invitation records, which carry panel identity.
+# ─────────────────────────────────────────────────────────────
+COLL_LS_WA_TEMPLATES = "tpms_leadership_wa_templates"   # one row per company (+ a shared default)
+COLL_LS_WA_LOG       = "tpms_leadership_wa_log"         # one row per send attempt
+COLL_LS_DOCUMENTS    = "tpms_leadership_documents"      # module file store
 COLL_LS_RESPONSES   = "tpms_leadership_responses"    # one submitted feedback form
 COLL_LS_QUESTIONS   = "tpms_leadership_questions"    # level-specific question master
 COLL_LS_SCORES      = "tpms_leadership_scores"       # snapshot taken when a cycle closes
@@ -210,9 +222,40 @@ LINK_OPENED    = "opened"
 LINK_SUBMITTED = "submitted"
 LINK_EXPIRED   = "expired"      # derived from the cycle window, never written
 
-EMAIL_PENDING = "pending"
-EMAIL_SENT    = "sent"
-EMAIL_FAILED  = "failed"
+# ─────────────────────────────────────────────────────────────
+# WhatsApp delivery states, in the order a message moves through them.
+#
+# PENDING is a real state, not a placeholder: a row is written before the send is attempted,
+# so a crash mid-dispatch leaves evidence that the attempt happened rather than nothing at
+# all. UNREACHABLE is kept apart from FAILED because they need different fixes — one is a
+# missing number on a user record, the other is Meta rejecting a message we did send.
+# ─────────────────────────────────────────────────────────────
+WA_PENDING     = "pending"
+WA_SENT        = "sent"
+WA_DELIVERED   = "delivered"
+WA_READ        = "read"
+WA_FAILED      = "failed"
+WA_UNREACHABLE = "unreachable"
+
+WA_STATUSES: List[str] = [WA_PENDING, WA_SENT, WA_DELIVERED, WA_READ, WA_FAILED, WA_UNREACHABLE]
+
+# Only ever move forward. Meta's webhooks arrive out of order often enough that a late
+# "sent" callback would otherwise drag a message that is already "read" backwards.
+WA_RANK: Dict[str, int] = {s: i for i, s in enumerate(
+    [WA_PENDING, WA_SENT, WA_DELIVERED, WA_READ])}
+
+
+def wa_is_forward(current: str, target: str) -> bool:
+    """Whether `target` is a later state than `current`.
+
+    Terminal failures always apply — a message can fail after being sent — but a progress
+    state never regresses.
+    """
+    if target in (WA_FAILED, WA_UNREACHABLE):
+        return True
+    if current in (WA_FAILED, WA_UNREACHABLE):
+        return False
+    return WA_RANK.get(target, -1) > WA_RANK.get(current, -1)
 
 # How long after a successful send the same pending invitation is left alone.
 #
@@ -224,7 +267,7 @@ EMAIL_FAILED  = "failed"
 RESEND_COOLDOWN_HOURS = 24
 
 # ─────────────────────────────────────────────────────────────
-# Invitation email template
+# Invitation link expiry
 #
 # Stored in the EXISTING `tpms_mail_templates` collection, so Leadership reuses the mail
 # system the rest of TPMS already uses instead of growing a second one. The collection is
@@ -239,45 +282,6 @@ RESEND_COOLDOWN_HOURS = 24
 # existing "*" row for schedule/reminder events can never be served as a leadership
 # invitation either.
 # ─────────────────────────────────────────────────────────────
-TEMPLATE_ACTIVITY = "Leadership Score"
-TEMPLATE_SIDE     = "company"
-TEMPLATE_EVENT    = "leadership_invite"
-
-# What an author may write in the body or subject. `leadership_link` is the important one:
-# it is replaced PER RECIPIENT with that giver's own /lf/<token> URL at dispatch time, so a
-# single stored template produces a different, personal mail for each of the 8 givers.
-TEMPLATE_PLACEHOLDERS: List[dict] = [
-    {"key": "leadership_link",     "desc": "This giver's own, single-use feedback link"},
-    {"key": "giver_name",          "desc": "Name of the person being asked for feedback"},
-    {"key": "giver_level",         "desc": "The GIVER's own level, e.g. 'L6' - not the leader's"},
-    {"key": "subject_name",        "desc": "The leader being rated"},
-    {"key": "subject_designation", "desc": "That leader's designation"},
-    {"key": "level_label",         "desc": "The LEADER's level, e.g. 'L-5 (Manager)'"},
-    {"key": "cycle_label",         "desc": "The feedback window, e.g. 'May-Jun 2026'"},
-    {"key": "company_name",        "desc": "Company name"},
-    {"key": "expires_on",          "desc": "Date the link stops working (YYYY-MM-DD)"},
-]
-
-DEFAULT_TEMPLATE_SUBJECT = "Leadership Feedback - {{subject_name}} ({{cycle_label}})"
-
-# The body used when no template has been authored yet. Identical in content to what the
-# module sent before templating, so behaviour is unchanged out of the box.
-DEFAULT_TEMPLATE_BODY = (
-    '<div style="font-family:Arial,sans-serif;font-size:14px;color:#1e293b;max-width:600px">'
-    '<p>Hello {{giver_name}},</p>'
-    '<p>You have been requested to give leadership feedback for '
-    '<b>{{subject_name}}</b> for the cycle <b>{{cycle_label}}</b>.</p>'
-    '<p>The form takes a few minutes. Your responses are <b>completely confidential</b> - '
-    'the leader receives only a combined score and never sees who gave which rating.</p>'
-    '<p><a href="{{leadership_link}}" style="display:inline-block;background:#4f46e5;'
-    'color:#fff;padding:10px 18px;border-radius:8px;text-decoration:none;font-weight:700">'
-    'Give your feedback</a></p>'
-    '<p style="font-size:12px;color:#6b7280">{{leadership_link}}</p>'
-    '<p style="font-size:12px;color:#6b7280">This link is personal to you and can be '
-    'submitted once. It stops working after {{expires_on}}.</p></div>'
-)
-
-
 # Rating ceiling. The document scores every option 1, 2, 4 or 5 on a 1-5 scale.
 SCALE_MIN = 1
 SCALE_MAX = 5
@@ -785,6 +789,64 @@ def _validate_threshold(v) -> int:
     return n
 
 
+# Meta's own template categories. UTILITY is the right one for a feedback invitation —
+# it is a transactional message the recipient is expected to act on, not marketing — but the
+# client owns the choice at approval time, so it is stored rather than assumed.
+WA_CATEGORIES: List[str] = ["UTILITY", "MARKETING", "AUTHENTICATION"]
+
+# ─────────────────────────────────────────────────────────────
+# Template approval lifecycle.
+#
+# DRAFT is ours — the template exists here and Meta has never seen it. The other three are
+# Meta's verdict, mirrored locally so the screen can answer "where is it up to?" without a
+# round trip on every page load.
+#
+# REJECTED is editable on purpose: a rejected template still OCCUPIES its name on the WABA,
+# so the only way to act on a rejection is to correct the one Meta already holds and put it
+# back into review. Deleting and recreating gets "Content in this language already exists".
+# ─────────────────────────────────────────────────────────────
+WA_TPL_DRAFT    = "DRAFT"
+WA_TPL_PENDING  = "PENDING"
+WA_TPL_APPROVED = "APPROVED"
+WA_TPL_REJECTED = "REJECTED"
+
+WA_TPL_STATUSES: List[str] = [WA_TPL_DRAFT, WA_TPL_PENDING, WA_TPL_APPROVED, WA_TPL_REJECTED]
+# Only these may be (re)submitted. PENDING is with Meta; APPROVED needs no resubmission.
+WA_TPL_EDITABLE = {WA_TPL_DRAFT, WA_TPL_REJECTED}
+
+# The data fields a Leadership template's parameters may map to. Exactly what
+# leadership_wa_service builds at send time, so a mapped field always resolves — Leadership's
+# own list, deliberately not TPMS's (an invitation has no activity, status or event date).
+WA_VARIABLE_FIELDS: List[str] = [
+    "giver_name", "subject_name", "link", "company_name", "cycle", "cycle_label",
+]
+
+
+class LeadershipWhatsAppTemplate(BaseModel):
+    """Leadership's own WIRING for a company's template — not the template itself.
+
+    The message (name, language, category, header, body, footer, buttons) is authored and
+    stored through the composer endpoints, which own the Meta definition. All that is left
+    here is what Meta cannot know: which Leadership data fills each placeholder, and whether
+    the wiring is switched on.
+
+    Parameter ORDER is the contract — Meta addresses body parameters positionally, so
+    `params[0]` fills {{1}}.
+    """
+    params: List[str] = Field(default_factory=lambda: ["giver_name", "subject_name", "link"])
+    active: bool = True
+
+    @field_validator("params")
+    @classmethod
+    def _known_fields(cls, values):
+        for name in values or []:
+            if str(name).strip() not in WA_VARIABLE_FIELDS:
+                raise ValueError(
+                    f"'{name}' is not a Leadership field. Available: "
+                    + ", ".join(WA_VARIABLE_FIELDS))
+        return [str(v).strip() for v in (values or []) if str(v).strip()]
+
+
 class CycleCreate(BaseModel):
     company_id: Optional[str] = None
     cycle: Optional[str] = None                 # defaults to the current 2-month window
@@ -1127,6 +1189,13 @@ def _validate_group_weightages(v):
 # Every collection here is new, so no existing index is touched.
 # ─────────────────────────────────────────────────────────────
 LEADERSHIP_INDEXES = [
+    # One template per company; the shared default is the row with company_id None.
+    (COLL_LS_WA_TEMPLATES, [("company_id", 1)], {"unique": True, "name": "uniq_wa_company"}),
+    # The delivery log is read per cycle and per assignment, and written once per attempt.
+    (COLL_LS_WA_LOG, [("company_id", 1), ("cycle", 1)], {"name": "wa_by_company_cycle"}),
+    (COLL_LS_WA_LOG, [("assignment_id", 1)], {"name": "wa_by_assignment"}),
+    (COLL_LS_WA_LOG, [("message_id", 1)], {"name": "wa_by_message"}),
+    (COLL_LS_DOCUMENTS, [("company_id", 1), ("cycle", 1)], {"name": "docs_by_company_cycle"}),
     (COLL_LS_CYCLES,      [("company_id", 1), ("cycle", 1)],
      {"unique": True, "name": "uniq_company_cycle"}),
     (COLL_LS_SUBJECTS,    [("company_id", 1), ("cycle", 1), ("subject_id", 1)],

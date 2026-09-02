@@ -1,9 +1,10 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   CalendarRange, Plus, RefreshCw, AlertTriangle, CheckCircle2, X, ShieldAlert,
   Users, Lock, Unlock, ArrowRight, Layers, Calculator, Send, Undo2, Trash2, Mail,
+  FolderOpen, Upload, ExternalLink,
 } from 'lucide-react';
 import {
   DashboardHero, HeaderSelect, HeroButton, Section, Th, Td, TableShell, KpiTile, FilterSelect,
@@ -12,10 +13,11 @@ import {
   getLeadershipConfig, getLeadershipCycles, createLeadershipCycle, updateLeadershipCycle,
   getLeadershipQuorum, computeLeadershipCycle, publishLeadershipCycle,
   deleteLeadershipCycle,
+  getLeadershipDocuments, uploadLeadershipDocument, deleteLeadershipDocument,
 } from '../../../../services/leadershipApi';
 import { cycleLabel, cycleHint, isScoreReady } from '../../leadership/leadershipStatus';
 import {
-  canManage, errText, fmtNum, useAsync, useLeadershipCompany,
+  canManage, errText, fmtNum, parseUtc, useAsync, useLeadershipCompany,
 } from '../../leadership/leadershipUtils';
 
 /* ─────────────────────────────────────────────────────────────
@@ -36,6 +38,19 @@ const STATUS_TONE = {
   closed:    { c: 'var(--accent-yellow)', bg: 'var(--accent-yellow-bg)',  bd: 'var(--accent-yellow-border)' },
   computed:  { c: 'var(--accent-indigo)', bg: 'var(--accent-indigo-bg)',  bd: 'var(--accent-indigo-border)' },
   published: { c: 'var(--accent-green)',  bg: 'var(--accent-green-bg)',   bd: 'var(--accent-green-border)' },
+};
+
+/** "Opens 5 Sep · Closes 19 Sep", or just whichever half was set. */
+const windowLabel = (row) => {
+  const when = (v) => {
+    const d = parseUtc(v);
+    return d ? d.toLocaleString(undefined,
+      { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : null;
+  };
+  return [
+    when(row.opens_at) && `Opens ${when(row.opens_at)}`,
+    when(row.closes_at) && `Closes ${when(row.closes_at)}`,
+  ].filter(Boolean).join(' · ');
 };
 
 const Pill = ({ label, tone = 'draft' }) => {
@@ -76,6 +91,8 @@ const CycleModal = ({ config, existing, onClose, onSubmit }) => {
   const [cycle, setCycle] = useState(available[0]?.code || '');
   const [degree, setDegree] = useState('360');
   const [minResponses, setMinResponses] = useState('3');
+  const [opensAt, setOpensAt] = useState('');
+  const [closesAt, setClosesAt] = useState('');
   const [notes, setNotes] = useState('');
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState('');
@@ -93,6 +110,11 @@ const CycleModal = ({ config, existing, onClose, onSubmit }) => {
         // to 3, and the degree's panel size, which is the most replies that can ever
         // arrive. Asking 8 of a 180° panel of four is a threshold nobody could reach.
         min_responses: Math.min(Math.max(3, Number(minResponses) || 3), panelSizeOf(degree)),
+        // Sent as UTC instants. A <input type="datetime-local"> value has no zone, so it is
+        // read in the browser's own timezone — which is the one HR is thinking in when they
+        // pick "closes 5pm Friday".
+        opens_at: opensAt ? new Date(opensAt).toISOString() : null,
+        closes_at: closesAt ? new Date(closesAt).toISOString() : null,
         notes: notes.trim(),
       });
     } catch (ex) {
@@ -158,6 +180,28 @@ const CycleModal = ({ config, existing, onClose, onSubmit }) => {
                 onChange={(e) => setMinResponses(e.target.value)} className={inputCls} />
             </Field>
           </div>
+
+          {/* The collection window. Both optional: leaving them empty keeps the behaviour
+              every existing cycle has, where the cycle's own two calendar months decide when
+              feedback can arrive. Setting them narrows that to the days HR actually wants. */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <Field label="Opens" hint="Optional. Before this, a giver's link says to come back.">
+              <input type="datetime-local" value={opensAt}
+                onChange={(e) => setOpensAt(e.target.value)} className={inputCls} />
+            </Field>
+            <Field label="Closes"
+              hint="Optional. After this, no further feedback is accepted — even on a page left open.">
+              <input type="datetime-local" value={closesAt} min={opensAt || undefined}
+                onChange={(e) => setClosesAt(e.target.value)} className={inputCls} />
+            </Field>
+          </div>
+
+          {opensAt && closesAt && new Date(closesAt) <= new Date(opensAt) && (
+            <div className="flex items-center gap-2 rounded-lg border border-[var(--accent-yellow-border)] bg-[var(--accent-yellow-bg)] px-3 py-2 text-[12px] font-bold text-[var(--accent-yellow)]">
+              <AlertTriangle size={14} /> The close date is not after the open date, so the
+              window would never be open.
+            </div>
+          )}
 
           <Field label="Notes">
             <textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows={2}
@@ -246,7 +290,7 @@ const ConfirmDeleteModal = ({ row, onClose, onConfirm }) => {
               <AlertTriangle size={14} className="mt-[1px] shrink-0" />
               <span>
                 This also un-enrols <b>{enrolled}</b> leader{enrolled === 1 ? '' : 's'} and invalidates
-                any feedback links already emailed to their panels.
+                any feedback links already sent to their panels.
               </span>
             </div>
           )}
@@ -616,7 +660,7 @@ const PublishConfirmModal = ({ row, onClose, onConfirm }) => {
         <div className="px-5 py-4 space-y-3">
           <p className="text-[12.5px] font-semibold text-[var(--text-muted)]">
             Each of <b className="text-[var(--text-main)]">{leaders} leader{leaders === 1 ? '' : 's'}</b> and
-            their reporting manager is emailed, and the score becomes visible on the leader&rsquo;s
+            their reporting manager is notified, and the score becomes visible on the leader&rsquo;s
             own Leadership Report.
           </p>
 
@@ -652,6 +696,162 @@ const PublishConfirmModal = ({ row, onClose, onConfirm }) => {
   );
 };
 
+/** A cycle's documents — upload, open, remove — without leaving the cycle list.
+    Files belong to the cycle they were gathered for (a rubric, a signed-off sheet, an
+    approval note), so they live on the row rather than on a page of their own where the
+    first job would be choosing which cycle you meant again. Mounted only while a row is
+    open, so it seeds from that cycle and needs no reset. */
+const DocumentsModal = ({ companyId, row, onClose }) => {
+  const [file, setFile] = useState(null);
+  const [note, setNote] = useState('');
+  const [busy, setBusy] = useState('');
+  const [err, setErr] = useState('');
+
+  const load = useCallback(
+    async () => (await getLeadershipDocuments(companyId, row.cycle)).data, [companyId, row.cycle]);
+  const { data, loading, reload } = useAsync(load, [companyId, row.cycle]);
+  const documents = data?.documents || [];
+
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape' && !busy) onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [busy, onClose]);
+
+  const upload = async () => {
+    if (!file) { setErr('Choose a file first.'); return; }
+    setBusy('upload');
+    setErr('');
+    try {
+      await uploadLeadershipDocument(companyId, file, { cycle: row.cycle, note });
+      setFile(null);
+      setNote('');
+      // The native input keeps its own value and would still show the last filename.
+      const input = document.getElementById('ls-cycle-doc');
+      if (input) input.value = '';
+      await reload();
+    } catch (e) {
+      setErr(errText(e, 'Could not upload that file.'));
+    } finally { setBusy(''); }
+  };
+
+  const remove = async (doc) => {
+    setBusy(doc.id);
+    setErr('');
+    try {
+      await deleteLeadershipDocument(companyId, doc.id);
+      await reload();
+    } catch (e) {
+      setErr(errText(e, 'Could not delete that document.'));
+    } finally { setBusy(''); }
+  };
+
+  const prettySize = (bytes) => {
+    if (!bytes && bytes !== 0) return '';
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+    return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  };
+
+  return (
+    <MotionDiv className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={busy ? undefined : onClose} />
+      <MotionDiv role="dialog" aria-modal="true"
+        initial={{ opacity: 0, y: 14, scale: 0.98 }}
+        animate={{ opacity: 1, y: 0, scale: 1 }}
+        exit={{ opacity: 0, y: 14, scale: 0.98 }}
+        transition={{ duration: 0.22, ease: [0.4, 0, 0.2, 1] }}
+        className="relative w-full max-w-lg rounded-2xl border border-[var(--border)] bg-[var(--bg-card)] shadow-xl overflow-hidden max-h-[88vh] flex flex-col">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-[var(--border)] shrink-0">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <span className="w-8 h-8 rounded-lg flex items-center justify-center bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] shrink-0">
+              <FolderOpen size={16} />
+            </span>
+            <div className="min-w-0">
+              <h3 className="text-[15px] font-extrabold tracking-tight">Documents</h3>
+              <span className="block text-[10.5px] font-bold text-[var(--text-muted)] truncate">
+                {row.label || row.cycle}
+              </span>
+            </div>
+          </div>
+          <button type="button" onClick={onClose} disabled={!!busy}
+            className="w-8 h-8 rounded-lg flex items-center justify-center text-[var(--text-muted)] hover:bg-[var(--input-bg)] transition-colors disabled:opacity-50">
+            <X size={16} />
+          </button>
+        </div>
+
+        <div className="px-5 py-4 space-y-3.5 overflow-y-auto">
+          <div className="rounded-xl border border-[var(--border)] bg-[var(--input-bg)] px-3.5 py-3 space-y-2.5">
+            <input id="ls-cycle-doc" type="file" disabled={!!busy}
+              onChange={(e) => { setFile(e.target.files?.[0] || null); setErr(''); }}
+              className="w-full text-[12px] font-semibold file:mr-3 file:px-3 file:py-1.5 file:rounded-lg file:border-0 file:bg-[var(--accent-indigo-bg)] file:text-[var(--accent-indigo)] file:font-bold" />
+            <input value={note} disabled={!!busy} onChange={(e) => setNote(e.target.value)}
+              placeholder="What is this file? (optional)" className={inputCls} />
+            <div className="flex justify-end">
+              <button type="button" onClick={upload} disabled={!!busy || !file}
+                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-[var(--accent-indigo)] text-white text-[13px] font-bold shadow-sm hover:opacity-90 transition-opacity disabled:opacity-40">
+                {busy === 'upload' ? <RefreshCw size={14} className="animate-spin" /> : <Upload size={14} />}
+                {busy === 'upload' ? 'Uploading…' : 'Upload'}
+              </button>
+            </div>
+          </div>
+
+          {loading ? (
+            <p className="text-[12.5px] font-bold text-[var(--text-muted)] text-center py-6">
+              Loading documents…
+            </p>
+          ) : documents.length === 0 ? (
+            <p className="text-[12.5px] font-semibold text-[var(--text-muted)] text-center py-6">
+              Nothing stored against this cycle yet.
+            </p>
+          ) : (
+            <div className="rounded-xl border border-[var(--border)] overflow-hidden">
+              {documents.map((d) => (
+                <div key={d.id}
+                  className="flex items-center justify-between gap-3 px-3.5 py-2.5 border-b border-[var(--border)] last:border-0">
+                  <div className="min-w-0">
+                    <span className="block text-[12.5px] font-bold truncate">{d.name}</span>
+                    <span className="block text-[10.5px] font-semibold text-[var(--text-muted)] truncate">
+                      {[prettySize(d.size), d.uploaded_by, d.note].filter(Boolean).join(' · ')}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    {/* `noreferrer` because the URL is signed and must not travel in a
+                        Referer header to whatever the file links on to. */}
+                    <a href={d.url} target="_blank" rel="noreferrer" title="Open or download"
+                      className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11.5px] font-bold text-[var(--accent-indigo)] bg-[var(--accent-indigo-bg)] border border-[var(--accent-indigo-border)] hover:opacity-90 transition-opacity">
+                      <ExternalLink size={12} />
+                    </a>
+                    <button type="button" onClick={() => remove(d)} disabled={!!busy}
+                      title="Delete this document"
+                      className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11.5px] font-bold text-[var(--accent-red)] bg-[var(--accent-red-bg)] border border-[var(--accent-red-border)] hover:opacity-90 transition-opacity disabled:opacity-50">
+                      {busy === d.id ? <RefreshCw size={12} className="animate-spin" /> : <Trash2 size={12} />}
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {err && (
+            <div className="flex items-center gap-2 rounded-lg border border-[var(--accent-red-border)] bg-[var(--accent-red-bg)] px-3 py-2 text-[12px] font-bold text-[var(--accent-red)]">
+              <AlertTriangle size={14} /> {err}
+            </div>
+          )}
+        </div>
+
+        <div className="flex items-center justify-end px-5 py-4 border-t border-[var(--border)] shrink-0">
+          <button type="button" onClick={onClose} disabled={!!busy}
+            className="px-4 py-2 rounded-lg text-[13px] font-bold text-[var(--text-muted)] hover:bg-[var(--input-bg)] transition-colors disabled:opacity-50">
+            Done
+          </button>
+        </div>
+      </MotionDiv>
+    </MotionDiv>
+  );
+};
+
 const LeadershipCycles = () => {
   const { user, staff, companyOptions, companyId, setCompanyId } = useLeadershipCompany();
   const manage = canManage(user);
@@ -665,6 +865,7 @@ const LeadershipCycles = () => {
   const [quorumWarn, setQuorumWarn] = useState(null);
   const [openBlocked, setOpenBlocked] = useState(null);
   const [pendingPublish, setPendingPublish] = useState(null);
+  const [docsFor, setDocsFor] = useState(null);
   const [busy, setBusy] = useState('');
   const [notice, setNotice] = useState('');
 
@@ -883,6 +1084,14 @@ const LeadershipCycles = () => {
                   <Td>
                     <span className="font-bold">{c.label}</span>
                     <span className="block text-[10.5px] text-[var(--text-muted)] font-mono">{c.cycle}</span>
+                    {/* Only shown when HR set one. An empty window is not a gap — it means
+                        the cycle's own calendar months apply, which is what the code label
+                        above already says. */}
+                    {(c.opens_at || c.closes_at) && (
+                      <span className="block text-[10.5px] font-semibold text-[var(--text-muted)] mt-0.5">
+                        {windowLabel(c)}
+                      </span>
+                    )}
                   </Td>
                   <Td align="center" className="font-bold tabular-nums">{c.degree}°</Td>
                   <Td align="center" className="tabular-nums text-[var(--text-muted)]">{fmtNum(c.min_responses)}</Td>
@@ -904,6 +1113,15 @@ const LeadershipCycles = () => {
                         className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11.5px] font-bold text-[var(--accent-indigo)] bg-[var(--accent-indigo-bg)] border border-[var(--accent-indigo-border)] hover:opacity-90 transition-opacity">
                         Leaders <ArrowRight size={12} />
                       </Link>
+                      {/* Files belong to the cycle they were gathered for, so they hang off
+                          the row rather than a page whose first job would be asking which
+                          cycle you meant. Available at every status — a rubric goes up
+                          before collection, a signed-off sheet long after. */}
+                      <button type="button" onClick={() => setDocsFor(c)}
+                        title="Documents for this cycle"
+                        className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11.5px] font-bold text-[var(--text-muted)] border border-[var(--border)] hover:bg-[var(--input-bg)] transition-colors">
+                        <FolderOpen size={12} />
+                      </button>
                       {/* Create -> enrol -> assign panels -> mail -> Open. `can_open` is
                           server-computed (leadership_service.open_readiness) and mirrors
                           exactly what assert_openable enforces, so the button and the API
@@ -919,7 +1137,7 @@ const LeadershipCycles = () => {
                           </button>
                         ) : (
                           <button type="button" onClick={() => setStatus(c.cycle, 'open')} disabled={busy === c.cycle}
-                            title="Start collecting — the feedback links already mailed go live"
+                            title="Start collecting — the feedback links already sent go live"
                             className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11.5px] font-bold text-[var(--accent-green)] bg-[var(--accent-green-bg)] border border-[var(--accent-green-border)] hover:opacity-90 transition-opacity disabled:opacity-50">
                             <Unlock size={12} /> Open
                           </button>
@@ -1004,6 +1222,10 @@ const LeadershipCycles = () => {
         {pendingPublish && (
           <PublishConfirmModal key="publish-cycle" row={pendingPublish}
             onClose={() => setPendingPublish(null)} onConfirm={publish} />
+        )}
+        {docsFor && (
+          <DocumentsModal key={`docs-${docsFor.cycle}`} companyId={companyId} row={docsFor}
+            onClose={() => setDocsFor(null)} />
         )}
       </AnimatePresence>
     </div>

@@ -3,7 +3,7 @@ import { useSearchParams } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   UserCog, Plus, RefreshCw, AlertTriangle, CheckCircle2, X, ShieldAlert, Send,
-  Users, Trash2, Mail, Lock, UserPlus,
+  Users, Trash2, MessageCircle, Lock, UserPlus,
 } from 'lucide-react';
 import {
   DashboardHero, HeaderSelect, HeroButton, Section, Th, Td, TableShell, KpiTile, FilterSelect,
@@ -17,7 +17,6 @@ import {
   canManage, canManagePanel, errText, useAsync, useLeadershipCompany,
 } from '../../leadership/leadershipUtils';
 import {
-  inviteLabel, inviteTone, inviteError, canRetryInvite,
 } from '../../leadership/leadershipStatus';
 
 /* ─────────────────────────────────────────────────────────────
@@ -202,6 +201,11 @@ const PanelModal = ({ companyId, cycle, subject, config, people, onClose, onChan
   const nameOf = (id) => (people || []).find((p) => String(p.person_id) === String(id))?.name
     || rows.find((r) => String(r.giver_id) === String(id))?.giver_name || id;
 
+  // Prefers the invitation's freshly-resolved number, falling back to the roster so a giver
+  // who has not been saved yet still shows one.
+  const mobileOf = (id, saved) => saved?.giver_mobile
+    || (people || []).find((p) => String(p.person_id) === String(id))?.mobile || '';
+
   const statusOf = (id) => rows.find((r) => String(r.giver_id) === String(id));
 
   const addGiver = (id, relation) => {
@@ -245,7 +249,7 @@ const PanelModal = ({ companyId, cycle, subject, config, people, onClose, onChan
     try {
       const res = await dispatchLeadershipLinks(companyId, cycle, subject.subject_id);
       const { sent = 0, failed = 0 } = res.data || {};
-      setNotice(`${sent} link${sent === 1 ? '' : 's'} emailed${failed ? `, ${failed} failed` : ''}.`);
+      setNotice(`${sent} link${sent === 1 ? '' : 's'} sent on WhatsApp${failed ? `, ${failed} failed` : ''}.`);
       await load();
       onChanged?.();
     } catch (e) {
@@ -353,8 +357,18 @@ const PanelModal = ({ companyId, cycle, subject, config, people, onClose, onChan
                       <tr key={g.giver_id} className="border-b border-[var(--border)] last:border-0">
                         <Td>
                           <span className="font-bold">{nameOf(g.giver_id)}</span>
-                          {saved?.giver_email && (
-                            <span className="block text-[10.5px] text-[var(--text-muted)]">{saved.giver_email}</span>
+                          {/* The NUMBER, not the email — links go by WhatsApp, so this is
+                              the address that decides whether they can be reached. Shown
+                              missing rather than omitted: a blank line reads as "no data",
+                              and this person simply will not receive their invitation. */}
+                          {mobileOf(g.giver_id, saved) ? (
+                            <span className="block text-[10.5px] font-mono text-[var(--text-muted)]">
+                              {mobileOf(g.giver_id, saved)}
+                            </span>
+                          ) : (
+                            <span className="block text-[10.5px] font-bold text-[var(--accent-red)]">
+                              No mobile number — cannot be invited
+                            </span>
                           )}
                         </Td>
                         <Td>
@@ -363,21 +377,22 @@ const PanelModal = ({ companyId, cycle, subject, config, people, onClose, onChan
                             options={relations.map((r) => ({ id: r.code, name: r.label }))} />
                         </Td>
                         <Td align="center">
+                          {/* Whether this giver has ANSWERED — not whether the message
+                              reached them. Delivery state is deliberately not shown: it is
+                              Meta's business, it changes after the fact, and none of it
+                              tells HR anything they can act on. */}
                           {saved
-                            ? (
-                              <span title={inviteError(saved)}>
-                                <Pill label={inviteLabel(saved)} tone={inviteTone(saved)} />
-                              </span>
-                            )
-                            : <Pill label="Pending" tone="yellow" />}
+                            ? <Pill label={saved.status === 'submitted' ? 'Submitted' : 'Awaiting'}
+                                tone={saved.status === 'submitted' ? 'green' : 'grey'} />
+                            : <Pill label="Not saved" tone="yellow" />}
                         </Td>
                         <Td align="right">
                           <div className="inline-flex items-center gap-1.5 justify-end">
                             {saved && saved.status !== 'submitted' && (
                               <button type="button" onClick={() => resend(saved.id)} disabled={busyId === saved.id}
                                 className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11.5px] font-bold text-[var(--accent-indigo)] bg-[var(--accent-indigo-bg)] border border-[var(--accent-indigo-border)] hover:opacity-90 transition-opacity disabled:opacity-50">
-                                {busyId === saved.id ? <RefreshCw size={12} className="animate-spin" /> : <Mail size={12} />}
-                                {canRetryInvite(saved) ? 'Retry' : 'Resend'}
+                                {busyId === saved.id ? <RefreshCw size={12} className="animate-spin" /> : <MessageCircle size={12} />}
+                                Send link
                               </button>
                             )}
                             {saved?.status !== 'submitted' && (
@@ -435,7 +450,7 @@ const PanelModal = ({ companyId, cycle, subject, config, people, onClose, onChan
               ? 'This cycle is closed or its window has ended — links can no longer be sent.'
               : undefined}
             className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-[13px] font-bold text-[var(--accent-green)] bg-[var(--accent-green-bg)] border border-[var(--accent-green-border)] hover:opacity-90 transition-opacity disabled:opacity-40 disabled:cursor-not-allowed">
-            <Send size={14} /> Email pending links
+            <Send size={14} /> Send pending links
           </button>
           <button type="button" onClick={save} disabled={saving || !dirty}
             className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-[var(--accent-indigo)] text-white text-[13px] font-bold shadow-sm hover:opacity-90 transition-opacity disabled:opacity-40 disabled:cursor-not-allowed">
@@ -450,7 +465,7 @@ const PanelModal = ({ companyId, cycle, subject, config, people, onClose, onChan
 
 /** The two actions on this page that could not be taken back quietly, and until now fired
     straight off a click: un-enrolling a leader (which destroys the panel built for them and
-    kills links already in inboxes) and mailing every pending invitation at once.
+    kills links already delivered) and sending every pending invitation at once.
 
     One component for both, driven by props, so a third such action has somewhere to go
     rather than reaching for a browser confirm. */
@@ -622,10 +637,10 @@ const LeadershipSubjects = () => {
         sent = 0, failed = 0, skipped_recent: held = 0, cooldown_hours: cd = 24,
         skipped_incomplete: incomplete = [],
       } = res.data || {};
-      const parts = [`${sent} link${sent === 1 ? '' : 's'} emailed`];
+      const parts = [`${sent} link${sent === 1 ? '' : 's'} sent on WhatsApp`];
       if (failed) parts.push(`${failed} failed`);
       // Say what was held and why, so a second click reads as deliberate rather than broken.
-      if (held) parts.push(`${held} already emailed in the last ${cd}h and skipped`);
+      if (held) parts.push(`${held} already sent in the last ${cd}h and skipped`);
       // Leaders whose panel is still short are named rather than counted: "2 skipped" leaves
       // HR hunting for which two, and the whole point is that they can go and finish them.
       if (incomplete.length) {
@@ -674,7 +689,7 @@ const LeadershipSubjects = () => {
             a button that cannot work would only invite the error. */}
         {managePanel && canDispatch && (
           <HeroButton icon={Send} onClick={() => setConfirmDispatch(true)}>
-            {busy === 'all' ? 'Sending…' : 'Email All Pending'}
+            {busy === 'all' ? 'Sending…' : 'Send All Pending'}
           </HeroButton>
         )}
       </DashboardHero>
@@ -704,7 +719,7 @@ const LeadershipSubjects = () => {
         <KpiTile value={totalPanel} label="Feedback givers" sub="Links issued" tone="blue" icon={Users} />
         <KpiTile value={totalDone} label="Submitted" sub="Responses received" tone={totalDone ? 'green' : 'plain'} icon={CheckCircle2} />
         <KpiTile value={totalPanel - totalDone} label="Pending" sub="Awaiting feedback"
-          tone={totalPanel - totalDone ? 'yellow' : 'plain'} icon={Mail} />
+          tone={totalPanel - totalDone ? 'yellow' : 'plain'} icon={MessageCircle} />
       </div>
 
       <Section title="Enrolled Leaders" icon={UserCog}
@@ -736,7 +751,7 @@ const LeadershipSubjects = () => {
             <thead>
               <tr className="bg-[var(--table-header-bg)] border-b border-[var(--border)]">
                 <Th>Leader</Th><Th>Level</Th><Th align="center">Panel</Th>
-                <Th align="center">Submitted</Th><Th align="center">Pending</Th><Th align="right">Actions</Th>
+                <Th align="center">Submitted</Th><Th align="right">Actions</Th>
               </tr>
             </thead>
             <tbody>
@@ -761,7 +776,6 @@ const LeadershipSubjects = () => {
                     style={{ color: s.submitted_count ? 'var(--accent-green)' : 'var(--text-muted)' }}>
                     {s.submitted_count ?? 0}
                   </Td>
-                  <Td align="center" className="tabular-nums text-[var(--text-muted)]">{s.pending_count ?? 0}</Td>
                   <Td align="right">
                     <div className="inline-flex items-center gap-1.5 justify-end">
                       {/* Panel = giver identity. HR (and internal staff) only — a
@@ -810,7 +824,7 @@ const LeadershipSubjects = () => {
                 <span>
                   The panel of <b>{pendingUnenrol.panel_size}</b> feedback
                   giver{pendingUnenrol.panel_size === 1 ? '' : 's'} built for them is deleted with
-                  them, and any invitation already emailed stops working.
+                  them, and any invitation already sent stops working.
                 </span>
               </div>
             ) : (
@@ -825,7 +839,7 @@ const LeadershipSubjects = () => {
         )}
         {confirmDispatch && (
           <ConfirmModal key="dispatch-all" icon={Send} tone="indigo"
-            title="Email every pending invitation?"
+            title="Send every pending invitation?"
             subtitle={activeCycle?.label || cycle}
             confirmLabel="Send Invitations" busyLabel="Sending…"
             onClose={() => setConfirmDispatch(false)}
@@ -833,11 +847,11 @@ const LeadershipSubjects = () => {
             <p className="text-[12.5px] font-semibold text-[var(--text-muted)]">
               Every feedback giver across
               this cycle&rsquo;s <b className="text-[var(--text-main)]">{subjects.length} enrolled
-              leader{subjects.length === 1 ? '' : 's'}</b> who has not yet submitted is emailed
-              their own link. These go to real inboxes and cannot be recalled.
+              leader{subjects.length === 1 ? '' : 's'}</b> who has not yet submitted is sent
+              their own link on WhatsApp. These reach real phones and cannot be recalled.
             </p>
             <p className="text-[12.5px] font-medium text-[var(--text-muted)]">
-              Anyone already emailed recently is held back by the resend cooldown, and leaders
+              Anyone already messaged recently is held back by the resend cooldown, and leaders
               whose panel is not yet complete are skipped and named in the result — so pressing
               this again to chase is safe.
             </p>

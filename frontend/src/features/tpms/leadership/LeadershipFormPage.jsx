@@ -9,7 +9,7 @@ import { errText } from './leadershipUtils';
 /* ─────────────────────────────────────────────────────────────
    Leadership Score ▸ the feedback giver's form (/lf/:token).
 
-   The landing page for the unique link mailed to each of a leader's 8 feedback givers.
+   The landing page for the unique link sent to each of a leader's 8 feedback givers.
    The token alone decides which leader is being rated and which level's questions are
    shown — there is no picker, so a giver cannot reach any form but their own.
 
