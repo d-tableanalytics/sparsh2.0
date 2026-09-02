@@ -82,6 +82,12 @@ const SettingsPage = () => {
         // context, including `name`, which the reminder_staff list above omits even though the
         // backend has always supplied it.
         upcoming_reminder: ['name', 'title', 'task_deadline', 'reminder_time', 'event_time', 'meeting_url', 'description'],
+        // Calendar To-do (todo_created) — exactly the keys send_todo_created_email() puts in
+        // the context. A to-do is private and self-owned, so there is no assignee, actor or
+        // meeting link to offer: showing the task or session lists here would hand the admin
+        // placeholders that always render empty.
+        todo: ['user_name', 'name', 'todo_title', 'title', 'todo_due_date', 'todo_due_time',
+               'priority', 'description', 'occurrence_note'],
         general: ['name', 'email', 'role', 'login_url']
     };
 
@@ -94,6 +100,11 @@ const SettingsPage = () => {
         if (slug.includes('upcoming_task_reminder') || slug.includes('upcoming_todo_reminder')) {
             return templateVariables.upcoming_reminder;
         }
+        // Calendar To-do. Must sit AFTER the upcoming_* branch above (upcoming_todo_reminder
+        // also contains "todo" and belongs to the reminder context) and BEFORE the generic
+        // 'reminder' branch below. Without it `todo_created` fell through every test to
+        // `general`, which offered login_url and role — none of which a to-do mail supplies.
+        if (slug.includes('todo')) return templateVariables.todo;
         // Legacy Task Reminder slug — kept resolving so an existing template row can still be
         // opened and read after the move to the `upcoming_` slugs.
         if (slug.includes('task_reminder')) return templateVariables.reminder_staff;
@@ -796,6 +807,15 @@ const SettingsPage = () => {
                                                 <option value="event_deleted">Session Cancelled</option>
                                                 <option value="session_complete">Session Completed</option>
                                                 <option value="reminder">Session Reminder</option>
+                                            </optgroup>
+                                            {/* Calendar To-do. Its own group rather than a Session or a Task:
+                                                a to-do is private and self-owned — never assigned, never
+                                                delegated — so it renders neither module's mail. The backend
+                                                has seeded this trigger all along (routes/settings.py
+                                                TEMPLATE_SEEDS); it was simply never offered here, so nobody
+                                                could open it to edit or deactivate it. */}
+                                            <optgroup label="Calendar To-do">
+                                                <option value="todo_created">Todo Created</option>
                                             </optgroup>
                                             {/* Task Management (Delegation) module — independent triggers,
                                                 same Email/WhatsApp engine. See backend task_notifications.py. */}

@@ -127,6 +127,8 @@ def get_reminder_anchor(event: dict):
 async def start_reminder_scheduler():
     logger.info("Starting reminder scheduler background worker...")
     last_recurring_day = None
+    last_nudge_day = None
+    nudge_state: dict = {}
     tpms_last_run: dict = {}
     while True:
         try:
@@ -155,6 +157,30 @@ async def start_reminder_scheduler():
                     last_recurring_day = today
                 except Exception as e:
                     logger.error(f"Error generating recurring tasks: {e}")
+
+            # Once per day, at the configured IST send time (10:00 by default): the
+            # time-driven Task & Delegation nudges — daily/weekly due reminders, the overdue
+            # alert, and the alternate-day chase on a task waiting for the assigner to close
+            # it. Deliberately NOT at the IST midnight boundary the recurrence rollover uses:
+            # a reminder that arrives at 3 AM has been dismissed before the working day
+            # starts. The day stamp is set only on success, so a failed run retries on the
+            # next tick rather than being lost until tomorrow, and can never send twice.
+            # Isolated for the same reason as everything else in this loop: a nudge failure
+            # must not stop the reminders.
+            if today != last_nudge_day:
+                try:
+                    from app.services.task_nudge_service import is_send_time, sweep_task_nudges
+                    if await is_send_time():
+                        # Claimed through the same durable ledger the TPMS jobs use. The
+                        # in-memory day flag alone has the failure this container's
+                        # `restart: always` makes routine: a restart clears it, and the sweep
+                        # re-runs. Per-task date stamps mean nothing would be re-sent, but a
+                        # restart loop would still re-scan every open task on every tick.
+                        await _run_job(nudge_state, "task_nudges", today,
+                                       "task nudge sweep", sweep_task_nudges)
+                        last_nudge_day = today
+                except Exception as e:
+                    logger.error(f"Error sweeping task nudges: {e}")
 
             # TPMS scheduled sweeps, each at its own hour. Isolated so a TPMS failure can
             # never stop the reminder loop the rest of the ERP depends on.

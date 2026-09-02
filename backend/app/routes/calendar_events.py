@@ -845,6 +845,21 @@ async def create_event(event: CalendarEventCreate, background_tasks: BackgroundT
         })
     return {"id": str(result.inserted_id), "message": f"Event created in {col_name}"}
 
+async def _assignee_names(user_ids) -> str:
+    """"Asha, Ravi" for a set of user ids — the {{previous_assignee}} / {{new_assignee}}
+    placeholders on the reassignment templates.
+
+    A name that cannot be resolved is simply left out rather than printed as an id: a handover
+    mail naming a raw ObjectId is worse than one naming only the people it could identify.
+    """
+    names = []
+    for uid in sorted(user_ids or []):
+        user = await find_user_by_id(uid)
+        if user:
+            names.append(user.get("full_name") or user.get("first_name") or user.get("email") or "")
+    return ", ".join(n for n in names if n)
+
+
 @router.patch("/{event_id}")
 async def update_event(event_id: str, updates: dict, background_tasks: BackgroundTasks, current_user: dict = Depends(get_current_user)):
     existing, col_name = await find_event_across_collections(event_id)
@@ -969,9 +984,28 @@ async def update_event(event_id: str, updates: dict, background_tasks: Backgroun
         old_assignees = {str(u) for u in (existing.get("target_staff_id") or []) if u}
         new_assignees = {str(u) for u in (projected.get("target_staff_id") or []) if u}
         added = new_assignees - old_assignees
+        removed = old_assignees - new_assignees
+        # A HANDOVER — someone taken off and someone else put on in the same edit — is not the
+        # same event as simply widening a task, and the manager doing it wants both halves
+        # announced. `reassigned` tells the new holder (and the assigner/watchers) that the
+        # work has MOVED; `assigned` is kept for the plain "another pair of hands" case, so an
+        # existing template for it never changes meaning.
+        handover = bool(added and removed)
         if added:
-            background_tasks.add_task(notify_task_event, "assigned", final_doc, current_user,
-                                      {"new_assignee_ids": list(added)})
+            background_tasks.add_task(notify_task_event,
+                                      "reassigned" if handover else "assigned",
+                                      final_doc, current_user,
+                                      {"new_assignee_ids": list(added),
+                                       "previous_assignee": await _assignee_names(removed),
+                                       "new_assignee": await _assignee_names(added)})
+        # Whoever LOST the task hears it from the unassigned trigger. They are no longer on the
+        # doc, so every other trigger's recipient set excludes them — without this they would
+        # simply watch the task vanish from their list with no explanation.
+        if removed:
+            background_tasks.add_task(notify_task_event, "unassigned", final_doc, current_user,
+                                      {"removed_assignee_ids": list(removed),
+                                       "previous_assignee": await _assignee_names(removed),
+                                       "new_assignee": await _assignee_names(added)})
         # Someone newly put in the loop (as a watcher) is being *added to the loop*, not merely
         # told the task changed — they get the In Loop Person trigger and are held back from the
         # generic update, so a single edit never sends one person two emails.
@@ -981,7 +1015,8 @@ async def update_event(event_id: str, updates: dict, background_tasks: Backgroun
         if added_watchers:
             background_tasks.add_task(notify_task_event, "in_loop_added", final_doc, current_user,
                                       {"new_watcher_ids": list(added_watchers)})
-        already_in_loop = recipients_for_event("updated", final_doc) - added - added_watchers
+        already_in_loop = (recipients_for_event("updated", final_doc)
+                           - added - removed - added_watchers)
         if already_in_loop:
             background_tasks.add_task(notify_task_event, "updated", final_doc, current_user,
                                       None, list(already_in_loop))

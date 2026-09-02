@@ -3,6 +3,7 @@ import requests
 import logging
 from typing import Optional, Dict, Any
 from app.db.mongodb import get_collection
+from app.services.whatsapp_components import build_send_components, resolve_params
 from datetime import datetime, timedelta, timezone
 from bson import ObjectId
 from email.mime.text import MIMEText
@@ -233,24 +234,21 @@ DEFAULT_TEMPLATES = {
         "subject": "New Task Assigned: {{task_name}}",
         "body": "Hello {{assigned_user}},\n\nA new task '{{task_name}}' has been assigned to you by {{assigned_by}}.\n\nDeadline: {{deadline}}\nPriority: {{critical_level}}\nDescription: {{description}}\n\nRegards,\nSparsh Notifications"
     },
-    # NOTE: there is deliberately NO default entry for upcoming_task_reminder_email or
-    # upcoming_todo_reminder_email. fetch_template() falls back to this dict when no DB doc
-    # resolves, which would have let an upcoming reminder render a built-in body nobody
-    # configured. Those two slugs must resolve ONLY to the admin's template in
-    # Settings ▸ Notifications — no template means no email. The seeded copies in
-    # routes/settings.py (TEMPLATE_SEEDS) supply the starting content instead.
+    # NOTE: there is deliberately NO default entry for upcoming_task_reminder_email,
+    # upcoming_todo_reminder_email or todo_created_email. fetch_template() falls back to this
+    # dict when no DB doc resolves, which would have let those triggers render a built-in body
+    # nobody configured. They must resolve ONLY to the admin's template in
+    # Settings ▸ Notifications — no template, or an inactive one, means no email. The seeded
+    # copies in routes/settings.py (TEMPLATE_SEEDS) supply the starting content instead.
+    #
+    # todo_created_email joined that list on request: a To-do mail now goes out only once the
+    # admin has activated its template. The gate is in send_todo_created_email rather than
+    # here, because removing the entry alone would silently fall through to whatever
+    # lower-precedence doc happened to resolve — see active_user_template.
     # ─── Task Management (Delegation) module ───
     # Separate triggers from the Calendar's. task_created/updated/deleted are the
     # pre-existing slugs (they only ever fired for delegation tasks); the rest are new.
     # See app/services/task_notifications.py for the recipients and context of each.
-    # A todo is private, so its create mail has exactly one recipient: the owner. It gets a
-    # DEFAULT here (unlike the upcoming_* reminder slugs) because the trigger is a user action
-    # rather than a scheduler sweep — the mail must go out on a fresh install, before anyone
-    # has visited Settings, and an admin can still override or deactivate it there.
-    "todo_created_email": {
-        "subject": "To-do added: {{todo_title}}",
-        "body": "Hello {{user_name}},\n\nYour to-do '{{todo_title}}' has been added to your calendar.\n\nDue Date: {{todo_due_date}}\nDue Time: {{todo_due_time}}\nPriority: {{priority}}\n{{occurrence_note}}\nNotes: {{description}}\n\nRegards,\nSparsh Notifications"
-    },
     "task_updated_email": {
         "subject": "Task Updated: {{task_name}}",
         "body": "Hello {{name}},\n\nThe task '{{task_name}}' was updated by {{actor_name}}.\n\nDeadline: {{deadline}}\nPriority: {{critical_level}}\nStatus: {{task_status}}\n\nRegards,\nSparsh Notifications"
@@ -636,9 +634,21 @@ async def send_notification_from_template(user_obj: dict, template_slug: str, co
         meta_name = whatsapp_t.get("meta_template_name")
         if meta_name:
             # Business-initiated → must use a Meta-approved template with positional params.
-            params = [str(context.get(k, "")) for k in whatsapp_t.get("meta_params", [])]
+            # meta_params fills the body's {{1}}, {{2}}, … in order; meta_header_params and
+            # meta_button_params do the same for a text header and any variable URL button.
+            # A template with neither produces components=None, which leaves send_whatsapp_template
+            # on its original body-only payload — so a row saved before header/button mapping
+            # existed sends exactly what it always did.
+            params = resolve_params(whatsapp_t.get("meta_params"), context)
+            components = build_send_components(
+                params,
+                header_keys=whatsapp_t.get("meta_header_params"),
+                button_keys=whatsapp_t.get("meta_button_params"),
+                mapping=context,
+            )
             results["whatsapp"] = await send_whatsapp_template(
-                phone, meta_name, whatsapp_t.get("meta_lang", "en"), params, user_id, wa_slug)
+                phone, meta_name, whatsapp_t.get("meta_lang", "en"), params, user_id, wa_slug,
+                components=components)
         else:
             # Fallback: free-form text (only delivered within the 24h window).
             rendered_body = render_template(whatsapp_t["body"], context)
@@ -804,7 +814,18 @@ async def send_todo_created_email(user_obj: dict, todo: dict, occurrences: int =
 
     A repeating todo writes its whole series at once; `occurrences` lets the single mail say so
     instead of one mail landing per generated date.
+
+    SENDS ONLY FROM A TEMPLATE THE ADMIN HAS ACTIVATED. No template in
+    Settings ▸ Notifications, one switched Inactive, or one saved with an empty body → no mail
+    at all, never a built-in body. This mirrors what Task & Delegation and the upcoming_*
+    reminders already do (see active_user_template), so every trigger an admin can see in
+    Settings behaves the same way: the switch there is the whole story.
     """
+    # Checked before any of the work below: nothing to render if nothing will be sent.
+    # scope is always staff for a todo (scope_override below), so the company is not consulted.
+    if not await active_user_template("todo_created_email", None):
+        logger.info("Todo created mail skipped — no active 'todo_created' template configured")
+        return {}
     try:
         due = todo.get("start") or ""
         due_date, due_time = "-", "-"

@@ -45,6 +45,7 @@ import AllTasks from './pages/AllTasks';
 import TaskActivity from './pages/TaskActivity';
 import Holiday from './pages/Holiday';
 import DeletedTasks from './pages/DeletedTasks';
+import NotifyTemplateAdmin from './pages/notifications/NotifyTemplateAdmin';
 import ForgotPassword from './pages/ForgotPassword';
 import PrivateRoute from './components/common/PrivateRoute';
 import RequireTaskAccess from './components/common/RequireTaskAccess';
@@ -164,6 +165,9 @@ const AppRoutes = () => {
       <Route path="/tasks/activity" element={<PrivateRoute><RequireTaskAccess><TaskActivity /></RequireTaskAccess></PrivateRoute>} />
       <Route path="/tasks/holiday" element={<PrivateRoute><RequireTaskAccess><Holiday /></RequireTaskAccess></PrivateRoute>} />
       <Route path="/tasks/deleted" element={<PrivateRoute><RequireTaskAccess><DeletedTasks /></RequireTaskAccess></PrivateRoute>} />
+      {/* Delegation & Checklist notification templates. Admin-gated inside the page itself,
+          the same way the TPMS templates screen is. */}
+      <Route path="/tasks/templates" element={<PrivateRoute><RequireTaskAccess><NotifyTemplateAdmin /></RequireTaskAccess></PrivateRoute>} />
       <Route path="/sessions" element={<PrivateRoute><LearnerSessions /></PrivateRoute>} />
       <Route path="/company-portal" element={<PrivateRoute><CompanyPortal /></PrivateRoute>} />
       <Route path="/my-reports" element={<PrivateRoute><MyReports /></PrivateRoute>} />

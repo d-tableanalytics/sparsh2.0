@@ -13,7 +13,12 @@ import {
 } from './constants';
 
 /* ─────────────────────────────────────────────────────────────
-   TPMS ▸ New / Edit WhatsApp template.
+   New / Edit WhatsApp template.
+
+   Shared by every module that wires WhatsApp notifications — TPMS ▸ Templates and Task
+   Management ▸ Templates both compose into the same WhatsApp Business Account library. The
+   four Graph-API calls arrive through the `api` prop rather than being imported, which is what
+   lets one composer serve both modules' endpoints.
 
    Authors a template definition and submits it to Meta for review. Submitting is
    irreversible — Meta assigns the template an id the moment it is created — so the composer
