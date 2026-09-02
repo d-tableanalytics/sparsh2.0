@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { RefreshCw, Link2 as LinkIcon, Copy, Check, ExternalLink, Send, AlertTriangle, Inbox, Trash2 } from 'lucide-react';
+import { motion, AnimatePresence } from 'framer-motion';
+import { RefreshCw, Link2 as LinkIcon, Copy, Check, ExternalLink, Send, AlertTriangle, Inbox, Trash2, X } from 'lucide-react';
 import { DashboardHero, HeroButton, Section, TableShell, Th, Td, usePaged, Pager } from '../../common/dashboardKit';
 import { getCompanies, getFormAssignments, resendFormAssignment, deleteFormAssignment } from '../../../../services/tpmsFormsApi';
 import { currentPeriod, periodLabel } from '../../../../services/tpmsApi';
@@ -17,6 +18,83 @@ const FORM_LABEL = {
   ownership: 'Ownership',
   culture: 'Culture',
   implementation_feedback: 'Implementation Feedback',
+};
+
+// Aliased rather than used as `motion.div` inline — matches LeadershipCycles, and the
+// no-unused-vars rule does not recognise the member-expression form as a use.
+const MotionDiv = motion.div;
+
+/** Confirm deleting one form link.
+    Not a formality: the link has already been emailed, so deleting it breaks a URL sitting
+    in someone's inbox — and if they had started the form, their progress goes with it. The
+    browser confirm this replaces could name the respondent and nothing else. Mounted only
+    while a row is pending, so it seeds from that row and needs no reset. */
+const ConfirmDeleteLinkModal = ({ row, busy, onClose, onConfirm }) => {
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape' && !busy) onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [busy, onClose]);
+
+  return (
+    <MotionDiv className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={busy ? undefined : onClose} />
+      <MotionDiv role="alertdialog" aria-modal="true"
+        initial={{ opacity: 0, y: 14, scale: 0.98 }}
+        animate={{ opacity: 1, y: 0, scale: 1 }}
+        exit={{ opacity: 0, y: 14, scale: 0.98 }}
+        transition={{ duration: 0.22, ease: [0.4, 0, 0.2, 1] }}
+        className="relative w-full max-w-md rounded-2xl border border-[var(--border)] bg-[var(--bg-card)] shadow-xl overflow-hidden">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-[var(--border)]">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <span className="w-8 h-8 rounded-lg flex items-center justify-center bg-[var(--accent-red-bg)] text-[var(--accent-red)] shrink-0">
+              <Trash2 size={16} />
+            </span>
+            <h3 className="text-[15px] font-extrabold tracking-tight">Delete this form link?</h3>
+          </div>
+          <button type="button" onClick={onClose} disabled={busy}
+            className="w-8 h-8 rounded-lg flex items-center justify-center text-[var(--text-muted)] hover:bg-[var(--input-bg)] transition-colors disabled:opacity-50">
+            <X size={16} />
+          </button>
+        </div>
+
+        <div className="px-5 py-4 space-y-3">
+          <div className="rounded-xl border border-[var(--border)] bg-[var(--input-bg)] px-3.5 py-2.5">
+            <span className="block text-[13.5px] font-bold truncate">{row.respondent_name || 'This respondent'}</span>
+            <span className="block text-[10.5px] font-semibold text-[var(--text-muted)] truncate">
+              {row.respondent_email}
+            </span>
+          </div>
+
+          {row.status === 'submitted' ? (
+            <div className="flex items-start gap-2 rounded-xl border border-[var(--accent-red-border)] bg-[var(--accent-red-bg)] px-3.5 py-2.5 text-[12px] font-semibold text-[var(--accent-red)]">
+              <AlertTriangle size={14} className="mt-[1px] shrink-0" />
+              <span>This form has already been <b>submitted</b>. Deleting the link discards the response with it.</span>
+            </div>
+          ) : (
+            <p className="text-[12.5px] font-medium text-[var(--text-muted)]">
+              The link has already been emailed, so deleting it breaks the URL in
+              {row.respondent_name ? ` ${row.respondent_name}'s` : ' their'} inbox. Any answers
+              started and not yet submitted are lost. Resend issues a fresh link instead.
+            </p>
+          )}
+        </div>
+
+        <div className="flex items-center justify-end gap-2 px-5 py-4 border-t border-[var(--border)]">
+          <button type="button" onClick={onClose} disabled={busy}
+            className="px-4 py-2 rounded-lg text-[13px] font-bold text-[var(--text-muted)] hover:bg-[var(--input-bg)] transition-colors disabled:opacity-50">
+            Keep it
+          </button>
+          <button type="button" onClick={onConfirm} disabled={busy} autoFocus
+            className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-[var(--accent-red)] text-white text-[13px] font-bold shadow-sm hover:opacity-90 transition-opacity disabled:opacity-40">
+            {busy ? <RefreshCw size={14} className="animate-spin" /> : <Trash2 size={14} />}
+            {busy ? 'Deleting…' : 'Delete Link'}
+          </button>
+        </div>
+      </MotionDiv>
+    </MotionDiv>
+  );
 };
 
 const STATUS_TONE = {
@@ -94,6 +172,7 @@ const FormLinks = () => {
   const [copiedId, setCopiedId] = useState('');
   const [resending, setResending] = useState('');
   const [deletingId, setDeletingId] = useState('');
+  const [pendingDelete, setPendingDelete] = useState(null);   // row awaiting confirmation
 
   useEffect(() => {
     getCompanies()
@@ -146,14 +225,18 @@ const FormLinks = () => {
     }
   };
 
-  const handleDelete = async (row) => {
-    if (!window.confirm(`Are you sure you want to delete the form link for ${row.respondent_name || 'this respondent'}?`)) return;
+  const handleDelete = async () => {
+    const row = pendingDelete;
+    if (!row) return;
     setDeletingId(row.id);
     try {
       await deleteFormAssignment(row.id);
+      setPendingDelete(null);
       showSuccess('Form link deleted successfully');
       load();
     } catch (e) {
+      // The dialog stays open on failure so the error is read next to what it refers to,
+      // and the delete can be retried without hunting for the row again.
       showError(e.response?.data?.detail || 'Delete failed.');
     } finally {
       setDeletingId('');
@@ -237,7 +320,7 @@ const FormLinks = () => {
                           className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11.5px] font-bold text-[var(--accent-green)] bg-[var(--accent-green-bg)] border border-[var(--accent-green-border)] hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed">
                           <Send size={12} /> {resending === r.id ? 'Sending…' : 'Resend'}
                         </button>
-                        <button type="button" onClick={() => handleDelete(r)} disabled={deletingId === r.id} title="Delete form link"
+                        <button type="button" onClick={() => setPendingDelete(r)} disabled={deletingId === r.id} title="Delete form link"
                           className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11.5px] font-bold text-[var(--accent-red)] bg-[var(--accent-red-bg)] border border-[var(--accent-red-border)] hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed">
                           <Trash2 size={12} /> {deletingId === r.id ? 'Deleting…' : 'Delete'}
                         </button>
@@ -251,6 +334,14 @@ const FormLinks = () => {
           </>
         )}
       </Section>
+
+      <AnimatePresence>
+        {pendingDelete && (
+          <ConfirmDeleteLinkModal key="delete-link" row={pendingDelete}
+            busy={deletingId === pendingDelete.id}
+            onClose={() => setPendingDelete(null)} onConfirm={handleDelete} />
+        )}
+      </AnimatePresence>
     </div>
   );
 };
