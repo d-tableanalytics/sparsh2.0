@@ -242,12 +242,16 @@ async def main() -> int:
     check("one response was written", len(stored) == 1)
     row = stored[0]
     check("it has no giver_id", "giver_id" not in row)
-    forbidden = {"giver_id", "giver_name", "giver_email", "token", "token_hash", "user_id"}
+    forbidden = {"giver_id", "giver_name", "giver_email", "token", "token_hash", "user_id",
+                 "phone", "mobile"}
     check("it has no field naming the giver at all",
           not (forbidden & set(row)), sorted(set(row) & forbidden) or "none present")
     check("it keeps only the relation group", row.get("relation") == "peer")
-    check("assignment_ref points at the invitation, not the person",
-          row.get("assignment_ref") == str(a["_id"]))
+    # Was: "assignment_ref points at the invitation, not the person". That reference was
+    # still a join — assignment_ref -> assignment -> giver_id — so the header's own promise
+    # ("no field that can be joined to one") was not actually kept. It is no longer stored.
+    check("it carries no reference back to the invitation either",
+          "assignment_ref" not in row)
 
     # Collection is digital only. There must be no way for an administrator to key in or
     # delete a response by hand: a hand-entered form is feedback nobody can trace, and a
@@ -535,7 +539,7 @@ async def main() -> int:
         return {"_id": ObjectId(), "company_id": "c1", "cycle": "2027-C1",
                 "subject_id": "s1", "giver_id": gid, "giver_name": gid,
                 "giver_email": f"{gid}@x.invalid", "relation": relation, "status": status,
-                "email_status": M.EMAIL_PENDING, "sent_at": sent_at, "subject_level": "L6",
+                "wa_status": M.WA_PENDING, "sent_at": sent_at, "subject_level": "L6",
                 "expires_at": links.cycle_expiry_utc("2027-C1")}
 
     def _mount(rows, degree=M.DEGREE_360):
@@ -547,12 +551,15 @@ async def main() -> int:
             mod.get_collection = harness.collection
         posted = []
 
-        async def _fake_send(doc, template=None):
-            posted.append(doc.get("giver_email"))
-            return {"ok": True, "email": doc.get("giver_email")}
+        # Stubs the WHATSAPP send, because that is the only channel Leadership has now.
+        # `posted` still collects one entry per invitation actually dispatched, so every
+        # assertion below reads the same as it did on the email path.
+        async def _fake_send(doc):
+            posted.append(doc.get("giver_id"))
+            return {"ok": True, "status": M.WA_SENT, "entry_id": "stub"}
 
-        links.send_assignment_email = _fake_send
-        R.links.send_assignment_email = _fake_send
+        links.send_assignment_whatsapp = _fake_send
+        R.links.send_assignment_whatsapp = _fake_send
         return harness, posted
 
     hh, posted = _mount([_row("g1", "superior"), _row("g2", "superior")])
@@ -562,7 +569,7 @@ async def main() -> int:
     except HTTPException as e:
         check("a first invitation on an incomplete panel is refused", e.status_code == 409,
               str(e.detail)[:52])
-    check("and no mail went out", posted == [])
+    check("and nothing was dispatched", posted == [])
 
     # The escape hatch must survive: chasing someone already delivered to is the whole
     # point of the button, and a panel that changed afterwards must not strand them.
@@ -570,7 +577,7 @@ async def main() -> int:
                          _row("g2", "superior")])
     res = await R.resend(str(hh.collection(M.COLL_LS_ASSIGNMENTS).docs[0]["_id"]), HRU)
     check("chasing an already-invited giver still works", res.get("ok") is True)
-    check("their mail went out", posted == ["g1@x.invalid"], str(posted))
+    check("their invitation went out", posted == ["g1"], str(posted))
 
     full = []
     for rel in M.RELATIONS:

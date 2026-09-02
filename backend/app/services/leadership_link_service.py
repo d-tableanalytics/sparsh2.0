@@ -21,7 +21,7 @@ and expiry behaviour are untouched. Only the pure helpers `new_token()` and
 
 MAIL ISOLATION
 --------------
-Dispatch calls `notification_service.send_email_notification` directly. It deliberately
+Dispatch sends over WhatsApp only (see leadership_wa_service). It deliberately
 does NOT route through `tpms_notify_service`, because that service's form hooks
 (`_recipient_form_links`, `notify_form_submission`) are bound to the existing four forms
 and to a schedule event, and `notify_form_submission` mails a per-employee scorecard —
@@ -33,19 +33,17 @@ import hashlib
 import logging
 import secrets
 from datetime import datetime, timedelta, timezone
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from bson import ObjectId
 
 from app.db.mongodb import get_collection
 from app.models.leadership import (
     COLL_LS_ASSIGNMENTS,
-    DEFAULT_TEMPLATE_BODY, DEFAULT_TEMPLATE_SUBJECT,
-    EMAIL_FAILED, EMAIL_PENDING, EMAIL_SENT,
+    WA_PENDING, WA_SENT,
     LEVEL_LABELS,
     LINK_EXPIRED, LINK_OPENED, LINK_PENDING, LINK_SENT, LINK_SUBMITTED,
     RELATION_LABELS, RESEND_COOLDOWN_HOURS,
-    TEMPLATE_ACTIVITY, TEMPLATE_EVENT, TEMPLATE_SIDE,
     cycle_label, cycle_period,
 )
 
@@ -105,12 +103,62 @@ def cycle_expiry_utc(cycle: str) -> Optional[datetime]:
     return (nxt - timedelta(microseconds=1)).astimezone(timezone.utc)
 
 
+def _aware(dt) -> Optional[datetime]:
+    """A stored datetime as UTC-aware. Mongo hands naive values back, and comparing one
+    against an aware `now` raises rather than returning False."""
+    if not dt:
+        return None
+    return dt if getattr(dt, "tzinfo", None) else dt.replace(tzinfo=timezone.utc)
+
+
+# Collection window states. `pending` is genuinely different from `closed`: one is "not
+# yet" and the other is "no longer", and a giver holding a link needs to be told which.
+WINDOW_PENDING = "pending"
+WINDOW_OPEN = "open"
+WINDOW_CLOSED = "closed"
+
+
+def survey_window(cyc: dict) -> tuple:
+    """(opens_at, closes_at) in UTC for a cycle — configured if set, derived if not.
+
+    HR's own Open/Close date wins. With neither set the cycle's calendar months apply, which
+    is exactly what governed access before the window was configurable — so every cycle
+    already in the database behaves as it always did.
+    """
+    opens = _aware((cyc or {}).get("opens_at"))
+    closes = _aware((cyc or {}).get("closes_at")) or cycle_expiry_utc((cyc or {}).get("cycle") or "")
+    return opens, closes
+
+
+def window_state(cyc: dict, now: Optional[datetime] = None) -> str:
+    """Whether this cycle is accepting feedback right now."""
+    now = now or datetime.now(timezone.utc)
+    opens, closes = survey_window(cyc)
+    if opens and now < opens:
+        return WINDOW_PENDING
+    if closes and now > closes:
+        return WINDOW_CLOSED
+    return WINDOW_OPEN
+
+
 def cycle_is_expired(cycle: str, now: Optional[datetime] = None) -> bool:
     """Whether the cycle's own window has closed. Independent of any assignment row."""
     exp = cycle_expiry_utc(cycle)
     if not exp:
         return False
     return exp < (now or datetime.now(timezone.utc))
+
+
+def delivery_status(doc: dict) -> str:
+    """This invitation's delivery status.
+
+    Reads `wa_status`, falling back to the retired `email_status` for rows written before
+    Leadership moved to WhatsApp. The fallback is a READ, never a migration: those rows
+    were genuinely delivered, and treating them as unsent would re-invite everybody the
+    first time the button was pressed after the switch — and would hold every old cycle
+    permanently unopenable, since open_readiness reads the same field.
+    """
+    return doc.get("wa_status") or doc.get("email_status") or ""
 
 
 def resend_blocked_until(doc: dict) -> Optional[datetime]:
@@ -120,7 +168,7 @@ def resend_blocked_until(doc: dict) -> Optional[datetime]:
     been mailed, or whose last attempt failed, therefore has no cooldown and goes out
     immediately — a cooldown must never be the reason someone is left without their link.
     """
-    if doc.get("email_status") != EMAIL_SENT:
+    if delivery_status(doc) != WA_SENT:
         return None
     sent_at = doc.get("sent_at")
     if not sent_at:
@@ -223,10 +271,10 @@ async def create_assignment(*, company_id: str, company_name: str, cycle: str,
         "giver_level": str(giver.get("leadership_level") or "").strip().upper(),
         "assigned_by_id": str((assigned_by or {}).get("_id") or ""),
         "assigned_by_name": _display_name(assigned_by or {}),
-        # Not "sent": nothing has been mailed yet. mark_email_result promotes it.
+        # Not "sent": nothing has gone out yet. mark_whatsapp_result promotes it.
         "status": LINK_PENDING,
-        "email_status": EMAIL_PENDING,
-        "email_error": None,
+        "wa_status": WA_PENDING,
+        "wa_error": None,
         "sent_at": None,
         "opened_at": None,
         "submitted_at": None,
@@ -368,50 +416,6 @@ async def mark_opened(doc: dict) -> None:
     )
 
 
-async def mark_email_result(assignment_id, status: str, error: Optional[str] = None) -> None:
-    now = datetime.now(timezone.utc)
-    oid = assignment_id if isinstance(assignment_id, ObjectId) else ObjectId(str(assignment_id))
-    updates = {"email_status": status, "email_error": error, "updated_at": now}
-    if status == EMAIL_SENT:
-        # `sent_at` is the cooldown's key, so it is written ONLY on a real delivery.
-        updates["sent_at"] = now
-    col = get_collection(COLL_LS_ASSIGNMENTS)
-    await col.update_one({"_id": oid}, {"$set": updates})
-
-    # A real delivery is also what turns a minted link into a Sent one. Done as a separate,
-    # FILTERED update so it can only ever move pending -> sent: a resend of a link the giver
-    # has already opened or submitted must not drag its status backwards.
-    if status == EMAIL_SENT:
-        await col.update_one({"_id": oid, "status": LINK_PENDING},
-                             {"$set": {"status": LINK_SENT}})
-
-
-async def get_invite_template(company_id: Optional[str] = None) -> Optional[dict]:
-    """The stored Leadership invitation template for ONE company, or None.
-
-    Most specific wins: this company's own row, then the shared default row
-    (`company_id: None`), then None so the built-in body is used.
-
-    The generic `tpms_notify_service.get_template` is deliberately NOT used here — it has
-    no company dimension at all, so it returned one row for every client and a template
-    authored by one company was mailed out by all of them. Only the leadership_invite
-    event is touched, which nothing else writes.
-    """
-    from app.models.tpms import COLL_MAIL_TEMPLATES
-    base = {"activity": TEMPLATE_ACTIVITY, "side": TEMPLATE_SIDE,
-            "event": TEMPLATE_EVENT, "active": {"$ne": False}}
-    try:
-        col = get_collection(COLL_MAIL_TEMPLATES)
-        for scope in ([str(company_id)] if company_id else []) + [None]:
-            doc = await col.find_one({**base, "company_id": scope})
-            if doc:
-                return doc
-        return None
-    except Exception as e:
-        logger.error("Leadership template lookup failed (%s) — using the default body", e)
-        return None
-
-
 def template_map(doc: dict, link: str = "") -> dict:
     """Placeholder values for ONE assignment.
 
@@ -480,67 +484,44 @@ async def _giver_level_fallback(doc: dict) -> str:
     return ""
 
 
-async def render_invite(doc: dict, template: Optional[dict] = None, link: str = "") -> tuple:
-    """(subject, html) for one giver — template if configured, built-in default otherwise.
+async def mark_whatsapp_result(assignment_id, status: str, error=None) -> None:
+    """Record a WhatsApp outcome on the invitation row.
 
-    Pass `template` when sending a batch so the row is fetched once rather than per
-    recipient; the FILLING still happens per recipient, which is what personalises the link.
+    Writes `sent_at` ONLY on a real
+    send: that timestamp is the resend cooldown's key, so stamping it on a refusal would
+    lock a giver out of a retry for RESEND_COOLDOWN_HOURS having never received anything.
     """
-    # Scoped to the assignment's own company, so a single-row render (a resend, a preview)
-    # picks up the same template the batch dispatch would use.
-    tpl = template if template is not None else await get_invite_template(doc.get("company_id"))
-    # Only for rows minted before the snapshot existed. A row that HAS the key keeps its
-    # snapshotted value, including a deliberate empty one.
-    if "giver_level" not in doc:
-        doc = {**doc, "giver_level": await _giver_level_fallback(doc)}
-    mapping = template_map(doc, link)
+    from app.models.leadership import WA_SENT
+    now = datetime.now(timezone.utc)
+    oid = assignment_id if isinstance(assignment_id, ObjectId) else ObjectId(str(assignment_id))
+    updates = {"wa_status": status, "wa_error": error, "updated_at": now}
+    if status == WA_SENT:
+        updates["sent_at"] = now
+    col = get_collection(COLL_LS_ASSIGNMENTS)
+    await col.update_one({"_id": oid}, {"$set": updates})
 
-    from app.services.tpms_notify_service import fill
-    subject_tpl = (tpl or {}).get("subject") or DEFAULT_TEMPLATE_SUBJECT
-    body_tpl = (tpl or {}).get("body_html") or DEFAULT_TEMPLATE_BODY
-
-    subject = fill(subject_tpl, mapping).strip() or fill(DEFAULT_TEMPLATE_SUBJECT, mapping)
-    html = _ensure_link_present(fill(body_tpl, mapping), mapping["leadership_link"])
-    return subject, html
+    # A real delivery is what turns a minted link into a Sent one. Filtered so it can only
+    # move pending -> sent: a resend must not drag a link the giver already opened backwards.
+    if status == WA_SENT:
+        await col.update_one({"_id": oid, "status": LINK_PENDING},
+                             {"$set": {"status": LINK_SENT}})
 
 
-async def send_assignment_email(doc: dict, template: Optional[dict] = None) -> dict:
-    """Mail one giver their link. Never raises — a failed send is recorded on the row so
-    the dispatch screen can show it and offer a resend."""
-    email = doc.get("giver_email")
-    if not email:
-        await mark_email_result(doc["_id"], EMAIL_FAILED, "No email address on file")
-        return {"ok": False, "error": "No email address on file"}
+async def send_assignment_whatsapp(doc: dict) -> dict:
+    """Send one giver their link over WhatsApp. Never raises — a refusal is recorded.
 
-    # Every send mints a fresh credential. The previous URL stops working, which is the
-    # point: a single-use link that has been forwarded, or is sitting in an old mailbox,
-    # dies the moment the real recipient is chased again. A row already submitted never
-    # reaches here (dispatch_pending filters it out), so nothing completed is reopened.
-    link = doc.get("_issued_token")
-    link = await public_link(link if link else await rotate_token(doc))
+    Every send mints a fresh credential, exactly as the email path did: the previous URL
+    stops working, so a link that has been forwarded or is sitting in an old chat dies the
+    moment the real recipient is chased again.
+    """
+    from app.services import leadership_wa_service as wa
 
-    from app.services.notification_service import send_email_notification
-    try:
-        subject_line, html = await render_invite(doc, template, link)
-        # send_email_notification NEVER raises — it returns False. The result must be
-        # captured: marking EMAIL_SENT on a failed send both lies to the dispatch screen and
-        # (since the cooldown is keyed on `sent_at`) locks the invitation out of retry for
-        # RESEND_COOLDOWN_HOURS. A failed send must stay immediately retryable.
-        delivered = await send_email_notification(
-            email, subject_line, html,
-            user_id=doc.get("giver_id"),
-            slug="tpms_leadership_feedback_link",
-        )
-        if not delivered:
-            await mark_email_result(doc["_id"], EMAIL_FAILED, "Delivery failed")
-            logger.warning("Leadership link mail not delivered to %s", email)
-            return {"ok": False, "error": "Delivery failed"}
-        await mark_email_result(doc["_id"], EMAIL_SENT, None)
-        return {"ok": True, "email": email}
-    except Exception as e:
-        logger.error("Leadership link mail failed for %s: %s", email, e)
-        await mark_email_result(doc["_id"], EMAIL_FAILED, str(e))
-        return {"ok": False, "error": str(e)}
+    token = doc.get("_issued_token")
+    link = await public_link(token if token else await rotate_token(doc))
+    result = await wa.send_invitation(doc, link)
+    await mark_whatsapp_result(doc["_id"], result["status"],
+                               None if result.get("ok") else result.get("status"))
+    return result
 
 
 async def dispatch_pending(company_id: str, cycle: str,
@@ -581,12 +562,19 @@ async def dispatch_pending(company_id: str, cycle: str,
     # Fetch the template ONCE for the batch, then fill it separately for every recipient —
     # each mail carries only that giver's own token URL. Scoped to the company being
     # dispatched, so one client's wording can never go out under another's name.
-    template = await get_invite_template(company_id) if due else None
-    sent = failed = 0
+    # No template fetch: WhatsApp renders from the copy Meta approved, not from ours, so
+    # there is nothing to fill in here. leadership_wa_service resolves the company's
+    # template name per send and records its own refusal when none is configured.
+    sent = failed = unreachable = 0
     for row in due:
-        result = await send_assignment_email(row, template)
+        result = await send_assignment_whatsapp(row)
         if result.get("ok"):
             sent += 1
+        elif result.get("status") == "unreachable":
+            # Kept apart from `failed`: a missing mobile number is fixed on the person's
+            # record, a refusal is fixed with Meta. Reporting them together sends HR to
+            # the wrong place.
+            unreachable += 1
         else:
             failed += 1
 
@@ -597,12 +585,14 @@ async def dispatch_pending(company_id: str, cycle: str,
         next_at = min(held) if held else None
 
     logger.info(
-        "Leadership dispatch [%s/%s]: %d sent, %d failed, %d held by the %dh cooldown "
-        "(%d pending total), template=%s",
-        company_id, cycle, sent, failed, skipped_recent, RESEND_COOLDOWN_HOURS,
-        len(rows), "custom" if template else "default",
+        "Leadership WhatsApp dispatch [%s/%s]: %d sent, %d failed, %d unreachable, "
+        "%d held by the %dh cooldown (%d pending total)",
+        company_id, cycle, sent, failed, unreachable, skipped_recent,
+        RESEND_COOLDOWN_HOURS, len(rows),
     )
     return {
+        "unreachable": unreachable,
+        "channel": "whatsapp",
         "sent": sent,
         "failed": failed,
         "total": len(rows),
@@ -619,6 +609,32 @@ async def assignments_for_subject(company_id: str, cycle: str, subject_id: str) 
     }).sort("created_at", 1).to_list(200)
 
 
+async def panel_rows(docs: List[dict], now: Optional[datetime] = None) -> List[dict]:
+    """`panel_row` for each invitation, with the giver's number resolved in one pass.
+
+    Read live rather than copied onto the assignment when it was created: a number corrected
+    on someone's user record has to be the one shown here, or HR fixes the record and the
+    panel still says they are unreachable.
+    """
+    ids = {str(d.get("giver_id")) for d in docs if d.get("giver_id")}
+    oids = []
+    for gid in ids:
+        try:
+            oids.append(ObjectId(gid))
+        except Exception:
+            continue
+
+    phones: Dict[str, str] = {}
+    if oids:
+        for coll in ("staff", "learners"):
+            for u in await get_collection(coll).find(
+                    {"_id": {"$in": oids}}, {"mobile": 1, "phone": 1}).to_list(2000):
+                phones[str(u["_id"])] = str(u.get("mobile") or u.get("phone") or "").strip()
+
+    return [{**panel_row(d, now),
+             "giver_mobile": phones.get(str(d.get("giver_id")), "")} for d in docs]
+
+
 def panel_row(doc: dict, now: Optional[datetime] = None) -> dict:
     """One panel member as HR sees them. HR-ONLY — this carries giver identity and must
     never be returned by a leader-facing or manager-facing endpoint."""
@@ -630,8 +646,8 @@ def panel_row(doc: dict, now: Optional[datetime] = None) -> dict:
         "relation": doc.get("relation"),
         "relation_label": RELATION_LABELS.get(doc.get("relation") or "", doc.get("relation") or ""),
         "status": effective_status(doc, now),
-        "email_status": doc.get("email_status"),
-        "email_error": doc.get("email_error"),
+        "wa_status": doc.get("wa_status"),
+        "wa_error": doc.get("wa_error"),
         # No link. Only its hash is stored, so there is nothing to hand back — and a URL
         # on screen is a live credential that could be used to submit as this person.
         # HR who needs one presses Resend, which mints a fresh link and mails it to them.

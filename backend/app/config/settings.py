@@ -49,6 +49,12 @@ class Settings(BaseSettings):
     WHATSAPP_APP_ID: Optional[str] = None
     # Local numbers stored without a country code get this prefixed (India = 91).
     WHATSAPP_DEFAULT_COUNTRY_CODE: str = "91"
+    # Meta webhook credentials. The APP SECRET signs every callback body (X-Hub-Signature-256)
+    # and is the ONLY thing separating a real Meta callback from anyone who guessed the URL —
+    # without it configured the Leadership webhook refuses traffic rather than trusting it.
+    # The VERIFY TOKEN is the string Meta echoes back during the one-time GET handshake.
+    WHATSAPP_APP_SECRET: Optional[str] = None
+    WHATSAPP_WEBHOOK_VERIFY_TOKEN: Optional[str] = None
 
     # OpenAI
     OPENAI_API_KEY: Optional[str] = None

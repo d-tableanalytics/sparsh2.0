@@ -42,7 +42,7 @@ from app.models.leadership import (
     CYCLE_CLOSED, CYCLE_COLLECTING, CYCLE_COMPUTED, CYCLE_DRAFT, CYCLE_OPEN,
     CYCLE_PUBLISHED, CYCLE_STATUSES, CYCLE_TRANSITIONS, can_transition,
     DEFAULT_QUORUM, DEGREE_180, DEGREE_360, DEGREE_RELATIONS,
-    EMAIL_FAILED, EMAIL_SENT, LINK_SUBMITTED,
+    LINK_SUBMITTED, WA_FAILED, WA_SENT, WA_UNREACHABLE,
     LEVEL_L4, LEVELS, LEVEL_LABELS, LEVEL_THEMES, MIN_RESPONSES_FLOOR,
     panel_size_for,
     RECOMMENDED_PER_RELATION, REL_DIRECT_REPORT, REL_OTHER_DEPT, REL_PEER,
@@ -377,6 +377,17 @@ def _name_list(rows: List[dict], limit: int = 4) -> str:
     return ", ".join(names[:limit]) + f" and {len(names) - limit} more"
 
 
+# Both mean "did not arrive", but they are fixed in different places — a missing number on
+# a user record, versus Meta refusing the message. open_readiness only needs to know the
+# invitation is still outstanding; the tracking screen is where they are told apart.
+FAILED_STATES = (WA_FAILED, WA_UNREACHABLE)
+
+
+def _delivery_status(row: dict) -> str:
+    """Delivery status of one invitation, tolerating rows from the email era."""
+    return row.get("wa_status") or row.get("email_status") or ""
+
+
 async def open_readiness(company_id: str, cycle: str) -> dict:
     """Whether a draft cycle has finished the set-up that has to precede collection.
 
@@ -413,13 +424,13 @@ async def open_readiness(company_id: str, cycle: str) -> dict:
             continue
         waiting = [r for r in panel
                    if r.get("status") != LINK_SUBMITTED
-                   and r.get("email_status") != EMAIL_SENT]
+                   and _delivery_status(r) != WA_SENT]
         if waiting:
             unmailed.append({
                 **head,
                 "panel_size": len(panel),
-                "failed": sum(1 for r in waiting if r.get("email_status") == EMAIL_FAILED),
-                "pending": sum(1 for r in waiting if r.get("email_status") != EMAIL_FAILED),
+                "failed": sum(1 for r in waiting if _delivery_status(r) in FAILED_STATES),
+                "pending": sum(1 for r in waiting if _delivery_status(r) not in FAILED_STATES),
             })
 
     if not subjects:
@@ -818,6 +829,10 @@ async def list_company_people(company_id: str) -> List[dict]:
                 "person_id": str(u["_id"]),
                 "name": _display_name(u),
                 "email": u.get("email"),
+                # The number the invitation will go to. Carried so the panel builder can show
+                # who is unreachable BEFORE the send, rather than after it lands in the ledger
+                # as "no mobile number on this person's record".
+                "mobile": str(u.get("mobile") or u.get("phone") or "").strip(),
                 "designation": u.get("designation"),
                 "department": u.get("department"),
                 "reporting_manager": u.get("reporting_manager"),
@@ -1170,10 +1185,13 @@ async def record_response(assignment: dict, answers: List) -> dict:
         # breakdown itself is suppressed below MIN_GROUP_FOR_BREAKDOWN.
         "relation": assignment.get("relation"),
         "answers": stored,
-        # The assignment row, not the person. It exists so a support question about one
-        # submission can be answered without walking from an answer to a name: the
-        # assignment holds the giver, and only HR can read assignments.
-        "assignment_ref": str(assignment.get("_id") or ""),
+        # NO `assignment_ref`. It used to be stored so a support question about a single
+        # submission could be traced, but the assignment row holds giver_id / giver_name /
+        # giver_email — so the reference WAS a join from an answer to a person, one hop
+        # long. "Ye feedback completely confidential hoga" cannot survive a field whose
+        # whole purpose is to be followed, however narrow the intended use. Nothing reads
+        # it: duplicate submission is prevented on the assignment by claim_for_submission,
+        # and scoring aggregates by subject and relation, neither of which needs it.
         "submitted_at": now,
         "created_at": now,
         "updated_at": now,

@@ -92,22 +92,12 @@ export const resendLeadershipLink = (assignmentId) =>
 export const getLeadershipAssignments = (companyId, cycle) =>
   api.get('/leadership/assignments', withCompany(companyId, { cycle: cycle || undefined }));
 
-/* ── Invitation email template (HR / Admin) ──
+/* ── Panels and invitations ──
    Stored in the shared tpms_mail_templates collection under a leadership-only key that
    now includes the COMPANY, so these calls read and write only that company's row.
    Editing one company's invitation no longer changes what any other company sends.
    `{{leadership_link}}` in the body becomes each giver's own /lf/<token> URL at dispatch
    time — nobody types a token. */
-export const getLeadershipTemplate = (companyId) =>
-  api.get('/leadership/template', withCompany(companyId));
-
-export const saveLeadershipTemplate = (companyId, payload) =>
-  api.put('/leadership/template', payload, withCompany(companyId));
-
-/** Render a draft against sample values. The link shown is a fake, never a real token. */
-export const previewLeadershipTemplate = (payload) =>
-  api.post('/leadership/template/preview', payload);
-
 // ── The giver's form (opened by token at /lf/<token>) ──
 export const getAssignedLeadershipForm = (token) =>
   api.get(`/leadership/assigned/${token}`);
@@ -174,3 +164,53 @@ export const recordLeadershipBriefing = (companyId, cycle, payload) =>
 // ── Organisation roll-up ──
 export const getLeadershipDashboard = (companyId, cycle) =>
   api.get('/leadership/dashboard', withCompany(companyId, { cycle: cycle || undefined }));
+
+// ── WhatsApp: the module's own template and its own delivery ledger ──
+// Leadership keeps these entirely apart from TPMS — different collections, different
+// endpoints, different tracking — so a TPMS change can never move a feedback invitation.
+
+/** This company's approved Meta template (name, language, positional params, wording). */
+export const getLeadershipWhatsAppTemplate = (companyId) =>
+  api.get('/leadership/whatsapp-template', withCompany(companyId));
+
+/* ── Template composer ──
+   Wired to the shared components/whatsapp/TemplateComposer, which takes its four calls as
+   a prop. Same modal TPMS and Notifications use; every record lands in Leadership's own
+   collection, so nothing here reads or writes a TPMS template. */
+
+/** Validate a definition and get back the exact JSON that would go to Meta. */
+export const checkLeadershipWaTemplate = (doc) =>
+  api.post('/leadership/whatsapp-template/check', doc);
+
+/** Save the authored definition for this company as a DRAFT. */
+export const saveLeadershipWaDraft = (companyId, doc) =>
+  api.post('/leadership/whatsapp-template/draft', doc, withCompany(companyId));
+
+/** Send it to one number to read on a real handset. */
+export const testLeadershipWaTemplate = (doc) =>
+  api.post('/leadership/whatsapp-template/test', doc);
+
+/** Send this company's template to Meta for review. It enters PENDING. */
+export const submitLeadershipWhatsAppTemplate = (companyId) =>
+  api.post('/leadership/whatsapp-template/submit', null, withCompany(companyId));
+
+/** Ask Meta where the template stands and mirror the verdict locally. */
+export const syncLeadershipWhatsAppTemplate = (companyId) =>
+  api.post('/leadership/whatsapp-template/sync', null, withCompany(companyId));
+
+// ── Documents ──
+export const getLeadershipDocuments = (companyId, cycle) =>
+  api.get('/leadership/documents', withCompany(companyId, { cycle: cycle || undefined }));
+
+/** Upload one file, optionally against a single cycle. */
+export const uploadLeadershipDocument = (companyId, file, { cycle, note } = {}) => {
+  const body = new FormData();
+  body.append('file', file);
+  return api.post('/leadership/documents', body, {
+    ...withCompany(companyId, { cycle: cycle || undefined, note: note || undefined }),
+    headers: { 'Content-Type': 'multipart/form-data' },
+  });
+};
+
+export const deleteLeadershipDocument = (companyId, documentId) =>
+  api.delete(`/leadership/documents/${documentId}`, withCompany(companyId));

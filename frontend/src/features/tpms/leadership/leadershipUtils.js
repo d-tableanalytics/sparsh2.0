@@ -113,6 +113,26 @@ export const scoreColor = (score) => ({
 export const linkTone = (status) => inviteTone({ status });
 
 /** Read `detail` off an axios error, falling back to a caller-supplied message. */
+/**
+ * A backend timestamp as a Date, read as UTC when it carries no zone.
+ *
+ * The API writes UTC-aware datetimes, but the Mongo client is not `tz_aware`, so they come
+ * back naive and serialise as "2026-09-02T09:20:57" with no marker. `new Date()` reads a
+ * zone-less string as LOCAL time, which showed every timestamp 5½ hours early in IST —
+ * submitted-at and checked-at both looked like they happened before they did.
+ *
+ * Returns null for anything unparseable, so callers can render a dash.
+ */
+export const parseUtc = (value) => {
+  if (!value) return null;
+  const raw = String(value);
+  // Zone-less ISO from Mongo → say it is UTC. Anything already carrying Z or ±hh:mm, and
+  // any other shape, is left for Date to interpret as it always did.
+  const iso = /^\d{4}-\d{2}-\d{2}T[\d:.]+$/.test(raw) ? `${raw}Z` : raw;
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? null : d;
+};
+
 export const errText = (e, fallback) => {
   const detail = e?.response?.data?.detail;
   if (typeof detail === 'string' && detail.trim()) return detail;

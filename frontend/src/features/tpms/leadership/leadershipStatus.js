@@ -1,7 +1,7 @@
 /* ─────────────────────────────────────────────────────────────
    Leadership Score ▸ how a status is SHOWN.
 
-   The backend keeps five cycle states, five link states, three email states and three
+   The backend keeps five cycle states, five link states, six delivery states and three
    score states. That is four vocabularies for one workflow, and three of them use the
    words "pending" and "sent" for different things — so a screen showing all of them made
    the reader translate before they could act.
@@ -15,7 +15,7 @@
 
      Cycle       Draft → Open → Closed → Published
      Invitation  Pending → Sent → Submitted / Expired   (+ Send failed)
-     Email       none — folded into the invitation
+     Delivery    none — folded into the invitation
      Score       Score available / Not enough responses / Not published
 
    Pure functions, no React import, so they can be unit-tested with plain node.
@@ -42,7 +42,7 @@ export const isScoreReady = (status) => status === 'computed';
 
 /** One line saying what this cycle is doing, for the row beneath the chip. */
 export const cycleHint = (status) => ({
-  draft: 'Being set up. Feedback links can be built but nothing is emailed yet.',
+  draft: 'Being set up. Feedback links can be built but nothing is sent yet.',
   open: 'Collecting feedback.',
   closed: 'Window shut. Compute the scores when you are ready.',
   computed: 'Window shut. Scores are calculated and ready to release.',
@@ -64,15 +64,20 @@ export const INVITE_FAILED = 'failed';
 
 /**
  * The single invitation state to show for one assignment row.
- * @param {object} row - assignment as the API returns it (`status`, `email_status`).
+ * @param {object} row - assignment as the API returns it (`status`, `wa_status`).
  * Delivery failure outranks the link state, because a link reported Pending after a
- * bounce looks like nobody has pressed send yet.
+ * failed send looks like nobody has pressed send yet.
+ *
+ * `email_status` is still read as a fallback for rows written before Leadership moved to
+ * WhatsApp — those invitations really did fail, and dropping the check would quietly
+ * relabel them Pending.
  */
 export const inviteState = (row) => {
   const link = row?.status || INVITE_PENDING;
   if (link === INVITE_SUBMITTED) return INVITE_SUBMITTED;   // finished business
   if (link === INVITE_EXPIRED) return INVITE_EXPIRED;
-  if (row?.email_status === 'failed') return INVITE_FAILED;
+  const delivery = row?.wa_status || row?.email_status;
+  if (delivery === 'failed' || delivery === 'unreachable') return INVITE_FAILED;
   if (link === 'opened') return INVITE_SENT;                // opened is not shown
   return link === INVITE_SENT ? INVITE_SENT : INVITE_PENDING;
 };
@@ -100,7 +105,7 @@ export const canRetryInvite = (row) => inviteState(row) === INVITE_FAILED;
 
 /** Why the send failed, for a tooltip. Empty unless it actually failed. */
 export const inviteError = (row) =>
-  (inviteState(row) === INVITE_FAILED && row?.email_error) || '';
+  (inviteState(row) === INVITE_FAILED && (row?.wa_error || row?.email_error)) || '';
 
 /* ── Score ──────────────────────────────────────────────────
    Three outcomes, no more. `leadership_score` stays null whenever a number is not

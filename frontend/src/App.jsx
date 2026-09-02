@@ -70,7 +70,7 @@ import ReviewReport from './features/tpms/common/ReviewReport';
 import LeadershipCycles from './features/tpms/admin/pages/LeadershipCycles';
 import LeadershipSubjects from './features/tpms/admin/pages/LeadershipSubjects';
 import LeadershipQuestions from './features/tpms/admin/pages/LeadershipQuestions';
-import LeadershipTemplate from './features/tpms/admin/pages/LeadershipTemplate';
+import LeadershipWhatsApp from './features/tpms/admin/pages/LeadershipWhatsApp';
 import LeadershipReport from './features/tpms/common/LeadershipReport';
 import LeadershipFormPage from './features/tpms/leadership/LeadershipFormPage';
 import { CompanyProvider } from './features/tpms/smops/CompanyContext';
@@ -220,7 +220,9 @@ const AppRoutes = () => {
         <Route path="leadership"           element={<LeadershipCycles />} />
         <Route path="leadership/subjects"  element={<LeadershipSubjects />} />
         <Route path="leadership/questions" element={<LeadershipQuestions />} />
-        <Route path="leadership/template"  element={<LeadershipTemplate />} />
+        {/* Invitations go out over WhatsApp only, so the template that carries them and
+            the ledger of what happened to them live together. */}
+        <Route path="leadership/whatsapp"  element={<LeadershipWhatsApp />} />
         <Route path="leadership/report"    element={<LeadershipReport />} />
       </Route>
 
@@ -243,9 +245,9 @@ const AppRoutes = () => {
             page itself keeps the wording and weightages editable by staff only. A cycle
             cannot be closed until every level it scores has been signed off. */}
         <Route path="leadership/questions" element={<LeadershipQuestions />} />
-        {/* Each company's own invitation wording. Scoped to the caller's company by
-            `_company_for`, so a client admin can only ever edit their own. */}
-        <Route path="leadership/template"  element={<LeadershipTemplate />} />
+        {/* Same scoping for the WhatsApp template. The delivery ledger on that page is
+            HR-only and the page hides it for anyone else — the API refuses it regardless. */}
+        <Route path="leadership/whatsapp"  element={<LeadershipWhatsApp />} />
       </Route>
 
 

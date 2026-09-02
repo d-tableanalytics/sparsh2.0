@@ -69,6 +69,10 @@ app.include_router(tpms.router, prefix="/api")
 # TPMS ▸ Leadership Score. Additive: owns its own tpms_leadership_* collections and does
 # not alter any existing TPMS route or stored data.
 app.include_router(leadership.router, prefix="/api")
+# Meta's delivery callbacks. A SECOND router because leadership.router requires a signed-in
+# user on every route and Meta has no session; this one is public and verifies Meta's
+# X-Hub-Signature-256 on each request instead.
+app.include_router(leadership.public_router, prefix="/api")
 app.include_router(irm.router, prefix="/api")
 # The WhatsApp template library, module-neutral. Also mounted inside the TPMS router, so
 # /api/tpms/meta-templates and /api/meta-templates are the same handlers over the same
