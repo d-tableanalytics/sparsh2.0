@@ -52,6 +52,29 @@ const Pill = ({ label, tone = 'plain' }) => {
   );
 };
 
+/** What the status column says for one saved invitation.
+
+    Ordered by what HR needs to see first. A reply ends the story, so Submitted outranks
+    everything. A refusal comes next because it is the only state anyone can DO something
+    about — an empty mobile field on a person's record. Then sent, then never sent.
+
+    `sent_at` is the test for "gone out" rather than the row status, because it is written
+    only on a real delivery — the same field the resend cooldown keys on. A row left over
+    from the email era carries it too, which is correct: those were genuinely sent. */
+const sendState = (row) => {
+  if (row.status === 'submitted') return { label: 'Submitted', tone: 'green' };
+  // Ranked above delivery: once the window has closed the link 410s on click, so what
+  // matters is that this one is over, not whether it was ever sent. Reading "Awaiting"
+  // invited HR to keep pressing Send link against a row the backend will only 409.
+  if (row.status === 'expired') return { label: 'Expired', tone: 'yellow' };
+  if (row.wa_status === 'unreachable') return { label: 'No number', tone: 'red' };
+  if (row.wa_status === 'failed') return { label: 'Not sent', tone: 'red' };
+  if (row.sent_at || row.status === 'sent' || row.status === 'opened') {
+    return { label: 'Sent', tone: 'blue' };
+  }
+  return { label: 'Awaiting', tone: 'plain' };
+};
+
 const labelCls = 'text-[11px] font-bold uppercase tracking-wide text-[var(--text-muted)]';
 
 const Field = ({ label, hint, children }) => (
@@ -248,8 +271,18 @@ const PanelModal = ({ companyId, cycle, subject, config, people, onClose, onChan
     setNotice('');
     try {
       const res = await dispatchLeadershipLinks(companyId, cycle, subject.subject_id);
-      const { sent = 0, failed = 0 } = res.data || {};
-      setNotice(`${sent} link${sent === 1 ? '' : 's'} sent on WhatsApp${failed ? `, ${failed} failed` : ''}.`);
+      const {
+        sent = 0, failed = 0, unreachable = 0,
+        skipped_recent: held = 0, cooldown_hours: cd = 24,
+      } = res.data || {};
+      // Every reason a link did NOT go is named. Reporting only `sent` turned a batch that
+      // was entirely held back by the cooldown into a bare "0 links sent on WhatsApp",
+      // which reads as a broken button rather than as working exactly as intended.
+      const parts = [`${sent} link${sent === 1 ? '' : 's'} sent on WhatsApp`];
+      if (failed) parts.push(`${failed} refused`);
+      if (unreachable) parts.push(`${unreachable} with no mobile number`);
+      if (held) parts.push(`${held} already sent in the last ${cd}h and skipped`);
+      setNotice(`${parts.join(', ')}.`);
       await load();
       onChanged?.();
     } catch (e) {
@@ -264,7 +297,10 @@ const PanelModal = ({ companyId, cycle, subject, config, people, onClose, onChan
     setErr('');
     try {
       await resendLeadershipLink(id);
-      setNotice('Link re-sent.');
+      // The route 4xx's on a refusal, so reaching here means it really went. Worded to
+      // agree with the row, which now reads Sent — "Link re-sent" above a row still
+      // saying Awaiting was the whole confusion.
+      setNotice('Link sent on WhatsApp.');
       await load();
     } catch (e) {
       setErr(errText(e, 'Could not re-send the link.'));
@@ -370,6 +406,13 @@ const PanelModal = ({ companyId, cycle, subject, config, people, onClose, onChan
                               No mobile number — cannot be invited
                             </span>
                           )}
+                          {/* Why the last attempt was refused. Meta's wording, unedited —
+                              a paraphrase would send HR looking for the wrong thing. */}
+                          {saved?.wa_error && (
+                            <span className="block text-[10.5px] font-semibold text-[var(--accent-red)]">
+                              {saved.wa_error}
+                            </span>
+                          )}
                         </Td>
                         <Td>
                           <FilterSelect value={g.relation}
@@ -377,14 +420,15 @@ const PanelModal = ({ companyId, cycle, subject, config, people, onClose, onChan
                             options={relations.map((r) => ({ id: r.code, name: r.label }))} />
                         </Td>
                         <Td align="center">
-                          {/* Whether this giver has ANSWERED — not whether the message
-                              reached them. Delivery state is deliberately not shown: it is
-                              Meta's business, it changes after the fact, and none of it
-                              tells HR anything they can act on. */}
-                          {saved
-                            ? <Pill label={saved.status === 'submitted' ? 'Submitted' : 'Awaiting'}
-                                tone={saved.status === 'submitted' ? 'green' : 'grey'} />
-                            : <Pill label="Not saved" tone="yellow" />}
+                          {/* Two different questions share this column, and pressing Send
+                              link only answers the second: has this person REPLIED, and has
+                              their invitation gone out. Showing only the first made a
+                              successful send look identical to one that never happened.
+                              Still not Meta's delivery state — no delivered/read receipts,
+                              nothing that changes after the fact. Just whether we sent it,
+                              and whether sending was refused, which is the part HR can act
+                              on. */}
+                          {saved ? <Pill {...sendState(saved)} /> : <Pill label="Not saved" tone="yellow" />}
                         </Td>
                         <Td align="right">
                           <div className="inline-flex items-center gap-1.5 justify-end">
@@ -634,11 +678,15 @@ const LeadershipSubjects = () => {
     try {
       const res = await dispatchLeadershipLinks(companyId, cycle);
       const {
-        sent = 0, failed = 0, skipped_recent: held = 0, cooldown_hours: cd = 24,
+        sent = 0, failed = 0, unreachable = 0,
+        skipped_recent: held = 0, cooldown_hours: cd = 24,
         skipped_incomplete: incomplete = [],
       } = res.data || {};
       const parts = [`${sent} link${sent === 1 ? '' : 's'} sent on WhatsApp`];
-      if (failed) parts.push(`${failed} failed`);
+      if (failed) parts.push(`${failed} refused`);
+      // Counted apart from a refusal: an empty mobile field is fixed on the person's
+      // record, a refusal is fixed with Meta. Merging them sends HR to the wrong screen.
+      if (unreachable) parts.push(`${unreachable} with no mobile number`);
       // Say what was held and why, so a second click reads as deliberate rather than broken.
       if (held) parts.push(`${held} already sent in the last ${cd}h and skipped`);
       // Leaders whose panel is still short are named rather than counted: "2 skipped" leaves

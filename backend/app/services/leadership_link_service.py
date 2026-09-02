@@ -40,11 +40,12 @@ from bson import ObjectId
 from app.db.mongodb import get_collection
 from app.models.leadership import (
     COLL_LS_ASSIGNMENTS,
+    COLL_LS_CYCLES,
     WA_PENDING, WA_SENT,
     LEVEL_LABELS,
     LINK_EXPIRED, LINK_OPENED, LINK_PENDING, LINK_SENT, LINK_SUBMITTED,
     RELATION_LABELS, RESEND_COOLDOWN_HOURS,
-    cycle_label, cycle_period,
+    cycle_label, cycle_months, cycle_period,
 )
 
 logger = logging.getLogger(__name__)
@@ -103,6 +104,49 @@ def cycle_expiry_utc(cycle: str) -> Optional[datetime]:
     return (nxt - timedelta(microseconds=1)).astimezone(timezone.utc)
 
 
+def cycle_start_utc(cycle: str) -> Optional[datetime]:
+    """First instant of the cycle's OPENING month in IST, expressed in UTC.
+
+    The mirror of `cycle_expiry_utc`, and used for one thing only: telling a giver when an
+    unconfigured window began. It is deliberately NOT wired into `survey_window`, because
+    that function treats a missing `opens_at` as "open from the start" — giving it a
+    calendar start would make every cycle PENDING before its first month, which is a change
+    to when feedback is accepted rather than to what a message says.
+    """
+    try:
+        year, first, _ = cycle_months(cycle)
+    except (ValueError, TypeError):
+        return None
+    return datetime(year, first, 1, tzinfo=IST).astimezone(timezone.utc)
+
+
+def message_window(cyc: dict) -> tuple:
+    """(opens, closes) as an invitation should state them — neither ever None.
+
+    `survey_window` leaves `opens` as None when HR configured no Open date, which is right
+    for deciding access and useless in a sentence. Here that gap is filled with the cycle's
+    own opening month, so the message can always name both ends of the window.
+    """
+    opens, closes = survey_window(cyc)
+    return opens or cycle_start_utc((cyc or {}).get("cycle") or ""), closes
+
+
+def format_window_dt(dt: Optional[datetime]) -> str:
+    """A window date as it should appear on a phone: '12 Sep 2026, 10:00 AM IST'.
+
+    Rendered in IST, and labelled. A WhatsApp template is plain text delivered by Meta —
+    there is no client-side rendering, so the zone has to be chosen when the message is
+    built. IST is the zone every date decision in TPMS is already made in and the one the
+    recipients live in; naming it means a date on a handset can never be read as UTC.
+    """
+    if not dt:
+        return ""
+    local = (dt if getattr(dt, "tzinfo", None) else dt.replace(tzinfo=timezone.utc)).astimezone(IST)
+    # %-d / %-I are not portable to Windows, so the leading zero is stripped by hand.
+    return (f"{local.day} {local.strftime('%b %Y')}, "
+            f"{local.strftime('%I:%M %p').lstrip('0')} IST")
+
+
 def _aware(dt) -> Optional[datetime]:
     """A stored datetime as UTC-aware. Mongo hands naive values back, and comparing one
     against an aware `now` raises rather than returning False."""
@@ -116,6 +160,28 @@ def _aware(dt) -> Optional[datetime]:
 WINDOW_PENDING = "pending"
 WINDOW_OPEN = "open"
 WINDOW_CLOSED = "closed"
+
+
+def cycle_key(doc: dict) -> str:
+    """Invitations are keyed by company AND cycle: the same cycle code exists at every
+    client, so the code alone would collide across companies in any shared lookup."""
+    return f"{doc.get('company_id')}|{doc.get('cycle')}"
+
+
+async def cycles_for(docs: List[dict]) -> Dict[str, dict]:
+    """The cycle document behind each invitation, fetched once for the whole set.
+
+    A log can span cycles, and resolving expiry per row would be one query per row. Returns
+    a map keyed by `cycle_key`; a row whose cycle has been deleted simply finds nothing and
+    falls back to its stored expiry.
+    """
+    keys = {(str(d.get("company_id")), str(d.get("cycle")))
+            for d in (docs or []) if d.get("cycle")}
+    if not keys:
+        return {}
+    rows = await get_collection(COLL_LS_CYCLES).find(
+        {"$or": [{"company_id": c, "cycle": y} for c, y in keys]}).to_list(500)
+    return {cycle_key(r): r for r in rows}
 
 
 def survey_window(cyc: dict) -> tuple:
@@ -139,6 +205,13 @@ def window_state(cyc: dict, now: Optional[datetime] = None) -> str:
     if closes and now > closes:
         return WINDOW_CLOSED
     return WINDOW_OPEN
+
+
+def window_is_closed(cyc: dict, now: Optional[datetime] = None) -> bool:
+    """Whether this cycle's collection window has shut — configured Close date if HR set
+    one, otherwise the cycle's own calendar months. The single answer that sending, link
+    expiry and the giver's form all read, so none of them can disagree."""
+    return window_state(cyc, now) == WINDOW_CLOSED
 
 
 def cycle_is_expired(cycle: str, now: Optional[datetime] = None) -> bool:
@@ -183,12 +256,22 @@ def in_resend_cooldown(doc: dict, now: Optional[datetime] = None) -> bool:
     return bool(until and until > (now or datetime.now(timezone.utc)))
 
 
-def is_expired(doc: dict, now: Optional[datetime] = None) -> bool:
+def is_expired(doc: dict, now: Optional[datetime] = None,
+               cyc: Optional[dict] = None) -> bool:
     """Past its window and never submitted. A submitted form is finished business and is
-    never reported as expired, however long ago its cycle closed."""
+    never reported as expired, however long ago its cycle closed.
+
+    Pass `cyc` and the CYCLE's window decides, which is the only way a Close date can move
+    an existing link: `expires_at` is stamped when the link is created and would otherwise
+    keep answering for a window HR has since changed. Reading it live also means no stored
+    row has to be rewritten when the dates are edited.
+
+    Without `cyc` the stored `expires_at` still answers, so a caller that has no cycle to
+    hand behaves exactly as before rather than reporting nothing as expired.
+    """
     if not doc or doc.get("status") == LINK_SUBMITTED:
         return False
-    exp = doc.get("expires_at")
+    exp = survey_window(cyc)[1] if cyc else doc.get("expires_at")
     if not exp:
         return False
     if exp.tzinfo is None:
@@ -196,10 +279,12 @@ def is_expired(doc: dict, now: Optional[datetime] = None) -> bool:
     return exp < (now or datetime.now(timezone.utc))
 
 
-def effective_status(doc: dict, now: Optional[datetime] = None) -> str:
+def effective_status(doc: dict, now: Optional[datetime] = None,
+                     cyc: Optional[dict] = None) -> str:
     """Status as it should be shown. Expiry is DERIVED, not written by a sweep, so a link
-    is never briefly reported live after its cycle closed just because no job has run."""
-    if is_expired(doc, now):
+    is never briefly reported live after its cycle closed just because no job has run —
+    and so an edited Close date takes effect on the next read rather than on a rewrite."""
+    if is_expired(doc, now, cyc):
         return LINK_EXPIRED
     return doc.get("status") or LINK_SENT
 
@@ -599,7 +684,6 @@ async def dispatch_pending(company_id: str, cycle: str,
         "skipped_recent": skipped_recent,
         "cooldown_hours": RESEND_COOLDOWN_HOURS,
         "next_resend_at": next_at,
-        "template": "custom" if template else "default",
     }
 
 
@@ -609,7 +693,8 @@ async def assignments_for_subject(company_id: str, cycle: str, subject_id: str) 
     }).sort("created_at", 1).to_list(200)
 
 
-async def panel_rows(docs: List[dict], now: Optional[datetime] = None) -> List[dict]:
+async def panel_rows(docs: List[dict], now: Optional[datetime] = None,
+                     cyc: Optional[dict] = None) -> List[dict]:
     """`panel_row` for each invitation, with the giver's number resolved in one pass.
 
     Read live rather than copied onto the assignment when it was created: a number corrected
@@ -631,11 +716,17 @@ async def panel_rows(docs: List[dict], now: Optional[datetime] = None) -> List[d
                     {"_id": {"$in": oids}}, {"mobile": 1, "phone": 1}).to_list(2000):
                 phones[str(u["_id"])] = str(u.get("mobile") or u.get("phone") or "").strip()
 
-    return [{**panel_row(d, now),
+    # One cycle lookup for the whole panel, so every row's Expired badge is measured
+    # against the window HR actually configured. `cyc` short-circuits it for the caller
+    # that already holds the cycle.
+    cycles = {cycle_key(d): cyc for d in docs} if cyc else await cycles_for(docs)
+
+    return [{**panel_row(d, now, cycles.get(cycle_key(d))),
              "giver_mobile": phones.get(str(d.get("giver_id")), "")} for d in docs]
 
 
-def panel_row(doc: dict, now: Optional[datetime] = None) -> dict:
+def panel_row(doc: dict, now: Optional[datetime] = None,
+              cyc: Optional[dict] = None) -> dict:
     """One panel member as HR sees them. HR-ONLY — this carries giver identity and must
     never be returned by a leader-facing or manager-facing endpoint."""
     return {
@@ -645,7 +736,7 @@ def panel_row(doc: dict, now: Optional[datetime] = None) -> dict:
         "giver_email": doc.get("giver_email"),
         "relation": doc.get("relation"),
         "relation_label": RELATION_LABELS.get(doc.get("relation") or "", doc.get("relation") or ""),
-        "status": effective_status(doc, now),
+        "status": effective_status(doc, now, cyc),
         "wa_status": doc.get("wa_status"),
         "wa_error": doc.get("wa_error"),
         # No link. Only its hash is stored, so there is nothing to hand back — and a URL

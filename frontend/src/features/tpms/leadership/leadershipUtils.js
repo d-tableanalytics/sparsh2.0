@@ -77,6 +77,16 @@ export const canManage = (user) =>
  *  here is presentation only, never the control itself. */
 export const canManagePanel = (user) => isStaff(user) || isHr(user);
 
+/** May WRITE the WhatsApp invitation template. Mirrors `_can_manage_template` — narrower
+ *  than `canManage`, which HR passes: the template is the wording sent to employees'
+ *  personal phones under the company's name and submitted to Meta for review, so it is the
+ *  client admin's and internal staff's. HR still reads the screen and refreshes the
+ *  approval status, because that is what decides whether their Send link works.
+ *
+ *  The server reports the same answer as `can_edit` on the template payload; this exists so
+ *  the controls are hidden rather than shown and then refused. */
+export const canManageTemplate = (user) => isStaff(user) || user?.role === 'clientadmin';
+
 /** Numbers render to 2dp with trailing zeros dropped; null → '—'. */
 export const fmtNum = (v, dash = '—') => {
   if (v === null || v === undefined || Number.isNaN(Number(v))) return dash;

@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { motion } from 'framer-motion';
 import {
   MessageCircle, RefreshCw, AlertTriangle, Save, Send, X, User, Link2, UserCog,
-  Plus, Trash2, Braces,
+  Plus, Trash2, Braces, CalendarClock,
 } from 'lucide-react';
 import { errText } from '../../leadership/leadershipUtils';
 
@@ -28,6 +28,18 @@ const MotionDiv = motion.div;
 const VARIABLES = [
   { name: 'giver_name', icon: User, label: "the giver's name", sample: 'Asha Rao' },
   { name: 'feedback_link', icon: Link2, label: 'their unique feedback link', sample: 'a link only they can use' },
+  {
+    name: 'opens_at',
+    icon: CalendarClock,
+    label: 'when the window opens',
+    sample: '12 Sep 2026, 10:00 AM IST',
+  },
+  {
+    name: 'closes_at',
+    icon: CalendarClock,
+    label: 'the last date to give feedback',
+    sample: '30 Sep 2026, 6:00 PM IST',
+  },
   {
     name: 'leader_name',
     icon: UserCog,
@@ -61,7 +73,11 @@ const preview = (body, custom) => {
 };
 
 const LeadershipTemplateModal = ({ template, api, onClose, onSaved }) => {
-  const [name, setName] = useState(template?.meta_template_name || '');
+  // The suggestion is this company's alone. Meta template names live on one shared
+  // WhatsApp Business Account, so the obvious name is taken by whoever writes first —
+  // starting from a company-specific one is what stops the second client hitting that.
+  const [name, setName] = useState(
+    template?.meta_template_name || template?.suggested_name || '');
   const [language, setLanguage] = useState(template?.language || 'en');
   const [body, setBody] = useState(template?.body || '');
   const [custom, setCustom] = useState(template?.variables || []);
@@ -189,9 +205,11 @@ const LeadershipTemplateModal = ({ template, api, onClose, onSaved }) => {
               </span>
               <input value={name} disabled={!!busy || locked} autoFocus
                 onChange={(e) => setName(e.target.value)}
-                placeholder="leadership_feedback_invite" className={`${inputCls} font-mono`} />
+                placeholder={template?.suggested_name || 'leadership_feedback_invite'}
+                className={`${inputCls} font-mono`} />
               <span className="text-[10.5px] font-semibold text-[var(--text-muted)]">
-                Lowercase letters, numbers and underscores.
+                Lowercase letters, numbers and underscores. This name identifies the
+                template at Meta and must differ from every other company's.
               </span>
             </label>
             <label className="flex flex-col gap-1.5">
