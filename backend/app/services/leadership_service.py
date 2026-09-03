@@ -303,6 +303,7 @@ async def list_cycles(company_id: str, limit: int = 50) -> List[dict]:
         {"company_id": str(company_id)}).sort("cycle", -1).to_list(limit)
     out = []
     for d in docs:
+        await sync_cycle_status(d)
         d["_id"] = str(d["_id"])
         d["label"] = cycle_label(d.get("cycle") or "")
         d["subject_count"] = await get_collection(COLL_LS_SUBJECTS).count_documents(
@@ -330,10 +331,134 @@ async def list_cycles(company_id: str, limit: int = 50) -> List[dict]:
     return out
 
 
+# ─────────────────────────────────────────────────────────────
+# Status from the clock
+#
+# The collection window owns draft/open/closed. HR owns computed/published. Nothing owns
+# both, which is what stops the two disagreeing.
+# ─────────────────────────────────────────────────────────────
+# Reached by a decision, not by a date. A cycle here has had its scores frozen and possibly
+# shown to leaders, so no clock may move it — only HR, and only forward.
+CYCLE_MANUAL = (CYCLE_COMPUTED, CYCLE_PUBLISHED)
+
+
+def validate_window(opens, closes, cycle: str = "") -> None:
+    """Refuse a window that could never be open.
+
+    Checked on the SERVER because the dates now decide the cycle's status, when its links
+    expire and what the invitation quotes — a window with the close before the open would
+    take a cycle from draft straight to closed, collecting nothing, and the two dialogs
+    that guard it in the UI are not the only way in.
+    """
+    if not opens or not closes:
+        return
+    a = opens if getattr(opens, "tzinfo", None) else opens.replace(tzinfo=timezone.utc)
+    b = closes if getattr(closes, "tzinfo", None) else closes.replace(tzinfo=timezone.utc)
+    if b <= a:
+        raise ValueError(
+            (f"{cycle_label(cycle)}: " if cycle else "")
+            + "the close date must be after the open date, or the feedback window would "
+              "never be open.")
+
+
+def derived_status(cyc: dict, now=None) -> str:
+    """What this cycle's status should be right now.
+
+    `computed` and `published` are returned untouched: a published score has been read by
+    the leader it describes, and a window closing afterwards must not reopen that. Every
+    other cycle takes its status from the window — which is HR's Open/Close dates when they
+    set them and the cycle's calendar months when they did not.
+    """
+    from app.services.leadership_link_service import (
+        WINDOW_CLOSED, WINDOW_PENDING, window_state,
+    )
+    stored = str((cyc or {}).get("status") or CYCLE_DRAFT)
+    if stored in CYCLE_MANUAL:
+        return stored
+    state = window_state(cyc or {}, now)
+    if state == WINDOW_PENDING:
+        return CYCLE_DRAFT
+    return CYCLE_CLOSED if state == WINDOW_CLOSED else CYCLE_OPEN
+
+
+async def sync_cycle_status(cyc: Optional[dict], now=None) -> Optional[dict]:
+    """Bring one cycle's STORED status in line with the clock, and return it.
+
+    The write matters: `chase_non_submitters`, `notify_window_closing` and the quorum and
+    RRO chasers all query Mongo by status, so a status that lived only in Python would leave
+    them acting on a stale one. Written only when it actually changes, so a read of an
+    unchanged cycle costs nothing.
+
+    `closed_at` is stamped the first time a cycle closes so the history still records when,
+    exactly as the manual Close used to.
+    """
+    if not cyc:
+        return cyc
+    previous = str(cyc.get("status") or CYCLE_DRAFT)
+    target = derived_status(cyc, now)
+    if target == previous:
+        return cyc
+
+    updates = {"status": target, "updated_at": datetime.utcnow()}
+    if target == CYCLE_CLOSED and not cyc.get("closed_at"):
+        updates["closed_at"] = datetime.utcnow()
+
+    col = get_collection(COLL_LS_CYCLES)
+    # The PREVIOUS status is part of the filter, so this is a compare-and-set: a request
+    # and the nightly sweep landing on the same cycle at the same moment cannot both apply
+    # the transition, and `closed_at` can therefore only ever be stamped once. The loser
+    # matches nothing and adopts the winner's write rather than repeating it.
+    res = await col.update_one(
+        {"company_id": str(cyc.get("company_id")), "cycle": str(cyc.get("cycle")),
+         "status": previous},
+        {"$set": updates})
+
+    if getattr(res, "matched_count", 0):
+        logger.info("Leadership cycle %s/%s moved %s -> %s by its window",
+                    cyc.get("company_id"), cyc.get("cycle"), previous, target)
+        cyc.update(updates)
+        return cyc
+
+    # Somebody else got there first. Read back what they wrote so this caller returns the
+    # cycle as it actually stands rather than as it hoped to leave it.
+    fresh = await col.find_one(
+        {"company_id": str(cyc.get("company_id")), "cycle": str(cyc.get("cycle"))})
+    if fresh:
+        for key in ("status", "updated_at", "closed_at"):
+            if key in fresh:
+                cyc[key] = fresh[key]
+    return cyc
+
+
+async def sync_all_cycle_statuses(now=None) -> dict:
+    """Reconcile every cycle that a clock could have moved.
+
+    Runs before the nightly jobs. Without it a cycle nobody opened in the UI would sit at
+    its old status until somebody did, and the reminder ladder would skip it on the very
+    day it opened. Cycles already computed or published are not fetched at all.
+    """
+    # Streamed rather than collected: `to_list(2000)` silently stopped reconciling at the
+    # 2000th cycle, and a cycle the sweep skips is invisible to every status-driven job
+    # below it. The cursor walks the whole collection in batches instead, so the ceiling is
+    # gone without holding every cycle in memory at once.
+    cursor = get_collection(COLL_LS_CYCLES).find(
+        {"status": {"$nin": list(CYCLE_MANUAL)}}).batch_size(200)
+    checked = moved = 0
+    async for cyc in cursor:
+        checked += 1
+        before = str(cyc.get("status") or CYCLE_DRAFT)
+        await sync_cycle_status(cyc, now)
+        if str(cyc.get("status")) != before:
+            moved += 1
+    return {"checked": checked, "moved": moved}
+
+
 async def get_cycle(company_id: str, cycle: str) -> Optional[dict]:
     doc = await get_collection(COLL_LS_CYCLES).find_one(
         {"company_id": str(company_id), "cycle": str(cycle)})
     if doc:
+        # Every read reconciles, so no caller can act on a status the clock has passed.
+        await sync_cycle_status(doc)
         doc["_id"] = str(doc["_id"])
         doc["label"] = cycle_label(doc.get("cycle") or "")
     return doc
@@ -364,10 +489,13 @@ async def assert_dispatchable(company_id: str, cycle: str) -> dict:
     cyc = await get_cycle(company_id, cycle)
     if not cyc:
         raise ValueError("This cycle does not exist")
-    if cyc.get("status") == CYCLE_CLOSED:
+    # `computed` and `published` refuse alongside `closed`. They are what a closed cycle
+    # becomes, so a cycle that has moved past collection must not be reachable by a send —
+    # and a published one has already been read by the leader it scores.
+    if cyc.get("status") in (CYCLE_CLOSED, CYCLE_COMPUTED, CYCLE_PUBLISHED):
         raise ValueError(
-            f"{cycle_label(cycle)} is closed. Its scores are final, so invitations and "
-            "reminders can no longer be sent.")
+            f"{cycle_label(cycle)} is {cyc.get('status')}. Its scores are final, so "
+            "invitations and reminders can no longer be sent.")
     if window_is_closed(cyc):
         closes = survey_window(cyc)[1]
         raise ValueError(
@@ -465,19 +593,6 @@ async def open_readiness(company_id: str, cycle: str) -> dict:
         "ready": bool(subjects) and not no_panel and not unmailed,
         "reason": reason,
     }
-
-
-async def assert_openable(company_id: str, cycle: str) -> dict:
-    """Raise unless a draft cycle is ready to start collecting.
-
-    Server-side for the same reason assert_dispatchable is: a stale browser tab or a direct
-    PATCH must not be able to open a cycle nobody has been invited to. Returns the report so
-    callers do not compute it twice.
-    """
-    report = await open_readiness(company_id, cycle)
-    if not report["ready"]:
-        raise ValueError(f"{cycle_label(cycle)} cannot be opened yet — {report['reason']}")
-    return report
 
 
 async def panel_shortfall(company_id: str, cycle: str, subject_id: str) -> Dict[str, int]:
@@ -594,6 +709,9 @@ async def create_cycle(company_id: str, payload, user: dict) -> dict:
     if existing:
         raise ValueError(f"A cycle already exists for {cycle_label(cycle)}")
 
+    validate_window(getattr(payload, "opens_at", None),
+                    getattr(payload, "closes_at", None), cycle)
+
     now = datetime.utcnow()
     doc = {
         "company_id": str(company_id),
@@ -655,6 +773,17 @@ async def update_cycle(company_id: str, cycle: str, updates: dict, user: dict) -
     if target and target != current:
         if target not in CYCLE_STATUSES:
             raise ValueError(f"status must be one of {', '.join(CYCLE_STATUSES)}")
+        # draft / open / closed belong to the clock now. Refused here rather than quietly
+        # ignored: a caller asking to open a cycle has to learn that the Open date is the
+        # control, or it will keep asking and keep appearing not to work.
+        # Reverting a compute is HR undoing their own decision, not reopening collection,
+        # so it stays available — the clock re-derives from `closed` on the next read.
+        reverting = current == CYCLE_COMPUTED and target == CYCLE_CLOSED
+        if target not in CYCLE_MANUAL and not reverting:
+            raise ValueError(
+                f"{cycle_label(cycle)} moves between draft, open and closed on its own "
+                "Open and Close dates. Change those dates instead — a cycle can no longer "
+                "be opened or closed by hand.")
         if not can_transition(current, target):
             allowed = CYCLE_TRANSITIONS.get(current) or []
             raise ValueError(
@@ -681,14 +810,10 @@ async def update_cycle(company_id: str, cycle: str, updates: dict, user: dict) -
             if key not in fields and int(cyc.get(key) or MIN_RESPONSES_FLOOR) > panel:
                 fields[key] = panel
 
-    # Create -> enrol -> mail the panels -> Open. Opening is what declares the cycle to be
-    # collecting, so it is gated on that set-up having actually happened: a cycle opened with
-    # nobody enrolled, or with every invitation unmailed, is collecting from no one.
-    #
-    # Scoped deliberately to draft -> open. Re-opening a CLOSED cycle is the documented
-    # remedy for a quorum shortfall and has to stay a single click, so that path is untouched.
-    if target == CYCLE_OPEN and current == CYCLE_DRAFT:
-        await assert_openable(company_id, cycle)
+    # The readiness gate that used to gate draft -> open is gone with the button. A date
+    # arrives whether or not the panels were built, so blocking it could only ever mean
+    # refusing to acknowledge the clock. `open_readiness` still reports, and the Cycles
+    # screen still warns — it advises now rather than blocks.
 
     # Settings are frozen once collection starts: changing a weightage, the degree or the
     # quorum midway would score the responses already in hand against different rules from
@@ -699,6 +824,23 @@ async def update_cycle(company_id: str, cycle: str, updates: dict, user: dict) -
             f"{cycle_label(cycle)} has already opened. Its degree, quorum and weightages "
             "are fixed so that every response is scored under the rules it was collected "
             "under.")
+
+    # The window itself freezes at `computed`. Moving a close date forward used to reopen
+    # collection on a cycle whose scores were already frozen — and, once published, already
+    # read by the leader they describe: the status stayed put while the window, the links
+    # and dispatch all came back to life. Feedback arriving after publication is exactly
+    # what the closed / computed / published split exists to prevent.
+    if current in CYCLE_MANUAL and ({"opens_at", "closes_at"} & set(fields)):
+        raise ValueError(
+            f"{cycle_label(cycle)} is {current}. Its feedback window is fixed — scores "
+            "have been frozen from what was collected inside it, so the dates can no "
+            "longer move. Un-compute it first if it genuinely needs to collect again.")
+
+    # Checked against the MERGED window: a PATCH may carry only one of the two dates, and
+    # the one already stored is what the new one has to be coherent with.
+    if {"opens_at", "closes_at"} & set(fields):
+        validate_window(fields.get("opens_at", cyc.get("opens_at")),
+                        fields.get("closes_at", cyc.get("closes_at")), cycle)
 
     # Computing is not gated on any approval of the rubric: the seeded questions and
     # options are the single source of truth and are scored exactly as they stand.

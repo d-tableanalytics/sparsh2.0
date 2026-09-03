@@ -331,6 +331,25 @@ async def _notify_hr(company_id, subject: str, html: str, text: str, slug: str) 
 async def run_leadership_jobs() -> dict:
     """Every Leadership job for one tick. Never raises — the scheduler must keep ticking."""
     out = {}
+    # Statuses first. Every job below queries Mongo by status, so a cycle that opened or
+    # closed since the last tick has to be reconciled before they run or it is skipped for
+    # a whole day — on the one day it mattered most.
+    from app.services.leadership_service import sync_all_cycle_statuses
+    try:
+        out["status_sweep"] = await sync_all_cycle_statuses()
+    except Exception as e:                                        # pragma: no cover
+        # Every job below selects cycles BY STATUS. Running them on statuses the sweep
+        # failed to reconcile is worse than not running them: they would chase people in a
+        # cycle that has closed, or stay silent on one that opened, and leave a run that
+        # looks successful. Skipped loudly instead, and picked up on the next tick.
+        logger.error(
+            "Leadership status sweep FAILED (%s) — skipping the reminder, closing, quorum "
+            "and RRO jobs this run rather than acting on stale cycle statuses.", e)
+        out["status_sweep"] = {"error": str(e)}
+        for skipped in ("reminders", "closing", "quorum", "rro"):
+            out[skipped] = {"skipped": "cycle statuses could not be reconciled"}
+        return out
+
     for name, fn in (("reminders", chase_non_submitters),
                      ("closing", notify_window_closing),
                      ("quorum", notify_quorum_shortfall),

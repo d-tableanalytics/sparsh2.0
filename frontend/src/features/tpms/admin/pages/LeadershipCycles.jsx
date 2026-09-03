@@ -4,6 +4,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import {
   CalendarRange, Plus, RefreshCw, AlertTriangle, CheckCircle2, X, ShieldAlert,
   Users, Lock, Unlock, ArrowRight, Layers, Calculator, Send, Undo2, Trash2, Mail,
+  CalendarClock,
   FolderOpen, Upload, ExternalLink,
 } from 'lucide-react';
 import {
@@ -327,7 +328,7 @@ const ConfirmDeleteModal = ({ row, onClose, onConfirm }) => {
     freezing. What the browser confirm could not do is offer the remedy it described:
     re-opening the cycle to extend the window is a button here, not a sentence. Mounted only
     while a shortfall is pending, so it seeds from that report and needs no reset. */
-const QuorumConfirmModal = ({ report, onClose, onReopen, onConfirm }) => {
+const QuorumConfirmModal = ({ report, onClose, onExtend, onConfirm }) => {
   const [saving, setSaving] = useState('');   // '' | 'reopen' | 'freeze'
   const [err, setErr] = useState('');
 
@@ -444,11 +445,13 @@ const QuorumConfirmModal = ({ report, onClose, onReopen, onConfirm }) => {
             className="px-4 py-2 rounded-lg text-[13px] font-bold text-[var(--text-muted)] hover:bg-[var(--input-bg)] transition-colors disabled:opacity-50">
             Cancel
           </button>
-          <button type="button" onClick={run('reopen', onReopen, 'Could not re-open this cycle.')} disabled={!!saving}
-            title="Extend the window so the missing panel members can still reply"
+          {/* Moving the Close date is what re-opens a cycle now: the status follows the
+              window, so pushing the deadline back puts this cycle straight back into
+              `open` and its links live again. */}
+          <button type="button" onClick={onExtend} disabled={!!saving}
+            title="Push the Close date back so the missing panel members can still reply"
             className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-[13px] font-bold text-[var(--text-muted)] border border-[var(--border)] hover:bg-[var(--input-bg)] transition-colors disabled:opacity-50">
-            {saving === 'reopen' ? <RefreshCw size={14} className="animate-spin" /> : <Unlock size={14} />}
-            {saving === 'reopen' ? 'Re-opening…' : 'Re-open Cycle'}
+            <CalendarClock size={14} /> Extend the window
           </button>
           <button type="button" onClick={run('freeze', onConfirm, 'Could not compute this cycle.')} disabled={!!saving} autoFocus
             className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-[var(--accent-indigo)] text-white text-[13px] font-bold shadow-sm hover:opacity-90 transition-opacity disabled:opacity-40">
@@ -488,125 +491,118 @@ const BlockedNames = ({ title, rows, render }) => !rows.length ? null : (
     and offer the way to it. The three steps are the module's actual order of work, shown as
     a checklist so it is obvious which one is outstanding rather than only that something is.
     Mounted only while a row is blocked, so it seeds from that row's readiness report. */
-const OpenBlockedModal = ({ row, panelBase, onClose }) => {
-  const rd = row.open_readiness || {};
-  const enrolled = rd.subjects || 0;
-  const noPanel = rd.panels_missing || [];
-  const unmailed = rd.mail_pending || [];
+/** A datetime-local input wants the viewer's OWN wall clock, so the stored UTC instant is
+    converted rather than sliced — `toISOString().slice(0,16)` would show UTC and silently
+    shift every date HR looked at. */
+const toLocalInput = (value) => {
+  const d = parseUtc(value);
+  if (!d) return '';
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+    + `T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+};
 
-  const steps = [
-    { icon: Users, label: 'Leaders enrolled', done: enrolled > 0,
-      detail: enrolled > 0
-        ? `${enrolled} leader${enrolled === 1 ? '' : 's'} in this cycle`
-        : 'Nobody is enrolled yet' },
-    { icon: Layers, label: 'Feedback panels assigned', done: enrolled > 0 && !noPanel.length,
-      detail: noPanel.length
-        ? `${noPanel.length} still without a panel`
-        : (enrolled > 0 ? 'Every leader has a panel' : 'Enrol a leader first') },
-    { icon: Mail, label: 'Invitations sent to feedback givers',
-      done: enrolled > 0 && !noPanel.length && !unmailed.length,
-      detail: unmailed.length
-        ? `${unmailed.length} leader${unmailed.length === 1 ? '' : 's'} still have unsent invitations`
-        : (enrolled > 0 && !noPanel.length ? 'All invitations delivered' : 'Not reached yet') },
-  ];
+/** Change when a cycle collects.
+ *
+ *  This is the only control over draft/open/closed. Moving the Open date earlier starts a
+ *  cycle; moving the Close date later extends one, which is what Re-open used to do for a
+ *  quorum shortfall. Nothing else about the cycle is editable here — degree, quorum and
+ *  weightages freeze once collection starts, and this dialog must not look like a way
+ *  around that. The server refuses both dates outright once a cycle is computed or
+ *  published, so a frozen cycle can never be made collectible again. */
+const RescheduleModal = ({ row, onClose, onSaved }) => {
+  const [opensAt, setOpensAt] = useState(toLocalInput(row?.opens_at));
+  const [closesAt, setClosesAt] = useState(toLocalInput(row?.closes_at));
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState('');
 
-  useEffect(() => {
-    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [onClose]);
+  const bad = opensAt && closesAt && new Date(closesAt) <= new Date(opensAt);
+
+  const save = async () => {
+    if (bad) return;
+    setSaving(true);
+    setErr('');
+    try {
+      await onSaved({
+        opens_at: opensAt ? new Date(opensAt).toISOString() : null,
+        closes_at: closesAt ? new Date(closesAt).toISOString() : null,
+      });
+    } catch (e) {
+      setErr(errText(e, 'Could not change these dates.'));
+      setSaving(false);
+    }
+  };
 
   return (
     <MotionDiv className="fixed inset-0 z-50 flex items-center justify-center p-4"
       initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
-      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={onClose} />
-      <MotionDiv role="alertdialog" aria-modal="true"
-        initial={{ opacity: 0, y: 14, scale: 0.98 }}
-        animate={{ opacity: 1, y: 0, scale: 1 }}
-        exit={{ opacity: 0, y: 14, scale: 0.98 }}
-        transition={{ duration: 0.22, ease: [0.4, 0, 0.2, 1] }}
-        className="relative w-full max-w-lg rounded-2xl border border-[var(--border)] bg-[var(--bg-card)] shadow-xl overflow-hidden">
-        <div className="flex items-center justify-between px-5 py-4 border-b border-[var(--border)]">
-          <div className="flex items-center gap-2.5 min-w-0">
-            <span className="w-8 h-8 rounded-lg flex items-center justify-center bg-[var(--accent-yellow-bg)] text-[var(--accent-yellow)] shrink-0">
-              <Lock size={16} />
+      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={saving ? undefined : onClose} />
+      <MotionDiv
+        initial={{ opacity: 0, y: 14, scale: 0.98 }} animate={{ opacity: 1, y: 0, scale: 1 }}
+        exit={{ opacity: 0, y: 14, scale: 0.98 }} transition={{ duration: 0.22, ease: [0.4, 0, 0.2, 1] }}
+        className="relative w-full max-w-md rounded-2xl border border-[var(--border)] bg-[var(--bg-card)] shadow-xl overflow-hidden">
+        <div className="flex items-center gap-2.5 px-5 py-4 border-b border-[var(--border)]">
+          <span className="w-8 h-8 rounded-lg flex items-center justify-center bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] shrink-0">
+            <CalendarClock size={16} />
+          </span>
+          <div className="min-w-0">
+            <h3 className="text-[15px] font-extrabold tracking-tight">Feedback window</h3>
+            <span className="block text-[10.5px] font-bold text-[var(--text-muted)]">
+              {row?.label || row?.cycle} · the cycle opens and closes on these dates
             </span>
-            <div className="min-w-0">
-              <h3 className="text-[15px] font-extrabold tracking-tight">Not ready to open</h3>
-              <span className="block text-[10.5px] font-bold text-[var(--text-muted)] truncate">
-                {row.label || row.cycle}
-              </span>
-            </div>
           </div>
-          <button type="button" onClick={onClose}
-            className="w-8 h-8 rounded-lg flex items-center justify-center text-[var(--text-muted)] hover:bg-[var(--input-bg)] transition-colors">
-            <X size={16} />
-          </button>
         </div>
 
-        <div className="px-5 py-4 space-y-3.5">
-          <p className="text-[12.5px] font-semibold text-[var(--text-muted)]">
-            Opening a cycle is what declares it to be collecting. Until the invitations are
-            out, it would be collecting from nobody.
-          </p>
-
-          <div className="space-y-2">
-            {steps.map((s, i) => (
-              <div key={s.label} className="flex items-start gap-2.5">
-                <span className="w-6 h-6 rounded-lg shrink-0 flex items-center justify-center border"
-                  style={s.done
-                    ? { color: 'var(--accent-green)', background: 'var(--accent-green-bg)', borderColor: 'var(--accent-green-border)' }
-                    : { color: 'var(--text-muted)', background: 'var(--input-bg)', borderColor: 'var(--border)' }}>
-                  {s.done ? <CheckCircle2 size={13} /> : <s.icon size={13} />}
-                </span>
-                <div className="min-w-0 pt-[2px]">
-                  <span className={`block text-[12.5px] font-bold ${s.done ? 'text-[var(--text-muted)] line-through' : ''}`}>
-                    {i + 1}. {s.label}
-                  </span>
-                  <span className="block text-[11px] font-semibold text-[var(--text-muted)]">{s.detail}</span>
-                </div>
-              </div>
-            ))}
+        <div className="px-5 py-4 space-y-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <label className="flex flex-col gap-1.5">
+              <span className={labelCls}>Opens</span>
+              <input type="datetime-local" value={opensAt} disabled={saving}
+                onChange={(e) => setOpensAt(e.target.value)} className={inputCls} />
+            </label>
+            <label className="flex flex-col gap-1.5">
+              <span className={labelCls}>Closes</span>
+              <input type="datetime-local" value={closesAt} disabled={saving} min={opensAt || undefined}
+                onChange={(e) => setClosesAt(e.target.value)} className={inputCls} />
+            </label>
           </div>
 
-          <BlockedNames title="No panel yet" rows={noPanel} render={() => 'panel not assigned'} />
-          <BlockedNames title="Invitations not sent" rows={unmailed}
-            render={(r) => (r.failed
-              ? `${r.failed} failed of ${r.panel_size}`
-              : `${r.pending} unsent of ${r.panel_size}`)} />
+          <p className="text-[11.5px] font-semibold text-[var(--text-muted)]">
+            The cycle becomes <b>open</b> on the first date and <b>closed</b> on the second,
+            on its own. Leaving one empty falls back to the cycle&rsquo;s own two calendar
+            months. These are the same dates the invitation quotes and the feedback form
+            enforces.
+          </p>
 
-          {unmailed.some((r) => r.failed) && (
-            <div className="flex items-start gap-2 rounded-xl border border-[var(--accent-red-border)] bg-[var(--accent-red-bg)] px-3.5 py-2.5 text-[12px] font-semibold text-[var(--accent-red)]">
-              <AlertTriangle size={14} className="mt-[1px] shrink-0" />
-              <span>
-                Some invitations failed to send. Resend them from the leader&rsquo;s panel, or
-                swap in a different giver if the address is wrong.
-              </span>
+          {bad && (
+            <div className="flex items-center gap-2 rounded-lg border border-[var(--accent-yellow-border)] bg-[var(--accent-yellow-bg)] px-3 py-2 text-[12px] font-bold text-[var(--accent-yellow)]">
+              <AlertTriangle size={14} /> The close date is not after the open date, so the
+              window would never be open.
+            </div>
+          )}
+          {err && (
+            <div className="flex items-center gap-2 rounded-lg border border-[var(--accent-red-border)] bg-[var(--accent-red-bg)] px-3 py-2 text-[12px] font-bold text-[var(--accent-red)]">
+              <AlertTriangle size={14} /> {err}
             </div>
           )}
         </div>
 
-        <div className="flex items-center justify-end gap-2 flex-wrap px-5 py-4 border-t border-[var(--border)]">
-          <button type="button" onClick={onClose}
-            className="px-4 py-2 rounded-lg text-[13px] font-bold text-[var(--text-muted)] hover:bg-[var(--input-bg)] transition-colors">
-            Close
+        <div className="flex items-center justify-end gap-2 px-5 py-4 border-t border-[var(--border)]">
+          <button type="button" onClick={onClose} disabled={saving}
+            className="px-4 py-2 rounded-lg text-[13px] font-bold text-[var(--text-muted)] hover:bg-[var(--input-bg)] transition-colors disabled:opacity-50">
+            Cancel
           </button>
-          <Link to={`${panelBase}/leadership/subjects?cycle=${row.cycle}`} onClick={onClose}
-            className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-[var(--accent-indigo)] text-white text-[13px] font-bold shadow-sm hover:opacity-90 transition-opacity">
-            Go to Leaders <ArrowRight size={14} />
-          </Link>
+          <button type="button" onClick={save} disabled={saving || bad}
+            className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-[var(--accent-indigo)] text-white text-[13px] font-bold shadow-sm hover:opacity-90 transition-opacity disabled:opacity-40">
+            {saving ? <RefreshCw size={14} className="animate-spin" /> : <CalendarClock size={14} />}
+            {saving ? 'Saving…' : 'Save dates'}
+          </button>
         </div>
       </MotionDiv>
     </MotionDiv>
   );
 };
 
-/** Confirm releasing a cycle's scores.
-    The most consequential button on this page and the last one still behind a browser
-    confirm: it mails every enrolled leader and their reporting manager, and the cycle can
-    never be re-opened afterwards. A native box could not show who is about to be told, nor
-    name the one state transition on this page that has no way back. Mounted only while a
-    row is pending, so it seeds from that row and needs no reset. */
 const PublishConfirmModal = ({ row, onClose, onConfirm }) => {
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState('');
@@ -863,7 +859,7 @@ const LeadershipCycles = () => {
   const [adding, setAdding] = useState(false);
   const [pendingDelete, setPendingDelete] = useState(null);
   const [quorumWarn, setQuorumWarn] = useState(null);
-  const [openBlocked, setOpenBlocked] = useState(null);
+  const [rescheduling, setRescheduling] = useState(null);
   const [pendingPublish, setPendingPublish] = useState(null);
   const [docsFor, setDocsFor] = useState(null);
   const [busy, setBusy] = useState('');
@@ -973,16 +969,6 @@ const LeadershipCycles = () => {
   // The other way out of a quorum shortfall — extend the window rather than freeze a thin
   // result. Same transition as the Re-open button on a closed row, offered where the
   // shortfall is actually being read.
-  const reopenForQuorum = async ({ cycle }) => {
-    setBusy(cycle); setError(''); setNotice('');
-    try {
-      await updateLeadershipCycle(companyId, cycle, { status: 'open' });
-      setQuorumWarn(null);
-      setNotice('Cycle re-opened — feedback links work again until you close it.');
-      await reload();
-    } finally { setBusy(''); }
-  };
-
   // The moment a leader can first see their own score. Irreversible for collection: once
   // people have been shown a number, changing the inputs behind it would rewrite a
   // conversation that has already happened.
@@ -1122,47 +1108,41 @@ const LeadershipCycles = () => {
                         className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11.5px] font-bold text-[var(--text-muted)] border border-[var(--border)] hover:bg-[var(--input-bg)] transition-colors">
                         <FolderOpen size={12} />
                       </button>
-                      {/* Create -> enrol -> assign panels -> mail -> Open. `can_open` is
-                          server-computed (leadership_service.open_readiness) and mirrors
-                          exactly what assert_openable enforces, so the button and the API
-                          cannot disagree. Blocked draws as its own control rather than a
-                          greyed Open: the remedy is on another screen, and a dead button
-                          would not say which one. */}
+                      {/* draft / open / closed are the CLOCK's, not HR's — there is
+                          deliberately no Open, Close or Re-open control any more. A cycle
+                          moves when its own Open and Close dates say so, and the remedy
+                          for every case those buttons used to serve (start early, stop
+                          early, extend for a late responder) is to edit those dates. The
+                          row shows the date it is waiting on so the state is never a
+                          mystery. */}
                       {c.status === 'draft' && (
-                        c.can_open === false ? (
-                          <button type="button" onClick={() => setOpenBlocked(c)} disabled={busy === c.cycle}
-                            title={c.open_blocked_reason || 'Enrol leaders and send their invitations first'}
-                            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11.5px] font-bold text-[var(--accent-yellow)] bg-[var(--accent-yellow-bg)] border border-[var(--accent-yellow-border)] hover:opacity-90 transition-opacity disabled:opacity-50">
-                            <Lock size={12} /> Set-up incomplete
-                          </button>
-                        ) : (
-                          <button type="button" onClick={() => setStatus(c.cycle, 'open')} disabled={busy === c.cycle}
-                            title="Start collecting — the feedback links already sent go live"
-                            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11.5px] font-bold text-[var(--accent-green)] bg-[var(--accent-green-bg)] border border-[var(--accent-green-border)] hover:opacity-90 transition-opacity disabled:opacity-50">
-                            <Unlock size={12} /> Open
-                          </button>
-                        )
+                        <button type="button" onClick={() => setRescheduling(c)} disabled={busy === c.cycle}
+                          title={c.can_open === false
+                            ? (c.open_blocked_reason || 'Enrol leaders and send their invitations before it opens')
+                            : 'Opens automatically on its Open date — edit the dates to change when'}
+                          className={`inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11.5px] font-bold border hover:opacity-90 transition-opacity disabled:opacity-50 ${
+                            c.can_open === false
+                              ? 'text-[var(--accent-yellow)] bg-[var(--accent-yellow-bg)] border-[var(--accent-yellow-border)]'
+                              : 'text-[var(--text-muted)] border-[var(--border)]'}`}>
+                          {c.can_open === false ? <Lock size={12} /> : <CalendarClock size={12} />}
+                          {c.can_open === false ? 'Set-up incomplete' : 'Opens on schedule'}
+                        </button>
                       )}
                       {c.status === 'open' && (
-                        <button type="button" onClick={() => setStatus(c.cycle, 'closed')} disabled={busy === c.cycle}
+                        <button type="button" onClick={() => setRescheduling(c)} disabled={busy === c.cycle}
+                          title="Closes automatically on its Close date — edit the dates to change when"
                           className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11.5px] font-bold text-[var(--text-muted)] border border-[var(--border)] hover:bg-[var(--input-bg)] transition-colors disabled:opacity-50">
-                          <Lock size={12} /> Close
+                          <CalendarClock size={12} /> Closes on schedule
                         </button>
                       )}
                       {/* closed → computed → published. Splitting these is what stops a
-                          leader watching their own score move during collection. */}
+                          leader watching their own score move during collection. Both are
+                          still HR's decision — only the collection window went automatic. */}
                       {c.status === 'closed' && (
-                        <>
-                          <button type="button" onClick={() => setStatus(c.cycle, 'open')} disabled={busy === c.cycle}
-                            title="Extend the window — the remedy when quorum is not met"
-                            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11.5px] font-bold text-[var(--text-muted)] border border-[var(--border)] hover:bg-[var(--input-bg)] transition-colors disabled:opacity-50">
-                            <Unlock size={12} /> Re-open
-                          </button>
-                          <button type="button" onClick={() => compute(c)} disabled={busy === c.cycle}
-                            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11.5px] font-bold text-[var(--accent-indigo)] bg-[var(--accent-indigo-bg)] border border-[var(--accent-indigo-border)] hover:opacity-90 transition-opacity disabled:opacity-50">
-                            <Calculator size={12} /> Compute
-                          </button>
-                        </>
+                        <button type="button" onClick={() => compute(c)} disabled={busy === c.cycle}
+                          className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11.5px] font-bold text-[var(--accent-indigo)] bg-[var(--accent-indigo-bg)] border border-[var(--accent-indigo-border)] hover:opacity-90 transition-opacity disabled:opacity-50">
+                          <Calculator size={12} /> Compute
+                        </button>
                       )}
                       {c.status === 'computed' && (
                         <>
@@ -1212,12 +1192,19 @@ const LeadershipCycles = () => {
         {quorumWarn && (
           <QuorumConfirmModal key="quorum-warning" report={quorumWarn}
             onClose={() => setQuorumWarn(null)}
-            onReopen={reopenForQuorum}
+            onExtend={() => { const c = cycles.find((x) => x.cycle === quorumWarn.cycle);
+              setQuorumWarn(null); setRescheduling(c || { cycle: quorumWarn.cycle }); }}
             onConfirm={({ cycle }) => freeze(cycle)} />
         )}
-        {openBlocked && (
-          <OpenBlockedModal key="open-blocked" row={openBlocked} panelBase={panelBase}
-            onClose={() => setOpenBlocked(null)} />
+        {rescheduling && (
+          <RescheduleModal key={`reschedule-${rescheduling.cycle}`} row={rescheduling}
+            onClose={() => setRescheduling(null)}
+            onSaved={async (dates) => {
+              await updateLeadershipCycle(companyId, rescheduling.cycle, dates);
+              setRescheduling(null);
+              setNotice('Window updated. The cycle will open and close on these dates.');
+              await reload();
+            }} />
         )}
         {pendingPublish && (
           <PublishConfirmModal key="publish-cycle" row={pendingPublish}

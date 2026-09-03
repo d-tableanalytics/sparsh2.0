@@ -28,6 +28,7 @@ from typing import Dict, List, Optional
 
 from bson import ObjectId
 
+from app.config.settings import settings
 from app.db.mongodb import get_collection
 from app.models.leadership import (
     COLL_LS_ASSIGNMENTS, COLL_LS_WA_LOG, COLL_LS_WA_TEMPLATES,
@@ -66,6 +67,18 @@ SYSTEM_VARIABLES = {
     "opens_at":      "when the feedback window opens",
     "closes_at":     "the last date to give feedback",
 }
+
+# What an invitation may be filed as. AUTHENTICATION is deliberately not offered — it is
+# for one-time-passcode templates, whose body Meta fixes entirely, and a feedback invitation
+# submitted under it is rejected on review.
+#
+# UTILITY is the right answer for an invitation: it is a transactional message about a
+# process the recipient is part of. MARKETING is offered because Meta may insist on it, and
+# a template it has already filed that way cannot be argued back — being able to author the
+# next one to match is better than being unable to say it at all.
+META_CATEGORIES = ("UTILITY", "MARKETING")
+DEFAULT_CATEGORY = "UTILITY"
+
 
 # Meta's own rule for a named parameter, mirrored so a bad name is refused while it can
 # still be typed rather than after a review that takes hours.
@@ -127,12 +140,17 @@ def validate_variables(body: str, variables) -> List[str]:
     return errors
 
 
-def authored_doc(name: str, language: str, body: str, variables=None) -> dict:
-    """The full Meta template document, from the three things a user actually chooses.
+def authored_doc(name: str, language: str, body: str, variables=None,
+                 category: Optional[str] = None) -> dict:
+    """The full Meta template document, from what a user actually chooses.
 
-    Everything else is fixed because a feedback invitation has one shape: UTILITY (it is a
-    transactional notice, not marketing), numbered variables, no header, no footer, no
-    buttons. Asking for those would be asking a question with only one right answer.
+    Variable style, header, footer and buttons stay fixed — a feedback invitation has one
+    shape and offering those would be asking questions with a single right answer.
+
+    CATEGORY is not one of them. It decides how Meta paces the message and whether it is
+    delivered to someone who never opted in, so it belongs to whoever is accountable for
+    the message going out. Meta still runs its own classifier over the content and its
+    answer is final; this is the request, not the verdict.
     """
     text = str(body or "").strip()
     custom = _custom_map(variables)
@@ -143,7 +161,7 @@ def authored_doc(name: str, language: str, body: str, variables=None) -> dict:
         "variables": [{"name": n, "value": v} for n, v in custom.items()],
         "name": str(name or "").strip().lower(),
         "language": str(language or "en").strip() or "en",
-        "category": "UTILITY",
+        "category": normalise_category(category),
         "variable_style": "named",
         "header_format": "NONE",
         "body": text,
@@ -153,6 +171,17 @@ def authored_doc(name: str, language: str, body: str, variables=None) -> dict:
         "footer": None,
         "buttons": [],
     }
+
+
+def normalise_category(value: Optional[str]) -> str:
+    """One of META_CATEGORIES, defaulting rather than raising.
+
+    A category Meta would not accept is worth refusing, but not at the cost of losing a
+    template someone spent ten minutes writing — an unknown value falls back to UTILITY,
+    which is both the safe default and the one an invitation should usually carry.
+    """
+    got = str(value or "").strip().upper()
+    return got if got in META_CATEGORIES else DEFAULT_CATEGORY
 
 
 def body_variables(body: str, custom=None) -> List[str]:
@@ -226,7 +255,12 @@ async def get_template(company_id: Optional[str] = None) -> dict:
                            else await suggest_template_name(str(company_id))
                            if company_id else ""),
         "language": (doc or {}).get("language") or "en",
-        "category": (doc or {}).get("category") or "UTILITY",
+        # What the author asked for, and what Meta actually filed it as. Kept apart:
+        # Meta re-categorises on content, and a screen that showed only our request would
+        # go on claiming UTILITY while every message was being paced as MARKETING.
+        "category": (doc or {}).get("category") or DEFAULT_CATEGORY,
+        "meta_category": (doc or {}).get("meta_category"),
+        "categories": list(META_CATEGORIES),
         "system_variables": dict(SYSTEM_VARIABLES),
         "variables": (doc or {}).get("variables") or [],
         # Written on insert and reported for completeness. It stopped gating anything when
@@ -428,6 +462,12 @@ async def sync_template_status(company_id: str) -> dict:
     status = str(match.get("status") or "").upper()
     updates = {"status": status, "synced_at": _now(), "updated_at": _now(),
                "meta_template_id": str(match.get("id") or "") or doc.get("meta_template_id")}
+    # Meta classifies a template itself, and its answer is final — one authored as UTILITY
+    # can come back MARKETING, which changes how it is paced and who receives it. Recorded
+    # SEPARATELY from the authored category so the screen can show the disagreement instead
+    # of quietly adopting Meta's answer as though it had been the request all along.
+    if match.get("category"):
+        updates["meta_category"] = str(match["category"]).upper()
     updates["rejected_reason"] = (match.get("rejected_reason")
                                   if status == WA_TPL_REJECTED else None)
     await col.update_one({"_id": doc["_id"]}, {"$set": updates})
@@ -466,13 +506,26 @@ async def open_entry(assignment: dict, phone: str, status: str,
 
 
 async def close_entry(entry_id: str, status: str, message_id: Optional[str] = None,
-                      error: Optional[str] = None) -> None:
-    """Stamp the outcome of the attempt this row was opened for."""
+                      error: Optional[str] = None, meta_status: Optional[str] = None,
+                      wa_id: Optional[str] = None) -> None:
+    """Stamp the outcome of the attempt this row was opened for.
+
+    `meta_status` is Meta's own verdict on the send — `accepted`, or
+    `held_for_quality_assessment`, which returns an ordinary message id and is never
+    delivered. Recorded here rather than in a second write, because this update is already
+    touching the row.
+    """
     updates = {"status": status, "updated_at": _now(), f"{status}_at": _now()}
     if message_id:
         updates["message_id"] = str(message_id)
     if error is not None:
         updates["error"] = error
+    if meta_status:
+        updates["message_status"] = str(meta_status)
+    if wa_id:
+        # What Meta resolved the number to. A missing wa_id means it does not recognise
+        # that number on WhatsApp at all, which no other field records.
+        updates["wa_id"] = str(wa_id)
     await get_collection(COLL_LS_WA_LOG).update_one(
         {"_id": ObjectId(entry_id)}, {"$set": updates})
 
@@ -497,6 +550,56 @@ async def apply_status(message_id: str, status: str,
         updates["error"] = error
     await col.update_one({"_id": row["_id"]}, {"$set": updates})
     return True
+
+
+def _mask_phone(phone: str) -> str:
+    """`••••8982` — enough to recognise a number you already know, not enough to collect
+    one you do not. A raw list of every giver's mobile on an administrator's screen is a
+    panel roster by another name."""
+    digits = "".join(ch for ch in str(phone or "") if ch.isdigit())
+    return ("\u2022" * 4 + digits[-4:]) if len(digits) >= 4 else ""
+
+
+async def company_log(company_id: str, limit: int = 60) -> dict:
+    """Recent WhatsApp send attempts for one company, WITHOUT panel identity.
+
+    Deliberately drops giver_name, giver_id, subject_name and subject_id. This screen is
+    administrators-only and they must not learn who gives feedback about whom — a delivery
+    log carrying both names is exactly the join the whole module exists to prevent. What
+    survives is what diagnoses a send: when it went, roughly where, what Meta said, and the
+    id needed to look it up on Meta's own dashboard.
+    """
+    rows = await get_collection(COLL_LS_WA_LOG).find(
+        {"company_id": str(company_id)}).sort("created_at", -1).to_list(max(1, min(limit, 200)))
+
+    counts: Dict[str, int] = {}
+    out = []
+    for r in rows:
+        status = str(r.get("status") or WA_PENDING)
+        counts[status] = counts.get(status, 0) + 1
+        out.append({
+            "id": str(r.get("_id")),
+            "at": r.get("created_at"),
+            "updated_at": r.get("updated_at"),
+            "cycle": r.get("cycle"),
+            "status": status,
+            "phone": _mask_phone(r.get("phone")),
+            "error": r.get("error"),
+            "message_id": r.get("message_id"),
+            # Meta's own verdict on the send, when it gave one. `held_for_quality_assessment`
+            # means the message was taken and will not be delivered — which looked identical
+            # to a successful send until it was recorded.
+            "message_status": r.get("message_status"),
+            "attempts": r.get("attempts") or 1,
+        })
+
+    # Every row stops at `sent` when Meta has nowhere to report delivery to. Said on the
+    # screen rather than left as a mystery, because "all sent, none delivered" reads as a
+    # broken integration when it is actually an unconfigured callback.
+    callbacks_ready = bool((settings.WHATSAPP_APP_SECRET or "").strip())
+
+    return {"rows": out, "counts": counts, "total": len(out),
+            "callbacks_configured": callbacks_ready}
 
 
 async def cycle_tracking(company_id: str, cycle: str) -> dict:
@@ -629,12 +732,20 @@ async def _post_template(phone: str, template_name: str, language: str,
 
     # Meta answers {"messages":[{"id":"wamid...."}]}. That id is the only handle the later
     # delivered/read webhooks carry, so losing it here would strand the row at `sent`.
+    # `message_status` is the field that separates "Meta will deliver this" from "Meta has
+    # taken it and will not" — held_for_quality_assessment returns a perfectly ordinary
+    # message id. Keeping only the id made those two outcomes indistinguishable.
+    message_id = meta_status = wa_id = None
     try:
-        message_id = (response.json().get("messages") or [{}])[0].get("id")
+        body = response.json() or {}
+        msg = (body.get("messages") or [{}])[0]
+        message_id, meta_status = msg.get("id"), msg.get("message_status")
+        wa_id = ((body.get("contacts") or [{}])[0]).get("wa_id")
     except Exception:
-        message_id = None
+        pass
     await log_notification(None, to, "whatsapp", "leadership_invite", log_text, "sent")
-    return {"ok": True, "message_id": message_id}
+    return {"ok": True, "message_id": message_id,
+            "message_status": meta_status, "wa_id": wa_id}
 
 
 async def send_invitation(assignment: dict, link: str) -> dict:
@@ -690,7 +801,9 @@ async def send_invitation(assignment: dict, link: str) -> dict:
         logged,
     )
     if result.get("ok"):
-        await close_entry(entry, WA_SENT, message_id=result.get("message_id"))
+        await close_entry(entry, WA_SENT, message_id=result.get("message_id"),
+                          meta_status=result.get("message_status"),
+                          wa_id=result.get("wa_id"))
         return {"ok": True, "status": WA_SENT, "entry_id": entry}
 
     reason = result.get("error") or "Delivery refused"

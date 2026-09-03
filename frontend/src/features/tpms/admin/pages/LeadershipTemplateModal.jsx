@@ -79,6 +79,9 @@ const LeadershipTemplateModal = ({ template, api, onClose, onSaved }) => {
   const [name, setName] = useState(
     template?.meta_template_name || template?.suggested_name || '');
   const [language, setLanguage] = useState(template?.language || 'en');
+  // What we ASK Meta to file this as. Meta runs its own classifier over the content and
+  // its answer wins — `meta_category` below is that answer, shown when the two differ.
+  const [category, setCategory] = useState(template?.category || 'UTILITY');
   const [body, setBody] = useState(template?.body || '');
   const [custom, setCustom] = useState(template?.variables || []);
   const [busy, setBusy] = useState('');
@@ -98,7 +101,7 @@ const LeadershipTemplateModal = ({ template, api, onClose, onSaved }) => {
   }, [busy, onClose]);
 
   const doc = () => ({
-    name: name.trim(), language: language.trim() || 'en', body,
+    name: name.trim(), language: language.trim() || 'en', category, body,
     variables: custom.filter((v) => v.name.trim()),
   });
 
@@ -219,6 +222,44 @@ const LeadershipTemplateModal = ({ template, api, onClose, onSaved }) => {
               <input value={language} disabled={!!busy || locked}
                 onChange={(e) => setLanguage(e.target.value)} placeholder="en" className={inputCls} />
             </label>
+          </div>
+
+          {/* Category decides how Meta PACES the message and whether it reaches someone who
+              never opted in — a utility notice goes through, a marketing one is throttled
+              and gated. It is the field that most affects whether an invitation arrives, so
+              it is chosen rather than assumed. */}
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            <label className="flex flex-col gap-1.5 sm:col-span-2">
+              <span className="text-[11px] font-black uppercase tracking-wide text-[var(--text-muted)]">
+                Category
+              </span>
+              <select value={category} disabled={!!busy || locked}
+                onChange={(e) => setCategory(e.target.value)} className={inputCls}>
+                <option value="UTILITY">Utility — a notice about a process they are part of</option>
+                <option value="MARKETING">Marketing — promotional, paced and opt-in gated</option>
+              </select>
+              <span className="text-[10.5px] font-semibold text-[var(--text-muted)]">
+                A feedback invitation is normally Utility. Meta reviews the wording and may
+                file it differently — its decision is final.
+              </span>
+            </label>
+
+            {/* Only shown when Meta disagreed. This is the difference that explains an
+                invitation Meta accepted and never delivered. */}
+            {template?.meta_category && template.meta_category !== category && (
+              <div className="flex flex-col justify-center gap-1 rounded-xl border border-[var(--accent-yellow-border)] bg-[var(--accent-yellow-bg)] px-3 py-2.5">
+                <span className="inline-flex items-center gap-1.5 text-[11px] font-black uppercase tracking-wide text-[var(--accent-yellow)]">
+                  <AlertTriangle size={12} /> Meta filed it as
+                </span>
+                <span className="text-[13px] font-extrabold text-[var(--accent-yellow)]">
+                  {template.meta_category}
+                </span>
+                <span className="text-[10.5px] font-semibold text-[var(--accent-yellow)]">
+                  An approved template&rsquo;s category cannot be changed. To move it, submit
+                  a new template under a different name.
+                </span>
+              </div>
+            )}
           </div>
 
           <div className="flex flex-col gap-1.5">

@@ -9,6 +9,7 @@ import {
 } from '../../common/dashboardKit';
 import LeadershipTemplateModal from './LeadershipTemplateModal';
 import {
+  getLeadershipWhatsAppLog,
   getLeadershipWhatsAppTemplate, submitLeadershipWhatsAppTemplate,
   syncLeadershipWhatsAppTemplate, checkLeadershipWaTemplate, saveLeadershipWaDraft,
 } from '../../../../services/leadershipApi';
@@ -76,6 +77,11 @@ const LeadershipWhatsApp = () => {
     useAsync(loadTemplate, [companyId], { skip: waiting || !manage });
 
   const status = template?.status || 'DRAFT';
+
+  const loadLog = useCallback(
+    async () => (await getLeadershipWhatsAppLog(companyId)).data, [companyId]);
+  const { data: log, reload: reloadLog } =
+    useAsync(loadLog, [companyId], { skip: waiting || !manage });
   // `can_edit` from the server is the authority; the same rule is applied locally so the
   // authoring controls are never rendered and then refused.
   const mayEdit = manage && template?.can_edit !== false;
@@ -107,6 +113,11 @@ const LeadershipWhatsApp = () => {
 
   const refreshStatus = () => run('sync', () => syncLeadershipWhatsAppTemplate(companyId),
     'Could not check the status with Meta.');
+
+  const LOG_TONE = {
+    read: 'green', delivered: 'green', sent: 'blue',
+    failed: 'red', unreachable: 'red', pending: 'plain',
+  };
 
   if (!manage) {
     return (
@@ -253,7 +264,11 @@ const LeadershipWhatsApp = () => {
               two sets of rules to keep in step with Meta. */}
           <Section title="Message" icon={MessageCircle}
             subtitle={template?.meta_template_name
+              // Meta's category, not ours. It decides how the message is paced and
+              // whether it reaches someone who never opted in, so it belongs on the
+              // line that identifies the template rather than two clicks away.
               ? `${template.meta_template_name} · ${template.language || 'en'}`
+                + ` · ${template.meta_category || template.category || 'UTILITY'}`
               : 'Not written yet'}>
             <div className="px-5 py-4 space-y-3.5">
               {template?.meta_template_name ? (
@@ -305,6 +320,103 @@ const LeadershipWhatsApp = () => {
                   ? 'Approved — invitations will send with this.'
                   : 'Invitations cannot be sent until Meta approves this.'}
               </span>
+            </div>
+          </Section>
+
+          {/* What actually happened to the messages this template sent. Placed last: the
+              template above is the thing being configured, and this is the evidence that
+              the configuration works. Deliberately carries no giver or leader name — the
+              server strips them, so an administrator can see WHY a send failed without
+              learning who was asked to rate whom. */}
+          <Section title="WhatsApp log" icon={MessageCircle}
+            subtitle="Recent send attempts. Delivery is reported by Meta, not by us.">
+            <div className="px-5 py-4 flex flex-col gap-3">
+              <div className="flex items-center gap-2 flex-wrap">
+                {Object.entries(log?.counts || {}).map(([k, v]) => (
+                  <span key={k}
+                    className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold border ${
+                      LOG_TONE[k] === 'green'
+                        ? 'text-[var(--accent-green)] bg-[var(--accent-green-bg)] border-[var(--accent-green-border)]'
+                        : LOG_TONE[k] === 'red'
+                        ? 'text-[var(--accent-red)] bg-[var(--accent-red-bg)] border-[var(--accent-red-border)]'
+                        : LOG_TONE[k] === 'blue'
+                        ? 'text-[var(--accent-indigo)] bg-[var(--accent-indigo-bg)] border-[var(--accent-indigo-border)]'
+                        : 'text-[var(--text-muted)] bg-[var(--input-bg)] border-[var(--border)]'}`}>
+                    {v} {k}
+                  </span>
+                ))}
+                <button type="button" onClick={reloadLog}
+                  className="ml-auto inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] font-bold text-[var(--text-muted)] border border-[var(--border)] hover:bg-[var(--input-bg)] transition-colors">
+                  <RefreshCw size={11} /> Refresh
+                </button>
+              </div>
+
+              {/* Every row stopping at `sent` reads as a broken integration. It is not —
+                  it is Meta having nowhere to report delivery to. Said plainly. */}
+              {log && log.callbacks_configured === false && log.total > 0 && (
+                <div className="flex items-start gap-2 rounded-xl border border-[var(--accent-yellow-border)] bg-[var(--accent-yellow-bg)] px-3.5 py-2.5 text-[12px] font-semibold text-[var(--accent-yellow)]">
+                  <AlertTriangle size={14} className="mt-[1px] shrink-0" />
+                  <span>
+                    Delivery callbacks are not configured, so every row stops at
+                    <b> sent</b> — that means Meta accepted the message, not that it
+                    arrived. Set <code>WHATSAPP_APP_SECRET</code> and
+                    {' '}<code>WHATSAPP_WEBHOOK_VERIFY_TOKEN</code>, then point Meta&rsquo;s
+                    webhook at <code>/api/leadership/whatsapp-status</code> to see
+                    Delivered, Read and Failed here.
+                  </span>
+                </div>
+              )}
+
+              <div className="overflow-x-auto">
+                <table className="w-full text-[12px]">
+                  <thead>
+                    <tr className="text-left text-[10.5px] font-black uppercase tracking-wide text-[var(--text-muted)]">
+                      <th className="py-2 pr-4 font-black">When</th>
+                      <th className="py-2 pr-4 font-black">Cycle</th>
+                      <th className="py-2 pr-4 font-black">To</th>
+                      <th className="py-2 pr-4 font-black">Status</th>
+                      <th className="py-2 pr-4 font-black">Meta said</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(log?.rows || []).map((r) => (
+                      <tr key={r.id} className="border-t border-[var(--border)] align-top">
+                        <td className="py-2 pr-4 whitespace-nowrap text-[var(--text-muted)] font-semibold">
+                          {stamp(r.at) || '—'}
+                        </td>
+                        <td className="py-2 pr-4 whitespace-nowrap font-mono text-[11px] text-[var(--text-muted)]">
+                          {r.cycle || '—'}
+                        </td>
+                        <td className="py-2 pr-4 whitespace-nowrap font-mono text-[11px]">
+                          {r.phone || '—'}
+                        </td>
+                        <td className="py-2 pr-4 whitespace-nowrap font-bold uppercase text-[10.5px]">
+                          {r.status}
+                          {r.attempts > 1 && (
+                            <span className="ml-1 font-semibold text-[var(--text-muted)] normal-case">
+                              ·{r.attempts} tries
+                            </span>
+                          )}
+                        </td>
+                        <td className="py-2 pr-4 text-[var(--text-muted)] font-semibold">
+                          {r.error
+                            || (r.message_status === 'held_for_quality_assessment'
+                              ? 'Held for quality assessment — Meta will not deliver this.'
+                              : r.message_status === 'accepted'
+                                ? 'Accepted for delivery'
+                                : r.message_id ? 'Accepted for delivery' : '—')}
+                        </td>
+                      </tr>
+                    ))}
+                    {!(log?.rows || []).length && (
+                      <tr><td colSpan={5}
+                        className="py-8 text-center text-[13px] font-bold text-[var(--text-muted)]">
+                        Nothing sent yet for this company.
+                      </td></tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
             </div>
           </Section>
 
