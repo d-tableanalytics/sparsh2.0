@@ -170,6 +170,12 @@ export const getLeadershipDashboard = (companyId, cycle) =>
 // endpoints, different tracking — so a TPMS change can never move a feedback invitation.
 
 /** This company's approved Meta template (name, language, positional params, wording). */
+/** Recent send attempts for a company. Carries no giver or leader identity — the server
+    strips it, because this screen belongs to administrators and a delivery log naming both
+    sides would be a panel roster. */
+export const getLeadershipWhatsAppLog = (companyId, limit = 60) =>
+  api.get('/leadership/whatsapp-log', { params: { company_id: companyId || undefined, limit } });
+
 export const getLeadershipWhatsAppTemplate = (companyId) =>
   api.get('/leadership/whatsapp-template', withCompany(companyId));
 

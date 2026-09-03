@@ -451,7 +451,8 @@ async def check_wa_template(payload: dict, current_user: dict = Depends(get_curr
     from app.services.meta_whatsapp_service import validate_template
 
     body, variables = payload.get("body"), payload.get("variables")
-    doc = ls_wa.authored_doc(payload.get("name"), payload.get("language"), body, variables)
+    doc = ls_wa.authored_doc(payload.get("name"), payload.get("language"), body, variables,
+                             payload.get("category"))
     # Ours first — an unfillable variable is a clearer complaint than whatever Meta's rules
     # make of the same template.
     errors = ls_wa.validate_variables(body, variables) + validate_template(doc)
@@ -473,7 +474,8 @@ async def save_wa_draft(payload: dict, company_id: Optional[str] = Query(None),
 
     cid = _company_for(current_user, company_id)
     body, variables = payload.get("body"), payload.get("variables")
-    doc = ls_wa.authored_doc(payload.get("name"), payload.get("language"), body, variables)
+    doc = ls_wa.authored_doc(payload.get("name"), payload.get("language"), body, variables,
+                             payload.get("category"))
 
     # Refused while it can still be fixed. Meta would reject it on review anyway, hours
     # later, with a reason that has to be gone and looked up — and it cannot catch a
@@ -510,7 +512,8 @@ async def test_wa_template(payload: dict, current_user: dict = Depends(get_curre
         raise HTTPException(status_code=400, detail="Enter a valid phone number.")
 
     doc = ls_wa.authored_doc(payload.get("name"), payload.get("language"),
-                             payload.get("body"), payload.get("variables"))
+                             payload.get("body"), payload.get("variables"),
+                             payload.get("category"))
     status = str(payload.get("status") or "DRAFT").upper()
 
     if status == "APPROVED":
@@ -552,6 +555,21 @@ async def submit_wa_template(company_id: Optional[str] = Query(None),
     tpl["message"] = ("Submitted to Meta. It is PENDING review — refresh to pick up the "
                       "verdict.")
     return tpl
+
+
+@router.get("/whatsapp-log")
+async def read_wa_log(company_id: Optional[str] = Query(None),
+                      limit: int = Query(60, ge=1, le=200),
+                      current_user: dict = Depends(get_current_user)):
+    """Recent WhatsApp send attempts for one company, without panel identity.
+
+    Same gate as the rest of this screen — administrators, not HR. The rows carry no giver
+    or leader name and only a masked number, so an administrator can see WHY a send failed
+    without learning who was asked to rate whom.
+    """
+    _require_template_manage(current_user)
+    cid = _company_for(current_user, company_id)
+    return await ls_wa.company_log(cid, limit)
 
 
 @router.post("/whatsapp-template/sync")
