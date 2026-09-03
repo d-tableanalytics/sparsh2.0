@@ -51,6 +51,17 @@ async def main() -> None:
     from bson import ObjectId
 
     from app.models import hrms as M
+
+    # ── Phase 12 ── the background-verification gate now stands in front of every offer,
+    # on both tracks. This file measures a different control, so the gate is stubbed here
+    # exactly as the shortlist and telephonic gates are elsewhere -- each has its own test
+    # file (test_int12_client_track), and a failure here should name THIS file's control
+    # rather than a precondition it never set up.
+    import app.services.hrms_background_service as _BGV
+
+    async def _bg_cleared(*_a, **_kw):
+        return None
+    _BGV.assert_background_cleared = _bg_cleared
     import app.db.mongodb as mongo
 
     S = M.AppStatus

@@ -107,6 +107,17 @@ async def main() -> None:
     from bson import ObjectId
 
     from app.models import hrms as M
+
+    # ── Phase 12 ── the background-verification gate now stands in front of every offer,
+    # on both tracks. This file measures a different control, so the gate is stubbed here
+    # exactly as the shortlist and telephonic gates are elsewhere -- each has its own test
+    # file (test_int12_client_track), and a failure here should name THIS file's control
+    # rather than a precondition it never set up.
+    import app.services.hrms_background_service as _BGV
+
+    async def _bg_cleared(*_a, **_kw):
+        return None
+    _BGV.assert_background_cleared = _bg_cleared
     import app.db.mongodb as mongo
     import app.utils.hrms_access as A
 
@@ -369,13 +380,16 @@ async def main() -> None:
             "not an oversight -- but it does mean the matrix's 'HOD = R' is a convention "
             "the system does not enforce. Nothing downstream is weakened: every APPROVAL "
             "after the raise is gated.")
-        check("(actual) the MD holds 89 of the 90 capabilities",
-              len(M.ROLE_CAPABILITIES[M.HrmsRole.MD]) == 89)
+        # Asserted as "all but one" rather than as a number, so a later phase adding a
+        # capability does not fail this line for the wrong reason -- what matters is that
+        # the MD's grant stays universal-minus-the-HR-verification-step, not its size.
+        check("(actual) the MD holds every capability but one",
+              len(M.ROLE_CAPABILITIES[M.HrmsRole.MD]) == len(list(M.Cap)) - 1)
         check("the one capability the MD does NOT hold is HR's verification step",
               M.Cap.REQUISITION_REVIEW_HR not in M.ROLE_CAPABILITIES[M.HrmsRole.MD])
         finding(
             "the MD is a superuser, so 'Consulted/Informed cannot execute' does not bind them",
-            "HrmsRole.MD resolves to 89 of 90 capabilities by documented design ('top of "
+            "HrmsRole.MD resolves to every capability but one by documented design ('top of "
             "every ladder'), so on rows where Annexure B marks Management as C or I -- "
             "sourcing, screening, telephonic, reference check, offer release, personnel "
             "file closure and others -- the restriction is enforced against FINANCE, the "

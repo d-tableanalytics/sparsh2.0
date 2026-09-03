@@ -11,21 +11,38 @@ def get_s3_client():
         region_name=settings.AWS_REGION
     )
 
-def get_signed_url(s3_key: str, expires_in: int = 3600) -> str:
+def get_signed_url(s3_key: str, expires_in: int = 3600, download_as: str = None) -> str:
     """
     Generate a pre-signed URL for an S3 object to allow secure temporary access.
+
+    `download_as` turns the link into a DOWNLOAD of that filename instead of something the
+    browser renders in a tab. Without it a PDF opens inline, which is right for previewing
+    a document and wrong when the caller asked to download one — and the stored object is
+    named with an internal prefix (`cv_CAN-001_...`), so a browser-chosen name would be
+    that rather than anything a person recognises.
+
+    Optional, and absent by default, so every existing caller keeps the inline behaviour it
+    was written against.
     """
     # A `local/` key belongs to the temporary on-disk fallback, not to S3. Checked here so
     # every existing caller keeps working unchanged: they persisted a key and asked for a
-    # URL, and where the bytes actually live is this layer's business.
+    # URL, and where the bytes actually live is this layer's business. That route already
+    # serves as an attachment under the original name, so `download_as` needs nothing there.
     if local_store.is_local_key(s3_key):
         return local_store.signed_url(s3_key, expires_in)
+
+    params = {'Bucket': settings.S3_BUCKET_NAME, 'Key': s3_key}
+    if download_as:
+        # Quotes escaped rather than stripped: a candidate called O"Brien should still get
+        # a working header rather than a silently renamed file.
+        safe = str(download_as).replace('"', '')
+        params['ResponseContentDisposition'] = f'attachment; filename="{safe}"'
 
     s3_client = get_s3_client()
     try:
         url = s3_client.generate_presigned_url(
             'get_object',
-            Params={'Bucket': settings.S3_BUCKET_NAME, 'Key': s3_key},
+            Params=params,
             ExpiresIn=expires_in
         )
         return url

@@ -4,6 +4,7 @@ import {
   UserCog, ClipboardList, ScrollText, Megaphone, UserCircle,
   ClipboardCheck, ListChecks, CalendarDays, FileSignature, UserPlus, PieChart,
   BadgeCheck, Building, Target, PhoneCall, Users2, Phone, Scale,
+  Inbox, Share2, ShieldCheck,
 } from 'lucide-react';
 
 /**
@@ -53,6 +54,14 @@ const TABS = [
   // Phase INT-10: salary negotiation (SOP step 9) sits between the final interview and the
   // offer -- a hiring stage, so it belongs in the strip.
   { label: 'Negotiation',      to: '/hrms/negotiations', icon: Scale },
+  // ── Phase 12: the client hiring track ──
+  // All three are hiring STAGES on the client flow (a request becomes a requisition, a CV
+  // goes to a client, verification gates the offer), so they belong in the strip beside the
+  // others rather than in the sidebar. The client's own screens are not here: a client sees
+  // its own navigation, not Sparsh's pipeline.
+  { label: 'Job requests',     to: '/hrms/job-requests', icon: Inbox },
+  { label: 'CV sharing',       to: '/hrms/cv-sharing',   icon: Share2 },
+  { label: 'Verification',     to: '/hrms/background-checks', icon: ShieldCheck },
 ];
 
 // Prefix match, so a detail route under a stage keeps that stage's tab lit. Anything added

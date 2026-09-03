@@ -104,6 +104,11 @@ import ScorecardLibrary from './features/hrms/internal/ScorecardLibrary';
 import ReferenceCheckBoard from './features/hrms/internal/ReferenceCheckBoard';
 import TelephonicBoard from './features/hrms/internal/TelephonicBoard';
 import NegotiationBoard from './features/hrms/internal/NegotiationBoard';
+// Phase 12 - the client hiring track.
+import JobRequestBoard from './features/hrms/client/JobRequestBoard';
+import CvSharingBoard from './features/hrms/client/CvSharingBoard';
+import BackgroundCheckBoard from './features/hrms/client/BackgroundCheckBoard';
+import SharedCandidates from './features/hrms/client/SharedCandidates';
 import HrmsSettings from './features/hrms/internal/HrmsSettings';
 import ProbationBoard from './features/hrms/internal/ProbationBoard';
 import ExceptionLog from './features/hrms/internal/ExceptionLog';
@@ -312,6 +317,14 @@ const AppRoutes = () => {
         {/* Phase INT-10 — the SOP's step 9 salary negotiation record. A hiring stage, so
             it lives in the workspace tab strip. */}
         <Route path="negotiations"         element={<NegotiationBoard />} />
+        {/* Phase 12 - the client hiring track. `job-requests` and `shared-candidates`
+            serve BOTH audiences: the server narrows a client-scoped user to their own
+            rows, so one route is correct for both and there is no second screen to keep
+            in step. */}
+        <Route path="job-requests"         element={<JobRequestBoard />} />
+        <Route path="cv-sharing"           element={<CvSharingBoard />} />
+        <Route path="background-checks"    element={<BackgroundCheckBoard />} />
+        <Route path="shared-candidates"    element={<SharedCandidates />} />
         <Route path="probation"            element={<ProbationBoard />} />
         <Route path="exceptions"           element={<ExceptionLog />} />
         {/* ── Phase INT-2 ── the remaining SOP controls. `shortlist-reviews` is a hiring

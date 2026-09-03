@@ -136,14 +136,6 @@ async def raise_exception(actor: dict, company_id: str, payload: dict) -> dict:
     if not req:
         raise HTTPException(
             status_code=422, detail="That requisition does not exist for this company.")
-    track = req.get("requisition_track") or RequisitionTrack.CLIENT.value
-    if track != RequisitionTrack.INTERNAL.value:
-        raise HTTPException(
-            status_code=409,
-            detail=(f"{request_no} is a client requisition. The exception log records "
-                    f"deviations from Sparsh Magic's own recruitment policy; the client "
-                    f"track has no gates for one to lift."))
-
     raw_type = getattr(payload.get("exception_type"), "value", payload.get("exception_type"))
     try:
         exception_type = ExceptionType(raw_type)
@@ -152,6 +144,26 @@ async def raise_exception(actor: dict, company_id: str, payload: dict) -> dict:
             status_code=422,
             detail=(f"Type must be one of: "
                     f"{', '.join(t.value for t in ExceptionType)}."))
+
+    # ── Track ──
+    # The exception log began as a record of deviations from Sparsh Magic's OWN recruitment
+    # policy, so it refused the client track outright: that track had no gates for a waiver
+    # to lift.
+    #
+    # Phase 12 changed that fact rather than the principle. Background verification now
+    # stands in front of every offer on BOTH tracks, so the client track has exactly one
+    # gate -- and a gate with no attributable way past it is how override flags get invented.
+    # The refusal therefore narrows from "not this track" to "not this type on this track",
+    # which is the same rule stated against what is actually true now.
+    track = req.get("requisition_track") or RequisitionTrack.CLIENT.value
+    if track != RequisitionTrack.INTERNAL.value             and exception_type is not ExceptionType.BACKGROUND_WAIVED:
+        raise HTTPException(
+            status_code=409,
+            detail=(f"{request_no} is a client requisition. The only gate the client track "
+                    f'carries is background verification, so "'
+                    f'{ExceptionType.BACKGROUND_WAIVED.value}" is the only exception it can '
+                    f"take. Everything else here records deviations from Sparsh Magic's own "
+                    f"recruitment policy."))
 
     reason = clean_text(payload.get("reason"), limit=4000)
     if not reason:

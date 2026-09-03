@@ -62,6 +62,17 @@ async def main() -> None:
     from bson import ObjectId
 
     from app.models import hrms as M
+
+    # ── Phase 12 ── the background-verification gate now stands in front of every offer,
+    # on both tracks. This file measures a different control, so the gate is stubbed here
+    # exactly as the shortlist and telephonic gates are elsewhere -- each has its own test
+    # file (test_int12_client_track), and a failure here should name THIS file's control
+    # rather than a precondition it never set up.
+    import app.services.hrms_background_service as _BGV
+
+    async def _bg_cleared(*_a, **_kw):
+        return None
+    _BGV.assert_background_cleared = _bg_cleared
     import app.db.mongodb as mongo
 
     MD = {"_id": ObjectId(), "full_name": "Anita MD", "email": "md@example.com"}
@@ -374,7 +385,10 @@ async def main() -> None:
     check("EXCEPTION_UNBLOCKS is untouched by configuration -- an approved, attributable "
           "record is still the only way past a gate",
           set(M.EXCEPTION_UNBLOCKS) == {"reference_check", "salary_band", "scorecard", "sla",
-                                        "statutory_check", "shortlist", "telephonic"})
+                                        "statutory_check", "shortlist", "telephonic",
+                                        # ── Phase 12 ── background verification before an
+                                        # offer, on both tracks.
+                                        "background"})
 
     # =========================================================================
     section("10. The spec table is the specification")

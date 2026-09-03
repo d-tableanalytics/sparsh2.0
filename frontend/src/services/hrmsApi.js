@@ -549,3 +549,72 @@ export const approvePurgeBatch = (batchNo, payload, params) =>
  *  URL; every figure on the form is read from the record and nothing is re-entered. */
 export const getRecordDocument = (entity, businessNo, params) =>
   api.get(`/hrms/records/${entity}/${businessNo}/document`, { params });
+
+/* ═══════════════════════════════════════════════════════════════
+ * Phase 12 — the client hiring track
+ *
+ * Client → Job Request → Sparsh → CV Sharing → Client Review → Interview
+ * → Selection → Background Verification → HR Approval → Offer → Onboarding
+ *
+ * One set of endpoints serves both Sparsh and the client: the SERVER narrows what a
+ * client-scoped user sees, from their engagements. The browser never sends a client id to
+ * choose its own scope — it could not be trusted to, and the list endpoints ignore one
+ * from a client user.
+ * ═══════════════════════════════════════════════════════════════ */
+
+/** Client job requests. Sparsh sees every client's; a client sees only their own. */
+export const getJobRequests = (params) => api.get('/hrms/job-requests', { params });
+export const getJobRequest = (jbrNo, params) =>
+  api.get(`/hrms/job-requests/${jbrNo}`, { params });
+export const createJobRequest = (payload, params) =>
+  api.post('/hrms/job-requests', payload, { params });
+export const updateJobRequest = (jbrNo, payload, params) =>
+  api.patch(`/hrms/job-requests/${jbrNo}`, payload, { params });
+/** Sparsh's review: review | accept | decline. Declining requires a reason. */
+export const actOnJobRequest = (jbrNo, payload, params) =>
+  api.post(`/hrms/job-requests/${jbrNo}/act`, payload, { params });
+export const withdrawJobRequest = (jbrNo, payload, params) =>
+  api.post(`/hrms/job-requests/${jbrNo}/withdraw`, payload, { params });
+/** Accepted request → client-track requisition. The masters a client cannot know
+ *  (department, designation, owner) are supplied here. */
+export const convertJobRequest = (jbrNo, payload, params) =>
+  api.post(`/hrms/job-requests/${jbrNo}/convert`, payload, { params });
+
+/** CV sharing. One candidate, many clients, one status each. */
+export const getShares = (params) => api.get('/hrms/shares', { params });
+export const getShare = (shareNo, params) => api.get(`/hrms/shares/${shareNo}`, { params });
+/** Share one CV with one or more clients in a single act. Sparsh only. Partial success:
+ *  the response reports what was shared and what was skipped, per client. */
+export const shareCandidate = (payload, params) =>
+  api.post('/hrms/shares', payload, { params });
+export const setShareStatus = (shareNo, payload, params) =>
+  api.post(`/hrms/shares/${shareNo}/status`, payload, { params });
+export const withdrawShare = (shareNo, payload, params) =>
+  api.post(`/hrms/shares/${shareNo}/withdraw`, payload, { params });
+/** A short-lived link to the CV on one share. Audited server-side on every open. */
+export const getShareCv = (shareNo, params) =>
+  api.get(`/hrms/shares/${shareNo}/cv`, { params });
+/** Every client one candidate went to. Sparsh only — the answer names other clients. */
+export const getCandidateShares = (uk, params) =>
+  api.get(`/hrms/candidates/${uk}/shares`, { params });
+
+/** Background verification, and the approval that unlocks an offer. */
+export const getBackgroundChecks = (params) =>
+  api.get('/hrms/background-checks', { params });
+export const getPendingVerifications = (params) =>
+  api.get('/hrms/background-checks/pending', { params });
+export const recordBackgroundCheck = (payload, params) =>
+  api.post('/hrms/background-checks', payload, { params });
+export const updateBackgroundCheck = (bgvNo, payload, params) =>
+  api.patch(`/hrms/background-checks/${bgvNo}`, payload, { params });
+export const getCandidateVerification = (uk, params) =>
+  api.get(`/hrms/candidates/${uk}/verification`, { params });
+/** HR's sign-off. Takes a typed signature — this is the step that unlocks the offer. */
+export const decideVerification = (uk, payload, params) =>
+  api.post(`/hrms/candidates/${uk}/verification/decide`, payload, { params });
+
+/** Candidate CV upload. `resume` is {name, mime_type, data} with data base64. */
+export const uploadCandidateCv = (uk, payload, params) =>
+  api.post(`/hrms/candidates/${uk}/cv`, payload, { params });
+export const getCandidateCv = (uk, params) =>
+  api.get(`/hrms/candidates/${uk}/cv`, { params });

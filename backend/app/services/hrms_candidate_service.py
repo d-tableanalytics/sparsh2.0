@@ -285,6 +285,19 @@ async def create_candidate(actor: dict, company_id: str, payload: dict) -> dict:
     from app.services.hrms_referral_service import resolve_referral
     doc.update(await resolve_referral(payload, company_id, source_from_applicant=False))
 
+    # ── Phase 12 ── the CV itself.
+    #
+    # `CandidateIn.resume` has been declared since Phase 5 and nothing ever stored it, so an
+    # HR-uploaded CV was accepted by the model and silently dropped. That matters more now
+    # than it did: a share carries the CV to a client, and `share_candidate` refuses a
+    # candidate who has none.
+    #
+    # Stored through the SAME helper the public form uses, so a walk-in CV and an applied-for
+    # one land in the same place, in the same shape, with the same validation.
+    if payload.get("resume"):
+        from app.services.hrms_posting_service import _store_upload
+        doc["resume"] = await _store_upload(payload["resume"], "Resume", f"cv_{uk}")
+
     await get_collection(COLL_CANDIDATES).insert_one(dict(doc))
     await audit(actor, AUDIT_CANDIDATE_ADDED, ENTITY_CANDIDATE, uk,
                 f"{name} added manually", company_id)
@@ -1054,3 +1067,65 @@ async def get_journey(actor: dict, company_id: str, uk: str) -> dict:
         "terminal": not allowed_next_statuses(status),
         "events": events,
     }
+
+
+async def upload_cv(actor: dict, company_id: str, uk: str, payload: dict) -> dict:
+    """Attach or replace a candidate's CV (Phase 12, requirement 1).
+
+    Separate from `create_candidate` because that is not how it usually happens: a record is
+    opened from a phone call and the CV arrives by email an hour later. Without this, the
+    only way to give an existing candidate a CV was to delete and re-add them.
+
+    Replacing keeps the OLD key in `resume_history` rather than overwriting it blind. The
+    previous CV may already have gone to a client on a share, and a share that points at a
+    document nobody can produce any more is worse than one carrying an old version.
+    """
+    current = await _require_visible(actor, company_id, uk)
+    if not payload.get("resume"):
+        raise HTTPException(status_code=422, detail="Attach a CV file.")
+
+    from app.services.hrms_posting_service import _store_upload
+    stored = await _store_upload(payload["resume"], "Resume", f"cv_{uk}")
+    if not stored:
+        raise HTTPException(status_code=422, detail="That file could not be read.")
+
+    now = datetime.now(timezone.utc)
+    updates = {"resume": stored, "updated_at": now}
+    previous = current.get("resume")
+    push = {}
+    if previous and previous.get("key"):
+        push = {"resume_history": {**previous, "replaced_at": now,
+                                   "replaced_by": str((actor or {}).get("_id") or "")}}
+
+    await get_collection(COLL_CANDIDATES).update_one(
+        {"uk": uk, "company_id": str(company_id)},
+        {"$set": updates, **({"$push": push} if push else {})})
+    await audit(actor, AUDIT_CANDIDATE_UPDATED, ENTITY_CANDIDATE, uk,
+                f"CV {'replaced' if previous else 'uploaded'}: {stored.get('name')}",
+                company_id)
+    return await get_candidate(actor, company_id, uk)
+
+
+async def cv_url(actor: dict, company_id: str, uk: str) -> dict:
+    """A short-lived link to a candidate's CV, for Sparsh-side readers.
+
+    Audited, because opening somebody's CV is a read of personal data and §8 of the audit
+    asked for exactly this trail. Clients do NOT come through here -- they hold no
+    `candidate.read` and use the share's own CV route, which additionally checks that the
+    candidate was shared with them.
+    """
+    candidate = await _require_visible(actor, company_id, uk)
+    key = (candidate.get("resume") or {}).get("key")
+    if not key:
+        raise HTTPException(status_code=404, detail="No CV is on file for this candidate.")
+
+    from app.services.s3_service import get_signed_url
+    url = get_signed_url(key, expires_in=300)
+    if not url:
+        raise HTTPException(
+            status_code=503,
+            detail="The CV could not be opened right now. Please try again.")
+    await audit(actor, AUDIT_CANDIDATE_UPDATED, ENTITY_CANDIDATE, uk,
+                "CV opened", company_id)
+    return {"url": url, "expires_in": 300,
+            "name": (candidate.get("resume") or {}).get("name") or "cv.pdf"}

@@ -382,6 +382,20 @@ async def create_offer(actor: dict, company_id: str, payload: dict) -> dict:
     from app.services.hrms_candidate_service import assert_selectable
     await assert_selectable(actor, company_id, candidate)
 
+    # ── Phase 12 ── background verification, on BOTH tracks.
+    #
+    #     Background Verification -> HR Approval -> Offer Letter -> Onboarding
+    #
+    # Placed last of the gates and still before any write, so a refusal costs nothing. It
+    # asks two things: that every required check has CLEARED, and that HR has signed the
+    # file off -- complete checks nobody reviewed are not an approval.
+    #
+    # Bypassed only by an approved `Background Verification Waived` exception, which is also
+    # how a candidate already at Selected when this shipped gets through: attributably,
+    # rather than because somebody set a flag.
+    from app.services.hrms_background_service import assert_background_cleared
+    await assert_background_cleared(company_id, candidate)
+
     # Create-and-send in one call cannot work on the internal track: Management's approval
     # happens BETWEEN the two, so there is no moment at which both could be satisfied.
     # Refused here rather than at the send step, because failing after the write would leave

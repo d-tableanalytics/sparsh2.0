@@ -186,6 +186,21 @@ export const CAP = {
   // Executing a retention purge (SOP §13). MD only, and the same standard as probation
   // confirmation because both destroy or end something.
   RETENTION_PURGE: 'retention.purge',
+
+  // ── Phase 12: the client hiring track ──
+  // A client raises a job request; Sparsh reviews it, shares CVs, and runs the hire.
+  // Every one of these is additionally row-scoped on the server by the client engagements
+  // the user belongs to — holding SHARE_READ says "may read shares", not "may read all
+  // shares", so the UI must never treat the capability alone as permission to show data.
+  JOB_REQUEST_READ: 'job_request.read',
+  JOB_REQUEST_WRITE: 'job_request.write',
+  JOB_REQUEST_REVIEW: 'job_request.review',
+  SHARE_READ: 'share.read',
+  SHARE_WRITE: 'share.write',
+  SHARE_RESPOND: 'share.respond',
+  BACKGROUND_READ: 'background.read',
+  BACKGROUND_WRITE: 'background.write',
+  BACKGROUND_APPROVE: 'background.approve',
 };
 
 /** Sparsh internal user rather than a client-side one. Same precedence the backend uses

@@ -73,6 +73,17 @@ async def main() -> None:
     from bson import ObjectId
 
     from app.models import hrms as M
+
+    # ── Phase 12 ── the background-verification gate now stands in front of every offer,
+    # on both tracks. This file measures a different control, so the gate is stubbed here
+    # exactly as the shortlist and telephonic gates are elsewhere -- each has its own test
+    # file (test_int12_client_track), and a failure here should name THIS file's control
+    # rather than a precondition it never set up.
+    import app.services.hrms_background_service as _BGV
+
+    async def _bg_cleared(*_a, **_kw):
+        return None
+    _BGV.assert_background_cleared = _bg_cleared
     import app.db.mongodb as mongo
 
     # SPARSH is the tenant. CLIENT_A / CLIENT_B are ERP companies it recruits for.
@@ -160,9 +171,22 @@ async def main() -> None:
 
         check("the CLIENT role's capabilities are deliberately minimal",
               {c.value for c in M.ROLE_CAPABILITIES[M.HrmsRole.CLIENT]}
-              == {"module.access", "requisition.read", "client.read"})
-        check("a CLIENT user cannot read candidates -- no client scope secures them yet",
+              == {"module.access", "requisition.read", "client.read",
+                  # ── Phase 12 ── what a client comes here to do: raise a job request and
+                  # act on the CVs shared with them. Each is row-scoped to their own
+                  # engagements at the service layer.
+                  "job_request.read", "job_request.write",
+                  "share.read", "share.respond"})
+        check("a CLIENT user still cannot read the CANDIDATE collection -- they read the "
+              "authorised snapshot on a share instead, so a field added to a candidate is "
+              "never retroactively exposed to them",
               not ACCESS.can(CLIENT_A_USER, M.Cap.CANDIDATE_READ))
+        check("a client can never share a CV onward", not ACCESS.can(CLIENT_A_USER,
+                                                                     M.Cap.SHARE_WRITE))
+        check("nor review their own job request", not ACCESS.can(CLIENT_A_USER,
+                                                                 M.Cap.JOB_REQUEST_REVIEW))
+        check("nor see any background verification", not ACCESS.can(CLIENT_A_USER,
+                                                                    M.Cap.BACKGROUND_READ))
         check("nor documents", not ACCESS.can(CLIENT_A_USER, M.Cap.DOCUMENT_READ))
         check("nor analytics", not ACCESS.can(CLIENT_A_USER, M.Cap.ANALYTICS_READ))
         check("and cannot manage engagements",

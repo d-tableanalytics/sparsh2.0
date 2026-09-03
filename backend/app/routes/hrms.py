@@ -46,6 +46,12 @@ from app.models.hrms import (
     DocumentIn, DocumentStatusIn, DocumentTypeIn, DocumentTypeUpdate, DocumentUpdate,
     LinkRevokeIn, SanctionedStrengthIn, SanctionedStrengthUpdate,
 )
+# -- Phase 12 - the client hiring track --
+from app.models.hrms import (
+    BackgroundApproveIn, BackgroundCheckIn, BackgroundCheckUpdate,
+    JobRequestAction, JobRequestConvertIn, JobRequestIn, JobRequestUpdate,
+    ShareIn, ShareStatusIn, UploadIn,
+)
 # ── Phase INT-2 — the remaining Internal Recruitment SOP controls ──
 from app.models.hrms import (
     PRINTABLE_DOCUMENTS,
@@ -89,6 +95,10 @@ from app.services import hrms_record_document_service as record_documents
 from app.services import hrms_salary_band_service as salary_bands
 from app.services import hrms_shortlist_service as shortlists
 from app.services import hrms_survey_service as surveys
+# ── Phase 12: the client hiring track ──
+from app.services import hrms_background_service as background
+from app.services import hrms_job_request_service as job_requests
+from app.services import hrms_share_service as shares
 from app.services.hrms_audit_service import read_audit
 from app.utils.hrms_access import (
     NO_ACCESS_MESSAGE, can, capabilities_for, ensure_hrms_enabled, hrms_role,
@@ -3207,3 +3217,330 @@ async def generate_record_document(
     _require(current_user, spec[3])
     return await record_documents.generate(
         current_user, _company(current_user, company_id), entity, business_no)
+
+
+# =============================================================
+# Phase 12 -- the client hiring track
+# =============================================================
+# Three surfaces, one router. What separates them is not the path but the SCOPE the service
+# applies: a Sparsh user sees the tenant's work, a client user sees only the rows their
+# engagements grant. That narrowing lives in the services (share / job-request
+# `_scope_filter`) rather than here, so no route can forget to apply it.
+
+
+# -- Client job requests --------------------------------------
+@router.get("/job-requests")
+async def list_job_requests(
+    status: Optional[str] = Query(None),
+    client_id: Optional[str] = Query(None),
+    limit: int = Query(200, ge=1, le=500),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Sparsh's inbox, or the client's own list -- the service decides which by role."""
+    _require(current_user, Cap.JOB_REQUEST_READ)
+    return await job_requests.list_job_requests(
+        current_user, _company(current_user, company_id),
+        status=status, client_id=client_id, limit=limit)
+
+
+@router.post("/job-requests", status_code=201)
+async def create_job_request(
+    body: JobRequestIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.JOB_REQUEST_WRITE)
+    return await job_requests.create_job_request(
+        current_user, _company(current_user, company_id), body.model_dump())
+
+
+@router.get("/job-requests/{jbr_no}")
+async def get_job_request(
+    jbr_no: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.JOB_REQUEST_READ)
+    return await job_requests.get_job_request(
+        current_user, _company(current_user, company_id), jbr_no)
+
+
+@router.patch("/job-requests/{jbr_no}")
+async def update_job_request(
+    jbr_no: str,
+    body: JobRequestUpdate,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.JOB_REQUEST_WRITE)
+    return await job_requests.update_job_request(
+        current_user, _company(current_user, company_id), jbr_no,
+        body.model_dump(exclude_unset=True))
+
+
+@router.post("/job-requests/{jbr_no}/act")
+async def act_on_job_request(
+    jbr_no: str,
+    body: JobRequestAction,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Sparsh's review: review | accept | decline.
+
+    The service re-checks the capability from JOB_REQUEST_TRANSITIONS, so the boundary
+    between what a client ASKED FOR and what Sparsh AGREED TO holds even for a caller that
+    reached the service some other way.
+    """
+    _require(current_user, Cap.JOB_REQUEST_REVIEW)
+    return await job_requests.act_on_job_request(
+        current_user, _company(current_user, company_id), jbr_no,
+        body.action, body.remarks)
+
+
+@router.post("/job-requests/{jbr_no}/withdraw")
+async def withdraw_job_request(
+    jbr_no: str,
+    body: Optional[JobRequestAction] = None,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.JOB_REQUEST_WRITE)
+    return await job_requests.withdraw_job_request(
+        current_user, _company(current_user, company_id), jbr_no,
+        (body.remarks if body else None))
+
+
+@router.post("/job-requests/{jbr_no}/convert", status_code=201)
+async def convert_job_request(
+    jbr_no: str,
+    body: JobRequestConvertIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """An accepted request becomes a client-track requisition.
+
+    Also demands REQUISITION_CREATE: this call creates one, and holding the review
+    capability alone should not become a side door into making requisitions.
+    """
+    _require(current_user, Cap.JOB_REQUEST_REVIEW)
+    _require(current_user, Cap.REQUISITION_CREATE)
+    return await job_requests.convert_to_requisition(
+        current_user, _company(current_user, company_id), jbr_no, body.model_dump())
+
+
+# -- CV sharing -----------------------------------------------
+@router.get("/shares")
+async def list_shares(
+    uk: Optional[str] = Query(None),
+    client_id: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    request_no: Optional[str] = Query(None),
+    limit: int = Query(200, ge=1, le=500),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Sparsh's sharing board, or the client's shared-candidate list."""
+    _require(current_user, Cap.SHARE_READ)
+    return await shares.list_shares(
+        current_user, _company(current_user, company_id),
+        uk=uk, client_id=client_id, status=status, request_no=request_no, limit=limit)
+
+
+@router.post("/shares", status_code=201)
+async def share_candidate(
+    body: ShareIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Share one CV with one or more clients. Sparsh only -- a client can never share a
+    candidate onward, which is why SHARE_WRITE is withheld from the CLIENT role."""
+    _require(current_user, Cap.SHARE_WRITE)
+    return await shares.share_candidate(
+        current_user, _company(current_user, company_id), body.model_dump())
+
+
+@router.get("/shares/{share_no}")
+async def get_share(
+    share_no: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.SHARE_READ)
+    return await shares.get_share(
+        current_user, _company(current_user, company_id), share_no)
+
+
+@router.get("/shares/{share_no}/cv")
+async def get_share_cv(
+    share_no: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """A short-lived link to the CV on this share, minted per request and audited -- this
+    is the moment a client actually reads somebody's personal data."""
+    _require(current_user, Cap.SHARE_READ)
+    return await shares.resume_url_for_share(
+        current_user, _company(current_user, company_id), share_no)
+
+
+@router.post("/shares/{share_no}/status")
+async def set_share_status(
+    share_no: str,
+    body: ShareStatusIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """The client's verdict, or Sparsh recording one they were told by phone.
+
+    Two capabilities reach this, and WHICH statuses each may set is decided by
+    SHARE_CLIENT_SETTABLE in the service rather than here -- a client says what they think
+    of a CV; only Sparsh records that somebody was hired.
+    """
+    if not (can(current_user, Cap.SHARE_RESPOND) or can(current_user, Cap.SHARE_WRITE)):
+        raise HTTPException(status_code=403, detail=NO_ACCESS_MESSAGE)
+    return await shares.set_share_status(
+        current_user, _company(current_user, company_id), share_no, body.model_dump())
+
+
+@router.post("/shares/{share_no}/withdraw")
+async def withdraw_share(
+    share_no: str,
+    body: Optional[ShareStatusIn] = None,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.SHARE_WRITE)
+    return await shares.withdraw_share(
+        current_user, _company(current_user, company_id), share_no,
+        (body.model_dump() if body else None))
+
+
+@router.get("/candidates/{uk}/shares")
+async def shares_for_candidate(
+    uk: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Every client this candidate went to, with each client's own status.
+
+    Sparsh only: the answer names other clients, which is precisely what a client user may
+    not see. The service refuses a client-scoped caller outright.
+    """
+    _require(current_user, Cap.SHARE_READ)
+    return await shares.shares_for_candidate(
+        current_user, _company(current_user, company_id), uk)
+
+
+# -- Background verification ----------------------------------
+@router.get("/background-checks")
+async def list_background_checks(
+    uk: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    limit: int = Query(200, ge=1, le=500),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.BACKGROUND_READ)
+    return await background.list_checks(
+        current_user, _company(current_user, company_id),
+        uk=uk, status=status, limit=limit)
+
+
+@router.get("/background-checks/pending")
+async def pending_verifications(
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """The work queue: candidates at Selected or Offer stage, and where each one's
+    verification stands."""
+    _require(current_user, Cap.BACKGROUND_READ)
+    return await background.pending_verifications(
+        current_user, _company(current_user, company_id))
+
+
+@router.post("/background-checks", status_code=201)
+async def record_background_check(
+    body: BackgroundCheckIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.BACKGROUND_WRITE)
+    return await background.record_check(
+        current_user, _company(current_user, company_id), body.model_dump())
+
+
+@router.patch("/background-checks/{bgv_no}")
+async def update_background_check(
+    bgv_no: str,
+    body: BackgroundCheckUpdate,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.BACKGROUND_WRITE)
+    return await background.update_check(
+        current_user, _company(current_user, company_id), bgv_no,
+        body.model_dump(exclude_unset=True))
+
+
+@router.get("/candidates/{uk}/verification")
+async def candidate_verification(
+    uk: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """One candidate's whole verification file, and whether it clears them for an offer."""
+    _require(current_user, Cap.BACKGROUND_READ)
+    return await background.verification_state(
+        _company(current_user, company_id), uk)
+
+
+@router.post("/candidates/{uk}/verification/decide")
+async def decide_verification(
+    uk: str,
+    body: BackgroundApproveIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """HR's sign-off, and the step that unlocks the offer.
+
+    Takes a typed signature -- the same standard probation confirmation and the retention
+    purge hold, because all three either commit the company or end something.
+    """
+    _require(current_user, Cap.BACKGROUND_APPROVE)
+    return await background.decide_verification(
+        current_user, _company(current_user, company_id), uk, body.model_dump())
+
+
+# -- Candidate CV (Phase 12, requirement 1) --------------------
+@router.post("/candidates/{uk}/cv")
+async def upload_candidate_cv(
+    uk: str,
+    body: UploadIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Attach or replace a candidate's CV.
+
+    CANDIDATE_WRITE, not DOCUMENT_WRITE: the CV is part of the candidate record rather than
+    a filed document, and it is what a share carries to a client.
+    """
+    _require(current_user, Cap.CANDIDATE_WRITE)
+    return await candidates.upload_cv(
+        current_user, _company(current_user, company_id), uk, {"resume": body.model_dump()})
+
+
+@router.get("/candidates/{uk}/cv")
+async def get_candidate_cv(
+    uk: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """A short-lived link to the CV, for Sparsh-side readers. Audited on every open.
+
+    A client never reaches this -- they hold no `candidate.read` and use
+    GET /shares/{share_no}/cv, which additionally proves the candidate was shared with them.
+    """
+    _require(current_user, Cap.CANDIDATE_READ)
+    return await candidates.cv_url(
+        current_user, _company(current_user, company_id), uk)

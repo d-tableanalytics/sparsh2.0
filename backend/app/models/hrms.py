@@ -67,6 +67,20 @@ COLL_APPOINTMENTS        = "hrms_appointments"
 # nowhere in the ERP and cannot be derived, so without it there is no way to answer "is this
 # company a client OF ours", which is the question every client-scope check rests on.
 COLL_CLIENT_ENGAGEMENTS  = "hrms_client_engagements"
+# ── Phase 12: the client hiring track ──
+# A job request is what a CLIENT asks for. It is deliberately NOT a requisition: a
+# requisition is Sparsh's own record of work it has agreed to do, and it carries Sparsh's
+# approval chain. Letting a client write straight into that chain would put an outside
+# party inside our governance. Sparsh reviews a request and CONVERTS it, which is the
+# moment the work becomes ours.
+COLL_JOB_REQUESTS        = "hrms_job_requests"
+# One row per (candidate, client). This is what makes "the same CV, five clients, five
+# different outcomes" representable: the candidate's own `application_status` is Sparsh's
+# pipeline stage, and each share carries the status FOR THAT CLIENT, independently.
+COLL_CANDIDATE_SHARES    = "hrms_candidate_shares"
+# Background verification, per candidate, one row per check performed. Separate from
+# onboarding's `bg_verification` flag, which happens after the offer and cannot gate it.
+COLL_BACKGROUND_CHECKS   = "hrms_background_checks"
 COLL_SANCTIONED_STRENGTH = "hrms_sanctioned_strength"
 
 # Internal (in-house) recruitment track. Every one of these carries `request_no`, and the
@@ -450,6 +464,38 @@ HRMS_INDEXES = [
     # Two rows for the same day would be counted once by the maths and twice by the screen.
     (COLL_HOLIDAYS, [("company_id", 1), ("holiday_date", 1)], {"unique": True,
                                                                "name": "uniq_company_date"}),
+    # ── Phase 12: the client hiring track ──
+    # Composite with company_id throughout, for the reason INT-10 records: business ids are
+    # minted per company, so two tenants' first request of a year are both JBR-2026-001 and
+    # a bare unique index would refuse the second tenant's.
+    (COLL_JOB_REQUESTS, [("company_id", 1), ("jbr_no", 1)],  {"unique": True,
+                                                              "name": "uniq_company_jbr_no"}),
+    # The client's own list, and Sparsh's inbox, are both this query.
+    (COLL_JOB_REQUESTS, [("company_id", 1), ("client_id", 1), ("status", 1)],
+     {"name": "by_company_client_status"}),
+    (COLL_JOB_REQUESTS, [("company_id", 1), ("status", 1)],  {"name": "by_company_status"}),
+
+    (COLL_CANDIDATE_SHARES, [("company_id", 1), ("share_no", 1)],
+     {"unique": True, "name": "uniq_company_share_no"}),
+    # UNIQUE, and the whole point of the collection: one candidate is shared with one client
+    # ONCE. A second share would give that client two rows with two different statuses for
+    # the same person, and nothing could say which was current. Re-sharing after a
+    # withdrawal reuses this row rather than adding to it.
+    (COLL_CANDIDATE_SHARES, [("company_id", 1), ("uk", 1), ("client_id", 1)],
+     {"unique": True, "name": "uniq_candidate_client"}),
+    # The client portal's only list: their shares, newest first, filtered by status.
+    (COLL_CANDIDATE_SHARES, [("company_id", 1), ("client_id", 1), ("status", 1)],
+     {"name": "by_client_status"}),
+    (COLL_CANDIDATE_SHARES, [("company_id", 1), ("uk", 1)], {"name": "by_candidate"}),
+    (COLL_CANDIDATE_SHARES, [("request_no", 1)],             {"name": "by_request"}),
+
+    # NOT unique on (company, candidate, type): a check is re-run when the first came back
+    # inconclusive, and the gate asks whether the LATEST of each required type cleared.
+    (COLL_BACKGROUND_CHECKS, [("company_id", 1), ("bgv_no", 1)],
+     {"unique": True, "name": "uniq_company_bgv_no"}),
+    (COLL_BACKGROUND_CHECKS, [("company_id", 1), ("uk", 1)], {"name": "by_candidate"}),
+    (COLL_BACKGROUND_CHECKS, [("company_id", 1), ("status", 1)],
+     {"name": "by_company_status"}),
     # ── Later phases append their indexes here, one phase at a time. ──
 ]
 
@@ -700,6 +746,32 @@ class Cap(str, Enum):
     # Executing a retention purge (SOP §13). MD only, and the same standard as probation
     # confirmation because both destroy or end something.
     RETENTION_PURGE = "retention.purge"
+
+    # ══ Phase 12: the client hiring track ══
+    # A client asks for people; Sparsh sources them, shares CVs, and runs the hire.
+    #
+    # The client-facing capabilities are the first in this module granted to somebody
+    # OUTSIDE the tenant, so each is written to be the narrowest thing that still lets the
+    # client do their job. Every one of them is additionally row-scoped at the service
+    # layer by the engagements the user belongs to -- the capability says "may read shares",
+    # the scope says "these shares".
+    #
+    # The client raises the request; only Sparsh may review, accept, decline or convert it.
+    JOB_REQUEST_READ   = "job_request.read"
+    JOB_REQUEST_WRITE  = "job_request.write"     # raise / edit one's own, before review
+    JOB_REQUEST_REVIEW = "job_request.review"    # Sparsh: accept, decline, convert
+    # CV sharing. WRITE is Sparsh's alone -- deciding which client sees a candidate is the
+    # whole control behind requirement 6, and a client must never be able to share a CV
+    # onward. RESPOND is the client's verdict on a CV they were shown.
+    SHARE_READ    = "share.read"
+    SHARE_WRITE   = "share.write"
+    SHARE_RESPOND = "share.respond"
+    # Background verification. WRITE records a check; APPROVE is the sign-off that unlocks
+    # the offer, and is deliberately a DIFFERENT capability -- the person who runs a check
+    # should not be the only signature that it passed.
+    BACKGROUND_READ    = "background.read"
+    BACKGROUND_WRITE   = "background.write"
+    BACKGROUND_APPROVE = "background.approve"
     # ── Later phases append their capabilities here. ──
 
 
@@ -777,6 +849,12 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
         Cap.COMM_READ,
         Cap.SURVEY_READ,
         Cap.POLICY_READ,
+        # ── Phase 12 ── Sparsh staff RUN the client track: they triage incoming job
+        # requests and place CVs. Consistent with this role everywhere else, they hold no
+        # approval -- BACKGROUND_APPROVE is what unlocks an offer, and that is a decision.
+        Cap.JOB_REQUEST_READ, Cap.JOB_REQUEST_WRITE, Cap.JOB_REQUEST_REVIEW,
+        Cap.SHARE_READ, Cap.SHARE_WRITE,
+        Cap.BACKGROUND_READ, Cap.BACKGROUND_WRITE,
     },
     HrmsRole.MD: {
         Cap.MODULE_ACCESS, Cap.MODULE_ADMIN, Cap.AUDIT_READ,
@@ -830,6 +908,10 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
         Cap.SURVEY_READ, Cap.SURVEY_WRITE,
         Cap.POLICY_READ, Cap.POLICY_WRITE, Cap.POLICY_APPROVE,
         Cap.RETENTION_PURGE,
+        # ── Phase 12 ── the client track, including the sign-off that unlocks an offer.
+        Cap.JOB_REQUEST_READ, Cap.JOB_REQUEST_WRITE, Cap.JOB_REQUEST_REVIEW,
+        Cap.SHARE_READ, Cap.SHARE_WRITE, Cap.SHARE_RESPOND,
+        Cap.BACKGROUND_READ, Cap.BACKGROUND_WRITE, Cap.BACKGROUND_APPROVE,
     },
     HrmsRole.HR: {
         Cap.MODULE_ACCESS, Cap.AUDIT_READ,
@@ -893,6 +975,14 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
         #   COMM_TEMPLATE_WRITE -- the templates carry the EEO and data-use wording.
         #   POLICY_APPROVE      -- HR drafts a revision; the MD makes it the one in force.
         #   RETENTION_PURGE     -- destroying records is not an operational act.
+        # ── Phase 12 ── HR runs the client track end to end, and holds the verification
+        # sign-off because requirement 8 names HR as the approver ("Background Verification
+        # -> HR Approval -> Offer Letter"). WRITE and APPROVE are still separate
+        # capabilities, so a company that wants two pairs of eyes can withdraw one of them
+        # from a junior recruiter without touching the other.
+        Cap.JOB_REQUEST_READ, Cap.JOB_REQUEST_WRITE, Cap.JOB_REQUEST_REVIEW,
+        Cap.SHARE_READ, Cap.SHARE_WRITE,
+        Cap.BACKGROUND_READ, Cap.BACKGROUND_WRITE, Cap.BACKGROUND_APPROVE,
     },
     # A hiring manager reads their own corner of the directory (enforced by row scoping in
     # hrms_employee_service, not by this set) and never sees pay. They RAISE requisitions --
@@ -952,6 +1042,9 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
         Cap.PREBOARDING_READ,
         Cap.SURVEY_READ,
         Cap.POLICY_READ,
+        # ── Phase 12 ── a hiring manager SEES the background verification behind a hire
+        # they are accountable for, and neither records nor approves one.
+        Cap.BACKGROUND_READ,
     },
     # Self-service, plus the deliberate exception that ANY employee may raise a hiring
     # requisition (FRONTEND_ANALYSIS §5: "anyone may raise a hiring requisition"). Reading
@@ -989,13 +1082,28 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
     #   client.dashboard.read
     HrmsRole.CLIENT: {
         Cap.MODULE_ACCESS,
-        # Their OWN requisitions only. The client narrowing that makes this true is applied
-        # by the requisition service in a later phase; until then a CLIENT user sees the
-        # tenant's requisitions, which is why no client user should be provisioned yet.
+        # Their OWN requisitions only. Phase 12 wires the narrowing that makes this true:
+        # every read a CLIENT user performs is intersected with the client ids their
+        # engagements grant, and fails CLOSED to nothing when they have none.
         Cap.REQUISITION_READ,
         # Needed to render their own client's name. Reading the client LIST is a separate
         # concern already gated by CLIENT_READ; narrowing that list is a later phase.
         Cap.CLIENT_READ,
+        # ── Phase 12 ── what a client actually comes here to do.
+        #
+        # They raise a job request and read their own; they see the CVs Sparsh chose to
+        # show them and give a verdict on each. That is the whole surface.
+        #
+        # What is deliberately ABSENT is everything that would let a client reach past the
+        # candidates shared WITH THEM: no CANDIDATE_READ (the share record carries the
+        # authorised snapshot instead -- see hrms_share_service), no SHARE_WRITE (a client
+        # can never share a CV onward, to anyone), no JOB_REQUEST_REVIEW (accepting their
+        # own request would make Sparsh's review a formality), and nothing at all about
+        # offers, onboarding, background checks or other clients' work.
+        Cap.JOB_REQUEST_READ,
+        Cap.JOB_REQUEST_WRITE,
+        Cap.SHARE_READ,
+        Cap.SHARE_RESPOND,
     },
     # ── Internal track ── the budget authority, and nothing else.
     #
@@ -1090,6 +1198,10 @@ ID_FORMATS = {
     "exception":   ("EXC",    True,  3),   # EXC-2026-001
     # ── Client engagements ──
     "engagement":  ("CLI-ENG", True, 3),   # CLI-ENG-2026-001
+    # ── Phase 12: the client hiring track ──
+    "job_request": ("JBR",    True,  3),   # JBR-2026-001
+    "share":       ("SHR",    True,  3),   # SHR-2026-001
+    "background":  ("BGV",    True,  3),   # BGV-2026-001
     # ── Phase INT-2 ──
     "shortlist":   ("SLR",    True,  3),   # SLR-2026-001  shortlisting committee record
     "preboarding": ("PBT",    True,  3),   # PBT-2026-001  pre-boarding touchpoint
@@ -3531,6 +3643,158 @@ CLIENT_RESPONSE_STATUS = {
 AUDIT_CLIENT_SHARED    = "cv shared with client"
 AUDIT_CLIENT_RESPONSE  = "client verdict recorded"
 
+
+# =============================================================
+# Phase 12 — the client hiring track
+# =============================================================
+# The flow this serves, end to end:
+#
+#   client raises a Job Request -> Sparsh reviews it -> Sparsh converts it to a requisition
+#   -> Sparsh sources candidates -> a CV is SHARED with one or more clients
+#   -> each client reviews INDEPENDENTLY -> interview -> selection
+#   -> background verification -> HR approval -> offer -> onboarding
+#
+# -- Why a share is a record and not a field ---------------------------------------------
+# The requirement is that one CV can go to five clients and carry five different outcomes.
+# A candidate has ONE `application_status`, so that stage can only ever describe Sparsh's
+# own pipeline. Everything per-client therefore lives on the share row, and the two never
+# compete: `application_status` says where WE are with somebody, `ShareStatus` says where
+# each CLIENT is.
+class JobRequestStatus(str, Enum):
+    SUBMITTED    = "Submitted"       # the client has sent it; Sparsh has not looked yet
+    UNDER_REVIEW = "Under Review"    # Sparsh has picked it up
+    ACCEPTED     = "Accepted"        # Sparsh will work it, and has converted it
+    DECLINED     = "Declined"        # Sparsh will not work it; a reason is mandatory
+    WITHDRAWN    = "Withdrawn"       # the client changed their mind before review finished
+
+
+# What the client may do to their own request, and when. A request Sparsh has already
+# accepted is a commitment on both sides and stops being the client's to edit.
+JOB_REQUEST_CLIENT_EDITABLE = {JobRequestStatus.SUBMITTED.value,
+                               JobRequestStatus.UNDER_REVIEW.value}
+
+# Sparsh's moves. Table-driven for the same reason the requisition chain is: the legal
+# transitions are data somebody can read, not branches spread through a handler.
+# action -> (from, to, capability, remark_required)
+JOB_REQUEST_TRANSITIONS = {
+    "review":  (JobRequestStatus.SUBMITTED,    JobRequestStatus.UNDER_REVIEW,
+                Cap.JOB_REQUEST_REVIEW, False),
+    "accept":  (JobRequestStatus.UNDER_REVIEW, JobRequestStatus.ACCEPTED,
+                Cap.JOB_REQUEST_REVIEW, False),
+    "decline": (JobRequestStatus.UNDER_REVIEW, JobRequestStatus.DECLINED,
+                Cap.JOB_REQUEST_REVIEW, True),
+}
+
+
+class ShareStatus(str, Enum):
+    """One client's view of one candidate. The spec's list, verbatim."""
+    CV_SHARED          = "CV Shared"
+    UNDER_REVIEW       = "Under Review"
+    SHORTLISTED        = "Shortlisted"
+    INTERVIEW_SCHEDULED = "Interview Scheduled"
+    SELECTED           = "Selected"
+    REJECTED           = "Rejected"
+    OFFER_IN_PROGRESS  = "Offer in Progress"
+    HIRED              = "Hired"
+    WITHDRAWN          = "Withdrawn"   # Sparsh pulled the CV back from this client
+
+
+# Legal moves for a share, mirroring FORWARD_TRANSITIONS' job for candidates: the graph
+# decides what is possible and the services decide who may ask.
+#
+# Rejected is revivable to Under Review for the same reason CLIENT_REJECTED is: a client
+# who passed in March may reconsider in June, and forcing a fresh share would lose the
+# history of the first one.
+SHARE_TRANSITIONS = {
+    ShareStatus.CV_SHARED:           {ShareStatus.UNDER_REVIEW, ShareStatus.SHORTLISTED,
+                                      ShareStatus.REJECTED, ShareStatus.WITHDRAWN},
+    ShareStatus.UNDER_REVIEW:        {ShareStatus.SHORTLISTED, ShareStatus.REJECTED,
+                                      ShareStatus.WITHDRAWN},
+    ShareStatus.SHORTLISTED:         {ShareStatus.INTERVIEW_SCHEDULED, ShareStatus.SELECTED,
+                                      ShareStatus.REJECTED, ShareStatus.WITHDRAWN},
+    ShareStatus.INTERVIEW_SCHEDULED: {ShareStatus.SELECTED, ShareStatus.REJECTED,
+                                      ShareStatus.WITHDRAWN},
+    ShareStatus.SELECTED:            {ShareStatus.OFFER_IN_PROGRESS, ShareStatus.REJECTED,
+                                      ShareStatus.WITHDRAWN},
+    ShareStatus.OFFER_IN_PROGRESS:   {ShareStatus.HIRED, ShareStatus.REJECTED,
+                                      ShareStatus.WITHDRAWN},
+    ShareStatus.HIRED:               set(),          # terminal
+    ShareStatus.REJECTED:            {ShareStatus.UNDER_REVIEW},
+    ShareStatus.WITHDRAWN:           set(),          # terminal; re-share to start again
+}
+
+# Which of those the CLIENT may set themselves, and which are Sparsh's. A client says what
+# they think of a CV; only Sparsh records that somebody was actually hired, because that is
+# a commercial fact with a fee attached and it is not theirs to assert.
+SHARE_CLIENT_SETTABLE = {ShareStatus.UNDER_REVIEW, ShareStatus.SHORTLISTED,
+                         ShareStatus.INTERVIEW_SCHEDULED, ShareStatus.SELECTED,
+                         ShareStatus.REJECTED}
+
+
+def share_can_transition(current, target) -> bool:
+    """Whether a share may move from `current` to `target`. Pure, and the ONLY authority on
+    share ordering -- services ask this rather than testing statuses themselves."""
+    try:
+        return ShareStatus(getattr(target, "value", target)) in SHARE_TRANSITIONS[
+            ShareStatus(getattr(current, "value", current))]
+    except (ValueError, KeyError):
+        return False
+
+
+class BackgroundCheckType(str, Enum):
+    EMPLOYMENT = "Employment"
+    EDUCATION  = "Education"
+    ADDRESS    = "Address"
+    IDENTITY   = "Identity / Document"
+    CRIMINAL   = "Criminal Record"
+    OTHER      = "Other"
+
+
+class BackgroundCheckStatus(str, Enum):
+    PENDING     = "Pending"
+    IN_PROGRESS = "In Progress"
+    CLEARED     = "Cleared"
+    FLAGGED     = "Flagged"
+
+
+# The checks that must be Cleared before an offer may be created. Declared as data so a
+# company can see the list without reading code, and so the gate is one lookup.
+#
+# Criminal and Other are deliberately absent: the SOP names identity, education and prior
+# employment, and a gate that demanded every check type would block on ones most hires
+# never need.
+REQUIRED_BACKGROUND_CHECKS = [
+    BackgroundCheckType.IDENTITY,
+    BackgroundCheckType.EDUCATION,
+    BackgroundCheckType.EMPLOYMENT,
+]
+
+# Only a Cleared check satisfies the gate. In Progress is not a pass, and Flagged is
+# emphatically not -- spelled out as a set for the same reason REFERENCE_CLEARS_OFFER is,
+# so widening it later is a one-line, reviewable change.
+BACKGROUND_CLEARS_OFFER = {BackgroundCheckStatus.CLEARED.value}
+
+
+class BackgroundApprovalStatus(str, Enum):
+    NOT_REQUESTED = "Not Requested"
+    PENDING       = "Pending"
+    APPROVED      = "Approved"
+    REJECTED      = "Rejected"
+
+
+AUDIT_JOB_REQUEST_RAISED    = "client job request raised"
+AUDIT_JOB_REQUEST_REVIEWED  = "client job request reviewed"
+AUDIT_JOB_REQUEST_CONVERTED = "client job request converted to a requisition"
+AUDIT_SHARE_CREATED         = "cv shared with client (share record)"
+AUDIT_SHARE_STATUS          = "client share status changed"
+AUDIT_SHARE_WITHDRAWN       = "cv withdrawn from client"
+# The moment a client actually READS somebody's personal data. Audited as its own
+# action because §8 asks for a trail of client ACCESS, not only of client decisions.
+AUDIT_SHARE_CV_OPENED       = "cv opened by client"
+AUDIT_BACKGROUND_RECORDED   = "background check recorded"
+AUDIT_BACKGROUND_APPROVED   = "background verification approved"
+AUDIT_BACKGROUND_REJECTED   = "background verification rejected"
+
 # ── Internal recruitment track ──
 AUDIT_BUDGET_APPROVED    = "headcount and budget approved"
 AUDIT_SCORECARD_CREATED  = "position scorecard drafted"
@@ -3887,6 +4151,12 @@ class ExceptionType(str, Enum):
     # backfill), and like every other deviation on this track it must be one somebody
     # signed rather than a flag on a request body.
     TELEPHONIC_WAIVED    = "Telephonic Screening Waived"
+    # ── Phase 12 ── background verification must clear before an offer, on BOTH tracks.
+    # A real hire sometimes has to move before a check comes back (a verifier who will not
+    # answer, a candidate with a counter-offer and a deadline), and the module's rule is
+    # that such a decision is signed rather than switched off. Note this also gives every
+    # candidate already mid-pipeline when the gate shipped a documented way through.
+    BACKGROUND_WAIVED    = "Background Verification Waived"
     OTHER                = "Other"
 
 
@@ -3914,6 +4184,10 @@ EXCEPTION_UNBLOCKS = {
     "shortlist":       ExceptionType.RELAXED_SCORECARD.value,
     # ── Phase INT-4 ── the telephonic gate on interview scheduling (SOP step 5).
     "telephonic":      ExceptionType.TELEPHONIC_WAIVED.value,
+    # ── Phase 12 ── the background-verification gate on offer creation. Applies to both
+    # tracks, so this is also the route through for anybody who was already at Selected
+    # when the gate shipped.
+    "background":      ExceptionType.BACKGROUND_WAIVED.value,
 }
 
 
@@ -5163,3 +5437,111 @@ MAX_HOLIDAYS = 500
 AUDIT_CONFIG_UPDATED = "company configuration updated"
 AUDIT_CONFIG_RESET   = "company configuration reset to defaults"
 ENTITY_CONFIG = "configuration"
+
+
+# =============================================================
+# Phase 12 — API models for the client hiring track
+# =============================================================
+class JobRequestIn(BaseModel):
+    """What a client asks Sparsh to hire for.
+
+    Free text where the client's vocabulary is theirs (skills, location) and structured
+    where Sparsh has to act on it (positions, budget). Deliberately NOT a requisition: it
+    carries no department, no designation id and no approval fields, because those are
+    Sparsh's masters and Sparsh's governance, filled in at conversion.
+    """
+    job_title: str
+    positions: int = 1
+    required_skills: str
+    experience: Optional[str] = None
+    location: Optional[str] = None
+    budget_min: Optional[float] = None
+    budget_max: Optional[float] = None
+    job_description: Optional[str] = None
+    other_requirements: Optional[str] = None
+    target_date: Optional[str] = None            # YYYY-MM-DD
+    # Sparsh staff raising one ON BEHALF of a client name them here. A CLIENT user's own
+    # request ignores this and takes the client from their engagement -- a client cannot
+    # raise a request against somebody else's account.
+    client_id: Optional[str] = None
+
+
+class JobRequestUpdate(BaseModel):
+    job_title: Optional[str] = None
+    positions: Optional[int] = None
+    required_skills: Optional[str] = None
+    experience: Optional[str] = None
+    location: Optional[str] = None
+    budget_min: Optional[float] = None
+    budget_max: Optional[float] = None
+    job_description: Optional[str] = None
+    other_requirements: Optional[str] = None
+    target_date: Optional[str] = None
+
+
+class JobRequestAction(BaseModel):
+    action: str                                   # review | accept | decline
+    remarks: Optional[str] = None
+
+
+class JobRequestConvertIn(BaseModel):
+    """Turn an accepted request into a requisition. The masters Sparsh must supply are
+    exactly the ones a client cannot know: which department and designation this maps to
+    in OUR structure, and who will run it."""
+    department_id: str
+    designation_id: str
+    assignee_id: str
+    required_date: str
+    vacancy: Optional[int] = None                 # defaults to the request's positions
+    offering_ctc: Optional[float] = None
+
+
+class ShareIn(BaseModel):
+    """Share one candidate with one or more clients, in a single act.
+
+    `client_ids` is a list because the requirement is explicitly plural -- one CV, several
+    clients -- and doing it in one call is what makes the audit read as one decision
+    rather than five coincidences.
+    """
+    uk: str
+    client_ids: List[str] = Field(default_factory=list)
+    request_no: Optional[str] = None
+    note: Optional[str] = None                    # covering note shown to every client
+    # What the client is allowed to see. Contact details are withheld by default: a client
+    # who can email the candidate directly can hire them around us, and that is a
+    # commercial decision rather than a default.
+    include_contact: bool = False
+
+
+class ShareStatusIn(BaseModel):
+    status: str
+    remarks: Optional[str] = None
+
+
+class BackgroundCheckIn(BaseModel):
+    uk: str
+    check_type: BackgroundCheckType
+    status: BackgroundCheckStatus = BackgroundCheckStatus.PENDING
+    agency: Optional[str] = None                  # who performed it
+    reference: Optional[str] = None               # the vendor's own case number
+    findings: Optional[str] = None
+    completed_on: Optional[str] = None            # YYYY-MM-DD
+    document_id: Optional[str] = None             # the report, in the document register
+
+
+class BackgroundCheckUpdate(BaseModel):
+    status: Optional[BackgroundCheckStatus] = None
+    agency: Optional[str] = None
+    reference: Optional[str] = None
+    findings: Optional[str] = None
+    completed_on: Optional[str] = None
+    document_id: Optional[str] = None
+
+
+class BackgroundApproveIn(BaseModel):
+    """HR's sign-off that verification is complete. A typed signature, the same standard
+    probation confirmation and the retention purge hold, because this one unlocks an
+    offer."""
+    decision: str                                 # Approved | Rejected
+    signature: str
+    remarks: Optional[str] = None
