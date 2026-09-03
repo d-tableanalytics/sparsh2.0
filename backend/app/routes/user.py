@@ -8,7 +8,7 @@ from app.controllers.auth_controller import (
 from app.db.mongodb import get_collection
 from bson import ObjectId
 from datetime import datetime
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, field_validator
 from app.services.notification_service import send_user_updated_email, send_access_control_email
 from app.services.activity_log_service import log_activity
 
@@ -101,7 +101,27 @@ class UserEditRequest(BaseModel):
     designation: Optional[str] = None
     department: Optional[str] = None
     reporting_manager: Optional[str] = None  # admin Edit form must be able to save this
+    level: Optional[str] = None
+    leadership_level: Optional[str] = None  # "L4" | "L5" | "L6" | "L7"; gates Leadership Score enrolment
     permissions: Optional[dict] = None
+
+    @field_validator("leadership_level")
+    @classmethod
+    def _normalise_level(cls, v):
+        """Accept l4/L4 alike, and refuse anything that is not a real level.
+
+        Stored upper-cased because that is how `leadership_level_of()` compares it; a
+        lower-case value would read back as "no level" and silently drop the leader out of
+        every cycle.
+        """
+        if v is None:
+            return None
+        level = str(v).strip().upper()
+        if not level:
+            return ""
+        if level not in ("L4", "L5", "L6", "L7"):
+            raise ValueError("leadership_level must be L4, L5, L6, L7 or empty")
+        return level
 
 class UserStatusUpdate(BaseModel):
     is_active: bool
@@ -117,6 +137,7 @@ class SelfProfileUpdate(BaseModel):
     department: Optional[str] = None
     reporting_manager: Optional[str] = None
     joining_date: Optional[str] = None
+    level: Optional[str] = None
 
 # ─── Current User ───
 @router.get("/me", response_model=UserResponse)
@@ -238,7 +259,7 @@ async def update_user(user_id: str, updates: UserEditRequest, background_tasks: 
              raise HTTPException(status_code=403, detail="Not authorized")
 
         
-    update_data = {k: v for k, v in updates.model_dump().items() if v is not None}
+    update_data = updates.model_dump(exclude_unset=True)
     if not update_data:
         raise HTTPException(status_code=400, detail="No fields to update")
     

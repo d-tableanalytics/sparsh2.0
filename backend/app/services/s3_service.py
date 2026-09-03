@@ -3,13 +3,18 @@ import uuid
 from app.config.settings import settings
 from app.services import local_upload_store as local_store
 
+_s3_client = None
+
 def get_s3_client():
-    return boto3.client(
-        's3',
-        aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
-        aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
-        region_name=settings.AWS_REGION
-    )
+    global _s3_client
+    if _s3_client is None:
+        _s3_client = boto3.client(
+            's3',
+            aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
+            aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
+            region_name=settings.AWS_REGION
+        )
+    return _s3_client
 
 def get_signed_url(s3_key: str, expires_in: int = 3600, download_as: str = None) -> str:
     """

@@ -215,6 +215,26 @@ async def notify_users_instant(event_dict: dict, action: str, creator_name: str)
         except Exception as e:
             print(f"Conflict Notification Error: {e}")
 
+
+async def notify_todo_created(todo: dict, occurrences: int = 1):
+    """Confirm a new calendar To-do to the one person it belongs to.
+
+    This is the todo's OWN trigger, deliberately separate from notify_users_instant above:
+    that function resolves a session's attendee list and renders the Calendar session
+    templates, neither of which a private todo has — which is exactly why todos are excluded
+    there, and why they were left with no email at all. Recipient is the owner (`user_id`),
+    template is `todo_created`, and it fires once per create, so nothing double-sends.
+    """
+    try:
+        owner = await find_user_by_id(todo.get("user_id"))
+        if not owner or not owner.get("email"):
+            return
+        from app.services.notification_service import send_todo_created_email
+        await send_todo_created_email(owner, todo, occurrences=occurrences)
+    except Exception as e:
+        print(f"Todo notification error: {e}")
+
+
 def _days_in_month(year, month):
     return calendar.monthrange(year, month)[1]
 
@@ -331,6 +351,10 @@ async def validate_conflict(event_data: dict, current_user: dict = Depends(get_c
 # two sets of counts can never mix.
 TODO_TYPE = "todo"
 
+# Task & Delegation owns this type. A task with `repeat` set is a Recurring Checklist and
+# carries no deadline of its own — see `_apply_recurring_task_day_window`.
+TASK_TYPE = "task"
+
 TODO_PRIVATE_MESSAGE = "Todos are private — only their owner can view or change them."
 
 # A todo's lifecycle statuses. "schedule" is the stored value the UI labels "Pending"; a todo
@@ -367,6 +391,56 @@ def _iso_utc(dt):
 # means "no due time was picked" everywhere — the form leaves its time field blank for it, and
 # the edit form reads it back as blank.
 TODO_END_OF_DAY = (23, 59, 59)
+
+
+def is_recurring_task(doc: dict) -> bool:
+    """A repeating TASK — the Recurring Checklist. Not a one-time task, not a todo."""
+    return (doc.get("type") == TASK_TYPE
+            and str(doc.get("repeat") or "").strip() not in ("", "Does not repeat"))
+
+
+def _apply_recurring_task_day_window(doc: dict) -> None:
+    """A Recurring Checklist has NO deadline — each occurrence simply owns its own day.
+
+    A repeating task is a checklist item that comes back: the question is only "was it done
+    today", so picking a due date for it is meaningless — every occurrence would carry the
+    same one. Instead the occurrence is live for its whole calendar day and closes at
+    23:59:59 IST, the same day boundary a personal todo uses.
+
+    That instant is written to `end` rather than tracked separately, which is what keeps the
+    rest of Task & Delegation working untouched: overdue, completion timing, reminders and
+    the nightly rollover all read `end` and go on doing exactly what they did. Nothing
+    "expires" — an occurrence whose day has passed is simply Overdue, and stays open.
+
+    Any deadline the form sent is discarded here, so the rule cannot be bypassed by a stale
+    tab or a direct API call. Applied only to NEW or EDITED recurring tasks; existing rows
+    are left exactly as they are.
+    """
+    if not is_recurring_task(doc):
+        return
+    # `start` ONLY — never `end`. `end` at this point is the deadline being discarded, so
+    # falling back to it would put the day window on the deadline's date: a checklist
+    # started today but sent with a 30 Sep deadline would have opened on 30 Sep.
+    raw = doc.get("start")
+    base_ist = None
+    if raw:
+        try:
+            s = str(raw)
+            if len(s) <= 10:                      # date-only "YYYY-MM-DD"
+                base_ist = datetime.fromisoformat(s).replace(tzinfo=IST_TZ)
+            else:
+                dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+                base_ist = (dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)).astimezone(IST_TZ)
+        except Exception:
+            base_ist = None
+    if base_ist is None:
+        base_ist = datetime.now(timezone.utc).astimezone(IST_TZ)
+    close_ist = base_ist.replace(hour=23, minute=59, second=59, microsecond=0)
+    # Stored in UTC, which is the convention Task & Delegation reads `end` under:
+    # tasks._parse_iso drops the offset WITHOUT converting and compares against a naive
+    # utcnow(), so an IST-offset string here would read as 23:59:59 UTC and the occurrence
+    # would only turn Overdue at 5:29 AM IST the next morning. 23:59:59 IST is 18:29:59 UTC.
+    doc["end"] = close_ist.astimezone(timezone.utc).isoformat()
 
 
 def _apply_todo_due_end_of_day(doc: dict) -> None:
@@ -510,6 +584,9 @@ async def create_event(event: CalendarEventCreate, background_tasks: BackgroundT
         rank_bad = await get_rank_ineligible_assignees(current_user, event_dict.get("target_staff_id") or [])
         if rank_bad:
             raise HTTPException(status_code=403, detail=ASSIGN_RANK_DENIED_MESSAGE)
+        # A repeating task is a Recurring Checklist: no deadline, each occurrence owns its
+        # own day and closes at 23:59:59 IST. A one-time task keeps the deadline the user set.
+        _apply_recurring_task_day_window(event_dict)
     elif event_dict.get("type") == TODO_TYPE:
         # A todo is personal planning: every authenticated user may create their own, so the
         # generic `calendar.create` bit is not required (a staff member without it must still
@@ -614,7 +691,9 @@ async def create_event(event: CalendarEventCreate, background_tasks: BackgroundT
             ids = [str(_id) for _id in insert_res.inserted_ids]
             await log_activity(current_user, "Create Recurring", col_name,
                                f"Generated {len(ids)} todos for {event_dict['title']}")
-            # No notification: a todo is private and has no attendees by design.
+            # One mail for the whole series. The owner asked for a repeating todo once, so
+            # a message per generated date would be the duplicate notification to avoid.
+            background_tasks.add_task(notify_todo_created, {**event_dict, "id": ids[0]}, len(ids))
             message = f"Created {len(ids)} todos"
             if truncated:
                 message += " (series capped — shorten the Repeat End Date for the remaining dates)"
@@ -746,6 +825,10 @@ async def create_event(event: CalendarEventCreate, background_tasks: BackgroundT
         else:
             background_tasks.add_task(notify_task_event, "created", event_dict, current_user)
         background_tasks.add_task(sync_task_meta, event_dict.get("category"), event_dict.get("tags"), str(current_user["_id"]))
+    elif event_dict.get("type") == TODO_TYPE:
+        # notify_users_instant ignores todos by design, so this is the only place a calendar
+        # To-do can be announced — without it, creating one sent nothing at all.
+        background_tasks.add_task(notify_todo_created, event_dict, 1)
     else:
         background_tasks.add_task(notify_users_instant, event_dict, "created", creator_name)
     await log_activity(current_user, "Create Task" if is_task else "Create Event", col_name, f"{'Task' if is_task else 'Event'} created: {event_dict['title']}",
@@ -761,6 +844,21 @@ async def create_event(event: CalendarEventCreate, background_tasks: BackgroundT
             "actor_id": str(current_user["_id"]),
         })
     return {"id": str(result.inserted_id), "message": f"Event created in {col_name}"}
+
+async def _assignee_names(user_ids) -> str:
+    """"Asha, Ravi" for a set of user ids — the {{previous_assignee}} / {{new_assignee}}
+    placeholders on the reassignment templates.
+
+    A name that cannot be resolved is simply left out rather than printed as an id: a handover
+    mail naming a raw ObjectId is worse than one naming only the people it could identify.
+    """
+    names = []
+    for uid in sorted(user_ids or []):
+        user = await find_user_by_id(uid)
+        if user:
+            names.append(user.get("full_name") or user.get("first_name") or user.get("email") or "")
+    return ", ".join(n for n in names if n)
+
 
 @router.patch("/{event_id}")
 async def update_event(event_id: str, updates: dict, background_tasks: BackgroundTasks, current_user: dict = Depends(get_current_user)):
@@ -828,6 +926,17 @@ async def update_event(event_id: str, updates: dict, background_tasks: Backgroun
         updates["status"] = TODO_OVERDUE_STATUS if is_todo_overdue({**existing, **updates}) else TODO_PENDING_STATUS
         updates["completed_at"] = None
 
+    # ─── Switching a task to/from Repeat re-resolves its day window ───
+    # Turning Repeat ON drops whatever deadline the task had — a Recurring Checklist has
+    # none — and turning it OFF hands the deadline back to the user. Resolved from the
+    # merged document so it follows the edit, not the stale stored value.
+    if existing.get("type") == TASK_TYPE:
+        merged = {**existing, **updates}
+        if is_recurring_task(merged):
+            window = dict(merged)
+            _apply_recurring_task_day_window(window)
+            updates["end"] = window["end"]
+
     updates["updated_at"] = datetime.now(timezone.utc)
 
     # ─── Movement Logic ───
@@ -875,9 +984,28 @@ async def update_event(event_id: str, updates: dict, background_tasks: Backgroun
         old_assignees = {str(u) for u in (existing.get("target_staff_id") or []) if u}
         new_assignees = {str(u) for u in (projected.get("target_staff_id") or []) if u}
         added = new_assignees - old_assignees
+        removed = old_assignees - new_assignees
+        # A HANDOVER — someone taken off and someone else put on in the same edit — is not the
+        # same event as simply widening a task, and the manager doing it wants both halves
+        # announced. `reassigned` tells the new holder (and the assigner/watchers) that the
+        # work has MOVED; `assigned` is kept for the plain "another pair of hands" case, so an
+        # existing template for it never changes meaning.
+        handover = bool(added and removed)
         if added:
-            background_tasks.add_task(notify_task_event, "assigned", final_doc, current_user,
-                                      {"new_assignee_ids": list(added)})
+            background_tasks.add_task(notify_task_event,
+                                      "reassigned" if handover else "assigned",
+                                      final_doc, current_user,
+                                      {"new_assignee_ids": list(added),
+                                       "previous_assignee": await _assignee_names(removed),
+                                       "new_assignee": await _assignee_names(added)})
+        # Whoever LOST the task hears it from the unassigned trigger. They are no longer on the
+        # doc, so every other trigger's recipient set excludes them — without this they would
+        # simply watch the task vanish from their list with no explanation.
+        if removed:
+            background_tasks.add_task(notify_task_event, "unassigned", final_doc, current_user,
+                                      {"removed_assignee_ids": list(removed),
+                                       "previous_assignee": await _assignee_names(removed),
+                                       "new_assignee": await _assignee_names(added)})
         # Someone newly put in the loop (as a watcher) is being *added to the loop*, not merely
         # told the task changed — they get the In Loop Person trigger and are held back from the
         # generic update, so a single edit never sends one person two emails.
@@ -887,7 +1015,8 @@ async def update_event(event_id: str, updates: dict, background_tasks: Backgroun
         if added_watchers:
             background_tasks.add_task(notify_task_event, "in_loop_added", final_doc, current_user,
                                       {"new_watcher_ids": list(added_watchers)})
-        already_in_loop = recipients_for_event("updated", final_doc) - added - added_watchers
+        already_in_loop = (recipients_for_event("updated", final_doc)
+                           - added - removed - added_watchers)
         if already_in_loop:
             background_tasks.add_task(notify_task_event, "updated", final_doc, current_user,
                                       None, list(already_in_loop))

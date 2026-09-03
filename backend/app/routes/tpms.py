@@ -29,7 +29,8 @@ from app.db.mongodb import get_collection
 from app.models.tpms import (
     COLL_ACTIVITIES, COLL_REMINDER_RULES, COLL_SUCCESS_MEASURES, TPMS_DEPARTMENTS,
     COLL_DEPARTMENTS, COLL_REMINDER_LOGS, COLL_MAIL_TEMPLATES, COLL_WHATSAPP_TEMPLATES,
-    TPMS_EVENT_KIND, REQUEST_PENDING, STATUS_SCHEDULED, is_md_like,
+    COLL_META_TEMPLATES, TPMS_EVENT_KIND, REQUEST_PENDING, STATUS_SCHEDULED, is_md_like,
+    META_STATUS_APPROVED,
 )
 from bson import ObjectId
 from bson.errors import InvalidId
@@ -399,17 +400,25 @@ async def upsert_mail_template(payload: dict, current_user: dict = Depends(get_c
     return {"ok": True}
 
 
+# ═════════════════════════════════════════════════════════════
+# WhatsApp template library (/tpms/meta-templates/*)
+#
+# Moved to routes/meta_templates.py and mounted here unchanged, because Task Management ▸
+# Templates wires its notifications to the same WhatsApp Business Account and therefore the
+# same library. Mounting rather than re-implementing keeps every /tpms/meta-templates path
+# exactly where it was for the TPMS admin screen.
+# ═════════════════════════════════════════════════════════════
+from app.routes import meta_templates as _meta_templates  # noqa: E402
+
+router.include_router(_meta_templates.router)
+
+
 @router.get("/whatsapp-templates")
 async def list_whatsapp_templates(
     activity: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user),
 ):
-    """WhatsApp templates (activity × side × event). Admin only.
-
-    Read-only listing so the Active switch has something to act on — WhatsApp template
-    AUTHORING is unchanged and still out of scope here; rows are configured directly against
-    the Meta-approved template names.
-    """
+    """WhatsApp templates (activity × side × event). Admin only."""
     if (current_user.get("role") or "").lower() not in STAFF_ROLES:
         raise HTTPException(status_code=403, detail="Admin only")
     query = {}
@@ -418,6 +427,156 @@ async def list_whatsapp_templates(
     docs = await get_collection(COLL_WHATSAPP_TEMPLATES).find(query).to_list(500)
     docs.sort(key=lambda d: (d.get("activity") or "", d.get("event") or "", d.get("side") or ""))
     return {"templates": [_serialize(d) for d in docs]}
+
+
+async def _assert_meta_approved(name: str, language: str) -> str:
+    """Only a Meta-APPROVED template may be wired to a TPMS notification.
+
+    Checked against the local library first (the fast, normal path) and, when the name is not
+    APPROVED there, against the WABA itself — templates approved directly in WhatsApp Manager
+    before this screen existed are legitimate and must keep working.
+
+    Returns a note when the check could not be completed. Meta being unreachable must not stop
+    an admin editing notification wiring, so that case is allowed through and reported rather
+    than treated as a rejection."""
+    from app.services.meta_whatsapp_service import approved_template_names, is_configured
+
+    local = await get_collection(COLL_META_TEMPLATES).find_one({"name": name})
+    if local and str(local.get("status") or "").upper() == META_STATUS_APPROVED:
+        return ""
+    if not is_configured():
+        return ("WhatsApp template management is not configured, so approval could not be "
+                "verified. Saved anyway.")
+    remote = await approved_template_names()
+    if remote is None:
+        return "Meta could not be reached, so approval could not be verified. Saved anyway."
+    if name in remote:
+        return ""
+
+    if local:
+        raise HTTPException(
+            status_code=400,
+            detail=f"'{name}' is {str(local.get('status') or 'DRAFT').upper()} at Meta. Only "
+                   "approved templates can be used for TPMS WhatsApp notifications.")
+    raise HTTPException(
+        status_code=400,
+        detail=f"'{name}' is not an approved WhatsApp template on this business account. "
+               "Create it under WhatsApp Templates and submit it for approval first.")
+
+
+@router.post("/whatsapp-templates")
+async def upsert_whatsapp_template(payload: dict, current_user: dict = Depends(get_current_user)):
+    """Create/update a WhatsApp notification, keyed (activity, side, event). Admin only.
+
+    Points the notification at a Meta-APPROVED template and maps its parameters: `variables`
+    fills the body's {{1}}, {{2}}, … in order, `header_variables` the text header's variable,
+    and `button_variables` any variable URL button. Each entry is a data field (a build_map
+    key) — see GET /whatsapp-variables for the fields you can map.
+
+    An unapproved template is refused here rather than at send time, where the failure would be
+    a silent per-recipient error in the logs."""
+    if (current_user.get("role") or "").lower() not in STAFF_ROLES:
+        raise HTTPException(status_code=403, detail="Only Admin / Super Admin can manage templates.")
+    activity = str(payload.get("activity") or "").strip()
+    side = str(payload.get("side") or "").strip().lower()
+    event = str(payload.get("event") or "").strip().lower()
+    # Lowercased because Meta template names are lowercase-only (validate_template's
+    # ^[a-z0-9_]+$). Stored as typed, "Accountability" would pass nothing at Meta and fail the
+    # approval check below even though "accountability" is approved.
+    meta_name = str(payload.get("meta_template_name") or payload.get("name") or "").strip().lower()
+    if not (activity and side in {"staff", "company"} and event and meta_name):
+        raise HTTPException(status_code=400,
+                            detail="activity, side (staff|company), event and meta_template_name are required")
+
+    def _field_list(key):
+        raw = payload.get(key) or []
+        if not isinstance(raw, list):
+            raise HTTPException(status_code=400, detail=f"{key} must be a list of field names")
+        return [str(v).strip() for v in raw if str(v).strip()]
+
+    def _button_map(raw):
+        """[{index, field}] — `index` is the button's real position in the template. Meta
+        addresses button parameters positionally, and a variable URL button is rarely the
+        first button, so the position among *variable* buttons is not the same number."""
+        if raw in (None, ""):
+            return []
+        if not isinstance(raw, list):
+            raise HTTPException(status_code=400, detail="button_variables must be a list")
+        out = []
+        for i, item in enumerate(raw):
+            if isinstance(item, dict):
+                field, index = str(item.get("field") or "").strip(), item.get("index", i)
+            else:
+                field, index = str(item).strip(), i
+            if not field:
+                continue
+            try:
+                index = int(index)
+            except (TypeError, ValueError):
+                index = i
+            out.append({"index": index, "field": field})
+        return out
+
+    variables = _field_list("variables")
+    language = str(payload.get("language") or "en").strip() or "en"
+    note = await _assert_meta_approved(meta_name, language)
+
+    doc = {
+        "activity": activity, "side": side, "event": event,
+        "meta_template_name": meta_name, "name": meta_name,
+        "language": language,
+        "variables": variables,
+        "header_variables": _field_list("header_variables"),
+        "button_variables": _button_map(payload.get("button_variables")),
+        "active": bool(payload.get("active", True)),
+        "source": "admin_edit", "updated_at": datetime.utcnow(),
+    }
+    await get_collection(COLL_WHATSAPP_TEMPLATES).update_one(
+        {"activity": activity, "side": side, "event": event}, {"$set": doc}, upsert=True)
+    return {"ok": True, "note": note or None}
+
+
+# The data fields a WhatsApp template's {{1}}, {{2}}, … parameters can map to. These are exactly
+# the keys build_map produces, so a mapped field is guaranteed to resolve at send time.
+_WHATSAPP_VARIABLE_FIELDS = [
+    "Title", "Activity", "Calendar_Type", "Company_Name", "Event_Date", "Event_Time",
+    "Status", "Departments", "Comment", "Recipient_Name",
+    "Form_Link", "Form_Link_2", "Form_Links",
+]
+
+
+@router.get("/whatsapp-variables")
+async def whatsapp_variable_catalog(current_user: dict = Depends(get_current_user)):
+    """Fields available to map to a WhatsApp template's positional parameters. Admin only."""
+    if (current_user.get("role") or "").lower() not in STAFF_ROLES:
+        raise HTTPException(status_code=403, detail="Admin only")
+    return {"fields": _WHATSAPP_VARIABLE_FIELDS}
+
+
+@router.post("/whatsapp-templates/test")
+async def test_whatsapp_template(payload: dict, current_user: dict = Depends(get_current_user)):
+    """Send a smoke-test of one WhatsApp template to a phone number. Admin only. Each mapped
+    variable is filled with a visible [Field] placeholder so the layout can be eyeballed."""
+    if (current_user.get("role") or "").lower() not in STAFF_ROLES:
+        raise HTTPException(status_code=403, detail="Admin only")
+    phone = str(payload.get("phone") or "").strip()
+    template_id = str(payload.get("template_id") or "").strip()
+    if not phone or not template_id:
+        raise HTTPException(status_code=400, detail="phone and template_id are required")
+    try:
+        tpl = await get_collection(COLL_WHATSAPP_TEMPLATES).find_one({"_id": ObjectId(template_id)})
+    except (InvalidId, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid template id")
+    if not tpl:
+        raise HTTPException(status_code=404, detail="Template not found")
+    from app.services.tpms_notify_service import normalize_phone
+    from app.services.notification_service import send_whatsapp_template
+    params = [f"[{v}]" for v in (tpl.get("variables") or [])]
+    ok = await send_whatsapp_template(
+        normalize_phone(phone),
+        tpl.get("meta_template_name") or tpl.get("name"),
+        tpl.get("language") or "en", params, slug="tpms_whatsapp_test")
+    return {"ok": bool(ok)}
 
 
 # Both channels resolve their template with an `active: {"$ne": False}` filter at send time
@@ -871,10 +1030,24 @@ async def success_measures_sync(
     period: Optional[str] = Query(None, description="'YYYY-MM'; defaults to this month"),
     current_user: dict = Depends(get_current_user),
 ):
-    """Seed + recompute on demand. The same pair also runs daily in the scheduler."""
+    """One-click recalculate of everything the dashboards read — the ERP equivalent of running
+    the Apps Script syncAutoFeed + seedSuccessMeasures + syncSuccessMeasures triggers together.
+    Also runs daily in the scheduler."""
     if (current_user.get("role") or "").lower() not in STAFF_ROLES:
         raise HTTPException(status_code=403, detail="Admin only")
-    return await run_score_daily(period)
+    from app.services.tpms_escalation_service import sync_auto_feed
+    auto = await sync_auto_feed()            # create/close Action_Items + refresh Escalations
+    scores = await run_score_daily(period)   # seed + recompute Success_Measures
+    return {"ok": True, "auto_feed": auto, "scores": scores}
+
+
+@router.post("/success-measures/dedupe")
+async def success_measures_dedupe(current_user: dict = Depends(get_current_user)):
+    """Collapse duplicate success-measure rows to the latest per key. Admin-only, one-off."""
+    if (current_user.get("role") or "").lower() not in STAFF_ROLES:
+        raise HTTPException(status_code=403, detail="Admin only")
+    from app.services.tpms_score_service import dedupe_success_measures
+    return await dedupe_success_measures()
 
 
 # GET /form-mail-logs used to live here, backing the TPMS ▸ Form Mail Logs admin page. Both were

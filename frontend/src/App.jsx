@@ -34,6 +34,8 @@ import MyReports from './pages/MyReports';
 import ORMPage from './pages/ORM/ORMPage';
 import ORMSetup from './pages/ORM/ORMSetup';
 import ORMSheet from './pages/ORM/ORMSheet';
+import IRMPage from './pages/IRM/IRMPage';
+import IRMSetup from './pages/IRM/IRMSetup';
 import MediaLibrary from './pages/MediaLibrary';
 import TaskDashboard from './pages/TaskDashboard';
 import MyTasks from './pages/MyTasks';
@@ -43,6 +45,7 @@ import AllTasks from './pages/AllTasks';
 import TaskActivity from './pages/TaskActivity';
 import Holiday from './pages/Holiday';
 import DeletedTasks from './pages/DeletedTasks';
+import NotifyTemplateAdmin from './pages/notifications/NotifyTemplateAdmin';
 import ForgotPassword from './pages/ForgotPassword';
 import PrivateRoute from './components/common/PrivateRoute';
 import RequireTaskAccess from './components/common/RequireTaskAccess';
@@ -61,7 +64,15 @@ import ClientActivityCalendar from './features/tpms/admin/pages/ClientActivityCa
 import MailTemplateAdmin from './features/tpms/admin/pages/MailTemplateAdmin';
 import ReminderRuleAdmin from './features/tpms/admin/pages/ReminderRuleAdmin';
 import FormQuestionAdmin from './features/tpms/admin/pages/FormQuestionAdmin';
+import FormLinks from './features/tpms/admin/pages/FormLinks';
 import ReviewReport from './features/tpms/common/ReviewReport';
+// TPMS ▸ Leadership Score (additive — no existing TPMS route is changed).
+import LeadershipCycles from './features/tpms/admin/pages/LeadershipCycles';
+import LeadershipSubjects from './features/tpms/admin/pages/LeadershipSubjects';
+import LeadershipQuestions from './features/tpms/admin/pages/LeadershipQuestions';
+import LeadershipWhatsApp from './features/tpms/admin/pages/LeadershipWhatsApp';
+import LeadershipReport from './features/tpms/common/LeadershipReport';
+import LeadershipFormPage from './features/tpms/leadership/LeadershipFormPage';
 import { CompanyProvider } from './features/tpms/smops/CompanyContext';
 import SmopsDashboard from './features/tpms/smops/pages/SmopsDashboard';
 import HodActivity from './features/tpms/smops/pages/HodActivity';
@@ -175,6 +186,12 @@ const AppRoutes = () => {
           it back). The token selects WHICH of the four forms renders — the backend also checks
           the signed-in user is the assignment's respondent, so a forwarded link opens nothing. */}
       <Route path="/f/:token" element={<PrivateRoute><AssignedFormPage /></PrivateRoute>} />
+
+      {/* TPMS Leadership Score feedback form. Its own route so the existing /f/:token flow
+          for the four original forms is untouched. Same two-check security model: the
+          token must resolve to a live assignment AND the signed-in user must be its
+          feedback giver, so a forwarded link opens nothing. */}
+      <Route path="/lf/:token" element={<PrivateRoute><LeadershipFormPage /></PrivateRoute>} />
       <Route path="/forgot-password" element={<ForgotPassword />} />
 
       {/* ===========  PUBLIC HRMS (NO AUTHENTICATION)  ===========
@@ -218,13 +235,22 @@ const AppRoutes = () => {
       <Route path="/tasks/activity" element={<PrivateRoute><RequireTaskAccess><TaskActivity /></RequireTaskAccess></PrivateRoute>} />
       <Route path="/tasks/holiday" element={<PrivateRoute><RequireTaskAccess><Holiday /></RequireTaskAccess></PrivateRoute>} />
       <Route path="/tasks/deleted" element={<PrivateRoute><RequireTaskAccess><DeletedTasks /></RequireTaskAccess></PrivateRoute>} />
+      {/* Delegation & Checklist notification templates. Admin-gated inside the page itself,
+          the same way the TPMS templates screen is. */}
+      <Route path="/tasks/templates" element={<PrivateRoute><RequireTaskAccess><NotifyTemplateAdmin /></RequireTaskAccess></PrivateRoute>} />
       <Route path="/sessions" element={<PrivateRoute><LearnerSessions /></PrivateRoute>} />
       <Route path="/company-portal" element={<PrivateRoute><CompanyPortal /></PrivateRoute>} />
       <Route path="/my-reports" element={<PrivateRoute><MyReports /></PrivateRoute>} />
       <Route path="/orm" element={<PrivateRoute><OrmGuard><ORMPage /></OrmGuard></PrivateRoute>} />
       <Route path="/orm/setup" element={<PrivateRoute><OrmGuard><ORMSetup /></OrmGuard></PrivateRoute>} />
       <Route path="/orm/sheet" element={<PrivateRoute><OrmGuard><ORMSheet /></OrmGuard></PrivateRoute>} />
-      
+
+      {/* IRM — Individual Result Matrix. Scores are per person; the weightage setup is
+          role-guarded inside the page (staff + clientadmin). */}
+      <Route path="/irm" element={<PrivateRoute><IRMPage /></PrivateRoute>} />
+      <Route path="/irm/setup" element={<PrivateRoute><IRMSetup /></PrivateRoute>} />
+
+
       <Route path="/media" element={<PrivateRoute><MediaLibrary /></PrivateRoute>} />
 
       {/* Admin Side: Staff Management */}
@@ -258,7 +284,16 @@ const AppRoutes = () => {
         <Route path="mail-templates" element={<MailTemplateAdmin />} />
         <Route path="reminder-rules" element={<ReminderRuleAdmin />} />
         <Route path="form-questions" element={<FormQuestionAdmin />} />
+        <Route path="form-links"     element={<FormLinks />} />
         <Route path="reviews"        element={<ReviewReport />} />
+        {/* Leadership Score — additive; the routes above are unchanged. */}
+        <Route path="leadership"           element={<LeadershipCycles />} />
+        <Route path="leadership/subjects"  element={<LeadershipSubjects />} />
+        <Route path="leadership/questions" element={<LeadershipQuestions />} />
+        {/* Invitations go out over WhatsApp only, so the template that carries them and
+            the ledger of what happened to them live together. */}
+        <Route path="leadership/whatsapp"  element={<LeadershipWhatsApp />} />
+        <Route path="leadership/report"    element={<LeadershipReport />} />
       </Route>
 
       {/* TPMS ▸ SMOPS PANEL (any internal user) — rendered inside the main app layout.
@@ -271,6 +306,18 @@ const AppRoutes = () => {
         <Route path="hod-activity"  element={<HodActivity />} />
         <Route path="tasks"         element={<SmopsEmployeeTask />} />
         <Route path="reviews"       element={<ReviewReport title="Review Report" subtitle="Detailed evaluation and feedback for your companies." />} />
+        {/* Leadership Score for the client/SMOPS side. The report is self-scoping: HR sees
+            every enrolled leader, a manager their direct reports, a leader only their own. */}
+        <Route path="leadership"           element={<LeadershipReport />} />
+        <Route path="leadership/cycles"    element={<LeadershipCycles />} />
+        <Route path="leadership/subjects"  element={<LeadershipSubjects />} />
+        {/* HR and the MD reach the question bank to REVIEW and sign off a level — the
+            page itself keeps the wording and weightages editable by staff only. A cycle
+            cannot be closed until every level it scores has been signed off. */}
+        <Route path="leadership/questions" element={<LeadershipQuestions />} />
+        {/* Same scoping for the WhatsApp template. The delivery ledger on that page is
+            HR-only and the page hides it for anyone else — the API refuses it regardless. */}
+        <Route path="leadership/whatsapp"  element={<LeadershipWhatsApp />} />
       </Route>
 
 

@@ -15,6 +15,7 @@ calculations can aggregate freely without re-parsing:
   • yesno_checklist → one answer per (company_id, period, md_id, question_id)
 Success Measure computation itself is intentionally NOT implemented here.
 """
+import re
 from pydantic import BaseModel, Field, field_validator
 from typing import Optional, List, Dict
 from datetime import datetime
@@ -62,6 +63,12 @@ FORM_DEFINITIONS: Dict[str, dict] = {
         "description": "Monthly HOD ownership rating for each team member.",
         "available": True,
         "audience": "hod",
+        # Ownership is only rated for senior members: L4 and above on the client's L1–L12
+        # hierarchy (L1 = lower level … L12 = MD), so L3 and below never appear on this form.
+        # This is the ONE place the rule lives — the roster endpoints, the assigned-link
+        # payload, the submit validation and the client UI all read it from here, so
+        # changing the number here changes the form everywhere.
+        "min_level": 4,
         "scale": {"min": SCALE_MIN, "max": SCALE_MAX},
         "criteria": [
             {"code": "O1", "title": "Active Departmental Participation",
@@ -203,6 +210,76 @@ ACTIVITY_FORM_MAP = {
     "Culture Rating": ["culture"],
     "Implementation Update Feedback": ["implementation_feedback"],
 }
+
+
+# ─────────────────────────────────────────────────────────────
+# Hierarchy-level eligibility (`min_level` on a form definition).
+#
+# A member's hierarchy level is free text — "L1" … "L12" in practice (L1 = lower level …
+# L12 = MD), occasionally written "Level 4" or as a bare number. It is parsed rather than
+# compared as a string so "L10"/"L12" rank above "L4" instead of sorting before them.
+#
+# TWO fields carry it. `leadership_level` is the one the org-structure tooling writes and it
+# WINS wherever it is set; `level` is the original field and remains the fallback for users
+# that tooling has not touched. Reading only `level` made recently-levelled members
+# (leadership_level set, level still empty) invisible to a level-gated form, and disagreed
+# with the newer value for members who have both.
+#
+# Membership is resolved at READ time (every time the form is opened), never snapshotted onto
+# the assignment — so correcting someone's level is reflected on the already-generated form
+# the next time it is opened, with no need to re-issue the link.
+# ─────────────────────────────────────────────────────────────
+LEVEL_FIELDS = ("leadership_level", "level")
+
+
+def user_level(user: dict):
+    """The level to judge a member by: `leadership_level` when set, otherwise `level`.
+
+    Blank strings count as unset — a cleared field falls through to the next one rather than
+    reading as level 0.
+    """
+    for field in LEVEL_FIELDS:
+        value = (user or {}).get(field)
+        if value is not None and str(value).strip() != "":
+            return value
+    return None
+
+
+def member_level_number(value) -> int:
+    """Numeric hierarchy level of a user's `level` field. 0 = unset or unparseable.
+
+    0 sorts below every real level, so a member with no level set does not appear on a
+    level-restricted form until their level is filled in.
+    """
+    if value is None:
+        return 0
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, (int, float)):
+        return int(value)
+    m = re.search(r"\d+", str(value))
+    return int(m.group()) if m else 0
+
+
+def form_min_level(form_type: str) -> int:
+    """Lowest hierarchy level that appears on this form's roster. 0 = no restriction."""
+    try:
+        return int((FORM_DEFINITIONS.get(form_type) or {}).get("min_level") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def user_level_number(user: dict) -> int:
+    """A member's effective numeric hierarchy level across both level fields."""
+    return member_level_number(user_level(user))
+
+
+def eligible_by_level(users: List[dict], form_type: str) -> List[dict]:
+    """`users` narrowed to those meeting the form's `min_level`. Unrestricted forms pass through."""
+    min_level = form_min_level(form_type)
+    if not min_level:
+        return list(users)
+    return [u for u in users if user_level_number(u) >= min_level]
 
 
 def get_definition(form_type: str) -> Optional[dict]:

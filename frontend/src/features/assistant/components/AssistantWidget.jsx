@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import {  AnimatePresence , motion } from 'framer-motion';
+import React, { useState, useRef } from 'react';
+import { AnimatePresence, motion } from 'framer-motion';
 import { MessageCircle, X } from 'lucide-react';
 import { useAuth } from '../../../context/AuthContext';
 import ChatWindow from './ChatWindow';
@@ -7,28 +7,44 @@ import ChatWindow from './ChatWindow';
 /**
  * Global floating assistant. Mounted once in App.jsx; renders nothing when the
  * user is logged out, so it appears on every authenticated page but not /login.
+ * Supports free-flow drag & drop positioning anywhere on screen.
  */
 export default function AssistantWidget() {
   const { user } = useAuth();
   const [open, setOpen] = useState(false);
   const [expanded, setExpanded] = useState(false);
+  const isDraggingRef = useRef(false);
 
   if (!user) return null;
 
   return (
-    <>
+    <motion.div
+      drag
+      dragMomentum={false}
+      dragElastic={0.05}
+      onDragStart={() => {
+        isDraggingRef.current = true;
+      }}
+      onDragEnd={() => {
+        setTimeout(() => {
+          isDraggingRef.current = false;
+        }, 150);
+      }}
+      className="fixed bottom-6 right-6 z-[9999] flex flex-col items-end gap-3 cursor-grab active:cursor-grabbing select-none"
+      style={{ touchAction: 'none' }}
+    >
       <AnimatePresence>
         {open && (
           <motion.div
             key="assistant-panel"
-            initial={{ opacity: 0, y: 24, scale: 0.98 }}
-            animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, y: 24, scale: 0.98 }}
+            initial={{ opacity: 0, scale: 0.95, y: 10 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            exit={{ opacity: 0, scale: 0.95, y: 10 }}
             transition={{ duration: 0.18, ease: 'easeOut' }}
             className={
               expanded
-                ? 'fixed bottom-24 right-4 z-[70] h-[calc(100vh-8rem)] w-[min(900px,calc(100vw-2rem))]'
-                : 'fixed bottom-24 right-4 z-[70] h-[min(620px,calc(100vh-8rem))] w-[min(400px,calc(100vw-2rem))]'
+                ? 'h-[calc(100vh-8rem)] w-[min(900px,calc(100vw-2rem))] shadow-2xl rounded-2xl overflow-hidden'
+                : 'h-[min(620px,calc(100vh-8rem))] w-[min(400px,calc(100vw-2rem))] shadow-2xl rounded-2xl overflow-hidden'
             }
           >
             <ChatWindow
@@ -42,10 +58,15 @@ export default function AssistantWidget() {
 
       <motion.button
         type="button"
+        whileHover={{ scale: 1.05 }}
         whileTap={{ scale: 0.92 }}
-        onClick={() => setOpen((o) => !o)}
-        title={open ? 'Close assistant' : 'Ask Sparsh'}
-        className="fixed bottom-5 right-5 z-[70] flex h-14 w-14 items-center justify-center rounded-full bg-[var(--accent-indigo)] text-white shadow-xl transition hover:opacity-90"
+        onClick={() => {
+          if (!isDraggingRef.current) {
+            setOpen((o) => !o);
+          }
+        }}
+        title={open ? 'Close assistant (Drag to move)' : 'Ask Sparsh (Drag to move)'}
+        className="flex h-14 w-14 items-center justify-center rounded-full bg-[var(--accent-indigo)] text-white shadow-2xl hover:opacity-90 relative border-2 border-white/20"
       >
         <AnimatePresence mode="wait" initial={false}>
           <motion.span
@@ -59,6 +80,6 @@ export default function AssistantWidget() {
           </motion.span>
         </AnimatePresence>
       </motion.button>
-    </>
+    </motion.div>
   );
 }

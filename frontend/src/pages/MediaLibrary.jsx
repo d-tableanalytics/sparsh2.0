@@ -119,6 +119,19 @@ const MediaLibrary = () => {
   const [file, setFile] = useState(null);
   const [selectedFileCount, setSelectedFileCount] = useState(0);
   const [isDraggingFiles, setIsDraggingFiles] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  // Active upload tracking
+  const activeCount = queue.filter(q => q.status === 'uploading' || q.status === 'queued' || q.status === 'processing').length;
+  const isUploadDisabled = isSubmitting || activeCount > 0 || (!file && (!fileInputRef.current || !fileInputRef.current._filesToProcess?.length));
+
+  const totalBytes = queue.reduce((acc, q) => acc + (q.size || 0), 0);
+  const uploadedBytes = queue.reduce((acc, q) => {
+    if (q.status === 'completed') return acc + (q.size || 0);
+    if (q.progress && q.size) return acc + (q.size * (q.progress / 100));
+    return acc;
+  }, 0);
+  const overallProgress = totalBytes > 0 ? Math.round((uploadedBytes / totalBytes) * 100) : (queue.length > 0 && queue.every(q => q.status === 'completed') ? 100 : 0);
 
   // New folder, tag, and insights dashboard states
   const [currentFolder, setCurrentFolder] = useState('/');
@@ -230,93 +243,161 @@ const MediaLibrary = () => {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    const filesToUpload = fileInputRef.current?._filesToProcess || (file ? [file] : []);
-    
-    if (filesToUpload.length === 0) return showError('Please choose a file to upload');
-    if (filesToUpload.length === 1 && !form.name.trim()) return showError('Please enter a name');
+    if (isUploadDisabled) return;
 
-    const invalidFile = filesToUpload.find((selected) => validateFileForMediaType(selected, form.media_type));
-    if (invalidFile) return showError(validateFileForMediaType(invalidFile, form.media_type));
+    setIsSubmitting(true);
+    try {
+      const filesToUpload = fileInputRef.current?._filesToProcess || (file ? [file] : []);
+      
+      if (filesToUpload.length === 0) {
+        showError('Please choose a file to upload');
+        setIsSubmitting(false);
+        return;
+      }
+      if (filesToUpload.length === 1 && !form.name.trim()) {
+        showError('Please enter a name');
+        setIsSubmitting(false);
+        return;
+      }
 
-    const uploadBatch = [];
+      const invalidFile = filesToUpload.find((selected) => validateFileForMediaType(selected, form.media_type));
+      if (invalidFile) {
+        showError(validateFileForMediaType(invalidFile, form.media_type));
+        setIsSubmitting(false);
+        return;
+      }
 
-    for (let i = 0; i < filesToUpload.length; i++) {
-        let fileToProcess = filesToUpload[i];
-        // Only use the form name for the first file if multiple selected
-        const formToUpload = i === 0 ? { ...form } : { media_type: form.media_type, name: fileToProcess.name, description: '' };
+      const uploadBatch = [];
 
-        // Additive Duplicate Detection check before calling upload API
-        try {
-          const { data: dupCheck } = await api.get(`/media/ai/check-duplicate?filename=${encodeURIComponent(fileToProcess.name)}&size=${fileToProcess.size}`);
-          if (dupCheck.duplicate) {
-            const choice = await openConflictModal(fileToProcess, dupCheck.existing);
-            if (!choice || choice === 'skip') {
-              continue;
+      for (let i = 0; i < filesToUpload.length; i++) {
+          let fileToProcess = filesToUpload[i];
+          // Only use the form name for the first file if multiple selected
+          const formToUpload = i === 0 ? { ...form } : { media_type: form.media_type, name: fileToProcess.name, description: '' };
+
+          // Additive Duplicate Detection check before calling upload API
+          try {
+            const { data: dupCheck } = await api.get(`/media/ai/check-duplicate?filename=${encodeURIComponent(fileToProcess.name)}&size=${fileToProcess.size}`);
+            if (dupCheck.duplicate) {
+              const choice = await openConflictModal(fileToProcess, dupCheck.existing);
+              if (!choice || choice === 'skip') {
+                continue;
+              }
+
+              if (choice === 'replace') {
+                await api.delete(`/media/${dupCheck.existing.id}`);
+              } else {
+                const nameParts = fileToProcess.name.split('.');
+                const ext = nameParts.pop();
+                const baseName = nameParts.join('.');
+                const newFileName = `${baseName}_copy_${Date.now()}.${ext}`;
+                fileToProcess = new File([fileToProcess], newFileName, { type: fileToProcess.type });
+                formToUpload.name = `${formToUpload.name.trim()} (Copy)`;
+              }
             }
-
-            if (choice === 'replace') {
-              await api.delete(`/media/${dupCheck.existing.id}`);
-            } else {
-              const nameParts = fileToProcess.name.split('.');
-              const ext = nameParts.pop();
-              const baseName = nameParts.join('.');
-              const newFileName = `${baseName}_copy_${Date.now()}.${ext}`;
-              fileToProcess = new File([fileToProcess], newFileName, { type: fileToProcess.type });
-              formToUpload.name = `${formToUpload.name.trim()} (Copy)`;
-            }
+          } catch (err) {
+            console.warn("Duplicate check error:", err);
           }
-        } catch (err) {
-          console.warn("Duplicate check error:", err);
-        }
 
-        uploadBatch.push({ file: fileToProcess, form: formToUpload, currentFolder });
-    }
+          uploadBatch.push({ file: fileToProcess, form: formToUpload, currentFolder });
+      }
 
-    if (uploadBatch.length === 0) {
-      return showError('No files were added to the upload queue');
-    }
+      if (uploadBatch.length === 0) {
+        showError('No files were added to the upload queue');
+        setIsSubmitting(false);
+        return;
+      }
 
-    // Add the whole batch at once so the upload manager can start files in parallel.
-    try {
-      await enqueueFiles(uploadBatch);
-    } catch {
-      return;
-    }
-    
-    showSuccess(`${uploadBatch.length} file(s) added to the background upload queue.`);
+      // Add the whole batch at once so the upload manager can start files in parallel.
+      try {
+        await enqueueFiles(uploadBatch);
+      } catch {
+        setIsSubmitting(false);
+        return;
+      }
+      
+      showSuccess(`${uploadBatch.length} file(s) added to the background upload queue.`);
 
-    // Clear form state immediately for the next upload
-    setForm({ media_type: 'video', name: '', description: '' });
-    setFile(null);
-    setSelectedFileCount(0);
-    if (fileInputRef.current) {
-        fileInputRef.current.value = '';
-        fileInputRef.current._filesToProcess = [];
-    }
-  };
-
-
-  const handleDelete = async (id) => {
-    if (!window.confirm('Delete this file? This cannot be undone.')) return;
-    try {
-      await api.delete(`/media/${id}`);
-      setItems((prev) => prev.filter((i) => i._id !== id));
-      showSuccess('File deleted');
+      // Clear form state immediately for the next upload
+      setForm({ media_type: 'video', name: '', description: '' });
+      setFile(null);
+      setSelectedFileCount(0);
+      if (fileInputRef.current) {
+          fileInputRef.current.value = '';
+          fileInputRef.current._filesToProcess = [];
+      }
     } catch (err) {
-      showError(err.response?.data?.detail || 'Delete failed');
+      console.error(err);
+      showError('Upload submission failed');
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
-  const filtered = items.filter((i) => {
-    const matchesType = filter === 'all' || i.media_type === filter;
-    const matchesSearch =
-      !search.trim() ||
-      i.name?.toLowerCase().includes(search.toLowerCase()) ||
-      i.description?.toLowerCase().includes(search.toLowerCase());
-    const matchesFolder = (i.folder || '/') === currentFolder;
-    const matchesTag = !selectedTag || (i.tags && i.tags.includes(selectedTag));
-    return matchesType && matchesSearch && matchesFolder && matchesTag;
-  });
+
+  /* Delete is irreversible and the files are large re-uploads, so it asks first — but with
+     the file NAMED, which a browser confirm() cannot do. `deleteError` is shown inside the
+     dialog rather than as a toast: the toast would be hidden behind the overlay. */
+  const [pendingDelete, setPendingDelete] = useState(null);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState('');
+
+  const askDelete = (item) => {
+    setPendingDelete(item);
+    setDeleteError('');
+  };
+
+  const closeDeleteModal = () => {
+    if (deleting) return;          // never vanish mid-request
+    setPendingDelete(null);
+    setDeleteError('');
+  };
+
+  const handleDelete = async () => {
+    const item = pendingDelete;
+    if (!item) return;
+    setDeleting(true);
+    setDeleteError('');
+    try {
+      await api.delete(`/media/${item._id}`);
+      setItems((prev) => prev.filter((i) => i._id !== item._id));
+      showSuccess(`Deleted "${item.name || item.file_name || 'file'}"`);
+      setPendingDelete(null);
+    } catch (err) {
+      setDeleteError(err.response?.data?.detail || 'Delete failed. The file is still in your library.');
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!pendingDelete) return undefined;
+    const onKey = (e) => { if (e.key === 'Escape' && !deleting) closeDeleteModal(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [pendingDelete, deleting]);   // eslint-disable-line react-hooks/exhaustive-deps
+
+  /* Searching looks through the WHOLE library, not just the folder you happen to be
+     standing in. The folder filter used to be AND-ed with the search, so a video uploaded
+     into a folder was invisible from Root — you had to already know which folder it was in
+     to find it, which is the opposite of what a search bar is for. With a query typed the
+     folder scope is lifted; clear the query and you are back in the folder you were browsing.
+
+     Matching covers the data a video actually carries — name, description, file name, folder
+     and tags — so a partial file name or a tag finds it too. */
+  const q = search.trim().toLowerCase();
+  const searching = q.length > 0;
+
+  const filtered = items
+    .filter((i) => {
+      const matchesType = filter === 'all' || i.media_type === filter;
+      const matchesSearch = !searching || [
+        i.name, i.description, i.file_name, i.folder, ...(i.tags || []),
+      ].some((v) => String(v || '').toLowerCase().includes(q));
+      const matchesFolder = searching || (i.folder || '/') === currentFolder;
+      const matchesTag = !selectedTag || (i.tags && i.tags.includes(selectedTag));
+      return matchesType && matchesSearch && matchesFolder && matchesTag;
+    })
+    .sort((a, b) => new Date(b.created_at || b.updated_at || 0) - new Date(a.created_at || a.updated_at || 0));
 
   return (
     <div className="p-6 md:p-8 max-w-7xl mx-auto">
@@ -472,13 +553,61 @@ const MediaLibrary = () => {
               />
             </div>
 
+            {/* Batch Upload Progress Bar */}
+            {queue.length > 0 && (
+              <div className="p-3.5 bg-[var(--input-bg)] border border-[var(--border)] rounded-xl space-y-2.5">
+                <div className="flex items-center justify-between text-xs font-bold">
+                  <span className="text-[var(--text-main)] flex items-center gap-1.5 truncate">
+                    <UploadCloud size={14} className={activeCount > 0 ? "animate-bounce text-[var(--accent-indigo)]" : "text-emerald-500"} />
+                    {activeCount > 0 ? `Uploading (${queue.length - activeCount}/${queue.length})` : 'Upload Batch Complete'}
+                  </span>
+                  <span className="text-[var(--accent-indigo)] font-black">{overallProgress}%</span>
+                </div>
+
+                <div className="w-full bg-[var(--border)] rounded-full h-2 overflow-hidden">
+                  <div
+                    className="bg-[var(--accent-indigo)] h-full transition-all duration-300 ease-out"
+                    style={{ width: `${overallProgress}%` }}
+                  />
+                </div>
+
+                <div className="max-h-36 overflow-y-auto space-y-2 pt-1 scrollbar-thin pr-1">
+                  {queue.map((item) => (
+                    <div key={item.id} className="text-[11px] space-y-1">
+                      <div className="flex items-center justify-between font-semibold text-[var(--text-muted)]">
+                        <span className="truncate max-w-[170px]" title={item.name}>{item.name}</span>
+                        <span className={`font-bold ${item.status === 'completed' ? 'text-emerald-500' : item.status === 'failed' ? 'text-red-500' : 'text-[var(--accent-indigo)]'}`}>
+                          {item.status === 'completed' ? '✓ Done' : item.status === 'failed' ? 'Failed' : `${item.progress || 0}%`}
+                        </span>
+                      </div>
+                      <div className="w-full bg-[var(--border)] rounded-full h-1.5 overflow-hidden">
+                        <div
+                          className={`h-full transition-all duration-200 ${item.status === 'completed' ? 'bg-emerald-500' : item.status === 'failed' ? 'bg-red-500' : 'bg-[var(--accent-indigo)]'}`}
+                          style={{ width: `${item.status === 'completed' ? 100 : (item.progress || 0)}%` }}
+                        />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
             <button
               type="submit"
-              disabled={!file && (!fileInputRef.current || !fileInputRef.current._filesToProcess?.length)}
-              className="w-full flex items-center justify-center gap-2 py-2.5 rounded-lg bg-[var(--sidebar-active-bg)] text-[var(--sidebar-active-text)] font-semibold text-sm disabled:opacity-60 hover:opacity-90 transition-opacity"
+              disabled={isUploadDisabled}
+              className="w-full flex items-center justify-center gap-2 py-2.5 rounded-lg bg-[var(--sidebar-active-bg)] text-[var(--sidebar-active-text)] font-semibold text-sm disabled:opacity-50 hover:opacity-90 transition-all cursor-pointer disabled:cursor-not-allowed"
             >
-              <UploadCloud size={16} />
-              Upload
+              {isSubmitting || activeCount > 0 ? (
+                <>
+                  <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                  <span>Uploading ({activeCount} remaining)...</span>
+                </>
+              ) : (
+                <>
+                  <UploadCloud size={16} />
+                  <span>Upload</span>
+                </>
+              )}
             </button>
           </motion.form>
         </div>
@@ -491,7 +620,7 @@ const MediaLibrary = () => {
                 type="text"
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
-                placeholder="Search by name or description"
+                placeholder="Search all folders by name, tag or file"
                 className="w-full pl-9 pr-3 py-2.5 rounded-lg bg-[var(--input-bg)] border border-[var(--border)] text-[var(--text-main)] text-sm focus:outline-none focus:ring-2 focus:ring-[var(--sidebar-active-bg)]"
               />
             </div>
@@ -535,13 +664,17 @@ const MediaLibrary = () => {
               )}
             </div>
 
-            {currentFolder === '/' && folders.length > 0 && (
+            {searching ? (
+              <span className="text-[10px] text-[var(--sidebar-active-bg)] uppercase tracking-wider font-bold">
+                Searching all folders · {filtered.length} result{filtered.length === 1 ? '' : 's'}
+              </span>
+            ) : currentFolder === '/' && folders.length > 0 && (
               <span className="text-[10px] text-[var(--text-muted)] uppercase tracking-wider">{folders.length} Folder(s) available</span>
             )}
           </div>
 
-          {/* Virtual Folders Grid */}
-          {currentFolder === '/' && folders.length > 0 && (
+          {/* Virtual Folders Grid — hidden while searching, when the hits below span folders. */}
+          {!searching && currentFolder === '/' && folders.length > 0 && (
             <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
               {folders.map((f) => (
                 <div
@@ -568,7 +701,11 @@ const MediaLibrary = () => {
           ) : filtered.length === 0 ? (
             <div className="text-center py-20 text-[var(--text-muted)] border border-dashed border-[var(--border)] rounded-2xl">
               <Library size={32} className="mx-auto mb-3 opacity-50" />
-              <p className="text-sm">No files yet in this view.</p>
+              <p className="text-sm">
+                {searching
+                  ? `No media matches “${search.trim()}” anywhere in the library.`
+                  : 'No files yet in this view.'}
+              </p>
             </div>
           ) : (
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -601,6 +738,18 @@ const MediaLibrary = () => {
                         <p className="text-[11px] text-[var(--text-muted)] mt-1 truncate">
                           {item.file_name}{item.size ? ` · ${formatSize(item.size)}` : ''}
                         </p>
+                        {/* Where the hit lives — only worth showing when the results are not
+                            all from the folder already named in the breadcrumb. */}
+                        {searching && (item.folder || '/') !== '/' && (
+                          <button
+                            type="button"
+                            onClick={() => { setSearch(''); setCurrentFolder(item.folder); }}
+                            title="Open this folder"
+                            className="inline-flex items-center gap-1 mt-1.5 text-[9px] font-bold uppercase tracking-wider text-[var(--text-muted)] bg-[var(--input-bg)] border border-[var(--border)] px-1.5 py-0.5 rounded-full hover:text-[var(--text-main)] transition-colors"
+                          >
+                            <Folder size={9} /> {String(item.folder).replace(/^\//, '')}
+                          </button>
+                        )}
 
                         {/* Display custom tags */}
                         {item.tags && item.tags.length > 0 && (
@@ -627,7 +776,7 @@ const MediaLibrary = () => {
                             <Download size={13} /> Open
                           </a>
                           <button
-                            onClick={() => handleDelete(item._id)}
+                            onClick={() => askDelete(item)}
                             className="inline-flex items-center gap-1 text-xs font-semibold text-[var(--accent-red)]"
                           >
                             <Trash2 size={13} /> Delete
@@ -733,6 +882,95 @@ const MediaLibrary = () => {
                 >
                   <Copy size={16} />
                   Keep Both
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {pendingDelete && (
+          <motion.div
+            className="fixed inset-0 z-[80] flex items-center justify-center bg-black/45 px-4 py-6 backdrop-blur-sm"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            onClick={closeDeleteModal}
+          >
+            <motion.div
+              role="alertdialog"
+              aria-modal="true"
+              aria-labelledby="delete-media-title"
+              initial={{ opacity: 0, y: 18, scale: 0.98 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: 12, scale: 0.98 }}
+              transition={{ type: 'spring', stiffness: 420, damping: 34 }}
+              onClick={(e) => e.stopPropagation()}
+              className="w-full max-w-md overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--bg-card)] shadow-2xl"
+            >
+              <div className="flex items-start gap-4 border-b border-[var(--border)] px-6 py-5">
+                <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-red-100 text-[var(--accent-red)]">
+                  <Trash2 size={22} />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <h2 id="delete-media-title" className="text-lg font-bold text-[var(--text-main)]">
+                    Delete this file?
+                  </h2>
+                  <p className="mt-1 text-sm leading-5 text-[var(--text-muted)]">
+                    It is removed from the library for everyone. This cannot be undone.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={closeDeleteModal}
+                  disabled={deleting}
+                  className="rounded-lg p-1.5 text-[var(--text-muted)] transition-colors hover:bg-[var(--input-bg)] hover:text-[var(--text-main)] disabled:opacity-40"
+                  aria-label="Close delete dialog"
+                >
+                  <X size={18} />
+                </button>
+              </div>
+
+              <div className="px-6 py-5 space-y-3">
+                <div className="flex items-start gap-3 rounded-xl border border-[var(--border)] bg-[var(--input-bg)] px-4 py-3">
+                  <FileIcon size={16} className="mt-0.5 shrink-0 text-[var(--text-muted)]" />
+                  <div className="min-w-0">
+                    <p className="text-sm font-bold text-[var(--text-main)] break-words">
+                      {pendingDelete.name || pendingDelete.file_name}
+                    </p>
+                    <p className="mt-0.5 text-[11px] text-[var(--text-muted)] truncate">
+                      {pendingDelete.file_name}
+                      {pendingDelete.size ? ` · ${formatSize(pendingDelete.size)}` : ''}
+                    </p>
+                  </div>
+                </div>
+
+                {deleteError && (
+                  <div className="flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs font-semibold text-[var(--accent-red)]">
+                    <AlertTriangle size={14} className="mt-0.5 shrink-0" />
+                    <span>{deleteError}</span>
+                  </div>
+                )}
+              </div>
+
+              <div className="flex items-center justify-end gap-2 border-t border-[var(--border)] px-6 py-4">
+                <button
+                  type="button"
+                  onClick={closeDeleteModal}
+                  disabled={deleting}
+                  className="inline-flex items-center justify-center rounded-lg border border-[var(--border)] px-4 py-2.5 text-sm font-semibold text-[var(--text-muted)] transition-colors hover:bg-[var(--input-bg)] disabled:opacity-40"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={handleDelete}
+                  disabled={deleting}
+                  className="inline-flex items-center justify-center gap-2 rounded-lg bg-[var(--accent-red)] px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition-opacity hover:opacity-90 disabled:opacity-50"
+                >
+                  {deleting ? <Loader2 size={16} className="animate-spin" /> : <Trash2 size={16} />}
+                  {deleting ? 'Deleting…' : 'Delete File'}
                 </button>
               </div>
             </motion.div>

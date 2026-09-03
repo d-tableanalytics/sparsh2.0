@@ -6,15 +6,19 @@ import {
   Settings, Building2,
   MessageSquare, LogOut, Layers, Copy, Calendar, Sparkles, PlayCircle, Target, BarChart3, Library, X,
   Forward, Bell, Trash2, ChevronDown, Activity, CalendarDays, Database, LayoutGrid,
-  Gauge, GitBranch, AlertTriangle, UserCog, ListChecks, ScrollText, ClipboardList, ClipboardCheck,
-  FolderOpen, FileCog, CalendarClock, ShieldAlert,
+  Gauge, GitBranch, AlertTriangle, UserCog, ListChecks, ScrollText, UserCircle, ClipboardList, ClipboardCheck, Link2,
+  Award, SlidersHorizontal, FolderOpen, FileCog, CalendarClock, ShieldAlert,
   // ── Phase INT-2 ── the remaining Internal Recruitment SOP surfaces.
-  HeartHandshake, Bookmark, Scale, Mail, BookMarked, SlidersHorizontal
+  HeartHandshake, Bookmark, Scale, Mail, BookMarked,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { canAccessTaskManagement } from '../../utils/taskAccess';
 import { canAccessTpms } from '../../features/tpms/access';
 import { canAccessHrms } from '../../features/hrms/access';
+import {
+  canManage as canManageLeadershipCycle,
+  canManageTemplate as canManageLeadershipTemplate,
+} from '../../features/tpms/leadership/leadershipUtils';
 
 import logo1 from '../../assets/Sparsh Magic  Logo PNG1.png';
 import logo2 from '../../assets/Sparsh Magic  Logo PNG2.png';
@@ -47,6 +51,13 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
   // panel a user lands on: superadmin/admin → Admin panel, every other internal → SMOPS.
   const isTpmsAdminUser = ['superadmin', 'admin'].includes(user?.role);
   const isTpmsClientUser = ['clientadmin', 'clientuser'].includes(user?.role);
+  // Who may run a Leadership Score cycle from the client side — HR or the client admin.
+  // Reuses the same predicate the Leadership pages use, so the menu can never offer a page
+  // the page itself will refuse.
+  const canManageLeadership = canManageLeadershipCycle(user);
+  // Narrower than the line above: HR runs cycles and panels but does not author the
+  // WhatsApp template, so that one child is listed for administrators only.
+  const canWriteLeadershipTemplate = canManageLeadershipTemplate(user);
   // Client-side users share the SMOPS submodules (Dashboard, HOD Activity, Employee Task,
   // Review Report, My Profile).
   //
@@ -60,6 +71,26 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
     { name: 'HOD Activity', path: '/tpms/smops/hod-activity', icon: Activity },
     { name: 'Employee Task', path: '/tpms/smops/tasks', icon: ClipboardList },
     { name: 'Review Report', path: '/tpms/smops/reviews', icon: BarChart3 },
+    // Leadership Score — every client-side user gets the result view; the page itself
+    // scopes what they see (HR: all leaders, manager: direct reports, leader: their own).
+    //
+    // HR and the client admin also RUN the cycle, and those pages had no entry here at all —
+    // the routes existed and the API allowed them, so the work was reachable only by typing
+    // the URL. They are listed for whoever `canManage` admits (mirrors _can_manage on the
+    // server: HR + clientadmin), and no wider: choosing the feedback panel is HR-only, which
+    // the Leaders & Givers page and the API both still enforce on their own.
+    canManageLeadership
+      ? {
+        name: 'Leadership Score', path: '/tpms/smops/leadership', icon: Award,
+        children: [
+          { name: 'Results', path: '/tpms/smops/leadership', icon: BarChart3, end: true },
+          { name: 'Cycles', path: '/tpms/smops/leadership/cycles', icon: CalendarDays },
+          { name: 'Leaders & Givers', path: '/tpms/smops/leadership/subjects', icon: UserCog },
+          canWriteLeadershipTemplate
+            && { name: 'WhatsApp', path: '/tpms/smops/leadership/whatsapp', icon: MessageSquare },
+        ].filter(Boolean),
+      }
+      : { name: 'Leadership Score', path: '/tpms/smops/leadership', icon: Award, end: true },
   ];
   const tpmsSubmodules = isTpmsClientUser
     ? tpmsClientForms
@@ -75,9 +106,21 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
         { name: 'Employee Tasks', path: '/tpms/admin/employee-tasks', icon: ListChecks },
         { name: 'Activities', path: '/tpms/admin/activities', icon: ClipboardList },
         { name: 'Departments', path: '/tpms/admin/departments', icon: Building2 },
-        { name: 'Mail Templates', path: '/tpms/admin/mail-templates', icon: ScrollText },
+        { name: 'Templates', path: '/tpms/admin/mail-templates', icon: ScrollText },
         { name: 'Reminder Rules', path: '/tpms/admin/reminder-rules', icon: AlertTriangle },
         { name: 'Form Questions', path: '/tpms/admin/form-questions', icon: ClipboardCheck },
+        { name: 'Form Links', path: '/tpms/admin/form-links', icon: Link2 },
+        // Leadership Score (additive group — the entries above are unchanged).
+        {
+          name: 'Leadership Score', path: '/tpms/admin/leadership', icon: Award,
+          children: [
+            { name: 'Cycles', path: '/tpms/admin/leadership', icon: CalendarDays, end: true },
+            { name: 'Leaders & Givers', path: '/tpms/admin/leadership/subjects', icon: UserCog },
+            { name: 'Questions', path: '/tpms/admin/leadership/questions', icon: ClipboardCheck },
+            { name: 'WhatsApp', path: '/tpms/admin/leadership/whatsapp', icon: MessageSquare },
+            { name: 'Results', path: '/tpms/admin/leadership/report', icon: BarChart3 },
+          ],
+        },
         { name: 'Logs Report', path: '/tpms/admin/logs', icon: ScrollText },
         { name: 'Review Report', path: '/tpms/admin/reviews', icon: BarChart3 },
       ]
@@ -87,6 +130,7 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
         { name: 'HOD Activity', path: '/tpms/smops/hod-activity', icon: Activity },
         { name: 'Employee Task', path: '/tpms/smops/tasks', icon: ClipboardList },
         { name: 'Review Report', path: '/tpms/smops/reviews', icon: BarChart3 },
+        { name: 'Leadership Score', path: '/tpms/smops/leadership', icon: Award, end: true },
       ];
 
   // HRMS submodules. The masters (Departments / Designations) are only meaningful to users
@@ -176,6 +220,17 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
     { name: 'My Progress', path: '/my-reports', icon: BarChart3, roles: ['clientadmin', 'clientuser'] },
     { name: 'Organization Result Matrix (ORM)', path: '/orm', icon: Database, roles: ['clientadmin'], requiresOrm: true },
     { name: 'ORM Sheet', path: '/orm/sheet', icon: CheckSquare, roles: ['clientadmin', 'clientuser'], requiresOrm: true },
+    {
+      // IRM — Individual Result Matrix. Internal staff pick a company; a clientadmin sees
+      // their own roster, a clientuser only their own score. Setup (the weightage column)
+      // is internal staff only — client-side users read the weightages on the scoreboard.
+      name: 'Individual Result Matrix (IRM)', path: '/irm', icon: Gauge,
+      roles: ['superadmin', 'admin', 'clientadmin', 'clientuser'],
+      submodules: [
+        { name: 'Scores', path: '/irm', icon: Gauge, end: true },
+        { name: 'Setup', path: '/irm/setup', icon: SlidersHorizontal, roles: ['superadmin', 'admin'] },
+      ],
+    },
     { name: 'Team', path: '/team', icon: Users, roles: ['clientadmin'] },
     { name: 'Calendar', path: '/calendar', icon: Calendar, roles: ['superadmin', 'admin', 'clientadmin', 'clientuser', 'coach', 'staff'], permissionKey: 'calendar' },
     {
@@ -192,6 +247,7 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
         { name: 'Holiday', path: '/tasks/holiday', icon: CalendarDays, roles: ['superadmin', 'admin'] },
         { name: 'Activity', path: '/tasks/activity', icon: Activity },
         { name: 'Deleted Tasks', path: '/tasks/deleted', icon: Trash2 },
+        { name: 'Templates', path: '/tasks/templates', icon: ScrollText, roles: ['superadmin', 'admin'] },
       ],
     },
     {
