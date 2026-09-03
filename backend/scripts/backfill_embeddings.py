@@ -21,7 +21,6 @@ from app.db.mongodb import connect_to_mongo, close_mongo_connection, get_collect
 
 BATCH = 100
 
-
 async def _embed_existing(collection: str, label: str) -> None:
     col = get_collection(collection)
     total = await col.count_documents({"embedding": {"$exists": False}, "content": {"$exists": True}})

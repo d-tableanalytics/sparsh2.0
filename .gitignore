@@ -83,6 +83,12 @@ frontend/.vite/
 *.sqlite3
 *.db
 
+# Local upload fallback (TEMPORARY, see app/services/local_upload_store.py).
+# Holds candidate CVs and ID documents when S3 is unreachable — personal data that must
+# never reach the repository.
+backend/var/
+var/uploads/
+
 # SSH / private keys
 *.pem
 *.key

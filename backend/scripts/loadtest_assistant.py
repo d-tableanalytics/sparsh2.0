@@ -1,21 +1,3 @@
-"""Load test for the ERP AI Assistant.
-
-Drives concurrent /ask requests and captures p50/p95/p99 latency, error rates,
-HTTP 429 (rate-limit) behavior, and cache effectiveness (via /metrics before vs
-after). Standalone — uses `requests` + a thread pool (no extra deps).
-
-WARNING: every request hits OpenAI and costs money. Start small.
-
-Prerequisites:
-    * Backend running (staging) with valid OpenAI key + DB.
-    * A learner JWT. Optionally an admin JWT to read /metrics.
-
-Usage (PowerShell):
-    $env:ASSISTANT_BASE_URL  = "http://localhost:8000"
-    $env:ASSISTANT_TOKEN     = "<learner_jwt>"
-    $env:ASSISTANT_ADMIN_TOKEN = "<admin_jwt>"     # optional, for /metrics
-    python scripts/loadtest_assistant.py --concurrency 10 --total 200
-"""
 from __future__ import annotations
 
 import argparse
@@ -38,7 +20,6 @@ PROMPTS = [
     "What is polymorphism?",
     "How did I do on my last quiz?",
 ]
-
 
 def one_request(i: int):
     prompt = PROMPTS[i % len(PROMPTS)]

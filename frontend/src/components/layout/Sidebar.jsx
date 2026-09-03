@@ -4,14 +4,17 @@ import {  AnimatePresence , motion } from 'framer-motion';
 import {
   LayoutDashboard, Users, Briefcase, CheckSquare,
   Settings, Building2,
-  PieChart, MessageSquare, LogOut, Layers, Copy, Calendar, Sparkles, PlayCircle, Target, BarChart3, Library, X,
+  MessageSquare, LogOut, Layers, Copy, Calendar, Sparkles, PlayCircle, Target, BarChart3, Library, X,
   Forward, Bell, Trash2, ChevronDown, Activity, CalendarDays, Database, LayoutGrid,
   Gauge, GitBranch, AlertTriangle, UserCog, ListChecks, ScrollText, UserCircle, ClipboardList, ClipboardCheck, Link2,
-  Award, SlidersHorizontal
+  Award, SlidersHorizontal, FolderOpen, FileCog, CalendarClock, ShieldAlert,
+  // ── Phase INT-2 ── the remaining Internal Recruitment SOP surfaces.
+  HeartHandshake, Bookmark, Scale, Mail, BookMarked,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { canAccessTaskManagement } from '../../utils/taskAccess';
 import { canAccessTpms } from '../../features/tpms/access';
+import { canAccessHrms } from '../../features/hrms/access';
 import {
   canManage as canManageLeadershipCycle,
   canManageTemplate as canManageLeadershipTemplate,
@@ -130,6 +133,82 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
         { name: 'Leadership Score', path: '/tpms/smops/leadership', icon: Award, end: true },
       ];
 
+  // HRMS submodules. The masters (Departments / Designations) are only meaningful to users
+  // who can administer them, so they are hidden from an Implementor-level client user —
+  // the API would refuse those screens anyway (see utils/hrms_access.ROLE_CAPABILITIES).
+  const isHrmsAdminUser = ['superadmin', 'admin', 'clientadmin'].includes(user?.role)
+    || ['MD', 'HR'].includes((user?.governance_role || '').trim().toUpperCase());
+  // The hiring pipeline's ten stages are deliberately ABSENT here — they live in the
+  // workspace tab strip (features/hrms/common/HrmsWorkspaceBar). Listing them in both
+  // places put the same links twice and made HRMS the longest group in the sidebar.
+  //
+  // '/hrms' (Overview) is in neither nav by request. The route still resolves — HrmsGate
+  // redirects there — it simply has no menu entry pointing at it.
+  //
+  // What is left is the way IN plus the screens the strip does not carry. `Recruitment`
+  // stays highlighted anywhere in the workspace (see `match`), so the sidebar still shows
+  // which part of HRMS you are in after the tabs have moved you off the requisition screen.
+  // Phase 11-R appends `appointments` — it lives in the workspace tab strip, so it belongs
+  // here and NOT in hrmsSubmodules (the two lists must stay disjoint).
+  const HRMS_WORKSPACE = ['/hrms/requisitions', '/hrms/jd', '/hrms/postings', '/hrms/candidates',
+    '/hrms/screening', '/hrms/assessments', '/hrms/interviews', '/hrms/offers',
+    '/hrms/appointments', '/hrms/onboarding', '/hrms/reports',
+    // Internal track — hiring stages, so they live in the tab strip.
+    '/hrms/internal-requisitions', '/hrms/scorecards', '/hrms/reference-checks',
+    // Phase INT-2: the shortlisting committee is a hiring stage too — it sits between
+    // screening and the final interview, and gates `Selected`.
+    '/hrms/shortlist-reviews',
+    // Phase INT-4: the telephonic screen sits between CV screening and the panel, and
+    // gates interview scheduling. A stage, so it belongs in the strip — which means it
+    // belongs in THIS list, so "Recruitment" stays lit while somebody is on it.
+    '/hrms/telephonic-screening',
+    // Phase INT-10: the salary negotiation record is a hiring stage (SOP step 9).
+    '/hrms/negotiations'];
+
+  const hrmsSubmodules = [
+    { name: 'Dashboard', path: '/hrms/dashboard', icon: BarChart3 },
+    { name: 'Employees', path: '/hrms/employees', icon: Users },
+    // Recruitment is visible to everyone: any HRMS user may raise a requisition, and whoever
+    // raises one becomes its hiring manager (the module's documented design intent).
+    {
+      name: 'Recruitment', path: '/hrms/requisitions', icon: ClipboardList,
+      match: (p) => HRMS_WORKSPACE.some((r) => p === r || p.startsWith(`${r}/`)),
+    },
+    // Phase 11-R, Item 2 — the document register has ONE home, and it is the sidebar
+    // (it is not a hiring stage, so it is deliberately absent from the workspace strip).
+    { name: 'Documents', path: '/hrms/documents', icon: FolderOpen },
+    // ── Internal track ── GOVERNANCE, not pipeline: probation is a post-hire employment
+    // event and the exception log is a control surface. Both are deliberately absent from
+    // the workspace tab strip, which owns the hiring stages (the two lists stay disjoint).
+    { name: 'Probation', path: '/hrms/probation', icon: CalendarClock },
+    { name: 'Exceptions', path: '/hrms/exceptions', icon: ShieldAlert },
+    // ── Phase INT-2 ── governance and sourcing surfaces, deliberately NOT in the tab
+    // strip. Pre-boarding is post-offer engagement rather than a pipeline stage; the
+    // talent pool is a search across candidates rather than a step in one hire.
+    { name: 'Pre-boarding', path: '/hrms/preboarding', icon: HeartHandshake },
+    { name: 'Talent Pool', path: '/hrms/talent-pool', icon: Bookmark },
+    ...(isHrmsAdminUser ? [
+      { name: 'Departments', path: '/hrms/departments', icon: Building2 },
+      { name: 'Designations', path: '/hrms/designations', icon: Briefcase },
+      // No 'Clients' entry: a recruitment client IS a company, so it is maintained in the
+      // Companies section. A second master here is the duplication this replaced.
+      { name: 'Document Types', path: '/hrms/document-types', icon: FileCog },
+      { name: 'Sanctioned Strength', path: '/hrms/sanctioned-strength', icon: Gauge },
+      // ── Phase INT-2 ── admin-only masters. Salary bands are agreed annually with
+      // Finance; the communication templates carry the equal-opportunity and data-use
+      // wording; the policy register records which version of the SOP governs. The
+      // capability checks are the real control -- this list only decides visibility.
+      { name: 'Salary Bands', path: '/hrms/salary-bands', icon: Scale },
+      { name: 'Communications', path: '/hrms/communications', icon: Mail },
+      { name: 'Policy Register', path: '/hrms/policies', icon: BookMarked },
+      // ── Phase INT-5 ── the per-company rule set: SLA targets, retention periods,
+      // probation duration, reminder tiers and score bands. Governance, not a hiring
+      // stage, so it stays out of the workspace tab strip. The `settings.write`
+      // capability is the real control -- this list only decides visibility.
+      { name: 'HRMS Settings', path: '/hrms/settings', icon: SlidersHorizontal },
+    ] : []),
+  ];
+
   const links = [
     { name: 'Dashboard', path: '/', icon: LayoutDashboard, roles: ['superadmin', 'admin', 'clientadmin', 'clientuser', 'coach', 'staff'] },
     { name: 'Companies', path: '/companies', icon: Building2, roles: ['superadmin'], permissionKey: 'companies' },
@@ -177,6 +256,14 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
       name: 'TPMS', path: '/tpms', icon: LayoutGrid,
       roles: [], visibleFn: canAccessTpms,
       submodules: tpmsSubmodules,
+    },
+    {
+      // HRMS — opt-in per company (like TPMS). Visibility is governed by canAccessHrms
+      // rather than a role list: internal Sparsh staff always, client-side users only
+      // while their company's HRMS toggle is ON. See features/hrms/access.js.
+      name: 'HRMS', path: '/hrms', icon: UserCog,
+      roles: [], visibleFn: canAccessHrms,
+      submodules: hrmsSubmodules,
     },
     { name: 'Reports', path: '/admin/reports', icon: BarChart3, roles: ['superadmin', 'admin'] },
     { name: 'Company Settings', path: '/settings', icon: Settings, roles: ['clientadmin'] },
@@ -372,7 +459,13 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
                             to={sub.path}
                             end={sub.end}
                             onClick={() => { if (isMobile) setIsMobileOpen(false); }}
-                            className={subLinkClass}
+                            // `match` lets one entry own a whole set of routes (HRMS ▸
+                            // Recruitment covers the pipeline its tab strip navigates).
+                            // Items without one keep NavLink's own matching exactly.
+                            className={(state) => subLinkClass({
+                              isActive: state.isActive
+                                || (sub.match ? sub.match(location.pathname) : false),
+                            })}
                           >
                             <sub.icon size={15} />
                             <span className="tracking-tight font-medium">{sub.name}</span>

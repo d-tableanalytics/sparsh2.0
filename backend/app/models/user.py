@@ -68,5 +68,19 @@ class UserResponse(UserBase):
     # No leadership flag: Leadership Score follows `tpms_enabled`, so the client gates it
     # on the TPMS flag it already receives.
 
+    hrms_enabled: Optional[bool] = False  # Company-level HRMS module access (opt-in)
+
+    # The client-side governance ladder (MD > HR > HOD > IMPLEMENTOR) that
+    # auth_controller.client_rank already uses server-side. Declared here so it survives
+    # response_model serialisation and reaches the client — HRMS maps it to an HRMS role
+    # in features/hrms/access.js, and it must agree with the server's utils/hrms_access.py.
+    #
+    # Every module flag the frontend gates on has to be listed on this class. The same
+    # omission has now bitten twice: once as the original `delegation_enabled` bug above,
+    # and once when these two HRMS lines were dropped — which left `hrmsAccessState()`
+    # permanently 'unknown' and degraded every client user to the EMPLOYEE role. The
+    # regression guard in test_phase1_foundation.py asserts all of them stay declared.
+    governance_role: Optional[str] = None
+
     class Config:
         populate_by_name = True

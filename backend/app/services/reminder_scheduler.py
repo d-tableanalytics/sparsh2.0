@@ -130,6 +130,11 @@ async def start_reminder_scheduler():
     last_nudge_day = None
     nudge_state: dict = {}
     tpms_last_run: dict = {}
+    # HRMS keeps its run ledger in the database (see hrms_scheduler_service), because
+    # re-running a reminder job SENDS THE REMINDER AGAIN and process memory resets on every
+    # deploy. This dict is only a cache in front of that ledger, so the ticks after a job
+    # has already run today cost no database read.
+    hrms_last_run: dict = {}
     while True:
         try:
             await check_and_trigger_reminders()
@@ -185,6 +190,19 @@ async def start_reminder_scheduler():
             # TPMS scheduled sweeps, each at its own hour. Isolated so a TPMS failure can
             # never stop the reminder loop the rest of the ERP depends on.
             await run_tpms_scheduled_jobs(tpms_last_run)
+
+            # HRMS governance sweeps — the SLA breach detector, probation and pre-boarding
+            # reminders, the policy review notice and the retention purge PROPOSAL. Each
+            # gates itself on its own hour and its own ledger entry; `run_due_jobs` never
+            # raises, and is wrapped anyway so a change there can never reach this loop.
+            #
+            # The retention job proposes and never executes: redaction still requires an MD
+            # to approve the batch with a typed signature.
+            try:
+                from app.services.hrms_scheduler_service import run_due_jobs
+                await run_due_jobs(hrms_last_run)
+            except Exception as e:
+                logger.error(f"Error in HRMS scheduled jobs: {e}")
         except Exception as e:
             logger.error(f"Error in reminder scheduler: {e}")
         await asyncio.sleep(60)  # tick every minute; each job gates itself on the clock

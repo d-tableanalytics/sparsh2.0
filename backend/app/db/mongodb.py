@@ -41,7 +41,7 @@ async def connect_to_mongo():
 
         # Provision the TPMS Leadership Score collections (all new; nothing existing touched).
         await _ensure_leadership_collections(db_connection.db)
-
+        await _ensure_hrms_collections(db_connection.db)
         # Provision the IRM collections (weightage config + score snapshots).
         await _ensure_irm_collections(db_connection.db)
 
@@ -150,9 +150,59 @@ async def _ensure_leadership_collections(db):
             try:
                 await db[coll_name].create_index(keys, **options)
             except Exception as ie:
-                print(f"[WARN] Leadership index {options.get('name')} on {coll_name}: {ie}")
+      print(f"[WARN] Leadership index {options.get('name')} on {coll_name}: {ie}")
     except Exception as e:
-        print(f"[WARN] Could not provision TPMS Leadership Score collections: {e}")
+        print(f"[WARN] Could not provision TPMS Leadership Score collections: {e}")     
+async def _ensure_hrms_collections(db):
+    """Idempotently create the HRMS collections and their indexes from the single spec in
+    app.models.hrms.HRMS_INDEXES.
+
+    Deliberately mirrors _ensure_tpms_collections above, with one difference: HRMS seeds no
+    master data at startup. Its reference data (departments, designations, settings) is
+    company-scoped and created when a company is onboarded onto the module, so there is
+    nothing global to seed.
+
+    As with the TPMS/forms provisioners, failures here must never block startup — a bad
+    index should degrade the module, not take the whole ERP down."""
+    try:
+        from app.models.hrms import HRMS_INDEXES
+        existing = set(await db.list_collection_names())
+        for coll_name, keys, options in HRMS_INDEXES:                
+# MongoDB does NOT alter an existing index when its definition changes -- it
+                # refuses and leaves the old one in place. Swallowing that would make this
+                # provisioner a liar: the spec says one thing and the database does another,
+                # silently, forever.
+                #
+                # This is not hypothetical. Phase 9 made `uniq_user` sparse so that several
+                # onboarding-created employees (who have no `user_id` key at all) can
+                # coexist. Under the old non-sparse index Mongo treats a missing field as
+                # null, so the SECOND such employee at any company would fail with a
+                # duplicate-key error. Reconciling by name fixes those already deployed.
+                #
+                # TWO codes matter, and matching only one is how this fix failed the first
+                # time (Phase 10 Finding #1). Atlas raised 86, not 85:
+                #   85 IndexOptionsConflict  - same keys and name, different options
+                #   86 IndexKeySpecsConflict - same name, different keys or spec
+                # Both mean "the deployed index does not match the spec", which is exactly
+                # the case to reconcile. Matched on the numeric codes alone -- the message
+                # wording is not a stable contract, and the earlier attempt relied on it.
+                #
+                # Anything else (a genuine duplicate in the data, say) is still only
+                # reported, and nothing here blocks startup.
+                name = options.get("name")
+                conflict = getattr(ie, "code", None) in (85, 86)
+                if not (conflict and name and name != "_id_"):
+                    print(f"[WARN] HRMS index {name} on {coll_name}: {ie}")
+                    continue
+                try:
+                    await db[coll_name].drop_index(name)
+                    await db[coll_name].create_index(keys, **options)
+                    print(f"[INFO] HRMS index {name} on {coll_name} rebuilt to match the spec")
+                except Exception as re_ie:
+                    print(f"[WARN] HRMS index {name} on {coll_name} could not be "
+                          f"reconciled: {re_ie}")
+    except Exception as e:
+        print(f"[WARN] Could not provision HRMS collections: {e}")
 
 
 async def close_mongo_connection():

@@ -78,6 +78,60 @@ import SmopsDashboard from './features/tpms/smops/pages/SmopsDashboard';
 import HodActivity from './features/tpms/smops/pages/HodActivity';
 import SmopsEmployeeTask from './features/tpms/smops/pages/SmopsEmployeeTask';
 import TpmsGate, { RequireTpms } from './features/tpms/TpmsGate';
+import HrmsGate, { RequireHrms } from './features/hrms/HrmsGate';
+import HrmsHome from './features/hrms/HrmsHome';
+import HrmsWorkspace from './features/hrms/HrmsWorkspace';
+import EmployeeDirectory from './features/hrms/people/EmployeeDirectory';
+import EmployeeProfile from './features/hrms/people/EmployeeProfile';
+import MasterManager from './features/hrms/people/MasterManager';
+import RequisitionList from './features/hrms/recruitment/RequisitionList';
+import JdLibrary from './features/hrms/recruitment/JdLibrary';
+import PostingList from './features/hrms/recruitment/PostingList';
+import CandidatePipeline from './features/hrms/recruitment/CandidatePipeline';
+import ScreeningBoard from './features/hrms/recruitment/ScreeningBoard';
+import AssessmentBoard from './features/hrms/recruitment/AssessmentBoard';
+import InterviewBoard from './features/hrms/recruitment/InterviewBoard';
+import OfferBoard from './features/hrms/recruitment/OfferBoard';
+import OnboardingBoard from './features/hrms/recruitment/OnboardingBoard';
+// Eagerly imported, unlike ReportsDashboard below. These pages share almost every
+// dependency with the other (eager) HRMS routes and use NO chart library, so lazy-loading
+// them bought ~15 kB of deferral while forcing the bundler to re-draw its shared-chunk
+// boundaries -- which moved ~111 kB of existing code INTO the main chunk. Measured, see
+// PHASE_10_REPORT section 7.
+import RecruitmentDashboard from './features/hrms/analytics/RecruitmentDashboard';
+import RecruitmentReports from './features/hrms/analytics/RecruitmentReports';
+import ApplyPage from './pages/hrms/public/ApplyPage';
+import AssessPage from './pages/hrms/public/AssessPage';
+import OfferPage from './pages/hrms/public/OfferPage';
+import OnboardPage from './pages/hrms/public/OnboardPage';
+// ── Phase 11-R — recruitment review enhancements ──
+import DocumentCenter from './features/hrms/documents/DocumentCenter';
+import DocumentTypeManager from './features/hrms/documents/DocumentTypeManager';
+import AppointmentBoard from './features/hrms/recruitment/AppointmentBoard';
+import SanctionedStrength from './features/hrms/people/SanctionedStrength';
+// ── Internal (in-house) recruitment track ──
+import InternalRequisitionList from './features/hrms/internal/InternalRequisitionList';
+import ScorecardLibrary from './features/hrms/internal/ScorecardLibrary';
+import ReferenceCheckBoard from './features/hrms/internal/ReferenceCheckBoard';
+import TelephonicBoard from './features/hrms/internal/TelephonicBoard';
+import NegotiationBoard from './features/hrms/internal/NegotiationBoard';
+// Phase 12 - the client hiring track.
+import JobRequestBoard from './features/hrms/client/JobRequestBoard';
+import CvSharingBoard from './features/hrms/client/CvSharingBoard';
+import BackgroundCheckBoard from './features/hrms/client/BackgroundCheckBoard';
+import SharedCandidates from './features/hrms/client/SharedCandidates';
+import HrmsSettings from './features/hrms/internal/HrmsSettings';
+import ProbationBoard from './features/hrms/internal/ProbationBoard';
+import ExceptionLog from './features/hrms/internal/ExceptionLog';
+import AppointmentPage from './pages/hrms/public/AppointmentPage';
+// ── Phase INT-2 — the remaining Internal Recruitment SOP controls ──
+import ShortlistCommittee from './features/hrms/internal/ShortlistCommittee';
+import PreboardingBoard from './features/hrms/internal/PreboardingBoard';
+import TalentPool from './features/hrms/internal/TalentPool';
+import CommTemplates from './features/hrms/internal/CommTemplates';
+import PolicyRegister from './features/hrms/internal/PolicyRegister';
+import SalaryBandManager from './features/hrms/people/SalaryBandManager';
+import SurveyPage from './pages/hrms/public/SurveyPage';
 import TpmsCalendar from './features/tpms/calendar/TpmsCalendar';
 import AssignedFormPage from './features/tpms/forms/AssignedFormPage';
 import ClientDashboard from './features/tpms/client/ClientDashboard';
@@ -139,6 +193,22 @@ const AppRoutes = () => {
           feedback giver, so a forwarded link opens nothing. */}
       <Route path="/lf/:token" element={<PrivateRoute><LeadershipFormPage /></PrivateRoute>} />
       <Route path="/forgot-password" element={<ForgotPassword />} />
+
+      {/* ===========  PUBLIC HRMS (NO AUTHENTICATION)  ===========
+          Candidate-facing. Mounted OUTSIDE PrivateRoute deliberately — wrapping these would
+          redirect every applicant to /login. They render their own standalone chrome: an
+          applicant is not a user of this ERP and must never see its navigation or modules. */}
+      <Route path="/apply/:code" element={<ApplyPage />} />
+      <Route path="/assess/:code" element={<AssessPage />} />
+      <Route path="/offer/:code" element={<OfferPage />} />
+      <Route path="/onboard/:code" element={<OnboardPage />} />
+      {/* Phase 11-R: the appointment letter a candidate acknowledges. Same anonymous
+          treatment as the four above — an applicant is not a user of this ERP. */}
+      <Route path="/appointment/:code" element={<AppointmentPage />} />
+      {/* Phase INT-2: the new-hire experience survey. Anonymous in a stronger sense than
+          the five above — the page is not told who the respondent is, because a survey that
+          greets you by name is one you can screenshot beside your answers. */}
+      <Route path="/survey/:code" element={<SurveyPage />} />
 
       <Route path="/" element={<PrivateRoute><Dashboard /></PrivateRoute>} />
       <Route path="/dashboard" element={<Navigate to="/" />} />
@@ -250,6 +320,73 @@ const AppRoutes = () => {
         <Route path="leadership/whatsapp"  element={<LeadershipWhatsApp />} />
       </Route>
 
+
+      {/* ===================  HRMS  ===================
+          Opt-in per company. `/hrms/entry` is the dynamic gate (role-routing lands in a
+          later phase); the panel routes are guarded by RequireHrms, which also supplies
+          the module's capability context to everything inside. */}
+      <Route path="/hrms/entry" element={<PrivateRoute><HrmsGate /></PrivateRoute>} />
+      <Route path="/hrms" element={<PrivateRoute><RequireHrms><HrmsWorkspace /></RequireHrms></PrivateRoute>}>
+        <Route index element={<HrmsHome />} />
+        {/* People — employee master, departments and designations (Phase 2). */}
+        <Route path="employees"          element={<EmployeeDirectory />} />
+        <Route path="employees/:userId"  element={<EmployeeProfile />} />
+        <Route path="departments"        element={<MasterManager kind="department" />} />
+        <Route path="designations"       element={<MasterManager kind="designation" />} />
+        {/* Recruitment — requisitions + their co-approved job descriptions (Phase 3). */}
+        <Route path="requisitions"       element={<RequisitionList />} />
+        <Route path="jd"                 element={<JdLibrary />} />
+        <Route path="postings"           element={<PostingList />} />
+        {/* Pipeline — candidates, triage and the audit-trail journey (Phase 5). */}
+        <Route path="candidates"         element={<CandidatePipeline />} />
+        <Route path="screening"          element={<ScreeningBoard />} />
+        <Route path="assessments"        element={<AssessmentBoard />} />
+        <Route path="interviews"         element={<InterviewBoard />} />
+        <Route path="offers"             element={<OfferBoard />} />
+        <Route path="onboarding"         element={<OnboardingBoard />} />
+        <Route path="dashboard"          element={<RecruitmentDashboard />} />
+        <Route path="reports"            element={<RecruitmentReports />} />
+        {/* Phase 11-R — recruitment review enhancements (Items 2-4, 7). */}
+        <Route path="documents"          element={<DocumentCenter />} />
+        <Route path="document-types"     element={<DocumentTypeManager />} />
+        <Route path="appointments"       element={<AppointmentBoard />} />
+        {/* No /hrms/clients: clients are the ERP's companies, managed at /companies. */}
+        <Route path="sanctioned-strength" element={<SanctionedStrength />} />
+        {/* ── Internal track ── Sparsh Magic's own hiring, governed by the Internal
+            Recruitment SOP. The pipeline screens sit in the workspace tab strip; the
+            governance ones (probation, exceptions) sit in the sidebar. */}
+        <Route path="internal-requisitions" element={<InternalRequisitionList />} />
+        <Route path="scorecards"           element={<ScorecardLibrary />} />
+        <Route path="reference-checks"     element={<ReferenceCheckBoard />} />
+        {/* Phase INT-4 — the SOP's step 5 telephonic screen, between CV screening and
+            the panel. A hiring stage, so it lives in the workspace tab strip. */}
+        <Route path="telephonic-screening" element={<TelephonicBoard />} />
+        {/* Phase INT-10 — the SOP's step 9 salary negotiation record. A hiring stage, so
+            it lives in the workspace tab strip. */}
+        <Route path="negotiations"         element={<NegotiationBoard />} />
+        {/* Phase 12 - the client hiring track. `job-requests` and `shared-candidates`
+            serve BOTH audiences: the server narrows a client-scoped user to their own
+            rows, so one route is correct for both and there is no second screen to keep
+            in step. */}
+        <Route path="job-requests"         element={<JobRequestBoard />} />
+        <Route path="cv-sharing"           element={<CvSharingBoard />} />
+        <Route path="background-checks"    element={<BackgroundCheckBoard />} />
+        <Route path="shared-candidates"    element={<SharedCandidates />} />
+        <Route path="probation"            element={<ProbationBoard />} />
+        <Route path="exceptions"           element={<ExceptionLog />} />
+        {/* ── Phase INT-2 ── the remaining SOP controls. `shortlist-reviews` is a hiring
+            stage and lives in the workspace tab strip; the rest are governance and live in
+            the sidebar. The two navigations stay disjoint. */}
+        <Route path="shortlist-reviews"    element={<ShortlistCommittee />} />
+        <Route path="preboarding"          element={<PreboardingBoard />} />
+        <Route path="talent-pool"          element={<TalentPool />} />
+        <Route path="salary-bands"         element={<SalaryBandManager />} />
+        <Route path="communications"       element={<CommTemplates />} />
+        <Route path="policies"             element={<PolicyRegister />} />
+        {/* Phase INT-5 — the per-company rule set. Governance, not a hiring stage, so
+            it lives in the sidebar and NOT in the workspace tab strip. */}
+        <Route path="settings"             element={<HrmsSettings />} />
+      </Route>
 
       <Route path="/admin/settings" element={<Navigate to="/settings" />} />
       <Route path="/settings" element={<PrivateRoute><SettingsPage /></PrivateRoute>} />

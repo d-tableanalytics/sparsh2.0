@@ -15,6 +15,8 @@ import {
 import { useAuth } from '../context/AuthContext';
 import ORMReportTab from '../components/company/ORMReportTab';
 import ORMTargetRequestsTab from '../components/company/ORMTargetRequestsTab';
+import { setHrmsAccess } from '../services/hrmsApi';
+import { canToggleHrms } from '../features/hrms/access';
 import {
   BarChart, Bar, LineChart, Line, PieChart, Pie, Cell,
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
@@ -245,6 +247,9 @@ const CompanyDetails = () => {
   // TPMS toggle is Admin / Super Admin only — deliberately stricter than the ORM
   // toggle, which also accepts a companies.update permission grant.
   const isTpmsToggler = ['superadmin', 'admin'].includes(user?.role);
+  // HRMS follows the TPMS rule (Admin / Super Admin only). Mirrors the server-side check
+  // in routes/company.py update_company_hrms_access.
+  const isHrmsToggler = canToggleHrms(user);
 
   const fetchData = async () => {
     try {
@@ -379,6 +384,19 @@ const CompanyDetails = () => {
       showSuccess(`Task Management ${next ? 'enabled' : 'disabled'} for ${company.name}`);
     } catch (err) {
       showError(err.response?.data?.detail || 'Failed to update Task Management access');
+    }
+  };
+
+  // HRMS — opt-in per company; absent flag means OFF. Admin / Super Admin only (stricter
+  // than the ORM toggle) because HRMS holds payroll and personal data.
+  const handleToggleHrms = async () => {
+    const next = !(company.hrms_enabled ?? false);
+    try {
+      await setHrmsAccess(companyId, next);
+      setCompany(prev => ({ ...prev, hrms_enabled: next }));
+      showSuccess(`HRMS ${next ? 'enabled' : 'disabled'} for ${company.name}`);
+    } catch (err) {
+      showError(err.response?.data?.detail || 'Failed to update HRMS access');
     }
   };
 
@@ -519,6 +537,16 @@ const CompanyDetails = () => {
               enabled={company.delegation_enabled ?? false}
               onToggle={handleToggleDelegation}
               title="Toggle whether this company can access the Task Management module"
+            />
+          )}
+          {/* HRMS module access. Off by default — a company has no HRMS until switched on
+              here. Admin / Super Admin only, matching the TPMS toggle. */}
+          {isHrmsToggler && (
+            <ModuleToggle
+              label="HRMS"
+              enabled={company.hrms_enabled ?? false}
+              onToggle={handleToggleHrms}
+              title="Toggle whether this company can access the HRMS module"
             />
           )}
           {canUpdate && (

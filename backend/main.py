@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
 from app.db.mongodb import connect_to_mongo, close_mongo_connection
-from app.routes import auth, user, company, batch, quarter, session_template, calendar_events, settings, gpt, dashboard, notification, media, media_ai, media_chunk, tasks, holiday, group, task_meta, reports, orm, orm_sheet, orm_requests, forms, tpms, leadership, irm, meta_templates, notify_templates
+from app.routes import auth, user, company, batch, quarter, session_template, calendar_events, settings, gpt, dashboard, notification, media, media_ai, media_chunk, tasks, holiday, group, task_meta, reports, orm, orm_sheet, orm_requests, forms, tpms, leadership, irm, meta_templates, notify_templates, hrms, hrms_public, local_files
 from app.assistant.router import router as assistant_router
 
 from app.services.reminder_scheduler import start_reminder_scheduler
@@ -66,6 +66,10 @@ app.include_router(orm_sheet.router, prefix="/api")
 app.include_router(orm_requests.router, prefix="/api")
 app.include_router(forms.router, prefix="/api")
 app.include_router(tpms.router, prefix="/api")
+app.include_router(hrms.router, prefix="/api")
+# PUBLIC (unauthenticated) HRMS routes - candidate-facing. See routes/hrms_public.py for
+# the rules that apply to anything mounted here.
+app.include_router(hrms_public.router, prefix="/api")
 # TPMS ▸ Leadership Score. Additive: owns its own tpms_leadership_* collections and does
 # not alter any existing TPMS route or stored data.
 app.include_router(leadership.router, prefix="/api")
@@ -82,6 +86,10 @@ app.include_router(notify_templates.router, prefix="/api")
 app.include_router(media.router, prefix="/api")
 app.include_router(media_ai.router, prefix="/api")
 app.include_router(media_chunk.router, prefix="/api")
+# TEMPORARY: serves files written by the local upload fallback while S3 is unreachable.
+# Inert unless LOCAL_UPLOAD_FALLBACK is on and `local/` keys exist. Remove this line, the
+# route and services/local_upload_store.py once the migration script reports nothing left.
+app.include_router(local_files.router, prefix="/api")
 app.include_router(assistant_router, prefix="/api")
 
 @app.get("/")
