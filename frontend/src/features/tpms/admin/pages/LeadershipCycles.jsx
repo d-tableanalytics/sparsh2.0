@@ -429,8 +429,9 @@ const QuorumConfirmModal = ({ report, onClose, onExtend, onConfirm }) => {
           )}
 
           <p className="text-[12.5px] font-medium text-[var(--text-muted)]">
-            Re-open the cycle to extend the window and chase the missing responses, or freeze
-            these scores as they stand. A freeze can still be undone until you publish.
+            Push the Close date back to keep collecting and chase the missing responses,
+            or freeze these scores as they stand. A freeze can still be undone until you
+            publish.
           </p>
 
           {err && (
@@ -966,9 +967,6 @@ const LeadershipCycles = () => {
     await reload();
   };
 
-  // The other way out of a quorum shortfall — extend the window rather than freeze a thin
-  // result. Same transition as the Re-open button on a closed row, offered where the
-  // shortfall is actually being read.
   // The moment a leader can first see their own score. Irreversible for collection: once
   // people have been shown a number, changing the inputs behind it would rewrite a
   // conversation that has already happened.
