@@ -48,7 +48,7 @@ from pymongo.errors import DuplicateKeyError
 from app.db.mongodb import get_collection
 from app.models.hrms import (
     AUDIT_SHARE_CREATED, AUDIT_SHARE_CV_OPENED, AUDIT_SHARE_STATUS,
-    AUDIT_SHARE_WITHDRAWN,
+    AUDIT_SHARE_RECORDING_OPENED, AUDIT_SHARE_REPORT_OPENED, AUDIT_SHARE_WITHDRAWN,
     COLL_CANDIDATE_SHARES, COLL_CANDIDATES, COLL_REQUISITIONS, ENTITY_CANDIDATE,
     SHARE_CLIENT_SETTABLE, SHARE_TRANSITIONS, ShareStatus, share_can_transition,
 )
@@ -113,6 +113,18 @@ def build_snapshot(candidate: dict, *, include_contact: bool = False) -> dict:
         "resume_key": (candidate.get("resume") or {}).get("key"),
         "resume_name": (candidate.get("resume") or {}).get("name"),
     }
+    # ── The interview record (brief §10) ──
+    # Pointers only, on the same rule as the CV above: a key, never a URL. What a client may
+    # DO with each differs and is enforced at the read routes, not here -- the report is
+    # viewable, the recording is watchable, and neither is downloadable.
+    #
+    # These keys are also the one part of a snapshot that is refreshed after the fact, by
+    # hrms_interview_media_service._refresh_shares. The reason is the real ordering of the
+    # process: the CV goes out first and the interview happens afterwards, so a snapshot
+    # frozen at share time would carry an interview record for almost nobody. That refresh
+    # writes exactly these keys and nothing else -- see the note above it.
+    from app.services.hrms_interview_media_service import interview_snapshot
+    snapshot.update(interview_snapshot(candidate))
     if include_contact:
         snapshot["can_email"] = candidate.get("can_email")
         snapshot["can_contact"] = candidate.get("can_contact")
@@ -150,7 +162,39 @@ def _client_view(doc: dict) -> dict:
     # which re-checks that this candidate was shared with them.
     snapshot["has_cv"] = bool(snapshot.pop("resume_key", None))
     snapshot.pop("resume_name", None)
+
+    # The interview record, reduced the same way and for the same reason. The client learns
+    # THAT there is a report and a recording; every open goes back through a route that
+    # re-proves this candidate was shared with them, and is audited.
+    #
+    # `interview_recording_url` is stripped even though it is not an S3 key: handing over a
+    # permanent Zoom link would be handing over an artifact that outlives the share, survives
+    # a withdrawal, and can be forwarded to anyone. They get a lease, on request, or nothing.
+    snapshot["has_interview_report"] = bool(snapshot.pop("interview_report_key", None))
+    snapshot.pop("interview_report_name", None)
+    # Both popped unconditionally before the `or`: written as `pop(a) or pop(b)` the second
+    # pop never runs when the first returns a key, and the raw recording URL stays in the
+    # payload -- exactly the leak this line exists to prevent.
+    rec_key = snapshot.pop("interview_recording_key", None)
+    rec_url = snapshot.pop("interview_recording_url", None)
+    snapshot["has_interview_recording"] = bool(rec_key or rec_url)
     out["snapshot"] = snapshot
+
+    # What this client may do NEXT, computed from the graph rather than restated in JS.
+    #
+    # Brief §12 asks that the buttons depend on the candidate's current status -- "once a
+    # candidate has already been rejected, the UI should not continue showing actions that
+    # are no longer applicable". Sending the answer means the UI cannot drift from the
+    # server's rules, and a status the client could not set never appears as a button that
+    # 403s or 409s when pressed.
+    #
+    # The intersection is the whole rule: reachable from here (SHARE_TRANSITIONS) AND theirs
+    # to set (SHARE_CLIENT_SETTABLE). Withdrawn and Hired are terminal for them either way.
+    try:
+        onward = SHARE_TRANSITIONS.get(ShareStatus(doc.get("status")), set())
+    except ValueError:
+        onward = set()
+    out["allowed_statuses"] = sorted(s.value for s in onward & SHARE_CLIENT_SETTABLE)
     return out
 
 
@@ -556,3 +600,161 @@ async def resume_url_for_share(actor: dict, company_id: str, share_no: str) -> d
                 f"{share.get('client_name')} downloaded {share.get('candidate_name')}'s CV",
                 company_id)
     return {"url": url, "expires_in": 300, "name": download_name}
+
+
+# ─────────────────────────────────────────────────────────────
+# The interview record, as a client reads it
+# ─────────────────────────────────────────────────────────────
+# Three routes, three different permissions, and the difference between them is the point of
+# brief §10:
+#
+#     resume_url_for_share      -> DOWNLOAD. `download_as` set, so it saves to disk.
+#     report_url_for_share      -> VIEW.     No disposition; the browser renders it.
+#     recording_ref_for_share   -> WATCH.    No disposition, short lease, no download in UI.
+#
+# Each re-proves the share through `_require_visible` rather than trusting that the caller
+# got a share number from a list we gave them. A share number in a URL is not authorisation.
+async def _require_openable(actor: dict, company_id: str, share_no: str) -> dict:
+    """One visible share that is still live.
+
+    A withdrawn share is refused with 410 rather than 404: the client saw this person, the
+    row still exists, and "gone" is both the truthful answer and a different thing from "no
+    such candidate".
+    """
+    share = await _require_visible(actor, company_id, share_no)
+    if share.get("status") == ShareStatus.WITHDRAWN.value:
+        raise HTTPException(
+            status_code=410,
+            detail="This candidate has been withdrawn and is no longer available.")
+    return share
+
+
+async def report_url_for_share(actor: dict, company_id: str, share_no: str) -> dict:
+    """A short-lived link to the interview report, to READ.
+
+    Deliberately without `download_as`. A client asked to review somebody, not to build a
+    file of them -- the CV is the one artifact they were promised a copy of.
+    """
+    share = await _require_openable(actor, company_id, share_no)
+    key = (share.get("snapshot") or {}).get("interview_report_key")
+    if not key:
+        raise HTTPException(
+            status_code=404,
+            detail="No interview report has been shared for this candidate yet.")
+
+    from app.services.hrms_interview_media_service import MEDIA_LEASE_SECONDS
+    from app.services.s3_service import get_signed_url
+    url = get_signed_url(key, expires_in=MEDIA_LEASE_SECONDS)
+    if not url:
+        raise HTTPException(
+            status_code=503,
+            detail="The interview report could not be opened right now. Please try again.")
+
+    await audit(actor, AUDIT_SHARE_REPORT_OPENED, ENTITY_SHARE, share_no,
+                f"{share.get('client_name')} opened {share.get('candidate_name')}'s "
+                f"interview report", company_id)
+    return {"url": url, "expires_in": MEDIA_LEASE_SECONDS, "downloadable": False,
+            "summary": (share.get("snapshot") or {}).get("interview_report_summary")}
+
+
+async def recording_ref_for_share(actor: dict, company_id: str, share_no: str) -> dict:
+    """A reference the client's player can WATCH the interview through.
+
+    Two shapes, because a recording arrives two ways:
+
+        source "file" -> a leased S3 URL the <video> element streams from.
+        source "link" -> the meeting platform's own link, opened in a new tab.
+
+    On the honest limit of "no download": see the module docstring of
+    hrms_interview_media_service. This route sets no attachment disposition and the client UI
+    offers no save control, and a `link` recording is governed by the platform that hosts it
+    rather than by us. `downloadable: False` tells the UI what to render; it is not a claim
+    that the bytes are unreachable to somebody determined to keep them.
+    """
+    share = await _require_openable(actor, company_id, share_no)
+    snapshot = share.get("snapshot") or {}
+    key = snapshot.get("interview_recording_key")
+    link = snapshot.get("interview_recording_url")
+    if not key and not link:
+        raise HTTPException(
+            status_code=404,
+            detail="No interview recording has been shared for this candidate yet.")
+
+    from app.services.hrms_interview_media_service import MEDIA_LEASE_SECONDS
+    common = {
+        "downloadable": False,
+        "title": snapshot.get("interview_recording_title"),
+        "duration_min": snapshot.get("interview_recording_duration_min"),
+    }
+
+    # Audited BEFORE the URL is minted, so a trail exists even if the storage layer then
+    # fails. The question the audit answers is "who asked to watch this", and they did.
+    await audit(actor, AUDIT_SHARE_RECORDING_OPENED, ENTITY_SHARE, share_no,
+                f"{share.get('client_name')} watched {share.get('candidate_name')}'s "
+                f"interview recording", company_id)
+
+    if link:
+        return {**common, "source": "link", "url": link, "expires_in": None}
+
+    from app.services.s3_service import get_signed_url
+    url = get_signed_url(key, expires_in=MEDIA_LEASE_SECONDS)
+    if not url:
+        raise HTTPException(
+            status_code=503,
+            detail="The recording could not be opened right now. Please try again.")
+    return {**common, "source": "file", "url": url, "expires_in": MEDIA_LEASE_SECONDS}
+
+
+async def add_share_remark(actor: dict, company_id: str, share_no: str,
+                           payload: dict) -> dict:
+    """Record a remark against a share WITHOUT moving its status.
+
+    Two things in the brief need this and neither is a verdict (§12): "Add Remark", and
+    "Send Back to Sparsh" -- a client saying "we like them but need X clarified", which is
+    not an approval, not a rejection, and not a reason to invent a status nobody else in the
+    lifecycle graph understands.
+
+    `needs_attention` is what separates the two. A plain remark is filed; a send-back is
+    filed AND notifies the recruiter, because the client is waiting on an answer. The stored
+    entry is the same shape `set_share_status` pushes, so one history renders both.
+    """
+    share = await _require_openable(actor, company_id, share_no)
+
+    remarks = _clean(payload.get("remarks"), 2000)
+    if not remarks:
+        raise HTTPException(status_code=422, detail="Write a remark before sending it.")
+    needs_attention = bool(payload.get("needs_attention"))
+
+    now = datetime.now(timezone.utc)
+    entry = {
+        # The status is unchanged, and the entry says so rather than omitting it: a history
+        # row with no status would render as a gap in every timeline that reads this list.
+        "status": share.get("status"),
+        "at": now,
+        "by": str((actor or {}).get("_id") or ""),
+        "by_name": _actor_name(actor),
+        "remarks": remarks,
+        "kind": "sent_back" if needs_attention else "remark",
+    }
+    await get_collection(COLL_CANDIDATE_SHARES).update_one(
+        {"share_no": share_no, "company_id": str(company_id)},
+        {"$set": {"updated_at": now}, "$push": {"history": entry}})
+
+    await audit(actor, AUDIT_SHARE_STATUS, ENTITY_SHARE, share_no,
+                f"{'sent back' if needs_attention else 'remark'}: {remarks}", company_id)
+
+    if needs_attention and is_client_scoped_user(actor):
+        try:
+            from app.services.hrms_notify_service import notify_hrms_role
+            await notify_hrms_role(
+                company_id, ["HR"],
+                f"{share.get('client_name')} sent back {share.get('candidate_name')}",
+                remarks, kind="warning", link="/hrms/cv-sharing", email=True)
+        except Exception as e:
+            # Best effort, the pattern every notification here follows: a message that could
+            # not be sent must never lose a remark that was already written.
+            print(f"[WARN] HRMS send-back notification failed: {e}")
+
+    fresh = await get_collection(COLL_CANDIDATE_SHARES).find_one(
+        {"share_no": share_no, "company_id": str(company_id)})
+    return _client_view(fresh) if is_client_scoped_user(actor) else _out(fresh)

@@ -484,13 +484,18 @@ def _seed_jd_from_requisition(jd: dict, requisition: dict) -> dict:
 # Read
 # -------------------------------------------------------------
 def _visibility_filter(actor: dict) -> dict:
-    """Extra clause restricting who sees which requisitions.
+    """Row scoping that can be decided from the ACTOR ALONE, with no database read.
 
     Everyone with `requisition.read` sees their company's requisitions -- hiring is not
-    secret, and an employee who raised one must be able to track it. Row scoping tightens
-    only for a plain EMPLOYEE, who sees the ones they raised.
+    secret, and an employee who raised one must be able to track it. This narrows only for a
+    plain EMPLOYEE, who sees the ones they raised.
+
+    A user of a client ORGANISATION needs a second, asynchronous narrowing that this
+    function cannot perform -- see `_visibility_query`, which is what the requisition reads
+    call. This one remains for the internal-track tracker (hrms_tracker_service), whose rows
+    are internal requisitions a client user holds no capability to reach at all.
     """
-    from app.models.hrms import Cap, HrmsRole
+    from app.models.hrms import HrmsRole
     from app.utils.hrms_access import hrms_role
 
     if hrms_role(actor) == HrmsRole.EMPLOYEE:
@@ -498,12 +503,37 @@ def _visibility_filter(actor: dict) -> dict:
     return {}
 
 
+async def _visibility_query(actor: dict, company_id: str) -> dict:
+    """THE row-scoping clause for every requisition read. Async because the client scope is
+    resolved from the engagement records rather than from the request.
+
+    Why this exists. `CLIENT` -- a user of a client organisation -- holds `requisition.read`
+    so they can follow the requisition their own job request became. Without the second
+    clause below that capability meant every requisition in the tenant: designation, salary
+    band, assignee and all, for every OTHER client Sparsh recruits for. The capability was
+    never the problem; the missing scope was (see the note in models/hrms.py above
+    HrmsRole.CLIENT).
+
+    `client_filter` is used rather than a hand-written `$in` for the reason spelled out in
+    hrms_access: an empty scope must produce a filter matching NOTHING, and the one place
+    that distinction is guaranteed is that helper.
+    """
+    from app.utils.hrms_access import client_filter, scope_client_ids
+
+    query = _visibility_filter(actor)
+    # None for a Sparsh-side caller -> `client_filter` returns {} and nothing changes for
+    # them. A client-scoped caller gets `{"client_id": {"$in": [...]}}`, empty included.
+    query.update(client_filter(await scope_client_ids(actor, company_id)))
+    return query
+
+
 async def list_requisitions(actor: dict, company_id: str, *, search: str = None,
                             approval_status: str = None, closing_status: str = None,
                             department_id: str = None, track: str = None,
                             limit: int = 100, skip: int = 0) -> dict:
     query = {"company_id": str(company_id)}
-    query.update(_visibility_filter(actor))
+    visibility = await _visibility_query(actor, company_id)
+    query.update(visibility)
     # `track=client` must also match every requisition raised BEFORE this phase, which
     # carries no `requisition_track` field at all -- hence the explicit missing-field arm.
     # Without it the client list would silently shed its own history.
@@ -542,7 +572,7 @@ async def list_requisitions(actor: dict, company_id: str, *, search: str = None,
         max(0, int(skip or 0))).limit(limit).to_list(limit)
 
     # Stat tiles come from the same scoped query, so the counts always agree with the list.
-    base = {"company_id": str(company_id), **_visibility_filter(actor)}
+    base = {"company_id": str(company_id), **visibility}
     stats = {
         "total": total,
         "pending_hr": await coll.count_documents({**base, "approval_status": ReqApproval.PENDING_HR.value}),
@@ -557,7 +587,7 @@ async def list_requisitions(actor: dict, company_id: str, *, search: str = None,
 async def get_requisition(actor: dict, company_id: str, request_no: str,
                           *, with_jd: bool = True) -> dict:
     query = {"request_no": request_no, "company_id": str(company_id)}
-    query.update(_visibility_filter(actor))
+    query.update(await _visibility_query(actor, company_id))
     doc = await get_collection(COLL_REQUISITIONS).find_one(query)
     if not doc:
         # 404 rather than 403 for an out-of-scope row: a 403 would confirm the id exists.

@@ -24,7 +24,7 @@ export const HrmsGate = () => {
   const state = hrmsAccessState(user);
   if (state === 'unknown') return <Resolving />;
   if (state === 'denied') return <Navigate to="/" replace />;
-  return <Navigate to={hrmsHome()} replace />;
+  return <Navigate to={hrmsHome(user)} replace />;
 };
 
 /**

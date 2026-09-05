@@ -1,4 +1,5 @@
 import React from 'react';
+import { Navigate } from 'react-router-dom';
 import { Users2, ShieldCheck, Building2, KeyRound } from 'lucide-react';
 import { useHrms } from './HrmsContext';
 import HrmsPageHeader from './common/HrmsPageHeader';
@@ -14,6 +15,12 @@ import { HrmsLoading, HrmsError } from './common/HrmsStates';
  *
  * Phases 2+ replace this with the real module landing (directory, recruitment workspace or
  * self-service, by role).
+ *
+ * A client organisation's user never sees it. HrmsGate already routes them to their own
+ * screen, and this redirect catches the other way in — a bookmark on /hrms, or a browser
+ * restoring the tab. What they would otherwise land on is a list of raw capability strings:
+ * a developer's view of the module, telling somebody outside this company nothing they can
+ * act on.
  */
 
 const InfoTile = ({ icon: Icon, label, value }) => (
@@ -29,10 +36,16 @@ const InfoTile = ({ icon: Icon, label, value }) => (
 );
 
 const HrmsHome = () => {
-  const { loading, error, role, capabilities, companyId, isInternal, reload } = useHrms();
+  const {
+    loading, error, role, capabilities, companyId, isInternal, isClientUser, reload,
+  } = useHrms();
 
   if (loading) return <HrmsLoading label="Loading HRMS…" />;
   if (error) return <HrmsError message={error} onRetry={reload} />;
+  // After the health call, never before: `isClientUser` is the server's answer and is false
+  // while it is in flight, so redirecting earlier would bounce a Sparsh user on every
+  // refresh — the same trap hrmsAccessState's 'unknown' branch exists to avoid.
+  if (isClientUser) return <Navigate to="/hrms/shared-candidates" replace />;
 
   return (
     <div className="space-y-6">

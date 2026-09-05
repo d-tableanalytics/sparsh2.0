@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import {
   CalendarClock, Plus, X, Video, MapPin, Star, CalendarDays, Ban, Download, Clock,
+  FileVideo,
 } from 'lucide-react';
 import { useNotification } from '../../../context/NotificationContext';
 import { useHrms } from '../HrmsContext';
@@ -12,6 +13,7 @@ import {
   getInterviews, getSchedulableCandidates, scheduleInterview, updateInterview,
   cancelInterview, evaluateInterview, getEmployees, inviteUrlFor,
 } from '../../../services/hrmsApi';
+import InterviewRecordModal from './InterviewRecordModal';
 
 /**
  * HRMS ▸ interviews.
@@ -20,6 +22,11 @@ import {
  * answer. Every row carries `can_evaluate` computed **server-side**, so the Evaluate button
  * appears only where the API will actually accept a scorecard — including the MD-round
  * restriction, which the client never has to know about.
+ *
+ * The interview RECORD — the written report and the recording (brief §10) — is reached from
+ * a row but filed against the CANDIDATE, not the round. That is the level a client reviews
+ * somebody at, and it is why <InterviewRecordModal> takes `uk` rather than `interview_no`.
+ * The scorecard on this screen stays Sparsh-side and is untouched by it.
  */
 
 const ROUNDS = ['HR Round', 'Technical', 'Manager Round', 'MD Round'];
@@ -347,8 +354,12 @@ const InterviewBoard = () => {
   const [status, setStatus] = useState('');
   const [showSchedule, setShowSchedule] = useState(false);
   const [evaluating, setEvaluating] = useState(null);
+  const [recordFor, setRecordFor] = useState(null);
 
   const canSchedule = can(CAP.INTERVIEW_SCHEDULE);
+  // Read access is enough to OPEN the record — a panellist checking what was filed is a
+  // normal thing to do. The modal gates the write controls on interview.media.write itself.
+  const canSeeRecord = can(CAP.INTERVIEW_READ) || can(CAP.INTERVIEW_MEDIA_WRITE);
 
   const load = useCallback(async () => {
     if (!companyId) { setLoading(false); return; }
@@ -520,6 +531,13 @@ const InterviewBoard = () => {
                           Evaluate
                         </button>
                       )}
+                      {canSeeRecord && (
+                        <button type="button" onClick={() => setRecordFor(i)}
+                          title="Interview report & recording"
+                          className="h-8 w-8 grid place-items-center rounded-lg border border-[var(--border)] text-[var(--text-muted)] hover:text-[var(--accent-indigo)]">
+                          <FileVideo size={13} />
+                        </button>
+                      )}
                       {canSchedule && i.status === 'Scheduled' && (
                         <>
                           <button type="button" onClick={() => setStatusFor(i, 'No Show')}
@@ -549,6 +567,13 @@ const InterviewBoard = () => {
       {evaluating && (
         <EvaluateModal interview={evaluating} onClose={() => setEvaluating(null)}
           onEvaluated={() => { setEvaluating(null); load(); }} />
+      )}
+      {recordFor && (
+        <InterviewRecordModal
+          uk={recordFor.uk}
+          candidateName={recordFor.candidate_name}
+          onClose={() => setRecordFor(null)}
+        />
       )}
     </div>
   );

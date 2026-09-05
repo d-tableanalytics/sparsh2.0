@@ -9,6 +9,7 @@ import { getShares, setShareStatus, getShareCv } from '../../../services/hrmsApi
 import { FIELD, LABEL, TEXTAREA, day } from '../internal/internalKit';
 import { Btn, Chip, Facts, Modal } from '../internal/internalKit.jsx';
 import ShareJourney from './ShareJourney';
+import ClientCandidateProfile from './ClientCandidateProfile';
 
 /**
  * HRMS ▸ the client's own screen — candidates Sparsh has shared with them.
@@ -24,9 +25,16 @@ import ShareJourney from './ShareJourney';
  * The statuses offered here are the ones a client may set. Hired is absent on purpose: it
  * is a commercial fact with a fee attached and Sparsh records it. The server enforces that
  * regardless of what this list contains — this just avoids offering a button that 403s.
+ *
+ * The list is a SUMMARY. "Full profile" opens <ClientCandidateProfile>, which is where the
+ * brief's §11 lives: the CV, the interview report, the recording, the remark history and the
+ * status-dependent actions, all against the same share record this row renders. Two views of
+ * one object rather than two sources of truth — nothing here re-fetches or re-derives it.
  */
 
-// What a client may say about a candidate. Mirrors SHARE_CLIENT_SETTABLE on the server.
+// The fallback list for the quick "Not a fit" dialog, used only when a share predates
+// `allowed_statuses` (an old row still cached in a tab, say). The authority is the server's
+// per-share answer — see ClientCandidateProfile, which reads that instead of this.
 const CLIENT_STATUSES = [
   'Under Review', 'Shortlisted', 'Interview Scheduled', 'Selected', 'Rejected',
 ];
@@ -55,15 +63,21 @@ const SharedCandidates = () => {
 
   const canRespond = can(CAP.SHARE_RESPOND);
 
+  // Returns the rows it fetched as well as storing them, so a caller that needs the FRESH
+  // record (the open profile, after a verdict) can read it directly. Reading `rows` right
+  // after awaiting load() would see the previous render's value — setState is not a write.
   const load = useCallback(async () => {
-    if (!companyId) { setLoading(false); return; }
+    if (!companyId) { setLoading(false); return []; }
     setLoading(true);
     setError(null);
     try {
       const { data } = await getShares(scope);
-      setRows(data?.shares || []);
+      const fresh = data?.shares || [];
+      setRows(fresh);
+      return fresh;
     } catch (e) {
       setError(e?.response?.data?.detail || 'Could not load your candidates.');
+      return [];
     } finally {
       setLoading(false);
     }
@@ -150,7 +164,7 @@ const SharedCandidates = () => {
                       <Download size={13} /> Download CV
                     </Btn>
                   )}
-                  <Btn onClick={() => setViewing(share)}>Details</Btn>
+                  <Btn onClick={() => setViewing(share)}>Full profile</Btn>
                   {canRespond && share.status !== 'Withdrawn' && (
                     <>
                       <Btn onClick={() => quick(share, 'Shortlisted')}>
@@ -200,40 +214,19 @@ const SharedCandidates = () => {
       </div>
 
       {viewing && (
-        <Modal
-          title={viewing.snapshot?.candidate_name}
-          subtitle={`${viewing.share_no} · ${viewing.status}`}
+        <ClientCandidateProfile
+          share={viewing}
           onClose={() => setViewing(null)}
-          footer={<Btn onClick={() => setViewing(null)}>Close</Btn>}
-        >
-          <div className="space-y-3">
-            <Facts items={[
-              { label: 'Experience', value: viewing.snapshot?.total_experience },
-              { label: 'Qualification', value: viewing.snapshot?.qualification },
-              { label: 'Current company', value: viewing.snapshot?.current_company },
-              { label: 'Location', value: viewing.snapshot?.current_location },
-              { label: 'Notice period', value: viewing.snapshot?.notice_period },
-              { label: 'Expected CTC', value: viewing.snapshot?.expected_ctc },
-              { label: 'Email', value: viewing.snapshot?.can_email },
-              { label: 'Phone', value: viewing.snapshot?.can_contact },
-              { label: 'LinkedIn', value: viewing.snapshot?.linkedin },
-              { label: 'Portfolio', value: viewing.snapshot?.portfolio },
-            ]} />
-            {viewing.snapshot?.cover_note && (
-              <div>
-                <p className={LABEL}>Cover note</p>
-                <p className="text-[12.5px] whitespace-pre-wrap text-[var(--text-main)]">
-                  {viewing.snapshot.cover_note}
-                </p>
-              </div>
-            )}
-            {!viewing.snapshot?.can_email && (
-              <p className="text-[11.5px] text-[var(--text-muted)]">
-                Contact details are held by the Sparsh team for this candidate.
-              </p>
-            )}
-          </div>
-        </Modal>
+          onChanged={async () => {
+            // Re-point at the refreshed row so the profile's status chip, its allowed
+            // actions and its remark history reflect what was just recorded. Closing the
+            // profile instead would make every verdict feel like it lost the reviewer's
+            // place; leaving the stale object would show a status that is no longer true.
+            const fresh = await load();
+            setViewing((prev) => (
+              fresh.find((r) => r.share_no === prev?.share_no) || prev));
+          }}
+        />
       )}
 
       {responding && (

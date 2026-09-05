@@ -49,8 +49,9 @@ from app.models.hrms import (
 # -- Phase 12 - the client hiring track --
 from app.models.hrms import (
     BackgroundApproveIn, BackgroundCheckIn, BackgroundCheckUpdate,
+    InterviewRecordingIn, InterviewReportIn,
     JobRequestAction, JobRequestConvertIn, JobRequestIn, JobRequestUpdate,
-    ShareIn, ShareStatusIn, UploadIn,
+    ShareIn, ShareRemarkIn, ShareStatusIn, UploadIn,
 )
 # ── Phase INT-2 — the remaining Internal Recruitment SOP controls ──
 from app.models.hrms import (
@@ -97,6 +98,7 @@ from app.services import hrms_shortlist_service as shortlists
 from app.services import hrms_survey_service as surveys
 # ── Phase 12: the client hiring track ──
 from app.services import hrms_background_service as background
+from app.services import hrms_interview_media_service as interview_media
 from app.services import hrms_job_request_service as job_requests
 from app.services import hrms_share_service as shares
 from app.services.hrms_audit_service import read_audit
@@ -3384,6 +3386,61 @@ async def get_share_cv(
         current_user, _company(current_user, company_id), share_no)
 
 
+@router.post("/shares/{share_no}/remarks")
+async def add_share_remark(
+    share_no: str,
+    body: ShareRemarkIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """File a remark against a share without moving its status.
+
+    `share.respond` rather than `share.read`: this writes to the record and reaches the
+    recruiter, so it is the same class of act as recording a verdict -- a client who may only
+    look at a CV should not be able to put words in its history.
+    """
+    _require(current_user, Cap.SHARE_RESPOND)
+    return await shares.add_share_remark(
+        current_user, _company(current_user, company_id), share_no, body.model_dump())
+
+
+# -- The interview record, as a client reads it (brief SS10) ----
+#
+# Three verbs, one capability. `share.read` is what proves the caller may look at this
+# candidate at all; WHAT they may do with each artifact is fixed by the route, not by a
+# permission the caller could hold more of:
+#
+#     GET /shares/{n}/cv                 -> download   (Content-Disposition: attachment)
+#     GET /shares/{n}/interview-report   -> view       (rendered in place)
+#     GET /shares/{n}/interview-recording-> watch      (streamed; no save affordance)
+#
+# There is deliberately no download route for the recording. Adding one later would be a
+# product decision, not a permissions change -- which is the point of putting the asymmetry
+# in the routing table where it is visible.
+@router.get("/shares/{share_no}/interview-report")
+async def get_share_interview_report(
+    share_no: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """View the interview report for a shared candidate. Audited on every open."""
+    _require(current_user, Cap.SHARE_READ)
+    return await shares.report_url_for_share(
+        current_user, _company(current_user, company_id), share_no)
+
+
+@router.get("/shares/{share_no}/interview-recording")
+async def get_share_interview_recording(
+    share_no: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Watch the interview recording for a shared candidate. Audited on every open."""
+    _require(current_user, Cap.SHARE_READ)
+    return await shares.recording_ref_for_share(
+        current_user, _company(current_user, company_id), share_no)
+
+
 @router.post("/shares/{share_no}/status")
 async def set_share_status(
     share_no: str,
@@ -3544,3 +3601,83 @@ async def get_candidate_cv(
     _require(current_user, Cap.CANDIDATE_READ)
     return await candidates.cv_url(
         current_user, _company(current_user, company_id), uk)
+
+
+# -- The interview record, Sparsh side (brief SS10) -------------
+#
+# INTERVIEW_MEDIA_WRITE rather than INTERVIEW_SCHEDULE or CANDIDATE_WRITE: filing this
+# material publishes evidence about a person to an outside company, which is neither
+# logistics nor an ordinary edit of a candidate row. See the capability's own note.
+@router.post("/candidates/{uk}/interview-report")
+async def file_interview_report(
+    uk: str,
+    body: InterviewReportIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """File the interview report. Replaces any previous one, keeping it in history.
+
+    Live shares of this candidate pick the report up immediately -- the CV usually goes out
+    before the interview happens, so a report that only reached future shares would reach
+    almost nobody.
+    """
+    _require(current_user, Cap.INTERVIEW_MEDIA_WRITE)
+    return await interview_media.file_report(
+        current_user, _company(current_user, company_id), uk, body.model_dump())
+
+
+@router.post("/candidates/{uk}/interview-recording")
+async def file_interview_recording(
+    uk: str,
+    body: InterviewRecordingIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """File the recording -- an uploaded file OR the meeting platform's link."""
+    _require(current_user, Cap.INTERVIEW_MEDIA_WRITE)
+    return await interview_media.file_recording(
+        current_user, _company(current_user, company_id), uk, body.model_dump())
+
+
+@router.get("/candidates/{uk}/interview-record")
+async def get_interview_record(
+    uk: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """What is on file for this candidate. Sparsh side -- a client reads their share."""
+    _require(current_user, Cap.CANDIDATE_READ)
+    return await interview_media.get_media(
+        current_user, _company(current_user, company_id), uk)
+
+
+@router.get("/candidates/{uk}/interview-record/{kind}/url")
+async def get_interview_record_url(
+    uk: str,
+    kind: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """A short-lived link to the report or the recording, for a Sparsh-side reader.
+
+    `kind` is "report" or "recording". Sparsh is not subject to the client's view-only
+    restriction: the material is theirs, and this is the same read their own candidate
+    screens already give them of a CV.
+    """
+    _require(current_user, Cap.CANDIDATE_READ)
+    return await interview_media.media_url(
+        current_user, _company(current_user, company_id), uk, kind)
+
+
+@router.delete("/candidates/{uk}/interview-record/{kind}")
+async def remove_interview_record(
+    uk: str,
+    kind: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Unpublish the report or the recording. The stored object is kept, only unlinked --
+    a client may already have been shown it, and the audit trail has to keep resolving."""
+    _require(current_user, Cap.INTERVIEW_MEDIA_WRITE)
+    return await interview_media.remove_media(
+        current_user, _company(current_user, company_id), uk, kind)

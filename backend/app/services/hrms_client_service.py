@@ -93,8 +93,35 @@ async def list_clients(actor: dict, company_id: str, *, include_inactive: bool =
     `company_id` is the CALLING tenant. It does not filter the companies returned -- a
     client is by definition a different organisation from the tenant recruiting for it -- but
     it does scope `with_stats`, so the counts are this tenant's own hiring and never another's.
+
+    -- The one caller this list is NOT open to ---------------------------------------------
+    A user of a client ORGANISATION also holds `client.read`, because a screen has to be able
+    to render their own client's name. Unnarrowed, that capability returned every company on
+    the books -- which is a list of who else Sparsh recruits for, i.e. exactly the fact the
+    client brief (§16) says a client must never learn, and one a competitor would read
+    straight off the dropdown.
+
+    So a client-scoped caller sees the clients their ENGAGEMENTS name and nothing else.
+    Resolved from those records rather than from the request, and empty when they have no
+    membership -- never "unfiltered", which is the way this control would break.
     """
+    from app.utils.hrms_access import scope_client_ids
+
     query = {} if include_inactive else {"is_active": {"$ne": False}}
+
+    allowed = await scope_client_ids(actor, company_id)
+    if allowed is not None:
+        oids = []
+        for cid in allowed:
+            try:
+                oids.append(ObjectId(str(cid)))
+            except (InvalidId, TypeError):
+                continue
+        # An empty scope yields `{"_id": {"$in": []}}`, which matches nothing. Written out
+        # rather than short-circuited: dropping the clause when the list is empty would turn
+        # "no clients" into "every client", and that is the single most likely way a scope
+        # check gets broken later.
+        query["_id"] = {"$in": oids}
     if search:
         safe = re.escape(search.strip())
         query["$or"] = [

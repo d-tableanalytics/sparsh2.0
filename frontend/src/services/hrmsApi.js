@@ -591,9 +591,24 @@ export const setShareStatus = (shareNo, payload, params) =>
   api.post(`/hrms/shares/${shareNo}/status`, payload, { params });
 export const withdrawShare = (shareNo, payload, params) =>
   api.post(`/hrms/shares/${shareNo}/withdraw`, payload, { params });
+/** A remark that does NOT move the status. `needs_attention` makes it a "send back",
+ *  which additionally notifies the recruiter — the client is waiting on an answer. */
+export const addShareRemark = (shareNo, payload, params) =>
+  api.post(`/hrms/shares/${shareNo}/remarks`, payload, { params });
 /** A short-lived link to the CV on one share. Audited server-side on every open. */
 export const getShareCv = (shareNo, params) =>
   api.get(`/hrms/shares/${shareNo}/cv`, { params });
+
+/** The interview record on one share — three verbs, three routes.
+ *
+ *  The asymmetry is the brief's (§10) and it lives in the ROUTES, not in a permission:
+ *  the CV downloads, the report is viewed, the recording is only watched. There is
+ *  deliberately no `downloadShareRecording` here, and adding one would be a product
+ *  decision rather than a permissions change. */
+export const getShareInterviewReport = (shareNo, params) =>
+  api.get(`/hrms/shares/${shareNo}/interview-report`, { params });
+export const getShareInterviewRecording = (shareNo, params) =>
+  api.get(`/hrms/shares/${shareNo}/interview-recording`, { params });
 /** Every client one candidate went to. Sparsh only — the answer names other clients. */
 export const getCandidateShares = (uk, params) =>
   api.get(`/hrms/candidates/${uk}/shares`, { params });
@@ -618,3 +633,20 @@ export const uploadCandidateCv = (uk, payload, params) =>
   api.post(`/hrms/candidates/${uk}/cv`, payload, { params });
 export const getCandidateCv = (uk, params) =>
   api.get(`/hrms/candidates/${uk}/cv`, { params });
+
+/** The interview record, Sparsh side. Filing it needs `interview.media.write`.
+ *
+ *  A report is a file. A recording is EITHER a file or the meeting platform's link —
+ *  send one or the other, never both, because two sources on one record means nobody can
+ *  say which was the real call. */
+export const getInterviewRecord = (uk, params) =>
+  api.get(`/hrms/candidates/${uk}/interview-record`, { params });
+export const fileInterviewReport = (uk, payload, params) =>
+  api.post(`/hrms/candidates/${uk}/interview-report`, payload, { params });
+export const fileInterviewRecording = (uk, payload, params) =>
+  api.post(`/hrms/candidates/${uk}/interview-recording`, payload, { params });
+/** `kind` is 'report' or 'recording'. */
+export const getInterviewRecordUrl = (uk, kind, params) =>
+  api.get(`/hrms/candidates/${uk}/interview-record/${kind}/url`, { params });
+export const removeInterviewRecord = (uk, kind, params) =>
+  api.delete(`/hrms/candidates/${uk}/interview-record/${kind}`, { params });

@@ -1,5 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Send, Share2, Download, Undo2, Users, ChevronDown, ChevronRight } from 'lucide-react';
+import {
+  Send, Share2, Download, Undo2, Users, ChevronDown, ChevronRight, FileVideo,
+} from 'lucide-react';
 import { useHrms } from '../HrmsContext';
 import { CAP } from '../access';
 import HrmsPageHeader from '../common/HrmsPageHeader';
@@ -13,6 +15,7 @@ import {
 import { FIELD, LABEL, TEXTAREA, day } from '../internal/internalKit';
 import { Btn, Chip, Facts, Modal, RecordList } from '../internal/internalKit.jsx';
 import ShareJourney from './ShareJourney';
+import InterviewRecordModal from '../recruitment/InterviewRecordModal';
 
 /**
  * HRMS ▸ client track — CV sharing.
@@ -28,6 +31,13 @@ import ShareJourney from './ShareJourney';
  * What the screen deliberately does not do: decide anything. Which statuses a client may
  * set, whether a CV may be shared at all, and what a client is allowed to see are all
  * server rules. This renders their outcome.
+ *
+ * The interview record (brief §10) is reachable from each candidate's group header, not from
+ * a share row: it is filed against the CANDIDATE and every live share of them picks it up.
+ * Offering it per client would suggest each client gets a different report, which is exactly
+ * what it is not. The same modal is reached from the interview board, where a recruiter files
+ * it in the first place — this is the second door, for the moment somebody asks "does this
+ * client have everything they need?".
  */
 
 // The spec's list, in process order, so the filter chips read as a pipeline rather than an
@@ -67,6 +77,7 @@ const CvSharingBoard = () => {
   const [verifications, setVerifications] = useState({});
 
   const canWrite = can(CAP.SHARE_WRITE);
+  const [recordFor, setRecordFor] = useState(null);
 
   const load = useCallback(async () => {
     if (!companyId) { setLoading(false); return; }
@@ -83,6 +94,37 @@ const CvSharingBoard = () => {
   }, [companyId, scope, status]);
 
   useEffect(() => { load(); }, [load]);
+
+  /**
+   * Expand or collapse one share's stage ladder.
+   *
+   * The handler the state, the import and the JSX above were all written for but which was
+   * never added — clicking "Stages" threw a ReferenceError, so the ladder could not be
+   * opened at all. Fixed here rather than left, because the stage view is what the brief
+   * (§19) asks to be visible on this board.
+   *
+   * Verification is fetched on FIRST expand and then cached. Per-row on mount would be one
+   * request per share for information nobody has asked to see, and re-fetching on every
+   * toggle would repeat it; caching by `uk` also means a candidate shared with four clients
+   * costs one call, not four, since the verification is the candidate's and not the share's.
+   *
+   * A failed fetch is deliberately not surfaced as an error toast: the ladder still renders
+   * from the share itself and simply shows the verification rung as unknown, which is a
+   * better outcome than refusing to open a panel because one of its two sources is down.
+   */
+  const toggleJourney = async (share) => {
+    if (openShare === share.share_no) { setOpenShare(null); return; }
+    setOpenShare(share.share_no);
+    if (!share.uk || verifications[share.uk] !== undefined) return;
+    try {
+      const { data } = await getCandidateVerification(share.uk, scope);
+      setVerifications((prev) => ({ ...prev, [share.uk]: data }));
+    } catch {
+      // Cached as null so a candidate whose verification cannot be read is not re-requested
+      // on every open.
+      setVerifications((prev) => ({ ...prev, [share.uk]: null }));
+    }
+  };
 
   // Grouped by candidate: the whole point of the page is seeing one person's several
   // clients together, which a flat list buries.
@@ -211,6 +253,11 @@ const CvSharingBoard = () => {
                 {group.shares.length} client{group.shares.length === 1 ? '' : 's'}
               </Chip>
             </div>
+            {group.uk && (
+              <Btn onClick={() => setRecordFor(group)}>
+                <FileVideo size={13} /> Interview record
+              </Btn>
+            )}
           </div>
 
           <div className="grid gap-2">
@@ -284,6 +331,16 @@ const CvSharingBoard = () => {
           onClose={() => setSharing(false)}
           onDone={async (msg) => { setSharing(false); showSuccess(msg); await load(); }}
           onError={showError}
+        />
+      )}
+      {recordFor && (
+        <InterviewRecordModal
+          uk={recordFor.uk}
+          candidateName={recordFor.name}
+          onClose={() => setRecordFor(null)}
+          // Filing publishes to every live share, so the board's own rows are stale the
+          // moment it happens.
+          onSaved={load}
         />
       )}
     </div>

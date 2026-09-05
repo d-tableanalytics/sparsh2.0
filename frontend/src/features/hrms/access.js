@@ -16,14 +16,22 @@ const INTERNAL_OWNER_ROLES = new Set(['superadmin']);
 const INTERNAL_STAFF_ROLES = new Set(['admin', 'coach', 'staff']);
 const CLIENT_ROLES = new Set(['clientadmin', 'clientuser']);
 
-// Mirrors models/hrms.py HrmsRole.
+// Mirrors models/hrms.py HrmsRole. CLIENT and FINANCE were missing here while the backend
+// resolved both, so a user of a client ORGANISATION was read as an EMPLOYEE on this side and
+// shown Sparsh's whole recruitment navigation — every link of which the API then refused.
+// That mismatch is what §18 of the client brief reported as "cannot access the required
+// section"; the list below is now the backend's, entry for entry.
 export const HRMS_ROLE = {
   ADMIN: 'admin',
   INTERNAL: 'internal',
   MD: 'md',
   HR: 'hr',
+  FINANCE: 'finance',
   MANAGER: 'manager',
   EMPLOYEE: 'employee',
+  // A user of a client ORGANISATION — not a Sparsh user at all. Scoped by company_id AND
+  // by the client engagements they belong to (backend: hrms_access.scope_client_ids).
+  CLIENT: 'client',
 };
 
 // Mirrors models/hrms.py Cap. Grows one phase at a time, alongside the backend.
@@ -201,6 +209,13 @@ export const CAP = {
   BACKGROUND_READ: 'background.read',
   BACKGROUND_WRITE: 'background.write',
   BACKGROUND_APPROVE: 'background.approve',
+
+  // ── The interview record — the report and the recording ──
+  // Separate from interview.schedule and interview.evaluate: booking a call is logistics and
+  // scoring one is a judgement, while ATTACHING the report and the recording publishes
+  // evidence about a person to an outside company. Sparsh-side only — a client reaches this
+  // material through the SHARE they were given (share.read), never by naming the interview.
+  INTERVIEW_MEDIA_WRITE: 'interview.media.write',
 };
 
 /** Sparsh internal user rather than a client-side one. Same precedence the backend uses
@@ -228,11 +243,26 @@ export const hrmsRole = (user) => {
     const governance = (user.governance_role || '').trim().toUpperCase();
     if (governance === 'MD') return HRMS_ROLE.MD;
     if (governance === 'HR') return HRMS_ROLE.HR;
+    if (governance === 'FINANCE') return HRMS_ROLE.FINANCE;
     if (governance === 'HOD') return HRMS_ROLE.MANAGER;
+    if (governance === 'CLIENT') return HRMS_ROLE.CLIENT;
     return HRMS_ROLE.EMPLOYEE;
   }
   return null;
 };
+
+/** A user of a CLIENT ORGANISATION, resolved from the token alone.
+ *
+ *  Deliberately NOT a security control and never used as one — the server resolves the same
+ *  answer from the engagement records and returns it on /hrms/health as `is_client_user`,
+ *  which is what every screen INSIDE the module gates on (see HrmsContext).
+ *
+ *  This exists for the one decision that has to be made BEFORE the module mounts and its
+ *  health call lands: which navigation the app shell draws. The Sidebar sits outside
+ *  <HrmsProvider> and has no capability list to consult, and drawing Sparsh's recruitment
+ *  links for a client — then having the API refuse each one — is exactly the failure this
+ *  replaces. Guessing wrong here costs a nav item, never data. */
+export const isClientOrgUser = (user) => hrmsRole(user) === HRMS_ROLE.CLIENT;
 
 /** Can this user open HRMS at all?
  *  Internal staff always (they administer across clients); client-side users only while
@@ -287,9 +317,13 @@ export const canToggleHrms = (user) =>
 export const hasCap = (caps, capability) =>
   Array.isArray(caps) && caps.includes(capability);
 
-/** Landing route for a user entering /hrms. Phase 1 has a single shell; later phases
- *  route by role here (recruitment vs. self-service), mirroring tpmsHome(). */
-export const hrmsHome = () => '/hrms';
+/** Landing route for a user entering /hrms, by role.
+ *
+ *  A client organisation's user lands on the candidates shared with them — the screen they
+ *  actually come here for. Everyone else keeps the module home. The old constant sent a
+ *  client to a page listing their raw capability strings, which is a developer's view of the
+ *  module and told them nothing they could act on. */
+export const hrmsHome = (user) => (isClientOrgUser(user) ? '/hrms/shared-candidates' : '/hrms');
 
 export const HRMS_DISABLED_MESSAGE =
   'The HRMS module is not enabled for your company. Please contact your administrator.';

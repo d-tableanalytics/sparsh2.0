@@ -14,7 +14,7 @@ import {
 import { useAuth } from '../../context/AuthContext';
 import { canAccessTaskManagement } from '../../utils/taskAccess';
 import { canAccessTpms } from '../../features/tpms/access';
-import { canAccessHrms } from '../../features/hrms/access';
+import { canAccessHrms, isClientOrgUser } from '../../features/hrms/access';
 import {
   canManage as canManageLeadershipCycle,
   canManageTemplate as canManageLeadershipTemplate,
@@ -165,6 +165,21 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
     // Phase INT-10: the salary negotiation record is a hiring stage (SOP step 9).
     '/hrms/negotiations'];
 
+  // ── A client organisation's user gets a different list entirely ──
+  //
+  // Not a subset of the one below: a client does not do a narrower version of Sparsh's job,
+  // they do a different one (brief §14). They raise a hiring request and review the
+  // candidates sent to them. Everything else in HRMS belongs to Sparsh.
+  //
+  // Drawing the internal list for them is what §18 reported as "cannot access the required
+  // section" — every entry pointed at a screen the API correctly refuses. Resolved from the
+  // token because the Sidebar sits OUTSIDE <HrmsProvider> and has no capability list to
+  // consult; the server enforces the same separation regardless (see isClientOrgUser).
+  const clientHrmsSubmodules = [
+    { name: 'Hiring Requests', path: '/hrms/job-requests', icon: ClipboardList },
+    { name: 'Candidate Review', path: '/hrms/shared-candidates', icon: Users },
+  ];
+
   const hrmsSubmodules = [
     { name: 'Dashboard', path: '/hrms/dashboard', icon: BarChart3 },
     { name: 'Employees', path: '/hrms/employees', icon: Users },
@@ -263,7 +278,7 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
       // while their company's HRMS toggle is ON. See features/hrms/access.js.
       name: 'HRMS', path: '/hrms', icon: UserCog,
       roles: [], visibleFn: canAccessHrms,
-      submodules: hrmsSubmodules,
+      submodules: isClientOrgUser(user) ? clientHrmsSubmodules : hrmsSubmodules,
     },
     { name: 'Reports', path: '/admin/reports', icon: BarChart3, roles: ['superadmin', 'admin'] },
     { name: 'Company Settings', path: '/settings', icon: Settings, roles: ['clientadmin'] },

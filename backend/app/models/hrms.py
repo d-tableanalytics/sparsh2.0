@@ -772,6 +772,18 @@ class Cap(str, Enum):
     BACKGROUND_READ    = "background.read"
     BACKGROUND_WRITE   = "background.write"
     BACKGROUND_APPROVE = "background.approve"
+    # ══ Interview record — the report and the recording ══
+    #
+    # Separate from INTERVIEW_SCHEDULE and INTERVIEW_EVALUATE on purpose. Booking a call is
+    # logistics and scoring one is a judgement; ATTACHING the report and the recording is
+    # neither -- it publishes evidence about a person that leaves this company, because a
+    # share carries it to a client. That is its own act and gets its own capability.
+    #
+    # There is no matching client-side capability, and there must not be: a client reaches
+    # this material through the SHARE they were given (share.read), which proves the
+    # candidate was shown to them. A capability naming the interview directly would let a
+    # client ask about a candidate they were never sent.
+    INTERVIEW_MEDIA_WRITE = "interview.media.write"
     # ── Later phases append their capabilities here. ──
 
 
@@ -855,6 +867,10 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
         Cap.JOB_REQUEST_READ, Cap.JOB_REQUEST_WRITE, Cap.JOB_REQUEST_REVIEW,
         Cap.SHARE_READ, Cap.SHARE_WRITE,
         Cap.BACKGROUND_READ, Cap.BACKGROUND_WRITE,
+        # Sparsh staff run the interviews on the client track, so filing what came out of
+        # one is squarely their work -- the same reasoning that gives them DOCUMENT_WRITE
+        # while withholding DOCUMENT_VERIFY.
+        Cap.INTERVIEW_MEDIA_WRITE,
     },
     HrmsRole.MD: {
         Cap.MODULE_ACCESS, Cap.MODULE_ADMIN, Cap.AUDIT_READ,
@@ -912,6 +928,7 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
         Cap.JOB_REQUEST_READ, Cap.JOB_REQUEST_WRITE, Cap.JOB_REQUEST_REVIEW,
         Cap.SHARE_READ, Cap.SHARE_WRITE, Cap.SHARE_RESPOND,
         Cap.BACKGROUND_READ, Cap.BACKGROUND_WRITE, Cap.BACKGROUND_APPROVE,
+        Cap.INTERVIEW_MEDIA_WRITE,
     },
     HrmsRole.HR: {
         Cap.MODULE_ACCESS, Cap.AUDIT_READ,
@@ -983,6 +1000,8 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
         Cap.JOB_REQUEST_READ, Cap.JOB_REQUEST_WRITE, Cap.JOB_REQUEST_REVIEW,
         Cap.SHARE_READ, Cap.SHARE_WRITE,
         Cap.BACKGROUND_READ, Cap.BACKGROUND_WRITE, Cap.BACKGROUND_APPROVE,
+        # HR runs the panel and files what it produced.
+        Cap.INTERVIEW_MEDIA_WRITE,
     },
     # A hiring manager reads their own corner of the directory (enforced by row scoping in
     # hrms_employee_service, not by this set) and never sees pay. They RAISE requisitions --
@@ -2097,6 +2116,28 @@ ALLOWED_UPLOAD_MIME = {
     "image/jpeg", "image/png", "image/webp",
 }
 
+# ── Interview recordings ──────────────────────────────────────────────────────────────────
+# A SECOND, wider allow-list, deliberately NOT merged into the one above.
+#
+# ALLOWED_UPLOAD_MIME governs the PUBLIC forms: an anonymous applicant posting to a job
+# link. Widening it to video would let an unauthenticated caller push hundreds of megabytes
+# per request at the bucket, which is a different risk from a signed-in recruiter filing a
+# panel recording. The two lists exist so that stays true no matter what is added to either.
+ALLOWED_RECORDING_MIME = {
+    "video/mp4", "video/webm", "video/quicktime", "video/x-matroska",
+    # Audio-only panels are common for telephonic rounds and are the same kind of artifact.
+    "audio/mpeg", "audio/mp4", "audio/webm", "audio/wav", "audio/x-m4a",
+}
+
+# Recordings are an order of magnitude larger than a CV, so they get their own ceiling.
+# Still bounded: the ingest path is base64-in-JSON (see UploadIn), which inflates the body
+# by a third, and a limit that admits an arbitrarily long call is not a limit.
+#
+# For anything longer than this the recording is attached BY URL instead -- which is how
+# most panels arrive anyway, since Zoom, Meet and Teams all hand back a cloud link rather
+# than a file. See InterviewRecordingIn.
+MAX_RECORDING_BYTES = 100 * 1024 * 1024      # 100 MB
+
 # Posting codes are public identifiers: two letters, a dash, six upper-alnum characters.
 POSTING_CODE_RE = _re.compile(r"^[A-Z]{2}-[A-Z0-9]{6}$")
 EMAIL_RE = _re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -2839,6 +2880,15 @@ class OfferIn(BaseModel):
     location: Optional[str] = None
     content: Optional[str] = None           # defaults to DEFAULT_OFFER_BODY
     send_now: bool = False                  # create and send in one action
+    # The authorised signatory, required ONLY when `send_now` is set -- creating a draft
+    # commits nobody, issuing the letter commits the company to a salary.
+    #
+    # Declared here rather than read loosely from the body because Pydantic drops undeclared
+    # keys: without this field the signature the operator typed never reached the service,
+    # and every "create and send" was refused with "An authorised signature is required to
+    # send an offer" no matter what they typed. AppointmentIn has carried the same field
+    # since Phase 11-R for the same reason; this is the one that was missed.
+    signature: Optional[str] = None
 
 
 class OfferUpdate(BaseModel):
@@ -3791,6 +3841,15 @@ AUDIT_SHARE_WITHDRAWN       = "cv withdrawn from client"
 # The moment a client actually READS somebody's personal data. Audited as its own
 # action because §8 asks for a trail of client ACCESS, not only of client decisions.
 AUDIT_SHARE_CV_OPENED       = "cv opened by client"
+# ── The interview record ──
+# Filing this material and READING it are separate audit actions, because they answer
+# different questions: who published evidence about this person, and who has since looked at
+# it. The client-side reads are the ones §10 of the brief cares about.
+AUDIT_INTERVIEW_REPORT_FILED     = "interview report filed"
+AUDIT_INTERVIEW_RECORDING_FILED  = "interview recording filed"
+AUDIT_INTERVIEW_MEDIA_REMOVED    = "interview record removed"
+AUDIT_SHARE_REPORT_OPENED        = "interview report opened by client"
+AUDIT_SHARE_RECORDING_OPENED     = "interview recording watched by client"
 AUDIT_BACKGROUND_RECORDED   = "background check recorded"
 AUDIT_BACKGROUND_APPROVED   = "background verification approved"
 AUDIT_BACKGROUND_REJECTED   = "background verification rejected"
@@ -5516,6 +5575,42 @@ class ShareIn(BaseModel):
 class ShareStatusIn(BaseModel):
     status: str
     remarks: Optional[str] = None
+
+
+class ShareRemarkIn(BaseModel):
+    """A remark on a share that does NOT move its status.
+
+    `needs_attention` is the difference between the brief's "Add Remark" and its "Send Back
+    to Sparsh" (§12): both file the same entry, and only the second notifies the recruiter,
+    because only the second means the client is waiting on an answer.
+    """
+    remarks: str
+    needs_attention: bool = False
+
+
+class InterviewReportIn(BaseModel):
+    """The written outcome of a panel, filed against the CANDIDATE rather than one round.
+
+    Against the candidate on purpose: a client reviewing somebody asks "how did they
+    interview", not "how did round two of three go". The per-round scorecards remain where
+    they are and stay Sparsh-side -- they carry interviewer names and internal scoring, and
+    none of that is the client's.
+    """
+    file: UploadIn
+    summary: Optional[str] = None            # the headline a client reads before opening it
+
+
+class InterviewRecordingIn(BaseModel):
+    """The recording, EITHER as an uploaded file OR as a link. Exactly one of the two.
+
+    A link is not a lesser option: Zoom, Meet and Teams all produce a cloud recording and a
+    URL, and making a recruiter download and re-upload a two-hour call to file it is how a
+    step stops being followed.
+    """
+    file: Optional[UploadIn] = None
+    url: Optional[str] = None                # an external recording link
+    title: Optional[str] = None
+    duration_min: Optional[int] = None
 
 
 class BackgroundCheckIn(BaseModel):
