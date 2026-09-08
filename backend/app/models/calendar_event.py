@@ -24,6 +24,10 @@ class CalendarEventBase(BaseModel):
     # Event specific
     session_type: Optional[str] = None
     priority: Optional[str] = "Normal"
+    # IRM ▸ how much this ONE task counts for inside the Task / Delegation parameter.
+    # Optional and unset by default, so every task already stored — and every task created
+    # from the ordinary Task form — keeps weighing exactly 1.0 (see irm_service.task_weight).
+    irm_weight: Optional[float] = None
     session_template_id: Optional[str] = None
     batch_id: Optional[str] = None
     quarter_id: Optional[str] = None

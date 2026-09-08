@@ -63,6 +63,8 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, scope, onChanged, onEdit })
   const [uploadingEvidence, setUploadingEvidence] = useState(false);
   const [deadlinePickerOpen, setDeadlinePickerOpen] = useState(false);
   const [savingDeadline, setSavingDeadline] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   // Reopen requires the assigner to set a NEW deadline before the task goes back to the assignee.
   const [reopenPickerOpen, setReopenPickerOpen] = useState(false);
   const [reopening, setReopening] = useState(false);
@@ -248,14 +250,22 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, scope, onChanged, onEdit })
     }
   };
 
+  // The delete itself is soft — the task moves to Deleted Tasks and can be brought back.
+  // The MAIL is not: the backend fires the `deleted` task notification to the assignee and
+  // every watcher, and that cannot be recalled. Since this button sits directly beside
+  // Edit Task, one misclick told everyone on the task it was deleted, with nothing in
+  // between. Hence the confirmation.
   const handleDelete = async () => {
+    setDeleting(true);
     try {
       await softDeleteTask(taskId);
       showSuccess('Task moved to Deleted Tasks');
+      setConfirmDelete(false);
       onChanged?.();
       onClose();
     } catch (err) {
       showError(err.response?.data?.detail || 'Failed to delete task');
+      setDeleting(false);
     }
   };
 
@@ -579,7 +589,7 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, scope, onChanged, onEdit })
                       className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider border bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] border-[var(--accent-indigo-border)] hover:opacity-90">
                       <Pencil size={13} /> Edit Task
                     </button>
-                    <button onClick={handleDelete}
+                    <button onClick={() => setConfirmDelete(true)}
                       className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider border bg-[var(--accent-red-bg)] text-[var(--accent-red)] border-[var(--accent-red-border)] hover:opacity-90">
                       <Trash2 size={13} /> Delete Task
                     </button>
@@ -961,6 +971,52 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, scope, onChanged, onEdit })
         </motion.div>
       </div>
     </AnimatePresence>
+
+    {/* Sibling of the task panel, not a child of it: that panel is a scroll container
+        (`overflow-y-auto`), so an absolutely-positioned dialog inside it would be placed
+        against the scrolled content and drift with it. Fixed at z-[310] instead — one step
+        above the panel's z-[300], so the task stays visible behind the question. */}
+    {confirmDelete && (
+      <div className="fixed inset-0 z-[310] flex items-center justify-center p-4">
+        <div className="absolute inset-0 bg-black/50 backdrop-blur-sm"
+          onClick={deleting ? undefined : () => setConfirmDelete(false)} />
+        <div role="alertdialog" aria-modal="true"
+          className="relative w-full max-w-sm rounded-2xl border border-[var(--border)] bg-[var(--bg-card)] shadow-xl overflow-hidden">
+          <div className="flex items-center gap-2.5 px-5 py-4 border-b border-[var(--border)]">
+            <span className="w-8 h-8 rounded-lg flex items-center justify-center bg-[var(--accent-red-bg)] text-[var(--accent-red)] shrink-0">
+              <Trash2 size={16} />
+            </span>
+            <h3 className="text-[15px] font-extrabold tracking-tight">Delete this task?</h3>
+          </div>
+
+          <div className="px-5 py-4 space-y-3">
+            <p className="text-[12.5px] font-bold truncate">{task?.title}</p>
+            <p className="text-[12.5px] font-medium text-[var(--text-muted)]">
+              It moves to <b className="text-[var(--text-main)]">Deleted Tasks</b> and can be
+              brought back from there.
+            </p>
+            <div className="flex items-start gap-2 rounded-xl border border-[var(--accent-yellow-border)] bg-[var(--accent-yellow-bg)] px-3.5 py-2.5 text-[12px] font-semibold text-[var(--accent-yellow)]">
+              <Bell size={14} className="mt-[1px] shrink-0" />
+              <span>
+                The assignee and everyone in the loop are emailed that it was deleted. That
+                notification cannot be recalled.
+              </span>
+            </div>
+          </div>
+
+          <div className="flex items-center justify-end gap-2 px-5 py-4 border-t border-[var(--border)]">
+            <button type="button" onClick={() => setConfirmDelete(false)} disabled={deleting}
+              className="px-4 py-2 rounded-lg text-[13px] font-bold text-[var(--text-muted)] hover:bg-[var(--input-bg)] transition-colors disabled:opacity-50">
+              Keep it
+            </button>
+            <button type="button" onClick={handleDelete} disabled={deleting} autoFocus
+              className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-[var(--accent-red)] text-white text-[13px] font-bold shadow-sm hover:opacity-90 transition-opacity disabled:opacity-40">
+              <Trash2 size={14} /> {deleting ? 'Deleting…' : 'Delete Task'}
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
 
     {/* Deadline / Date Revision picker — assigner-only (button only shown when canManage). */}
     <MiniDatePicker

@@ -203,15 +203,22 @@ async def upload_media(
 @router.get("")
 async def list_media(
     media_type: Optional[str] = None,
+    include_url: bool = True,
     current_user: dict = Depends(get_current_user),
 ):
     col = get_collection("media_library")
     query = {}
     if media_type and media_type.lower() != "all":
-        query["media_type"] = media_type.lower()
+        mt = media_type.lower()
+        if mt in ["pdf", "document"]:
+            query["media_type"] = {"$in": ["pdf", "document"]}
+        elif mt in ["excel", "doc"]:
+            query["media_type"] = {"$in": ["document", "pdf", "other"]}
+        else:
+            query["media_type"] = mt
 
     items = await col.find(query).sort("created_at", -1).to_list(500)
-    return [_serialize(i) for i in items]
+    return [_serialize(i, with_url=include_url) for i in items]
 
 
 @router.get("/{media_id}")

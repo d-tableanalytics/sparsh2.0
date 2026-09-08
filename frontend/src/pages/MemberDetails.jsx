@@ -1,4 +1,4 @@
-﻿import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { AnimatePresence } from 'framer-motion';
 import {
@@ -6,7 +6,7 @@ import {
   ChevronLeft, Edit3, Trash2, CheckCircle2,
   XCircle, History, Zap,
   Lock, Settings2, Save, X, Building2,
-  Activity, Award, Layout, BookOpen, Search, ChevronDown
+  Activity, Award, Layout, BookOpen, Search, ChevronDown, Layers
 } from 'lucide-react';
 import api from '../services/api';
 import { useNotification } from '../context/NotificationContext';
@@ -16,7 +16,7 @@ const ManagerSelect = ({ value, managers, onChange }) => {
     const [open, setOpen] = useState(false);
     const [query, setQuery] = useState('');
     const ref = useRef(null);
-    const selected = managers.find((m) => m._id === value);
+    const selected = managers.find((m) => m._id === value || m.email === value);
     const filtered = managers.filter((m) =>
         `${m.full_name || ''} ${m.email || ''} ${m.designation || ''} ${m.role || ''}`
             .toLowerCase()
@@ -33,8 +33,8 @@ const ManagerSelect = ({ value, managers, onChange }) => {
         <div className="relative" ref={ref}>
             <button type="button" onClick={() => setOpen((o) => !o)}
                 className="w-full bg-[var(--input-bg)] p-3 rounded-xl text-[12px] font-black border-2 border-transparent focus:border-[var(--accent-indigo)] flex items-center justify-between gap-2 text-left">
-                <span className={selected ? 'text-[var(--text-main)]' : 'text-[var(--text-muted)]'}>
-                    {selected ? selected.full_name : '— None —'}
+                <span className={selected || value ? 'text-[var(--text-main)]' : 'text-[var(--text-muted)]'}>
+                    {selected ? selected.full_name : (value || '— None —')}
                 </span>
                 <ChevronDown size={14} className="text-[var(--text-muted)] shrink-0" />
             </button>
@@ -110,12 +110,18 @@ const MemberDetails = () => {
     }, [user?.company_id, userId]);
 
     const reportingManagerName =
-        (user?.reporting_manager && managers.find((m) => m._id === user.reporting_manager)?.full_name) || '—';
+        (user?.reporting_manager && (
+            managers.find((m) => m._id === user.reporting_manager || m.email === user.reporting_manager)?.full_name || user.reporting_manager
+        )) || '—';
 
     // ─── Update Logic ───
     const handleUpdate = async () => {
         try {
-            const payload = { ...editForm, reporting_manager: editForm.reporting_manager || null };
+            const payload = { 
+                ...editForm, 
+                reporting_manager: editForm.reporting_manager || null,
+                level: editForm.level || null 
+            };
             await api.put(`/users/${userId}`, payload);
             setIsEditing(false);
             showSuccess("Neural profile updated");
@@ -227,22 +233,32 @@ const MemberDetails = () => {
                                            <p className="text-[9px] font-black text-[var(--text-muted)] uppercase tracking-[0.2em] group-hover/card:text-white/60">Reporting Manager</p>
                                            <div className="flex items-center gap-2 text-[var(--text-main)] font-black text-[14px] group-hover/card:text-white truncate"><UserCircle2 size={16} className="text-[var(--accent-indigo)] group-hover/card:text-white shrink-0" /> {reportingManagerName}</div>
                                        </div>
+                                       <div className="bg-white/50 backdrop-blur-sm p-4 rounded-[20px] border border-[var(--border)] space-y-1 group/card hover:bg-black transition-all">
+                                           <p className="text-[9px] font-black text-[var(--text-muted)] uppercase tracking-[0.2em] group-hover/card:text-white/60">Hierarchy Level</p>
+                                           <div className="flex items-center gap-2 text-[var(--text-main)] font-black text-[14px] group-hover/card:text-white truncate"><Layers size={16} className="text-black group-hover/card:text-white shrink-0" /> {user.level || '—'}</div>
+                                       </div>
                                    </div>
                                )}
                                
                                {isEditing && (
                                    <div className="space-y-4 pt-4">
                                        <div className="grid grid-cols-2 gap-3">
-                                           <input className="bg-[var(--input-bg)] p-3 rounded-xl text-[12px] font-black border-2 border-transparent focus:border-[var(--accent-indigo)]" placeholder="Email Node" value={editForm.email} onChange={e => setEditForm({...editForm, email: e.target.value})} />
-                                           <input className="bg-[var(--input-bg)] p-3 rounded-xl text-[12px] font-black border-2 border-transparent focus:border-[var(--accent-indigo)]" placeholder="Neural Link" value={editForm.mobile} onChange={e => setEditForm({...editForm, mobile: e.target.value})} />
+                                           <input className="bg-[var(--input-bg)] p-3 rounded-xl text-[12px] font-black border-2 border-transparent focus:border-[var(--accent-indigo)]" placeholder="Email Node" value={editForm.email || ''} onChange={e => setEditForm({...editForm, email: e.target.value})} />
+                                           <input className="bg-[var(--input-bg)] p-3 rounded-xl text-[12px] font-black border-2 border-transparent focus:border-[var(--accent-indigo)]" placeholder="Neural Link" value={editForm.mobile || ''} onChange={e => setEditForm({...editForm, mobile: e.target.value})} />
                                        </div>
-                                       <div className="space-y-1.5 text-left">
-                                           <label className="text-[9px] font-black text-[var(--text-muted)] uppercase tracking-[0.2em]">Reporting Manager</label>
-                                           <ManagerSelect
-                                               value={editForm.reporting_manager || ''}
-                                               managers={managers}
-                                               onChange={(val) => setEditForm({ ...editForm, reporting_manager: val })}
-                                           />
+                                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-left">
+                                           <div className="space-y-1.5">
+                                               <label className="text-[9px] font-black text-[var(--text-muted)] uppercase tracking-[0.2em]">Reporting Manager</label>
+                                               <ManagerSelect
+                                                   value={editForm.reporting_manager || ''}
+                                                   managers={managers}
+                                                   onChange={(val) => setEditForm({ ...editForm, reporting_manager: val })}
+                                               />
+                                           </div>
+                                           <div className="space-y-1.5">
+                                               <label className="text-[9px] font-black text-[var(--text-muted)] uppercase tracking-[0.2em]">Hierarchy Level</label>
+                                               <input className="bg-[var(--input-bg)] p-3 rounded-xl text-[12px] font-black border-2 border-transparent focus:border-[var(--accent-indigo)] w-full outline-none" placeholder="e.g. L1, L2, Manager" value={editForm.level || ''} onChange={e => setEditForm({...editForm, level: e.target.value})} />
+                                           </div>
                                        </div>
                                        <button onClick={handleUpdate} className="w-full bg-black text-white py-4 rounded-2xl font-black flex items-center justify-center gap-2 tracking-[0.1em] uppercase text-[12px] transition-all shadow-xl"> <Save size={16}/> Sync Registry </button>
                                    </div>

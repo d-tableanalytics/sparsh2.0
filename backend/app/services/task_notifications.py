@@ -44,6 +44,16 @@ TASK_EVENT_SLUGS = {
     "follow_up_added": "task_follow_up_added",
     "subtask_created": "task_subtask_created",
     "in_loop_added": "task_in_loop_added",
+    # ─── Reassignment (raised from the task update route) ───
+    "reassigned": "task_reassigned",
+    "unassigned": "task_unassigned",
+    # ─── Time-driven nudges (raised by task_nudge_service's daily sweep, never by a user
+    #     action). They are ordinary triggers in every other respect: same template
+    #     resolution, same Active switch, same channels.
+    "due_reminder_daily": "task_due_reminder_daily",
+    "due_reminder_weekly": "task_due_reminder_weekly",
+    "overdue": "task_overdue",
+    "verification_pending": "task_verification_pending_reminder",
 }
 
 # In-app title + tone per event (the bell feed mirrors every email/WhatsApp trigger).
@@ -63,6 +73,12 @@ _IN_APP = {
     "follow_up_added": ("Follow-up Added", "info"),
     "subtask_created": ("Subtask Created", "info"),
     "in_loop_added": ("Added to Task Loop", "info"),
+    "reassigned": ("Task Reassigned", "warning"),
+    "unassigned": ("Removed from Task", "warning"),
+    "due_reminder_daily": ("Task Due Reminder", "info"),
+    "due_reminder_weekly": ("Task Due Reminder", "info"),
+    "overdue": ("Task Overdue", "error"),
+    "verification_pending": ("Verification Still Pending", "warning"),
 }
 
 
@@ -86,6 +102,15 @@ def recipients_for_event(event: str, task: dict, extra: Optional[dict] = None) -
     if event == "assigned":
         # Only the people newly put on the task, not the ones who were already on it.
         return _ids(extra.get("new_assignee_ids"))
+    if event == "unassigned":
+        # ONLY the people just taken off it. They are no longer on the task, so they are not
+        # in any of the sets below and would otherwise hear nothing about losing the work.
+        return _ids(extra.get("removed_assignee_ids"))
+    if event == "reassigned":
+        # The task moved between people: whoever now holds it, plus the assigner and the
+        # watchers tracking it. The person who LOST it gets the unassigned trigger instead, so
+        # one handover never sends the same person two different messages.
+        return _ids(extra.get("new_assignee_ids")) | assigner | watchers
     if event == "in_loop_added":
         # Only the people newly put in the loop (as watchers), not the existing ones.
         return _ids(extra.get("new_watcher_ids"))
@@ -98,6 +123,16 @@ def recipients_for_event(event: str, task: dict, extra: Optional[dict] = None) -
     if event in ("reopened", "verification_approved"):
         # The assigner's verdict, reported back down to whoever did the work.
         return assignees | watchers
+    if event in ("due_reminder_daily", "due_reminder_weekly"):
+        # A due-date nudge is addressed to the people who have to DO the work.
+        return assignees
+    if event == "overdue":
+        # A missed deadline is the assigner's problem as much as the doer's.
+        return assignees | assigner | watchers
+    if event == "verification_pending":
+        # The chase is aimed at whoever has to close it out — the assigner, never the doer,
+        # who has already done their part and is waiting.
+        return assigner
     if event == "deleted":
         return assignees | watchers
     if event == "created":
@@ -246,6 +281,17 @@ def _build_context(event: str, task: dict, actor_name: str, extra: Optional[dict
         "new_deadline": format_datetime_standard(extra.get("new_end")) if extra.get("new_end") else "Not set",
         "parent_task": extra.get("parent_title") or "",
         "subtask_name": extra.get("subtask_title") or "",
+        # ─── Reassignment + time-driven nudges ───
+        # Populated by the raiser (the update route / the nightly sweep). Empty for every other
+        # trigger, which is harmless: render_template only substitutes the keys a body uses.
+        "previous_assignee": extra.get("previous_assignee") or "",
+        "new_assignee": extra.get("new_assignee") or "",
+        # Whole days, as a string so a template can print it directly. "days_overdue" counts
+        # past the deadline, "days_remaining" counts down to it — only one is ever meaningful
+        # for a given task, and the trigger that fires decides which.
+        "days_overdue": str(extra.get("days_overdue") or 0),
+        "days_remaining": str(extra.get("days_remaining") or 0),
+        "due_date": format_datetime_standard(deadline),
         # The in-loop (watcher) member being notified. On task_in_loop_added the recipient IS
         # the person just put in the loop, so this mirrors their name; on other triggers it
         # simply names whoever is receiving the notification.

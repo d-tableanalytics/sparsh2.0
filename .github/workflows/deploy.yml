@@ -19,11 +19,12 @@ jobs:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
+          command_timeout: 30m
           script: |
+            set -e
             cd ~/sparsh2.0
             git fetch origin main
             git reset --hard origin/main
-            docker-compose down
-            docker-compose up -d --build --remove-orphans --force-recreate
+            docker-compose build
+            docker-compose up -d --remove-orphans --force-recreate
             docker image prune -f
-            docker-compose up -d

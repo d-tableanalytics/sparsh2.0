@@ -1,11 +1,11 @@
-﻿import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { AnimatePresence } from 'framer-motion';
 import {
   UserCircle2, Shield, Mail, Phone, Clock,
   ChevronLeft, Edit3, Trash2, CheckCircle2,
   XCircle, MoreHorizontal, History, Zap,
-  Lock, Settings2, Save, X, Building2, MapPin, Search, ChevronDown
+  Lock, Settings2, Save, X, Building2, MapPin, Search, ChevronDown, Layers
 } from 'lucide-react';
 import api from '../services/api';
 import { useNotification } from '../context/NotificationContext';
@@ -15,7 +15,7 @@ const ManagerSelect = ({ value, managers, onChange }) => {
     const [open, setOpen] = useState(false);
     const [query, setQuery] = useState('');
     const ref = useRef(null);
-    const selected = managers.find((m) => m._id === value);
+    const selected = managers.find((m) => m._id === value || m.email === value);
     const filtered = managers.filter((m) =>
         `${m.full_name || ''} ${m.email || ''} ${m.designation || ''} ${m.role || ''}`
             .toLowerCase()
@@ -31,9 +31,9 @@ const ManagerSelect = ({ value, managers, onChange }) => {
     return (
         <div className="relative" ref={ref}>
             <button type="button" onClick={() => setOpen((o) => !o)}
-                className="w-full bg-[var(--input-bg)] p-4 rounded-xl text-[14px] font-bold border border-[var(--border)] flex items-center justify-between gap-2 text-left">
-                <span className={selected ? 'text-[var(--text-main)]' : 'text-[var(--text-muted)]'}>
-                    {selected ? selected.full_name : '— None —'}
+                className="w-full bg-[var(--input-bg)] p-3 rounded-xl text-[12px] font-black border-2 border-transparent focus:border-[var(--accent-indigo)] flex items-center justify-between gap-2 text-left">
+                <span className={selected || value ? 'text-[var(--text-main)]' : 'text-[var(--text-muted)]'}>
+                    {selected ? selected.full_name : (value || '— None —')}
                 </span>
                 <ChevronDown size={16} className="text-[var(--text-muted)] shrink-0" />
             </button>
@@ -113,20 +113,24 @@ const UserDetails = () => {
     }, [userId]);
 
     const reportingManagerName =
-        (user?.reporting_manager && managers.find((m) => m._id === user.reporting_manager)?.full_name) || '—';
+        (user?.reporting_manager && (
+            managers.find((m) => m._id === user.reporting_manager || m.email === user.reporting_manager)?.full_name || user.reporting_manager
+        )) || '—';
 
     // ─── Update Logic ───
     const handleUpdate = async () => {
         try {
-            const payload = { ...editForm, reporting_manager: editForm.reporting_manager || null };
+            const payload = { 
+                ...editForm, 
+                reporting_manager: editForm.reporting_manager || null,
+                level: editForm.level || null 
+            };
             await api.put(`/users/${userId}`, payload);
             setIsEditing(false);
             showSuccess("Profile updated");
             fetchData();
         } catch (err) {
             if (err.response?.status !== 403) {
-                // A 422 from field validation (e.g. malformed email) returns detail as an
-                // array of error objects, not a string.
                 const detail = err.response?.data?.detail;
                 showError(typeof detail === 'string' ? detail : "Update failed");
             }
@@ -226,15 +230,20 @@ const UserDetails = () => {
                                            <p className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest">Reporting Manager</p>
                                            <div className="flex items-center gap-2 text-[var(--text-main)] font-bold text-[14px]"><UserCircle2 size={16}/> {reportingManagerName}</div>
                                        </div>
+                                       <div className="bg-[var(--input-bg)] p-4 rounded-2xl border border-[var(--border)] space-y-1">
+                                           <p className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest">Hierarchy Level</p>
+                                           <div className="flex items-center gap-2 text-[var(--text-main)] font-bold text-[14px]"><Layers size={16}/> {user.level || '—'}</div>
+                                       </div>
                                    </div>
                                )}
                                {isEditing && (
                                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                                       <input className="bg-[var(--input-bg)] p-4 rounded-xl text-[14px] font-bold border border-[var(--border)]" placeholder="Email" value={editForm.email} onChange={e => setEditForm({...editForm, email: e.target.value})} />
-                                       <input className="bg-[var(--input-bg)] p-4 rounded-xl text-[14px] font-bold border border-[var(--border)]" placeholder="Phone" value={editForm.mobile} onChange={e => setEditForm({...editForm, mobile: e.target.value})} />
+                                       <input className="bg-[var(--input-bg)] p-4 rounded-xl text-[14px] font-bold border border-[var(--border)]" placeholder="Email" value={editForm.email || ''} onChange={e => setEditForm({...editForm, email: e.target.value})} />
+                                       <input className="bg-[var(--input-bg)] p-4 rounded-xl text-[14px] font-bold border border-[var(--border)]" placeholder="Phone" value={editForm.mobile || ''} onChange={e => setEditForm({...editForm, mobile: e.target.value})} />
                                        <select className="bg-[var(--input-bg)] p-4 rounded-xl text-[14px] font-bold border border-[var(--border)]" value={editForm.role} onChange={e => setEditForm({...editForm, role: e.target.value})}>
                                             <option value="superadmin">Superadmin</option><option value="admin">Admin</option><option value="coach">Coach</option>
                                        </select>
+                                       <input className="bg-[var(--input-bg)] p-4 rounded-xl text-[14px] font-bold border border-[var(--border)]" placeholder="Hierarchy Level (e.g. L1, L2)" value={editForm.level || ''} onChange={e => setEditForm({...editForm, level: e.target.value})} />
                                        <div className="sm:col-span-2 space-y-1.5">
                                            <label className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest">Reporting Manager</label>
                                            <ManagerSelect

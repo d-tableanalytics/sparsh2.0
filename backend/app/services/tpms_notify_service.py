@@ -26,6 +26,7 @@ from datetime import datetime
 from typing import Dict, List, Optional
 
 from app.db.mongodb import get_collection
+from app.services.whatsapp_components import build_send_components, resolve_params
 from app.models.tpms import COLL_MAIL_TEMPLATES, TPMS_NOTIFICATIONS_ENABLED
 
 logger = logging.getLogger(__name__)
@@ -38,6 +39,9 @@ EVENT_REMINDER = "reminder"
 EVENT_RESCHEDULE = "reschedule"
 EVENT_CANCEL = "cancel"
 EVENT_COMPLETED = "completed"
+# Fired after a review form is submitted — the HOD/MD summary and the per-employee scorecard.
+EVENT_FORM_SUMMARY = "form_summary"
+EVENT_FORM_SCORECARD = "form_scorecard"
 
 _PLACEHOLDER = re.compile(r"\{\{\s*(\w+)\s*\}\}")
 
@@ -120,14 +124,20 @@ async def _recipient_form_links(event: dict, actor: Optional[dict] = None) -> Di
     except Exception as e:
         logger.error(f"TPMS form link generation failed for '{event.get('activity')}': {e}")
         return {}, {}
+    from app.services.tpms_form_link_service import configured_base_url, link_on
+
+    # Rebuilt from the token against the CURRENT Application URL rather than read from the
+    # `link` frozen at creation — an assignment minted while the URL was wrong is still mailed
+    # with a working address once Settings is corrected.
+    base = await configured_base_url()
     links: Dict[str, List[dict]] = {}
     respondents: Dict[str, dict] = {}
     for row in rows:
-        if not row.get("link"):
+        if not row.get("token"):
             continue
         rid = str(row.get("respondent_id"))
         links.setdefault(rid, []).append({
-            "link": row["link"],
+            "link": link_on(base, row["token"]),
             "title": row.get("form_title") or row.get("form_type") or "Form",
         })
         if row.get("respondent_email"):
@@ -170,6 +180,22 @@ _FORBIDDEN_LINK_PATTERNS = (
 
 _ANCHOR_RE = re.compile(r"<a(?:\s[^>]*)?>.*?</a>", re.IGNORECASE | re.DOTALL)
 _HREF_RE = re.compile(r"""href\s*=\s*["']([^"']*)["']""", re.IGNORECASE)
+# A generated form link sitting in the body as plain text — what a template that writes a bare
+# {{Form_Link}} (rather than <a href="{{Form_Link}}">) leaves behind once it is filled.
+_BARE_FORM_URL_RE = re.compile(r"https?://\S*/f/[A-Za-z0-9_\-]+")
+# {{Form_Link}} wired into the template's OWN anchor, e.g. <a href="{{Form_Link}}">Fill it</a>.
+_FORM_LINK_AS_HREF_RE = re.compile(
+    r"""href\s*=\s*["']\s*\{\{\s*Form_Link\s*\}\}\s*["']""", re.IGNORECASE)
+
+
+def _template_wires_own_button(body_tpl: str) -> bool:
+    """True when the template builds its own link around {{Form_Link}}.
+
+    Such a template wants the raw URL and supplies its own label. A template that merely drops
+    {{Form_Link}} into the body as text wants a link it does not have to build — and gets the
+    labelled block, placed exactly where the placeholder sits.
+    """
+    return bool(_FORM_LINK_AS_HREF_RE.search(body_tpl or ""))
 
 
 def _is_form_link(url: str) -> bool:
@@ -223,16 +249,48 @@ def _link_block(entries: List[dict]) -> str:
     )
 
 
-def _ensure_links_delivered(html: str, entries: List[dict]) -> str:
-    """Append any form link the rendered body does not already contain.
+def _linked_hrefs(html: str) -> set:
+    """Every URL the rendered body exposes as a real, clickable anchor."""
+    return {(m.group(1) or "").strip() for m in _HREF_RE.finditer(html or "")}
 
-    A template that uses {{Form_Link}} already carries the primary link, so nothing is appended
-    for it and the mail looks exactly as the admin designed it. Anything missing — because the
-    template has no placeholder, or because this activity has a second form — is added below,
-    so "the assignee receives the email with their unique link" cannot depend on how the
-    template happens to be written.
+
+def _strip_bare_form_urls(html: str) -> str:
+    """Drop naked form URLs from the body, leaving anchors untouched.
+
+    A template that writes `{{Form_Link}}` on its own — as the Accountability & Ownership one
+    does — renders the raw https://…/f/<token> string into the mail as text. Some clients
+    auto-link it, most show an unlabelled URL, and the recipient cannot tell WHICH form it
+    opens. The link is not lost: _ensure_links_delivered puts it back below, named after the
+    form it belongs to. Only text outside <a>…</a> is cleaned, so a template that wraps the
+    placeholder in its own button keeps that button exactly as authored.
     """
-    missing = [e for e in entries if e["link"] not in html]
+    body = html or ""
+    out, last = [], 0
+    for m in _ANCHOR_RE.finditer(body):
+        out.append(_BARE_FORM_URL_RE.sub("", body[last:m.start()]))
+        out.append(m.group(0))
+        last = m.end()
+    out.append(_BARE_FORM_URL_RE.sub("", body[last:]))
+    return "".join(out)
+
+
+def _ensure_links_delivered(html: str, entries: List[dict]) -> str:
+    """Append every form link the rendered body does not already offer as a labelled anchor.
+
+    A template that uses <a href="{{Form_Link}}">…</a> already carries that link, so nothing is
+    appended for it and the mail looks exactly as the admin designed it. Anything else is added
+    below, so "the assignee receives the email with their unique link" cannot depend on how the
+    template happens to be written.
+
+    Membership is judged on ANCHOR HREFS, not on the raw text. "Accountability & Ownership
+    Rating" carries two forms and the stored template has a single bare {{Form_Link}}: the
+    accountability URL was therefore present as plain text, counted as already delivered, and
+    only the ownership link got a label — which is the reported "no link for ownership form in
+    template, only accountability". Judged by href, neither is linked, so both are appended,
+    each named after its own form.
+    """
+    linked = _linked_hrefs(html)
+    missing = [e for e in entries if e["link"] not in linked]
     return html + _link_block(missing) if missing else html
 
 
@@ -255,7 +313,19 @@ async def build_map(event: dict, extra: Optional[dict] = None) -> Dict[str, str]
         "Staff_Assigner": await _resolve_names(event.get("coach_ids"), "staff"),
         "Company_Assigners": await _resolve_names(event.get("assigned_member_ids"), "learners"),
         "Session_Type": (str(meta.get("scope") or "").upper() or (event.get("activity") or "")),
+        # The stored templates read "A new {{Calendar_Type}} has been scheduled for …", so this
+        # is the NOUN for the calendar entry, not a code. It was never in this mapping, and
+        # fill() leaves an unknown placeholder untouched by design — so 22 templates delivered
+        # the literal text "{{Calendar_Type}}" to recipients. Anything carrying an `activity`
+        # is a TPMS activity; any other calendar row keeps its own word.
+        "Calendar_Type": "activity" if event.get("activity") else (event.get("type") or "event"),
         "Form_Link": _form_link(event),
+        # Overridden per-recipient by _dispatch and by the reminder sender, which are the only
+        # places a personal link exists. They default to EMPTY rather than being absent: fill()
+        # leaves an unknown placeholder untouched, so a template written with {{Form_Links}}
+        # delivered the literal text "{{Form_Links}}" to the recipient.
+        "Form_Link_2": "",
+        "Form_Links": "",
     }
     if extra:
         mapping.update({k: v for k, v in extra.items() if v is not None})
@@ -394,51 +464,107 @@ def wa_guess_field(variable: str, mapping: Dict[str, str]) -> str:
 
 
 async def get_whatsapp_template(activity: str, event_kind: str, side: str) -> Optional[dict]:
-    """Most-specific WhatsApp template wins: exact activity, then '*'. Returns None when no
-    row exists — the business's per-event on/off switch ("no template row = skip")."""
+    """Most-specific WhatsApp template wins: the exact activity, the same name ignoring case
+    and surrounding space, then the '*' catch-all. Returns None when no row exists — the
+    business's per-event on/off switch ("no template row = skip").
+
+    The tolerant middle step matters because the wiring row stores the activity as free text
+    while the calendar event carries the canonical name: a row saved as "accountability &
+    ownership rating" (or with a trailing space) would otherwise never match
+    "Accountability & Ownership Rating", and the send would skip silently."""
     from app.models.tpms import COLL_WHATSAPP_TEMPLATES
     coll = get_collection(COLL_WHATSAPP_TEMPLATES)
-    for name in (activity, "*"):
-        if not name:
-            continue
-        doc = await coll.find_one({"activity": name, "side": side,
-                                   "event": event_kind, "active": {"$ne": False}})
+    base = {"side": side, "event": event_kind, "active": {"$ne": False}}
+    name = str(activity or "").strip()
+    if name:
+        doc = await coll.find_one({**base, "activity": name})
         if doc:
             return doc
-    return None
+        doc = await coll.find_one(
+            {**base, "activity": {"$regex": rf"^\s*{re.escape(name)}\s*$", "$options": "i"}})
+        if doc:
+            return doc
+    return await coll.find_one({**base, "activity": "*"})
+
+
+def _resolve_params(keys, mapping: Dict[str, str]) -> list:
+    """Data-field names → the values Meta will substitute. A key that doesn't name a known
+    field falls back to the heuristic guesser (spec §11); "-" is the last resort because Meta
+    rejects a blank parameter outright."""
+    return resolve_params(keys, mapping, wa_guess_field)
+
+
+def _build_send_components(tpl: dict, mapping: Dict[str, str], body_params: list) -> Optional[list]:
+    """The Cloud API `components` array for one send — see services/whatsapp_components.
+
+    The structure is shared with Task & Delegation and the Checklist repeat-task triggers, so it
+    lives in one place; this wrapper only supplies the TPMS wiring row's own key names and the
+    spec §11 guesser."""
+    return build_send_components(
+        body_params,
+        header_keys=tpl.get("header_variables"),
+        button_keys=tpl.get("button_variables"),
+        mapping=mapping,
+        guess=wa_guess_field,
+    )
 
 
 async def send_whatsapp(event: dict, event_kind: str, side: str) -> dict:
     """Resolve a Meta template, map ordered positional params from build_map, normalise
     phones, and send. No template row → skip (returns skipped=1). Gated by the TPMS switch."""
     if not TPMS_NOTIFICATIONS_ENABLED:
-        return {"sent": 0, "skipped": 0}
-    tpl = await get_whatsapp_template(event.get("activity") or "", event_kind, side)
+        return {"sent": 0, "failed": 0, "skipped": 0, "no_phone": 0}
+    activity = event.get("activity") or ""
+    tpl = await get_whatsapp_template(activity, event_kind, side)
     if not tpl:
-        return {"sent": 0, "skipped": 1}  # no template = intentional skip
+        # Not an error — but the single most common reason a WhatsApp notification "never
+        # arrives", so say which key was looked up instead of returning in silence.
+        logger.info("TPMS WhatsApp skip: no active template wired for "
+                    f"'{activity}' / {side} / {event_kind}")
+        return {"sent": 0, "failed": 0, "skipped": 1, "no_phone": 0}
     from app.services.notification_service import send_whatsapp_template
 
     mapping = await build_map(event)
-    # Meta requires ORDERED params; the template row stores the variable order. A variable
-    # that doesn't name a known field falls back to the heuristic guesser (spec §11) rather
-    # than silently sending "-".
-    var_keys = tpl.get("variables") or []
-    params = [str(mapping.get(k) or wa_guess_field(k, mapping) or "-") for k in var_keys]
+    # Meta requires ORDERED params; the template row stores the variable order.
+    params = _resolve_params(tpl.get("variables") or [], mapping)
+    components = _build_send_components(tpl, mapping, params)
     people = await _recipients(event)
-    sent = failed = 0
-    for person in people.get(side) or []:
+    recipients = people.get(side) or []
+    # Meta template names are lowercase-only (validate_template enforces ^[a-z0-9_]+$), but the
+    # wiring row holds whatever was typed. Sending "Accountability" for the approved
+    # "accountability" is rejected as a non-existent template, per recipient, in the log only —
+    # so normalise here and let rows written before this keep working without a data migration.
+    tpl_name = str(tpl.get("meta_template_name") or tpl.get("name") or "").strip().lower()
+    # Same Activity / Company context the mail path records, so the Logs Report can fill its
+    # ACTIVITY and COMPANY columns for a WhatsApp row instead of showing a dash.
+    context = log_context(event)
+    sent = failed = no_phone = 0
+    for person in recipients:
         phone = normalize_phone(person.get("phone"))
         if not phone:
+            no_phone += 1
             continue
         try:
-            await send_whatsapp_template(phone, tpl.get("meta_template_name") or tpl.get("name"),
-                                         tpl.get("language") or "en", params,
-                                         user_id=person.get("id"), slug=f"tpms_wa_{event_kind}_{side}")
-            sent += 1
+            ok = await send_whatsapp_template(phone, tpl_name,
+                                              tpl.get("language") or "en", params,
+                                              user_id=person.get("id"),
+                                              slug=f"tpms_wa_{event_kind}_{side}",
+                                              components=components, meta=context)
         except Exception as e:
-            failed += 1
+            ok = False
             logger.error(f"TPMS WhatsApp to {phone} failed: {e}")
-    return {"sent": sent, "failed": failed, "skipped": 0}
+        # The send layer REPORTS failure by returning False — missing credentials, a template
+        # Meta does not consider approved, a number not on WhatsApp — and only raises on an
+        # unexpected error. Counting that as sent is what made this look delivered when
+        # nothing arrived; the Cloud API's own error is already in the notification log.
+        if ok:
+            sent += 1
+        else:
+            failed += 1
+    if no_phone:
+        logger.warning(f"TPMS WhatsApp '{tpl_name}' ({side}/{event_kind}): {no_phone} of "
+                       f"{len(recipients)} recipient(s) have no usable mobile number")
+    return {"sent": sent, "failed": failed, "skipped": 0, "no_phone": no_phone}
 
 
 async def _record_form_link_delivery(event: dict, person: dict, status: str,
@@ -466,8 +592,9 @@ async def _record_form_link_delivery(event: dict, person: dict, status: str,
 
 async def _dispatch(event: dict, event_kind: str, heading: str,
                     extra: Optional[dict] = None) -> dict:
-    """Resolve a template per side, fill it and send. Never raises — a mail failure must
-    not roll back the action that triggered it (the source wraps every send too)."""
+    """Resolve a template per side, fill it and send — mail first, then WhatsApp for the sides
+    that have a template wired. Never raises: a delivery failure must not roll back the action
+    that triggered it (the source wraps every send too)."""
     # TPMS notifications globally disabled → send nothing (schedule/reschedule/cancel/complete).
     if not TPMS_NOTIFICATIONS_ENABLED:
         return {"sent": 0, "failed": 0}
@@ -500,14 +627,15 @@ async def _dispatch(event: dict, event_kind: str, heading: str,
         if not recipients:
             continue
         tpl = await get_template(activity, event_kind, side)
-        # Strictly respect the template's Active/Inactive status. get_template returns None when
-        # the template is Inactive OR not configured — in BOTH cases send nothing for this side:
-        # no default subject, no _default_body fallback. Only an Active template that has a body
-        # is used for delivery.
-        if not tpl or not tpl.get("body_html"):
-            continue
-        subject_tpl = tpl.get("subject") or f"[{heading}] {{{{Title}}}} – {{{{Activity}}}}"
-        body_tpl = tpl.get("body_html")
+        # Spec parity (defaultBody_): when no Active template with a body is configured for this
+        # (activity, side), fall back to a branded default body + generic subject so the
+        # notification still goes out — instead of silently sending nothing.
+        if tpl and tpl.get("body_html"):
+            subject_tpl = tpl.get("subject") or f"[{heading}] {{{{Title}}}} – {{{{Activity}}}}"
+            body_tpl = tpl.get("body_html")
+        else:
+            subject_tpl = f"[{heading}] {{{{Title}}}} – {{{{Activity}}}}"
+            body_tpl = _default_body(mapping, heading)
 
         for person in recipients:
             person_map = {**mapping, "Recipient_Name": person["name"]}
@@ -515,31 +643,80 @@ async def _dispatch(event: dict, event_kind: str, heading: str,
             # respondents. Staff-side recipients and non-form activities keep the empty default.
             my_links = form_links.get(str(person.get("id") or "")) or []
             if my_links and SEND_FORM_LINKS:
-                person_map["Form_Link"] = my_links[0]["link"]
+                # Where the links LAND matters as much as whether they are sent. A template that
+                # writes a bare {{Form_Link}} gets the labelled block substituted at that exact
+                # spot — inside the body, above the sign-off. Appending it after the template
+                # instead put it below the "Sparsh Magic Automation" footer, where the mail looks
+                # finished: on a phone the links were off-screen and read as missing.
+                # A template that wires its own <a href="{{Form_Link}}"> still gets the raw URL.
+                person_map["Form_Link"] = (my_links[0]["link"]
+                                           if _template_wires_own_button(body_tpl)
+                                           else _link_block(my_links))
+                # Second form's link — e.g. "Accountability & Ownership Rating" carries TWO forms
+                # (accountability + ownership), so each HOD needs both. Empty when there is only one.
+                person_map["Form_Link_2"] = my_links[1]["link"] if len(my_links) > 1 else ""
+                # A ready-made HTML block of ALL of this recipient's links; drop it anywhere.
+                person_map["Form_Links"] = _link_block(my_links)
             subject = fill(subject_tpl, person_map)
             html = fill(body_tpl, person_map)
             if my_links and SEND_FORM_LINKS:
+                # Clean first, then guarantee: a bare {{Form_Link}} leaves an unlabelled URL
+                # that hides which form it opens, and would also mask the link from the
+                # completeness check below.
+                html = _strip_bare_form_urls(html)
                 html = _ensure_links_delivered(html, my_links)
             # Stage 1 guarantee: whatever the stored template contained — a legacy Google Form
             # URL, an old /tpms/forms deep link, or a now-empty {{Form_Link}} button — no form
             # link leaves in this mail.
             html = _strip_form_links(html)
             try:
-                await send_email_notification(
+                # send_email_notification returns False on failure and NEVER raises, so this
+                # except block could not see a delivery failure: every send counted as `sent`
+                # and every form link was stamped delivered. Capture the result instead.
+                delivered = await send_email_notification(
                     person["email"], subject, html,
                     user_id=person.get("id"), slug=f"tpms_{event_kind}_{side}",
                     meta=log_context(event),
                 )
-                sent += 1
+                if delivered:
+                    sent += 1
+                else:
+                    failed += 1
+                    logger.warning(f"TPMS {event_kind} mail to {person['email']} was not delivered")
                 if my_links and SEND_FORM_LINKS:
-                    await _record_form_link_delivery(event, person, "sent", None)
+                    await _record_form_link_delivery(
+                        event, person,
+                        "sent" if delivered else "failed",
+                        None if delivered else "Delivery failed",
+                    )
             except Exception as e:
                 failed += 1
                 logger.error(f"TPMS {event_kind} mail to {person['email']} failed: {e}")
                 if my_links and SEND_FORM_LINKS:
                     await _record_form_link_delivery(event, person, "failed", str(e))
 
-    return {"sent": sent, "failed": failed}
+    # ── WhatsApp, off the same (activity × side × event) wiring as the mail above.
+    # Every lifecycle event goes through here, not just reminders: the admin screen has always
+    # offered `schedule` / `reschedule` / `cancel` / `completed` for WhatsApp and validated the
+    # chosen template against Meta, but this dispatcher was mail-only, so those rows saved,
+    # listed — and never fired. The reminder path calls send_whatsapp() directly from the
+    # reminder scheduler and never reaches _dispatch, so nothing double-sends.
+    #
+    # Isolated per side and non-fatal by design: mail has already gone out at this point, and a
+    # WhatsApp failure must not turn a delivered notification into a failed request.
+    whatsapp = {"sent": 0, "failed": 0, "skipped": 0, "no_phone": 0}
+    for side in (SIDE_STAFF, SIDE_COMPANY):
+        if not (people.get(side) or []):
+            continue
+        try:
+            result = await send_whatsapp(event, event_kind, side)
+        except Exception as e:
+            logger.error(f"TPMS {event_kind} WhatsApp ({side}) failed: {e}")
+            continue
+        for key in whatsapp:
+            whatsapp[key] += result.get(key) or 0
+
+    return {"sent": sent, "failed": failed, "whatsapp": whatsapp}
 
 
 # ─────────────────────────────────────────────────────────────
@@ -623,9 +800,12 @@ async def notify_learner_done(event: dict, doer_name: str) -> dict:
     sent = 0
     for person in people.get(SIDE_STAFF) or []:
         try:
-            await send_email_notification(person["email"], subject, html,
-                                          user_id=person.get("id"), slug="tpms_learner_done")
-            sent += 1
+            # Result captured: a False return means the mail did not go out.
+            if await send_email_notification(person["email"], subject, html,
+                                             user_id=person.get("id"), slug="tpms_learner_done"):
+                sent += 1
+            else:
+                logger.warning(f"TPMS learner-done mail to {person['email']} was not delivered")
         except Exception as e:
             logger.error(f"TPMS learner-done mail to {person['email']} failed: {e}")
     return {"sent": sent}
@@ -650,9 +830,12 @@ async def notify_reschedule_request(event: dict, requester_name: str, new_date: 
     sent = 0
     for person in people.get(SIDE_STAFF) or []:
         try:
-            await send_email_notification(person["email"], subject, html,
-                                          user_id=person.get("id"), slug="tpms_reschedule_request")
-            sent += 1
+            # Result captured: a False return means the mail did not go out.
+            if await send_email_notification(person["email"], subject, html,
+                                             user_id=person.get("id"), slug="tpms_reschedule_request"):
+                sent += 1
+            else:
+                logger.warning(f"TPMS reschedule-request mail to {person['email']} was not delivered")
         except Exception as e:
             logger.error(f"TPMS reschedule-request mail to {person['email']} failed: {e}")
     return {"sent": sent}
@@ -680,19 +863,64 @@ async def notify_reschedule_decision(event: dict, approved: bool, note: str = ""
     sent = 0
     for person in people.get(SIDE_COMPANY) or []:
         try:
-            await send_email_notification(person["email"], subject, html,
-                                          user_id=person.get("id"), slug=f"tpms_reschedule_{verdict}")
-            sent += 1
+            # Result captured: a False return means the mail did not go out.
+            if await send_email_notification(person["email"], subject, html,
+                                             user_id=person.get("id"), slug=f"tpms_reschedule_{verdict}"):
+                sent += 1
+            else:
+                logger.warning(f"TPMS reschedule-decision mail to {person['email']} was not delivered")
         except Exception as e:
             logger.error(f"TPMS reschedule-decision mail to {person['email']} failed: {e}")
     return {"sent": sent}
+
+
+def _form_response_table(cells: List[dict], qlabel) -> str:
+    """HOD/MD summary — ratings grouped by criterion, each member's score listed under it."""
+    if not cells:
+        return ""
+    by_q: Dict[str, List[dict]] = {}
+    order: List[str] = []
+    for c in cells:
+        code = str(c.get("criterion_code"))
+        if code not in by_q:
+            by_q[code] = []
+            order.append(code)
+        by_q[code].append(c)
+    blocks = []
+    for i, code in enumerate(order, 1):
+        rows = "".join(
+            f'<tr><td style="border:1px solid #e5e7eb;padding:6px 10px">{c.get("member_name","")}</td>'
+            f'<td align="center" style="border:1px solid #e5e7eb;padding:6px 10px"><b>{c.get("rating")}</b>/5</td></tr>'
+            for c in by_q[code])
+        blocks.append(
+            f'<div style="margin:16px 0 6px;font-weight:600">{i}. {qlabel(code)}</div>'
+            '<table style="border-collapse:collapse;width:100%;font-size:13px">'
+            '<tr><th align="left" style="border:1px solid #e5e7eb;padding:6px 10px;background:#f5f5f5">Employee</th>'
+            '<th style="border:1px solid #e5e7eb;padding:6px 10px;background:#f5f5f5;width:90px">Rating</th></tr>'
+            f'{rows}</table>')
+    return "".join(blocks)
+
+
+def _form_score_table(cells: List[dict], qlabel) -> str:
+    """Per-employee scorecard — their criterion → score."""
+    rows = "".join(
+        f'<tr><td style="border:1px solid #e5e7eb;padding:8px 10px">{qlabel(c.get("criterion_code"))}</td>'
+        f'<td align="center" style="border:1px solid #e5e7eb;padding:8px 10px"><b>{c.get("rating")}</b>/5</td></tr>'
+        for c in cells)
+    return ('<table style="border-collapse:collapse;width:100%;font-size:13px;margin-top:8px">'
+            '<tr><th align="left" style="border:1px solid #e5e7eb;padding:8px 10px;background:#f5f5f5">Criteria</th>'
+            '<th style="border:1px solid #e5e7eb;padding:8px 10px;background:#f5f5f5;width:90px">Score</th></tr>'
+            f'{rows}</table>')
 
 
 async def notify_form_submission(*, form_type: str, title: str, company_id: str, period: str,
                                  respondent_id: str, respondent_name: str,
                                  ratings: Optional[List[dict]] = None) -> dict:
     """H3 — after a review form is submitted: a summary mail to the HOD/MD respondent, plus a
-    per-employee scorecard mail to each rated team member (rating forms only). Gated."""
+    per-employee scorecard mail to each rated team member (rating forms only).
+
+    Both are template-driven — events `form_summary` / `form_scorecard`, side `company` — with
+    a built-in default body when no active template is configured. Gated by the TPMS switch."""
     if not TPMS_NOTIFICATIONS_ENABLED:
         return {"summary_sent": 0, "employee_sent": 0}
     from bson import ObjectId
@@ -708,39 +936,89 @@ async def notify_form_submission(*, form_type: str, title: str, company_id: str,
         except Exception:
             return None
 
+    # Company name + a criterion_code → question-text map, so the tables read nicely.
+    company_name = str(company_id)
+    try:
+        co = await get_collection("companies").find_one({"_id": ObjectId(str(company_id))})
+        if co:
+            company_name = co.get("name") or str(company_id)
+    except Exception:
+        pass
+    qtitle: Dict[str, str] = {}
+    try:
+        from app.models.forms import QUESTION_COLLECTION
+        for q in await get_collection(QUESTION_COLLECTION).find({"form_type": form_type}).to_list(200):
+            qtitle[str(q.get("item_id"))] = q.get("title") or q.get("prompt") or str(q.get("item_id"))
+    except Exception:
+        pass
+
+    def qlabel(code):
+        return qtitle.get(str(code)) or str(code)
+
+    submitted_on = datetime.utcnow().strftime("%d %b %Y")
+    base = {
+        "Form_Type": title, "Company_Name": company_name, "Company_ID": str(company_id),
+        "Month": period, "HOD_Name": respondent_name, "Submitted_On": submitted_on,
+        "Total_Ratings": str(len(ratings or [])),
+    }
     summary_sent = employee_sent = 0
 
-    # 1) Respondent (HOD/MD) summary.
+    # 1) Respondent (HOD/MD) summary — template first, else default body.
     respondent = await _find(respondent_id)
     if respondent and respondent.get("email"):
-        html = _wrap(f"{title} submitted",
-                     f"<p>Your <b>{title}</b> submission for <b>{period}</b> has been received. Thank you.</p>")
+        ctx = {**base, "Recipient_Name": respondent_name or respondent.get("full_name", ""),
+               "Response_Table": _form_response_table(ratings or [], qlabel)}
+        tpl = await get_template(title, EVENT_FORM_SUMMARY, SIDE_COMPANY)
+        if tpl and tpl.get("body_html"):
+            subject = fill(tpl.get("subject") or f"[{title}] Submission received – {{{{Month}}}}", ctx)
+            html = _strip_form_links(fill(tpl["body_html"], ctx))
+        else:
+            subject = f"[{title}] Submission received – {period}"
+            html = _wrap(f"{title} submitted",
+                         f"<p>Your <b>{title}</b> submission for <b>{period}</b> has been received. Thank you.</p>"
+                         + (ctx["Response_Table"] or ""))
         try:
-            await send_email_notification(respondent["email"], f"[{title}] Submission received – {period}",
-                                          html, user_id=str(respondent["_id"]), slug=f"tpms_form_{form_type}_summary")
-            summary_sent += 1
+            if await send_email_notification(respondent["email"], subject, html,
+                                             user_id=str(respondent["_id"]),
+                                             slug=f"tpms_form_{form_type}_summary"):
+                summary_sent += 1
+            else:
+                logger.warning("TPMS form summary mail was not delivered")
         except Exception as e:
             logger.error(f"TPMS form summary mail failed: {e}")
 
-    # 2) Per-employee scorecards (rating forms only).
+    # 2) Per-employee scorecards (rating forms only) — template first, else default body.
     if ratings:
         by_member: Dict[tuple, List[dict]] = {}
         for c in ratings:
             by_member.setdefault((str(c.get("member_id")), c.get("member_name") or ""), []).append(c)
+        tpl_emp = await get_template(title, EVENT_FORM_SCORECARD, SIDE_COMPANY)
         for (mid, mname), cells in by_member.items():
             member = await _find(mid)
             if not member or not member.get("email"):
                 continue
-            rows = "".join(
-                f'<tr><td style="padding:3px 12px 3px 0;color:#64748b">{c.get("criterion_code")}</td>'
-                f'<td style="padding:3px 0"><b>{c.get("rating")}</b>/5</td></tr>' for c in cells)
-            html = _wrap(f"Your {title} scorecard – {period}",
-                         f'<p>Hello {mname or member.get("full_name","")}, your ratings for <b>{period}</b>:</p>'
-                         f'<table style="border-collapse:collapse;font-size:14px">{rows}</table>')
+            avg = sum(int(c.get("rating") or 0) for c in cells) / max(1, len(cells))
+            ctx = {**base,
+                   "Recipient_Name": mname or member.get("full_name", ""),
+                   "Employee_Name": mname or member.get("full_name", ""),
+                   "Average_Rating": f"{round(avg, 1):.1f}",
+                   "Total_Questions": str(len(cells)),
+                   "Score_Table": _form_score_table(cells, qlabel)}
+            if tpl_emp and tpl_emp.get("body_html"):
+                subject = fill(tpl_emp.get("subject") or f"[{title}] Your scorecard – {{{{Month}}}}", ctx)
+                html = _strip_form_links(fill(tpl_emp["body_html"], ctx))
+            else:
+                subject = f"[{title}] Your scorecard – {period}"
+                html = _wrap(f"Your {title} scorecard – {period}",
+                             f'<p>Hello {ctx["Employee_Name"]}, your ratings for <b>{period}</b>:</p>'
+                             + ctx["Score_Table"])
             try:
-                await send_email_notification(member["email"], f"[{title}] Your scorecard – {period}",
-                                              html, user_id=str(member["_id"]), slug=f"tpms_form_{form_type}_scorecard")
-                employee_sent += 1
+                if await send_email_notification(member["email"], subject, html,
+                                                 user_id=str(member["_id"]),
+                                                 slug=f"tpms_form_{form_type}_scorecard"):
+                    employee_sent += 1
+                else:
+                    logger.warning("TPMS form scorecard mail was not delivered")
             except Exception as e:
                 logger.error(f"TPMS form scorecard mail failed: {e}")
 

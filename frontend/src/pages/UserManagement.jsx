@@ -113,7 +113,7 @@ const UserManagement = () => {
         first_name: '', last_name: '', email: '', password: '',
         mobile: '', role: 'coach', is_active: true,
         session_type: 'Both', department: 'Other',
-        reporting_manager: '',
+        reporting_manager: '', level: '',
         permissions: {
             batches: { create: false, read: true, update: false, delete: false },
             calendar: { create: false, read: true, update: false, delete: false },
@@ -334,16 +334,24 @@ const UserManagement = () => {
                                     </div>
                                 </div>
 
-                                <div className="space-y-1.5">
-                                    <label className="text-[10px] font-black text-[var(--text-muted)] uppercase px-2 flex items-center gap-1.5">
-                                        <Network size={12} className="text-[var(--accent-indigo)]" /> Reporting Manager
-                                    </label>
-                                    <SearchableSelect
-                                        options={managerOptions}
-                                        value={staffForm.reporting_manager}
-                                        onChange={val => setStaffForm({ ...staffForm, reporting_manager: val })}
-                                        placeholder="— None —"
-                                    />
+                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                                    <div className="space-y-1.5">
+                                        <label className="text-[10px] font-black text-[var(--text-muted)] uppercase px-2 flex items-center gap-1.5">
+                                            <Network size={12} className="text-[var(--accent-indigo)]" /> Reporting Manager
+                                        </label>
+                                        <SearchableSelect
+                                            options={managerOptions}
+                                            value={staffForm.reporting_manager}
+                                            onChange={val => setStaffForm({ ...staffForm, reporting_manager: val })}
+                                            placeholder="— None —"
+                                        />
+                                    </div>
+                                    <div className="space-y-1.5">
+                                        <label className="text-[10px] font-black text-[var(--text-muted)] uppercase px-2 flex items-center gap-1.5">
+                                            <Shield size={12} className="text-[var(--accent-indigo)]" /> Hierarchy Level
+                                        </label>
+                                        <input className="w-full bg-[var(--input-bg)] px-5 py-3 rounded-2xl border border-[var(--border)] text-[14px] font-black focus:border-[var(--accent-indigo)] outline-none" placeholder="e.g. L1, L2, Manager" value={staffForm.level || ''} onChange={e => setStaffForm({ ...staffForm, level: e.target.value })} />
+                                    </div>
                                 </div>
 
                                 <div className="space-y-3 bg-[var(--bg-main)] p-6 rounded-[28px] border border-dashed border-[var(--border)]">

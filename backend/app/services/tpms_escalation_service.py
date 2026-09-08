@@ -24,13 +24,13 @@ is not implemented in the source — it is not implemented here either.
 Both engines are idempotent and keyed by event id, so re-running is safe.
 """
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 
 from app.db.mongodb import get_collection
 from app.models.tpms import (
     AUTO_ACTION_MIN_DAYS, AUTO_ESCALATION_MIN_DAYS,
-    COLL_ACTION_ITEMS, COLL_ESCALATIONS,
+    COLL_ACTION_ITEMS, COLL_ESCALATIONS, COLL_ESCALATION_SENDS,
     LADDER_CRITICAL_DAYS, LADDER_LAPSE_DAYS, LADDER_PENDING_DAYS,
     STATUS_CANCELLED, STATUS_COMPLETED, STATUS_LAPSED, STATUS_SCHEDULED,
     TPMS_EVENT_KIND, TPMS_NOTIFICATIONS_ENABLED, erp_status_for, escalation_level,
@@ -135,6 +135,106 @@ def _esc_body(event: dict, label: str, note: str) -> str:
     )
 
 
+# ── Undelivered-escalation retry ─────────────────────────────────────────────
+# WHY THE LEDGER RETRIES, AND NOT THE LADDER
+#
+# The obvious fix for "a failed escalation is lost" is to advance `esc_stage` only when the
+# mail was delivered. That does not work, for two reasons:
+#
+#   1. The lapse stage also sets tpms_status = Lapsed, and a Lapsed event is skipped at the
+#      top of the ladder (SKIP_STATUSES). So a failed lapse mail would never be retried
+#      anyway — the ladder can no longer see the event.
+#   2. Lapsing is a BUSINESS state: an activity is overdue on day 3 whether or not anyone
+#      could be emailed. Gating it on SMTP would let a mail outage silently change what the
+#      dashboards report.
+#
+# So the stage and the status still advance exactly as before, and the undelivered MAIL is
+# kept in the ledger with its rendered body and retried by its own sweep. Every byte of new
+# state lives in `tpms_escalation_sends` — no existing calendar-event document is written.
+ESCALATION_MAIL_MAX_ATTEMPTS = 3
+ESCALATION_MAIL_RETRY_MINUTES = 30
+# Past this, an escalation is stale: the situation has moved on and mailing about it is
+# noise. The row is closed as given-up rather than retried forever.
+ESCALATION_MAIL_MAX_AGE_HOURS = 24
+
+
+async def _claim_send(event_id: str, stage: str, recipient: str) -> bool:
+    """Reserve the right to mail `recipient` for this (event, stage). False = already owned.
+
+    The unique index on (event_id, stage, recipient) does the work: the insert either
+    succeeds — this caller owns the send — or raises a duplicate-key error, meaning an
+    earlier run already handled it. That is what makes the ladder safe to run twice.
+
+    Claiming BEFORE the send is deliberate. Marking afterwards leaves a window where a crash
+    between delivery and mark produces a duplicate on the next run.
+
+    A duplicate key now means "some row already exists" — delivered, or awaiting retry. The
+    retry sweep owns the pending ones, so the ladder must not re-send them itself.
+
+    A ledger failure must never suppress an escalation: if the claim itself errors we return
+    True and mail anyway, preferring a possible duplicate over a missed alert.
+    """
+    if not event_id or not recipient:
+        return True  # nothing to key on — behave exactly as before
+    try:
+        await get_collection(COLL_ESCALATION_SENDS).insert_one({
+            "event_id": str(event_id),
+            "stage": stage,
+            "recipient": recipient,
+            "sent_on": _today(),
+            "claimed_at": datetime.now(timezone.utc),
+            "delivered": False,
+            "attempts": 0,
+        })
+        return True
+    except Exception as e:
+        if "duplicate key" in str(e).lower() or "E11000" in str(e):
+            logger.info("TPMS escalation: %s already handled for %s on event %s — skipping",
+                        stage, recipient, event_id)
+            return False
+        logger.error("TPMS escalation ledger unavailable (%s) — sending without dedup", e)
+        return True
+
+
+async def _record_outcome(event_id: str, stage: str, recipient: str, *, delivered: bool,
+                          subject: str = "", html: str = "", cc: Optional[List[str]] = None,
+                          company_id: str = "", activity: str = "",
+                          error: Optional[str] = None) -> None:
+    """Stamp what happened onto the claim row.
+
+    A FAILED send keeps its row (it used to be deleted) and stores the rendered message, so
+    `retry_failed_escalation_mail` can re-send exactly what was meant to go out without
+    re-deriving recipients or re-rendering anything.
+    """
+    if not event_id or not recipient:
+        return
+    now = datetime.now(timezone.utc)
+    updates = {
+        "delivered": delivered,
+        "last_attempt_at": now,
+        "error": None if delivered else (error or "Delivery failed"),
+    }
+    if delivered:
+        updates.update({"delivered_at": now, "next_retry_at": None,
+                        "subject": None, "html": None, "cc": None})
+    else:
+        # Payload retained ONLY while undelivered, so the ledger does not accumulate message
+        # bodies for mail that already went out.
+        updates.update({
+            "subject": subject, "html": html, "cc": list(cc or []),
+            "company_id": str(company_id or ""), "activity": activity or "",
+            "next_retry_at": now + timedelta(minutes=ESCALATION_MAIL_RETRY_MINUTES),
+        })
+    try:
+        await get_collection(COLL_ESCALATION_SENDS).update_one(
+            {"event_id": str(event_id), "stage": stage, "recipient": recipient},
+            {"$set": updates, "$inc": {"attempts": 1}},
+        )
+    except Exception as e:
+        logger.error("TPMS escalation: could not record outcome for %s/%s: %s",
+                     stage, recipient, e)
+
+
 async def _send(recipients: List[str], subject: str, html: str, slug: str,
                 cc: Optional[List[str]] = None, event: Optional[dict] = None) -> int:
     """Spec §6 — `recipients` are addressed on To, `cc` is copied. Each To recipient gets
@@ -142,6 +242,12 @@ async def _send(recipients: List[str], subject: str, html: str, slug: str,
 
     TPMS notifications globally disabled → suppress escalation mails only. The ladder's
     STATE transitions (esc_stage bumps, Lapsed status) still run; this silences the mail.
+
+    Every send is now claimed in `tpms_escalation_sends` first, so a person is mailed once
+    per (event, stage) no matter how many times the ladder runs. Recipients, CC, subject,
+    body, stages and timings are all unchanged — only repeat delivery of an identical mail
+    is suppressed. 6,796 escalation mails were attempted historically where 2,418 were
+    distinct; the rest were replays of runs that had already happened.
     """
     if not TPMS_NOTIFICATIONS_ENABLED:
         return 0
@@ -152,14 +258,155 @@ async def _send(recipients: List[str], subject: str, html: str, slug: str,
     meta = log_context(event) if event else None
     to_list = list(dict.fromkeys(e for e in recipients if e))
     cc_list = [e for e in dict.fromkeys(cc or []) if e and e not in to_list]
+    event_id = str((event or {}).get("_id") or "")
     sent = 0
+    skipped = 0
+    company_id = str((event or {}).get("company_id") or "")
+    activity = (event or {}).get("activity") or ""
     for email in to_list:
+        if not await _claim_send(event_id, slug, email):
+            skipped += 1
+            continue
         try:
-            await send_email_notification(email, subject, html, slug=slug, cc=cc_list, meta=meta)
-            sent += 1
+            ok = await send_email_notification(email, subject, html, slug=slug, cc=cc_list, meta=meta)
+            if ok:
+                sent += 1
+                await _record_outcome(event_id, slug, email, delivered=True)
+            else:
+                # Delivery failed (throttled, refused, breaker open). The row is KEPT, with
+                # the rendered message, so the retry sweep can send it later — the ladder
+                # itself will not see this event again once its stage/status has advanced.
+                await _record_outcome(event_id, slug, email, delivered=False,
+                                      subject=subject, html=html, cc=cc_list,
+                                      company_id=company_id, activity=activity)
         except Exception as e:
             logger.error(f"TPMS escalation mail to {email} failed: {e}")
+            await _record_outcome(event_id, slug, email, delivered=False,
+                                  subject=subject, html=html, cc=cc_list,
+                                  company_id=company_id, activity=activity, error=str(e))
+    if skipped:
+        logger.info("TPMS escalation %s: %d sent, %d already handled earlier (event %s)",
+                    slug, sent, skipped, event_id)
     return sent
+
+
+async def retry_failed_escalation_mail() -> dict:
+    """Re-send escalation mail that was claimed but never delivered.
+
+    This is what closes Bug 6 without touching a single calendar-event document: the ladder
+    advances its stage and status exactly as it always did, and the undelivered message is
+    recovered from the ledger instead of being lost.
+
+    Three guards keep it from becoming noise:
+      • bounded — ESCALATION_MAIL_MAX_ATTEMPTS, spaced ESCALATION_MAIL_RETRY_MINUTES apart;
+      • time-boxed — nothing older than ESCALATION_MAIL_MAX_AGE_HOURS is retried;
+      • state-checked — if the activity has since been completed or cancelled, the mail is
+        dropped rather than sent. Chasing someone about work they have already finished is
+        worse than not chasing them at all.
+    """
+    if not TPMS_NOTIFICATIONS_ENABLED:
+        return {"retried": 0, "delivered": 0, "given_up": 0, "dropped": 0}
+
+    from app.services.notification_service import send_email_notification
+
+    now = datetime.now(timezone.utc)
+    col = get_collection(COLL_ESCALATION_SENDS)
+    try:
+        rows = await col.find({
+            "delivered": False,
+            "attempts": {"$lt": ESCALATION_MAIL_MAX_ATTEMPTS},
+            "next_retry_at": {"$lte": now},
+        }).to_list(500)
+    except Exception as e:
+        logger.error("TPMS escalation retry sweep could not read the ledger: %s", e)
+        return {"retried": 0, "delivered": 0, "given_up": 0, "dropped": 0, "error": str(e)}
+
+    retried = delivered = given_up = dropped = 0
+
+    for row in rows:
+        claimed_at = row.get("claimed_at")
+        if claimed_at and claimed_at.tzinfo is None:
+            claimed_at = claimed_at.replace(tzinfo=timezone.utc)
+        too_old = claimed_at and (now - claimed_at) > timedelta(hours=ESCALATION_MAIL_MAX_AGE_HOURS)
+
+        if too_old:
+            await col.update_one({"_id": row["_id"]},
+                                 {"$set": {"delivered": False, "given_up": True,
+                                           "next_retry_at": None, "subject": None, "html": None}})
+            given_up += 1
+            logger.error(
+                "TPMS escalation mail GIVEN UP (stale) — %s to %s for event %s was never delivered.",
+                row.get("stage"), row.get("recipient"), row.get("event_id"))
+            continue
+
+        # Has the activity moved on since the mail was queued?
+        if await _event_is_closed(row.get("event_id")):
+            await col.update_one({"_id": row["_id"]},
+                                 {"$set": {"delivered": False, "dropped": True,
+                                           "next_retry_at": None, "subject": None, "html": None}})
+            dropped += 1
+            continue
+
+        subject, html = row.get("subject") or "", row.get("html") or ""
+        if not subject or not html:
+            # Nothing to re-send (a row from before the payload was retained).
+            await col.update_one({"_id": row["_id"]},
+                                 {"$set": {"given_up": True, "next_retry_at": None}})
+            given_up += 1
+            continue
+
+        retried += 1
+        try:
+            ok = await send_email_notification(
+                row["recipient"], subject, html, slug=row.get("stage"),
+                cc=list(row.get("cc") or []),
+                meta={"activity": row.get("activity"), "company_id": row.get("company_id")},
+            )
+        except Exception as e:
+            ok = False
+            logger.error("TPMS escalation retry to %s failed: %s", row.get("recipient"), e)
+
+        if ok:
+            delivered += 1
+            await _record_outcome(row["event_id"], row["stage"], row["recipient"], delivered=True)
+        else:
+            await _record_outcome(
+                row["event_id"], row["stage"], row["recipient"], delivered=False,
+                subject=subject, html=html, cc=list(row.get("cc") or []),
+                company_id=row.get("company_id", ""), activity=row.get("activity", ""))
+            # attempts was just incremented; if that exhausts the budget, say so loudly.
+            if int(row.get("attempts") or 0) + 1 >= ESCALATION_MAIL_MAX_ATTEMPTS:
+                given_up += 1
+                logger.error(
+                    "TPMS escalation mail GIVEN UP after %d attempts — %s to %s for event %s "
+                    "was never delivered.",
+                    ESCALATION_MAIL_MAX_ATTEMPTS, row.get("stage"),
+                    row.get("recipient"), row.get("event_id"))
+
+    if retried or given_up or dropped:
+        logger.info("TPMS escalation retry sweep: %d retried, %d delivered, %d given up, "
+                    "%d dropped (activity closed)", retried, delivered, given_up, dropped)
+    return {"retried": retried, "delivered": delivered,
+            "given_up": given_up, "dropped": dropped}
+
+
+async def _event_is_closed(event_id: str) -> bool:
+    """True when the activity has been completed or cancelled since the mail was queued."""
+    if not event_id:
+        return False
+    from bson import ObjectId
+    try:
+        oid = ObjectId(str(event_id))
+    except Exception:
+        return False
+    for coll in CAL_COLLECTIONS:
+        try:
+            doc = await get_collection(coll).find_one({"_id": oid})
+        except Exception:
+            continue
+        if doc:
+            return str(doc.get("tpms_status") or "") in {STATUS_COMPLETED, STATUS_CANCELLED}
+    return False
 
 
 # ─────────────────────────────────────────────────────────────
@@ -173,6 +420,11 @@ async def run_escalation_ladder() -> dict:
     """
     today = _today()
     pending = critical = lapsed = 0
+
+    # Recover anything a previous run queued but could not deliver. Done FIRST so a mail
+    # held over from an outage goes out before today's new escalations compete for the
+    # provider's rate budget.
+    retry = await retry_failed_escalation_mail()
 
     for event, coll in await _open_tpms_events():
         status = event.get("tpms_status") or STATUS_SCHEDULED
@@ -249,9 +501,11 @@ async def run_escalation_ladder() -> dict:
             updates["updated_at"] = datetime.utcnow()
             await get_collection(coll).update_one({"_id": event["_id"]}, {"$set": updates})
 
-    msg = f"TPMS escalation ladder: {pending} pending, {critical} critical, {lapsed} lapsed [{today}]"
+    msg = (f"TPMS escalation ladder: {pending} pending, {critical} critical, {lapsed} lapsed, "
+           f"{retry.get('delivered', 0)} recovered from earlier failures [{today}]")
     logger.info(msg)
-    return {"pending": pending, "critical": critical, "lapsed": lapsed, "date": today}
+    return {"pending": pending, "critical": critical, "lapsed": lapsed,
+            "date": today, "retry": retry}
 
 
 # ─────────────────────────────────────────────────────────────

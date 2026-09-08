@@ -3,9 +3,9 @@ import requests
 import logging
 from typing import Optional, Dict, Any
 from app.db.mongodb import get_collection
+from app.services.whatsapp_components import build_send_components, resolve_params
 from datetime import datetime, timedelta, timezone
 from bson import ObjectId
-import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import asyncio
@@ -234,12 +234,17 @@ DEFAULT_TEMPLATES = {
         "subject": "New Task Assigned: {{task_name}}",
         "body": "Hello {{assigned_user}},\n\nA new task '{{task_name}}' has been assigned to you by {{assigned_by}}.\n\nDeadline: {{deadline}}\nPriority: {{critical_level}}\nDescription: {{description}}\n\nRegards,\nSparsh Notifications"
     },
-    # NOTE: there is deliberately NO default entry for upcoming_task_reminder_email or
-    # upcoming_todo_reminder_email. fetch_template() falls back to this dict when no DB doc
-    # resolves, which would have let an upcoming reminder render a built-in body nobody
-    # configured. Those two slugs must resolve ONLY to the admin's template in
-    # Settings ▸ Notifications — no template means no email. The seeded copies in
-    # routes/settings.py (TEMPLATE_SEEDS) supply the starting content instead.
+    # NOTE: there is deliberately NO default entry for upcoming_task_reminder_email,
+    # upcoming_todo_reminder_email or todo_created_email. fetch_template() falls back to this
+    # dict when no DB doc resolves, which would have let those triggers render a built-in body
+    # nobody configured. They must resolve ONLY to the admin's template in
+    # Settings ▸ Notifications — no template, or an inactive one, means no email. The seeded
+    # copies in routes/settings.py (TEMPLATE_SEEDS) supply the starting content instead.
+    #
+    # todo_created_email joined that list on request: a To-do mail now goes out only once the
+    # admin has activated its template. The gate is in send_todo_created_email rather than
+    # here, because removing the entry alone would silently fall through to whatever
+    # lower-precedence doc happened to resolve — see active_user_template.
     # ─── Task Management (Delegation) module ───
     # Separate triggers from the Calendar's. task_created/updated/deleted are the
     # pre-existing slugs (they only ever fired for delegation tasks); the rest are new.
@@ -450,7 +455,17 @@ async def log_notification(user_id: str, contact: str, channel: str, slug: str, 
 async def send_email_notification(to_email: str, subject: str, message: str, user_id: str = None, slug: str = "manual", cc: list = None, meta: dict = None):
     """`cc` and `meta` are optional and default to None, so existing callers are unaffected.
     `cc` exists for the TPMS escalation ladder, which addresses owners/HODs directly and
-    copies SMOps; `meta` records which activity a send belonged to, for the Logs Report."""
+    copies SMOps; `meta` records which activity a send belonged to, for the Logs Report.
+
+    The message is built exactly as before — same From/To/Cc/Subject headers and HTML body.
+    What changed is underneath: delivery goes through app.services.smtp_delivery, which
+    reuses one SMTP session across consecutive sends, paces them, retries a dropped socket
+    with backoff, and stops calling out entirely once too many sends fail in a row. Opening
+    a fresh authenticated connection per email is what got the Gmail account throttled.
+
+    The contract here is unchanged: returns True/False, never raises, and writes exactly one
+    `notifications` row per call with the same fields and statuses as before.
+    """
     if not settings.SMTP_USERNAME or not settings.SMTP_PASSWORD:
         logger.warning("SMTP credentials not configured")
         return False
@@ -465,13 +480,15 @@ async def send_email_notification(to_email: str, subject: str, message: str, use
         msg['Subject'] = subject
         msg.attach(MIMEText(message, 'html'))
 
-        server = smtplib.SMTP(settings.SMTP_SERVER, settings.SMTP_PORT)
-        server.starttls()
-        server.login(settings.SMTP_USERNAME, settings.SMTP_PASSWORD)
-        server.send_message(msg, to_addrs=[to_email] + cc_list)
-        server.quit()
-        await log_notification(user_id, to_email, "email", slug, message, "sent", meta=meta)
-        return True
+        from app.services import smtp_delivery
+        sent, error = await smtp_delivery.send_message(msg, [to_email] + cc_list)
+        if sent:
+            await log_notification(user_id, to_email, "email", slug, message, "sent", meta=meta)
+            return True
+
+        logger.error(f"Failed to send email: {error}")
+        await log_notification(user_id, to_email, "email", slug, message, "failed", error, meta=meta)
+        return False
     except Exception as e:
         logger.error(f"Failed to send email: {e}")
         await log_notification(user_id, to_email, "email", slug, message, "failed", str(e), meta=meta)
@@ -533,10 +550,19 @@ async def send_whatsapp_notification(phone: str, message: str, user_id: str = No
         return False
 
 async def send_whatsapp_template(phone: str, template_name: str, language: str, params: list,
-                                 user_id: str = None, slug: str = "manual"):
+                                 user_id: str = None, slug: str = "manual",
+                                 components: list = None, meta: dict = None):
     """Business-initiated WhatsApp via a Meta-approved template.
     `params` are positional body values mapped to {{1}}, {{2}}, ... in the
-    approved template."""
+    approved template.
+
+    `components` overrides that body-only structure for templates whose header or buttons also
+    take variables — pass the full Cloud API components array and `params` is used only for the
+    delivery log. Omit it and behaviour is exactly as before.
+
+    `meta` is the same optional log context send_email_notification takes — TPMS passes the
+    activity and company so the Logs Report can show them next to a WhatsApp row instead of
+    the blank dashes it showed while only the mail path recorded them."""
     if not _wa_configured():
         logger.warning("WhatsApp Cloud API credentials not configured")
         return False
@@ -547,12 +573,13 @@ async def send_whatsapp_template(phone: str, template_name: str, language: str, 
         return False
 
     params = params or []
-    components = []
-    if params:
-        components = [{
-            "type": "body",
-            "parameters": [{"type": "text", "text": str(p)} for p in params],
-        }]
+    if components is None:
+        components = []
+        if params:
+            components = [{
+                "type": "body",
+                "parameters": [{"type": "text", "text": str(p)} for p in params],
+            }]
     log_text = f"[template:{template_name}] " + " | ".join(str(p) for p in params)
 
     try:
@@ -568,15 +595,15 @@ async def send_whatsapp_template(phone: str, template_name: str, language: str, 
         }
         response = requests.post(_wa_endpoint(), json=payload, headers=_wa_headers(), timeout=20)
         if response.status_code == 200:
-            await log_notification(user_id, to, "whatsapp", slug, log_text, "sent")
+            await log_notification(user_id, to, "whatsapp", slug, log_text, "sent", meta=meta)
             return True
         error = f"WhatsApp template error: {response.status_code} - {response.text}"
         logger.error(error)
-        await log_notification(user_id, to, "whatsapp", slug, log_text, "failed", error)
+        await log_notification(user_id, to, "whatsapp", slug, log_text, "failed", error, meta=meta)
         return False
     except Exception as e:
         logger.error(f"Failed to send WhatsApp template: {e}")
-        await log_notification(user_id, to, "whatsapp", slug, log_text, "failed", str(e))
+        await log_notification(user_id, to, "whatsapp", slug, log_text, "failed", str(e), meta=meta)
         return False
 
 async def send_notification_from_template(user_obj: dict, template_slug: str, context: Dict[str, Any], delivery_type: str = "both", scope_override: str = None):
@@ -607,9 +634,21 @@ async def send_notification_from_template(user_obj: dict, template_slug: str, co
         meta_name = whatsapp_t.get("meta_template_name")
         if meta_name:
             # Business-initiated → must use a Meta-approved template with positional params.
-            params = [str(context.get(k, "")) for k in whatsapp_t.get("meta_params", [])]
+            # meta_params fills the body's {{1}}, {{2}}, … in order; meta_header_params and
+            # meta_button_params do the same for a text header and any variable URL button.
+            # A template with neither produces components=None, which leaves send_whatsapp_template
+            # on its original body-only payload — so a row saved before header/button mapping
+            # existed sends exactly what it always did.
+            params = resolve_params(whatsapp_t.get("meta_params"), context)
+            components = build_send_components(
+                params,
+                header_keys=whatsapp_t.get("meta_header_params"),
+                button_keys=whatsapp_t.get("meta_button_params"),
+                mapping=context,
+            )
             results["whatsapp"] = await send_whatsapp_template(
-                phone, meta_name, whatsapp_t.get("meta_lang", "en"), params, user_id, wa_slug)
+                phone, meta_name, whatsapp_t.get("meta_lang", "en"), params, user_id, wa_slug,
+                components=components)
         else:
             # Fallback: free-form text (only delivered within the 24h window).
             rendered_body = render_template(whatsapp_t["body"], context)
@@ -762,6 +801,60 @@ async def send_company_registration_email(admin_obj: dict, company_name: str, ra
         "login_url": "https://sparsh.app/login"
     }
     return await send_notification_from_template(admin_obj, "company_registration", context, "email")
+
+async def send_todo_created_email(user_obj: dict, todo: dict, occurrences: int = 1,
+                                 delivery_type: str = "email"):
+    """Confirm a newly created calendar To-do to the person who owns it.
+
+    A todo has no attendees and is never delegated, so the owner is the only recipient there
+    can be — which is why this does not go through notify_users_instant (that resolves a
+    session's attendee list and renders the session templates; a todo passing through it mailed
+    its author "session created"). Reusing send_notification_from_template keeps the todo mail
+    on the same template/override/kill-switch machinery as every other notification.
+
+    A repeating todo writes its whole series at once; `occurrences` lets the single mail say so
+    instead of one mail landing per generated date.
+
+    SENDS ONLY FROM A TEMPLATE THE ADMIN HAS ACTIVATED. No template in
+    Settings ▸ Notifications, one switched Inactive, or one saved with an empty body → no mail
+    at all, never a built-in body. This mirrors what Task & Delegation and the upcoming_*
+    reminders already do (see active_user_template), so every trigger an admin can see in
+    Settings behaves the same way: the switch there is the whole story.
+    """
+    # Checked before any of the work below: nothing to render if nothing will be sent.
+    # scope is always staff for a todo (scope_override below), so the company is not consulted.
+    if not await active_user_template("todo_created_email", None):
+        logger.info("Todo created mail skipped — no active 'todo_created' template configured")
+        return {}
+    try:
+        due = todo.get("start") or ""
+        due_date, due_time = "-", "-"
+        if due:
+            dt = datetime.fromisoformat(str(due).replace("Z", "+00:00"))
+            dt = to_ist(dt)
+            due_date = dt.strftime("%d %b %Y")
+            # A todo with no chosen time is stored due at 23:59:59 IST — that is an end-of-day
+            # marker, not a time the user picked, so it is not shown back to them as one.
+            due_time = "End of day" if dt.strftime("%H:%M") == "23:59" else dt.strftime("%I:%M %p")
+
+        context = {
+            "user_name": user_obj.get("full_name") or user_obj.get("first_name") or "there",
+            "name": user_obj.get("full_name") or user_obj.get("first_name") or "there",
+            "todo_title": todo.get("title") or "Untitled to-do",
+            "title": todo.get("title") or "Untitled to-do",
+            "todo_due_date": due_date,
+            "todo_due_time": due_time,
+            "priority": todo.get("priority") or "Normal",
+            "description": todo.get("description") or todo.get("additional_details") or "-",
+            "occurrence_note": (f"This is a repeating to-do — {occurrences} dates were added."
+                                if occurrences > 1 else ""),
+        }
+        return await send_notification_from_template(
+            user_obj, "todo_created", context, delivery_type=delivery_type, scope_override="staff")
+    except Exception as e:
+        logger.error(f"Failed to send todo created email: {e}")
+        return {}
+
 
 async def send_event_created_email(user_obj: dict, event_data: dict, creator_name: str, batch_name: str = "TBD", quarter: str = "TBD", delivery_type: str = "email"):
     try:

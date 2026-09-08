@@ -7,7 +7,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import {
   BarChart3, PieChart as PieChartIcon, TrendingUp, Award, Zap,
   Building2, Globe, MapPin, Users, Mail, Phone, Hash, Briefcase,
-  ArrowLeft, Pencil, Trash2, Download, Upload, Plus, User, Lock,
+  ArrowLeft, Pencil, Trash2, Download, Upload, Plus, User, UserCheck, Lock,
   CheckCircle2, XCircle, PauseCircle, ChevronDown, Save, X,
   FileSpreadsheet, AlertTriangle, ExternalLink, Layers, Calendar,
   Target, BookOpen, ChevronRight, CheckCircle, Circle, UploadCloud, FileText, Bot, Inbox
@@ -216,10 +216,18 @@ const CompanyDetails = () => {
   const [newUser, setNewUser] = useState({
     email: '', password: '', first_name: '', last_name: '', mobile: '',
     role: 'clientuser', session_type: 'None', designation: '', department: 'Other',
-    reporting_manager: ''
+    reporting_manager: '', level: ''
   });
   // Reporting-manager dropdown options (active users of THIS company)
   const [managerOptions, setManagerOptions] = useState([]);
+  // SMOP dropdown options (staff & admin users)
+  const [smopOptions, setSmopOptions] = useState([]);
+
+  useEffect(() => {
+    api.get('/companies/smop-options')
+      .then(res => setSmopOptions(Array.isArray(res.data) ? res.data : []))
+      .catch(() => setSmopOptions([]));
+  }, []);
 
   // Training Path State
   const [trainingPath, setTrainingPath] = useState([]);
@@ -399,10 +407,11 @@ const CompanyDetails = () => {
       if (!cleanUser.mobile) cleanUser.mobile = null;
       if (!cleanUser.designation) cleanUser.designation = null;
       if (!cleanUser.reporting_manager) cleanUser.reporting_manager = null;
+      if (!cleanUser.level) cleanUser.level = null;
       await api.post(`/companies/${companyId}/users/bulk`, [cleanUser]);
       setShowAddUser(false);
       showSuccess('User added successfully');
-      setNewUser({ email: '', password: '', first_name: '', last_name: '', mobile: '', role: 'clientuser', session_type: 'None', designation: '', department: 'Other', reporting_manager: '' });
+      setNewUser({ email: '', password: '', first_name: '', last_name: '', mobile: '', role: 'clientuser', session_type: 'None', designation: '', department: 'Other', reporting_manager: '', level: '' });
       fetchData();
     } catch (err) { showError(err.response?.data?.detail || 'Failed to create user'); }
   };
@@ -413,11 +422,13 @@ const CompanyDetails = () => {
       const url = window.URL.createObjectURL(new Blob([response.data]));
       const link = document.createElement('a');
       link.href = url;
-      link.download = `user_template_${companyId}.xlsx`;
+      link.setAttribute('download', `user_template_${companyId}.xlsx`);
+      document.body.appendChild(link);
       link.click();
+      link.remove();
       window.URL.revokeObjectURL(url);
       showSuccess('Template downloaded');
-    } catch (err) { showError('Template download failed'); }
+    } catch (err) { showError(err.response?.data?.detail || 'Template download failed'); }
   };
 
   const handleImportFile = async (e) => {
@@ -428,9 +439,10 @@ const CompanyDetails = () => {
     try {
       const res = await api.post(`/companies/${companyId}/users/import`, formData, { headers: { 'Content-Type': 'multipart/form-data' } });
       setImportStatus(res.data);
-      showSuccess('Import successfully completed');
+      const msg = res.data.message || `Import completed: ${res.data.created || 0} created, ${res.data.updated || 0} updated`;
+      showSuccess(msg);
       fetchData();
-    } catch (err) { showError('Import failed'); }
+    } catch (err) { showError(err.response?.data?.detail || 'Import failed'); }
     e.target.value = '';
   };
 
@@ -582,6 +594,23 @@ const CompanyDetails = () => {
                     className="w-full px-3 py-1.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-md outline-none text-[13px] font-medium text-[var(--text-main)] focus:border-[var(--accent-indigo)]" />
                 </div>
               ))}
+              <div className="space-y-1">
+                <label className="text-[10px] font-bold text-[var(--accent-indigo)] uppercase tracking-widest flex items-center gap-1">
+                  <UserCheck size={12} /> Assign SMOP
+                </label>
+                <select
+                  value={editData.smop_id || editData.smop || (editData.smops_ids && editData.smops_ids[0]) || ''}
+                  onChange={e => setEditData({ ...editData, smop_id: e.target.value, smop: e.target.value, smops_ids: e.target.value ? [e.target.value] : [] })}
+                  className="w-full px-3 py-1.5 bg-[var(--input-bg)] border border-[var(--accent-indigo-border)] rounded-md outline-none text-[13px] font-bold text-[var(--text-main)] focus:border-[var(--accent-indigo)]"
+                >
+                  <option value="">— Unassigned —</option>
+                  {smopOptions.map(opt => (
+                    <option key={opt._id} value={opt._id}>
+                      {opt.full_name}{opt.designation ? ` · ${opt.designation}` : ''} ({opt.role || 'Staff'})
+                    </option>
+                  ))}
+                </select>
+              </div>
             </div>
             <div className="flex gap-3 mt-6">
               <button onClick={handleSaveEdit} className="h-9 px-6 bg-[var(--accent-green)] text-white rounded-lg text-[12px] font-bold flex items-center gap-2"><Save size={14} /> Save Changes</button>
@@ -623,6 +652,16 @@ const CompanyDetails = () => {
                 <InfoRow icon={Building2} label="Company" value={company.name} />
                 <InfoRow icon={Globe} label="Domain" value={company.domain} />
                 <InfoRow icon={User} label="Owner" value={company.owner} />
+                <InfoRow
+                  icon={UserCheck}
+                  label="Assigned SMOP"
+                  value={(() => {
+                    const smopVal = company.smop_id || company.smop || (company.smops_ids && company.smops_ids[0]);
+                    if (!smopVal) return '—';
+                    const opt = smopOptions.find(o => o._id === smopVal || o.email === smopVal);
+                    return opt ? `${opt.full_name} (${opt.role || 'Staff'})` : smopVal;
+                  })()}
+                />
                 <InfoRow icon={Briefcase} label="Industry" value={company.company_type} />
                 <InfoRow icon={Mail} label="Email" value={company.email} />
                 <InfoRow icon={Phone} label="Contact" value={company.contact} />
@@ -807,13 +846,13 @@ const CompanyDetails = () => {
                 <div className="flex items-center gap-2">
                   {canUpdate && (
                     <>
+                      <input type="file" ref={fileInputRef} onChange={handleImportFile} accept=".xlsx, .xls, .csv" className="hidden" />
                       <button onClick={handleExportTemplate} className="h-8 px-3 bg-[var(--accent-green-bg)] border border-[var(--accent-green-border)] text-[var(--accent-green)] rounded-lg text-[11px] font-bold flex items-center gap-1.5 hover:opacity-80 transition-all">
                         <Download size={12} /> Template
                       </button>
                       <button onClick={() => fileInputRef.current?.click()} className="h-8 px-3 bg-[var(--accent-orange-bg)] border border-[var(--accent-orange-border)] text-[var(--accent-orange)] rounded-lg text-[11px] font-bold flex items-center gap-1.5 hover:opacity-80 transition-all">
                         <Upload size={12} /> Import
                       </button>
-                      <input ref={fileInputRef} type="file" accept=".xlsx,.xls" onChange={handleImportFile} className="hidden" />
                       <button onClick={() => setShowAddUser(true)} className="h-8 px-3 bg-[var(--btn-primary)] text-white rounded-lg text-[11px] font-bold flex items-center gap-1.5 hover:bg-[var(--btn-primary-hover)] transition-all">
                         <Plus size={12} /> Add User
                       </button>
@@ -826,7 +865,7 @@ const CompanyDetails = () => {
                 <div className="px-5 py-3 bg-[var(--accent-green-bg)] border-b border-[var(--accent-green-border)] flex items-center justify-between">
                   <span className="text-[12px] font-bold text-[var(--accent-green)]">
                     <FileSpreadsheet size={14} className="inline mr-2" />
-                    Import: {importStatus.created} created, {importStatus.skipped} skipped
+                    Import: {importStatus.created || 0} created, {importStatus.updated || 0} updated, {importStatus.skipped || 0} skipped
                   </span>
                   <button onClick={() => setImportStatus(null)} className="text-[var(--text-muted)] hover:text-[var(--accent-red)]"><X size={14} /></button>
                 </div>
@@ -838,6 +877,8 @@ const CompanyDetails = () => {
                     <tr className="bg-[var(--table-header-bg)] border-b border-[var(--border)]">
                       <th className="px-5 py-3 text-left text-[11px] font-bold text-[var(--text-muted)] uppercase tracking-wider">Name</th>
                       <th className="px-5 py-3 text-left text-[11px] font-bold text-[var(--text-muted)] uppercase tracking-wider">Email</th>
+                      <th className="px-5 py-3 text-left text-[11px] font-bold text-[var(--text-muted)] uppercase tracking-wider">Level</th>
+                      <th className="px-5 py-3 text-left text-[11px] font-bold text-[var(--text-muted)] uppercase tracking-wider">Reporting Manager</th>
                       <th className="px-5 py-3 text-left text-[11px] font-bold text-[var(--text-muted)] uppercase tracking-wider">Role</th>
                       <th className="px-5 py-3 text-left text-[11px] font-bold text-[var(--text-muted)] uppercase tracking-wider">Department</th>
                       <th className="px-5 py-3 text-left text-[11px] font-bold text-[var(--text-muted)] uppercase tracking-wider">Session</th>
@@ -846,39 +887,47 @@ const CompanyDetails = () => {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-[var(--border)]">
-                    {users.map(u => (
-                      <tr key={u._id} className="hover:bg-[var(--table-hover)] transition-all">
-                        <td className="px-5 py-2.5">
-                          <div className="flex items-center gap-3">
-                            <div className="w-7 h-7 rounded-md flex items-center justify-center text-white font-bold text-[10px]" style={{ background: 'var(--avatar-bg)' }}>
-                              {u.full_name?.charAt(0) || u.email?.charAt(0) || '?'}
+                    {users.map(u => {
+                      const mgr = users.find(m => m._id === u.reporting_manager || m.email === u.reporting_manager);
+                      const mgrDisplay = u.reporting_manager ? (mgr ? (mgr.full_name || mgr.email) : u.reporting_manager) : '—';
+                      return (
+                        <tr key={u._id} className="hover:bg-[var(--table-hover)] transition-all">
+                          <td className="px-5 py-2.5">
+                            <div className="flex items-center gap-3">
+                              <div className="w-7 h-7 rounded-md flex items-center justify-center text-white font-bold text-[10px]" style={{ background: 'var(--avatar-bg)' }}>
+                                {u.full_name?.charAt(0) || u.email?.charAt(0) || '?'}
+                              </div>
+                              <div className="flex flex-col">
+                                <span className="text-[13px] font-bold text-[var(--text-main)]">{u.full_name || '—'}</span>
+                                <span className="text-[10px] text-[var(--text-muted)]">{u.mobile || ''}</span>
+                              </div>
                             </div>
-                            <div className="flex flex-col">
-                              <span className="text-[13px] font-bold text-[var(--text-main)]">{u.full_name || '—'}</span>
-                              <span className="text-[10px] text-[var(--text-muted)]">{u.mobile || ''}</span>
-                            </div>
-                          </div>
-                        </td>
-                        <td className="px-5 py-2.5 text-[12px] text-[var(--text-muted)]">{u.email}</td>
-                        <td className="px-5 py-2.5">
-                          <span className="px-2 py-0.5 bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] border border-[var(--accent-indigo-border)] rounded-md text-[10px] font-bold uppercase">{u.role}</span>
-                        </td>
-                        <td className="px-5 py-2.5 text-[12px] text-[var(--text-muted)] font-medium">{u.department || '—'}</td>
-                        <td className="px-5 py-2.5 text-[12px] text-[var(--accent-orange)] font-bold">{u.session_type || '—'}</td>
-                        <td className="px-5 py-2.5">
-                          <span className={`px-2 py-0.5 rounded-md text-[10px] font-bold ${u.is_active !== false ? 'bg-[var(--status-active-bg)] text-[var(--status-active-text)]' : 'bg-[var(--accent-red-bg)] text-[var(--accent-red)]'}`}>
-                            {u.is_active !== false ? 'Active' : 'Inactive'}
-                          </span>
-                        </td>
-                        <td className="px-5 py-2.5 text-right">
-                          <button onClick={() => navigate(`/members/${u._id}`)} className="p-1.5 text-[var(--text-muted)] hover:text-[var(--accent-indigo)] hover:bg-[var(--accent-indigo-bg)] rounded-md transition-all" title="View Member Dashboard">
-                            <ExternalLink size={14} />
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
+                          </td>
+                          <td className="px-5 py-2.5 text-[12px] text-[var(--text-muted)]">{u.email}</td>
+                          <td className="px-5 py-2.5">
+                            <span className="px-2 py-0.5 bg-indigo-50 text-[var(--accent-indigo)] border border-indigo-100 rounded-md text-[10px] font-bold uppercase">{u.level || '—'}</span>
+                          </td>
+                          <td className="px-5 py-2.5 text-[12px] text-[var(--text-muted)] font-medium">{mgrDisplay}</td>
+                          <td className="px-5 py-2.5">
+                            <span className="px-2 py-0.5 bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] border border-[var(--accent-indigo-border)] rounded-md text-[10px] font-bold uppercase">{u.role}</span>
+                          </td>
+                          <td className="px-5 py-2.5 text-[12px] text-[var(--text-muted)] font-medium">{u.department || '—'}</td>
+                          <td className="px-5 py-2.5 text-[12px] text-[var(--accent-orange)] font-bold">{u.session_type || '—'}</td>
+                          <td className="px-5 py-2.5">
+                            <span className={`px-2 py-0.5 rounded-md text-[10px] font-bold ${u.is_active !== false ? 'bg-[var(--status-active-bg)] text-[var(--status-active-text)]' : 'bg-[var(--accent-red-bg)] text-[var(--accent-red)]'}`}>
+                              {u.is_active !== false ? 'Active' : 'Inactive'}
+                            </span>
+                          </td>
+                          <td className="px-5 py-2.5 text-right">
+                            <button onClick={() => navigate(`/members/${u._id}`)} className="p-1.5 text-[var(--text-muted)] hover:text-[var(--accent-indigo)] hover:bg-[var(--accent-indigo-bg)] rounded-md transition-all" title="View Member Dashboard">
+                              <ExternalLink size={14} />
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
                     {users.length === 0 && (
-                      <tr><td colSpan={7} className="px-5 py-12 text-center text-[var(--text-muted)] text-[13px]">No users yet. Add users or import via template.</td></tr>
+                      <tr><td colSpan={9} className="px-5 py-12 text-center text-[var(--text-muted)] text-[13px]">No users yet. Add users or import via template.</td></tr>
                     )}
                   </tbody>
                 </table>
@@ -1184,11 +1233,16 @@ const CompanyDetails = () => {
               </select></div>
             <div className="space-y-1"><label className="text-[10px] font-bold text-[var(--text-muted)] uppercase tracking-widest">Department</label>
               <select className="w-full px-3 py-1.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-md text-[13px] text-[var(--text-main)] outline-none" value={newUser.department} onChange={e => setNewUser({...newUser, department: e.target.value})}>
-                <option value="HOD">HOD</option><option value="Implementor">Implementor</option><option value="EA">EA</option><option value="MD">MD</option><option value="Other">Other</option>
+                <option value="HOD">HOD</option><option value="Manager">Manager</option><option value="Implementor">Implementor</option><option value="EA">EA</option><option value="MD">MD</option><option value="HR">HR</option><option value="Other">Other</option>
               </select></div>
           </div>
-          <div className="space-y-1"><label className="text-[10px] font-bold text-[var(--text-muted)] uppercase tracking-widest">Reporting Manager</label>
-            <ReportingManagerSelect options={managerOptions} value={newUser.reporting_manager} onChange={val => setNewUser({...newUser, reporting_manager: val})} />
+          <div className="grid grid-cols-2 gap-4">
+            <div className="space-y-1"><label className="text-[10px] font-bold text-[var(--text-muted)] uppercase tracking-widest">Reporting Manager</label>
+              <ReportingManagerSelect options={managerOptions} value={newUser.reporting_manager} onChange={val => setNewUser({...newUser, reporting_manager: val})} />
+            </div>
+            <div className="space-y-1"><label className="text-[10px] font-bold text-[var(--text-muted)] uppercase tracking-widest">Level</label>
+              <input className="w-full px-3 py-1.5 bg-[var(--input-bg)] border border-[var(--input-border)] rounded-md text-[13px] text-[var(--text-main)] outline-none" placeholder="e.g. L1, L2, Manager" value={newUser.level} onChange={e => setNewUser({...newUser, level: e.target.value})} />
+            </div>
           </div>
           <div className="flex gap-3 mt-6">
             <button type="submit" className="flex-1 py-2 bg-[var(--btn-primary)] text-white rounded-lg text-[13px] font-bold hover:bg-[var(--btn-primary-hover)] transition-all">Create User</button>
