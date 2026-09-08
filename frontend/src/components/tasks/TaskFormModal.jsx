@@ -17,7 +17,7 @@ import MiniDatePicker from './MiniDatePicker';
 import ReminderModal from '../calendar/ReminderModal';
 import TaskTagsModal from './TaskTagsModal';
 import VoiceNoteModal from './VoiceNoteModal';
-import { formatDate, formatDateTime, getAttachmentKind } from './taskDisplayUtils';
+import { formatDate, formatDateTime, getAttachmentKind, isMdUser } from './taskDisplayUtils';
 
 const PRIORITY_CYCLE = ['Low', 'Normal', 'High'];
 
@@ -89,6 +89,11 @@ const TaskFormModal = ({ isOpen, onClose, onSaved, task = null, categories = [],
   const { showSuccess, showError } = useNotification();
   const [form, setForm] = useState(emptyForm);
   const [staffOptions, setStaffOptions] = useState([]);
+  // Who may be kept IN LOOP is a wider set than who may be ASSIGNED to. The backend rank rule
+  // (calendar_events.py: get_rank_ineligible_assignees) is "assignees only" — a client HR may
+  // loop in their MD even though they may not assign to them — so the loop picker reads the
+  // full directory while the assign picker keeps the rank-filtered list.
+  const [loopOptions, setLoopOptions] = useState([]);
   const [saving, setSaving] = useState(false);
 
   const [checklistOpen, setChecklistOpen] = useState(false);
@@ -132,6 +137,7 @@ const TaskFormModal = ({ isOpen, onClose, onSaved, task = null, categories = [],
     // Only internal Sparsh users are assignable / can be added In Loop — client-side users
     // must never appear here (backend also enforces this on save). See /tasks/assignable-users.
     api.get('/tasks/assignable-users').then(res => setStaffOptions(res.data || [])).catch(() => setStaffOptions([]));
+    api.get('/tasks/assignable-users?all=true').then(res => setLoopOptions(res.data || [])).catch(() => setLoopOptions([]));
 
     if (task) {
       setForm({
@@ -412,11 +418,26 @@ const TaskFormModal = ({ isOpen, onClose, onSaved, task = null, categories = [],
     }
   };
 
-  const nameOf = (id) => staffOptions.find(u => u._id === id)?.full_name || staffOptions.find(u => u._id === id)?.email;
+  // Resolve names across BOTH directories: a watcher may be someone the assign list excludes
+  // (an MD above the creator's rank), and they must not render as blank.
+  // Plain Map, not useMemo: this sits after the early `if (!isOpen) return null`, so a hook
+  // here would break hook order. Two short arrays — the cost is nil.
+  const directory = new Map([...staffOptions, ...loopOptions].map(u => [u._id, u]));
+  const nameOf = (id) => directory.get(id)?.full_name || directory.get(id)?.email;
   const assigneeNames = form.target_staff_id.map(nameOf).filter(Boolean);
   const watcherNames = form.watchers.map(nameOf).filter(Boolean);
 
-  const staffItems = staffOptions.filter(u => u._id !== user?._id).map(u => ({ id: u._id, primary: u.full_name || u.email, secondary: u.email }));
+  const toItem = (u) => ({ id: u._id, primary: u.full_name || u.email, secondary: u.email });
+  const staffItems = staffOptions.filter(u => u._id !== user?._id).map(toItem);
+  // The loop list falls back to the assign list until the wider fetch lands, so the picker is
+  // never momentarily empty.
+  const loopSource = loopOptions.length ? loopOptions : staffOptions;
+  const loopItems = loopSource.filter(u => u._id !== user?._id).map(toItem);
+  // "Include MD" — built from the SAME list the loop picker renders, so every id it stages is
+  // one the user could have ticked by hand, and self can never be looped in as their own MD.
+  const mdIds = loopSource
+    .filter(u => u._id !== user?._id && isMdUser(u))
+    .map(u => u._id);
   const categoryItems = Array.from(new Set([...categories, form.category].filter(Boolean))).map(c => ({ id: c, primary: c }));
 
   return (
@@ -857,8 +878,14 @@ const TaskFormModal = ({ isOpen, onClose, onSaved, task = null, categories = [],
       />
       <PickerModal
         isOpen={pickerOpen === 'inLoop'} onClose={() => setPickerOpen(null)}
-        title="Keep In Loop" searchPlaceholder="Search Users..." items={staffItems}
+        title="Keep In Loop" searchPlaceholder="Search Users..." items={loopItems}
         multi selected={form.watchers} renderAvatar
+        bulkOption={{
+          label: 'Include MD',
+          ids: mdIds,
+          hint: 'Keeps the Managing Director in the loop on this task.',
+          emptyHint: 'No one in your organisation is marked as MD.',
+        }}
         onApply={(ids) => setForm(f => ({ ...f, watchers: ids }))}
       />
       <PickerModal

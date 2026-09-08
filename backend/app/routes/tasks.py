@@ -794,6 +794,9 @@ async def list_assignable_users(
         "email": u.get("email"),
         "role": u.get("role"),
         "designation": u.get("designation"),
+        # Exposed so the In Loop picker can offer "Include MD". Read-only here: the rank
+        # rule itself stays in auth_controller.client_rank, which this only mirrors.
+        "governance_role": u.get("governance_role"),
     } for u in docs]
 
 
@@ -1299,12 +1302,21 @@ async def delete_completion_attachment(task_id: str, attachment_id: str, current
 # time ("Date Revision"). The ASSIGNEE may also revise it ("Revision") — e.g. when they can't
 # finish by the current deadline they pick a new one. Every change is stamped into
 # `deadline_history` (with who revised it), so the trail stays auditable for the assigner.
+#
+# A REASON IS MANDATORY. A deadline that moves with no stated cause hands the assigner a
+# changed commitment and no explanation, which defeats the point of recording the shift at
+# all. Enforced here as well as in the picker so the endpoint can't be called directly to
+# skip it. Rows written before this rule keep their empty reason — the history renderer
+# treats a missing reason as "not captured", never back-fills one.
 @router.patch("/{task_id}/deadline")
 async def revise_task_deadline(task_id: str, body: dict, current_user: dict = Depends(require_task_access)):
     new_end = body.get("end")
     reason = (body.get("reason") or "").strip() or None
     if not new_end:
         raise HTTPException(status_code=400, detail="A new deadline (end) is required")
+    if not reason:
+        raise HTTPException(status_code=400,
+                            detail="A reason is required when revising the deadline.")
 
     existing, col_name = await _get_task_or_404(task_id)
 

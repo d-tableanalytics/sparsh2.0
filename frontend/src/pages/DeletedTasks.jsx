@@ -8,6 +8,7 @@ const DeletedTasks = () => (
     subheading="Soft-deleted tasks — restore or leave archived"
     emptyMessage="No deleted tasks."
     allowCreate={false}
+    splitByRecurrence
   />
 );
 

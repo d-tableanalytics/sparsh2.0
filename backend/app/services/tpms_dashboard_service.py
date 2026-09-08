@@ -117,30 +117,68 @@ async def _load_companies() -> Dict[str, dict]:
     return {cid: info for cid, info in (await _load_all_companies()).items() if cid in enabled}
 
 
+def _norm_name(value: str) -> str:
+    """Loose key for matching a typed owner name against a staff record — case and internal
+    spacing are not meaningful ("Rupak  Aich" and "rupak aich" are the same person)."""
+    return " ".join(str(value or "").split()).strip().lower()
+
+
 async def _load_all_companies() -> Dict[str, dict]:
     """company_id → {name, om_key, om_name}. `owner` may hold a staff id or a plain
-    name, so resolve tolerantly and fall back to the raw value."""
+    name, so resolve tolerantly and fall back to the raw value.
+
+    OWNER-NAME RESOLUTION
+    ---------------------
+    The OM dropdown submits a staff `_id`, but `companies.owner` is free text and in practice
+    holds a typed NAME. Comparing the two directly can never match, so every dashboard's OM
+    filter silently returned nothing. Here an owner that names a real staff member is resolved
+    to that staff id, which is what the filter compares against — so the dropdown starts
+    working against the data as it already is, with no migration.
+
+    An owner that matches nobody keeps its raw value as `om_key`, exactly as before: those
+    rows still group and label themselves by that name in the OM league table, they simply
+    can't be selected by a dropdown that only offers real staff.
+    """
     staff = {}
     for s in await get_collection("staff").find({}).to_list(500):
         staff[str(s["_id"])] = (s.get("full_name")
                                 or " ".join(filter(None, [s.get("first_name"), s.get("last_name")])).strip()
                                 or s.get("email") or str(s["_id"]))
+    # name → id. First writer wins, so two staff sharing a display name resolve consistently
+    # rather than flip-flopping between loads.
+    staff_by_name: Dict[str, str] = {}
+    for sid, name in staff.items():
+        staff_by_name.setdefault(_norm_name(name), sid)
+
+    def resolve(value: str) -> str:
+        """A staff id if `value` is one or names one; otherwise "" ."""
+        v = str(value or "").strip()
+        if not v:
+            return ""
+        if v in staff:
+            return v
+        return staff_by_name.get(_norm_name(v), "")
 
     out = {}
     for c in await get_collection("companies").find({}).to_list(1000):
         cid = str(c["_id"])
         owner = str(c.get("owner") or "").strip()
+        owner_id = resolve(owner)
         # Full ownership set for scoping: owner + admin_id + smops_ids (matches the write-side
-        # assert_can_schedule). `om_key` stays = owner so the OM league grouping is unchanged.
+        # assert_can_schedule), each resolved the same way so a name-valued field scopes too.
         om_keys = {k for k in (
-            owner,
-            str(c.get("admin_id") or "").strip(),
+            owner, owner_id,
+            str(c.get("admin_id") or "").strip(), resolve(c.get("admin_id")),
             *[str(x).strip() for x in (c.get("smops_ids") or [])],
+            *[resolve(x) for x in (c.get("smops_ids") or [])],
         ) if k}
         out[cid] = {
             "name": c.get("name") or cid,
-            "om_key": owner,
-            "om_name": staff.get(owner, owner),
+            # Prefer the resolved id so the OM filter and the OM league group by the SAME key
+            # the dropdown submits; fall back to the raw value so unmatched owners keep the
+            # grouping and label they have today.
+            "om_key": owner_id or owner,
+            "om_name": staff.get(owner_id) or staff.get(owner, owner),
             "om_keys": om_keys,
         }
     return out
@@ -557,10 +595,14 @@ async def get_analytics(user: dict, scope: dict) -> dict:
     companies = await _load_companies()
     allowed = _allowed_companies(user, companies, scope)
     om_filter = str(scope.get("om_id") or scope.get("smops_id") or "")
+    # Same correction as the OM dashboard: narrow the company list on the full ownership set
+    # rather than re-filtering events on `om_key` alone, so picking an OM who RUNS a client
+    # without being its recorded owner returns their work instead of nothing.
+    allowed = _narrow_to_om(allowed, companies, om_filter)
     window = _period_window(scope.get("period"))
 
     events = await _load_events(allowed)
-    totals, by_company, by_om = _accumulate(events, allowed, companies, window, om_filter)
+    totals, by_company, by_om = _accumulate(events, allowed, companies, window)
     closure = await _action_closure()
     escalations = await _active_escalations()
     rollup = await _success_rollup(allowed, period=window[0][:7])
@@ -703,10 +745,21 @@ async def get_staff_dashboard(user: dict, scope: dict) -> dict:
     companies = await _load_companies()
     allowed = _allowed_companies(user, companies, scope)
     om_filter = str(scope.get("om_id") or scope.get("smops_id") or "")
+    # The OM dropdown has to narrow the COMPANY list too, not just the events. Without this
+    # the activity cards honoured the OM filter while Action Closure and Active Escalations —
+    # which are summed over `scoped` below — kept reporting every company in scope, so the
+    # same screen could read "0 clients" and "32 active escalations" at once.
+    allowed = _narrow_to_om(allowed, companies, om_filter)
     window = _period_window(scope.get("period"))
 
     events = await _load_events(allowed)
-    totals, by_company, _by_om = _accumulate(events, allowed, companies, window, om_filter)
+    # NB: no om_filter here — `allowed` already carries it, and it carries it CORRECTLY.
+    # _narrow_to_om matches the full ownership set (owner + admin_id + smops_ids), while
+    # _accumulate's own om filter compares against `om_key` alone, i.e. the owner field.
+    # Passing it again therefore re-filtered on the narrower rule and dropped every event for
+    # a company this OM runs but does not own — which is why the card could read 0 clients
+    # while the grid beneath it listed their clients and the escalation count was non-zero.
+    totals, by_company, _by_om = _accumulate(events, allowed, companies, window)
     closure = await _action_closure()
     escalations = await _active_escalations()
     # Spec §9.2 / §17 — the OM dashboard carries the same "Scheduled by OM / Client"

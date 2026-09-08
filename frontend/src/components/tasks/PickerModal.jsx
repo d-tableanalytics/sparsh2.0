@@ -6,6 +6,12 @@ import { getInitials } from './taskDisplayUtils';
 // Shared search + scrollable-list + Cancel/Apply popover, used for the Assignee,
 // In Loop and Category pickers (they all share the same header/search/list/footer shape).
 //
+// `bulkOption` (optional): a checkbox above the list that selects/deselects a whole SET of
+// ids at once — e.g. "Include MD" on the In Loop picker. It stages onto `pending` like every
+// other click here, so Cancel still discards it and Apply still commits it; a control that
+// wrote straight through to the parent would survive a Cancel and surprise the user.
+//     bulkOption = { label, ids: [...], hint?, emptyHint? }
+//
 // `onAddNew` (optional): when provided, the "Add More" flow CREATES + APPENDS an item
 // (via the parent) and keeps the modal open WITHOUT changing the current selection —
 // so e.g. adding a new category never clears the already-selected one. Without it,
@@ -13,6 +19,7 @@ import { getInitials } from './taskDisplayUtils';
 const PickerModal = ({
   isOpen, onClose, title, searchPlaceholder = 'Search...', items, multi = true,
   selected, onApply, onAddNew, renderAvatar = false, renderDot = false, allowAddMore = false, addMoreLabel = 'Add More',
+  bulkOption = null,
 }) => {
   const [search, setSearch] = useState('');
   const [pending, setPending] = useState(multi ? [] : null);
@@ -59,6 +66,18 @@ const PickerModal = ({
     } else {
       setPending(id);
     }
+  };
+
+  // ── bulkOption ───────────────────────────────────────────────
+  // Checked only when EVERY id in the set is staged, so ticking the last one by hand lights
+  // the box and unticking any one clears it — the checkbox can never contradict the list.
+  const bulkIds = bulkOption?.ids || [];
+  const bulkChecked = multi && bulkIds.length > 0 && bulkIds.every(id => pending.includes(id));
+  const toggleBulk = () => {
+    if (!multi || !bulkIds.length) return;
+    setPending(p => (bulkChecked
+      ? p.filter(id => !bulkIds.includes(id))
+      : [...p, ...bulkIds.filter(id => !p.includes(id))]));
   };
 
   const handleAddNew = () => {
@@ -110,6 +129,34 @@ const PickerModal = ({
                 className="w-full pl-9 pr-3 py-2.5 bg-[var(--bg-card)] border-2 border-[var(--accent-indigo)] rounded-full text-[12px] font-bold outline-none" />
             </div>
           </div>
+
+          {bulkOption && multi && (
+            <div className="px-5 pt-3 shrink-0">
+              <label className={`flex items-start gap-2.5 px-3 py-2.5 rounded-xl border transition-all ${
+                bulkIds.length === 0
+                  ? 'border-[var(--border)] opacity-60 cursor-not-allowed'
+                  : `cursor-pointer ${bulkChecked
+                    ? 'border-[var(--accent-indigo)] bg-[var(--accent-indigo-bg)]'
+                    : 'border-[var(--border)] hover:bg-[var(--input-bg)]'}`
+              }`}>
+                <input type="checkbox" className="mt-0.5 shrink-0" checked={bulkChecked}
+                  disabled={bulkIds.length === 0} onChange={toggleBulk} />
+                <span className="min-w-0">
+                  <span className={`block text-[12px] font-black ${bulkChecked ? 'text-[var(--accent-indigo)]' : 'text-[var(--text-main)]'}`}>
+                    {bulkOption.label}
+                    {bulkIds.length > 0 && (
+                      <span className="ml-1.5 font-bold text-[var(--text-muted)]">({bulkIds.length})</span>
+                    )}
+                  </span>
+                  {(bulkIds.length === 0 ? bulkOption.emptyHint : bulkOption.hint) && (
+                    <span className="block text-[10.5px] font-medium text-[var(--text-muted)] mt-0.5 leading-relaxed">
+                      {bulkIds.length === 0 ? bulkOption.emptyHint : bulkOption.hint}
+                    </span>
+                  )}
+                </span>
+              </label>
+            </div>
+          )}
 
           <div className="flex-1 overflow-y-auto no-scrollbar px-5 py-3 space-y-1">
             {filtered.map(it => {

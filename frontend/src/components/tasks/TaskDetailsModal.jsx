@@ -236,10 +236,10 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, scope, onChanged, onEdit })
     }
   };
 
-  const handleReviseDeadline = async (iso) => {
+  const handleReviseDeadline = async (iso, remark) => {
     setSavingDeadline(true);
     try {
-      await reviseTaskDeadline(taskId, iso);
+      await reviseTaskDeadline(taskId, iso, remark);
       showSuccess('Deadline revised');
       fetchDetail({ silent: true });
       onChanged?.();
@@ -674,9 +674,18 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, scope, onChanged, onEdit })
                       <div className="space-y-1.5">
                         {[...task.deadlineHistory].reverse().map((h, i) => (
                           <div key={i} className="text-[10px] font-bold text-[var(--text-muted)]">
-                            {h.old_end ? formatDate(h.old_end) : '—'} <span className="mx-1">→</span>
-                            <span className="text-[var(--accent-indigo)]">{h.new_end ? formatDate(h.new_end) : '—'}</span>
-                            <span className="opacity-70"> · {h.revised_by_name || 'Unknown'}</span>
+                            <div>
+                              {h.old_end ? formatDate(h.old_end) : '—'} <span className="mx-1">→</span>
+                              <span className="text-[var(--accent-indigo)]">{h.new_end ? formatDate(h.new_end) : '—'}</span>
+                              <span className="opacity-70"> · {h.revised_by_name || 'Unknown'}</span>
+                            </div>
+                            {/* Why it moved. Older revisions predate the mandatory reason, so
+                                this stays conditional rather than rendering an empty quote. */}
+                            {h.reason && (
+                              <p className="mt-0.5 pl-2 border-l-2 border-[var(--border)] font-medium text-[var(--text-main)] leading-relaxed">
+                                {h.reason}
+                              </p>
+                            )}
                           </div>
                         ))}
                       </div>
@@ -1018,15 +1027,23 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, scope, onChanged, onEdit })
       </div>
     )}
 
-    {/* Deadline / Date Revision picker — assigner-only (button only shown when canManage). */}
+    {/* Deadline / Date Revision picker. Reached two ways: the assigner's "Revise" button next
+        to the deadline, and the assignee's "Revise" option in their working dropdown — the
+        latter is how a doer shifts a delegation they can't finish in time.
+
+        The reason is MANDATORY either way: a date that moves without a stated cause leaves the
+        assigner with a changed commitment and no explanation, which is the whole point of
+        recording the shift. `remarkRequired` blocks Done until it's typed, and the backend
+        rejects a reasonless revision too, so the API can't be used to skip it. */}
     <MiniDatePicker
       isOpen={deadlinePickerOpen}
       onClose={() => setDeadlinePickerOpen(false)}
       value={task?.end}
       title="Revise Deadline"
-      onApply={(iso) => handleReviseDeadline(iso)}
+      onApply={(iso, remark) => handleReviseDeadline(iso, remark)}
       holidayDates={holidayDates} weeklyOffs={WEEKLY_OFFS} onBlocked={showError}
       disablePast
+      remarkLabel="Reason for Revision" remarkRequired
     />
 
     {/* Reopen picker — the assigner must set a NEW deadline and give a mandatory reason; only

@@ -1,13 +1,13 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   RefreshCw, Building2, Target, Gauge, CheckCircle2, ClipboardList, Star,
-  ListChecks, AlertTriangle, CalendarClock,
+  ListChecks, AlertTriangle, CalendarClock, Download,
 } from 'lucide-react';
 import {
   DashboardHero, HeroButton, HeaderSelect, Section, Th, Td, Progress, TableShell, KpiTile,
   usePaged, Pager, Fraction,
 } from '../../common/dashboardKit';
-import { getClientDashboard, currentPeriod, periodLabel } from '../../../../services/tpmsApi';
+import { getClientDashboard, exportClientReport, currentPeriod, periodLabel } from '../../../../services/tpmsApi';
 import api from '../../../../services/api';
 
 /* ─────────────────────────────────────────────────────────────
@@ -74,6 +74,7 @@ const ClientView = () => {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [downloading, setDownloading] = useState(false);
 
   // Company roster for the picker.
   useEffect(() => {
@@ -110,6 +111,32 @@ const ClientView = () => {
 
   useEffect(() => { load(); }, [load]);
 
+  // Download the selected client's whole TPMS record as .xlsx. The workbook is built
+  // server-side (tpms_client_export_service) so the export carries the client's full history,
+  // not just the rows this screen happens to have fetched for one month.
+  const download = useCallback(async () => {
+    if (!company || downloading) return;
+    setDownloading(true);
+    try {
+      const res = await exportClientReport({ company_id: company, period });
+      // Prefer the filename the server chose — it carries the client name and period.
+      const disp = res.headers?.['content-disposition'] || '';
+      const match = /filename="?([^"]+)"?/.exec(disp);
+      const url = URL.createObjectURL(new Blob([res.data]));
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = match ? match[1] : `TPMS report ${period}.xlsx`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      setError(e.response?.data?.detail || 'Could not download the report. Please try again.');
+    } finally {
+      setDownloading(false);
+    }
+  }, [company, period, downloading]);
+
   const rows = data?.rows || [];
   const pending = data?.pending_actions || [];
   const cards = data?.cards || {};
@@ -134,6 +161,12 @@ const ClientView = () => {
         <HeaderSelect value={company} onChange={setCompany} options={companies} />
         <HeaderSelect value={period} onChange={setPeriod} options={months} searchable={false} />
         <HeroButton icon={RefreshCw} onClick={load}>Refresh</HeroButton>
+        {/* Only meaningful once a client is picked — the report IS the client's record. */}
+        {company && (
+          <HeroButton icon={Download} onClick={download}>
+            {downloading ? 'Preparing…' : 'Download Report'}
+          </HeroButton>
+        )}
       </DashboardHero>
 
       {loading && !data && (

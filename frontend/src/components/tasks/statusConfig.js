@@ -1,5 +1,6 @@
 import {
   Clock, CheckCircle2, PlayCircle, Link2, Ban, Eye, CheckCircle, AlertTriangle, RotateCcw,
+  AlertCircle, ArrowDown, ListChecks,
 } from 'lucide-react';
 
 // Central status → visual mapping for the Task Management module. Deliberately reuses
@@ -19,7 +20,7 @@ export const STATUS_CONFIG = {
 };
 
 export const EXTRA_CARD_CONFIG = {
-  totalTasks: { label: 'Total Tasks', shortLabel: 'Total', icon: CheckCircle2, color: 'var(--text-main)', bg: 'var(--input-bg)', border: 'var(--border)' },
+  totalTasks: { label: 'Total Tasks', shortLabel: 'Total', icon: ListChecks, color: 'var(--text-main)', bg: 'var(--input-bg)', border: 'var(--border)' },
   overdue: { label: 'Overdue', shortLabel: 'Overdue', icon: AlertTriangle, color: 'var(--accent-red)', bg: 'var(--accent-red-bg)', border: 'var(--accent-red-border)' },
   inTime: { label: 'In Time', shortLabel: 'In Time', icon: CheckCircle, color: 'var(--accent-green)', bg: 'var(--accent-green-bg)', border: 'var(--accent-green-border)' },
   delayed: { label: 'Delayed', shortLabel: 'Delayed', icon: AlertTriangle, color: 'var(--accent-red)', bg: 'var(--accent-red-bg)', border: 'var(--accent-red-border)' },
@@ -77,10 +78,13 @@ export const GROUP_DASHBOARD_CARD_ORDER = [
   ['delayed', EXTRA_CARD_CONFIG.delayed],
 ];
 
+// Priority renders as a filled pill (icon + label) in the table, so each level carries a full
+// bg/border/icon set like STATUS_CONFIG does — red / amber / green reads as high-to-low at a
+// glance without needing the label.
 export const PRIORITY_CONFIG = {
-  Low: { color: 'var(--text-muted)' },
-  Normal: { color: 'var(--accent-indigo)' },
-  High: { color: 'var(--accent-red)' },
+  Low: { label: 'Low', color: 'var(--accent-green)', bg: 'var(--accent-green-bg)', border: 'var(--accent-green-border)', icon: ArrowDown },
+  Normal: { label: 'Normal', color: 'var(--accent-yellow)', bg: 'var(--accent-yellow-bg)', border: 'var(--accent-yellow-border)', icon: AlertCircle },
+  High: { label: 'High', color: 'var(--accent-red)', bg: 'var(--accent-red-bg)', border: 'var(--accent-red-border)', icon: AlertCircle },
 };
 
 export const WORKFLOW_STATUSES = Object.keys(STATUS_CONFIG);
