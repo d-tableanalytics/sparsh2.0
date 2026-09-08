@@ -347,21 +347,39 @@ async def create_offer(actor: dict, company_id: str, payload: dict) -> dict:
     ctc = _validate_money(payload.get("ctc"))
     joining = _validate_joining(payload.get("joining_date"))
 
-    # When the caller asked to create AND send, the signature is validated BEFORE anything
-    # is written. Otherwise a 422 would still leave an orphaned draft behind -- an operation
-    # that reports failure must not half-succeed. Same all-or-nothing rule as the
-    # multi-platform publish in Phase 4.
+    # When the caller asked to create AND send, both send-time refusals below happen BEFORE
+    # anything is written. Same all-or-nothing rule as the multi-platform publish in Phase 4.
     send_now = bool(payload.get("send_now"))
     send_signature = clean_text(payload.get("signature"), limit=120) if send_now else None
-    if send_now and not send_signature:
-        raise HTTPException(
-            status_code=422,
-            detail="An authorised signature is required to send an offer.")
 
     req = {}
     if candidate.get("request_no"):
         req = await get_collection(COLL_REQUISITIONS).find_one(
             {"request_no": candidate["request_no"], "company_id": str(company_id)}) or {}
+
+    # Order matters here, and it used to be wrong.
+    #
+    # Create-and-send in one call cannot work on the internal track at all: Management's
+    # approval happens BETWEEN the two, so there is no moment at which both are satisfied.
+    # That refusal has to come FIRST. When the signature check ran first, an internal-track
+    # user who clicked "send now" was told "an authorised signature is required" -- and
+    # supplying one changed nothing, because the very next check refused the whole shape of
+    # the request. An error message that sends somebody to do something useless is a defect
+    # even when the status code is right.
+    if send_now and _is_internal(req):
+        raise HTTPException(
+            status_code=409,
+            detail=("An internal offer cannot be created and sent in one step. Save it as a "
+                    "draft, have Management or Finance approve it, then send it."))
+
+    # Validated BEFORE anything is written. Otherwise a 422 would still leave an orphaned
+    # draft behind -- an operation that reports failure must not half-succeed.
+    if send_now and not send_signature:
+        raise HTTPException(
+            status_code=422,
+            detail=("Type the authorised signatory's name in the offer form to send it. "
+                    "Leave it blank and use Save draft to create the offer without "
+                    "sending."))
 
     # ── Internal track ── two gates, both checked BEFORE anything is written so a refusal
     # cannot leave a draft offer behind. Both are silent on the client track.
@@ -395,16 +413,6 @@ async def create_offer(actor: dict, company_id: str, payload: dict) -> dict:
     # rather than because somebody set a flag.
     from app.services.hrms_background_service import assert_background_cleared
     await assert_background_cleared(company_id, candidate)
-
-    # Create-and-send in one call cannot work on the internal track: Management's approval
-    # happens BETWEEN the two, so there is no moment at which both could be satisfied.
-    # Refused here rather than at the send step, because failing after the write would leave
-    # an orphaned draft -- the same all-or-nothing rule the signature check above follows.
-    if send_now and _is_internal(req):
-        raise HTTPException(
-            status_code=409,
-            detail=("An internal offer cannot be created and sent in one step. Raise it, "
-                    "have Management or Finance approve it, then send it."))
 
     designation = clean_text(payload.get("designation"), limit=140) \
         or req.get("designation_name") or "the role"

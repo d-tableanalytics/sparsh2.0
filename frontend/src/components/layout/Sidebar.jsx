@@ -119,7 +119,15 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
     // belongs in THIS list, so "Recruitment" stays lit while somebody is on it.
     '/hrms/telephonic-screening',
     // Phase INT-10: the salary negotiation record is a hiring stage (SOP step 9).
-    '/hrms/negotiations'];
+    '/hrms/negotiations',
+    // Phase INT-15: the internal hiring dashboard is the way into the internal track, so
+    // it belongs in the strip -- and therefore in this list, or the sidebar would go dark
+    // on the very screen somebody starts from.
+    '/hrms/internal-hiring',
+    // Phase 12: the client track's own stages. These were in the tab strip from the start
+    // but were never listed here, so "Recruitment" unlit itself the moment somebody opened
+    // a job request. They are stages like any other.
+    '/hrms/job-requests', '/hrms/cv-sharing', '/hrms/background-checks'];
 
   const hrmsSubmodules = [
     { name: 'Dashboard', path: '/hrms/dashboard', icon: BarChart3 },

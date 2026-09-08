@@ -411,7 +411,8 @@ export const getCandidateNegotiation = (uk, params) =>
 export const approveOffer = (offerNo, payload, params) =>
   api.post(`/hrms/offers/${offerNo}/approve`, payload, { params });
 
-/** Probation. An EMPLOYEE event, not a recruitment stage — see hrms_probation_service. */
+/** Probation. Recorded against the EMPLOYEE; confirming it also stamps the candidate's
+ *  `Probation Confirmed` stage (Phase INT-15) — see hrms_probation_service. */
 export const getProbations = (params) => api.get('/hrms/probation', { params });
 export const getProbationsDue = (params) => api.get('/hrms/probation/due', { params });
 export const getProbation = (prbNo, params) =>
@@ -618,3 +619,28 @@ export const uploadCandidateCv = (uk, payload, params) =>
   api.post(`/hrms/candidates/${uk}/cv`, payload, { params });
 export const getCandidateCv = (uk, params) =>
   api.get(`/hrms/candidates/${uk}/cv`, { params });
+
+/* ── Interview evidence (spec §10) and the client candidate hub (§11) ──
+ *
+ * The access rule differs per artefact and is enforced by which endpoint exists:
+ *   CV                  view + download  (getShareCv — served as an attachment)
+ *   Interview report    view             (inline)
+ *   Interview recording watch only       (inline; no download control anywhere)
+ */
+export const getInterviewMedia = (interviewNo, params) =>
+  api.get(`/hrms/interviews/${interviewNo}/media`, { params });
+/** `kind` is 'report' or 'recording'. Body: {name, mime_type, data} or {external_url}. */
+export const attachInterviewMedia = (interviewNo, kind, payload, params) =>
+  api.post(`/hrms/interviews/${interviewNo}/media/${kind}`, payload, { params });
+export const removeInterviewMedia = (interviewNo, kind, params) =>
+  api.delete(`/hrms/interviews/${interviewNo}/media/${kind}`, { params });
+/** Sparsh-side: every interview for a candidate, with scores and panel. */
+export const getCandidateInterviews = (uk, params) =>
+  api.get(`/hrms/candidates/${uk}/interviews`, { params });
+
+/** The client's single-call candidate hub: profile, interviews, evidence, timeline. */
+export const getSharedCandidateHub = (shareNo, params) =>
+  api.get(`/hrms/shares/${shareNo}/candidate`, { params });
+/** A link to one interview's report or recording, authorised by the share. */
+export const getShareInterviewMedia = (shareNo, interviewNo, kind, params) =>
+  api.get(`/hrms/shares/${shareNo}/interviews/${interviewNo}/${kind}`, { params });

@@ -4,6 +4,7 @@ import { useHrms } from '../HrmsContext';
 import { HrmsLoading, HrmsError } from '../common/HrmsStates';
 import { getCandidateJourney } from '../../../services/hrmsApi';
 import DocumentPanel from '../documents/DocumentPanel';
+import InternalCandidatePanels from '../internal/InternalCandidatePanels';
 
 /**
  * HRMS ▸ candidate journey.
@@ -39,6 +40,9 @@ export const CandidateJourneyView = ({ uk }) => {
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
   const [showDocs, setShowDocs] = useState(false);
+  // Bumped after a write from one of the internal panels, so the rail, the timeline and
+  // the score re-read together rather than drifting apart.
+  const [reloads, setReloads] = useState(0);
 
   useEffect(() => {
     let alive = true;
@@ -51,7 +55,7 @@ export const CandidateJourneyView = ({ uk }) => {
       });
     return () => { alive = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [uk]);
+  }, [uk, reloads]);
 
   if (error) return <HrmsError message={error} />;
   if (!data) return <HrmsLoading label="Loading journey…" />;
@@ -182,6 +186,17 @@ export const CandidateJourneyView = ({ uk }) => {
           ))}
         </ol>
       </div>
+
+      {/* ── Phase INT-15 (spec §30) ── the internal track's own sections. Rendered only
+          for an internal-track candidate: the client track has no position scorecard, no
+          mandatory reference check and no probation, so these would be permanently empty
+          there rather than merely unfilled. */}
+      {data.track === 'internal' && (
+        <InternalCandidatePanels
+          candidate={data.candidate}
+          onChanged={() => setReloads((n) => n + 1)}
+        />
+      )}
 
       {/* ── Phase 11-R, Item 2 ── the SAME DocumentPanel the employee profile mounts.
           Collapsed behind a toggle so the journey stays a timeline first: documents are

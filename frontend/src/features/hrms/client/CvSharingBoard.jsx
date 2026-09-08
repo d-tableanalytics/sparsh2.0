@@ -13,6 +13,7 @@ import {
 import { FIELD, LABEL, TEXTAREA, day } from '../internal/internalKit';
 import { Btn, Chip, Facts, Modal, RecordList } from '../internal/internalKit.jsx';
 import ShareJourney from './ShareJourney';
+import InterviewEvidence from './InterviewEvidence';
 
 /**
  * HRMS ▸ client track — CV sharing.
@@ -34,7 +35,10 @@ import ShareJourney from './ShareJourney';
 // alphabetical set.
 const STATUSES = [
   'CV Shared', 'Under Review', 'Shortlisted', 'Interview Scheduled',
-  'Selected', 'Offer in Progress', 'Hired', 'Rejected', 'Withdrawn',
+  'Selected', 'Offer in Progress', 'Hired', 'Rejected',
+  // Handed back by the client — distinct from Rejected, and the distinction is the point:
+  // "not for this role" is worth re-pitching, "not for us" is not.
+  'Sent Back to Sparsh', 'Withdrawn',
 ];
 
 const TONE = {
@@ -46,6 +50,7 @@ const TONE = {
   'Offer in Progress': 'warn',
   Hired: 'good',
   Rejected: 'bad',
+  'Sent Back to Sparsh': 'warn',
   Withdrawn: 'neutral',
 };
 
@@ -270,6 +275,14 @@ const CvSharingBoard = () => {
                       variant="sparsh"
                       verification={verifications[share.uk]}
                     />
+                    <div className="mt-3 pt-3 border-t border-[var(--border)]">
+                      <p className="text-[10.5px] font-bold uppercase tracking-widest
+                                    text-[var(--text-muted)] mb-2">
+                        Interview evidence shown to {share.client_name}
+                      </p>
+                      <InterviewEvidence uk={share.uk}
+                                         candidateName={share.candidate_name} />
+                    </div>
                   </div>
                 )}
               </div>

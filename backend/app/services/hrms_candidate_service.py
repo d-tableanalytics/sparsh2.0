@@ -31,6 +31,7 @@ from app.db.mongodb import get_collection
 from app.models.hrms import (
     AUDIT_ASSIGNED, AUDIT_CANDIDATE_ADDED, AUDIT_CANDIDATE_DELETED, AUDIT_CANDIDATE_UPDATED,
     AUDIT_SCREENED, AUDIT_STAGE_CHANGED, COLL_AUDIT_LOG, COLL_CANDIDATES, COLL_REQUISITIONS,
+    RequisitionTrack,
     EMAIL_RE, ENTITY_CANDIDATE, JOURNEY_KINDS, JOURNEY_RAIL, JOURNEY_STATUS_KINDS,
     MAX_BULK_SCREEN, PHONE_RE, PIPELINE_COLUMNS, SCREEN_ACTIONS, AppStatus, Cap, HrmsRole,
     ScreenAction, allowed_next_statuses, can_transition, is_iso_date,
@@ -498,7 +499,10 @@ def candidate_retention_until(candidate: dict, years_map: dict = None) -> Option
     from app.models.hrms import RETENTION_YEARS
     years_map = RETENTION_YEARS if years_map is None else years_map
     status = (candidate or {}).get("application_status")
-    selected = status in (AppStatus.JOINED.value, AppStatus.EMPLOYEE_CREATED.value)
+    selected = status in (AppStatus.JOINED.value, AppStatus.EMPLOYEE_CREATED.value,
+                          # Phase INT-15: still a hire, so retention still runs from the
+                          # joining date at the 3-year band, not the 1-year unselected one.
+                          AppStatus.PROBATION_CONFIRMED.value)
     anchor = (candidate.get("joined_at") if selected else None) \
         or candidate.get("applied_at") or candidate.get("created_at")
     if hasattr(anchor, "strftime"):
@@ -708,7 +712,8 @@ async def delete_candidate(actor: dict, company_id: str, uk: str) -> dict:
     current = await _require_visible(actor, company_id, uk)
     if current.get("application_status") in (
             AppStatus.OFFER_ACCEPTED.value, AppStatus.PRE_ONBOARDING.value,
-            AppStatus.JOINED.value, AppStatus.EMPLOYEE_CREATED.value):
+            AppStatus.JOINED.value, AppStatus.EMPLOYEE_CREATED.value,
+            AppStatus.PROBATION_CONFIRMED.value):
         raise HTTPException(
             status_code=409,
             detail=("This candidate has an accepted offer or has joined - their record is "
@@ -987,6 +992,32 @@ async def record_client_response(actor: dict, company_id: str, payload: dict) ->
 # -------------------------------------------------------------
 # Journey
 # -------------------------------------------------------------
+async def _is_internal_track(company_id: str, request_no) -> bool:
+    """Whether a candidate's requisition runs on the internal track.
+
+    A candidate with no requisition (a talent-pool or directly sourced record) is treated as
+    client-track, which is also what every requisition raised before the track field existed
+    defaults to.
+    """
+    if not request_no:
+        return False
+    req = await get_collection(COLL_REQUISITIONS).find_one(
+        {"request_no": request_no, "company_id": str(company_id)},
+        {"requisition_track": 1})
+    if not req:
+        return False
+    track = req.get("requisition_track") or RequisitionTrack.CLIENT.value
+    return track == RequisitionTrack.INTERNAL.value
+
+
+def _journey_is_over(status: str, is_internal: bool) -> bool:
+    """Whether the rail has run out of steps for THIS candidate."""
+    if not is_internal and status == AppStatus.EMPLOYEE_CREATED.value:
+        # There is no probation on the client track, so the hire is the last stop.
+        return True
+    return not allowed_next_statuses(status)
+
+
 async def get_journey(actor: dict, company_id: str, uk: str) -> dict:
     """Reconstruct a candidate's full history from the audit trail.
 
@@ -995,6 +1026,14 @@ async def get_journey(actor: dict, company_id: str, uk: str) -> dict:
     """
     candidate = await _require_visible(actor, company_id, uk)
     status = candidate.get("application_status") or AppStatus.APPLIED.value
+
+    # -- Phase INT-15 -- whether a hire is the END depends on the track.
+    #
+    # `Probation Confirmed` follows `Employee Created` on the INTERNAL track only. The
+    # lifecycle graph is shared and cannot express that, so it offers the edge to everybody
+    # and the reader decides. Without this, a client-track hire -- who has no probation and
+    # never will -- would render as an unfinished journey for ever.
+    is_internal = await _is_internal_track(company_id, candidate.get("request_no"))
 
     rows = await get_collection(COLL_AUDIT_LOG).find(
         {"entity": ENTITY_CANDIDATE, "entity_id": uk}).sort("created_at", 1).to_list(500)
@@ -1059,12 +1098,23 @@ async def get_journey(actor: dict, company_id: str, uk: str) -> dict:
             "referrer_employee_code": candidate.get("referrer_employee_code"),
             "referral_relation": candidate.get("referral_relation"),
             "client_share": candidate.get("client_share"),
+            # ── Phase INT-15 ── the internal track's own facts, so the candidate page can
+            # be one place rather than four. Null on the client track, where none of these
+            # exist -- the screen renders the section only when there is something in it.
+            "scorecard_evaluation": candidate.get("scorecard_evaluation"),
+            "scorecard_score": candidate.get("scorecard_score"),
+            "scorecard_band": candidate.get("scorecard_band"),
         },
+        # Which track this candidate is on, so the reader does not have to infer it from
+        # the presence of fields that are merely empty on a new internal hire.
+        "track": (RequisitionTrack.INTERNAL.value if is_internal
+                  else RequisitionTrack.CLIENT.value),
         "rail": rail,
         "reached": reached,
         # A terminal stage means the rail stops here -- the UI shows why rather than
-        # implying more steps are coming.
-        "terminal": not allowed_next_statuses(status),
+        # implying more steps are coming. A client-track hire is finished at
+        # `Employee Created`; an internal one still has its probation confirmation to come.
+        "terminal": _journey_is_over(status, is_internal),
         "events": events,
     }
 

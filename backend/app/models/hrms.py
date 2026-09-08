@@ -695,8 +695,8 @@ class Cap(str, Enum):
     # Offer approval. Annexure B marks this "A" for Management/Finance and Table 2 calls it
     # mandatory, so it is a real act and not merely a band check on the CTC.
     OFFER_APPROVE = "offer.approve"
-    # Probation. Recorded against the EMPLOYEE, not the candidate — see the note above
-    # TERMINAL_STATUSES for why the candidate lifecycle is deliberately left alone.
+    # Probation. Recorded against the EMPLOYEE; confirming it also stamps the candidate's
+    # `Probation Confirmed` stage — see POST_HIRE_STATUSES for why that edge is one-way.
     PROBATION_READ    = "probation.read"
     PROBATION_REVIEW  = "probation.review"
     PROBATION_CONFIRM = "probation.confirm"
@@ -772,6 +772,14 @@ class Cap(str, Enum):
     BACKGROUND_READ    = "background.read"
     BACKGROUND_WRITE   = "background.write"
     BACKGROUND_APPROVE = "background.approve"
+    # ── spec §10 ── the interview report and recording.
+    #
+    # A separate capability from `interview.schedule` and `interview.evaluate` because it is
+    # a different act: booking a conversation and judging one are operational, while
+    # attaching the evidence a CLIENT will read and watch is a disclosure decision. A
+    # company that wants a senior recruiter to control what leaves the building can grant
+    # the first two widely and this one narrowly.
+    INTERVIEW_MEDIA = "interview.media"
     # ── Later phases append their capabilities here. ──
 
 
@@ -855,6 +863,7 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
         Cap.JOB_REQUEST_READ, Cap.JOB_REQUEST_WRITE, Cap.JOB_REQUEST_REVIEW,
         Cap.SHARE_READ, Cap.SHARE_WRITE,
         Cap.BACKGROUND_READ, Cap.BACKGROUND_WRITE,
+        Cap.INTERVIEW_MEDIA,
     },
     HrmsRole.MD: {
         Cap.MODULE_ACCESS, Cap.MODULE_ADMIN, Cap.AUDIT_READ,
@@ -912,6 +921,7 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
         Cap.JOB_REQUEST_READ, Cap.JOB_REQUEST_WRITE, Cap.JOB_REQUEST_REVIEW,
         Cap.SHARE_READ, Cap.SHARE_WRITE, Cap.SHARE_RESPOND,
         Cap.BACKGROUND_READ, Cap.BACKGROUND_WRITE, Cap.BACKGROUND_APPROVE,
+        Cap.INTERVIEW_MEDIA,
     },
     HrmsRole.HR: {
         Cap.MODULE_ACCESS, Cap.AUDIT_READ,
@@ -983,6 +993,7 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
         Cap.JOB_REQUEST_READ, Cap.JOB_REQUEST_WRITE, Cap.JOB_REQUEST_REVIEW,
         Cap.SHARE_READ, Cap.SHARE_WRITE,
         Cap.BACKGROUND_READ, Cap.BACKGROUND_WRITE, Cap.BACKGROUND_APPROVE,
+        Cap.INTERVIEW_MEDIA,
     },
     # A hiring manager reads their own corner of the directory (enforced by row scoping in
     # hrms_employee_service, not by this set) and never sees pay. They RAISE requisitions --
@@ -2084,6 +2095,12 @@ class AppStatus(str, Enum):
     PRE_ONBOARDING       = "Pre-Onboarding"
     JOINED               = "Joined"
     EMPLOYEE_CREATED     = "Employee Created"
+    # ── Phase INT-15 (SOP §7) ── the post-hire governance event. Confirmation of probation
+    # is the last thing the internal track has an opinion about, and until now it lived only
+    # on the employee record. It ranks 8 WITH `Employee Created` rather than opening a rank
+    # 9: the funnel ends at hired, and a confirmation months later is not a ninth stage of
+    # it. See POST_HIRE_STATUSES for why this edge does not un-terminalise the hire.
+    PROBATION_CONFIRMED  = "Probation Confirmed"
 
 
 # -- Upload limits (public surface) ----------------------------------------------
@@ -2235,8 +2252,20 @@ class PublicApplicationIn(BaseModel):
 
 # Stages a candidate can never leave. Reaching one of these ends the pipeline.
 TERMINAL_STATUSES = {
-    AppStatus.EMPLOYEE_CREATED, AppStatus.OFFER_DECLINED, AppStatus.DUPLICATE,
+    AppStatus.PROBATION_CONFIRMED, AppStatus.OFFER_DECLINED, AppStatus.DUPLICATE,
 }
+
+# ── Phase INT-15 ── Hired, but with one governance event still to come.
+#
+# `Employee Created` was terminal until this phase, and it very nearly had to stay that way.
+# `allowed_next_statuses` grants ALWAYS_AVAILABLE to every non-terminal stage, so simply
+# dropping it from TERMINAL_STATUSES to hang `Probation Confirmed` off it would also make
+# Rejected, On Hold and Duplicate legal from a HIRED employee -- on the client track as much
+# as this one, which is a lifecycle both tracks share.
+#
+# So a post-hire stage advances but is never parked or rejected. It is the narrowest change
+# that satisfies the SOP without handing the client track three edges it never asked for.
+POST_HIRE_STATUSES = {AppStatus.EMPLOYEE_CREATED}
 
 # Available from ANY non-terminal stage. A recruiter must always be able to stop a pipeline
 # or park it, whatever stage it has reached -- encoding those as per-stage edges would be
@@ -2303,6 +2332,8 @@ FORWARD_TRANSITIONS = {
     AppStatus.APPOINTMENT_LETTER_SENT: {AppStatus.PRE_ONBOARDING},
     AppStatus.PRE_ONBOARDING:       {AppStatus.JOINED},
     AppStatus.JOINED:               {AppStatus.EMPLOYEE_CREATED},
+    # ── Phase INT-15 ── the only edge out of a hire, and only forwards.
+    AppStatus.EMPLOYEE_CREATED:     {AppStatus.PROBATION_CONFIRMED},
     # Parked and rejected candidates can be revived -- a hold that cannot be lifted is a
     # dead end, and rejections are sometimes reversed.
     AppStatus.ON_HOLD:              {AppStatus.UNDER_REVIEW, AppStatus.SHORTLISTED},
@@ -2315,6 +2346,10 @@ def allowed_next_statuses(current) -> set:
     current = AppStatus(current) if not isinstance(current, AppStatus) else current
     if current in TERMINAL_STATUSES:
         return set()
+    if current in POST_HIRE_STATUSES:
+        # Advance only. Somebody who has been hired is not a candidate any more and must
+        # never be rejectable, parked or marked a duplicate -- see POST_HIRE_STATUSES.
+        return set(FORWARD_TRANSITIONS.get(current, set()))
     return set(FORWARD_TRANSITIONS.get(current, set())) | (ALWAYS_AVAILABLE - {current})
 
 
@@ -2343,7 +2378,8 @@ PIPELINE_COLUMNS = [
                                     AppStatus.OFFER_ACCEPTED,
                                     AppStatus.APPOINTMENT_LETTER_SENT]),
     ("onboarding",  "Onboarding",  [AppStatus.PRE_ONBOARDING, AppStatus.JOINED,
-                                    AppStatus.EMPLOYEE_CREATED]),
+                                    AppStatus.EMPLOYEE_CREATED,
+                                    AppStatus.PROBATION_CONFIRMED]),
     ("hold",        "On Hold",     [AppStatus.ON_HOLD]),
     # TELEPHONIC_REJECTED groups with the other "declined at a stage" outcomes, exactly as
     # CLIENT_REJECTED does -- both rank 2 in the funnel and both read as a rejection here.
@@ -2410,6 +2446,7 @@ JOURNEY_STATUS_KINDS = {
     AppStatus.SHORTLISTED: "success", AppStatus.ASSESSMENT_PASSED: "success",
     AppStatus.SELECTED: "success", AppStatus.OFFER_ACCEPTED: "success",
     AppStatus.JOINED: "success", AppStatus.EMPLOYEE_CREATED: "success",
+    AppStatus.PROBATION_CONFIRMED: "success",
     AppStatus.REJECTED: "reject", AppStatus.DUPLICATE: "reject",
     AppStatus.ASSESSMENT_FAILED: "reject", AppStatus.OFFER_DECLINED: "reject",
     AppStatus.ON_HOLD: "warning",
@@ -2437,7 +2474,8 @@ JOURNEY_RAIL = [
     # step would re-flow a rail every existing screen renders. (Stated per Item 3 §2.)
     ("Offer",       {AppStatus.OFFER_GENERATED, AppStatus.OFFER_ACCEPTED,
                      AppStatus.APPOINTMENT_LETTER_SENT}),
-    ("Hired",       {AppStatus.PRE_ONBOARDING, AppStatus.JOINED, AppStatus.EMPLOYEE_CREATED}),
+    ("Hired",       {AppStatus.PRE_ONBOARDING, AppStatus.JOINED,
+                     AppStatus.EMPLOYEE_CREATED, AppStatus.PROBATION_CONFIRMED}),
 ]
 
 
@@ -2776,6 +2814,9 @@ EDITABLE_OFFER_STATUSES = {OfferStatus.DRAFT}
 FILLED_STATUSES = {
     AppStatus.OFFER_ACCEPTED, AppStatus.PRE_ONBOARDING,
     AppStatus.JOINED, AppStatus.EMPLOYEE_CREATED,
+    # A confirmed employee still fills the vacancy. Omitting this would RE-OPEN the
+    # requisition the moment probation was confirmed, which is the opposite of the SOP.
+    AppStatus.PROBATION_CONFIRMED,
     # Phase 11-R: an issued appointment letter means the vacancy is spoken for. Omitting it
     # would make a requisition RE-OPEN the moment the letter went out, because the candidate
     # leaves Offer Accepted for this stage.
@@ -3083,6 +3124,9 @@ STAGE_RANK = {
     AppStatus.PRE_ONBOARDING:       7,
     AppStatus.JOINED:               7,
     AppStatus.EMPLOYEE_CREATED:     8,
+    # Rank 8, WITH the hire. A confirmation is not a further step down the funnel,
+    # so FUNNEL_STAGES keeps its 8 rows and every Phase 10 figure keeps its meaning.
+    AppStatus.PROBATION_CONFIRMED:  8,
 }
 
 # The funnel, declared once. `min_rank` is the bar a candidate must clear to be counted.
@@ -3696,6 +3740,13 @@ class ShareStatus(str, Enum):
     REJECTED           = "Rejected"
     OFFER_IN_PROGRESS  = "Offer in Progress"
     HIRED              = "Hired"
+    # ── spec §12 ── the client hands the candidate back without rejecting them.
+    #
+    # Distinct from Rejected on purpose, and the distinction is the point: Rejected means
+    # "not for us", Sent Back means "not for THIS role -- see what else you have". Collapsing
+    # them would lose the difference between a candidate a client turned down and one they
+    # liked but could not place, and only one of those is worth re-pitching to them.
+    SENT_BACK          = "Sent Back to Sparsh"
     WITHDRAWN          = "Withdrawn"   # Sparsh pulled the CV back from this client
 
 
@@ -3707,19 +3758,26 @@ class ShareStatus(str, Enum):
 # history of the first one.
 SHARE_TRANSITIONS = {
     ShareStatus.CV_SHARED:           {ShareStatus.UNDER_REVIEW, ShareStatus.SHORTLISTED,
-                                      ShareStatus.REJECTED, ShareStatus.WITHDRAWN},
+                                      ShareStatus.REJECTED, ShareStatus.SENT_BACK,
+                                      ShareStatus.WITHDRAWN},
     ShareStatus.UNDER_REVIEW:        {ShareStatus.SHORTLISTED, ShareStatus.REJECTED,
-                                      ShareStatus.WITHDRAWN},
+                                      ShareStatus.SENT_BACK, ShareStatus.WITHDRAWN},
     ShareStatus.SHORTLISTED:         {ShareStatus.INTERVIEW_SCHEDULED, ShareStatus.SELECTED,
-                                      ShareStatus.REJECTED, ShareStatus.WITHDRAWN},
+                                      ShareStatus.REJECTED, ShareStatus.SENT_BACK,
+                                      ShareStatus.WITHDRAWN},
     ShareStatus.INTERVIEW_SCHEDULED: {ShareStatus.SELECTED, ShareStatus.REJECTED,
-                                      ShareStatus.WITHDRAWN},
+                                      ShareStatus.SENT_BACK, ShareStatus.WITHDRAWN},
     ShareStatus.SELECTED:            {ShareStatus.OFFER_IN_PROGRESS, ShareStatus.REJECTED,
-                                      ShareStatus.WITHDRAWN},
+                                      ShareStatus.SENT_BACK, ShareStatus.WITHDRAWN},
     ShareStatus.OFFER_IN_PROGRESS:   {ShareStatus.HIRED, ShareStatus.REJECTED,
                                       ShareStatus.WITHDRAWN},
     ShareStatus.HIRED:               set(),          # terminal
     ShareStatus.REJECTED:            {ShareStatus.UNDER_REVIEW},
+    # Back with Sparsh. They can re-open the conversation with this client (Under Review),
+    # or close it off as a rejection -- and either way the CV is free to go elsewhere,
+    # because a share with one client never constrained the others.
+    ShareStatus.SENT_BACK:           {ShareStatus.UNDER_REVIEW, ShareStatus.REJECTED,
+                                      ShareStatus.WITHDRAWN},
     ShareStatus.WITHDRAWN:           set(),          # terminal; re-share to start again
 }
 
@@ -3728,7 +3786,9 @@ SHARE_TRANSITIONS = {
 # a commercial fact with a fee attached and it is not theirs to assert.
 SHARE_CLIENT_SETTABLE = {ShareStatus.UNDER_REVIEW, ShareStatus.SHORTLISTED,
                          ShareStatus.INTERVIEW_SCHEDULED, ShareStatus.SELECTED,
-                         ShareStatus.REJECTED}
+                         ShareStatus.REJECTED,
+                         # §12: handing a candidate back is a client action by definition.
+                         ShareStatus.SENT_BACK}
 
 
 def share_can_transition(current, target) -> bool:
@@ -5545,3 +5605,72 @@ class BackgroundApproveIn(BaseModel):
     decision: str                                 # Approved | Rejected
     signature: str
     remarks: Optional[str] = None
+
+
+# =============================================================
+# Phase 13 — interview evidence, and sending a candidate back
+# =============================================================
+# -- Interview report and recording (spec §10) -------------------------------------------
+# Both hang off the INTERVIEW record rather than the candidate: a candidate may sit several
+# rounds, and "the report" is meaningless without saying which conversation it describes.
+#
+# They are stored separately from `hrms_documents` on purpose. That register is a filing
+# cabinet for a person's paperwork -- typed, verified, retained against the employee. An
+# interview recording is evidence about one event, it is never verified, and it is shown to
+# a client who has no `document.read` at all.
+#
+# -- What a client may do with each, and the honest limit ---------------------------------
+#     CV                    view + download
+#     Interview report      view          (inline; a PDF a browser renders)
+#     Interview recording   watch only
+#
+# The recording rule is enforced as far as it honestly can be, and no further. A client is
+# never given a storage URL -- the bytes are streamed through an endpoint that answers a
+# short-lived, share-bound token, sends `Content-Disposition: inline`, and audits the view.
+# There is no download button anywhere in their UI.
+#
+# What that does NOT do is make the file unsaveable. A browser must receive the bytes to
+# play them, so anyone determined can keep a copy. This is a control against casual
+# redistribution and an audit trail of who watched what -- claiming more would be false.
+RECORDING_MIME = {
+    "video/mp4", "video/webm", "video/quicktime", "video/x-matroska",
+    # Audio-only interviews are common on a phone screen, and a client should be able to
+    # listen to one for the same reason they can watch a video.
+    "audio/mpeg", "audio/mp4", "audio/wav", "audio/webm",
+}
+REPORT_MIME = {
+    "application/pdf",
+    "application/msword",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+}
+
+# A recording is a video file, so the 15 MB document ceiling is useless here. 500 MB holds
+# roughly an hour at a sensible bitrate; beyond that the answer is a link to wherever the
+# conferencing tool already stored it, not a bigger upload.
+MAX_RECORDING_BYTES = 500 * 1024 * 1024
+MAX_REPORT_BYTES = 25 * 1024 * 1024
+
+# How long a streaming token is good for. Long enough to watch an interview through without
+# it dying mid-playback; short enough that a copied URL is worthless tomorrow.
+RECORDING_TOKEN_TTL_SECONDS = 4 * 60 * 60
+
+AUDIT_INTERVIEW_REPORT_ADDED    = "interview report uploaded"
+AUDIT_INTERVIEW_RECORDING_ADDED = "interview recording uploaded"
+AUDIT_INTERVIEW_MEDIA_REMOVED   = "interview evidence removed"
+AUDIT_INTERVIEW_REPORT_VIEWED   = "interview report opened by client"
+AUDIT_INTERVIEW_RECORDING_VIEWED = "interview recording watched by client"
+
+
+class InterviewMediaIn(BaseModel):
+    """A report or a recording, arriving as base64 like every other HRMS upload.
+
+    `external_url` is the alternative to sending bytes: most recordings already live in the
+    conferencing tool that made them, and re-uploading a 400 MB file to store a second copy
+    helps nobody. Exactly one of the two is required.
+    """
+    name: Optional[str] = None
+    mime_type: Optional[str] = None
+    data: Optional[str] = None                  # base64, optionally a data: URL
+    external_url: Optional[str] = None          # a link to where it already lives
+    notes: Optional[str] = None
+    duration_minutes: Optional[int] = None       # recordings only; for the player's label

@@ -654,6 +654,228 @@ async def main() -> None:
         await expect_http("opening a withdrawn CV",
                           SH.resume_url_for_share(BOB, COMPANY, share_b), 410, "withdrawn")
 
+        # =================================================================
+        section("spec 12. Sent back to Sparsh -- which is not a rejection")
+        # =================================================================
+        # A client who cannot take a candidate forward has, until now, had only one honest
+        # button: Rejected. That overstates what usually happened -- the role changed, the
+        # location moved, the budget went. Sending the candidate BACK says "not for us,
+        # over to you" without writing a verdict on the person into the record.
+        devi = await CS.create_candidate(HR, COMPANY, {
+            "request_no": REQ, "candidate_name": "Devi Demo",
+            "can_email": "devi@example.com", "can_contact": "+91 90000 00003",
+            "total_experience": "6 years", "current_company": "Orion",
+            "resume": cv("devi.pdf")})
+        DEVI = devi["uk"]
+        pair = await SH.share_candidate(HR, COMPANY, {
+            "uk": DEVI, "client_ids": [CLIENT_A, CLIENT_B], "request_no": REQ})
+        d_alice = next(x["share_no"] for x in pair["shared"] if x["client_id"] == CLIENT_A)
+        d_bob = next(x["share_no"] for x in pair["shared"] if x["client_id"] == CLIENT_B)
+
+        check("a client may hand a candidate back themselves",
+              M.ShareStatus.SENT_BACK in M.SHARE_CLIENT_SETTABLE)
+        sent_back = await SH.set_share_status(BOB, COMPANY, d_bob, {
+            "status": M.ShareStatus.SENT_BACK.value,
+            "remarks": "Strong profile, but we have moved the role to Bhopal."})
+        check("the share reads Sent Back to Sparsh",
+              sent_back["status"] == M.ShareStatus.SENT_BACK.value)
+        check("sending back is NOT rejecting -- they are two different states",
+              M.ShareStatus.SENT_BACK.value != M.ShareStatus.REJECTED.value)
+        check("the candidate's own pipeline stage is untouched by a hand-back",
+              (await store[M.COLL_CANDIDATES].find_one({"uk": DEVI}))["application_status"]
+              != M.AppStatus.REJECTED.value)
+        check("Sparsh can re-open the conversation with the same client",
+              M.share_can_transition(M.ShareStatus.SENT_BACK,
+                                     M.ShareStatus.UNDER_REVIEW))
+        check("...or close it out as a rejection",
+              M.share_can_transition(M.ShareStatus.SENT_BACK, M.ShareStatus.REJECTED))
+        check("...or withdraw it",
+              M.share_can_transition(M.ShareStatus.SENT_BACK, M.ShareStatus.WITHDRAWN))
+        check("but a returned candidate cannot jump straight to Hired",
+              not M.share_can_transition(M.ShareStatus.SENT_BACK, M.ShareStatus.HIRED))
+        await SH.set_share_status(HR, COMPANY, d_bob, {
+            "status": M.ShareStatus.UNDER_REVIEW.value,
+            "remarks": "Re-pitched against the Pune opening."})
+        back_row = await store[M.COLL_CANDIDATE_SHARES].find_one({"share_no": d_bob})
+        check("re-opening keeps the hand-back and the client's reason in the history",
+              any(h["status"] == M.ShareStatus.SENT_BACK.value
+                  and "Bhopal" in (h.get("remarks") or "") for h in back_row["history"]))
+        check("the other client's share was not moved by the hand-back",
+              (await store[M.COLL_CANDIDATE_SHARES].find_one(
+                  {"share_no": d_alice}))["status"] == M.ShareStatus.CV_SHARED.value)
+
+        # =================================================================
+        section("spec 10. The interview report and the recording")
+        # =================================================================
+        import app.services.hrms_interview_media_service as IM
+        IM.get_collection = mongo.get_collection
+
+        # An interview needs a candidate who has cleared screening. How they get there is
+        # the lifecycle's business and is tested elsewhere; here it is a precondition.
+        for who in (DEVI, no_cv["uk"]):
+            await store[M.COLL_CANDIDATES].update_one(
+                {"uk": who},
+                {"$set": {"application_status": M.AppStatus.SHORTLISTED.value}})
+
+        iv = await IV.schedule_interview(HR, COMPANY, {
+            "uk": DEVI, "round": M.InterviewRound.TECHNICAL.value,
+            "scheduled_at": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+            "mode": M.InterviewMode.VIRTUAL.value, "duration_min": 45,
+            "interviewer_id": U_HR, "meeting_link": "https://meet.example/devi"})
+        IVNO = iv["interview_no"]
+
+        check("attaching evidence needs interview.media, which HR holds",
+              A.can(HR, M.Cap.INTERVIEW_MEDIA))
+        check("...and which no client will ever hold",
+              not A.can(ALICE, M.Cap.INTERVIEW_MEDIA))
+
+        await expect_http("a recording in a format we do not accept",
+                          IM.attach_media(HR, COMPANY, IVNO, "recording", {
+                              "name": "x.exe", "mime_type": "application/x-msdownload",
+                              "data": base64.b64encode(b"MZ\x90").decode()}),
+                          415, "not accepted")
+        await expect_http("evidence with neither a file nor a link",
+                          IM.attach_media(HR, COMPANY, IVNO, "report", {}), 422)
+        await expect_http("a made-up kind of evidence",
+                          IM.attach_media(HR, COMPANY, IVNO, "transcript", {}), 422)
+        await expect_http("a link that is not a link",
+                          IM.attach_media(HR, COMPANY, IVNO, "recording", {
+                              "external_url": "javascript:alert(1)"}), 422)
+
+        await IM.attach_media(HR, COMPANY, IVNO, "report", {
+            "name": "interview-report.pdf", "mime_type": "application/pdf",
+            "data": base64.b64encode(b"%PDF-1.4 the report").decode(),
+            "notes": "Strong on APIs; probe testing depth at the next round."})
+        await IM.attach_media(HR, COMPANY, IVNO, "recording", {
+            "name": "round-2.mp4", "mime_type": "video/mp4",
+            "data": base64.b64encode(b"\x00\x00\x00 ftypmp42").decode(),
+            "duration_minutes": 42})
+        media = await IM.get_media(COMPANY, IVNO)
+        check("the report is attached", media["report"]["name"] == "interview-report.pdf")
+        check("the recording is attached, with its running time",
+              media["recording"]["duration_minutes"] == 42)
+
+        # Replacing must not erase what a client may already have watched.
+        await IM.attach_media(HR, COMPANY, IVNO, "recording", {
+            "name": "round-2-full.mp4", "mime_type": "video/mp4",
+            "data": base64.b64encode(b"\x00\x00\x00 ftypmp42 full").decode()})
+        iv_row = await store[M.COLL_INTERVIEWS].find_one({"interview_no": IVNO})
+        check("replacing a recording keeps the previous one in its history",
+              len(iv_row.get("recording_history") or []) == 1
+              and iv_row["recording_history"][0]["name"] == "round-2.mp4")
+
+        section("spec 10. What the CLIENT is told about the evidence")
+        client_media = await IM.get_media(COMPANY, IVNO, for_client=True)
+        check("a client is told the report exists", client_media["report"] is not None)
+        check("...but never where it is stored", "key" not in client_media["report"])
+        check("...nor who on our side uploaded it",
+              "uploaded_by_name" not in client_media["report"])
+        check("Sparsh's own read DOES carry the storage key",
+              "key" in (await IM.get_media(COMPANY, IVNO))["report"])
+
+        client_ivs = await IM.interviews_for_candidate(COMPANY, DEVI, for_client=True)
+        check("a client sees the interview rounds", len(client_ivs) == 1)
+        check("...but never the competency score, the panel or our remarks",
+              all(k not in client_ivs[0]
+                  for k in ("average_score", "panel", "remarks", "interviewer_name")))
+        sparsh_ivs = await IM.interviews_for_candidate(COMPANY, DEVI)
+        check("Sparsh sees the score, the panel and the remarks",
+              all(k in sparsh_ivs[0]
+                  for k in ("average_score", "panel", "remarks", "interviewer_name")))
+
+        section("spec 10. Watch, but no download -- one omitted argument")
+        signed_calls.clear()
+        report_link = await SH.interview_media_link(ALICE, COMPANY, d_alice, IVNO,
+                                                   "report")
+        check("a client holding the share can open the report",
+              bool(report_link.get("stream_url")))
+        rec_link = await SH.interview_media_link(ALICE, COMPANY, d_alice, IVNO,
+                                                "recording")
+        check("...and can stream the recording", bool(rec_link.get("stream_url")))
+        check("neither link was minted as an attachment",
+              len(signed_calls) == 2
+              and all(c["download_as"] is None for c in signed_calls))
+        check("both links are short-lived, not permanent URLs",
+              all(0 < c["expires_in"] <= M.RECORDING_TOKEN_TTL_SECONDS
+                  for c in signed_calls))
+        cv_call_count = len(signed_calls)
+        await SH.resume_url_for_share(ALICE, COMPANY, d_alice)
+        check("whereas the CV IS an attachment -- the whole distinction, in one field",
+              signed_calls[cv_call_count]["download_as"] is not None)
+
+        section("spec 10. The share is the authorisation, not the interview")
+        check("a client holds no interview.read at all",
+              not A.can(ALICE, M.Cap.INTERVIEW_READ))
+        await expect_http("a client opening evidence through another client's share",
+                          SH.interview_media_link(BOB, COMPANY, d_alice, IVNO, "report"),
+                          404)
+        # Pairing a share you DO hold with an interview belonging to a different candidate
+        # is the obvious way to fish, so it is refused on the candidate, not on the share.
+        bhavna_iv = await IV.schedule_interview(HR, COMPANY, {
+            "uk": no_cv["uk"], "round": M.InterviewRound.HR.value,
+            "scheduled_at": (datetime.now(timezone.utc) + timedelta(days=2)).isoformat(),
+            "mode": M.InterviewMode.VIRTUAL.value, "duration_min": 30,
+            "interviewer_id": U_HR, "meeting_link": "https://meet.example/bhavna"})
+        await expect_http("your own share paired with another candidate's interview",
+                          SH.interview_media_link(ALICE, COMPANY, d_alice,
+                                                  bhavna_iv["interview_no"], "report"),
+                          404, "not found")
+
+        section("spec 10. Every viewing is on the record")
+        views = [a for a in store[M.COLL_AUDIT_LOG].docs
+                 if a["action"] in (M.AUDIT_INTERVIEW_REPORT_VIEWED,
+                                    M.AUDIT_INTERVIEW_RECORDING_VIEWED)]
+        check("opening the report and watching the recording are both audited",
+              len(views) == 2)
+        check("the audit names the client user who watched",
+              all(v["actor_id"] == U_CLIENT_A for v in views))
+        check("...and which share they came in through",
+              all(d_alice in v["detail"] for v in views))
+
+        # =================================================================
+        section("spec 11. The candidate hub answers in one call")
+        # =================================================================
+        hub = await SH.client_candidate_view(ALICE, COMPANY, d_alice)
+        for key in ("snapshot", "interviews", "timeline", "status", "can_respond"):
+            check(f"the hub carries {key}", key in hub)
+        check("it is built from the SHARE, so the candidate key does not leak",
+              "uk" not in hub)
+        check("its interviews come back in the client shape",
+              all("panel" not in i for i in hub["interviews"]))
+        check("the evidence is listed on each interview",
+              hub["interviews"][0]["report"] is not None
+              and hub["interviews"][0]["recording"] is not None)
+        check("the timeline is this client's own decisions, in order",
+              [t["status"] for t in hub["timeline"]] == [M.ShareStatus.CV_SHARED.value])
+        check("a live share can still be responded to", hub["can_respond"] is True)
+        check("Sparsh reading the same hub gets the internal shape",
+              "uk" in await SH.client_candidate_view(HR, COMPANY, d_alice))
+        await expect_http("a client opening the hub on somebody else's share",
+                          SH.client_candidate_view(BOB, COMPANY, d_alice), 404)
+
+        # =================================================================
+        section("spec 4 & 16. A client cannot reach the internal requisition")
+        # =================================================================
+        for cap in (M.Cap.REQUISITION_CREATE, M.Cap.REQUISITION_WRITE,
+                    M.Cap.REQUISITION_REVIEW_HR, M.Cap.REQUISITION_APPROVE_MD,
+                    M.Cap.REQUISITION_CLOSE, M.Cap.SANCTION_READ,
+                    M.Cap.SANCTION_WRITE):
+            check(f"a client holds no {cap.value}", not A.can(ALICE, cap))
+        # requisition.read they DO hold -- so the answer must be NARROWED, not merely
+        # capability-checked. This is the hole the section-4 review found: before
+        # `visibility_filter_for`, a client read every requisition in the tenant.
+        alice_reqs = await RS.list_requisitions(ALICE, COMPANY)
+        check("a client reading requisitions sees only their own client's",
+              {r.get("client_id") for r in alice_reqs["requisitions"]} <= {CLIENT_A})
+        bob_reqs = await RS.list_requisitions(BOB, COMPANY)
+        check("a client with no requisition of their own sees an empty list",
+              bob_reqs["total"] == 0)
+        await expect_http("a client opening another client's requisition by its number",
+                          RS.get_requisition(BOB, COMPANY, REQ), 404)
+        sparsh_reqs = await RS.list_requisitions(HR, COMPANY)
+        check("Sparsh still sees every requisition in the tenant",
+              sparsh_reqs["total"] >= alice_reqs["total"] and sparsh_reqs["total"] >= 1)
+
     finally:
         mongo.get_collection = original
         NS.notify_user, NS.notify_users, NS.notify_hrms_role = keep

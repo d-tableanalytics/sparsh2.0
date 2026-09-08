@@ -48,3 +48,11 @@ export const day = (value) => {
     ? '—'
     : parsed.toLocaleDateString(undefined, { day: '2-digit', month: 'short', year: 'numeric' });
 };
+
+/** An amount, grouped for reading. Currency-symbol-free on purpose: the module stores plain
+ *  numbers and a company's own currency is a setting, not something to guess here. */
+export const money = (value) => {
+  if (value == null || value === '') return '—';
+  const n = Number(value);
+  return Number.isNaN(n) ? '—' : n.toLocaleString();
+};

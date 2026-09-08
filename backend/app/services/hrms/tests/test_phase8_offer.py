@@ -253,7 +253,7 @@ async def main() -> None:
         # only AFTER inserting would leave an orphaned draft behind.
         before = len(offers_coll.docs)
         await expect_http("send_now with no signature",
-                          draft("CAN-004", send_now=True), 422, "authorised signature")
+                          draft("CAN-004", send_now=True), 422, "authorised signatory")
         check("nothing was written when create-and-send failed validation",
               len(offers_coll.docs) == before)
 

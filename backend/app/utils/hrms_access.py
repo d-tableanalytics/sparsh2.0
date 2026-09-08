@@ -10,6 +10,9 @@ Three layers use this:
                                  administer and support across clients.
   • hrms_enabled_company_ids() — data-layer filter; disabled companies are excluded from
                                  every list, dashboard, report and aggregation.
+  • hrms_tenant_company_ids()  — where HRMS records actually live. The fallback scope for
+                                 internal staff when NO company has the toggle on, so
+                                 administering a switched-off module is still possible.
   • can() / require_cap()      — the capability check every feature gate resolves through.
 
 ── Why a capability check and not role strings ──────────────────────────────────
@@ -40,6 +43,27 @@ MODULE_DISABLED_MESSAGE = (
     "The HRMS module is not enabled for your company. Please contact your administrator."
 )
 NO_ACCESS_MESSAGE = "You do not have access to the HRMS module."
+
+# ─────────────────────────────────────────────────────────────
+# The client-participant stamp
+# ─────────────────────────────────────────────────────────────
+# A user of a CLIENT organisation is not a tenant of HRMS. Their own company has the module
+# switched off -- correctly, because they do not run a hiring pipeline; Sparsh runs one FOR
+# them. They reach HRMS as a participant in Sparsh's tenant, through a client engagement.
+#
+# Establishing that takes a database read, and `hrms_role` / `can` are synchronous and
+# called on every gate in the module. So the entry dependency (`ensure_hrms_enabled`, which
+# already runs per request) resolves it once and STAMPS the answer on the user dict, and
+# the synchronous resolvers read the stamp.
+#
+# Two properties this must hold, because getting either wrong is a privilege escalation:
+#
+#   1. The stamp is SERVER-SET ONLY. `ensure_hrms_enabled` clears any inbound value before
+#      deciding, so a crafted request body can never award itself a tenant.
+#   2. A stamped user is a CLIENT, whatever their governance_role says. A client company's
+#      "HR" is HR *of that company*; inside Sparsh's HRMS they are a client contact, and
+#      mapping their title to HrmsRole.HR would hand them Sparsh's entire HR capability set.
+CLIENT_TENANT_FIELD = "_hrms_client_tenant"
 
 
 # ─────────────────────────────────────────────────────────────
@@ -96,6 +120,13 @@ def hrms_role(user: dict) -> Optional[HrmsRole]:
             return HrmsRole.ADMIN
         return HrmsRole.INTERNAL
 
+    # A participant from a CLIENT organisation, admitted through an engagement. Checked
+    # before the governance ladder on purpose: their title describes their standing in
+    # their OWN company, and reading it here would promote a client's HR to Sparsh's HR or
+    # a client's owner (clientadmin) to Sparsh's MD. In this module they are a client.
+    if user.get(CLIENT_TENANT_FIELD):
+        return HrmsRole.CLIENT
+
     if role == "clientadmin":
         return HrmsRole.MD
     if role in CLIENT_ROLES:
@@ -131,9 +162,57 @@ async def ensure_hrms_enabled(current_user: dict, company_id: str = None) -> Non
     """
     if is_internal_user(current_user):
         return
+
+    # Never trust an inbound stamp. This runs before any decision, so a value arriving on
+    # the request body or a stale dict cannot award itself a tenant.
+    current_user.pop(CLIENT_TENANT_FIELD, None)
+
     target = company_id or str(current_user.get("company_id") or "")
-    if not await is_hrms_enabled(target):
-        raise HTTPException(status_code=403, detail=MODULE_DISABLED_MESSAGE)
+    if await is_hrms_enabled(target):
+        return
+
+    # Their own company has HRMS off. Before refusing, ask the question the old code never
+    # did: is this a CLIENT organisation's user, participating in a tenant that DOES run
+    # HRMS? That is the whole client-hiring model -- a client does not run a pipeline, they
+    # are a party to somebody else's -- and without this every client contact was refused
+    # at the door, which is exactly the reported "client HR cannot access HRMS".
+    tenant = await client_participant_tenant(current_user)
+    if tenant:
+        current_user[CLIENT_TENANT_FIELD] = tenant
+        return
+
+    raise HTTPException(status_code=403, detail=MODULE_DISABLED_MESSAGE)
+
+
+async def client_participant_tenant(user: dict) -> Optional[str]:
+    """The HRMS tenant this user takes part in as a client contact, or None.
+
+    An engagement that lists them as a member, whose status grants scope, belonging to a
+    company that actually has HRMS enabled. All three conditions matter: a lapsed
+    engagement grants nothing, and an engagement in a tenant with the module switched off
+    is not a way in through the back.
+
+    Fails closed on any error, for the same reason `scope_client_ids` does -- a resolver
+    that returns access because a read failed is a lock that opens when it breaks.
+    """
+    user_id = str((user or {}).get("_id") or "")
+    if not user_id:
+        return None
+    try:
+        rows = await get_collection(COLL_CLIENT_ENGAGEMENTS).find(
+            {"member_user_ids": user_id,
+             "status": {"$in": sorted(ENGAGEMENT_GRANTS_SCOPE)}},
+            {"company_id": 1}).to_list(50)
+        if not rows:
+            return None
+        enabled = await hrms_enabled_company_ids()
+        for row in rows:
+            candidate = str(row.get("company_id") or "")
+            if candidate in enabled:
+                return candidate
+    except Exception as e:
+        print(f"[WARN] HRMS client-participant lookup failed for {user_id}: {e}")
+    return None
 
 
 async def hrms_enabled_company_ids() -> set:
@@ -144,6 +223,44 @@ async def hrms_enabled_company_ids() -> set:
         {"hrms_enabled": True}, {"_id": 1}
     ).to_list(5000)
     return {str(d["_id"]) for d in docs}
+
+
+# Collections whose rows mean "the HRMS module has been used in this company". Deliberately
+# a short list of the things only a TENANT owns -- a client company is named inside a
+# requisition's `client_id`, never as the `company_id` of one, so this cannot mistake a
+# client for the operator.
+HRMS_TENANT_COLLECTIONS = ("hrms_requisitions", "hrms_employee_profiles", "hrms_settings")
+
+
+async def hrms_tenant_company_ids() -> set:
+    """Companies that actually hold HRMS records, whether or not the module is switched on.
+
+    Used for ONE thing: giving Sparsh internal staff somewhere to stand when no company has
+    the toggle enabled.
+
+    `ensure_hrms_enabled` has always let internal staff through -- they administer the
+    module and support it across clients, so the toggle was never meant to gate them. But
+    the company SELECTOR listed only enabled companies, so with everything switched off they
+    landed inside a module with nothing to select and every endpoint answering
+    "company_id is required". The toggle governs whether a company's OWN users can reach
+    HRMS; it was never supposed to lock out the people who administer it.
+
+    Reading the data rather than a flag is deliberate. There is no "this is the operator"
+    marker on a company, and inventing one would be a second source of truth to keep in
+    step. Where the requisitions and employee records actually live is not an opinion.
+
+    Fails closed: an empty set on any error, so a broken read narrows access and never
+    widens it.
+    """
+    found: set = set()
+    for name in HRMS_TENANT_COLLECTIONS:
+        try:
+            for cid in await get_collection(name).distinct("company_id"):
+                if cid:
+                    found.add(str(cid))
+        except Exception as e:
+            print(f"[WARN] HRMS tenant lookup failed on {name}: {e}")
+    return found
 
 
 def can_toggle_module(user: dict) -> bool:
@@ -202,6 +319,14 @@ def scope_company_id(user: dict, requested: str = None) -> Optional[str]:
     """
     if is_internal_user(user):
         return requested or None
+    # A client participant works inside the TENANT's data, not their own company's -- their
+    # own company holds no HRMS records at all. What narrows them to their own candidates
+    # and requests is `scope_client_ids`, which is a different axis: this says WHOSE
+    # database, that says WHICH ROWS in it. A requested id is ignored here exactly as it is
+    # for any other client-side user.
+    tenant = user.get(CLIENT_TENANT_FIELD)
+    if tenant:
+        return str(tenant)
     return str(user.get("company_id") or "") or None
 
 

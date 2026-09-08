@@ -9,6 +9,7 @@ import { getShares, setShareStatus, getShareCv } from '../../../services/hrmsApi
 import { FIELD, LABEL, TEXTAREA, day } from '../internal/internalKit';
 import { Btn, Chip, Facts, Modal } from '../internal/internalKit.jsx';
 import ShareJourney from './ShareJourney';
+import CandidateHub from './CandidateHub';
 
 /**
  * HRMS ▸ the client's own screen — candidates Sparsh has shared with them.
@@ -29,6 +30,9 @@ import ShareJourney from './ShareJourney';
 // What a client may say about a candidate. Mirrors SHARE_CLIENT_SETTABLE on the server.
 const CLIENT_STATUSES = [
   'Under Review', 'Shortlisted', 'Interview Scheduled', 'Selected', 'Rejected',
+  // §12: handing the candidate back is not a rejection — the client keeps the door open
+  // and Sparsh gets the reason. Mirrors SHARE_CLIENT_SETTABLE on the server.
+  'Sent Back to Sparsh',
 ];
 
 const TONE = {
@@ -40,6 +44,7 @@ const TONE = {
   'Offer in Progress': 'warn',
   Hired: 'good',
   Rejected: 'bad',
+  'Sent Back to Sparsh': 'warn',
   Withdrawn: 'neutral',
 };
 
@@ -150,7 +155,7 @@ const SharedCandidates = () => {
                       <Download size={13} /> Download CV
                     </Btn>
                   )}
-                  <Btn onClick={() => setViewing(share)}>Details</Btn>
+                  <Btn onClick={() => setViewing(share)}>Full profile</Btn>
                   {canRespond && share.status !== 'Withdrawn' && (
                     <>
                       <Btn onClick={() => quick(share, 'Shortlisted')}>
@@ -200,42 +205,12 @@ const SharedCandidates = () => {
       </div>
 
       {viewing && (
-        <Modal
-          title={viewing.snapshot?.candidate_name}
-          subtitle={`${viewing.share_no} · ${viewing.status}`}
+        <CandidateHub
+          shareNo={viewing.share_no}
           onClose={() => setViewing(null)}
-          footer={<Btn onClick={() => setViewing(null)}>Close</Btn>}
-        >
-          <div className="space-y-3">
-            <Facts items={[
-              { label: 'Experience', value: viewing.snapshot?.total_experience },
-              { label: 'Qualification', value: viewing.snapshot?.qualification },
-              { label: 'Current company', value: viewing.snapshot?.current_company },
-              { label: 'Location', value: viewing.snapshot?.current_location },
-              { label: 'Notice period', value: viewing.snapshot?.notice_period },
-              { label: 'Expected CTC', value: viewing.snapshot?.expected_ctc },
-              { label: 'Email', value: viewing.snapshot?.can_email },
-              { label: 'Phone', value: viewing.snapshot?.can_contact },
-              { label: 'LinkedIn', value: viewing.snapshot?.linkedin },
-              { label: 'Portfolio', value: viewing.snapshot?.portfolio },
-            ]} />
-            {viewing.snapshot?.cover_note && (
-              <div>
-                <p className={LABEL}>Cover note</p>
-                <p className="text-[12.5px] whitespace-pre-wrap text-[var(--text-main)]">
-                  {viewing.snapshot.cover_note}
-                </p>
-              </div>
-            )}
-            {!viewing.snapshot?.can_email && (
-              <p className="text-[11.5px] text-[var(--text-muted)]">
-                Contact details are held by the Sparsh team for this candidate.
-              </p>
-            )}
-          </div>
-        </Modal>
+          onChanged={load}
+        />
       )}
-
       {responding && (
         <RespondModal
           scope={scope}

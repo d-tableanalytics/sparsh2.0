@@ -83,6 +83,17 @@ export const HrmsProvider = ({ children }) => {
     canSwitchCompany: !!health?.is_internal && companies.length > 1,
     /** Query params for every scoped HRMS call. */
     scope: companyId ? { company_id: companyId } : {},
+    /** Is the MODULE switched on for the company currently selected?
+     *
+     *  Only ever false for internal staff, who administer HRMS and are not gated by the
+     *  toggle — the server hands them the companies that hold HRMS records when nothing is
+     *  enabled, so they can still run Sparsh Magic's own hiring. A client-side user of a
+     *  switched-off company never gets this far; they are refused with a 403.
+     *
+     *  Absent on a row (an older payload) reads as ON, so a stale response never invents a
+     *  warning banner. */
+    moduleEnabledHere:
+      (companies.find((c) => c.id === companyId) || {}).hrms_enabled !== false,
 
     // ── Client scope ──
     // The SERVER's answer, resolved from the engagement records and returned by

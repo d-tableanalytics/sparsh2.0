@@ -2,19 +2,19 @@
 
 The last gate on an internal hire: did this actually work out.
 
--- Why probation lives on the EMPLOYEE, not the candidate ----------------------------------
-The obvious design is a `Probation Confirmed` candidate status after `Employee Created`. It
-was deliberately not built that way.
+-- Probation lives on the EMPLOYEE, and is mirrored onto the candidate ----------------------
+The review, the rating, the extension and the decision are all employment facts and belong on
+the employee record. That has not changed.
 
-`Employee Created` is TERMINAL. Un-terminalising it to hang one more edge off it would also
-make `Rejected`, `On Hold` and `Duplicate` legal from it -- ALWAYS_AVAILABLE applies to every
-non-terminal stage -- so a hired employee could be "rejected", on the client track as well as
-this one. The candidate lifecycle is shared; probation is not.
+What changed in Phase INT-15 is that a confirmation ALSO stamps the candidate's stage as
+`Probation Confirmed`, so the recruitment record shows how the hire actually turned out
+rather than stopping at `Employee Created`.
 
-And the honest reading is that probation is not a recruitment stage at all. The pipeline ends
-when somebody joins. Whether they are confirmed three or six months later is an employment
-event about an EMPLOYEE, and it belongs on their record. So STAGE_RANK, FORWARD_TRANSITIONS
-and AppStatus are all untouched by this module.
+The obstacle was never the status; it was the edge. `allowed_next_statuses` grants
+ALWAYS_AVAILABLE to every non-terminal stage, so making `Employee Created` non-terminal would
+have made `Rejected`, `On Hold` and `Duplicate` legal from a hired employee -- on the CLIENT
+track too, which shares this lifecycle. POST_HIRE_STATUSES exists for exactly that: a
+post-hire stage advances, and is never parked or rejected. See models/hrms.py.
 
 -- Opened automatically at joining ---------------------------------------------------------
 A probation record nobody remembered to create is a probation nobody reviews. The employee-ID
@@ -33,10 +33,13 @@ from fastapi import HTTPException
 from app.db.mongodb import get_collection
 from app.models.hrms import (
     AUDIT_PERSONNEL_FILE_CLOSED, AUDIT_PROBATION_CONFIRMED, AUDIT_PROBATION_STARTED,
-    AUDIT_PROBATION_UPDATED, AUDIT_REQ_CLOSED, COLL_EMPLOYEE_PROFILES, COLL_ONBOARDING,
+    AUDIT_PROBATION_UPDATED, AUDIT_REQ_CLOSED, AUDIT_STAGE_CHANGED, COLL_CANDIDATES,
+    COLL_EMPLOYEE_PROFILES, COLL_ONBOARDING,
     COLL_PROBATION_REVIEWS, COLL_REQUISITIONS, DEFAULT_PROBATION_MONTHS,
-    ENTITY_PROBATION, ENTITY_REQUISITION, MAX_PROBATION_MONTHS, MIN_PROBATION_MONTHS,
-    RETENTION_YEARS, ProbationOutcome, ReqClosing, RequisitionTrack, is_iso_date,
+    ENTITY_CANDIDATE, ENTITY_PROBATION, ENTITY_REQUISITION, MAX_PROBATION_MONTHS,
+    MIN_PROBATION_MONTHS,
+    RETENTION_YEARS, AppStatus, ProbationOutcome, ReqClosing, RequisitionTrack,
+    can_transition, is_iso_date,
 )
 from app.services.hrms_audit_service import audit
 from app.services.hrms_id_service import next_business_id
@@ -134,12 +137,17 @@ async def _is_managerial(company_id: str, request_no: str) -> bool:
 # Read
 # -------------------------------------------------------------
 async def list_probations(actor: dict, company_id: str, *, outcome: str = None,
-                          request_no: str = None, limit: int = 100) -> dict:
+                          request_no: str = None, uk: str = None,
+                          limit: int = 100) -> dict:
     query = {"company_id": str(company_id)}
     if outcome:
         query["outcome"] = outcome
     if request_no:
         query["request_no"] = request_no
+    if uk:
+        # Phase INT-15: reachable by candidate, so the candidate page can show how the hire
+        # it is describing actually turned out.
+        query["uk"] = uk
     limit = max(1, min(int(limit or 100), 200))
     rows = await get_collection(COLL_PROBATION_REVIEWS).find(query).sort(
         "ends_on", 1).to_list(limit)
@@ -227,6 +235,12 @@ async def open_probation(actor: dict, company_id: str, payload: dict,
         "employee_name": profile.get("display_name") or profile.get("full_name"),
         # Carried so the single analytics scope filter reaches this collection too.
         "request_no": payload.get("request_no") or profile.get("request_no"),
+        # ── Phase INT-15 ── the candidate this employee came from, so confirming the
+        # probation can stamp the recruitment record too (spec §35: every candidate-linked
+        # collection carries `uk`). `source_uk` is the employee profile's own pointer back
+        # to the hire; a manually opened probation for somebody who was never a candidate
+        # in this system simply carries None and stamps nothing.
+        "uk": payload.get("uk") or profile.get("source_uk"),
         "started_on": started_on,
         "duration_months": months,
         "ends_on": ends_on,
@@ -567,6 +581,7 @@ async def confirm_probation(actor: dict, company_id: str, prb_no: str,
 
     requisition_closed = False
     if outcome is ProbationOutcome.CONFIRMED:
+        await _stamp_candidate_confirmed(actor, company_id, current)
         requisition_closed = await _close_requisition_on_confirmation(
             actor, company_id, current)
         # ── Phase INT-2 (SOP §10) ── the second experience survey, at the moment the SOP
@@ -627,6 +642,37 @@ async def confirm_probation(actor: dict, company_id: str, prb_no: str,
                 kind="warning", link=link, email=False)
 
     return await get_probation(company_id, prb_no)
+
+
+async def _stamp_candidate_confirmed(actor: dict, company_id: str,
+                                     probation: dict) -> bool:
+    """Move the candidate record to `Probation Confirmed` (SOP §7).
+
+    Best-effort and last-write-wins on the transition table, never a reason a confirmation
+    fails: the decision is already committed by the time this runs, and a candidate row that
+    was purged or never existed must not undo an employment decision.
+
+    Guarded by `can_transition` rather than a status literal, so the one legal edge stays
+    declared in the model. Anything not at `Employee Created` is left alone -- a record that
+    never reached the hire is not dragged forward by a probation nobody linked correctly.
+    """
+    uk = probation.get("uk")
+    if not uk:
+        return False
+    coll = get_collection(COLL_CANDIDATES)
+    candidate = await coll.find_one({"uk": uk, "company_id": str(company_id)})
+    if not candidate:
+        return False
+    current_status = candidate.get("application_status")
+    if not can_transition(current_status, AppStatus.PROBATION_CONFIRMED.value):
+        return False
+    await coll.update_one(
+        {"uk": uk, "company_id": str(company_id)},
+        {"$set": {"application_status": AppStatus.PROBATION_CONFIRMED.value,
+                  "updated_at": datetime.now(timezone.utc)}})
+    await audit(actor, AUDIT_STAGE_CHANGED, ENTITY_CANDIDATE, uk,
+                f"{current_status} -> {AppStatus.PROBATION_CONFIRMED.value}", company_id)
+    return True
 
 
 async def _close_requisition_on_confirmation(actor: dict, company_id: str,

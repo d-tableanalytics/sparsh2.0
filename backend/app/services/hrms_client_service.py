@@ -412,11 +412,24 @@ async def update_engagement(actor: dict, company_id: str, engagement_id: str,
 # -------------------------------------------------------------
 # Membership
 # -------------------------------------------------------------
-async def _require_tenant_user(company_id: str, user_id: str) -> dict:
-    """The user being granted access, who must belong to THIS company.
+async def _require_tenant_user(company_id: str, user_id: str,
+                               client_id: str = None) -> dict:
+    """The user being granted access to an engagement.
 
-    This is the cross-company rejection. `company_id` is the security boundary, so client
-    scope narrows INSIDE it and can never be used to reach a user of another tenant.
+    Two kinds of person legitimately sit on one engagement, and the rule has to admit both:
+
+      * a user of THIS tenant -- Sparsh's own account manager for the client;
+      * a user of the CLIENT ORGANISATION the engagement is for -- their HR contact, who
+        logs in to review the CVs we send them.
+
+    The second was refused until now, which made the client-facing half of the module
+    unreachable: a client's HR belongs to their own company, so "must belong to THIS
+    company" rejected exactly the people the engagement exists to admit.
+
+    What has NOT loosened is the boundary that matters. A user of some THIRD company is
+    still refused, so an engagement can never be used to reach across to an unrelated
+    organisation -- the check moved from "the tenant" to "the tenant or this engagement's
+    own client", which is narrower than it sounds: it names one specific other company.
     """
     try:
         oid = ObjectId(str(user_id))
@@ -437,11 +450,19 @@ async def _require_tenant_user(company_id: str, user_id: str) -> dict:
                        "governance_role": 1, "is_active": 1})
     if not doc:
         raise HTTPException(status_code=404, detail="User not found.")
-    if str(doc.get("company_id") or "") != str(company_id):
+    owner = str(doc.get("company_id") or "")
+    allowed = {str(company_id)}
+    if client_id:
+        allowed.add(str(client_id))
+    if owner not in allowed:
         raise HTTPException(
-            status_code=422, detail="That user belongs to another company.")
+            status_code=422,
+            detail=("That user belongs to another company. An engagement may only include "
+                    "your own people and the client's own people."))
     if doc.get("is_active") is False:
         raise HTTPException(status_code=422, detail="That user is not active.")
+    # Recorded so a reader can tell at a glance which side of the table somebody sits on.
+    doc["_is_client_side"] = owner != str(company_id)
     return doc
 
 
@@ -481,11 +502,12 @@ async def list_engagement_members(company_id: str, engagement_id: str) -> dict:
 async def add_engagement_member(actor: dict, company_id: str, engagement_id: str,
                                 user_id: str) -> dict:
     coll = get_collection(COLL_CLIENT_ENGAGEMENTS)
-    if not await coll.find_one({"engagement_id": engagement_id,
-                                "company_id": str(company_id)}):
+    engagement = await coll.find_one({"engagement_id": engagement_id,
+                                      "company_id": str(company_id)})
+    if not engagement:
         raise HTTPException(status_code=404, detail="Engagement not found.")
 
-    user = await _require_tenant_user(company_id, user_id)
+    user = await _require_tenant_user(company_id, user_id, engagement.get("client_id"))
     # $addToSet, not $push: adding the same person twice must not create two memberships
     # that a single removal would only half undo.
     await coll.update_one(

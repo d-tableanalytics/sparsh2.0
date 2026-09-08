@@ -468,7 +468,7 @@ def _is_schedulable(candidate: dict) -> bool:
     except ValueError:
         return False
     if current in (AppStatus.REJECTED, AppStatus.DUPLICATE, AppStatus.OFFER_DECLINED,
-                   AppStatus.EMPLOYEE_CREATED):
+                   AppStatus.EMPLOYEE_CREATED, AppStatus.PROBATION_CONFIRMED):
         return False
     if candidate.get("requires_assessment") and current in PRE_ASSESSMENT_STATUSES:
         return False

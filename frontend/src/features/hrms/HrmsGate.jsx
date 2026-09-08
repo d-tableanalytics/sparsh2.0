@@ -3,6 +3,7 @@ import { Navigate } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
 import { hrmsAccessState, hrmsHome } from './access';
 import { HrmsProvider } from './HrmsContext';
+import HrmsScopeGuard from './common/HrmsScopeGuard';
 
 /** Shown while the profile (and with it the module flags) is still arriving. */
 const Resolving = () => (
@@ -30,11 +31,15 @@ export const HrmsGate = () => {
 /**
  * Route guard for the HRMS panels.
  *
- * Two layers, deliberately:
+ * Three layers, deliberately:
  *   1. `hrmsAccessState` — a synchronous check on the company toggle, so a user without
  *      access never mounts the module or fires its requests.
  *   2. `HrmsProvider` — fetches the server's authoritative capability list for everything
  *      inside. Feature-level gating uses `useHrms().can(...)`, never a raw role check.
+ *   3. `HrmsScopeGuard` — an internal user passes layer 1 unconditionally (they administer
+ *      the toggle), so they can reach a module in which NO company has it enabled. That is
+ *      a real state with no way out from inside, and it needs explaining rather than 400ing
+ *      on every screen.
  *
  * The 'unknown' branch matters: AuthProvider seeds `user` from the JWT and merges the full
  * profile asynchronously, and the module flags live only on the profile. Redirecting on a
@@ -51,7 +56,15 @@ export const RequireHrms = ({ children }) => {
   if (state === 'unknown') return <Resolving />;
   if (state === 'denied') return <Navigate to="/" replace />;
 
-  return <HrmsProvider>{children}</HrmsProvider>;
+  // `HrmsScopeGuard` sits INSIDE the provider because it needs the resolved company list.
+  // It catches the one state the two layers above cannot see: an internal user who is
+  // entitled to the module but has no HRMS-enabled company to work in, which otherwise
+  // shows up as a technical 400 on every screen. See the component for why.
+  return (
+    <HrmsProvider>
+      <HrmsScopeGuard>{children}</HrmsScopeGuard>
+    </HrmsProvider>
+  );
 };
 
 export default HrmsGate;
