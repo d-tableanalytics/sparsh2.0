@@ -263,7 +263,8 @@ async def dashboard(actor: dict, company_id: str, *, date_from: str = None,
     in_pipeline = sum(1 for c, r in zip(candidates, ranks)
                       if c.get("application_status") not in
                       (AppStatus.REJECTED.value, AppStatus.DUPLICATE.value,
-                       AppStatus.OFFER_DECLINED.value, AppStatus.EMPLOYEE_CREATED.value))
+                       AppStatus.OFFER_DECLINED.value, AppStatus.EMPLOYEE_CREATED.value,
+                       AppStatus.PROBATION_CONFIRMED.value))
 
     open_reqs = [r for r in reqs if r.get("closing_status") == ReqClosing.OPEN.value]
     total_vacancy = sum(int(r.get("vacancy") or 1) for r in open_reqs)
@@ -433,7 +434,10 @@ REJECTION_STATUSES = {
     AppStatus.REJECTED.value, AppStatus.CLIENT_REJECTED.value, AppStatus.DUPLICATE.value,
     AppStatus.ASSESSMENT_FAILED.value, AppStatus.OFFER_DECLINED.value,
 }
-JOINED_STATUSES = {AppStatus.JOINED.value, AppStatus.EMPLOYEE_CREATED.value}
+JOINED_STATUSES = {AppStatus.JOINED.value, AppStatus.EMPLOYEE_CREATED.value,
+                   # Phase INT-15: a confirmed employee joined. Leaving this out would
+                   # make the offer-to-joining ratio FALL as probations are confirmed.
+                   AppStatus.PROBATION_CONFIRMED.value}
 # Rank-1 statuses that mean the CV was looked at, as opposed to merely received.
 REVIEW_OUTCOME_STATUSES = {
     AppStatus.UNDER_REVIEW.value, AppStatus.REJECTED.value, AppStatus.DUPLICATE.value,

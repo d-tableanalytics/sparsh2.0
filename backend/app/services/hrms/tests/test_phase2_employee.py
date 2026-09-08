@@ -245,6 +245,21 @@ class FakeCollection:
     async def count_documents(self, query=None):
         return len([d for d in self.docs if _matches(d, query or {})])
 
+    async def distinct(self, key, query=None):
+        """Distinct values of one field. Mongo skips documents where the key is absent and
+        flattens array values; both matter, so neither is faked away."""
+        seen = []
+        for d in self.docs:
+            if not _matches(d, query or {}):
+                continue
+            if not _dotted_has(d, key):
+                continue
+            value = _dotted_get(d, key)
+            for item in (value if isinstance(value, list) else [value]):
+                if item not in seen:
+                    seen.append(item)
+        return seen
+
     async def update_one(self, query, update, upsert=False):
         doc = await self.find_one(query)
         if doc is None:

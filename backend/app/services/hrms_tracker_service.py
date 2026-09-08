@@ -57,7 +57,8 @@ _SELECTED_RANK = STAGE_RANK[AppStatus.SELECTED]
 _INTERVIEW_RANK = STAGE_RANK[AppStatus.INTERVIEW_SCHEDULED]
 _SHORTLIST_RANK = STAGE_RANK[AppStatus.SHORTLISTED]
 
-JOINED_STATUSES = {AppStatus.JOINED.value, AppStatus.EMPLOYEE_CREATED.value}
+JOINED_STATUSES = {AppStatus.JOINED.value, AppStatus.EMPLOYEE_CREATED.value,
+                   AppStatus.PROBATION_CONFIRMED.value}
 
 
 def _rank(status) -> int:

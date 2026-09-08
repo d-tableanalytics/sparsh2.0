@@ -621,6 +621,7 @@ async def generate_employee_id(actor: dict, company_id: str, onb_no: str) -> dic
             await open_probation(actor, company_id, {
                 "employee_code": employee_code,
                 "request_no": doc.get("request_no"),
+                "uk": doc.get("uk"),
                 "started_on": doc.get("joining_date"),
                 "reviewer_id": doc.get("reporting_manager_id"),
             }, silent=True)

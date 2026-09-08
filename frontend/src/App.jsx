@@ -111,6 +111,8 @@ import AppointmentBoard from './features/hrms/recruitment/AppointmentBoard';
 import SanctionedStrength from './features/hrms/people/SanctionedStrength';
 // ── Internal (in-house) recruitment track ──
 import InternalRequisitionList from './features/hrms/internal/InternalRequisitionList';
+import InternalRequisitionDetail from './features/hrms/internal/InternalRequisitionDetail';
+import InternalHiringDashboard from './features/hrms/internal/InternalHiringDashboard';
 import ScorecardLibrary from './features/hrms/internal/ScorecardLibrary';
 import ReferenceCheckBoard from './features/hrms/internal/ReferenceCheckBoard';
 import TelephonicBoard from './features/hrms/internal/TelephonicBoard';
@@ -355,7 +357,12 @@ const AppRoutes = () => {
         {/* ── Internal track ── Sparsh Magic's own hiring, governed by the Internal
             Recruitment SOP. The pipeline screens sit in the workspace tab strip; the
             governance ones (probation, exceptions) sit in the sidebar. */}
+        <Route path="internal-hiring"      element={<InternalHiringDashboard />} />
         <Route path="internal-requisitions" element={<InternalRequisitionList />} />
+        {/* Phase INT-15 (spec 29) -- one position, end to end. Nested under the list so
+            the workspace tab stays lit on the detail page. */}
+        <Route path="internal-requisitions/:requestNo"
+               element={<InternalRequisitionDetail />} />
         <Route path="scorecards"           element={<ScorecardLibrary />} />
         <Route path="reference-checks"     element={<ReferenceCheckBoard />} />
         {/* Phase INT-4 — the SOP's step 5 telephonic screen, between CV screening and

@@ -201,6 +201,9 @@ export const CAP = {
   BACKGROUND_READ: 'background.read',
   BACKGROUND_WRITE: 'background.write',
   BACKGROUND_APPROVE: 'background.approve',
+  // Attaching the interview report and recording — a disclosure decision, so a separate
+  // capability from scheduling or evaluating an interview.
+  INTERVIEW_MEDIA: 'interview.media',
 };
 
 /** Sparsh internal user rather than a client-side one. Same precedence the backend uses

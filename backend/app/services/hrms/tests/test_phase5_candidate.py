@@ -377,7 +377,16 @@ async def main() -> None:
         check("not terminal while mid-pipeline", j["terminal"] is False)
 
         jt = await CS.get_journey(HR, COMPANY, term["uk"])
-        check("a terminal candidate is flagged terminal", jt["terminal"] is True)
+        # Phase INT-15 gave `Employee Created` one onward edge (the internal track's
+        # probation confirmation), so "terminal" is now a question about the TRACK. This
+        # candidate has no requisition, which reads as client-track -- where a hire is
+        # still the last stop and the rail must not promise a step that will never come.
+        check("a client-track hire is still flagged terminal", jt["terminal"] is True)
+        await candidates.update_one(
+            {"uk": term["uk"]},
+            {"$set": {"application_status": S.PROBATION_CONFIRMED.value}})
+        jt2 = await CS.get_journey(HR, COMPANY, term["uk"])
+        check("and so is a confirmed hire", jt2["terminal"] is True)
 
         # A candidate with no audit history must still render a timeline.
         bare = await candidates.insert_one({

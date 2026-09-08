@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
+import { Link, useNavigate } from 'react-router-dom';
 import { Building, Plus, Timer, Table2, ListTodo } from 'lucide-react';
 import { useHrms } from '../HrmsContext';
 import { CAP } from '../access';
@@ -57,6 +58,7 @@ const GATES = {
 
 const InternalRequisitionList = () => {
   const { scope, companyId, can } = useHrms();
+  const navigate = useNavigate();
   const { showSuccess, showError } = useNotification();
 
   const [rows, setRows] = useState([]);
@@ -109,11 +111,15 @@ const InternalRequisitionList = () => {
 
   const columns = [
     { key: 'req', label: 'Requisition',
+      // A link rather than a clickable row: the row already carries approve/reject buttons,
+      // and a row that both navigates and acts is a row that navigates by accident.
       render: (r) => (
         <>
-          <span className="font-semibold text-[var(--text-main)]">
+          <Link to={`/hrms/internal-requisitions/${r.request_no}`}
+                className="font-semibold text-[var(--text-main)]
+                           hover:text-[var(--accent-indigo)] hover:underline">
             {r.designation_name}
-          </span>
+          </Link>
           <span className="block text-[11px] text-[var(--text-muted)]">
             {r.request_no} · {r.department_name || '—'}
           </span>
@@ -201,6 +207,10 @@ const InternalRequisitionList = () => {
             </Btn>
           )}
           <Btn tone="ghost" onClick={() => setSlaFor(r)}>SLA</Btn>
+          <Btn tone="ghost"
+               onClick={() => navigate(`/hrms/internal-requisitions/${r.request_no}`)}>
+            Open
+          </Btn>
         </div>
       </div>
     );

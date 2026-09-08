@@ -664,8 +664,14 @@ async def main() -> None:
         check("Pre-Onboarding -> Joined", M.can_transition(S.PRE_ONBOARDING, S.JOINED))
         check("Joined -> Employee Created",
               M.can_transition(S.JOINED, S.EMPLOYEE_CREATED))
-        check("Employee Created is terminal",
-              M.allowed_next_statuses(S.EMPLOYEE_CREATED) == set())
+        # Phase INT-15 gave a hire exactly one onward edge, for the internal track's
+        # probation confirmation. What Phase 9 actually depends on is that onboarding is the
+        # LAST thing that moves a candidate -- nothing here may reject or re-park a hire.
+        check("Employee Created leads only to the probation confirmation",
+              M.allowed_next_statuses(S.EMPLOYEE_CREATED) == {S.PROBATION_CONFIRMED})
+        check("and onboarding can never undo a hire",
+              not any(M.can_transition(S.EMPLOYEE_CREATED, t)
+                      for t in (S.REJECTED, S.ON_HOLD, S.DUPLICATE, S.JOINED)))
     finally:
         mongo.get_collection = original
         S3.upload_file_to_s3_with_key = original_s3

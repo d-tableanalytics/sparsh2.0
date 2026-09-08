@@ -52,6 +52,7 @@ from app.models.hrms import (
     JobRequestAction, JobRequestConvertIn, JobRequestIn, JobRequestUpdate,
     ShareIn, ShareStatusIn, UploadIn,
 )
+from app.models.hrms import InterviewMediaIn
 # ── Phase INT-2 — the remaining Internal Recruitment SOP controls ──
 from app.models.hrms import (
     PRINTABLE_DOCUMENTS,
@@ -97,6 +98,7 @@ from app.services import hrms_shortlist_service as shortlists
 from app.services import hrms_survey_service as surveys
 # ── Phase 12: the client hiring track ──
 from app.services import hrms_background_service as background
+from app.services import hrms_interview_media_service as interview_media
 from app.services import hrms_job_request_service as job_requests
 from app.services import hrms_share_service as shares
 from app.services.hrms_audit_service import read_audit
@@ -206,14 +208,35 @@ async def hrms_companies(current_user: dict = Depends(get_current_user)):
 
     Client-side users get exactly their own company, so the same UI works for both without
     branching.
+
+    ── When nothing is enabled ──────────────────────────────────────────────
+    Internal staff are never gated by the company toggle (`ensure_hrms_enabled` returns
+    early for them) because they administer the module. But this list used to be filtered
+    by that same toggle, so switching HRMS off everywhere put them INSIDE the module with an
+    empty scope selector, and every endpoint then answered "company_id is required" — an
+    error telling them to pick a company from a dropdown that had nothing in it.
+
+    So when no company has the module on, internal staff fall back to the companies that
+    actually hold HRMS records. Sparsh Magic's own internal hiring lives in one of them: an
+    internal requisition is a row in the operator's database with `client_id = null`, so
+    "internal hiring" is not something that exists outside a company and can be reached
+    without one.
+
+    Every row carries `hrms_enabled`, so the UI can say plainly that it is working in a
+    company whose module is switched off rather than implying everything is normal. This
+    widens nothing for anybody else: client-side users are still refused at the door by
+    `ensure_hrms_enabled`, which is what the toggle is actually for.
     """
     from bson import ObjectId
 
     from app.db.mongodb import get_collection
-    from app.utils.hrms_access import hrms_enabled_company_ids
+    from app.utils.hrms_access import (
+        hrms_enabled_company_ids, hrms_tenant_company_ids)
 
     if is_internal_user(current_user):
         ids = await hrms_enabled_company_ids()
+        if not ids:
+            ids = await hrms_tenant_company_ids()
         oids = []
         for i in ids:
             try:
@@ -221,20 +244,26 @@ async def hrms_companies(current_user: dict = Depends(get_current_user)):
             except Exception:
                 continue
         rows = await get_collection("companies").find(
-            {"_id": {"$in": oids}}, {"name": 1}).sort("name", 1).to_list(500)
+            {"_id": {"$in": oids}}, {"name": 1, "hrms_enabled": 1}).sort(
+                "name", 1).to_list(500)
     else:
         own = str(current_user.get("company_id") or "")
         rows = []
         if own:
             try:
                 doc = await get_collection("companies").find_one(
-                    {"_id": ObjectId(own)}, {"name": 1})
+                    {"_id": ObjectId(own)}, {"name": 1, "hrms_enabled": 1})
                 if doc:
                     rows = [doc]
             except Exception:
                 rows = []
 
-    return {"companies": [{"id": str(r["_id"]), "name": r.get("name")} for r in rows]}
+    return {"companies": [
+        {"id": str(r["_id"]), "name": r.get("name"),
+         # False here does NOT mean "you may not work in this company" -- for internal
+         # staff it means "the module is off, so this company's own users cannot reach it".
+         "hrms_enabled": bool(r.get("hrms_enabled", False))}
+        for r in rows]}
 
 
 # =============================================================
@@ -2332,6 +2361,7 @@ async def update_telephonic_screening(
 async def list_probations(
     outcome: Optional[str] = Query(None),
     request_no: Optional[str] = Query(None),
+    uk: Optional[str] = Query(None, description="the candidate this hire came from"),
     limit: int = Query(100, ge=1, le=200),
     company_id: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user),
@@ -2339,7 +2369,7 @@ async def list_probations(
     _require(current_user, Cap.PROBATION_READ)
     return await probation.list_probations(
         current_user, _company(current_user, company_id),
-        outcome=outcome, request_no=request_no, limit=limit)
+        outcome=outcome, request_no=request_no, uk=uk, limit=limit)
 
 
 @router.get("/probation/due")
@@ -3544,3 +3574,111 @@ async def get_candidate_cv(
     _require(current_user, Cap.CANDIDATE_READ)
     return await candidates.cv_url(
         current_user, _company(current_user, company_id), uk)
+
+
+# =============================================================
+# Phase 13 -- interview evidence (spec §10) and the candidate hub (§11)
+# =============================================================
+# What a client may do with each artefact differs, and the difference is enforced by which
+# route exists rather than by a flag:
+#
+#     CV                    view + DOWNLOAD   -> /shares/{no}/cv          (attachment)
+#     Interview report      view              -> /shares/{no}/interviews/... (inline)
+#     Interview recording   watch only        -> the same, inline, no download control
+#
+# There is deliberately no client-facing route that returns a recording as an attachment.
+
+
+@router.get("/interviews/{interview_no}/media")
+async def get_interview_media(
+    interview_no: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """What evidence is attached to one interview. Sparsh side -- includes storage keys."""
+    _require(current_user, Cap.INTERVIEW_READ)
+    return await interview_media.get_media(
+        _company(current_user, company_id), interview_no)
+
+
+@router.post("/interviews/{interview_no}/media/{kind}", status_code=201)
+async def attach_interview_media(
+    interview_no: str,
+    kind: str,
+    body: InterviewMediaIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Attach the report or the recording. `kind` is `report` or `recording`.
+
+    Gated by `interview.media`, not by `interview.schedule`: booking a conversation and
+    deciding what a client gets to read about it are different acts.
+    """
+    _require(current_user, Cap.INTERVIEW_MEDIA)
+    return await interview_media.attach_media(
+        current_user, _company(current_user, company_id), interview_no, kind,
+        body.model_dump())
+
+
+@router.delete("/interviews/{interview_no}/media/{kind}")
+async def remove_interview_media(
+    interview_no: str,
+    kind: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.INTERVIEW_MEDIA)
+    return await interview_media.remove_media(
+        current_user, _company(current_user, company_id), interview_no, kind)
+
+
+@router.get("/candidates/{uk}/interviews")
+async def candidate_interviews(
+    uk: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Every interview for one candidate, with the evidence each carries.
+
+    The Sparsh half of the §11 hub -- scores, panel and remarks included, which is exactly
+    what the client half omits.
+    """
+    _require(current_user, Cap.INTERVIEW_READ)
+    return {"interviews": await interview_media.interviews_for_candidate(
+        _company(current_user, company_id), uk)}
+
+
+# -- The client's own candidate hub ---------------------------
+@router.get("/shares/{share_no}/candidate")
+async def client_candidate_hub(
+    share_no: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Everything about one shared candidate in a single call (spec §11).
+
+    Profile, interviews, evidence, status and the history of this client's own decisions.
+    Composed from the SHARE, so a field added to a candidate tomorrow does not appear here.
+    """
+    _require(current_user, Cap.SHARE_READ)
+    return await shares.client_candidate_view(
+        current_user, _company(current_user, company_id), share_no)
+
+
+@router.get("/shares/{share_no}/interviews/{interview_no}/{kind}")
+async def client_interview_media(
+    share_no: str,
+    interview_no: str,
+    kind: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """The report or the recording, for a client who holds this share.
+
+    Authorised by the SHARE -- a client has no `interview.read` and never will. Returns a
+    URL to open or stream; it is never an attachment, and the UI offers no download for a
+    recording. See hrms_interview_media_service for what that does and does not guarantee.
+    """
+    _require(current_user, Cap.SHARE_READ)
+    return await shares.interview_media_link(
+        current_user, _company(current_user, company_id), share_no, interview_no, kind)

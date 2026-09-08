@@ -35,17 +35,35 @@
 HRMS is an **opt-in, per-company module** inside the Sparsh ERP covering the employee master
 and the full recruitment pipeline, from raising a vacancy to the new joiner's employee record.
 
-It runs the **recruitment-agency model**. The operating company (the tenant) recruits *on
-behalf of* client organisations. That shapes almost every design decision in the module:
+It runs **two hiring tracks on one platform**, chosen per requisition by
+`requisition_track` and defaulting to `client`:
 
-- A CV is **shared with a client**, who returns a verdict, before interviews begin.
-- Requisitions are tagged with the **client company** they are being filled for.
-- Analytics are sliced **client-wise**.
+| | **Client hiring** (`client`) | **Internal hiring** (`internal`) |
+|---|---|---|
+| Vacancy belongs to | a client organisation | Sparsh Magic itself |
+| `client_id` | set | **null** — and a `client_id` on an internal requisition is a 422 |
+| Approval chain | HR review → MD | HR verification → budget → scorecard |
+| Before an offer | client verdict, background verification | reference check, salary band |
+| A CV goes | **out**, to the client, who decides | nowhere; Sparsh decides |
+| After joining | client handover | induction → probation → confirmation |
+
+The **agency model** shapes the client track: a CV is shared with a client who returns a
+verdict, requisitions are tagged with the client they are filled for, and analytics slice
+client-wise. The **internal track** has none of that and adds its own governance instead —
+a mandatory budget gate, a position scorecard, a reference check and a probation.
+
+They are two tracks, not two systems. Candidates, interviews, offers and onboarding are one
+set of collections and one set of screens; the track selects which gates apply. **The track
+is immutable after creation** (409): an approval granted under one track's rules means
+nothing under the other's.
 
 The module is switched on per company with `companies.hrms_enabled`. **A missing flag means
 OFF** — nothing is exposed until it is explicitly enabled (unlike ORM, which defaults on).
 
 ### The one-paragraph version of the flow
+
+*(The paragraph below traces the CLIENT track, which is the module's original spine. The
+internal track's own chain is in §9.)*
 
 A hiring manager raises a **requisition** with its **job description**. HR reviews it, the MD
 approves it (via an **escalation ladder** if it exceeds sanctioned headcount). HR publishes a
@@ -138,7 +156,7 @@ was rebuilt to prevent.
 (`staff` / `learners`) → `tag` → role name. Same precedence `auth_controller` uses, so the two
 cannot disagree.
 
-### 3.2 Role — resolve the ERP user to one of six HRMS roles
+### 3.2 Role — resolve the ERP user to one of eight HRMS roles
 
 | ERP identity | HRMS role | Meaning |
 |---|---|---|
@@ -150,10 +168,17 @@ cannot disagree.
 | client, `governance_role: HOD` | `MANAGER` | hiring manager |
 | client, anything else | `EMPLOYEE` | self-service only |
 
-### 3.3 Capabilities — 52 of them, granted per role
+### 3.3 Capabilities — 100 of them, granted per role
 
-`Cap` enum in `models/hrms.py`; `ROLE_CAPABILITIES` maps role → set. Counts: `MD` 51,
-`HR` 48, `INTERNAL` 37, `MANAGER` 23, `EMPLOYEE` 5.
+`Cap` enum in `models/hrms.py`; `ROLE_CAPABILITIES` maps role → set. Counts: `MD` 99,
+`HR` 84, `INTERNAL` 58, `MANAGER` 41, `FINANCE` 22, `CLIENT` 7, `EMPLOYEE` 6.
+
+`MD` holds every capability but one — `requisition.review_hr`, which is HR's own step and
+would collapse the two-person approval chain if the same person could take both. `ADMIN` is
+deliberately absent from the map: it short-circuits in `capabilities_for`.
+
+`test_capability_parity.py` asserts this enum matches `frontend/src/features/hrms/access.js`
+exactly. A capability added to one and not the other fails that test.
 
 Every route starts with `_require(current_user, Cap.X)`. Examples: `requisition.approve_md`,
 `candidate.screen`, `offer.send`, `employee.salary.read`, `document.verify`,
@@ -467,11 +492,24 @@ Assessment Pending · Assessment Completed · Assessment Passed · Assessment Fa
 Interview Scheduled · Technical Round · MD Round
 Selected · Offer Generated · Offer Accepted · Offer Declined
 Appointment Letter Sent · Pre-Onboarding · Joined · Employee Created
+Probation Confirmed
 ```
 
-**Terminal:** `Employee Created`, `Offer Declined`, `Duplicate`.
+**Terminal:** `Probation Confirmed`, `Offer Declined`, `Duplicate`.
 **Always available from any non-terminal stage:** `Rejected`, `On Hold`, `Duplicate` — a
 recruiter must always be able to stop or park a pipeline.
+
+**Post-hire (`POST_HIRE_STATUSES`):** `Employee Created`. It advances — to
+`Probation Confirmed`, on the internal track — but never receives the always-available three.
+This is the whole reason that set exists: `allowed_next_statuses` grants
+`Rejected`/`On Hold`/`Duplicate` to every non-terminal stage, so merely un-terminalising the
+hire would have made a hired employee rejectable, on the **client** track as much as the
+internal one. Read `POST_HIRE_STATUSES` in `models/hrms.py` before touching this.
+
+`Probation Confirmed` is stamped by `confirm_probation`, not by a pipeline action, and only
+on the internal track. `get_journey` therefore decides "is this finished?" by track: a
+client-track hire is done at `Employee Created`, and reporting it as unfinished for ever was
+the regression that made `_journey_is_over` track-aware.
 
 ### 7.2 Stage rank (`STAGE_RANK`) — how the funnel stays honest
 
@@ -489,7 +527,7 @@ assessment/interview/offer record, whichever is further (`_effective`).
 | 5 | Selected |
 | 6 | Offer Generated, **Offer Declined** |
 | 7 | Offer Accepted, Appointment Letter Sent, Pre-Onboarding, Joined |
-| 8 | Employee Created |
+| 8 | Employee Created, **Probation Confirmed** |
 
 Two subtleties that trip people up:
 
@@ -498,6 +536,10 @@ Two subtleties that trip people up:
 - **The client-share band sits WITH Shortlisted (rank 2), not after it.** Sharing a CV and
   getting a verdict is a decision *about* a shortlisted candidate; it does not move them
   further down the funnel.
+- **`Probation Confirmed` shares rank 8 with `Employee Created`; there is no rank 9.** The
+  funnel ends at hired. Whether somebody is confirmed six months later is a governance event
+  about an employee, not a ninth stage of recruitment — and giving it its own rank would add
+  an empty tail to every chart and renumber `FUNNEL_STAGES`.
 - **`Applied` and `Under Review` share rank 1.** Neither has cleared a hiring gate. This is
   why "CVs reviewed" cannot be defined as `rank >= rank(Under Review)` — that counts
   everybody (see [§12.2](#122-cv-metrics-and-the-cv-funnel)).
@@ -690,7 +732,7 @@ Computed in one already-scoped pass (`_cv_metrics`), so none can escape `_scope`
 | `rejected` | status in the rejection set |
 | `shared_with_client` | a client-share record exists |
 | `client_shortlisted` / `client_rejected` / `client_awaiting` | the verdict on it |
-| `joinings` | status in `{Joined, Employee Created}` |
+| `joinings` | status in `{Joined, Employee Created, Probation Confirmed}` |
 
 > `reviewed` **cannot** be `rank >= rank(Under Review)` — `Applied` shares that rank, so the
 > figure would silently equal the total.
@@ -741,14 +783,25 @@ Public (no auth): /apply/:code  /assess/:code  /offer/:code  /onboard/:code  /ap
 
 ### 13.2 Two navigations, deliberately disjoint
 
-- **Workspace tab strip** (`HrmsWorkspaceBar`) owns the hiring pipeline: Hiring Req → Job
-  Descriptions → Job Postings → Candidates → HR Screening → Assessments → Interviews → Offers
-  → Appointments → Onboarding → Reports.
+- **Workspace tab strip** (`HrmsWorkspaceBar`) owns the hiring pipeline, in three labelled
+  groups, because the module runs two hiring tracks and a flat row of twenty tabs said so
+  nowhere:
+  - **Both tracks** — Hiring Req → Job Descriptions → Job Postings → Candidates → HR
+    Screening → Assessments → Interviews → Offers → Appointments → Onboarding → Reports.
+  - **Internal hiring** — Overview → Internal reqs → Scorecards → Phone screen →
+    Shortlisting → References → Negotiation.
+  - **Client hiring** — Job requests → CV sharing → Verification.
+
+  The breadcrumb reads `HRMS / <group> / <screen>`, so which track you are working in is
+  answered before anything else. The grouping is presentational: it adds no route, hides
+  nothing and gates nothing — capability filtering stays on the screens and the API.
 - **Sidebar** (`Sidebar.jsx` `hrmsSubmodules`) keeps Dashboard, Employees, Documents,
   Recruitment (the way *in*), and the admin-only masters.
 
 `HRMS_WORKSPACE` in Sidebar.jsx lists the strip's routes so "Recruitment" stays highlighted
-anywhere in the workspace. **The two lists must stay disjoint.**
+anywhere in the workspace. **The two lists must stay disjoint.** A tab added to the strip
+without a matching entry there does not break — the sidebar simply unlights itself on that
+screen, which is how the Phase 12 client-track tabs went unnoticed until Phase INT-15.
 
 ### 13.3 `HrmsContext`
 

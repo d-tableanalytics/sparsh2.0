@@ -68,7 +68,9 @@ async def main() -> None:
     profiles = FakeCollection([
         {"_id": ObjectId(), "employee_code": "EMP-2026-001", "company_id": COMPANY,
          "display_name": "Internal Joiner", "joined_on": days(-200),
-         "reporting_manager_id": U_HOD, "request_no": "HR-REQ-2026-001"},
+         "reporting_manager_id": U_HOD, "request_no": "HR-REQ-2026-001",
+         # Phase INT-15: the pointer back to the hire, so confirming can stamp it.
+         "source_uk": "CAN-INTERNAL-1"},
         {"_id": ObjectId(), "employee_code": "EMP-2026-002", "company_id": COMPANY,
          "display_name": "Second Joiner", "joined_on": days(-10),
          "request_no": "HR-REQ-2026-001"},
@@ -89,9 +91,15 @@ async def main() -> None:
     ])
     probations = FakeCollection()
     audit_log = FakeCollection()
+    candidates = FakeCollection([
+        {"uk": "CAN-INTERNAL-1", "company_id": COMPANY, "candidate_name": "Internal Joiner",
+         "request_no": "HR-REQ-2026-001",
+         "application_status": M.AppStatus.EMPLOYEE_CREATED.value},
+    ])
 
     store = {M.COLL_EMPLOYEE_PROFILES: profiles, M.COLL_REQUISITIONS: reqs,
              M.COLL_PROBATION_REVIEWS: probations, M.COLL_COUNTERS: FakeCollection(),
+             M.COLL_CANDIDATES: candidates,
              M.COLL_AUDIT_LOG: audit_log, "learners": FakeCollection()}
     original = mongo.get_collection
     mongo.get_collection = lambda name: store.setdefault(name, FakeCollection())
@@ -111,19 +119,32 @@ async def main() -> None:
 
     try:
         # =================================================================
-        section("The candidate lifecycle is NOT touched")
+        section("Phase INT-15: the one post-hire edge, and nothing else")
         # =================================================================
-        check("Employee Created is still terminal",
-              M.AppStatus.EMPLOYEE_CREATED in M.TERMINAL_STATUSES)
-        check("so nothing at all is reachable from it",
-              M.allowed_next_statuses(M.AppStatus.EMPLOYEE_CREATED) == set())
-        check("a hired employee still cannot be 'rejected'",
-              not M.can_transition(M.AppStatus.EMPLOYEE_CREATED.value,
-                                   M.AppStatus.REJECTED.value))
-        check("no 'Probation Confirmed' status was added",
-              "Probation Confirmed" not in {s.value for s in M.AppStatus})
+        # A hire may now advance to `Probation Confirmed` -- and to NOTHING else. The whole
+        # risk of this change was ALWAYS_AVAILABLE leaking Rejected/On Hold/Duplicate into a
+        # stage the CLIENT track shares, so that is what these checks are really about.
+        check("Probation Confirmed exists as a stage",
+              "Probation Confirmed" in {s.value for s in M.AppStatus})
+        check("it is the ONLY thing reachable from a hire",
+              M.allowed_next_statuses(M.AppStatus.EMPLOYEE_CREATED)
+              == {M.AppStatus.PROBATION_CONFIRMED})
+        for blocked in (M.AppStatus.REJECTED, M.AppStatus.ON_HOLD, M.AppStatus.DUPLICATE):
+            check(f"a hired employee still cannot be '{blocked.value}'",
+                  not M.can_transition(M.AppStatus.EMPLOYEE_CREATED.value, blocked.value))
+        check("Employee Created is post-hire, not merely non-terminal",
+              M.AppStatus.EMPLOYEE_CREATED in M.POST_HIRE_STATUSES)
+        check("and the confirmation itself is terminal",
+              M.AppStatus.PROBATION_CONFIRMED in M.TERMINAL_STATUSES
+              and M.allowed_next_statuses(M.AppStatus.PROBATION_CONFIRMED) == set())
+        check("nobody skips the hire to reach it",
+              [s.value for s in M.AppStatus
+               if M.can_transition(s.value, M.AppStatus.PROBATION_CONFIRMED.value)]
+              == [M.AppStatus.EMPLOYEE_CREATED.value])
         check("the funnel gained no empty tail",
-              max(M.STAGE_RANK.values()) == 8)
+              max(M.STAGE_RANK.values()) == 8 and len(M.FUNNEL_STAGES) == 8)
+        check("a confirmed hire still fills its vacancy",
+              M.AppStatus.PROBATION_CONFIRMED in M.FILLED_STATUSES)
 
         # =================================================================
         section("Induction items -- internal onboardings only")
@@ -158,6 +179,8 @@ async def main() -> None:
               row["ends_on"] == PB._add_months(days(-200), 6))
         check("it carries the requisition, so analytics scoping reaches it",
               row["request_no"] == "HR-REQ-2026-001")
+        check("and the candidate key, taken from the employee's own pointer (spec 35)",
+              row["uk"] == "CAN-INTERNAL-1")
         check("a retention floor is stored (SOP 13: employment + 3 years)",
               row["retention_until"] > row["ends_on"])
         check("opening is audited",
@@ -240,6 +263,15 @@ async def main() -> None:
               profile["probation_status"] == M.ProbationOutcome.CONFIRMED.value)
         check("and points back at the review that decided it",
               profile["probation_prb_no"] == PRB)
+
+        # -- Phase INT-15 -- the recruitment record learns how the hire turned out.
+        cand = await candidates.find_one({"uk": "CAN-INTERNAL-1"})
+        check("confirming moves the CANDIDATE to Probation Confirmed",
+              cand["application_status"] == M.AppStatus.PROBATION_CONFIRMED.value)
+        check("the stage change is audited like any other",
+              any(a["action"] == M.AUDIT_STAGE_CHANGED
+                  and a["entity_id"] == "CAN-INTERNAL-1"
+                  and "Probation Confirmed" in a["detail"] for a in audit_log.docs))
 
         req = await reqs.find_one({"request_no": "HR-REQ-2026-001"})
         check("confirming CLOSES the internal requisition as Hired (SOP 7)",

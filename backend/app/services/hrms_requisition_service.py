@@ -487,10 +487,14 @@ def _visibility_filter(actor: dict) -> dict:
     """Extra clause restricting who sees which requisitions.
 
     Everyone with `requisition.read` sees their company's requisitions -- hiring is not
-    secret, and an employee who raised one must be able to track it. Row scoping tightens
-    only for a plain EMPLOYEE, who sees the ones they raised.
+    secret WITHIN a tenant, and an employee who raised one must be able to track it. Row
+    scoping tightens only for a plain EMPLOYEE, who sees the ones they raised.
+
+    A CLIENT user is NOT covered here: their narrowing needs a database read (their
+    engagements) and this function is synchronous. Use `visibility_filter_for` instead --
+    every read path does, and a client reaching this one directly would see the tenant.
     """
-    from app.models.hrms import Cap, HrmsRole
+    from app.models.hrms import HrmsRole
     from app.utils.hrms_access import hrms_role
 
     if hrms_role(actor) == HrmsRole.EMPLOYEE:
@@ -498,12 +502,35 @@ def _visibility_filter(actor: dict) -> dict:
     return {}
 
 
+async def visibility_filter_for(actor: dict, company_id: str) -> dict:
+    """The row filter for `actor`, including the client narrowing.
+
+    A CLIENT user sees the requisitions raised FOR THEIR OWN organisation and nothing else.
+    Without this a client contact holding `requisition.read` saw every requisition in the
+    tenant -- including which roles we are filling for their competitors, and for whom.
+    That is the disclosure the client dimension exists to prevent, and it went live the
+    moment real client users could sign in.
+
+    `$in` even when the scope is empty, so a client with no live engagement matches nothing
+    rather than everything -- the same fail-closed rule the share and job-request services
+    follow.
+    """
+    from app.utils.hrms_access import is_client_scoped_user, scope_client_ids
+
+    base = _visibility_filter(actor)
+    if not is_client_scoped_user(actor):
+        return base
+    allowed = await scope_client_ids(actor, company_id)
+    base["client_id"] = {"$in": list(allowed or [])}
+    return base
+
+
 async def list_requisitions(actor: dict, company_id: str, *, search: str = None,
                             approval_status: str = None, closing_status: str = None,
                             department_id: str = None, track: str = None,
                             limit: int = 100, skip: int = 0) -> dict:
     query = {"company_id": str(company_id)}
-    query.update(_visibility_filter(actor))
+    query.update(await visibility_filter_for(actor, company_id))
     # `track=client` must also match every requisition raised BEFORE this phase, which
     # carries no `requisition_track` field at all -- hence the explicit missing-field arm.
     # Without it the client list would silently shed its own history.
@@ -557,7 +584,7 @@ async def list_requisitions(actor: dict, company_id: str, *, search: str = None,
 async def get_requisition(actor: dict, company_id: str, request_no: str,
                           *, with_jd: bool = True) -> dict:
     query = {"request_no": request_no, "company_id": str(company_id)}
-    query.update(_visibility_filter(actor))
+    query.update(await visibility_filter_for(actor, company_id))
     doc = await get_collection(COLL_REQUISITIONS).find_one(query)
     if not doc:
         # 404 rather than 403 for an out-of-scope row: a 403 would confirm the id exists.

@@ -556,3 +556,66 @@ async def resume_url_for_share(actor: dict, company_id: str, share_no: str) -> d
                 f"{share.get('client_name')} downloaded {share.get('candidate_name')}'s CV",
                 company_id)
     return {"url": url, "expires_in": 300, "name": download_name}
+
+
+# ─────────────────────────────────────────────────────────────
+# The candidate hub, as a client sees it (spec §11)
+# ─────────────────────────────────────────────────────────────
+async def client_candidate_view(actor: dict, company_id: str, share_no: str) -> dict:
+    """Everything about one shared candidate, in one call.
+
+    Spec §11 asks for a single place a client can see the whole picture without navigating
+    through unrelated sections. That is a READ problem, not a screen problem: the screen is
+    easy once one call returns the profile, the interviews, the evidence, the status and the
+    history together.
+
+    Composed from the SHARE, never from the candidate. The snapshot is what Sparsh
+    authorised at share time; the interviews come back in their client shape, which carries
+    the report and the recording but not the competency scores or the panel. A field added
+    to a candidate tomorrow does not appear here.
+    """
+    share = await _require_visible(actor, company_id, share_no)
+    client_side = is_client_scoped_user(actor)
+
+    from app.services.hrms_interview_media_service import interviews_for_candidate
+    interviews = await interviews_for_candidate(
+        company_id, share["uk"], for_client=client_side)
+
+    view = _client_view(share) if client_side else _out(share)
+    view["interviews"] = interviews
+    # The timeline the client can act on: their own decisions, in order, with who and when.
+    # Sparsh's internal stage moves are deliberately absent -- this is the history of THIS
+    # client's process, which is the only one they are a party to.
+    view["timeline"] = [
+        {"status": h.get("status"), "at": h.get("at"), "remarks": h.get("remarks"),
+         **({} if client_side else {"by_name": h.get("by_name")})}
+        for h in (share.get("history") or [])
+    ]
+    view["can_respond"] = share.get("status") not in (
+        ShareStatus.WITHDRAWN.value, ShareStatus.HIRED.value)
+    return view
+
+
+async def interview_media_link(actor: dict, company_id: str, share_no: str,
+                               interview_no: str, kind: str) -> dict:
+    """A link to one interview's report or recording, for a client who holds the share.
+
+    The authorisation is the SHARE, not the interview: a client has no `interview.read` and
+    never will. This proves the candidate was shared with them, then proves the interview
+    belongs to that candidate -- an interview number from somewhere else resolves to a
+    different candidate and is refused.
+    """
+    share = await _require_visible(actor, company_id, share_no)
+    if share.get("status") == ShareStatus.WITHDRAWN.value:
+        raise HTTPException(
+            status_code=410,
+            detail="This candidate has been withdrawn and is no longer available.")
+
+    from app.services.hrms_interview_media_service import _require_interview, open_stream
+    interview = await _require_interview(company_id, interview_no)
+    if interview.get("uk") != share.get("uk"):
+        # 404, not 403: confirming the interview exists would tell a client something about
+        # a candidate that is not theirs.
+        raise HTTPException(status_code=404, detail="Interview not found.")
+
+    return await open_stream(actor, company_id, interview_no, kind, share_no)

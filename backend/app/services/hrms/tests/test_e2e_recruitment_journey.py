@@ -1192,8 +1192,11 @@ async def main() -> None:  # noqa: C901 -- a linear scenario reads better in one
         # "nothing was added" count is now a lie. What the count was really standing in for
         # is that the CLIENT TRACK's own path is unchanged -- so that is asserted directly,
         # which is both true and harder to satisfy by accident.
-        check("the lifecycle has the 26 statuses these phases account for",
-              len(list(M.AppStatus)) == 26)
+        # Phase INT-15 added a 27th (Probation Confirmed). As with INT-4's two, the count is
+        # standing in for "the client track's own path is unchanged" -- asserted directly
+        # below, which is both true and harder to satisfy by accident.
+        check("the lifecycle has the 27 statuses these phases account for",
+              len(list(M.AppStatus)) == 27)
         check("every status is ranked and column-mapped, so nothing new can be counted in a "
               "total while belonging to no funnel stage or board column",
               all(st in M.STAGE_RANK for st in M.AppStatus)
