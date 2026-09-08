@@ -150,9 +150,11 @@ async def _ensure_leadership_collections(db):
             try:
                 await db[coll_name].create_index(keys, **options)
             except Exception as ie:
-      print(f"[WARN] Leadership index {options.get('name')} on {coll_name}: {ie}")
+                print(f"[WARN] Leadership index {options.get('name')} on {coll_name}: {ie}")
     except Exception as e:
-        print(f"[WARN] Could not provision TPMS Leadership Score collections: {e}")     
+        print(f"[WARN] Could not provision TPMS Leadership Score collections: {e}")
+
+
 async def _ensure_hrms_collections(db):
     """Idempotently create the HRMS collections and their indexes from the single spec in
     app.models.hrms.HRMS_INDEXES.
@@ -167,8 +169,17 @@ async def _ensure_hrms_collections(db):
     try:
         from app.models.hrms import HRMS_INDEXES
         existing = set(await db.list_collection_names())
-        for coll_name, keys, options in HRMS_INDEXES:                
-# MongoDB does NOT alter an existing index when its definition changes -- it
+        for coll_name, keys, options in HRMS_INDEXES:
+            if coll_name not in existing:
+                try:
+                    await db.create_collection(coll_name)
+                    existing.add(coll_name)
+                except Exception:
+                    pass  # created concurrently or already present
+            try:
+                await db[coll_name].create_index(keys, **options)
+            except Exception as ie:
+                # MongoDB does NOT alter an existing index when its definition changes -- it
                 # refuses and leaves the old one in place. Swallowing that would make this
                 # provisioner a liar: the spec says one thing and the database does another,
                 # silently, forever.
