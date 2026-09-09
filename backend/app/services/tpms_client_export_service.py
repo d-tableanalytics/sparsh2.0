@@ -20,10 +20,13 @@ WHAT IS IN IT
   Uploads              proof files attached against activities
   People               the client's roster, for grouping the sheets above by person
 
-Only the Summary is period-scoped (it mirrors the on-screen dashboard). Every detail sheet
-carries the client's FULL history plus a Period / Date column, so a month can be filtered in
-the spreadsheet without having to re-export — which is what "complete data" has to mean if the
-report is going to be analysed rather than just read.
+SCOPE
+-----
+The caller chooses the window: the selected month (default), an explicit from/to range — a
+single day included — or the client's entire history. Every detail sheet is cut to it on its
+own date field, so a download taken from a screen showing September contains September.
+The Summary always describes the selected PERIOD, because it mirrors the on-screen dashboard;
+the cover states both, so the two can never be mistaken for one another.
 
 READ-ONLY: nothing here writes, and no collection is created or altered.
 """
@@ -270,6 +273,41 @@ def _sheet_people(people: Dict[str, dict]) -> tuple:
 
 
 # ─────────────────────────────────────────────────────────────
+# Date-window filtering
+#
+# Which field carries a row's date differs per collection, so each sheet names its own.
+# A row with NO usable date is kept: dropping it would silently lose records (an action item
+# with no target date, say) from a report whose whole point is completeness.
+# ─────────────────────────────────────────────────────────────
+def _in_window(value: Any, frm: str, to: str) -> bool:
+    if not frm and not to:
+        return True
+    day = _day(value)
+    if not day:
+        return True
+    if frm and day < frm:
+        return False
+    if to and day > to:
+        return False
+    return True
+
+
+def _filter_rows(rows: List[dict], field: str, frm: str, to: str) -> List[dict]:
+    if not frm and not to:
+        return rows
+    return [r for r in rows if _in_window(r.get(field), frm, to)]
+
+
+def _filter_measures(rows: List[dict], frm: str, to: str) -> List[dict]:
+    """Success measures are stamped with a PERIOD ("2026-09"), not a date, so they are
+    matched on the months the window touches rather than by day."""
+    if not frm and not to:
+        return rows
+    lo, hi = (frm or "0000-00")[:7], (to or "9999-99")[:7]
+    return [r for r in rows if lo <= str(r.get("period") or "")[:7] <= hi]
+
+
+# ─────────────────────────────────────────────────────────────
 # Authorization
 # ─────────────────────────────────────────────────────────────
 class ExportNotPermitted(Exception):
@@ -312,16 +350,43 @@ async def assert_may_export(user: dict, company_id: str) -> None:
 # Assembly
 # ─────────────────────────────────────────────────────────────
 async def build_client_report(user: dict, company_id: str,
-                              period: Optional[str] = None) -> dict:
-    """Gather one client's whole TPMS record plus the selected period's headline KPIs.
+                              period: Optional[str] = None,
+                              date_from: Optional[str] = None,
+                              date_to: Optional[str] = None,
+                              all_time: bool = False) -> dict:
+    """Gather one client's TPMS record for a chosen window, plus that period's headline KPIs.
 
     The KPIs come from get_learner_dashboard — the very function the Client View renders — so
     the Summary sheet and the screen the user clicked Download on cannot disagree.
+
+    WHICH ROWS COME OUT
+    -------------------
+      default            the selected month, on every sheet
+      date_from/date_to  that exact range (a single day if both are the same date)
+      all_time=True      the client's entire history, unfiltered
+
+    The month is the default because that is what the picker on screen says; exporting all
+    history from a screen showing one month was the surprise this argument exists to remove.
     """
     company_id = str(company_id)
     await assert_may_export(user, company_id)
     window = _period_window(period)
     period_key = period or window[0][:7]
+
+    # Resolve the window the DETAIL sheets are cut to. An explicit range wins over the month;
+    # all_time clears both. The Summary always describes `period_key`, since it mirrors the
+    # dashboard, and the cover states the detail window alongside it so the two can't be
+    # mistaken for each other.
+    if all_time:
+        frm = to = ""
+        scope_label = "All time — the client's full history"
+    elif date_from or date_to:
+        frm, to = str(date_from or "")[:10], str(date_to or "")[:10]
+        scope_label = (f"{frm or 'the beginning'} → {to or 'today'}"
+                       if frm != to or not frm else f"{frm} (single day)")
+    else:
+        frm, to = window[0], window[1]
+        scope_label = f"{period_display(period_key)} ({frm} → {to})"
 
     company = await get_collection("companies").find_one({"_id": _oid(company_id)}) or {}
     people = await _people(company_id)
@@ -342,14 +407,16 @@ async def build_client_report(user: dict, company_id: str,
     uploads = await get_collection(COLL_TASK_UPLOADS).find(scoped).to_list(MAX_ROWS)
     schedules = await _schedules(company_id)
 
+    # Each sheet is cut to the window on its OWN date field. People is deliberately exempt —
+    # it is the roster the other sheets are read against, not dated activity.
     sheets = [
-        _sheet_success(measures),
-        _sheet_schedules(schedules, people),
-        _sheet_tracker(tracker, people),
-        _sheet_escalations(escalations),
-        _sheet_actions(actions),
-        _sheet_reschedules(reschedules),
-        _sheet_uploads(uploads),
+        _sheet_success(_filter_measures(measures, frm, to)),
+        _sheet_schedules(_filter_rows(schedules, "start", frm, to), people),
+        _sheet_tracker(_filter_rows(tracker, "date", frm, to), people),
+        _sheet_escalations(_filter_rows(escalations, "escalation_date", frm, to)),
+        _sheet_actions(_filter_rows(actions, "target_date", frm, to)),
+        _sheet_reschedules(_filter_rows(reschedules, "requested_at", frm, to)),
+        _sheet_uploads(_filter_rows(uploads, "uploaded_at", frm, to)),
         _sheet_people(people),
     ]
 
@@ -361,6 +428,9 @@ async def build_client_report(user: dict, company_id: str,
         "period_label": period_display(period_key),
         "period_from": window[0],
         "period_to": window[1],
+        "range_from": frm,
+        "range_to": to,
+        "scope_label": scope_label,
         "generated_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
         "generated_by": user.get("full_name") or user.get("email") or "",
         "dashboard": dashboard,
@@ -403,8 +473,10 @@ def export_client_workbook(report: dict) -> bytes:
     for label, value in (
         ("Client", report.get("company")),
         ("Operations Manager", report.get("om") or "—"),
-        ("Reporting period", f"{report.get('period_label') or report.get('period')} "
-                             f"({report.get('period_from')} → {report.get('period_to')})"),
+        ("Summary period", f"{report.get('period_label') or report.get('period')} "
+                           f"({report.get('period_from')} → {report.get('period_to')})"),
+        # Stated explicitly: the detail sheets can cover a different span from the Summary.
+        ("Detail sheets cover", report.get("scope_label") or "the selected period"),
         ("Generated at (UTC)", report.get("generated_at")),
         ("Generated by", report.get("generated_by")),
     ):
@@ -443,9 +515,9 @@ def export_client_workbook(report: dict) -> bytes:
         ws.append([title, len(rows), note])
 
     ws.append([])
-    ws.append(["The figures above cover the selected period only. Every detail sheet carries "
-               "this client's FULL history with a Period / Date column, so any month can be "
-               "filtered in the sheet without re-exporting."])
+    ws.append([f"Key figures above describe the Summary period. Every detail sheet is limited "
+               f"to: {report.get('scope_label') or 'the selected period'}. Each row keeps its "
+               f"own Period / Date column, so the range can be narrowed further in the sheet."])
     ws.cell(row=ws.max_row, column=1).alignment = wrap
     for col, width in zip("ABC", (30, 46, 70)):
         ws.column_dimensions[col].width = width

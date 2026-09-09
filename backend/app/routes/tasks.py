@@ -22,6 +22,7 @@ from app.services.activity_log_service import log_activity
 from app.services.s3_service import upload_file_to_s3_with_key
 from app.routes.group import _is_member_or_manager
 from app.services import task_events
+from app.services.task_logs_service import get_task_logs_report
 from app.services.task_notifications import notify_task_event
 
 router = APIRouter(prefix="/tasks", tags=["Tasks"])
@@ -763,6 +764,32 @@ async def task_event_stream(token: str = Query(...)):
 # module is ON) gets ONLY their own company's active users — the internal Sparsh directory is
 # never exposed to a client company. Mirrors get_ineligible_recipient_ids, which enforces the
 # same split on save.
+@router.get("/logs")
+async def task_notification_logs(
+    channel: str = Query("email", description="email | whatsapp"),
+    status: Optional[str] = Query(None),
+    event: Optional[str] = Query(None, description="a task_* trigger slug"),
+    search: Optional[str] = Query(None, description="recipient address or error text"),
+    date_from: Optional[str] = Query(None, alias="from"),
+    date_to: Optional[str] = Query(None, alias="to"),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(500, ge=1, le=3000),
+    current_user: dict = Depends(require_task_access),
+):
+    """Task & Delegation email / WhatsApp delivery log, with KPI counts and a 14-day
+    sparkline. Paginated server-side.
+
+    Admin only: the ledger lists every recipient's address across the whole organisation,
+    which is broader than any one user's own task visibility. Mirrors the TPMS Logs Report.
+    """
+    if (current_user.get("role") or "").lower() not in VIEW_ALL_ROLES:
+        raise HTTPException(status_code=403, detail="Admin only")
+    return await get_task_logs_report(current_user, channel, {
+        "status": status, "event": event, "search": search,
+        "from": date_from, "to": date_to, "skip": skip, "limit": limit,
+    })
+
+
 @router.get("/assignable-users")
 async def list_assignable_users(
     include_all: bool = Query(False, alias="all"),

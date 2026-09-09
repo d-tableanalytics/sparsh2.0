@@ -1070,13 +1070,17 @@ async def success_measures_dedupe(current_user: dict = Depends(get_current_user)
 async def export_client_report(
     company_id: str = Query(..., description="The client to report on"),
     period: Optional[str] = Query(None, description="'YYYY-MM'; defaults to this month"),
+    date_from: Optional[str] = Query(None, alias="from", description="YYYY-MM-DD; overrides period"),
+    date_to: Optional[str] = Query(None, alias="to", description="YYYY-MM-DD; equal to `from` for a single day"),
+    all_time: bool = Query(False, description="Ignore the window; export the full history"),
     current_user: dict = Depends(get_current_user),
 ):
-    """One client's complete TPMS record as an Excel / Google Sheets workbook.
+    """One client's TPMS record as an Excel / Google Sheets workbook, for a chosen window.
 
-    Summary sheet carries the selected period's KPIs (the same figures the Client View
-    renders); every detail sheet carries the client's full history with a Period / Date
-    column so a month can be filtered in the spreadsheet. Read-only.
+    Window: the selected `period` month by default, an explicit `from`/`to` range (set both
+    to the same date for one day), or `all_time=true` for the client's whole history. Every
+    detail sheet is cut to it. The Summary always describes `period`, mirroring the Client
+    View, and the cover states both. Read-only.
 
     Scoped like every other TPMS read: get_learner_dashboard refuses a company the caller
     may not see, so a client user can only ever export themselves.
@@ -1087,14 +1091,24 @@ async def export_client_report(
         raise HTTPException(status_code=403, detail="Not authorized")
 
     try:
-        report = await build_client_report(current_user, company_id, period)
+        report = await build_client_report(
+            current_user, company_id, period,
+            date_from=date_from, date_to=date_to, all_time=all_time)
     except ExportNotPermitted as exc:
         raise HTTPException(status_code=403, detail=str(exc))
 
     content = export_client_workbook(report)
     safe = "".join(ch if ch.isalnum() or ch in " -_" else "-"
                    for ch in str(report.get("company") or "client")).strip() or "client"
-    filename = f"TPMS {safe} {report.get('period')}.xlsx"
+    # Name the file after what it actually contains, so downloads of the same client for
+    # different windows don't collide in the download folder.
+    if all_time:
+        stamp = "all-time"
+    elif date_from or date_to:
+        stamp = f"{date_from or 'start'} to {date_to or 'today'}"
+    else:
+        stamp = str(report.get("period") or "")
+    filename = f"TPMS {safe} {stamp}.xlsx"
     return StreamingResponse(
         io.BytesIO(content),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
