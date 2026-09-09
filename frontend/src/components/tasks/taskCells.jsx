@@ -26,13 +26,17 @@ const tone = (accent) => ({
   border: `var(--accent-${accent}-border)`,
 });
 
+// A category is a LABEL, not a state — so it stays neutral and the accent lands only on the
+// folder mark. A fully tinted category pill sat next to a tinted priority pill and a tinted
+// status pill, three warm blocks in a row, and the one that actually matters (status) stopped
+// standing out. The hashed colour still distinguishes one category from another at a glance;
+// it just no longer shouts.
 export const CategoryPill = ({ name }) => {
   if (!name) return <span className="text-[12px] font-bold text-[var(--text-muted)]">—</span>;
   const t = tone(accentFor(name));
   return (
-    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-bold max-w-[160px]"
-      style={{ background: t.bg, color: t.color, border: `1px solid ${t.border}` }}>
-      <Folder size={12} className="shrink-0" />
+    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-bold max-w-[160px] bg-[var(--input-bg)] text-[var(--text-main)] border border-[var(--border)]">
+      <Folder size={12} className="shrink-0" style={{ color: t.color }} />
       <span className="truncate">{name}</span>
     </span>
   );
@@ -54,9 +58,22 @@ export const AssigneeCell = ({ name }) => {
   );
 };
 
+// Priority earns colour only when it is NOT the default. Almost every task is Normal, so a
+// tinted Normal pill painted the whole list yellow and told the reader nothing — the eye
+// should be drawn to the High ones. Normal renders neutral with a coloured dot; High and Low
+// keep their full tint.
 export const PriorityPill = ({ priority }) => {
-  const cfg = PRIORITY_CONFIG[priority] || PRIORITY_CONFIG.Normal;
+  const key = PRIORITY_CONFIG[priority] ? priority : 'Normal';
+  const cfg = PRIORITY_CONFIG[key];
   const Icon = cfg.icon;
+  if (key === 'Normal') {
+    return (
+      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-bold whitespace-nowrap bg-[var(--input-bg)] text-[var(--text-muted)] border border-[var(--border)]">
+        <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: cfg.color }} />
+        {cfg.label}
+      </span>
+    );
+  }
   return (
     <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-bold whitespace-nowrap"
       style={{ background: cfg.bg, color: cfg.color, border: `1px solid ${cfg.border}` }}>
@@ -95,14 +112,51 @@ export const SortableTh = ({ label, sortKey, activeKey, dir, onSort, align = 'le
 
 // Row "⋯" menu. Positioned `fixed` from the button's own rect: the table body is a horizontal
 // scroll container, so an absolutely-positioned menu would be clipped on the last rows.
+//
+// A ONE-ITEM menu is rendered as that item's button instead. Most viewers can only view a
+// task — delete is limited to its creator and admins — so the dropdown was costing everyone
+// else a click to reveal a single "View Details" entry. A menu that holds one option is just
+// a button wearing a disguise.
 export const RowActionsMenu = ({ open, onToggle, onClose, items }) => {
   const btnRef = useRef(null);
   const [pos, setPos] = useState(null);
 
+  const list = items || [];
+  if (list.length === 1) {
+    const only = list[0];
+    const OnlyIcon = only.icon;
+    return (
+      <button type="button" title={only.label}
+        onClick={(e) => { e.stopPropagation(); only.onClick(); }}
+        className={`p-1.5 rounded-lg transition-colors ${only.danger
+          ? 'text-[var(--accent-red)] hover:bg-[var(--accent-red-bg)]'
+          : 'text-[var(--text-muted)] hover:text-[var(--accent-indigo)] hover:bg-[var(--accent-indigo-bg)]'}`}>
+        <OnlyIcon size={16} />
+      </button>
+    );
+  }
+
+  // Height of one menu row (py-2 + 12px text) plus the list's own vertical padding. Used to
+  // decide whether the menu still fits below the button — measuring the real node would need
+  // it mounted first, which is a frame too late to place it.
+  const ITEM_H = 34;
+  const PAD_V = 12;
+  const GAP = 6;
+
   const handleToggle = (e) => {
     e.stopPropagation();
     const r = btnRef.current?.getBoundingClientRect();
-    if (r) setPos({ top: r.bottom + 6, right: Math.max(8, window.innerWidth - r.right) });
+    if (r) {
+      const height = list.length * ITEM_H + PAD_V;
+      // Flip ABOVE the button when the space beneath it can't hold the menu. The last rows of
+      // a long table sit near the bottom of the viewport, where a downward menu would open
+      // off-screen — and that is also exactly where the floating chat button lives.
+      const roomBelow = window.innerHeight - r.bottom;
+      const top = roomBelow >= height + GAP + 8
+        ? r.bottom + GAP
+        : Math.max(8, r.top - height - GAP);
+      setPos({ top, right: Math.max(8, window.innerWidth - r.right) });
+    }
     onToggle();
   };
 
@@ -114,9 +168,9 @@ export const RowActionsMenu = ({ open, onToggle, onClose, items }) => {
       </button>
       {open && pos && (
         <div onClick={e => e.stopPropagation()}
-          className="fixed z-50 min-w-[164px] py-1.5 bg-[var(--bg-card)] border border-[var(--border)] rounded-xl shadow-xl"
+          className="fixed z-[70] min-w-[164px] py-1.5 bg-[var(--bg-card)] border border-[var(--border)] rounded-xl shadow-xl"
           style={{ top: pos.top, right: pos.right }}>
-          {items.map((item) => {
+          {list.map((item) => {
             const Icon = item.icon;
             return (
               <button key={item.label} type="button"

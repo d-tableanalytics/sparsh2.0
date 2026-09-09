@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import {
   ListChecks, CirclePlus, Filter as FilterIcon, Search, RefreshCw, Download,
   List as ListIcon, LayoutGrid, ArrowUpDown, Trash2, RotateCcw,
-  Calendar as CalendarIcon, Eye, X, Check, ChevronDown, ChevronLeft, ChevronRight, Repeat, Forward,
+  Eye, X, Check, ChevronDown, ChevronLeft, ChevronRight, Repeat, Forward,
 } from 'lucide-react';
 import api from '../../services/api';
 import { getTasks, softDeleteTask, restoreTask, updateTaskStatus, reviseTaskDeadline } from '../../services/taskApi';
@@ -11,133 +11,18 @@ import { openTaskEventStream } from '../../services/taskEventsApi';
 import { getHolidays } from '../../services/holidayApi';
 import { useAuth } from '../../context/AuthContext';
 import { useNotification } from '../../context/NotificationContext';
-import { STATUS_CONFIG, LIST_CARD_ORDER, CARD_KEY_TO_STATUS, PRIORITY_CONFIG, statusOptions, statusOptionLabel, REASON_REQUIRED_STATUSES, VERIFICATION_ACTIONS } from './statusConfig';
-import { getInitials, formatRelativeTime, formatFrequencyLabel, formatDate, exportTasksToCsv, groupTasksByRecurrence, isRecurringTask, summarizeSeries, formatRecurrenceRule, formatOccurrenceDate } from './taskDisplayUtils';
+import { STATUS_CONFIG, LIST_CARD_ORDER, CARD_KEY_TO_STATUS, statusOptions, statusOptionLabel, REASON_REQUIRED_STATUSES, VERIFICATION_ACTIONS } from './statusConfig';
+import { exportTasksToCsv, groupTasksByRecurrence, isRecurringTask, summarizeSeries, formatRecurrenceRule, formatOccurrenceDate } from './taskDisplayUtils';
 import StatusSummaryCards from './StatusSummaryCards';
 import TaskKindTabs from './TaskKindTabs';
-import RecurrenceDetail from './RecurrenceDetail';
+import TaskCard from './TaskCard';
 import DateRangeFilter from './DateRangeFilter';
 import TaskFormModal from './TaskFormModal';
 import TaskDetailsModal from './TaskDetailsModal';
 import StatusReasonModal from './StatusReasonModal';
 import { CategoryPill, AssigneeCell, PriorityPill, DateCell, SortableTh, RowActionsMenu, StatusControl } from './taskCells';
 import MiniDatePicker from './MiniDatePicker';
-import { motion } from 'framer-motion';
 import { SelectField } from '../common/StyledSelect';
-
-// One row in the card/list view. Extracted so both a standalone task and a recurring
-// series' primary occurrence render identically; `groupBadge` adds the "×N / expand" control
-// for the row that represents a collapsed series, and `indent` visually nests the occurrences
-// once that series is expanded.
-const TaskRow = ({
-  task, scope, userMap, checked, onToggleSelect, onOpenDetails, onStatusChange,
-  onRestore, indent, groupBadge, statusPending, isAssigner, frozenReason, isDependencyDoer,
-  series,
-}) => {
-  const cfg = STATUS_CONFIG[task.status] || STATUS_CONFIG.pending;
-  const priorityCfg = PRIORITY_CONFIG[task.priority] || PRIORITY_CONFIG.Normal;
-  const counterpartLabel = scope === 'delegated'
-    ? `To: ${(task.assignedTo || []).map(id => userMap[id] || id).join(', ') || '—'}`
-    : `From: ${userMap[task.assignedBy] || 'Someone'}`;
-  // Completion lives in the status dropdown itself — on the doer's side it reads "Request for
-  // Verification" when the task needs verifying (see TaskDetailsModal for the same rule).
-  const isDoerSide = scope === 'my' && !isAssigner;
-  // Once submitted, the task is the assigner's to approve or send back — the assignee gets a
-  // read-only badge rather than a status control they aren't allowed to act on.
-  const awaitingVerification = isDoerSide && task.status === 'verification';
-  // The assigner's side of the same moment: the only two moves are Approve and Reopen.
-  const isVerifying = !isDoerSide && task.status === 'verification';
-  return (
-    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }}
-      className={`group relative flex items-center gap-3 bg-[var(--bg-card)] border border-[var(--border)] rounded-2xl px-4 py-3.5 hover:shadow-md hover:border-[var(--accent-indigo-border)] transition-all ${indent ? 'ml-8' : ''}`}>
-      {/* Overdue rows carry a red spine so they're scannable without reading every date. */}
-      {task.isOverdue && (
-        <span className="absolute left-0 top-3 bottom-3 w-1 rounded-full" style={{ background: 'var(--accent-red)' }} />
-      )}
-      {scope !== 'deleted' && (
-        <input type="checkbox" checked={checked} onChange={onToggleSelect} className="shrink-0" />
-      )}
-      <div className="w-9 h-9 rounded-full flex items-center justify-center text-white font-black text-[11px] shrink-0" style={{ background: 'var(--avatar-bg)' }}>
-        {getInitials(userMap[task.assignedBy] || task.title)}
-      </div>
-
-      <div className="min-w-0 flex-1 cursor-pointer" onClick={onOpenDetails}>
-        <p className="text-[11px] font-bold text-[var(--text-muted)] truncate">
-          {counterpartLabel} <span className="text-[13px] font-black text-[var(--text-main)] ml-1 group-hover:text-[var(--accent-indigo)] transition-colors">{task.title}</span>
-        </p>
-        {/* Recurring tab only: the series' repeat rule + how far through it this doer is. */}
-        <RecurrenceDetail task={task} series={series} />
-        {(task.tags || []).length > 0 && (
-          <div className="mt-1 flex flex-wrap gap-1">
-            {task.tags.map(tag => (
-              <span key={tag} className="px-2 py-0.5 rounded-full text-[8px] font-black uppercase tracking-wider bg-[var(--accent-green-bg)] text-[var(--accent-green)] border border-[var(--accent-green-border)]">
-                {tag}
-              </span>
-            ))}
-          </div>
-        )}
-      </div>
-
-      <div className="flex items-center gap-2 shrink-0 flex-wrap justify-end">
-        {groupBadge}
-        {scope === 'deleted' || awaitingVerification ? (
-          <span className="px-3 py-1 rounded-full text-[9px] font-black uppercase tracking-wider border" style={{ background: cfg.bg, color: cfg.color, borderColor: cfg.border }}>{cfg.label}</span>
-        ) : frozenReason ? (
-          // In-Loop observer, or an assignee waiting on a dependency doer: visible but frozen.
-          <select value={task.status} disabled onClick={e => e.stopPropagation()} title={frozenReason}
-            className="px-3 py-1 rounded-full text-[9px] font-black uppercase tracking-wider border outline-none opacity-60 cursor-not-allowed"
-            style={{ background: cfg.bg, color: cfg.color, borderColor: cfg.border }}>
-            <option value={task.status}>{cfg.label}</option>
-          </select>
-        ) : isVerifying ? (
-          <select value={task.status} onChange={e => onStatusChange(e.target.value)} onClick={e => e.stopPropagation()} disabled={statusPending}
-            className="px-3 py-1 rounded-full text-[9px] font-black uppercase tracking-wider border outline-none cursor-pointer disabled:opacity-60 disabled:cursor-wait"
-            style={{ background: cfg.bg, color: cfg.color, borderColor: cfg.border }}>
-            <option value={task.status} disabled>{cfg.label}</option>
-            {VERIFICATION_ACTIONS.map(([val, label]) => <option key={val} value={val}>{label}</option>)}
-          </select>
-        ) : (
-          <select value={task.status} onChange={e => onStatusChange(e.target.value)} onClick={e => e.stopPropagation()} disabled={statusPending}
-            className="px-3 py-1 rounded-full text-[9px] font-black uppercase tracking-wider border outline-none cursor-pointer disabled:opacity-60 disabled:cursor-wait"
-            style={{ background: cfg.bg, color: cfg.color, borderColor: cfg.border }}>
-            {statusOptions(task.status, { isDependencyDoer })
-              .map(s => <option key={s} value={s}>{statusOptionLabel(s, { verificationRequired: task.verificationRequired, isAssigner, isDependencyDoer, currentStatus: task.status })}</option>)}
-          </select>
-        )}
-        {/* In the Recurring tab the repeat rule already leads the detail line below the title,
-            so repeating it here would just be noise. */}
-        {!series && (
-          <span className="px-2.5 py-1 rounded-full text-[9px] font-black uppercase tracking-wider bg-[var(--input-bg)] text-[var(--text-muted)] border border-[var(--border)]">
-            {formatFrequencyLabel(task.frequency)}
-          </span>
-        )}
-        {task.end && (
-          <span className={`flex items-center gap-1 text-[10px] font-bold ${task.isOverdue ? 'text-[var(--accent-red)]' : 'text-[var(--text-muted)]'}`}>
-            <CalendarIcon size={11} /> {formatDate(task.end)}
-          </span>
-        )}
-        <span className="flex items-center gap-1 text-[10px] font-bold text-[var(--text-muted)]">
-          <span className="w-1.5 h-1.5 rounded-full" style={{ background: priorityCfg.color }} /> {task.priority || 'Normal'}
-        </span>
-        <span className="text-[10px] font-bold text-[var(--text-muted)] opacity-70">{formatRelativeTime(task.end || task.start)}</span>
-
-        {/* Direct action buttons — the old kebab dropdown (which only held "View") is gone;
-            clicking the row body opens details too, so this is just a redundant quick action. */}
-        {scope === 'deleted' ? (
-          <button onClick={(e) => { e.stopPropagation(); onRestore(); }} title="Restore"
-            className="p-1.5 rounded-lg text-[var(--accent-indigo)] hover:bg-[var(--accent-indigo-bg)]">
-            <RotateCcw size={15} />
-          </button>
-        ) : (
-          <button onClick={(e) => { e.stopPropagation(); onOpenDetails(); }} title="View"
-            className="p-1.5 rounded-lg text-[var(--text-muted)] hover:text-[var(--accent-indigo)] hover:bg-[var(--input-bg)]">
-            <Eye size={15} />
-          </button>
-        )}
-      </div>
-    </motion.div>
-  );
-};
 
 const SORT_OPTIONS = [
   { key: 'end', label: 'Target Date' },
@@ -545,31 +430,18 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
     else { setSortKey(key); setSortDir('asc'); }
   };
 
-  const handleDelete = async (task) => {
-    setOpenMenuId(null);
-    try {
-      await softDeleteTask(task.id);
-      showSuccess('Task moved to Deleted Tasks');
-      fetchTasks();
-    } catch (err) {
-      showError(err.response?.data?.detail || 'Failed to delete task');
-    }
-  };
-
-  // Row "⋯" menu. Edit deliberately is NOT offered here: the list payload carries no
-  // reminders / checklist / attachments, so seeding the form from a row would blank them on
-  // save. Edit lives in the details modal, which loads the full task first.
+  // Row actions: View only. Editing and deleting live inside the details modal — the list
+  // payload carries no reminders / checklist / attachments, so acting on a task straight from
+  // a row risks operating on a partial copy of it. Restore is the exception and stays, because
+  // it is the Deleted Tasks page's only action; without it a deleted task can't be recovered.
+  // Both cases are a single action, so RowActionsMenu renders them as a plain button.
   const rowActions = (task) => (scope === 'deleted'
     ? [{ label: 'Restore Task', icon: RotateCcw, onClick: () => handleRestore(task) }]
-    : [
-      { label: 'View Details', icon: Eye, onClick: () => setDetailsTaskId(task.id) },
-      ...((task.isCreator || isAdmin || task.isCompanyAdmin)
-        ? [{ label: 'Delete Task', icon: Trash2, onClick: () => handleDelete(task), danger: true }]
-        : []),
-    ]);
+    : [{ label: 'View', icon: Eye, onClick: () => setDetailsTaskId(task.id) }]);
 
   // The table's Status cell, shared by a series' parent row and its expanded occurrence rows.
-  // Mirrors the card view's TaskRow rules exactly: who may act, and on what.
+  // Shared by the table rows and the grid cards, so both views apply exactly the same
+  // rules about who may act and on what.
   const renderStatusCell = (task) => {
     const cfg = STATUS_CONFIG[task.status] || STATUS_CONFIG.pending;
     if (scope === 'deleted') return <StatusControl cfg={cfg} />;
@@ -926,7 +798,7 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
           </table>
         </div>
       ) : (
-        <div className="space-y-2">
+        <div className="space-y-3">
           <div className="flex items-center justify-between px-1">
             <label className="flex items-center gap-2 text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest cursor-pointer">
               <input type="checkbox" checked={visibleTasks.length > 0 && selected.size === visibleTasks.length} onChange={toggleSelectAll} /> Select All
@@ -935,42 +807,39 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
               {groupedRows.length} {showRecurrenceDetail ? 'series' : (groupedRows.length === 1 ? 'task' : 'tasks')}
             </span>
           </div>
-          {pagedRows.map(group => {
-            const isSeries = group.items.length > 1;
-            const isExpanded = expandedGroups.has(group.key);
-            const rowProps = (task, { indent = false } = {}) => ({
-              task, scope, userMap, indent,
-              statusPending: completing.has(task.id),
-              isAssigner: task.isCreator || isAdmin || task.isReportingManager,
-              frozenReason: frozenReason(task),
-              isDependencyDoer: isDependencyDoer(task),
-              checked: selected.has(task.id),
-              onToggleSelect: () => toggleSelect(task.id),
-              onOpenDetails: () => setDetailsTaskId(task.id),
-              onStatusChange: (status) => handleStatusChange(task, status),
-              onRestore: () => handleRestore(task),
-            });
-            return (
-              <React.Fragment key={group.key}>
-                <TaskRow
-                  {...rowProps(group.primary)}
+
+          {/* A real grid — the whole point of the grid toggle. `items-start` keeps each card
+              at its natural height so an expanded series doesn't stretch its whole row. */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 gap-3 items-start">
+            {pagedRows.map(group => {
+              const task = group.primary;
+              const isSeries = group.items.length > 1;
+              return (
+                <TaskCard
+                  key={group.key}
+                  task={task}
+                  group={group}
+                  scope={scope}
+                  userMap={userMap}
                   series={showRecurrenceDetail ? summarizeSeries(group) : null}
-                  checked={isSeries ? group.items.every(t => selected.has(t.id)) : selected.has(group.primary.id)}
-                  onToggleSelect={() => (isSeries ? toggleGroupSelect(group) : toggleSelect(group.primary.id))}
-                  groupBadge={isSeries && (
-                    <button onClick={(e) => { e.stopPropagation(); toggleGroupExpand(group.key); }} title="This is a recurring series — click to see/track each day"
-                      className="flex items-center gap-1 px-2.5 py-1 rounded-full text-[9px] font-black uppercase tracking-wider bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] border border-[var(--accent-indigo-border)]">
-                      <Repeat size={11} /> ×{group.items.length}
-                      <ChevronDown size={12} className={`transition-transform ${isExpanded ? 'rotate-180' : ''}`} />
-                    </button>
+                  checked={isSeries ? group.items.every(t => selected.has(t.id)) : selected.has(task.id)}
+                  onToggleSelect={() => (isSeries ? toggleGroupSelect(group) : toggleSelect(task.id))}
+                  onOpenDetails={() => setDetailsTaskId(task.id)}
+                  statusCell={renderStatusCell(task)}
+                  isExpanded={expandedGroups.has(group.key)}
+                  onToggleExpand={() => toggleGroupExpand(group.key)}
+                  onOccurrenceOpen={(id) => setDetailsTaskId(id)}
+                  actions={(
+                    <RowActionsMenu
+                      open={openMenuId === group.key}
+                      onToggle={() => setOpenMenuId(openMenuId === group.key ? null : group.key)}
+                      onClose={() => setOpenMenuId(null)}
+                      items={rowActions(task)} />
                   )}
                 />
-                {isSeries && isExpanded && group.items.map(task => (
-                  <TaskRow key={task.id} {...rowProps(task, { indent: true })} />
-                ))}
-              </React.Fragment>
-            );
-          })}
+              );
+            })}
+          </div>
         </div>
       )}
       {/* ─── Pager ─── */}
