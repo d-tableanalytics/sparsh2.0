@@ -1,11 +1,12 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   LayoutDashboard, RefreshCw, CheckCircle2, ClipboardList,
-  Percent, Timer, AlertTriangle, Building2, Grid3x3, ListTodo,
+  Percent, Timer, AlertTriangle, Building2, Grid3x3, ListTodo, Download,
 } from 'lucide-react';
 import { useAuth } from '../../../context/AuthContext';
 import { useNotification } from '../../../context/NotificationContext';
 import { getClientDashboard } from '../../../services/tpmsFormsApi';
+import { exportClientReport } from '../../../services/tpmsApi';
 import { Section, Th, Td, TableShell, HeaderSelect, FilterSelect } from '../common/dashboardKit';
 
 // Spec §8 — the delay columns have three display states; the numeric "Nd" one only appears
@@ -145,6 +146,36 @@ const ClientDashboard = () => {
   const [data, setData] = useState(null);
   const [actionStatus, setActionStatus] = useState('open');
   const [loading, setLoading] = useState(true);
+  const [downloading, setDownloading] = useState(false);
+
+  // Only the company's admin may pull the whole-company report. A clientuser sees their own
+  // dashboard but not an export of everyone's rows; the backend enforces the same rule, so
+  // hiding the button is a courtesy rather than the control.
+  const canDownload = user?.role === 'clientadmin' && !!user?.company_id;
+
+  const download = async () => {
+    if (!canDownload || downloading) return;
+    setDownloading(true);
+    try {
+      // No company picker here — this dashboard is already scoped to the signed-in company,
+      // and the endpoint rejects any other one.
+      const res = await exportClientReport({ company_id: user.company_id, period: month });
+      const disp = res.headers?.['content-disposition'] || '';
+      const match = /filename="?([^"]+)"?/.exec(disp);
+      const url = URL.createObjectURL(new Blob([res.data]));
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = match ? match[1] : `TPMS report ${month}.xlsx`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      showError(err.response?.data?.detail || 'Could not download the report. Please try again.');
+    } finally {
+      setDownloading(false);
+    }
+  };
 
   useEffect(() => {
     let alive = true;
@@ -194,7 +225,15 @@ const ClientDashboard = () => {
           </div>
           {/* Shared hero select — the rest of the TPMS headers use this; this page was the
               only one hand-rolling its own, which is how it drifted out of theme. */}
-          <HeaderSelect value={month} onChange={setMonth} options={months} searchable={false} />
+          <div className="flex items-center gap-2 flex-wrap">
+            <HeaderSelect value={month} onChange={setMonth} options={months} searchable={false} />
+            {canDownload && (
+              <button type="button" onClick={download} disabled={downloading}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-white text-indigo-600 text-[12.5px] font-bold shadow-sm hover:bg-white/90 disabled:opacity-70 disabled:cursor-wait transition-all">
+                <Download size={14} /> {downloading ? 'Preparing…' : 'Download Report'}
+              </button>
+            )}
+          </div>
         </div>
       </div>
 

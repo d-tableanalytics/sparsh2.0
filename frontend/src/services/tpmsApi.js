@@ -140,6 +140,11 @@ export const getReviewReports = (params) => api.get('/tpms/reports/reviews', { p
 // saved file is corrupt.
 export const exportTpms = () => api.get('/tpms/export', { responseType: 'blob' });
 
+// One client's complete TPMS record as an Excel / Google Sheets workbook — Summary KPIs for
+// the selected period, then a sheet per dataset carrying that client's full history.
+export const exportClientReport = (params) =>
+  api.get('/tpms/export/client', { params, responseType: 'blob' });
+
 export const importTpms = (file) => {
   const form = new FormData();
   form.append('file', file);

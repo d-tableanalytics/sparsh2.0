@@ -1,13 +1,13 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   RefreshCw, Building2, Target, Gauge, CheckCircle2, ClipboardList, Star,
-  ListChecks, AlertTriangle, CalendarClock,
+  ListChecks, AlertTriangle, CalendarClock, Download,
 } from 'lucide-react';
 import {
   DashboardHero, HeroButton, HeaderSelect, Section, Th, Td, Progress, TableShell, KpiTile,
   usePaged, Pager, Fraction,
 } from '../../common/dashboardKit';
-import { getClientDashboard, currentPeriod, periodLabel } from '../../../../services/tpmsApi';
+import { getClientDashboard, exportClientReport, currentPeriod, periodLabel } from '../../../../services/tpmsApi';
 import api from '../../../../services/api';
 
 /* ─────────────────────────────────────────────────────────────
@@ -74,6 +74,18 @@ const ClientView = () => {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [downloading, setDownloading] = useState(false);
+  // Download window. 'month' follows the picker above; 'range' takes explicit dates (set both
+  // the same for a single day); 'all' exports the client's whole history.
+  const [dlOpen, setDlOpen] = useState(false);
+  // Anchored with position:fixed off the button's own rect. DashboardHero is `overflow-hidden`
+  // (its gradient bloom depends on that), so an absolutely-positioned panel inside it gets
+  // clipped to the header band and only a sliver shows.
+  const dlBtnRef = useRef(null);
+  const [dlPos, setDlPos] = useState(null);
+  const [dlMode, setDlMode] = useState('month');
+  const [dlFrom, setDlFrom] = useState('');
+  const [dlTo, setDlTo] = useState('');
 
   // Company roster for the picker.
   useEffect(() => {
@@ -110,6 +122,40 @@ const ClientView = () => {
 
   useEffect(() => { load(); }, [load]);
 
+  // Download the selected client's whole TPMS record as .xlsx. The workbook is built
+  // server-side (tpms_client_export_service) so the export carries the client's full history,
+  // not just the rows this screen happens to have fetched for one month.
+  const download = useCallback(async () => {
+    if (!company || downloading) return;
+    setDownloading(true);
+    try {
+      const params = { company_id: company, period };
+      if (dlMode === 'all') params.all_time = true;
+      else if (dlMode === 'range') {
+        // Either bound may be left open — the backend treats a missing side as unbounded.
+        if (dlFrom) params.from = dlFrom;
+        if (dlTo) params.to = dlTo;
+      }
+      const res = await exportClientReport(params);
+      // Prefer the filename the server chose — it carries the client name and period.
+      const disp = res.headers?.['content-disposition'] || '';
+      const match = /filename="?([^"]+)"?/.exec(disp);
+      const url = URL.createObjectURL(new Blob([res.data]));
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = match ? match[1] : `TPMS report ${period}.xlsx`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      setError(e.response?.data?.detail || 'Could not download the report. Please try again.');
+    } finally {
+      setDownloading(false);
+      setDlOpen(false);
+    }
+  }, [company, period, downloading, dlMode, dlFrom, dlTo]);
+
   const rows = data?.rows || [];
   const pending = data?.pending_actions || [];
   const cards = data?.cards || {};
@@ -134,6 +180,75 @@ const ClientView = () => {
         <HeaderSelect value={company} onChange={setCompany} options={companies} />
         <HeaderSelect value={period} onChange={setPeriod} options={months} searchable={false} />
         <HeroButton icon={RefreshCw} onClick={load}>Refresh</HeroButton>
+        {/* Only meaningful once a client is picked — the report IS the client's record. */}
+        {company && (
+          <div className="relative">
+            <span ref={dlBtnRef}>
+              <HeroButton icon={Download} onClick={() => {
+                const r = dlBtnRef.current?.getBoundingClientRect();
+                if (r) setDlPos({ top: r.bottom + 8, right: Math.max(8, window.innerWidth - r.right) });
+                setDlOpen((o) => !o);
+              }}>
+                {downloading ? 'Preparing…' : 'Download Report'}
+              </HeroButton>
+            </span>
+            {dlOpen && dlPos && (
+              <>
+                {/* Click-away closes without downloading. */}
+                <div className="fixed inset-0 z-[65]" onClick={() => setDlOpen(false)} />
+                <div className="fixed z-[70] w-[300px] p-4 rounded-2xl bg-[var(--bg-card)] border border-[var(--border)] shadow-xl text-left"
+                  style={{ top: dlPos.top, right: dlPos.right }}>
+                  <p className="text-[10px] font-black uppercase tracking-widest text-[var(--text-muted)] mb-2.5">
+                    What should the report cover?
+                  </p>
+                  <div className="space-y-1.5">
+                    {[
+                      ['month', `Selected month — ${periodLabel(period) || period}`],
+                      ['range', 'Specific dates'],
+                      ['all', "All time — the client's full history"],
+                    ].map(([id, label]) => (
+                      <label key={id}
+                        className={`flex items-start gap-2 px-2.5 py-2 rounded-xl cursor-pointer border transition-colors ${
+                          dlMode === id
+                            ? 'border-[var(--accent-indigo)] bg-[var(--accent-indigo-bg)]'
+                            : 'border-[var(--border)] hover:bg-[var(--input-bg)]'}`}>
+                        <input type="radio" name="dl-window" className="mt-0.5 shrink-0"
+                          checked={dlMode === id} onChange={() => setDlMode(id)} />
+                        <span className={`text-[12px] font-bold ${dlMode === id ? 'text-[var(--accent-indigo)]' : 'text-[var(--text-main)]'}`}>
+                          {label}
+                        </span>
+                      </label>
+                    ))}
+                  </div>
+
+                  {dlMode === 'range' && (
+                    <div className="mt-2.5 grid grid-cols-2 gap-2">
+                      <label className="text-[10px] font-black uppercase tracking-widest text-[var(--text-muted)]">
+                        From
+                        <input type="date" value={dlFrom} onChange={(e) => setDlFrom(e.target.value)}
+                          className="mt-1 w-full px-2 py-1.5 rounded-lg bg-[var(--input-bg)] border border-[var(--input-border)] text-[12px] font-bold outline-none focus:border-[var(--accent-indigo)]" />
+                      </label>
+                      <label className="text-[10px] font-black uppercase tracking-widest text-[var(--text-muted)]">
+                        To
+                        <input type="date" value={dlTo} onChange={(e) => setDlTo(e.target.value)}
+                          className="mt-1 w-full px-2 py-1.5 rounded-lg bg-[var(--input-bg)] border border-[var(--input-border)] text-[12px] font-bold outline-none focus:border-[var(--accent-indigo)]" />
+                      </label>
+                      <p className="col-span-2 text-[10.5px] font-medium text-[var(--text-muted)] leading-relaxed">
+                        Set both to the same date for a single day. Leave one empty to leave that
+                        end open.
+                      </p>
+                    </div>
+                  )}
+
+                  <button type="button" onClick={download} disabled={downloading}
+                    className="mt-3 w-full flex items-center justify-center gap-1.5 px-4 py-2 rounded-xl bg-[var(--accent-indigo)] text-white text-[11px] font-black uppercase tracking-widest disabled:opacity-60 disabled:cursor-wait">
+                    <Download size={13} /> {downloading ? 'Preparing…' : 'Download'}
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        )}
       </DashboardHero>
 
       {loading && !data && (

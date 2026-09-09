@@ -43,6 +43,7 @@ import DelegatedTasks from './pages/DelegatedTasks';
 import SubscribedTasks from './pages/SubscribedTasks';
 import AllTasks from './pages/AllTasks';
 import TaskActivity from './pages/TaskActivity';
+import TaskLogsReport from './pages/TaskLogsReport';
 import Holiday from './pages/Holiday';
 import DeletedTasks from './pages/DeletedTasks';
 import NotifyTemplateAdmin from './pages/notifications/NotifyTemplateAdmin';
@@ -240,6 +241,9 @@ const AppRoutes = () => {
       {/* Delegation & Checklist notification templates. Admin-gated inside the page itself,
           the same way the TPMS templates screen is. */}
       <Route path="/tasks/templates" element={<PrivateRoute><RequireTaskAccess><NotifyTemplateAdmin /></RequireTaskAccess></PrivateRoute>} />
+      {/* Email / WhatsApp delivery log for task notifications. The page itself is admin-only
+          server-side; the sidebar entry is role-gated to match. */}
+      <Route path="/tasks/logs" element={<PrivateRoute><RequireTaskAccess><TaskLogsReport /></RequireTaskAccess></PrivateRoute>} />
       <Route path="/sessions" element={<PrivateRoute><LearnerSessions /></PrivateRoute>} />
       <Route path="/company-portal" element={<PrivateRoute><CompanyPortal /></PrivateRoute>} />
       <Route path="/my-reports" element={<PrivateRoute><MyReports /></PrivateRoute>} />

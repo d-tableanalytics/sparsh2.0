@@ -7,6 +7,7 @@ const MyTasks = () => (
     heading="My Tasks"
     subheading="Tasks assigned to you"
     emptyMessage="No tasks assigned to you yet."
+    splitByRecurrence
   />
 );
 

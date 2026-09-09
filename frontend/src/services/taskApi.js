@@ -48,3 +48,7 @@ export const uploadCompletionAttachment = (taskId, file) => {
 };
 
 export const deleteCompletionAttachment = (taskId, attachmentId) => api.delete(`/tasks/${taskId}/completion-attachments/${attachmentId}`);
+
+// Task & Delegation notification delivery log (email / WhatsApp). Admin only — the ledger
+// spans every recipient in the organisation. Mirrors the TPMS Logs Report endpoint.
+export const getTaskLogs = (params) => api.get('/tasks/logs', { params });

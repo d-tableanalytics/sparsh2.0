@@ -256,6 +256,8 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
         { name: 'Activity', path: '/tasks/activity', icon: Activity },
         { name: 'Deleted Tasks', path: '/tasks/deleted', icon: Trash2 },
         { name: 'Templates', path: '/tasks/templates', icon: ScrollText, roles: ['superadmin', 'admin'] },
+        // Delivery ledger for the templates above — admin-only, matching the endpoint's own gate.
+        { name: 'Notification Logs', path: '/tasks/logs', icon: Mail, roles: ['superadmin', 'admin'] },
       ],
     },
     {

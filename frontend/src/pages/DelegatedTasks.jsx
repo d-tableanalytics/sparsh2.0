@@ -7,6 +7,7 @@ const DelegatedTasks = () => (
     heading="Delegated Tasks"
     subheading="Tasks you created and assigned to others"
     emptyMessage="You haven't delegated any tasks yet."
+    splitByRecurrence
   />
 );
 

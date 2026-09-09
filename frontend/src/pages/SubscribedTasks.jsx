@@ -8,6 +8,7 @@ const SubscribedTasks = () => (
     subheading="Tasks you're kept in the loop on"
     emptyMessage="You're not subscribed to any tasks yet."
     allowCreate={false}
+    splitByRecurrence
   />
 );
 

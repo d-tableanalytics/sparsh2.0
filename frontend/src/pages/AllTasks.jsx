@@ -7,6 +7,7 @@ const AllTasks = () => (
     heading="All Tasks"
     subheading="Organization-wide task list"
     emptyMessage="No tasks found."
+    splitByRecurrence
   />
 );
 
