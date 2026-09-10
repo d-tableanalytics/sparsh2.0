@@ -31,7 +31,7 @@ from bson import ObjectId
 from app.config.settings import settings
 from app.db.mongodb import get_collection
 from app.models.leadership import (
-    COLL_LS_ASSIGNMENTS, COLL_LS_WA_LOG, COLL_LS_WA_TEMPLATES,
+    COLL_LS_ASSIGNMENTS, COLL_LS_WA_LOG, COLL_LS_WA_TEMPLATE, COLL_LS_WA_TEMPLATES,
     WA_DELIVERED, WA_FAILED, WA_PENDING, WA_READ, WA_SENT, WA_UNREACHABLE,
     WA_TPL_APPROVED, WA_TPL_DRAFT, WA_TPL_EDITABLE, WA_TPL_PENDING, WA_TPL_REJECTED,
     WA_VARIABLE_FIELDS, wa_is_forward,
@@ -205,55 +205,52 @@ def _now() -> datetime:
 
 
 # ─────────────────────────────────────────────────────────────
-# Template — one per company, and never shared
+# Template — ONE invitation, shared by every company
+#
+# There is a single row. Every company's invitation is written once, submitted to Meta once
+# and approved once, because the message says the same thing whoever receives it: who is
+# asking, who they are rating, and where the form is. All three arrive as variables filled
+# per invitation, so nothing in the wording is company-specific and nothing was gained by
+# making each client author and get approved their own copy of the same sentence.
+#
+# It also removes the failure this module kept hitting: a Meta template name is global to
+# the WhatsApp Business Account, so per-company names collided, and a company that had
+# never written one simply could not send.
+#
+# `SHARED_KEY` is the row. It is a fixed filter rather than a hardcoded _id so the document
+# is created by the first save like any other upsert.
 # ─────────────────────────────────────────────────────────────
-async def suggest_template_name(company_id: str) -> str:
-    """A Meta template name for this company that no other company is using.
+SHARED_KEY = {"scope": "shared"}
 
-    Built from the company's own name so it stays readable on the Meta dashboard, where
-    every client's templates sit in one list and "leadership_invitation" tells nobody which
-    company it belongs to. Falls back to the id when the name yields nothing usable — an
-    ugly name is recoverable, a collision is not.
+
+def _template_col():
+    return get_collection(COLL_LS_WA_TEMPLATE)
+
+
+async def suggest_template_name(company_id: str = "") -> str:
+    """A Meta template name for the one shared invitation.
+
+    One template for everyone means one obvious name. It still has to be a name no legacy
+    per-company row already holds: to Meta a name IS the template, so reusing one would
+    submit against that row's template and quietly adopt its approval and its wording.
+
+    `company_id` is accepted and ignored — kept so an older caller cannot break.
     """
-    slug = ""
-    try:
-        oid = ObjectId(str(company_id))
-    except Exception:
-        oid = None
-    if oid is not None:
-        co = await get_collection("companies").find_one({"_id": oid}, {"name": 1})
-        slug = re.sub(r"[^a-z0-9]+", "_", str((co or {}).get("name") or "").lower()).strip("_")
-    # Meta allows lowercase, digits and underscores, starting with a letter.
-    slug = re.sub(r"^[^a-z]+", "", slug)[:40].strip("_")
-    base = f"{slug}_leadership_invite" if slug else "leadership_invite"
-
-    col = get_collection(COLL_LS_WA_TEMPLATES)
-    candidate, tail = base, str(company_id)[-6:].lower()
-    # Two clients with the same trading name would otherwise collide on the slug alone.
-    if await col.find_one({"meta_template_name": candidate,
-                           "company_id": {"$ne": str(company_id)}}):
-        candidate = f"{base}_{re.sub(r'[^a-z0-9]', '', tail) or 'x'}"
-    return candidate[:60]
+    base = "leadership_invite"
+    legacy = get_collection(COLL_LS_WA_TEMPLATES)
+    return base if not await legacy.find_one({"meta_template_name": base}) else f"{base}_all"
 
 
-async def get_template(company_id: Optional[str] = None) -> dict:
-    """This company's own template, or the empty built-in shape.
+def _shape(doc: Optional[dict], suggested: str = "") -> dict:
+    """One stored row rendered as the screen and the sender both read it.
 
-    There is deliberately no fall back to any other row. Every company writes its own
-    invitation and gets it approved, so a company that has not written one yet has nothing
-    to send — which the screen says plainly — rather than quietly borrowing wording, and a
-    Meta template name, belonging to a different client.
+    Shared by the live template and by a legacy per-company row, so the fallback in
+    `send_invitation` is judged by exactly the same `is_ready` rule as the real thing.
     """
-    col = get_collection(COLL_LS_WA_TEMPLATES)
-    doc = await col.find_one({"company_id": str(company_id)}) if company_id else None
-
     return {
-        "company_id": str(company_id) if company_id else None,
         "meta_template_name": (doc or {}).get("meta_template_name") or "",
         # Offered only when nothing is written yet, so it never overwrites a chosen name.
-        "suggested_name": ("" if (doc or {}).get("meta_template_name")
-                           else await suggest_template_name(str(company_id))
-                           if company_id else ""),
+        "suggested_name": "" if (doc or {}).get("meta_template_name") else suggested,
         "language": (doc or {}).get("language") or "en",
         # What the author asked for, and what Meta actually filed it as. Kept apart:
         # Meta re-categorises on content, and a screen that showed only our request would
@@ -268,7 +265,7 @@ async def get_template(company_id: Optional[str] = None) -> dict:
         "active": bool((doc or {}).get("active", True)),
         "fields": list(WA_VARIABLE_FIELDS),
         "body": (doc or {}).get("body") or "",
-        # Every row belongs to a company now, so having one IS being customised.
+        # There is one row for everybody, so having one IS being written.
         "is_customised": bool(doc),
         # Where the template stands with Meta. DRAFT means it has never been submitted.
         "status": str((doc or {}).get("status") or WA_TPL_DRAFT).upper(),
@@ -297,43 +294,61 @@ async def get_template(company_id: Optional[str] = None) -> dict:
     }
 
 
-async def save_authored_template(company_id: str, doc: dict, user: dict) -> dict:
-    """Store the composer's full definition for one company, as a DRAFT.
+async def get_template(company_id: Optional[str] = None) -> dict:
+    """THE invitation template — the same one for every company.
+
+    `company_id` is accepted and ignored. Kept on the signature so a caller that still
+    passes one gets the shared template rather than a TypeError.
+    """
+    doc = await _template_col().find_one(SHARED_KEY)
+    suggested = "" if (doc or {}).get("meta_template_name") else await suggest_template_name()
+    return _shape(doc, suggested)
+
+
+async def legacy_company_template(company_id: str) -> dict:
+    """A company's own pre-shared-template row, if it still has one.
+
+    Read-only and used in exactly one place: keeping a company whose old template Meta had
+    already approved able to send while the shared one is still being written or reviewed.
+    Nothing writes here any more.
+    """
+    doc = await get_collection(COLL_LS_WA_TEMPLATES).find_one({"company_id": str(company_id)})
+    return _shape(doc)
+
+
+async def save_authored_template(doc: dict, user: dict) -> dict:
+    """Store the composer's full definition as THE invitation, in DRAFT.
 
     The authored fields (header, body, footer, buttons, variable style, examples) are kept
     exactly as the composer produced them, because that is what Meta validates and renders
     from. Leadership's own wiring — which data field fills each placeholder, and whether the
     template is switched on — lives alongside and is left untouched by an edit here.
     """
-    col = get_collection(COLL_LS_WA_TEMPLATES)
-    existing = await col.find_one({"company_id": str(company_id)}) or {}
+    col = _template_col()
+    existing = await col.find_one(SHARED_KEY) or {}
 
-    # A Meta template NAME is global to the WhatsApp Business Account rather than scoped to
-    # a company, so two clients choosing the same obvious name are ONE template to Meta.
-    # Refused here, while it can still be typed differently. Letting it through would fail
-    # at submit with Meta's "Content in this language already exists", and — worse — a
-    # later Refresh matches on name, so this company would adopt the other client's
-    # approval and send its invitations with their wording.
+    # A Meta template NAME is global to the WhatsApp Business Account, so a name a legacy
+    # per-company row still holds is ALREADY a template at Meta. Refused here, while it can
+    # still be typed differently. Letting it through would fail at submit with Meta's
+    # "Content in this language already exists", and — worse — a later Refresh matches on
+    # name, so the shared template would adopt that old row's approval and start sending
+    # one client's wording to everybody.
     #
     # Checked on the name alone, not name + language: to Meta a name is one template that
     # may carry several language versions, so a shared name collides whatever the language.
-    # The other company is never identified — that a name is taken is all one client may
-    # learn about another.
     name = str(doc.get("name") or "").strip().lower()
     if name:
-        clash = await col.find_one({"meta_template_name": name,
-                                    "company_id": {"$ne": str(company_id)}})
+        clash = await get_collection(COLL_LS_WA_TEMPLATES).find_one({"meta_template_name": name})
         if clash:
             raise ValueError(
-                f"The template name '{name}' is already used by another company. Meta "
-                "template names are shared across the whole WhatsApp Business Account, so "
+                f"The template name '{name}' already belongs to a template on this "
+                "WhatsApp Business Account. Meta template names are account-wide, so "
                 "please choose a different one.")
 
     await col.update_one(
-        {"company_id": str(company_id)},
+        SHARED_KEY,
         {"$set": {
             **doc,
-            "company_id": str(company_id),
             "meta_template_name": doc.get("name") or "",
             # Any edit returns it to DRAFT: Meta reviews content, so a changed template is
             # no longer the one it approved.
@@ -343,20 +358,20 @@ async def save_authored_template(company_id: str, doc: dict, user: dict) -> dict
             "updated_by": (user or {}).get("full_name") or (user or {}).get("email"),
             "updated_at": _now(),
         },
-         "$setOnInsert": {"created_at": _now(), "active": True}},
+         "$setOnInsert": {**SHARED_KEY, "created_at": _now(), "active": True}},
         upsert=True,
     )
-    saved = await get_template(company_id)
-    # The composer identifies what it is editing by `_id`; one template per company means
-    # that is simply this company's row.
-    row = await col.find_one({"company_id": str(company_id)})
+    saved = await get_template()
+    # The composer identifies what it is editing by `_id`; one template for everybody means
+    # that is simply the shared row.
+    row = await col.find_one(SHARED_KEY)
     saved["_id"] = str(row["_id"]) if row else None
     saved["meta_template_id"] = existing.get("meta_template_id")
     return saved
 
 
-async def submit_template(company_id: str, user: dict) -> dict:
-    """Send this company's template to Meta for review.
+async def submit_template(user: dict) -> dict:
+    """Send the shared template to Meta for review.
 
     Meta assigns it an id and it enters PENDING; approval usually lands within minutes to
     hours and is picked up by `sync_template_status`. A REJECTED template is EDITED rather
@@ -367,8 +382,8 @@ async def submit_template(company_id: str, user: dict) -> dict:
         MetaTemplateError, create_message_template, edit_message_template, is_configured,
     )
 
-    col = get_collection(COLL_LS_WA_TEMPLATES)
-    doc = await col.find_one({"company_id": str(company_id)})
+    col = _template_col()
+    doc = await col.find_one(SHARED_KEY)
     if not doc:
         raise ValueError("Save the template before submitting it.")
     if not is_configured():
@@ -416,13 +431,13 @@ async def submit_template(company_id: str, user: dict) -> dict:
         "submitted_at": now, "synced_at": now, "updated_at": now,
         "submitted_by": (user or {}).get("full_name") or (user or {}).get("email"),
     }})
-    logger.info("Leadership template '%s' submitted for company %s — %s",
-                meta_doc["name"], company_id, meta_status)
-    return await get_template(company_id)
+    logger.info("Leadership invitation template '%s' submitted — %s",
+                meta_doc["name"], meta_status)
+    return await get_template()
 
 
-async def sync_template_status(company_id: str) -> dict:
-    """Ask Meta where this company's template stands, and mirror the verdict locally.
+async def sync_template_status() -> dict:
+    """Ask Meta where the shared template stands, and mirror the verdict locally.
 
     Meta reviews asynchronously and does not call us back for templates, so the status only
     moves when somebody asks. Called from the screen's Refresh, which is why it is cheap and
@@ -430,25 +445,25 @@ async def sync_template_status(company_id: str) -> dict:
     """
     from app.services.meta_whatsapp_service import fetch_templates, is_configured
 
-    col = get_collection(COLL_LS_WA_TEMPLATES)
-    doc = await col.find_one({"company_id": str(company_id)})
+    col = _template_col()
+    doc = await col.find_one(SHARED_KEY)
     name = str((doc or {}).get("meta_template_name") or "").strip()
     if not doc or not name or not is_configured():
-        return await get_template(company_id)
+        return await get_template()
 
     try:
         rows = await fetch_templates()
     except Exception as e:                                        # pragma: no cover
         # Unreachable Meta is not a verdict. Leaving the stored status alone is what stops
         # a network blink reading as "your approved template disappeared".
-        logger.warning("Leadership template sync failed for %s: %s", company_id, e)
-        return await get_template(company_id)
+        logger.warning("Leadership template sync failed: %s", e)
+        return await get_template()
 
-    # Bind to the template this company actually submitted. Once Meta has issued an id,
-    # that id IS the identity — matching on name alone would let one company pick up
-    # another's verdict, because the name lives on the shared Business Account. The name
-    # match survives only for a row that has never been submitted, and cross-company name
-    # reuse is refused on save, so it can no longer resolve to somebody else's template.
+    # Bind to the template we actually submitted. Once Meta has issued an id, that id IS
+    # the identity — matching on name alone would let this row pick up the verdict on a
+    # legacy per-company template that happens to share the name. The name match survives
+    # only for a row that has never been submitted, and reuse of a legacy name is refused
+    # on save, so it can no longer resolve to a different template.
     language = str(doc.get("language") or "en")
     tpl_id = str(doc.get("meta_template_id") or "").strip()
     match = next((r for r in (rows or []) if tpl_id and str(r.get("id") or "") == tpl_id), None)
@@ -457,7 +472,7 @@ async def sync_template_status(company_id: str) -> dict:
                       if str(r.get("name") or "") == name
                       and str(r.get("language") or "") == language), None)
     if not match:
-        return await get_template(company_id)
+        return await get_template()
 
     status = str(match.get("status") or "").upper()
     updates = {"status": status, "synced_at": _now(), "updated_at": _now(),
@@ -471,7 +486,7 @@ async def sync_template_status(company_id: str) -> dict:
     updates["rejected_reason"] = (match.get("rejected_reason")
                                   if status == WA_TPL_REJECTED else None)
     await col.update_one({"_id": doc["_id"]}, {"$set": updates})
-    return await get_template(company_id)
+    return await get_template()
 
 
 async def open_entry(assignment: dict, phone: str, status: str,
@@ -560,17 +575,19 @@ def _mask_phone(phone: str) -> str:
     return ("\u2022" * 4 + digits[-4:]) if len(digits) >= 4 else ""
 
 
-async def company_log(company_id: str, limit: int = 60) -> dict:
-    """Recent WhatsApp send attempts for one company, WITHOUT panel identity.
+async def company_log(company_id: Optional[str] = None, limit: int = 60) -> dict:
+    """Recent WhatsApp send attempts, WITHOUT panel identity. No company means all of them.
 
     Deliberately drops giver_name, giver_id, subject_name and subject_id. This screen is
     administrators-only and they must not learn who gives feedback about whom — a delivery
     log carrying both names is exactly the join the whole module exists to prevent. What
     survives is what diagnoses a send: when it went, roughly where, what Meta said, and the
-    id needed to look it up on Meta's own dashboard.
+    id needed to look it up on Meta's own dashboard. None of that identifies anybody, which
+    is what makes the unscoped read safe for staff.
     """
+    scope = {"company_id": str(company_id)} if company_id else {}
     rows = await get_collection(COLL_LS_WA_LOG).find(
-        {"company_id": str(company_id)}).sort("created_at", -1).to_list(max(1, min(limit, 200)))
+        scope).sort("created_at", -1).to_list(max(1, min(limit, 200)))
 
     counts: Dict[str, int] = {}
     out = []
@@ -756,7 +773,21 @@ async def send_invitation(assignment: dict, link: str) -> dict:
     admits is broken.
     """
     company_id = str(assignment.get("company_id"))
-    template = await get_template(company_id)
+    template = await get_template()
+
+    # Transition only. The shared template is the one every invitation should go out on,
+    # but Meta approval takes hours to days — so a company that was already sending on its
+    # own approved template keeps sending on it until the shared one is approved, rather
+    # than going dark for the length of a review it did not ask for. Once the shared
+    # template is APPROVED this branch is never reached again, and the legacy rows it reads
+    # can be dropped.
+    if not template.get("is_ready"):
+        legacy = await legacy_company_template(company_id)
+        if legacy.get("is_ready"):
+            logger.info("Leadership invitation for company %s sent on its legacy template "
+                        "'%s' — the shared template is %s",
+                        company_id, legacy.get("meta_template_name"), template.get("status"))
+            template = legacy
 
     phone = await _giver_phone(assignment.get("giver_id"))
     if not phone:
@@ -765,9 +796,10 @@ async def send_invitation(assignment: dict, link: str) -> dict:
         return {"ok": False, "status": WA_UNREACHABLE, "entry_id": entry, "error": reason}
 
     if not template.get("is_ready"):
-        reason = ("No approved WhatsApp template is configured for this company"
+        reason = ("No WhatsApp invitation template has been written yet"
                   if not template.get("meta_template_name") else
-                  "This company's WhatsApp template is switched off")
+                  f"The WhatsApp invitation template is {template.get('status')}, "
+                  "so Meta will not deliver it")
         entry = await open_entry(assignment, phone, WA_FAILED, reason)
         return {"ok": False, "status": WA_FAILED, "entry_id": entry, "error": reason}
 

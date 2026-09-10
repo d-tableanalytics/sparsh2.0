@@ -78,17 +78,6 @@ async def _send(user_id: str, phone: str, text: str, slug: str) -> None:
         logger.warning("Leadership %s WhatsApp to %s failed: %s", slug, phone, e)
 
 
-def _wrap(title: str, body: str) -> str:
-    return (
-        '<div style="font-family:Arial,sans-serif;max-width:560px">'
-        f'<h2 style="margin:0 0 12px;font-size:18px;color:#1f2937">{title}</h2>'
-        f'<div style="font-size:14px;line-height:1.6;color:#374151">{body}</div>'
-        '<p style="margin-top:18px;font-size:11px;color:#6b7280">'
-        'Leadership Score is completely confidential. Nobody is told who gave which '
-        'feedback.</p></div>'
-    )
-
-
 # ─────────────────────────────────────────────────────────────
 # The reminder ladder
 # ─────────────────────────────────────────────────────────────
@@ -125,14 +114,6 @@ async def chase_non_submitters() -> dict:
                 continue
 
             label = cycle_label(cyc.get("cycle") or "")
-            title = ("Last day to give your leadership feedback" if stage == "final"
-                     else "Your leadership feedback is still pending")
-            body = (
-                f"You were asked for confidential feedback on "
-                f"<b>{row.get('subject_name') or 'a colleague'}</b> for {label}."
-                + ("<p>The window closes tomorrow.</p>" if stage == "final" else "")
-                + "<p>Your last invitation has the link. If you cannot find it, ask "
-                  "HR to resend — a fresh link will be issued.</p>")
             text = (f"Reminder: your confidential leadership feedback for "
                     f"{row.get('subject_name') or 'a colleague'} ({label}) is still "
                     f"pending. Your invitation message has the link.")
@@ -145,9 +126,7 @@ async def chase_non_submitters() -> dict:
                 person = await _person(row.get("giver_id"), cyc.get("company_id"))
                 phone = (person or {}).get("mobile") or ""
 
-            await _send(row.get("giver_id"), row.get("giver_email"), phone,
-                        f"{title} — {label}", _wrap(title, body), text,
-                        "tpms_leadership_reminder")
+            await _send(row.get("giver_id"), phone, text, "tpms_leadership_reminder")
             await get_collection(COLL_LS_ASSIGNMENTS).update_one(
                 {"_id": row["_id"]},
                 {"$addToSet": {"reminded_stages": stage},
@@ -172,11 +151,6 @@ async def notify_window_closing() -> dict:
         label = cycle_label(cyc.get("cycle") or "")
         await _notify_hr(
             cyc.get("company_id"),
-            f"{label} closes today",
-            _wrap(f"{label} closes today",
-                  "<p>Collection for this Leadership Score cycle ends today.</p>"
-                  "<p>Check the quorum report before closing — you can extend the window "
-                  "instead of publishing a score built from too few responses.</p>"),
             f"Leadership Score {label} closes today. Check the quorum report.",
             "tpms_leadership_closing")
         await get_collection(COLL_LS_CYCLES).update_one(
@@ -200,17 +174,8 @@ async def notify_quorum_shortfall() -> dict:
         if report["all_met"]:
             continue
         label = cycle_label(cyc.get("cycle") or "")
-        lines = "".join(
-            f"<li>{r['subject_name']} — {r['responses']} of {r['panel_size']} "
-            f"(needs {r['short_by']} more)</li>" for r in report["below_quorum"])
         await _notify_hr(
             cyc.get("company_id"),
-            f"{label} — quorum not met for {len(report['below_quorum'])} leader(s)",
-            _wrap("Quorum not met",
-                  f"<p>{label} has closed, but these leaders are below the quorum of "
-                  f"{report['quorum']}:</p><ul>{lines}</ul>"
-                  "<p>Re-open the cycle to extend the window, or publish the overall score "
-                  "with the group breakdown suppressed.</p>"),
             f"Leadership Score {label}: {len(report['below_quorum'])} leader(s) below quorum.",
             "tpms_leadership_quorum")
         await get_collection(COLL_LS_CYCLES).update_one(
@@ -234,17 +199,10 @@ async def notify_published(company_id: str, cycle: str) -> dict:
                 continue
             if who == "leader":
                 title = f"Your Leadership Score for {label} is ready"
-                body = ("<p>Your Leadership Score is now available on your dashboard, "
-                        "parameter by parameter.</p>"
-                        "<p>Yeh mat socho ki kisne feedback diya — apne received feedback "
-                        "par improve karo.</p>")
             else:
                 title = f"Leadership Scores for {label} are ready"
-                body = (f"<p>{s.get('subject_name')}'s Leadership Score is available.</p>"
-                        "<p>Discuss it with them parameter-wise during RRO, then log the "
-                        "conversation and the action plan.</p>")
-            await _send(str(uid), person.get("email"), person.get("mobile"),
-                        title, _wrap(title, body), title, "tpms_leadership_published")
+            await _send(str(uid), person.get("mobile"), title,
+                        "tpms_leadership_published")
             sent += 1
     logger.info("Leadership publish notices sent: %d [%s/%s]", sent, company_id, cycle)
     return {"notified": sent}
@@ -276,21 +234,13 @@ async def chase_rro_discussions() -> dict:
             person = await _person(manager_id, company_id)
             if not person:
                 continue
-            names = "".join(f"<li>{r.get('subject_name')}</li>" for r in rows)
-            title = f"RRO discussion pending for {label}"
-            await _send(manager_id, person.get("email"), person.get("mobile"), title,
-                        _wrap(title,
-                              f"<p>These scores were published {age} days ago and the RRO "
-                              f"conversation has not been logged yet:</p><ul>{names}</ul>"),
+            await _send(manager_id, person.get("mobile"),
                         f"RRO discussion pending for {len(rows)} leader(s) — {label}.",
                         "tpms_leadership_rro_pending")
             nudged += 1
 
         if pending:
-            await _notify_hr(company_id, f"{label} — {len(pending)} RRO discussion(s) pending",
-                             _wrap("RRO discussions pending",
-                                   f"<p>{len(pending)} leader(s) have not had their RRO "
-                                   f"conversation logged for {label}.</p>"),
+            await _notify_hr(company_id,
                              f"{len(pending)} RRO discussion(s) pending for {label}.",
                              "tpms_leadership_rro_pending")
         await get_collection(COLL_LS_CYCLES).update_one(
@@ -316,7 +266,7 @@ async def _person(user_id, company_id) -> Optional[dict]:
     return None
 
 
-async def _notify_hr(company_id, subject: str, html: str, text: str, slug: str) -> None:
+async def _notify_hr(company_id, text: str, slug: str) -> None:
     """Reach the company's HR users — the people the document puts in charge of a cycle."""
     rows = await get_collection("learners").find({
         "company_id": str(company_id), "is_active": {"$ne": False},
@@ -324,8 +274,7 @@ async def _notify_hr(company_id, subject: str, html: str, text: str, slug: str) 
     hr = [u for u in rows
           if str(u.get("governance_role") or u.get("department") or "").strip().lower() == "hr"]
     for u in hr:
-        await _send(str(u.get("_id")), u.get("email"), u.get("mobile"),
-                    subject, html, text, slug)
+        await _send(str(u.get("_id")), u.get("mobile"), text, slug)
 
 
 async def run_leadership_jobs() -> dict:

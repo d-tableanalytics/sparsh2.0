@@ -10,15 +10,15 @@ import {
   Award, SlidersHorizontal, FolderOpen, FileCog, CalendarClock, ShieldAlert,
   // ── Phase INT-2 ── the remaining Internal Recruitment SOP surfaces.
   HeartHandshake, Bookmark, Scale, Mail, BookMarked,
+  // Notification Templates.
+  BellRing,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { canAccessTaskManagement } from '../../utils/taskAccess';
 import { canAccessTpms } from '../../features/tpms/access';
 import { canAccessHrms } from '../../features/hrms/access';
-import {
-  canManage as canManageLeadershipCycle,
-  canManageTemplate as canManageLeadershipTemplate,
-} from '../../features/tpms/leadership/leadershipUtils';
+import { canManage as canManageLeadershipCycle } from '../../features/tpms/leadership/leadershipUtils';
+import { canOpenNotificationTemplates } from '../../utils/notifyTemplateAccess';
 
 import logo1 from '../../assets/Sparsh Magic  Logo PNG1.png';
 import logo2 from '../../assets/Sparsh Magic  Logo PNG2.png';
@@ -55,9 +55,6 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
   // Reuses the same predicate the Leadership pages use, so the menu can never offer a page
   // the page itself will refuse.
   const canManageLeadership = canManageLeadershipCycle(user);
-  // Narrower than the line above: HR runs cycles and panels but does not author the
-  // WhatsApp template, so that one child is listed for administrators only.
-  const canWriteLeadershipTemplate = canManageLeadershipTemplate(user);
   // Client-side users share the SMOPS submodules (Dashboard, HOD Activity, Employee Task,
   // Review Report, My Profile).
   //
@@ -86,9 +83,8 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
           { name: 'Results', path: '/tpms/smops/leadership', icon: BarChart3, end: true },
           { name: 'Cycles', path: '/tpms/smops/leadership/cycles', icon: CalendarDays },
           { name: 'Leaders & Givers', path: '/tpms/smops/leadership/subjects', icon: UserCog },
-          canWriteLeadershipTemplate
-            && { name: 'WhatsApp', path: '/tpms/smops/leadership/whatsapp', icon: MessageSquare },
-        ].filter(Boolean),
+          // The WhatsApp invitation template lives in Notification Templates.
+        ],
       }
       : { name: 'Leadership Score', path: '/tpms/smops/leadership', icon: Award, end: true },
   ];
@@ -106,7 +102,6 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
         { name: 'Employee Tasks', path: '/tpms/admin/employee-tasks', icon: ListChecks },
         { name: 'Activities', path: '/tpms/admin/activities', icon: ClipboardList },
         { name: 'Departments', path: '/tpms/admin/departments', icon: Building2 },
-        { name: 'Templates', path: '/tpms/admin/mail-templates', icon: ScrollText },
         { name: 'Reminder Rules', path: '/tpms/admin/reminder-rules', icon: AlertTriangle },
         { name: 'Form Questions', path: '/tpms/admin/form-questions', icon: ClipboardCheck },
         { name: 'Form Links', path: '/tpms/admin/form-links', icon: Link2 },
@@ -117,7 +112,6 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
             { name: 'Cycles', path: '/tpms/admin/leadership', icon: CalendarDays, end: true },
             { name: 'Leaders & Givers', path: '/tpms/admin/leadership/subjects', icon: UserCog },
             { name: 'Questions', path: '/tpms/admin/leadership/questions', icon: ClipboardCheck },
-            { name: 'WhatsApp', path: '/tpms/admin/leadership/whatsapp', icon: MessageSquare },
             { name: 'Results', path: '/tpms/admin/leadership/report', icon: BarChart3 },
           ],
         },
@@ -195,11 +189,10 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
       { name: 'Document Types', path: '/hrms/document-types', icon: FileCog },
       { name: 'Sanctioned Strength', path: '/hrms/sanctioned-strength', icon: Gauge },
       // ── Phase INT-2 ── admin-only masters. Salary bands are agreed annually with
-      // Finance; the communication templates carry the equal-opportunity and data-use
-      // wording; the policy register records which version of the SOP governs. The
+      // Finance; the policy register records which version of the SOP governs (candidate
+      // communications are managed in Notification Templates). The
       // capability checks are the real control -- this list only decides visibility.
       { name: 'Salary Bands', path: '/hrms/salary-bands', icon: Scale },
-      { name: 'Communications', path: '/hrms/communications', icon: Mail },
       { name: 'Policy Register', path: '/hrms/policies', icon: BookMarked },
       // ── Phase INT-5 ── the per-company rule set: SLA targets, retention periods,
       // probation duration, reminder tiers and score bands. Governance, not a hiring
@@ -247,8 +240,8 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
         { name: 'Holiday', path: '/tasks/holiday', icon: CalendarDays, roles: ['superadmin', 'admin'] },
         { name: 'Activity', path: '/tasks/activity', icon: Activity },
         { name: 'Deleted Tasks', path: '/tasks/deleted', icon: Trash2 },
-        { name: 'Templates', path: '/tasks/templates', icon: ScrollText, roles: ['superadmin', 'admin'] },
-        // Delivery ledger for the templates above — admin-only, matching the endpoint's own gate.
+        // Delivery ledger for task notifications (templates live in Notification Templates) —
+        // admin-only, matching the endpoint's own gate.
         { name: 'Notification Logs', path: '/tasks/logs', icon: Mail, roles: ['superadmin', 'admin'] },
       ],
     },
@@ -266,6 +259,16 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
       name: 'HRMS', path: '/hrms', icon: UserCog,
       roles: [], visibleFn: canAccessHrms,
       submodules: hrmsSubmodules,
+    },
+    {
+      // Notification Templates — every Email and WhatsApp template in the application, in one
+      // module. Shown to whoever could manage any of the template screens it replaced.
+      name: 'Notification Templates', path: '/notification-templates', icon: BellRing,
+      roles: [], visibleFn: canOpenNotificationTemplates,
+      submodules: [
+        { name: 'Email', path: '/notification-templates/email', icon: Mail },
+        { name: 'WhatsApp', path: '/notification-templates/whatsapp', icon: MessageSquare },
+      ],
     },
     { name: 'Reports', path: '/admin/reports', icon: BarChart3, roles: ['superadmin', 'admin'] },
     { name: 'Company Settings', path: '/settings', icon: Settings, roles: ['clientadmin'] },

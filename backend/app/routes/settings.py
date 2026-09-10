@@ -101,13 +101,19 @@ async def update_app_url(payload: AppUrlUpdate = Body(...),
             "source": await base_url_source()}
 
 
+# Notification templates are managed by Super Admin and Admin only — the same rule the
+# Notification Templates module (routes/notify_templates.py) applies to these rows.
+TEMPLATE_ADMIN_ROLES = {"superadmin", "admin"}
+TEMPLATE_ADMIN_ONLY = "Only Admin and Super Admin can manage notification templates"
+
+
 @router.get("/templates", response_model=List[dict])
 async def get_templates(scope: Optional[str] = None, company_id: Optional[str] = None, current_user: dict = Depends(get_current_user)):
     permissions = current_user.get("permissions", {})
     can_read = permissions.get("templates", {}).get("read", False)
     
-    if current_user.get("role") not in ["superadmin", "clientadmin"] and not can_read:
-        raise HTTPException(status_code=403, detail="Unauthorized")
+    if current_user.get("role") not in TEMPLATE_ADMIN_ROLES:
+        raise HTTPException(status_code=403, detail=TEMPLATE_ADMIN_ONLY)
 
     col = get_collection("notification_templates")
     query = {}
@@ -131,8 +137,8 @@ async def create_template(template: dict = Body(...), current_user: dict = Depen
     can_create = permissions.get("templates", {}).get("create", False)
     
     role = current_user.get("role")
-    if role not in ["superadmin", "clientadmin"] and not can_create:
-         raise HTTPException(status_code=403, detail="Unauthorized")
+    if role not in TEMPLATE_ADMIN_ROLES:
+        raise HTTPException(status_code=403, detail=TEMPLATE_ADMIN_ONLY)
     
     col = get_collection("notification_templates")
     new_template = {
@@ -179,8 +185,8 @@ async def update_template(template_id: str, template: dict = Body(...), current_
     role = current_user.get("role")
     if role == "clientadmin" and existing.get("company_id") != current_user.get("company_id"):
         raise HTTPException(status_code=403, detail="Unauthorized")
-    if role != "superadmin" and role != "clientadmin" and not can_update:
-        raise HTTPException(status_code=403, detail="Unauthorized")
+    if role not in TEMPLATE_ADMIN_ROLES:
+        raise HTTPException(status_code=403, detail=TEMPLATE_ADMIN_ONLY)
 
     # `is_active` is intentionally excluded here: template status may ONLY be changed via
     # the strictly-gated PATCH /templates/{id}/status endpoint (Admin & Super Admin only).
@@ -196,8 +202,8 @@ async def update_template(template_id: str, template: dict = Body(...), current_
 # Only Super Admin and Admin roles may flip a template's status. This is a
 # deliberately STRICTER gate than update_template: a staff member who merely
 # holds the granular `templates.update` permission must NOT be able to toggle
-# status. Client Admins may only toggle templates belonging to their own company.
-TEMPLATE_STATUS_ADMIN_ROLES = {"superadmin", "admin", "clientadmin"}
+# status.
+TEMPLATE_STATUS_ADMIN_ROLES = TEMPLATE_ADMIN_ROLES
 
 
 class TemplateStatusUpdate(BaseModel):
@@ -254,8 +260,8 @@ async def delete_template(template_id: str, current_user: dict = Depends(get_cur
     role = current_user.get("role")
     if role == "clientadmin" and existing.get("company_id") != current_user.get("company_id"):
         raise HTTPException(status_code=403, detail="Unauthorized")
-    if role != "superadmin" and role != "clientadmin" and not can_delete:
-        raise HTTPException(status_code=403, detail="Unauthorized")
+    if role not in TEMPLATE_ADMIN_ROLES:
+        raise HTTPException(status_code=403, detail=TEMPLATE_ADMIN_ONLY)
 
     await col.delete_one({"_id": ObjectId(template_id)})
     return {"message": "Template deleted"}

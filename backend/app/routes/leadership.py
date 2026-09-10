@@ -141,6 +141,19 @@ def _self_id(user: dict) -> str:
     return str(user.get("_id"))
 
 
+def _company_scope(user: dict, company_id: Optional[str]) -> Optional[str]:
+    """Like `_company_for`, but staff may decline to name one and get all companies.
+
+    Only for reads that are meaningful unscoped. Anything that WRITES against a company
+    still uses `_company_for`, which refuses rather than guessing.
+    """
+    if _is_client(user):
+        return _company_for(user, company_id)
+    if _is_staff(user):
+        return str(company_id or "").strip() or None
+    raise HTTPException(status_code=403, detail="Not authorized to access Leadership Score")
+
+
 def _company_for(user: dict, company_id: Optional[str]) -> str:
     """Client-side users are pinned to their own company whatever they pass."""
     if _is_client(user):
@@ -318,18 +331,16 @@ def _is_md(user: dict) -> bool:
 # WhatsApp — Leadership's own template, ledger and callbacks
 # ─────────────────────────────────────────────────────────────
 @router.get("/whatsapp-template")
-async def read_wa_template(company_id: Optional[str] = Query(None),
-                           current_user: dict = Depends(get_current_user)):
-    """The WhatsApp invitation template for one company.
+async def read_wa_template(current_user: dict = Depends(get_current_user)):
+    """THE WhatsApp invitation template — one template, every company.
 
-    `_require_manage` + `_company_for` give exactly the rule asked for: internal staff name
-    any company, a clientadmin is pinned to their own whatever they pass. The template is
-    wording and a Meta template NAME — it carries no giver identity — so it sits behind the
-    manage gate rather than the narrower panel one.
+    No company scope: the wording is the same for everyone, and every company-specific
+    value in it (who is asking, who they are rating, their link) is a variable filled per
+    invitation. The template is wording and a Meta template NAME — it carries no giver
+    identity — so it sits behind the manage gate rather than the narrower panel one.
     """
     _require_template_manage(current_user)
-    cid = _company_for(current_user, company_id)
-    tpl = await ls_wa.get_template(cid)
+    tpl = await ls_wa.get_template()
     tpl["can_edit"] = True
     return tpl
 
@@ -460,19 +471,20 @@ async def check_wa_template(payload: dict, current_user: dict = Depends(get_curr
 
 
 @router.post("/whatsapp-template/draft")
-async def save_wa_draft(payload: dict, company_id: Optional[str] = Query(None),
-                        current_user: dict = Depends(get_current_user)):
-    """Save this company's invitation message as a DRAFT.
+async def save_wa_draft(payload: dict, current_user: dict = Depends(get_current_user)):
+    """Save the invitation message as a DRAFT.
 
-    One template per company, so this upserts on company rather than creating rows. Category,
-    variable style, header, footer and buttons are all fixed by `authored_doc` — a feedback
-    invitation has one shape, and offering those choices would be asking questions with only
-    one right answer.
+    One template for the whole application, so this upserts the single row rather than
+    creating any. Category, variable style, header, footer and buttons are all fixed by
+    `authored_doc` — a feedback invitation has one shape, and offering those choices would
+    be asking questions with only one right answer.
+
+    Saving returns it to DRAFT for EVERY company at once, which is the cost of one shared
+    template: nothing sends again until Meta re-approves it.
     """
     _require_template_manage(current_user)
     from app.services.meta_whatsapp_service import validate_template
 
-    cid = _company_for(current_user, company_id)
     body, variables = payload.get("body"), payload.get("variables")
     doc = ls_wa.authored_doc(payload.get("name"), payload.get("language"), body, variables,
                              payload.get("category"))
@@ -485,9 +497,10 @@ async def save_wa_draft(payload: dict, company_id: Optional[str] = Query(None),
         raise HTTPException(status_code=400, detail=" ".join(errors))
 
     try:
-        return await ls_wa.save_authored_template(cid, doc, current_user)
+        return await ls_wa.save_authored_template(doc, current_user)
     except ValueError as e:
-        # A name another company already holds. Recoverable, and the message says how.
+        # A name already taken on the WhatsApp Business Account. Recoverable, and the
+        # message says how.
         raise HTTPException(status_code=400, detail=str(e))
 
 
@@ -537,18 +550,16 @@ async def test_wa_template(payload: dict, current_user: dict = Depends(get_curre
 
 
 @router.post("/whatsapp-template/submit")
-async def submit_wa_template(company_id: Optional[str] = Query(None),
-                             current_user: dict = Depends(get_current_user)):
-    """Send this company's template to Meta for review.
+async def submit_wa_template(current_user: dict = Depends(get_current_user)):
+    """Send the shared invitation template to Meta for review.
 
     It enters PENDING and Meta usually answers within minutes to hours. Nothing polls for
     the verdict — the screen's Refresh calls the sync below, which is why approval appears
     when somebody looks rather than on a timer.
     """
     _require_template_manage(current_user)
-    cid = _company_for(current_user, company_id)
     try:
-        tpl = await ls_wa.submit_template(cid, current_user)
+        tpl = await ls_wa.submit_template(current_user)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     tpl["can_edit"] = True
@@ -561,28 +572,30 @@ async def submit_wa_template(company_id: Optional[str] = Query(None),
 async def read_wa_log(company_id: Optional[str] = Query(None),
                       limit: int = Query(60, ge=1, le=200),
                       current_user: dict = Depends(get_current_user)):
-    """Recent WhatsApp send attempts for one company, without panel identity.
+    """Recent WhatsApp send attempts, without panel identity.
+
+    The template is shared but a send is not, so this is still the one company-scoped thing
+    on the screen. Staff who name no company see every company's attempts — with the picker
+    gone there is nothing for them to name, and one shared template makes "did it send
+    anywhere?" the question actually being asked. A client user is pinned to their own.
 
     Same gate as the rest of this screen — administrators, not HR. The rows carry no giver
     or leader name and only a masked number, so an administrator can see WHY a send failed
     without learning who was asked to rate whom.
     """
     _require_template_manage(current_user)
-    cid = _company_for(current_user, company_id)
-    return await ls_wa.company_log(cid, limit)
+    return await ls_wa.company_log(_company_scope(current_user, company_id), limit)
 
 
 @router.post("/whatsapp-template/sync")
-async def sync_wa_template(company_id: Optional[str] = Query(None),
-                           current_user: dict = Depends(get_current_user)):
-    """Ask Meta where this company's template stands and mirror the verdict locally.
+async def sync_wa_template(current_user: dict = Depends(get_current_user)):
+    """Ask Meta where the shared template stands and mirror the verdict locally.
 
     Safe to repeat, and safe when Meta is unreachable: an unanswered call leaves the stored
     status alone rather than reading as "your approved template disappeared".
     """
     _require_template_manage(current_user)
-    cid = _company_for(current_user, company_id)
-    tpl = await ls_wa.sync_template_status(cid)
+    tpl = await ls_wa.sync_template_status()
     tpl["can_edit"] = True
     return tpl
 
