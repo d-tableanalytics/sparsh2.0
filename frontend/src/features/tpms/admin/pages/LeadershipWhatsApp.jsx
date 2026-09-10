@@ -4,18 +4,15 @@ import {
   MessageCircle, RefreshCw, AlertTriangle, CheckCircle2, ShieldAlert,
   Send, Clock, XCircle, Info, FileCheck2, Pencil, Plus,
 } from 'lucide-react';
-import {
-  DashboardHero, HeaderSelect, HeroButton, Section,
-} from '../../common/dashboardKit';
+import { DashboardHero, HeroButton, Section } from '../../common/dashboardKit';
 import LeadershipTemplateModal from './LeadershipTemplateModal';
 import {
   getLeadershipWhatsAppLog,
   getLeadershipWhatsAppTemplate, submitLeadershipWhatsAppTemplate,
   syncLeadershipWhatsAppTemplate, checkLeadershipWaTemplate, saveLeadershipWaDraft,
 } from '../../../../services/leadershipApi';
-import {
-  canManageTemplate, errText, parseUtc, useAsync, useLeadershipCompany,
-} from '../../leadership/leadershipUtils';
+import { canManageTemplate, errText, parseUtc, useAsync } from '../../leadership/leadershipUtils';
+import { useAuth } from '../../../../context/AuthContext';
 
 /* ─────────────────────────────────────────────────────────────
    Leadership Score ▸ WhatsApp Template.
@@ -24,6 +21,15 @@ import {
    be sent until Meta has approved it — Meta renders every business-initiated message from
    its OWN approved copy, so an unapproved name fails per recipient with nothing on screen
    to explain why. Showing the verdict here is what makes that visible before it matters.
+
+   ONE TEMPLATE, EVERY COMPANY. There is no company picker because there is nothing to
+   pick: the invitation says the same thing to everybody, and the three things that differ
+   per recipient — who is asking, who they are rating, and their link — arrive as variables
+   filled when the message is sent. Writing it once means it is approved once, rather than
+   every client waiting on their own review of the same sentence.
+
+   The cost is real and worth knowing: editing sends it back to Draft for EVERYONE, so no
+   invitations go out anywhere until Meta approves it again.
 
    ENTIRELY SEPARATE FROM TPMS. Leadership's templates live in their own collection with
    their own endpoints; a TPMS template change cannot alter a feedback invitation.
@@ -58,8 +64,9 @@ const stamp = (value) => {
     { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
 };
 
-const LeadershipWhatsApp = () => {
-  const { user, staff, companyOptions, companyId, setCompanyId } = useLeadershipCompany();
+/** `embedded` — rendered inside Notification Templates, which supplies the page header. */
+const LeadershipWhatsApp = ({ embedded = false }) => {
+  const { user } = useAuth();
   // Administrators only — superadmin, admin, client admin. Writing the invitation is an
   // administrative decision, and HR does not need the screen to send links.
   const manage = canManageTemplate(user);
@@ -69,29 +76,27 @@ const LeadershipWhatsApp = () => {
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
 
-  const waiting = staff && !companyId;
-
   const loadTemplate = useCallback(
-    async () => (await getLeadershipWhatsAppTemplate(companyId)).data, [companyId]);
-  const { data: template, loading, reload } =
-    useAsync(loadTemplate, [companyId], { skip: waiting || !manage });
+    async () => (await getLeadershipWhatsAppTemplate()).data, []);
+  const { data: template, loading, reload } = useAsync(loadTemplate, [], { skip: !manage });
 
   const status = template?.status || 'DRAFT';
 
-  const loadLog = useCallback(
-    async () => (await getLeadershipWhatsAppLog(companyId)).data, [companyId]);
-  const { data: log, reload: reloadLog } =
-    useAsync(loadLog, [companyId], { skip: waiting || !manage });
+  // The ledger is the one thing here that is still per company — a send belongs to one.
+  // Staff name no company and see every attempt; a client user is pinned to their own by
+  // the server.
+  const loadLog = useCallback(async () => (await getLeadershipWhatsAppLog()).data, []);
+  const { data: log, reload: reloadLog } = useAsync(loadLog, [], { skip: !manage });
   // `can_edit` from the server is the authority; the same rule is applied locally so the
   // authoring controls are never rendered and then refused.
   const mayEdit = manage && template?.can_edit !== false;
 
-  // Company scoping is closed over here, so the modal only ever deals in a message.
+  // The modal only ever deals in a message; there is one template behind these calls.
   const templateApi = useMemo(() => ({
     check: (doc) => checkLeadershipWaTemplate(doc),
-    save: (doc) => saveLeadershipWaDraft(companyId, doc),
-    submit: () => submitLeadershipWhatsAppTemplate(companyId),
-  }), [companyId]);
+    save: (doc) => saveLeadershipWaDraft(doc),
+    submit: () => submitLeadershipWhatsAppTemplate(),
+  }), []);
 
   const run = async (kind, fn, failure) => {
     setBusy(kind);
@@ -108,10 +113,10 @@ const LeadershipWhatsApp = () => {
     }
   };
 
-  const submit = () => run('submit', () => submitLeadershipWhatsAppTemplate(companyId),
+  const submit = () => run('submit', () => submitLeadershipWhatsAppTemplate(),
     'Could not submit the template to Meta.');
 
-  const refreshStatus = () => run('sync', () => syncLeadershipWhatsAppTemplate(companyId),
+  const refreshStatus = () => run('sync', () => syncLeadershipWhatsAppTemplate(),
     'Could not check the status with Meta.');
 
   const LOG_TONE = {
@@ -132,22 +137,46 @@ const LeadershipWhatsApp = () => {
 
   return (
     <div className="space-y-5">
+      {embedded ? (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-[var(--border)] bg-[var(--bg-card)] px-4 py-3 shadow-sm">
+          <div className="min-w-0">
+            <p className="text-[13px] font-extrabold">Leadership Score · Feedback invitation</p>
+            <p className="text-[11.5px] text-[var(--text-muted)] mt-0.5">
+              One Meta-approved WhatsApp template, used for every company. Invitations cannot go out until Meta approves it.
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <button type="button" onClick={refreshStatus} disabled={!!busy}
+              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-[var(--border)] text-[12px] font-bold text-[var(--text-main)] hover:bg-[var(--input-bg)] transition-colors disabled:opacity-50">
+              <RefreshCw size={13} className={busy === 'sync' ? 'animate-spin' : ''} />
+              {busy === 'sync' ? 'Checking…' : 'Check status'}
+            </button>
+            {mayEdit && (
+              <button type="button" onClick={() => setComposerOpen(true)}
+                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-[var(--accent-indigo)] text-white text-[12px] font-bold shadow-sm hover:opacity-90 transition-opacity">
+                {template?.meta_template_name ? <Pencil size={13} /> : <Plus size={13} />}
+                {template?.meta_template_name ? 'Edit template' : 'Create template'}
+              </button>
+            )}
+          </div>
+        </div>
+      ) : (
       <DashboardHero icon={MessageCircle} title="Leadership Score — WhatsApp Template"
-        subtitle="Write the invitation, submit it to Meta, and track its approval">
-        {staff && <HeaderSelect value={companyId} onChange={setCompanyId} options={companyOptions} />}
+        subtitle="One invitation for every company. Write it, submit it to Meta, track its approval">
         <HeroButton icon={RefreshCw} onClick={refreshStatus}>
           {busy === 'sync' ? 'Checking…' : 'Check Status'}
         </HeroButton>
         {/* The page's primary action, so it sits with the other page-level controls rather
             than at the bottom of a section — writing the message is the first thing anyone
             comes here to do, and the only thing that has to happen before anything else can. */}
-        {!waiting && mayEdit && (
+        {mayEdit && (
           <HeroButton icon={template?.meta_template_name ? Pencil : Plus}
             onClick={() => setComposerOpen(true)}>
             {template?.meta_template_name ? 'Edit Template' : 'Create Template'}
           </HeroButton>
         )}
       </DashboardHero>
+      )}
 
       {error && (
         <div className="flex items-center gap-2 rounded-2xl border border-[var(--accent-red-border)] bg-[var(--accent-red-bg)] px-4 py-3 text-[12px] font-bold text-[var(--accent-red)]">
@@ -160,13 +189,7 @@ const LeadershipWhatsApp = () => {
         </div>
       )}
 
-      {waiting ? (
-        <Section title="WhatsApp Template" subtitle="Select a company" icon={MessageCircle}>
-          <div className="px-5 py-14 text-center text-[13px] font-bold text-[var(--text-muted)]">
-            Select a company to write its invitation template.
-          </div>
-        </Section>
-      ) : loading ? (
+      {loading ? (
         <Section title="WhatsApp Template" subtitle="Loading" icon={MessageCircle}>
           <div className="px-5 py-14 text-center text-[13px] font-bold text-[var(--text-muted)]">
             Loading template…
@@ -223,7 +246,7 @@ const LeadershipWhatsApp = () => {
                 <div className="flex items-start gap-2 rounded-xl border border-[var(--accent-green-border)] bg-[var(--accent-green-bg)] px-3.5 py-2.5 text-[12px] font-semibold text-[var(--accent-green)]">
                   <CheckCircle2 size={14} className="mt-[1px] shrink-0" />
                   <span>
-                    Approved by Meta. Invitations for this company will be sent with it
+                    Approved by Meta. Every company&rsquo;s invitations will be sent with it
                     {template?.active === false && ' — once you switch it on below'}.
                   </span>
                 </div>
@@ -282,8 +305,8 @@ const LeadershipWhatsApp = () => {
                 </div>
               ) : (
                 <p className="text-[12.5px] font-semibold text-[var(--text-muted)]">
-                  No template written for this company yet. Everything Meta needs — the
-                  wording, header, buttons and category — is set in the composer.
+                  No invitation template written yet. Everything Meta needs — the wording,
+                  header, buttons and category — is set in the composer.
                 </p>
               )}
 
@@ -351,22 +374,6 @@ const LeadershipWhatsApp = () => {
                 </button>
               </div>
 
-              {/* Every row stopping at `sent` reads as a broken integration. It is not —
-                  it is Meta having nowhere to report delivery to. Said plainly. */}
-              {log && log.callbacks_configured === false && log.total > 0 && (
-                <div className="flex items-start gap-2 rounded-xl border border-[var(--accent-yellow-border)] bg-[var(--accent-yellow-bg)] px-3.5 py-2.5 text-[12px] font-semibold text-[var(--accent-yellow)]">
-                  <AlertTriangle size={14} className="mt-[1px] shrink-0" />
-                  <span>
-                    Delivery callbacks are not configured, so every row stops at
-                    <b> sent</b> — that means Meta accepted the message, not that it
-                    arrived. Set <code>WHATSAPP_APP_SECRET</code> and
-                    {' '}<code>WHATSAPP_WEBHOOK_VERIFY_TOKEN</code>, then point Meta&rsquo;s
-                    webhook at <code>/api/leadership/whatsapp-status</code> to see
-                    Delivered, Read and Failed here.
-                  </span>
-                </div>
-              )}
-
               <div className="overflow-x-auto">
                 <table className="w-full text-[12px]">
                   <thead>
@@ -411,7 +418,7 @@ const LeadershipWhatsApp = () => {
                     {!(log?.rows || []).length && (
                       <tr><td colSpan={5}
                         className="py-8 text-center text-[13px] font-bold text-[var(--text-muted)]">
-                        Nothing sent yet for this company.
+                        Nothing sent yet.
                       </td></tr>
                     )}
                   </tbody>
@@ -426,7 +433,6 @@ const LeadershipWhatsApp = () => {
       <AnimatePresence>
         {composerOpen && (
           <LeadershipTemplateModal
-            key={companyId}
             template={template}
             api={templateApi}
             onClose={() => setComposerOpen(false)}

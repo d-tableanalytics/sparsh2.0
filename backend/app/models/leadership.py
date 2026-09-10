@@ -56,7 +56,10 @@ COLL_LS_ASSIGNMENTS = "tpms_leadership_assignments"  # one link per (subject, gi
 # module that is not TPMS. Separate collections also mean a TPMS retention sweep can never
 # reach feedback-invitation records, which carry panel identity.
 # ─────────────────────────────────────────────────────────────
-COLL_LS_WA_TEMPLATES = "tpms_leadership_wa_templates"   # exactly one row per company
+COLL_LS_WA_TEMPLATE  = "tpms_leadership_wa_template"    # THE invitation: exactly one row, all companies
+# Superseded by the single shared template above. Read-only now, and only as a fallback
+# while the shared one is not yet approved — see leadership_wa_service.send_invitation.
+COLL_LS_WA_TEMPLATES = "tpms_leadership_wa_templates"   # legacy: one row per company
 COLL_LS_WA_LOG       = "tpms_leadership_wa_log"         # one row per send attempt
 COLL_LS_DOCUMENTS    = "tpms_leadership_documents"      # module file store
 COLL_LS_RESPONSES   = "tpms_leadership_responses"    # one submitted feedback form
@@ -1189,7 +1192,12 @@ def _validate_group_weightages(v):
 # Every collection here is new, so no existing index is touched.
 # ─────────────────────────────────────────────────────────────
 LEADERSHIP_INDEXES = [
-    # One template per company.
+    # THE invitation, shared by every company. The unique index on `scope` is what keeps
+    # "exactly one row" true even if two administrators save at the same moment — both
+    # upserts then resolve to the same document instead of racing a second one into being.
+    (COLL_LS_WA_TEMPLATE, [("scope", 1)], {"unique": True, "name": "uniq_wa_shared"}),
+    # Legacy per-company templates. Kept indexed because they are still read as a fallback
+    # while the shared template waits on Meta; nothing writes here any more.
     (COLL_LS_WA_TEMPLATES, [("company_id", 1)], {"unique": True, "name": "uniq_wa_company"}),
     # And a Meta template name belongs to exactly one company. Those names are global to the
     # WhatsApp Business Account, so this is the backstop behind the check in

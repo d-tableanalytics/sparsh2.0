@@ -46,7 +46,7 @@ import TaskActivity from './pages/TaskActivity';
 import TaskLogsReport from './pages/TaskLogsReport';
 import Holiday from './pages/Holiday';
 import DeletedTasks from './pages/DeletedTasks';
-import NotifyTemplateAdmin from './pages/notifications/NotifyTemplateAdmin';
+import NotificationTemplates from './pages/notifications/NotificationTemplates';
 import ForgotPassword from './pages/ForgotPassword';
 import PrivateRoute from './components/common/PrivateRoute';
 import RequireTaskAccess from './components/common/RequireTaskAccess';
@@ -62,7 +62,6 @@ import EmployeeTasks from './features/tpms/admin/pages/EmployeeTasks';
 import ActivityManagement from './features/tpms/admin/pages/ActivityManagement';
 import DepartmentManagement from './features/tpms/admin/pages/DepartmentManagement';
 import ClientActivityCalendar from './features/tpms/admin/pages/ClientActivityCalendar';
-import MailTemplateAdmin from './features/tpms/admin/pages/MailTemplateAdmin';
 import ReminderRuleAdmin from './features/tpms/admin/pages/ReminderRuleAdmin';
 import FormQuestionAdmin from './features/tpms/admin/pages/FormQuestionAdmin';
 import FormLinks from './features/tpms/admin/pages/FormLinks';
@@ -71,7 +70,6 @@ import ReviewReport from './features/tpms/common/ReviewReport';
 import LeadershipCycles from './features/tpms/admin/pages/LeadershipCycles';
 import LeadershipSubjects from './features/tpms/admin/pages/LeadershipSubjects';
 import LeadershipQuestions from './features/tpms/admin/pages/LeadershipQuestions';
-import LeadershipWhatsApp from './features/tpms/admin/pages/LeadershipWhatsApp';
 import LeadershipReport from './features/tpms/common/LeadershipReport';
 import LeadershipFormPage from './features/tpms/leadership/LeadershipFormPage';
 import { CompanyProvider } from './features/tpms/smops/CompanyContext';
@@ -131,7 +129,6 @@ import AppointmentPage from './pages/hrms/public/AppointmentPage';
 import ShortlistCommittee from './features/hrms/internal/ShortlistCommittee';
 import PreboardingBoard from './features/hrms/internal/PreboardingBoard';
 import TalentPool from './features/hrms/internal/TalentPool';
-import CommTemplates from './features/hrms/internal/CommTemplates';
 import PolicyRegister from './features/hrms/internal/PolicyRegister';
 import SalaryBandManager from './features/hrms/people/SalaryBandManager';
 import SurveyPage from './pages/hrms/public/SurveyPage';
@@ -238,12 +235,23 @@ const AppRoutes = () => {
       <Route path="/tasks/activity" element={<PrivateRoute><RequireTaskAccess><TaskActivity /></RequireTaskAccess></PrivateRoute>} />
       <Route path="/tasks/holiday" element={<PrivateRoute><RequireTaskAccess><Holiday /></RequireTaskAccess></PrivateRoute>} />
       <Route path="/tasks/deleted" element={<PrivateRoute><RequireTaskAccess><DeletedTasks /></RequireTaskAccess></PrivateRoute>} />
-      {/* Delegation & Checklist notification templates. Admin-gated inside the page itself,
-          the same way the TPMS templates screen is. */}
-      <Route path="/tasks/templates" element={<PrivateRoute><RequireTaskAccess><NotifyTemplateAdmin /></RequireTaskAccess></PrivateRoute>} />
+      {/* Templates are managed in Notification Templates now; the old address still lands there. */}
+      <Route path="/tasks/templates" element={<Navigate to="/notification-templates/email?module=delegation" replace />} />
       {/* Email / WhatsApp delivery log for task notifications. The page itself is admin-only
           server-side; the sidebar entry is role-gated to match. */}
       <Route path="/tasks/logs" element={<PrivateRoute><RequireTaskAccess><TaskLogsReport /></RequireTaskAccess></PrivateRoute>} />
+
+      {/* ===========  NOTIFICATION TEMPLATES  ===========
+          Every Email and WhatsApp template in the application, in one module. Who sees which
+          part is decided inside the page (utils/notifyTemplateAccess), mirroring the template
+          screens it replaced. */}
+      <Route path="/notification-templates" element={<Navigate to="/notification-templates/email" replace />} />
+      <Route path="/notification-templates/email" element={<PrivateRoute><NotificationTemplates view="email" /></PrivateRoute>} />
+      <Route path="/notification-templates/whatsapp" element={<PrivateRoute><NotificationTemplates view="whatsapp" /></PrivateRoute>} />
+      {/* The Meta library and the Trigger picker open on the Email / WhatsApp pages themselves;
+          these addresses from earlier builds land there. */}
+      <Route path="/notification-templates/meta-templates" element={<Navigate to="/notification-templates/whatsapp" replace />} />
+      <Route path="/notification-templates/triggers" element={<Navigate to="/notification-templates/email" replace />} />
       <Route path="/sessions" element={<PrivateRoute><LearnerSessions /></PrivateRoute>} />
       <Route path="/company-portal" element={<PrivateRoute><CompanyPortal /></PrivateRoute>} />
       <Route path="/my-reports" element={<PrivateRoute><MyReports /></PrivateRoute>} />
@@ -287,7 +295,8 @@ const AppRoutes = () => {
         <Route path="client-calendar" element={<ClientActivityCalendar />} />
         <Route path="activities"     element={<ActivityManagement />} />
         <Route path="departments"    element={<DepartmentManagement />} />
-        <Route path="mail-templates" element={<MailTemplateAdmin />} />
+        {/* TPMS templates are managed in Notification Templates now. */}
+        <Route path="mail-templates" element={<Navigate to="/notification-templates/email?module=tpms" replace />} />
         <Route path="reminder-rules" element={<ReminderRuleAdmin />} />
         <Route path="form-questions" element={<FormQuestionAdmin />} />
         <Route path="form-links"     element={<FormLinks />} />
@@ -296,9 +305,8 @@ const AppRoutes = () => {
         <Route path="leadership"           element={<LeadershipCycles />} />
         <Route path="leadership/subjects"  element={<LeadershipSubjects />} />
         <Route path="leadership/questions" element={<LeadershipQuestions />} />
-        {/* Invitations go out over WhatsApp only, so the template that carries them and
-            the ledger of what happened to them live together. */}
-        <Route path="leadership/whatsapp"  element={<LeadershipWhatsApp />} />
+        {/* The invitation template (with its send log) is managed in Notification Templates. */}
+        <Route path="leadership/whatsapp"  element={<Navigate to="/notification-templates/whatsapp?module=leadership" replace />} />
         <Route path="leadership/report"    element={<LeadershipReport />} />
       </Route>
 
@@ -321,9 +329,8 @@ const AppRoutes = () => {
             page itself keeps the wording and weightages editable by staff only. A cycle
             cannot be closed until every level it scores has been signed off. */}
         <Route path="leadership/questions" element={<LeadershipQuestions />} />
-        {/* Same scoping for the WhatsApp template. The delivery ledger on that page is
-            HR-only and the page hides it for anyone else — the API refuses it regardless. */}
-        <Route path="leadership/whatsapp"  element={<LeadershipWhatsApp />} />
+        {/* The invitation template is managed in Notification Templates. */}
+        <Route path="leadership/whatsapp"  element={<Navigate to="/notification-templates/whatsapp?module=leadership" replace />} />
       </Route>
 
 
@@ -392,7 +399,8 @@ const AppRoutes = () => {
         <Route path="preboarding"          element={<PreboardingBoard />} />
         <Route path="talent-pool"          element={<TalentPool />} />
         <Route path="salary-bands"         element={<SalaryBandManager />} />
-        <Route path="communications"       element={<CommTemplates />} />
+        {/* Candidate communications are managed in Notification Templates. */}
+        <Route path="communications"       element={<Navigate to="/notification-templates/email?module=hrms" replace />} />
         <Route path="policies"             element={<PolicyRegister />} />
         {/* Phase INT-5 — the per-company rule set. Governance, not a hiring stage, so
             it lives in the sidebar and NOT in the workspace tab strip. */}

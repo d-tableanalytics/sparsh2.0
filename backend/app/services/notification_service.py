@@ -515,10 +515,17 @@ def _wa_endpoint() -> str:
 def _wa_headers() -> dict:
     return {"Authorization": f"Bearer {settings.WHATSAPP_ACCESS_TOKEN}", "Content-Type": "application/json"}
 
-async def send_whatsapp_notification(phone: str, message: str, user_id: str = None, slug: str = "manual"):
+async def send_whatsapp_notification(phone: str, message: str, user_id: str = None, slug: str = "manual",
+                                     unconfirmed_reason: str = None):
     """Free-form WhatsApp text via Meta Cloud API.
     NOTE: Meta only delivers free-form text inside the 24h customer-service
-    window. For business-initiated notifications use send_whatsapp_template()."""
+    window. For business-initiated notifications use send_whatsapp_template().
+
+    `unconfirmed_reason` — set when the send is business-initiated and so very unlikely to
+    arrive. HTTP 200 from Meta means ACCEPTED, never delivered; such a message is accepted and
+    then silently dropped. With a reason given the row is logged "accepted" (with the reason),
+    not "sent", so accepted / sent / failed stay genuinely distinct in the ledger.
+    """
     if not _wa_configured():
         logger.warning("WhatsApp Cloud API credentials not configured")
         return False
@@ -538,7 +545,14 @@ async def send_whatsapp_notification(phone: str, message: str, user_id: str = No
         }
         response = requests.post(_wa_endpoint(), json=payload, headers=_wa_headers(), timeout=20)
         if response.status_code == 200:
-            await log_notification(user_id, to, "whatsapp", slug, message, "sent")
+            # 200 == Meta ACCEPTED the request. It is not proof of delivery.
+            if unconfirmed_reason:
+                logger.warning("WhatsApp free-form '%s' accepted but likely undelivered: %s",
+                               slug, unconfirmed_reason)
+                await log_notification(user_id, to, "whatsapp", slug, message,
+                                       "accepted", unconfirmed_reason)
+            else:
+                await log_notification(user_id, to, "whatsapp", slug, message, "sent")
             return True
         error = f"WhatsApp API error: {response.status_code} - {response.text}"
         logger.error(error)
@@ -650,9 +664,19 @@ async def send_notification_from_template(user_obj: dict, template_slug: str, co
                 phone, meta_name, whatsapp_t.get("meta_lang", "en"), params, user_id, wa_slug,
                 components=components)
         else:
-            # Fallback: free-form text (only delivered within the 24h window).
+            # Fallback: free-form text. A system notification is business-initiated, and Meta
+            # only delivers free-form inside the 24h customer-service window — so it is accepted
+            # with a 200 and then dropped. Still attempted (it arrives when the window is open),
+            # but logged as "accepted" rather than claiming a delivery that did not happen.
             rendered_body = render_template(whatsapp_t["body"], context)
-            results["whatsapp"] = await send_whatsapp_notification(phone, rendered_body, user_id, wa_slug)
+            results["whatsapp"] = await send_whatsapp_notification(
+                phone, rendered_body, user_id, wa_slug,
+                unconfirmed_reason=(
+                    f"No approved Meta template is bound to '{wa_slug}', so this went as "
+                    "free-form text. WhatsApp only delivers free-form inside the 24-hour "
+                    "customer-service window, so it most likely did NOT arrive. Bind an "
+                    "approved Meta template in Notification Templates to deliver reliably."),
+            )
         print(f"[DEBUG-NOTIFY] WhatsApp send result: {results.get('whatsapp')}")
     elif delivery_type in ["whatsapp", "both"]:
         print(f"[DEBUG-NOTIFY] WhatsApp skip: phone={phone}, template={bool(whatsapp_t)}")

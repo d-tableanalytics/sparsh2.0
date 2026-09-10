@@ -1,20 +1,25 @@
 """
-Task Management ▸ Templates — the notification wiring API for Delegation and Checklist.
+Notification Templates — the wiring API for every slug-keyed notification.
 
-The counterpart to TPMS's /tpms/mail-templates + /tpms/whatsapp-templates, for the two modules
-that key their notifications by TRIGGER rather than by activity × side × event.
+The central Notification Templates module manages Delegation, Checklist, Calendar events,
+Sessions & attendance, reminders, To-Do and account mail through this router. TPMS
+(/tpms/mail-templates, /tpms/whatsapp-templates) and Leadership Score (/leadership/whatsapp-
+template) keep their own stores and endpoints; the module embeds their existing screens.
 
 Storage is deliberately the EXISTING `notification_templates` collection, the same one
-Settings ▸ Notifications has always written and `notification_service.fetch_template` has
-always read. Nothing is migrated and nothing is duplicated: this screen is a better editor over
-the same rows, so a template configured here is the one that actually sends, and one configured
-in Settings shows up here.
+`notification_service.fetch_template` has always read. Nothing is migrated and nothing is
+duplicated: this is an editor over the same rows, so a template configured here is the one
+that actually sends.
 
   slug            "<trigger>_email" | "<trigger>_whatsapp"   (unchanged)
   scope           "staff" | "company"                        (unchanged)
   body / subject  the email content                          (unchanged)
   meta_template_name / meta_lang / meta_params                (unchanged)
-  meta_header_params / meta_button_params                    NEW — header and button slots
+  meta_header_params / meta_button_params                    header and button slots
+
+WHO MAY DO WHAT: notification templates are managed by Super Admin and Admin only — every
+endpoint here, including Active / Inactive, test sends and the reminder schedule. The legacy
+/settings/templates endpoints over the same rows apply the same rule.
 
 The WhatsApp template LIBRARY is not served here: it lives on the WhatsApp Business Account and
 is shared with TPMS, so it is mounted once at /meta-templates (routes/meta_templates.py).
@@ -30,9 +35,11 @@ from app.controllers.auth_controller import get_current_user
 from app.db.mongodb import get_collection
 from app.models.notify_modules import (
     NOTIFY_MODULES,
+    SEND_BUILTIN_FALLBACK,
     module_for_slug,
     module_triggers,
     module_variables,
+    trigger_variables,
 )
 from app.models.tpms import COLL_META_TEMPLATES, META_STATUS_APPROVED
 
@@ -42,7 +49,7 @@ COLLECTION = "notification_templates"
 CHANNELS = ("email", "whatsapp")
 SCOPES = ("staff", "company")
 
-# Managing notification wiring is an Admin / Super Admin job, matching the TPMS templates screen.
+# Notification templates are an Admin / Super Admin job, everywhere.
 STAFF_ROLES = {"superadmin", "admin"}
 
 
@@ -108,10 +115,21 @@ def _button_map(raw) -> list:
 async def list_modules(current_user: dict = Depends(get_current_user)):
     """Every module, its triggers and the placeholders each may map, plus Meta health.
 
-    The screen is built entirely from this, so adding a trigger to the registry makes it
-    appear here with no frontend change."""
+    Each trigger also says whether its sending code falls back to a BUILT-IN message when no
+    template exists (`builtin`), so the screen can say "sends the standard email" rather than
+    "sends nothing" — read from notification_service.DEFAULT_TEMPLATES, never altered.
+    """
     _admin(current_user)
     from app.services.meta_whatsapp_service import config_status
+    from app.services.notification_service import DEFAULT_TEMPLATES
+
+    def _with_builtin(mod: dict, trigger: dict) -> dict:
+        fallback = mod.get("send_rule") == SEND_BUILTIN_FALLBACK
+        return {
+            **trigger,
+            "builtin": {ch: fallback and f"{trigger['slug']}_{ch}" in DEFAULT_TEMPLATES
+                        for ch in CHANNELS},
+        }
 
     return {
         "modules": [
@@ -119,12 +137,19 @@ async def list_modules(current_user: dict = Depends(get_current_user)):
                 "key": key,
                 "label": mod["label"],
                 "description": mod["description"],
-                "triggers": module_triggers(key),
+                "send_rule": mod.get("send_rule"),
+                "staff_only": bool(mod.get("staff_only")),
+                "triggers": [_with_builtin(mod, t) for t in module_triggers(key)],
                 "variables": module_variables(key),
             }
             for key, mod in NOTIFY_MODULES.items()
         ],
         "meta": config_status(),
+        # Only Admin / Super Admin reach this point, and they may do everything.
+        "access": {
+            "company_id": None, "is_admin": True,
+            "can_create": True, "can_update": True, "can_delete": True, "can_toggle": True,
+        },
     }
 
 
@@ -133,17 +158,16 @@ async def list_modules(current_user: dict = Depends(get_current_user)):
 # ─────────────────────────────────────────────────────────────
 @router.get("")
 async def list_notify_templates(
-    module: Optional[str] = Query(None, description="delegation | checklist"),
+    module: Optional[str] = Query(None, description="any registered module key; omit for all"),
     channel: Optional[str] = Query(None, description="email | whatsapp"),
     scope: str = Query("staff", description="staff | company"),
     company_id: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user),
 ):
-    """Configured templates for a module, one row per (trigger × channel).
+    """Configured templates, one row per (trigger × channel).
 
-    Returns only rows whose slug is a REGISTERED trigger — `notification_templates` also holds
-    session, user and company mail that belongs to Settings, and listing that here would offer
-    the admin templates this screen cannot meaningfully wire.
+    Returns only rows whose slug is a REGISTERED trigger, so the screen never offers a template
+    no sending code reads.
     """
     _admin(current_user)
     if scope not in SCOPES:
@@ -173,10 +197,10 @@ async def upsert_notify_template(payload: dict, current_user: dict = Depends(get
     """Create or update one trigger's template on one channel. Admin only.
 
     Keyed (slug, scope, company_id) — the same key `fetch_template` resolves on — so saving is
-    an upsert and creating and editing hit one endpoint, exactly like the TPMS screen.
+    an upsert and creating and editing hit one endpoint.
 
     `is_active` is deliberately NOT writable here: status changes only through the status
-    endpoint below, which mirrors the rule Settings already enforces.
+    endpoint below.
     """
     _admin(current_user)
 
@@ -189,7 +213,7 @@ async def upsert_notify_template(payload: dict, current_user: dict = Depends(get
         raise HTTPException(status_code=400, detail="scope must be 'staff' or 'company'")
     if not module_for_slug(trigger):
         raise HTTPException(status_code=400,
-                            detail=f"'{trigger}' is not a Delegation or Checklist trigger.")
+                            detail=f"'{trigger}' is not a registered notification trigger.")
 
     company_id = str(payload.get("company_id") or "") or None
     if scope == "company" and not company_id:
@@ -209,6 +233,7 @@ async def upsert_notify_template(payload: dict, current_user: dict = Depends(get
         "updated_by": str(current_user.get("_id") or ""),
     }
 
+    note = ""
     if channel == "email":
         doc["subject"] = str(payload.get("subject") or "")
     else:
@@ -232,15 +257,13 @@ async def upsert_notify_template(payload: dict, current_user: dict = Depends(get
     existing = await col.find_one(key)
     if existing:
         await col.update_one({"_id": existing["_id"]}, {"$set": doc})
-        return {"ok": True, "_id": str(existing["_id"]),
-                "note": (note if channel == "whatsapp" else "") or None}
+        return {"ok": True, "_id": str(existing["_id"]), "note": note or None}
 
     doc.update({"created_at": datetime.utcnow(),
                 "created_by": str(current_user.get("_id") or ""),
                 "is_active": True})
     result = await col.insert_one(doc)
-    return {"ok": True, "_id": str(result.inserted_id),
-            "note": (note if channel == "whatsapp" else "") or None}
+    return {"ok": True, "_id": str(result.inserted_id), "note": note or None}
 
 
 async def _assert_meta_approved(name: str) -> str:
@@ -275,7 +298,7 @@ async def _assert_meta_approved(name: str) -> str:
     raise HTTPException(
         status_code=400,
         detail=f"'{name}' is not an approved WhatsApp template on this business account. "
-               "Create it under WhatsApp Templates and submit it for approval first.")
+               "Create it under Meta Templates and submit it for approval first.")
 
 
 @router.patch("/{template_id}/status")
@@ -303,8 +326,8 @@ async def set_notify_template_status(template_id: str, payload: dict,
 async def delete_notify_template(template_id: str, current_user: dict = Depends(get_current_user)):
     """Remove a configured template. Admin only.
 
-    The trigger itself does not go away — it simply stops sending on that channel until a
-    template is configured for it again.
+    The trigger itself does not go away — it simply stops sending on that channel (or goes back
+    to its built-in message, where it has one) until a template is configured for it again.
     """
     _admin(current_user)
     res = await get_collection(COLLECTION).delete_one({"_id": _oid(template_id)})
@@ -397,10 +420,9 @@ async def test_notify_template(payload: dict, current_user: dict = Depends(get_c
         raise HTTPException(status_code=400, detail="Enter a valid phone number.")
 
     trigger = str(payload.get("trigger") or "").strip()
-    module = module_for_slug(trigger)
-    if not module:
+    if not module_for_slug(trigger):
         raise HTTPException(status_code=400,
-                            detail=f"'{trigger}' is not a Delegation or Checklist trigger.")
+                            detail=f"'{trigger}' is not a registered notification trigger.")
 
     scope = str(payload.get("scope") or "staff").strip().lower()
     company_id = str(payload.get("company_id") or "") or None
@@ -421,7 +443,7 @@ async def test_notify_template(payload: dict, current_user: dict = Depends(get_c
     # left over, so every slot is visibly filled and a wrong ORDER is obvious on the handset.
     supplied = payload.get("sample") or {}
     context = {v: str(supplied.get(v) or v.replace("_", " ").title())
-               for v in module_variables(module)}
+               for v in trigger_variables(trigger)}
 
     params = resolve_params(doc.get("meta_params"), context)
     components = build_send_components(

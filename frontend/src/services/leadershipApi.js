@@ -169,15 +169,17 @@ export const getLeadershipDashboard = (companyId, cycle) =>
 // Leadership keeps these entirely apart from TPMS — different collections, different
 // endpoints, different tracking — so a TPMS change can never move a feedback invitation.
 
-/** This company's approved Meta template (name, language, positional params, wording). */
-/** Recent send attempts for a company. Carries no giver or leader identity — the server
-    strips it, because this screen belongs to administrators and a delivery log naming both
-    sides would be a panel roster. */
+/** Recent send attempts. Carries no giver or leader identity — the server strips it,
+    because this screen belongs to administrators and a delivery log naming both sides would
+    be a panel roster. No company means every company, which is what staff now see: the
+    template is shared, so "did it send anywhere?" is the question. */
 export const getLeadershipWhatsAppLog = (companyId, limit = 60) =>
   api.get('/leadership/whatsapp-log', { params: { company_id: companyId || undefined, limit } });
 
-export const getLeadershipWhatsAppTemplate = (companyId) =>
-  api.get('/leadership/whatsapp-template', withCompany(companyId));
+/** THE invitation template — one for every company. Wording, name, language, variables and
+    where it stands with Meta. Not company-scoped, so it takes no id. */
+export const getLeadershipWhatsAppTemplate = () =>
+  api.get('/leadership/whatsapp-template');
 
 /* ── Template composer ──
    Wired to the shared components/whatsapp/TemplateComposer, which takes its four calls as
@@ -188,21 +190,21 @@ export const getLeadershipWhatsAppTemplate = (companyId) =>
 export const checkLeadershipWaTemplate = (doc) =>
   api.post('/leadership/whatsapp-template/check', doc);
 
-/** Save the authored definition for this company as a DRAFT. */
-export const saveLeadershipWaDraft = (companyId, doc) =>
-  api.post('/leadership/whatsapp-template/draft', doc, withCompany(companyId));
+/** Save the authored definition as a DRAFT — for every company at once. */
+export const saveLeadershipWaDraft = (doc) =>
+  api.post('/leadership/whatsapp-template/draft', doc);
 
 /** Send it to one number to read on a real handset. */
 export const testLeadershipWaTemplate = (doc) =>
   api.post('/leadership/whatsapp-template/test', doc);
 
-/** Send this company's template to Meta for review. It enters PENDING. */
-export const submitLeadershipWhatsAppTemplate = (companyId) =>
-  api.post('/leadership/whatsapp-template/submit', null, withCompany(companyId));
+/** Send the shared template to Meta for review. It enters PENDING. */
+export const submitLeadershipWhatsAppTemplate = () =>
+  api.post('/leadership/whatsapp-template/submit');
 
 /** Ask Meta where the template stands and mirror the verdict locally. */
-export const syncLeadershipWhatsAppTemplate = (companyId) =>
-  api.post('/leadership/whatsapp-template/sync', null, withCompany(companyId));
+export const syncLeadershipWhatsAppTemplate = () =>
+  api.post('/leadership/whatsapp-template/sync');
 
 // ── Documents ──
 export const getLeadershipDocuments = (companyId, cycle) =>

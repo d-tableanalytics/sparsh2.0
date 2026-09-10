@@ -3,8 +3,9 @@ import api from '../services/api';
 import { useAuth } from '../context/AuthContext';
 import { useNotification } from '../context/NotificationContext';
 import { canAccessTaskManagement, canManageTaskSettings } from '../utils/taskAccess';
-import { ShieldCheck, Plus, Trash2, Mail, Save, ToggleLeft as ToggleOff, ToggleRight as ToggleOn, Search, Info, UserCircle2, FolderTree, Tag } from 'lucide-react';
-import {  AnimatePresence , motion } from 'framer-motion';
+import { Link } from 'react-router-dom';
+import { ShieldCheck, Trash2, Mail, ToggleLeft as ToggleOff, ToggleRight as ToggleOn, UserCircle2, FolderTree, Tag, BellRing, ArrowRight } from 'lucide-react';
+import { canOpenNotificationTemplates } from '../utils/notifyTemplateAccess';
 import GeneralSection from '../components/settings/GeneralSection';
 import MetaListSection from '../components/settings/MetaListSection';
 import PasswordCard from '../components/settings/PasswordCard';
@@ -23,30 +24,8 @@ const SettingsPage = () => {
     const [newEmail, setNewEmail] = useState('');
     const [loading, setLoading] = useState(true);
 
-    // Notification Templates State
-    const [templates, setTemplates] = useState([]);
-    const [editingTemplate, setEditingTemplate] = useState(null);
-
-    // Auto-detect scope: Client roles = company, Staff roles = staff
-    const scope = user?.role?.toLowerCase().includes('client') ? 'company' : 'staff';
-
-    const [companies, setCompanies] = useState([]);
-    const [selectedCompanyId, setSelectedCompanyId] = useState('');
-    const [showCreateModal, setShowCreateModal] = useState(false);
-    const [newTemplateForm, setNewTemplateForm] = useState({ name: '', slug: 'task_created', channel: 'both' });
-    const [searchQuery, setSearchQuery] = useState('');
-    const [togglingId, setTogglingId] = useState(null); // template _id currently updating status
-
     // Permission Checks
     const canUpdateSettings = user?.role === 'superadmin' || user?.permissions?.settings?.update;
-    const canReadTemplates = user?.role === 'superadmin' || user?.role === 'clientadmin' || user?.permissions?.templates?.read;
-    const canUpdateTemplates = user?.role === 'superadmin' || user?.role === 'clientadmin' || user?.permissions?.templates?.update;
-    const canDeleteTemplates = user?.role === 'superadmin' || user?.role === 'clientadmin' || user?.permissions?.templates?.delete;
-    // Active/Inactive status is Admin & Super Admin ONLY — stricter than the template CRUD
-    // permission above (a staff member with templates.update must NOT be able to toggle).
-    // Mirrors backend TEMPLATE_STATUS_ADMIN_ROLES.
-    const canToggleStatus = ['superadmin', 'admin', 'clientadmin'].includes(user?.role);
-    const canReadCompanies = user?.role === 'superadmin' || user?.permissions?.companies?.read;
     // Task settings (categories/tags) are internal-Sparsh-only, matching the module gate.
     const canAccessTasks = canAccessTaskManagement(user);
     const canManageMeta = canManageTaskSettings(user);
@@ -65,109 +44,24 @@ const SettingsPage = () => {
 
     const [section, setSection] = useState('general');
 
-    const templateVariables = {
-        // Task Management (Delegation). The first row is shared by every task trigger; the
-        // second is event-specific and renders empty on triggers that don't carry it
-        // (e.g. {{remark}} is only populated by Follow-up Added).
-        task: ['task_name', 'topic', 'task_category', 'critical_level', 'assigned_user', 'assigned_by', 'actor_name', 'deadline', 'date', 'day', 'time', 'description', 'task_status', 'name',
-               'reason', 'doer_name', 'remark', 'old_deadline', 'new_deadline', 'parent_task', 'loop_person'],
-        event_staff: ['session_type', 'topic', 'date', 'day', 'time', 'meeting_link', 'description', 'batch_name', 'quarter', 'event_title', 'event_datetime'],
-        event_learner: ['event_title', 'date', 'day', 'time', 'meeting_link', 'description', 'event_datetime'],
-        user: ['name', 'email', 'new_role', 'updated_by', 'login_url', 'password'],
-        company: ['name', 'company_name', 'email', 'password', 'login_url'],
-        attendance: ['user_name', 'event_title', 'event_time'],
-        reminder_learner: ['event_title', 'date', 'day', 'time', 'meeting_link', 'description', 'event_datetime'],
-        reminder_staff: ['title', 'reminder_time', 'event_time', 'task_deadline', 'meeting_url', 'description'],
-        // Upcoming Task/Todo Reminder — exactly the keys send_reminder_email() puts in the
-        // context, including `name`, which the reminder_staff list above omits even though the
-        // backend has always supplied it.
-        upcoming_reminder: ['name', 'title', 'task_deadline', 'reminder_time', 'event_time', 'meeting_url', 'description'],
-        // Calendar To-do (todo_created) — exactly the keys send_todo_created_email() puts in
-        // the context. A to-do is private and self-owned, so there is no assignee, actor or
-        // meeting link to offer: showing the task or session lists here would hand the admin
-        // placeholders that always render empty.
-        todo: ['user_name', 'name', 'todo_title', 'title', 'todo_due_date', 'todo_due_time',
-               'priority', 'description', 'occurrence_note'],
-        general: ['name', 'email', 'role', 'login_url']
-    };
-
-    const getVarsForTemplate = (slug) => {
-        const isClient = user?.role?.toLowerCase().includes('client');
-        // Upcoming reminders first: both slugs must resolve to the reminder variables, and
-        // `upcoming_todo_reminder` would otherwise fall through to the generic 'reminder'
-        // branch, which hands a client-role admin the session variables the reminder context
-        // never supplies.
-        if (slug.includes('upcoming_task_reminder') || slug.includes('upcoming_todo_reminder')) {
-            return templateVariables.upcoming_reminder;
-        }
-        // Calendar To-do. Must sit AFTER the upcoming_* branch above (upcoming_todo_reminder
-        // also contains "todo" and belongs to the reminder context) and BEFORE the generic
-        // 'reminder' branch below. Without it `todo_created` fell through every test to
-        // `general`, which offered login_url and role — none of which a to-do mail supplies.
-        if (slug.includes('todo')) return templateVariables.todo;
-        // Legacy Task Reminder slug — kept resolving so an existing template row can still be
-        // opened and read after the move to the `upcoming_` slugs.
-        if (slug.includes('task_reminder')) return templateVariables.reminder_staff;
-        if (slug.includes('task')) return templateVariables.task;
-        if (slug.includes('event') || slug.includes('session_complete')) {
-            return isClient ? templateVariables.event_learner : templateVariables.event_staff;
-        }
-        if (slug.includes('user')) return templateVariables.user;
-        if (slug.includes('company')) return templateVariables.company;
-        if (slug.includes('attendance')) return templateVariables.attendance;
-        if (slug.includes('reminder')) {
-            return isClient ? templateVariables.reminder_learner : templateVariables.reminder_staff;
-        }
-        return templateVariables.general;
-    };
-
     useEffect(() => {
         const init = async () => {
             setLoading(true);
             try {
-                const requests = [];
                 const readSettings = user?.role === 'superadmin' || user?.permissions?.settings?.read;
-                const readCompanies = user?.role === 'superadmin' || user?.permissions?.companies?.read;
-
-                if (readSettings) requests.push(api.get('/settings/backdate-control'));
-                if (readSettings) requests.push(api.get('/settings/app-url'));
-                if (readCompanies) requests.push(api.get('/companies'));
-
-                if (requests.length > 0) {
-                    const responses = await Promise.all(requests);
-                    let index = 0;
-                    if (readSettings) {
-                        setConfig(responses[index].data);
-                        index++;
-                        setAppUrl(responses[index].data);
-                        index++;
-                    }
-                    if (readCompanies) {
-                        setCompanies(responses[index].data);
-                    }
-                }
-
-                if (user?.role === 'clientadmin') {
-                    setSelectedCompanyId(user.company_id);
+                if (readSettings) {
+                    const [backdate, url] = await Promise.all([
+                        api.get('/settings/backdate-control'),
+                        api.get('/settings/app-url'),
+                    ]);
+                    setConfig(backdate.data);
+                    setAppUrl(url.data);
                 }
             } catch (err) { console.error(err); }
             finally { setLoading(false); }
         };
         init();
     }, [user]);
-
-    useEffect(() => {
-        if (section === 'notifications' && canReadTemplates) fetchTemplates();
-    }, [section, scope, selectedCompanyId, canReadTemplates]);
-
-    const fetchTemplates = async () => {
-        try {
-            let url = `/settings/templates?scope=${scope}`;
-            if (scope === 'company' && selectedCompanyId) url += `&company_id=${selectedCompanyId}`;
-            const res = await api.get(url);
-            setTemplates(res.data);
-        } catch (err) { console.error(err); }
-    };
 
     const handleSave = async () => {
         try {
@@ -186,151 +80,6 @@ const SettingsPage = () => {
             showError(error.response?.data?.detail || 'Could not save the application URL.');
         } finally {
             setSavingUrl(false);
-        }
-    };
-
-    const handleTemplateSave = async () => {
-        try {
-            await api.put(`/settings/templates/${editingTemplate._id}`, editingTemplate);
-            showSuccess("Template synchronized.");
-            setEditingTemplate(null);
-            fetchTemplates();
-        } catch (err) { showError("Sync failed."); }
-    };
-
-    // Activate / deactivate a single template (Admin & Super Admin only).
-    // Uses the dedicated PATCH status endpoint, updates only the affected row in place
-    // (no full refetch / page reload), and guards against duplicate calls while in flight.
-    const handleToggleStatus = async (template, nextActive) => {
-        if (!canToggleStatus || togglingId) return;
-        const id = template._id;
-        setTogglingId(id);
-        try {
-            const res = await api.patch(`/settings/templates/${id}/status`, { is_active: nextActive });
-            const value = res.data?.is_active ?? nextActive;
-            setTemplates(prev => prev.map(t => (t._id === id ? { ...t, is_active: value } : t)));
-            setEditingTemplate(prev => (prev && prev._id === id ? { ...prev, is_active: value } : prev));
-            showSuccess(value ? "Template activated successfully." : "Template deactivated successfully.");
-        } catch (err) {
-            if (err?.response?.status === 403) {
-                showError("You are not allowed to change template status.");
-            } else {
-                showError("Unable to update template status.");
-            }
-        } finally {
-            setTogglingId(null);
-        }
-    };
-
-    const deleteTemplate = async (id) => {
-        try {
-            await api.delete(`/settings/templates/${id}`);
-            showSuccess("Template override removed");
-            fetchTemplates();
-        } catch (err) { showError("Delete failed."); }
-    };
-
-    const handleCreateTemplate = async () => {
-        try {
-            const channels = newTemplateForm.channel === 'both' ? ['email', 'whatsapp'] : [newTemplateForm.channel];
-
-            for (const channel of channels) {
-                const payload = {
-                    name: `${newTemplateForm.name} (${channel.toUpperCase()})`,
-                    slug: `${newTemplateForm.slug}_${channel}`,
-                    channel: channel,
-                    subject: channel === 'email' ? `New ${newTemplateForm.name} Notification` : undefined,
-                    body: channel === 'email' ? "Hello {{name}},\n\nAdd your email content here..." : "Hello {{name}},\n\nAdd your WhatsApp message here...",
-                    scope: scope,
-                    company_id: selectedCompanyId || null
-                };
-                await api.post('/settings/templates', payload);
-            }
-            showSuccess(`${newTemplateForm.name} infrastructure initialized`);
-            setShowCreateModal(false);
-            setNewTemplateForm({ name: '', slug: 'task_created', channel: 'both' });
-            fetchTemplates();
-        } catch (err) {
-            showError("Failed to initialize template.");
-        }
-    };
-
-    const insertVariable = (variable) => {
-        if (!editingTemplate) return;
-        const curPos = document.getElementById('template-editor')?.selectionStart || 0;
-        const text = editingTemplate.body;
-        const newText = text.slice(0, curPos) + `{{${variable}}}` + text.slice(curPos);
-        setEditingTemplate({...editingTemplate, body: newText});
-    };
-
-    // ─── WhatsApp (Meta) ordered-parameter mapping helpers ───
-    const addMetaParam = () => {
-        if (!editingTemplate) return;
-        setEditingTemplate({ ...editingTemplate, meta_params: [...(editingTemplate.meta_params || []), ''] });
-    };
-    const updateMetaParam = (idx, value) => {
-        const arr = [...(editingTemplate.meta_params || [])];
-        arr[idx] = value;
-        setEditingTemplate({ ...editingTemplate, meta_params: arr });
-    };
-    const removeMetaParam = (idx) => {
-        const arr = (editingTemplate.meta_params || []).filter((_, i) => i !== idx);
-        setEditingTemplate({ ...editingTemplate, meta_params: arr });
-    };
-
-    const filteredTemplates = templates.filter(t =>
-        t.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        t.slug.toLowerCase().includes(searchQuery.toLowerCase())
-    );
-
-    const handleInitializeDefaults = async () => {
-        try {
-            await api.post('/settings/initialize-templates');
-            showSuccess("Default infrastructure deployed");
-            fetchTemplates();
-        } catch (err) {
-            showError("Initialization failed");
-        }
-    };
-
-    const handleInitializeClientDefaults = async () => {
-        setLoading(true);
-        try {
-            const triggers = [
-                { name: 'Session Scheduled', slug: 'event_created' },
-                { name: 'Session Rescheduled', slug: 'event_updated' },
-                { name: 'Session Cancelled', slug: 'event_deleted' },
-                { name: 'Session Completed', slug: 'session_complete' },
-                { name: 'Task Created', slug: 'task_created' },
-                { name: 'Task Updated', slug: 'task_updated' },
-                { name: 'Task Deleted', slug: 'task_deleted' },
-                { name: 'Session Reminder', slug: 'reminder' }
-            ];
-
-            const channels = ['email', 'whatsapp'];
-
-            for (const t of triggers) {
-                for (const channel of channels) {
-                    const payload = {
-                        name: `${t.name} (${channel.toUpperCase()})`,
-                        slug: `${t.slug}_${channel}`,
-                        channel: channel,
-                        subject: channel === 'email' ? `Notification: ${t.name}` : undefined,
-                        body: channel === 'email'
-                            ? "Hello {{name}},\n\nThis is an automated notification regarding your session/task. Please log in to your portal for details."
-                            : "Hello {{name}},\n\nYou have an update regarding: " + t.name,
-                        scope: 'company',
-                        company_id: user.company_id
-                    };
-                    try { await api.post('/settings/templates', payload); } catch (e) { /* skip existing */ }
-                }
-            }
-            showSuccess("Internal infrastructure synchronized.");
-            fetchTemplates();
-        } catch (err) {
-            showError("Initialization failed");
-        } finally {
-            setLoading(false);
         }
     };
 
@@ -385,243 +134,19 @@ const SettingsPage = () => {
                         {/* Personal alert preferences — shown to every user (matches the design). */}
                         <NotificationSettings />
 
-                        {/* Admin template editor stays below, only for template-permission users. */}
-                        {canReadTemplates && (
-                        <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-[24px] shadow-sm overflow-hidden flex flex-col h-[78vh]">
-                            <div className="px-6 py-4 border-b border-[var(--border)] shrink-0">
-                                <h2 className="text-lg font-black text-[var(--text-main)] tracking-tight">Notification Templates</h2>
-                                <p className="text-[11px] font-medium text-[var(--text-muted)]">Manage the email &amp; WhatsApp templates sent to users.</p>
-                            </div>
-                        {/* Company selector for staff roles managing client templates */}
-                        {scope === 'company' && user?.role !== 'clientadmin' && (user?.role === 'superadmin' || canReadCompanies) && (
-                            <div className="flex items-center gap-2 px-6 py-2.5 bg-[var(--bg-card)] border-b border-[var(--border)]">
-                                <span className="text-[9px] font-black text-[var(--text-muted)] uppercase tracking-widest">Client</span>
-                                <select value={selectedCompanyId} onChange={(e) => setSelectedCompanyId(e.target.value)}
-                                    className="bg-[var(--input-bg)] border border-[var(--border)] px-3 py-1 rounded-lg text-[10px] font-bold text-[var(--text-main)] outline-none focus:border-[var(--accent-indigo)]">
-                                    <option value="">Select Company...</option>
-                                    {companies.map(c => <option key={c._id} value={c._id}>{c.name}</option>)}
-                                </select>
-                            </div>
-                        )}
-                        <div className="flex flex-1 overflow-hidden">
-                            {/* Compact Sidebar: Template Selection */}
-                            <div className="w-64 border-r border-[var(--border)] flex flex-col bg-[var(--bg-card)]">
-                                <div className="p-4 space-y-3 border-b border-[var(--border)]">
-                                    <div className="flex items-center justify-between">
-                                        <h2 className="text-[12px] font-black text-[var(--text-main)] uppercase tracking-widest">Infrastructure</h2>
-                                        <div className="flex items-center gap-1.5">
-                                            <span className="px-1.5 py-0.5 rounded-md bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] text-[8px] font-black uppercase">{scope}</span>
-                                            {canUpdateTemplates && (
-                                                <button onClick={() => setShowCreateModal(true)} title="New template (Email / WhatsApp)"
-                                                    className="flex items-center gap-0.5 px-1.5 py-0.5 rounded-md bg-[var(--accent-indigo)] text-white text-[8px] font-black uppercase tracking-wide hover:brightness-110 transition-all">
-                                                    <Plus size={10}/> New
-                                                </button>
-                                            )}
-                                        </div>
-                                    </div>
-                                    <div className="relative">
-                                        <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[var(--text-muted)]" size={12}/>
-                                        <input placeholder="Search..." value={searchQuery} onChange={e => setSearchQuery(e.target.value)}
-                                            className="w-full pl-8 pr-3 py-1.5 bg-[var(--input-bg)] rounded-lg text-[11px] font-bold outline-none border border-transparent focus:border-[var(--border)]" />
-                                    </div>
-                                </div>
-
-                                <div className="flex-1 overflow-y-auto no-scrollbar p-2 space-y-1">
-                                    {filteredTemplates.length > 0 ? (
-                                        filteredTemplates.map(t => (
-                                            <button key={t._id} onClick={() => setEditingTemplate(t)}
-                                                className={`w-full p-3 rounded-xl flex flex-col gap-0.5 text-left transition-all group border-2 ${editingTemplate?._id === t._id ? 'bg-white border-[var(--accent-indigo)] shadow-md' : 'bg-transparent border-transparent hover:bg-[var(--input-bg)]'}`}>
-                                                <div className="flex items-center justify-between">
-                                                    <span className={`flex items-center gap-1.5 text-[11px] font-black transition-colors ${editingTemplate?._id === t._id ? 'text-[var(--accent-indigo)]' : 'text-[var(--text-main)]'}`}>
-                                                        <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${t.is_active === false ? 'bg-[var(--accent-red)]' : 'bg-[var(--status-active-text)]'}`} title={t.is_active === false ? 'Inactive' : 'Active'}></span>
-                                                        {t.name} {"{"}{t.channel?.toUpperCase() || 'EMAIL'}{"}"}
-                                                    </span>
-                                                    {canDeleteTemplates && (
-                                                        <Trash2 size={12} className="text-gray-200 hover:text-red-500 transition-all cursor-pointer" onClick={(e) => { e.stopPropagation(); deleteTemplate(t._id); }} />
-                                                    )}
-                                                </div>
-                                                <div className="flex items-center justify-between">
-                                                    <span className="text-[9px] font-medium text-[var(--text-muted)] uppercase italic">/{t.slug}</span>
-                                                    <span className={`text-[7px] font-black px-1.5 py-0.5 rounded uppercase tracking-tighter ${t.is_active === false ? 'bg-[var(--accent-red-bg)] text-[var(--accent-red)]' : 'bg-[var(--status-active-bg)] text-[var(--status-active-text)]'}`}>{t.is_active === false ? 'Inactive' : 'Active'}</span>
-                                                </div>
-                                            </button>
-                                        ))
-                                    ) : (
-                                        <div className="mt-10 text-center px-4 space-y-3">
-                                            <p className="text-[9px] font-black text-gray-300 uppercase tracking-widest italic">Inventory Empty</p>
-                                            <div className="flex flex-col gap-2">
-                                                {canUpdateTemplates && (
-                                                    <button onClick={() => setShowCreateModal(true)} className="text-[10px] font-black text-[var(--accent-indigo)] hover:underline">+ New Template</button>
-                                                )}
-                                                {(user?.role === 'superadmin' || user?.role === 'clientadmin' || user?.permissions?.settings?.update) && (
-                                                    <button onClick={user?.role === 'clientadmin' ? handleInitializeClientDefaults : handleInitializeDefaults} className="text-[9px] font-black text-[var(--accent-green)] hover:underline uppercase tracking-tighter">Initialize Defaults</button>
-                                                )}
-                                            </div>
-                                        </div>
-                                    )}
-                                </div>
-                            </div>
-
-                            {/* Dense Editor Workspace */}
-                            <div className="flex-1 bg-[var(--bg-main)] overflow-y-auto p-6 no-scrollbar">
-                                {editingTemplate ? (
-                                    <div className="max-w-6xl mx-auto space-y-4 pb-10">
-                                        <div className="flex items-center justify-between">
-                                            <div className="flex items-center gap-3">
-                                                <div className="w-10 h-10 rounded-xl bg-[var(--bg-card)] border border-[var(--border)] flex items-center justify-center text-[var(--accent-indigo)]">
-                                                    <Mail size={20}/>
-                                                </div>
-                                                <div>
-                                                    <h2 className="text-lg font-black text-[var(--text-main)] leading-tight">{editingTemplate.name}</h2>
-                                                    <div className="flex items-center gap-2 mt-0.5">
-                                                        <span className="text-[8px] font-black px-1.5 py-0.5 rounded bg-gray-100 text-gray-400 uppercase tracking-tighter">/{editingTemplate.slug}</span>
-                                                        <span className={`text-[8px] font-black px-1.5 py-0.5 rounded uppercase tracking-tighter ${editingTemplate.channel === 'whatsapp' ? 'bg-green-50 text-green-500' : 'bg-indigo-50 text-indigo-500'}`}>{editingTemplate.channel || 'EMAIL'}</span>
-                                                        <span className="text-[8px] font-black px-1.5 py-0.5 rounded bg-amber-50 text-amber-500 uppercase tracking-tighter">{editingTemplate.scope}</span>
-                                                    </div>
-                                                </div>
-                                            </div>
-                                            <div className="flex items-center gap-3">
-                                                <button onClick={() => setEditingTemplate(null)} className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest hover:text-red-500 mr-1 transition-all">Discard</button>
-
-                                                {/* Status: badge + Active/Inactive toggle (Admin & Super Admin only). */}
-                                                <div className="flex items-center gap-2 pl-3 pr-1 border-l border-[var(--border)]">
-                                                    <span className="text-[9px] font-black text-[var(--text-muted)] uppercase tracking-widest">Status</span>
-                                                    <span className={`text-[9px] font-black px-2 py-0.5 rounded-md uppercase tracking-tighter inline-flex items-center gap-1.5 border ${editingTemplate.is_active === false ? 'bg-[var(--accent-red-bg)] text-[var(--accent-red)] border-[var(--accent-red-bg)]' : 'bg-[var(--status-active-bg)] text-[var(--status-active-text)] border-[var(--status-active-border)]'}`}>
-                                                        <span className={`w-1.5 h-1.5 rounded-full ${editingTemplate.is_active === false ? 'bg-[var(--accent-red)]' : 'bg-[var(--status-active-text)]'}`}></span>
-                                                        {editingTemplate.is_active === false ? 'Inactive' : 'Active'}
-                                                    </span>
-                                                    {canToggleStatus && (
-                                                        <button type="button" role="switch" aria-checked={editingTemplate.is_active !== false}
-                                                            disabled={togglingId === editingTemplate._id}
-                                                            onClick={() => handleToggleStatus(editingTemplate, editingTemplate.is_active === false)}
-                                                            title={editingTemplate.is_active === false ? 'Activate template' : 'Deactivate template'}
-                                                            className={`relative w-11 h-6 rounded-full transition-colors duration-300 shrink-0 outline-none ${togglingId === editingTemplate._id ? 'opacity-50 cursor-wait' : 'cursor-pointer'} ${editingTemplate.is_active !== false ? 'bg-[var(--accent-indigo)]' : 'bg-[var(--border)]'}`}>
-                                                            <span className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform duration-300 ${editingTemplate.is_active !== false ? 'translate-x-5' : 'translate-x-0'}`} />
-                                                        </button>
-                                                    )}
-                                                </div>
-
-                                                {canUpdateTemplates && (
-                                                    <button onClick={handleTemplateSave} className="bg-[var(--accent-indigo)] text-white px-5 py-2 rounded-xl font-black text-[11px] shadow-lg shadow-indigo-500/20 flex items-center gap-2 hover:brightness-110 transition-all uppercase tracking-widest">
-                                                        <Save size={14}/> Sync Template
-                                                    </button>
-                                                )}
-                                            </div>
-                                        </div>
-
-                                        <div className="grid grid-cols-1 xl:grid-cols-4 gap-6 items-start">
-                                            {/* Main Editor */}
-                                            <div className="xl:col-span-3 space-y-4">
-                                                <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-[24px] p-6 space-y-4 shadow-sm">
-                                                    {editingTemplate.channel !== 'whatsapp' && (
-                                                        <div className="space-y-1.5">
-                                                            <label className="text-[9px] font-black text-[var(--text-muted)] uppercase tracking-widest px-2">Email Subject Header</label>
-                                                            <input value={editingTemplate.subject} onChange={e => setEditingTemplate({...editingTemplate, subject: e.target.value})}
-                                                                className="w-full bg-[var(--input-bg)] px-4 py-2.5 border border-[var(--border)] rounded-xl font-black text-[13px] text-[var(--text-main)] outline-none focus:bg-[var(--bg-card)] focus:border-[var(--accent-indigo)] transition-all" />
-                                                        </div>
-                                                    )}
-
-                                                    <div className="space-y-1.5">
-                                                        <div className="flex items-center justify-between px-2">
-                                                            <label className="text-[9px] font-black text-[var(--text-muted)] uppercase tracking-widest">{editingTemplate.channel === 'whatsapp' ? 'Fallback Text (used only if no Meta template set)' : 'Canvas (HTML Supported)'}</label>
-                                                            <span className="text-[8px] font-black text-[var(--accent-indigo)] flex items-center gap-1"><Info size={10}/> {editingTemplate.channel === 'whatsapp' ? 'CONFIGURE META TEMPLATE BELOW ↓' : 'FULL HTML WRAPPER ACTIVE'}</span>
-                                                        </div>
-                                                        <textarea id="template-editor" rows={editingTemplate.channel === 'whatsapp' ? 4 : 18} value={editingTemplate.body} onChange={e => setEditingTemplate({...editingTemplate, body: e.target.value})}
-                                                            className="w-full bg-[var(--input-bg)] p-6 border border-[var(--border)] rounded-[20px] font-medium text-[13px] leading-relaxed text-[var(--text-main)] outline-none focus:bg-[var(--bg-card)] focus:border-[var(--accent-indigo)] transition-all font-mono" />
-                                                    </div>
-                                                </div>
-
-                                                {/* WhatsApp Cloud API (Meta) configuration */}
-                                                {editingTemplate.channel === 'whatsapp' && (
-                                                    <div className="bg-[var(--bg-card)] border border-green-200 rounded-[24px] p-6 space-y-4 shadow-sm">
-                                                        <div>
-                                                            <h3 className="text-[11px] font-black text-green-600 uppercase tracking-widest flex items-center gap-2">
-                                                                <Info size={12}/> WhatsApp Cloud API (Meta)
-                                                            </h3>
-                                                            <p className="text-[10px] font-medium text-[var(--text-muted)] leading-relaxed mt-1.5">
-                                                                Business-initiated WhatsApp must use a template you created &amp; got <b>approved in Meta WhatsApp Manager</b>. Enter that approved name + language, then map each <span className="font-mono font-black">{"{{1}}, {{2}}…"}</span> placeholder to a variable in order. Leave the name blank to fall back to the free-text body above (only delivered within Meta's 24h window).
-                                                            </p>
-                                                        </div>
-
-                                                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                                                            <div className="sm:col-span-2 space-y-1.5">
-                                                                <label className="text-[9px] font-black text-[var(--text-muted)] uppercase tracking-widest px-2">Meta Template Name</label>
-                                                                <input value={editingTemplate.meta_template_name || ''} onChange={e => setEditingTemplate({...editingTemplate, meta_template_name: e.target.value})}
-                                                                    placeholder="e.g. task_created_staff"
-                                                                    className="w-full bg-[var(--input-bg)] px-4 py-2.5 border border-[var(--border)] rounded-xl font-black text-[13px] text-[var(--text-main)] outline-none focus:border-green-500 transition-all font-mono" />
-                                                            </div>
-                                                            <div className="space-y-1.5">
-                                                                <label className="text-[9px] font-black text-[var(--text-muted)] uppercase tracking-widest px-2">Language</label>
-                                                                <input value={editingTemplate.meta_lang || 'en'} onChange={e => setEditingTemplate({...editingTemplate, meta_lang: e.target.value})}
-                                                                    placeholder="en"
-                                                                    className="w-full bg-[var(--input-bg)] px-4 py-2.5 border border-[var(--border)] rounded-xl font-black text-[13px] text-[var(--text-main)] outline-none focus:border-green-500 transition-all" />
-                                                            </div>
-                                                        </div>
-
-                                                        <div className="space-y-2">
-                                                            <div className="flex items-center justify-between px-2">
-                                                                <label className="text-[9px] font-black text-[var(--text-muted)] uppercase tracking-widest">Body Parameters (order = {"{{1}}, {{2}}…"})</label>
-                                                                <button onClick={addMetaParam} className="text-[9px] font-black text-green-600 uppercase tracking-widest flex items-center gap-1 hover:brightness-110 transition-all">
-                                                                    <Plus size={11}/> Add Parameter
-                                                                </button>
-                                                            </div>
-                                                            {(editingTemplate.meta_params || []).length === 0 && (
-                                                                <p className="text-[10px] font-medium text-[var(--text-muted)] px-2 italic">No parameters mapped yet — add one for each {"{{n}}"} in your approved template.</p>
-                                                            )}
-                                                            <div className="space-y-2">
-                                                                {(editingTemplate.meta_params || []).map((param, idx) => (
-                                                                    <div key={idx} className="flex items-center gap-2">
-                                                                        <span className="text-[11px] font-black text-green-600 w-10 shrink-0 font-mono">{"{{" + (idx + 1) + "}}"}</span>
-                                                                        <select value={param} onChange={e => updateMetaParam(idx, e.target.value)}
-                                                                            className="flex-1 bg-[var(--input-bg)] px-3 py-2 border border-[var(--border)] rounded-lg font-bold text-[12px] text-[var(--text-main)] outline-none focus:border-green-500 transition-all">
-                                                                            <option value="">— select variable —</option>
-                                                                            {getVarsForTemplate(editingTemplate.slug).map(v => (
-                                                                                <option key={v} value={v}>{v}</option>
-                                                                            ))}
-                                                                        </select>
-                                                                        <button onClick={() => removeMetaParam(idx)} className="text-[var(--text-muted)] hover:text-red-500 p-1 transition-all"><Trash2 size={14}/></button>
-                                                                    </div>
-                                                                ))}
-                                                            </div>
-                                                        </div>
-                                                    </div>
-                                                )}
-                                            </div>
-
-                                            {/* Compact Side Panel: Variables */}
-                                            <div className="space-y-4">
-                                                <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-[24px] p-4 shadow-sm">
-                                                    <h3 className="text-[10px] font-black text-[var(--text-main)] uppercase tracking-widest border-b border-[var(--border)] pb-3 mb-3 flex items-center gap-2"> <Plus size={12}/> Placeholders</h3>
-                                                    <div className="flex flex-wrap gap-1.5">
-                                                        {getVarsForTemplate(editingTemplate.slug).map(v => (
-                                                            <button key={v} onClick={() => insertVariable(v)}
-                                                                className="px-2 py-1 bg-[var(--input-bg)] hover:bg-[var(--accent-indigo-bg)] hover:text-[var(--accent-indigo)] rounded-lg border border-[var(--border)] text-[9px] font-black transition-all">
-                                                                {"{{" + v + "}}"}
-                                                            </button>
-                                                        ))}
-                                                    </div>
-                                                    <div className="mt-6 p-3 bg-indigo-50/30 rounded-xl border border-indigo-100/50">
-                                                         <p className="text-[9px] font-black text-indigo-400 uppercase tracking-tighter mb-1">Navigation Tip</p>
-                                                         <p className="text-[9px] font-medium text-indigo-300 leading-tight">
-                                                             Type {"{{"} in editor to see all placeholders. Click any tag to auto-inject.
-                                                         </p>
-                                                    </div>
-                                                </div>
-                                            </div>
-                                        </div>
-                                    </div>
-                                ) : (
-                                    <div className="h-full flex flex-col items-center justify-center text-center opacity-30">
-                                        <div className="w-20 h-20 border-2 border-dashed border-gray-400 rounded-full flex items-center justify-center">
-                                            <Mail size={32} className="text-gray-400" />
-                                        </div>
-                                        <h3 className="mt-6 text-sm font-black text-[var(--text-main)] uppercase tracking-[0.2em]">Communication Hub</h3>
-                                        <p className="text-[11px] font-medium text-[var(--text-muted)] mt-1">Select a template from the left panel to begin editing.</p>
-                                    </div>
-                                )}
-                            </div>
-                        </div>
-                        </div>
+                        {/* Email & WhatsApp templates are managed in one module now. */}
+                        {canOpenNotificationTemplates(user) && (
+                            <Link to="/notification-templates/email"
+                                className="group max-w-4xl mx-auto w-full flex items-center gap-4 p-5 bg-[var(--bg-card)] border border-[var(--border)] rounded-[24px] shadow-sm hover:border-[var(--accent-indigo-border)] transition-all">
+                                <span className="w-11 h-11 rounded-2xl flex items-center justify-center bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] shrink-0">
+                                    <BellRing size={20} />
+                                </span>
+                                <span className="flex-1 min-w-0">
+                                    <span className="block text-[15px] font-bold text-[var(--text-main)] tracking-tight">Notification Templates</span>
+                                    <span className="block text-[11.5px] font-medium text-[var(--text-muted)]">Email and WhatsApp templates for every module are managed in one place.</span>
+                                </span>
+                                <ArrowRight size={18} className="text-[var(--text-muted)] group-hover:text-[var(--accent-indigo)] transition-colors shrink-0" />
+                            </Link>
                         )}
                     </div>
                 ) : (
@@ -778,112 +303,6 @@ const SettingsPage = () => {
                 )}
             </main>
 
-            {/* Create Template Modal */}
-            <AnimatePresence>
-                {showCreateModal && (
-                    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-                        className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
-                        <motion.div initial={{ scale: 0.9, y: 20 }} animate={{ scale: 1, y: 0 }} exit={{ scale: 0.9, y: 20 }}
-                            className="bg-white w-full max-w-sm rounded-[32px] overflow-hidden shadow-2xl">
-                            <div className="p-6 space-y-6">
-                                <div className="flex items-center justify-between">
-                                    <h2 className="text-[16px] font-black text-gray-900 uppercase italic">New Override</h2>
-                                    <button onClick={() => setShowCreateModal(false)} className="text-gray-300 hover:text-black"> <Trash2 size={20} /> </button>
-                                </div>
-
-                                <div className="space-y-4">
-                                    <div className="space-y-1">
-                                        <label className="text-[9px] font-black text-gray-400 uppercase tracking-widest px-1">Friendly Name</label>
-                                        <input value={newTemplateForm.name} onChange={e => setNewTemplateForm({...newTemplateForm, name: e.target.value})} placeholder="Ex: Custom Session Email" className="w-full bg-gray-50 border border-gray-100 p-3 rounded-xl font-bold text-[12px] outline-none focus:border-indigo-500" />
-                                    </div>
-                                    <div className="space-y-1">
-                                        <label className="text-[9px] font-black text-gray-400 uppercase tracking-widest px-1">Trigger Event</label>
-                                        <select value={newTemplateForm.slug} onChange={e => setNewTemplateForm({...newTemplateForm, slug: e.target.value})} className="w-full bg-gray-50 border border-gray-100 p-3 rounded-xl font-bold text-[12px] outline-none">
-                                            {/* Calendar module. Tasks are NOT here: a type=="task" doc belongs
-                                                to the Task Management module below and fires only its triggers. */}
-                                            <optgroup label="Sessions">
-                                                <option value="event_created">Session Scheduled</option>
-                                                <option value="event_updated">Session Rescheduled</option>
-                                                <option value="event_deleted">Session Cancelled</option>
-                                                <option value="session_complete">Session Completed</option>
-                                                <option value="reminder">Session Reminder</option>
-                                            </optgroup>
-                                            {/* Calendar To-do. Its own group rather than a Session or a Task:
-                                                a to-do is private and self-owned — never assigned, never
-                                                delegated — so it renders neither module's mail. The backend
-                                                has seeded this trigger all along (routes/settings.py
-                                                TEMPLATE_SEEDS); it was simply never offered here, so nobody
-                                                could open it to edit or deactivate it. */}
-                                            <optgroup label="Calendar To-do">
-                                                <option value="todo_created">Todo Created</option>
-                                            </optgroup>
-                                            {/* Task Management (Delegation) module — independent triggers,
-                                                same Email/WhatsApp engine. See backend task_notifications.py. */}
-                                            <optgroup label="Task Management">
-                                                <option value="task_created">Task Created</option>
-                                                <option value="task_assigned">Task Assigned</option>
-                                                {/* Goes to the ASSIGNER, not the assignee — a receipt
-                                                    sent alongside Task Assigned above, never instead
-                                                    of it. Own placeholders: assigner_name,
-                                                    assignee_name, task_name, priority, due_date,
-                                                    assigned_date, company_name. */}
-                                                <option value="task_assignment_confirmation">Task Assignment Confirmation (Assigner)</option>
-                                                <option value="task_updated">Task Updated</option>
-                                                <option value="task_deleted">Task Deleted</option>
-                                                <option value="task_accepted">Task Accepted</option>
-                                                <option value="task_completed">Task Completed</option>
-                                                <option value="task_reopened">Task Reopened</option>
-                                                <option value="task_verification_requested">Verification Requested</option>
-                                                <option value="task_verification_approved">Verification Approved</option>
-                                                <option value="task_deadline_revised">Deadline Revised</option>
-                                                <option value="task_blocked">Task Blocked</option>
-                                                <option value="task_dependent_on_other">Dependent on Other</option>
-                                                <option value="task_follow_up_added">Follow-up Added</option>
-                                                <option value="task_subtask_created">Subtask Created</option>
-                                                <option value="task_in_loop_added">In Loop Person</option>
-                                            </optgroup>
-                                            {/* Upcoming reminders — fired ONLY by the scheduler when a
-                                                reminder's time arrives, never on create/update. Grouped
-                                                separately so they are not mistaken for the task lifecycle
-                                                templates above. */}
-                                            <optgroup label="Upcoming Reminders">
-                                                <option value="upcoming_task_reminder">Upcoming Task Reminder</option>
-                                                <option value="upcoming_todo_reminder">Upcoming Todo Reminder</option>
-                                            </optgroup>
-                                            {user?.role === 'superadmin' && (
-                                                <>
-                                                    <optgroup label="User Management">
-                                                        <option value="user_creation">User Created</option>
-                                                        <option value="user_edit">Profile Updated</option>
-                                                        <option value="user_access_control_change">Access Changed</option>
-                                                        <option value="company_registration">New Company</option>
-                                                    </optgroup>
-                                                    <optgroup label="Attendance (Staff Only)">
-                                                        <option value="attendance_thanks">Attendance Thanks</option>
-                                                        <option value="attendance_absent">Attendance Absent</option>
-                                                    </optgroup>
-                                                </>
-                                            )}
-                                        </select>
-                                    </div>
-                                    <div className="space-y-1">
-                                        <label className="text-[9px] font-black text-gray-400 uppercase tracking-widest px-1">Channels</label>
-                                        <select value={newTemplateForm.channel} onChange={e => setNewTemplateForm({...newTemplateForm, channel: e.target.value})} className="w-full bg-gray-50 border border-gray-100 p-3 rounded-xl font-bold text-[12px] outline-none">
-                                            <option value="both">Both (Email & WhatsApp)</option>
-                                            <option value="email">Email Only</option>
-                                            <option value="whatsapp">WhatsApp Only</option>
-                                        </select>
-                                    </div>
-                                </div>
-
-                                <button onClick={handleCreateTemplate} className="w-full bg-indigo-600 text-white py-4 rounded-2xl font-black text-[12px] uppercase tracking-widest shadow-xl shadow-indigo-100 hover:brightness-110 active:scale-95 transition-all">
-                                    Initialize Infrastructure
-                                </button>
-                            </div>
-                        </motion.div>
-                    </motion.div>
-                )}
-            </AnimatePresence>
         </div>
     );
 };

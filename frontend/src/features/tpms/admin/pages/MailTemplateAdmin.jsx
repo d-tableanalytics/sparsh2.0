@@ -5,7 +5,7 @@ import {
   MessageCircle, BadgeCheck, Eye, Info, Trash2,
 } from 'lucide-react';
 import {
-  DashboardHero, HeroButton, HeaderSelect, Section, Th, Td, TableShell, usePaged, Pager,
+  DashboardHero, HeroButton, HeaderSelect, FilterSelect, Section, Th, Td, TableShell, usePaged, Pager,
 } from '../../common/dashboardKit';
 import TemplateComposer from '../../../../components/whatsapp/TemplateComposer';
 import { EDITABLE_STATUSES, STATUS_TONE } from '../../../../components/whatsapp/constants';
@@ -33,7 +33,8 @@ import { isTpmsAdmin } from '../../access';
      WhatsApp wiring tab can only point at one Meta has APPROVED, which is why the library
      sits beside it rather than on a screen of its own.
 
-   Route: /tpms/admin/mail-templates   (wired separately)
+   Shown inside Notification Templates ▸ Email / WhatsApp ▸ TPMS (embedded); the old
+   /tpms/admin/mail-templates address redirects there.
    ───────────────────────────────────────────────────────────── */
 
 // Alias so the animated element is a plain JSX identifier (keeps `motion` counted
@@ -282,8 +283,9 @@ const Select = ({ value, onChange, options }) => (
   </select>
 );
 
-/** Seed the form from a template row (edit) or a blank (add). */
-const seedForm = (editing) => (editing
+/** Seed the form from a template row (edit) or a blank (add). `preset` pre-selects fields on
+ *  an add — Notification Templates opens this with the event already chosen. */
+const seedForm = (editing, preset) => (editing
   ? {
     activity: editing.activity || '*',
     side: SIDE_OPTIONS.includes(editing.side) ? editing.side : 'staff',
@@ -301,16 +303,16 @@ const seedForm = (editing) => (editing
       : [],
     active: editing.active !== false,
   }
-  : EMPTY_FORM);
+  : { ...EMPTY_FORM, ...(preset || {}) });
 
 /**
  * Add / Edit modal — reused for both create and update flows (both upsert).
  * Mounted only while open (via a keyed parent), so state seeds cleanly from
  * props on mount — no effect-driven syncing needed.
  */
-const TemplateModal = ({ editing, activityOptions, channel = 'mail', variableFields = [],
+const TemplateModal = ({ editing, preset, activityOptions, channel = 'mail', variableFields = [],
   approvedTemplates = [], onClose, onSubmit }) => {
-  const [form, setForm] = useState(() => seedForm(editing));
+  const [form, setForm] = useState(() => seedForm(editing, preset));
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState('');
 
@@ -614,7 +616,13 @@ const TemplateModal = ({ editing, activityOptions, channel = 'mail', variableFie
   );
 };
 
-const MailTemplateAdmin = () => {
+/**
+ * `embedded` — rendered inside Notification Templates, which supplies the page header, the
+ * channel (`channel`: 'mail' | 'whatsapp') and the shared Meta template library, so this screen
+ * shows only its own TPMS notifications. `createPreset` opens the Add form with that event
+ * chosen; `onPresetUsed` lets the host clear it.
+ */
+const MailTemplateAdmin = ({ embedded = false, channel: fixedChannel, createPreset, onPresetUsed }) => {
   const { user } = useAuth();
   const admin = isTpmsAdmin(user);
 
@@ -628,7 +636,9 @@ const MailTemplateAdmin = () => {
   // template and talks to Meta. Both live on the WhatsApp tab, so the kind is explicit.
   const [modalKind, setModalKind] = useState('wiring');
   const [editing, setEditing] = useState(null);
-  const [channel, setChannel] = useState('mail');
+  const [channel, setChannel] = useState(fixedChannel || 'mail');
+  // Fields pre-selected on an Add opened from Notification Templates.
+  const [preset, setPreset] = useState(null);
   // The row awaiting confirmation before its status flips. null = no dialog open.
   const [confirmTarget, setConfirmTarget] = useState(null);
   const [statusSaving, setStatusSaving] = useState(false);
@@ -774,7 +784,7 @@ const MailTemplateAdmin = () => {
   const pTemplates = usePaged(templates || [], 10);
   const pLibrary = usePaged(library || [], 10);
 
-  const openWiring = (row = null) => { setModalKind('wiring'); setEditing(row); setModalOpen(true); };
+  const openWiring = (row = null) => { setPreset(null); setModalKind('wiring'); setEditing(row); setModalOpen(true); };
   const openLibrary = (row = null) => { setModalKind('library'); setEditing(row); setModalOpen(true); };
 
   const handleSubmit = async (payload) => {
@@ -791,6 +801,16 @@ const MailTemplateAdmin = () => {
       getWhatsappVariables().then(({ data }) => setVariableFields(data.fields || [])).catch(() => {});
     }
   }, [admin, variableFields.length]);
+
+  // Opened from Notification Templates' "New template" with the event already chosen.
+  useEffect(() => {
+    if (!createPreset) return;
+    setPreset({ event: createPreset });
+    setModalKind('wiring');
+    setEditing(null);
+    setModalOpen(true);
+    onPresetUsed?.();
+  }, [createPreset, onPresetUsed]);
 
   if (!admin) {
     return (
@@ -812,6 +832,20 @@ const MailTemplateAdmin = () => {
 
   return (
     <div className="space-y-5">
+      {embedded && (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-[var(--border)] bg-[var(--bg-card)] px-4 py-3 shadow-sm">
+          <div className="min-w-0">
+            <p className="text-[13px] font-extrabold">TPMS · {channelLabel} notifications</p>
+            <p className="text-[11.5px] text-[var(--text-muted)] mt-0.5">
+              Each activity, side (Sparsh team or client company) and event can have its own template.
+              An activity without one uses the &quot;*&quot; (all activities) template.
+            </p>
+          </div>
+          <FilterSelect value={filter} onChange={setFilter} options={filterOptions} />
+        </div>
+      )}
+
+      {!embedded && (
       <DashboardHero icon={Mail} title="Notification Templates"
         subtitle={isWhatsapp
           ? 'Create WhatsApp templates, get them approved by Meta, and wire the approved ones to activities, sides & events'
@@ -833,8 +867,9 @@ const MailTemplateAdmin = () => {
           Refresh
         </HeroButton>
       </DashboardHero>
+      )}
 
-      {isWhatsapp && <ConnectionBanner meta={meta} />}
+      {isWhatsapp && !embedded && <ConnectionBanner meta={meta} />}
 
       {notice && (
         <div className="flex items-start gap-2 rounded-2xl border border-[var(--accent-green-border)] bg-[var(--accent-green-bg)] px-4 py-3 text-[12px] font-bold text-[var(--accent-green)]">
@@ -852,7 +887,7 @@ const MailTemplateAdmin = () => {
              Account, with where each one has got to in Meta's review. Sits above the
              notifications because a template must exist and be approved before anything can
              be wired to it. ── */}
-      {isWhatsapp && (
+      {isWhatsapp && !embedded && (
         <Section
           title="WhatsApp Templates"
           subtitle={library.length
@@ -1041,8 +1076,9 @@ const MailTemplateAdmin = () => {
           />
         ) : (
           <TemplateModal
-            key={editing?._id || 'new'}
+            key={editing?._id || (preset ? `new-${preset.event}` : 'new')}
             editing={editing}
+            preset={preset}
             activityOptions={formActivityOptions}
             channel={channel}
             variableFields={variableFields}
