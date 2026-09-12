@@ -92,26 +92,40 @@ const Breakdown = ({ row, columns }) => (
           </div>
 
           <dl className="mt-2.5 space-y-1 text-[11.5px]">
-            <div className="flex items-center justify-between gap-2">
-              <dt className="text-[var(--text-muted)]">
-                {p.source === 'form' ? 'Rating points' : 'Achieved / Assigned'}
-              </dt>
-              <dd className="font-bold tabular-nums">
-                {fmtNum(p.achieved, '0')} / {fmtNum(p.assigned, '0')}
-                {/* A part-finished checklist earns part of a task, so `achieved` can read
-                    3.9 of 5. Spell out the split rather than leaving a puzzling decimal. */}
-                {p.source === 'task' && p.partial > 0 && (
-                  <span className="text-[10px] font-medium text-[var(--text-muted)]">
-                    {' '}({p.completed} done + {p.partial} part-done)
-                  </span>
-                )}
-                {p.source === 'form' && p.ratings > 0 && (
-                  <span className="text-[10px] font-medium text-[var(--text-muted)]">
-                    {' '}({p.ratings} × {p.scale_max})
-                  </span>
-                )}
-              </dd>
-            </div>
+            {/* TASKS FIRST, AS A HEADCOUNT. `achieved`/`assigned` are sums of per-task
+                WEIGHTS (irm_weight), not tasks: one task set to weight 5 makes three tasks
+                read as "6 / 7". That line was labelled "Achieved / Assigned", so a person
+                with 3 delegated tasks saw 7 and had no way to reconcile it. The real count
+                leads now, and the weighted pair is shown underneath, named for what it is —
+                and only when the weights actually differ from 1 (`p.weighted`). */}
+            {p.source === 'task' && (
+              <div className="flex items-center justify-between gap-2">
+                <dt className="text-[var(--text-muted)]">Tasks</dt>
+                <dd className="font-bold tabular-nums">
+                  {fmtNum(p.completed, '0')} / {fmtNum(p.count, '0')}
+                  {p.partial > 0 && (
+                    <span className="text-[10px] font-medium text-[var(--text-muted)]">
+                      {' '}(+{p.partial} part-done)
+                    </span>
+                  )}
+                </dd>
+              </div>
+            )}
+            {(p.source !== 'task' || p.weighted) && (
+              <div className="flex items-center justify-between gap-2">
+                <dt className="text-[var(--text-muted)]">
+                  {p.source === 'form' ? 'Rating points' : 'Weighted credit'}
+                </dt>
+                <dd className="font-bold tabular-nums">
+                  {fmtNum(p.achieved, '0')} / {fmtNum(p.assigned, '0')}
+                  {p.source === 'form' && p.ratings > 0 && (
+                    <span className="text-[10px] font-medium text-[var(--text-muted)]">
+                      {' '}({p.ratings} × {p.scale_max})
+                    </span>
+                  )}
+                </dd>
+              </div>
+            )}
             <div className="flex items-center justify-between gap-2">
               <dt className="text-[var(--text-muted)]">Achievement %</dt>
               <dd className="font-bold tabular-nums" style={{ color: scoreColor(p.achievement) }}>

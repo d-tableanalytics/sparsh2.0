@@ -518,6 +518,24 @@ def _series_end_cutoff(value):
     return end_of_day_ist.astimezone(timezone.utc)
 
 
+async def _expand_task_series(head: dict, end_date_str) -> list:
+    """Every occurrence AFTER `head`, up to its Repeat End Date.
+
+    A recurring task used to exist as a single occurrence that the nightly engine extended one
+    day at a time, so the rest of the schedule simply was not there to look at — a checklist
+    running to the 20th showed nothing past today, and its end date had no occurrences behind
+    it. Writing the series up front makes the whole plan visible the moment it is saved.
+
+    Dates come from the SAME builder the repeating-todo path and the nightly engine use, so
+    cadence, holidays and weekly offs land identically however a date was produced. The nightly
+    engine stays exactly as it was: it skips dates that already exist, and it still carries
+    series with no Repeat End Date, which cannot be pre-generated at all.
+    """
+    from app.services.recurring_task_service import build_series_occurrences
+    occurrences, _truncated = await build_series_occurrences(head, _series_end_cutoff(end_date_str))
+    return occurrences
+
+
 def _strip_todo_sharing(doc: dict) -> None:
     """Force a todo to be personal: no assignees, no watchers, no delegation of any kind.
     Applied on create AND update so a hand-crafted payload can't turn a todo into shared work."""
@@ -792,6 +810,20 @@ async def create_event(event: CalendarEventCreate, background_tasks: BackgroundT
             docs.append(d)
         insert_res = await col.insert_many(docs)
         ids = [str(_id) for _id in insert_res.inserted_ids]
+        # Each assignee owns an independent series, so each one is pre-generated separately
+        # (see _expand_task_series). Occurrences are inserted WITHOUT notifications — the
+        # assignment is announced once per assignee in the loop below, not once per date.
+        if is_repeating and end_date_str:
+            occurrences = []
+            for d in docs:
+                try:
+                    occurrences.extend(await _expand_task_series(d, end_date_str))
+                except Exception as e:
+                    # A series that fails to expand still has its head: the nightly engine
+                    # rolls it forward exactly as it did before, so no task is ever lost.
+                    print(f"TASK SERIES PRE-GENERATION FAILURE: {e}")
+            if occurrences:
+                await col.insert_many(occurrences)
         # Mirror the single-create side effects (notifications, meta sync, activity, realtime)
         # for every created doc so nothing downstream behaves differently per assignee.
         for d, _id in zip(docs, ids):
@@ -812,6 +844,20 @@ async def create_event(event: CalendarEventCreate, background_tasks: BackgroundT
 
     result = await col.insert_one(event_dict)
     event_dict["id"] = str(result.inserted_id)
+
+    # The head is inserted above; the rest of a recurring task's schedule is written here so the
+    # whole series exists immediately (see _expand_task_series). Deliberately silent: the single
+    # "task assigned" notification fires below, as it always has — one per assignment, never one
+    # per generated date.
+    if event_dict.get("type") == "task" and is_repeating and end_date_str:
+        try:
+            occurrences = await _expand_task_series(event_dict, end_date_str)
+            if occurrences:
+                await col.insert_many(occurrences)
+        except Exception as e:
+            # The task itself is already saved; the nightly engine extends it as before.
+            print(f"TASK SERIES PRE-GENERATION FAILURE: {e}")
+
     is_task = event_dict.get("type") == "task"
     if is_task:
         # A subtask announces itself as a subtask, not as a brand-new top-level task.
@@ -1669,7 +1715,26 @@ async def complete_event(event_id: str, background_tasks: BackgroundTasks, curre
     if not (is_admin or has_update_perm or is_creator):
          raise HTTPException(status_code=403, detail="Not authorized")
 
-    await get_collection(col_name).update_one({"_id": ObjectId(event_id)}, {"$set": {"status": "completed", "updated_at": datetime.utcnow()}})
+    updates = {"status": "completed", "updated_at": datetime.utcnow()}
+    if event.get("type") == TASK_TYPE:
+        # This quick-action is a second door onto the same completion as PATCH
+        # /tasks/{id}/status (tasks.py) — without the same checkpoint gate, it let a Task or
+        # Delegation (recurring or one-time) be marked done here while its check points sat
+        # unticked, and it never touched `workflow_status`, so the Task module kept showing
+        # the task as still in progress. Both rules apply identically to every task, so no
+        # recurring/one-time branch is needed.
+        pending_items = [c for c in (event.get("checklist") or []) if not (isinstance(c, dict) and c.get("completed"))]
+        if pending_items:
+            done = len(event.get("checklist") or []) - len(pending_items)
+            raise HTTPException(
+                status_code=400,
+                detail=f"Complete all check points before completing this task ({done}/{len(event.get('checklist') or [])} done).",
+            )
+        updates["workflow_status"] = "completed"
+        updates["completed_at"] = datetime.utcnow()
+        updates["completed_by"] = str(current_user["_id"])
+
+    await get_collection(col_name).update_one({"_id": ObjectId(event_id)}, {"$set": updates})
     await sync_event_to_collection(event_id)
 
     # A completed todo notifies nobody — it is personal, and it has no attendees by design.

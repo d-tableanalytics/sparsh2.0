@@ -12,10 +12,11 @@ import { getHolidays } from '../../services/holidayApi';
 import { useAuth } from '../../context/AuthContext';
 import { useNotification } from '../../context/NotificationContext';
 import { STATUS_CONFIG, LIST_CARD_ORDER, CARD_KEY_TO_STATUS, statusOptions, statusOptionLabel, REASON_REQUIRED_STATUSES, VERIFICATION_ACTIONS } from './statusConfig';
-import { exportTasksToCsv, groupTasksByRecurrence, isRecurringTask, summarizeSeries, formatRecurrenceRule, formatOccurrenceDate } from './taskDisplayUtils';
+import { exportTasksToCsv, groupTasksByRecurrence, isRecurringTask, summarizeSeries, formatOccurrenceDate } from './taskDisplayUtils';
 import StatusSummaryCards from './StatusSummaryCards';
 import TaskKindTabs from './TaskKindTabs';
 import TaskCard from './TaskCard';
+import RecurrenceDetail from './RecurrenceDetail';
 import DateRangeFilter from './DateRangeFilter';
 import TaskFormModal from './TaskFormModal';
 import TaskDetailsModal from './TaskDetailsModal';
@@ -663,7 +664,10 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
                 <SortableTh label={scope === 'delegated' ? 'Assigned To' : 'Assigned By'} sortKey={null} />
                 <SortableTh label="Priority" sortKey={null} />
                 <SortableTh label="Status" sortKey={null} />
-                <SortableTh label="Due Date" sortKey="end" activeKey={sortKey} dir={sortDir} onSort={handleSort} />
+                {/* The Recurring tab's cell below this header shows the CHECKLIST's end date
+                    (seriesEnd), not a per-occurrence due date — "Due Date" would misdescribe it,
+                    so the header follows the same tab-based switch as the cell. */}
+                <SortableTh label={showRecurrenceDetail ? 'End Date' : 'Due Date'} sortKey="end" activeKey={sortKey} dir={sortDir} onSort={handleSort} />
                 <SortableTh label="Created On" sortKey="createdAt" activeKey={sortKey} dir={sortDir} onSort={handleSort} />
                 <SortableTh label="Actions" sortKey={null} align="right" />
               </tr>
@@ -700,14 +704,16 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
                           )}
                         </div>
                         {/* The repeat rule sits under the title rather than in its own column, so
-                            the Recurring tab keeps Category and only adds one column. */}
+                            the Recurring tab keeps Category and only adds one column. Progress is
+                            skipped here (showProgress=false) — the table already has its own
+                            Progress column — but the series' overdue count, next occurrence, and
+                            end date only lived on the card/grid view until now, so a list-view
+                            user had no way to see when a series runs out without opening it. */}
                         <div className="flex items-center gap-2 mt-0.5">
-                          {task.isOverdue && <span className="text-[9px] font-black text-[var(--accent-red)] uppercase tracking-widest">Overdue</span>}
-                          {seriesInfo && (
-                            <span className="inline-flex items-center gap-1 text-[10px] font-bold text-[var(--accent-indigo)]">
-                              <Repeat size={10} /> {formatRecurrenceRule(task)}
-                            </span>
-                          )}
+                          {!seriesInfo && task.isOverdue && <span className="text-[9px] font-black text-[var(--accent-red)] uppercase tracking-widest">Overdue</span>}
+                          {seriesInfo ? (
+                            <RecurrenceDetail task={task} series={seriesInfo} showProgress={false} showNextDue={false} showEnds={false} />
+                          ) : null}
                         </div>
                       </td>
                       <td className="px-4 py-3"><CategoryPill name={task.category} /></td>
@@ -725,7 +731,16 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
                       <td className="px-4 py-3"><AssigneeCell name={counterpartOf(task)} /></td>
                       <td className="px-4 py-3"><PriorityPill priority={task.priority} /></td>
                       <td className="px-4 py-3">{renderStatusCell(task)}</td>
-                      <td className="px-4 py-3"><DateCell value={task.end} overdue={task.isOverdue} /></td>
+                      {/* Recurring tab: this row stands for the whole series, so "Due Date"
+                          shows when the CHECKLIST itself ends (seriesEnd), not just the one
+                          occurrence happening to be primary right now. Delegated (one-time)
+                          tasks are unaffected — they keep their own real deadline. */}
+                      <td className="px-4 py-3">
+                        <DateCell
+                          value={seriesInfo ? seriesInfo.seriesEnd : task.end}
+                          overdue={seriesInfo ? false : task.isOverdue}
+                        />
+                      </td>
                       <td className="px-4 py-3"><DateCell value={task.createdAt} /></td>
                       <td className="px-4 py-3 text-right">
                         <RowActionsMenu

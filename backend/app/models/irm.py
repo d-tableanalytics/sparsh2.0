@@ -19,8 +19,9 @@ recalculation job to wait for and no weightage literal anywhere in the maths. Se
 app/services/irm_service.py.
 
 The four parameters map onto data the ERP already captures:
-  task           → non-delegated tasks where the person is the doer
-  delegation     → tasks delegated TO the person (assigned_to == "other")
+  task           → the person's own tasks: self-assigned, or a recurring task/checklist
+                   (however it was assigned to them) — see irm_service._is_irm_delegated
+  delegation     → a ONE-TIME task someone else hand-assigned to the person
   culture        → TPMS `culture` rating matrix (their HOD's 0-5 ratings of them)
   accountability → TPMS `accountability` rating matrix (same shape)
 """
@@ -97,7 +98,7 @@ IRM_PARAMETERS: List[dict] = [
         "default_weightage": 25.0,
         "source": SOURCE_TASK,
         "delegated": False,
-        "description": "Target achievement on the person's own (non-delegated) tasks.",
+        "description": "Target achievement on the person's own tasks and recurring checklists.",
     },
     {
         "code": "delegation",
@@ -105,7 +106,7 @@ IRM_PARAMETERS: List[dict] = [
         "default_weightage": 30.0,
         "source": SOURCE_TASK,
         "delegated": True,
-        "description": "Completion of tasks delegated to the person by someone else.",
+        "description": "Completion of one-time tasks delegated to the person by someone else.",
     },
     {
         "code": "culture",
