@@ -189,6 +189,21 @@ def _fresh_occurrence(head: dict, target, natural, anchor_day) -> dict:
     doc["remarks"] = []
     doc["attachments"] = []
     doc["status_history"] = []
+    # A fresh occurrence must not inherit a still-open "Dependent on Other" hand-off from the
+    # occurrence it was cloned from — `head` is simply the latest occurrence by date, picked
+    # with no regard to whether its dependency chain had unwound yet. Left alone, the next
+    # occurrence opened with the doer still on `target_staff_id`/`dependency_doer_id`, which
+    # froze or narrowed their status dropdown for a period that was never actually delegated to
+    # them. The bottom of `dependency_stack` is the ORIGINAL assignee set from before any
+    # hand-off, so a new period starts there — the doer and every intermediate hand-off end
+    # with the period they were raised in, not the next one.
+    stack = head.get("dependency_stack") or []
+    if stack:
+        original = stack[0]
+        doc["target_staff_id"] = original.get("assignee_ids") or []
+        doc["assigned_to"] = original.get("assigned_to") or "other"
+    doc["dependency_doer_id"] = None
+    doc["dependency_stack"] = []
     if head.get("reminders"):
         doc["reminders"] = [{**r, "sent": False} for r in head["reminders"]]
     return doc

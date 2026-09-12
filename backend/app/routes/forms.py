@@ -110,13 +110,36 @@ def _is_hod(user: dict) -> bool:
     return _user_department(user) == "hod"
 
 
-def _enforce_client_scope(user: dict, company_id: str, respondent_id: str, form_type: str) -> None:
+async def _has_explicit_assignment(company_id: str, respondent_id: str,
+                                   form_type: str, period: str) -> bool:
+    """Was this person deliberately put on this form's schedule for this period?
+
+    Scheduling a form lets an admin pick the doers by hand, and that choice already overrides
+    the audience rule on the way OUT: tpms_form_link_service.eligible_respondents mails the
+    exact people chosen, whatever role they hold. This is the same question asked on the way
+    back IN, so the two halves agree.
+    """
+    if not (company_id and respondent_id and form_type and period):
+        return False
+    from app.services.tpms_form_link_service import ASSIGNMENT_COLLECTION
+    found = await get_collection(ASSIGNMENT_COLLECTION).find_one({
+        "form_type": form_type,
+        "company_id": str(company_id),
+        "respondent_id": str(respondent_id),
+        "period": period,
+    })
+    return bool(found)
+
+
+async def _enforce_client_scope(user: dict, company_id: str, respondent_id: str,
+                                form_type: str, period: str = "") -> None:
     """Defence-in-depth for client-side submissions. Staff bypass all of this.
     A client user may only write:
       • within their own company, and
       • under their own identity (as the HOD/MD/respondent),
       • and department-gated forms only from the matching department
-        ('hod' → Accountability/Ownership/Culture, 'md' → Implementation Feedback).
+        ('hod' → Accountability/Ownership/Culture, 'md' → Implementation Feedback),
+        UNLESS they were explicitly scheduled to fill this one.
     """
     if _is_staff(user):
         return
@@ -131,10 +154,16 @@ def _enforce_client_scope(user: dict, company_id: str, respondent_id: str, form_
         raise HTTPException(status_code=403, detail="You can only submit your own form.")
     required_dept = AUDIENCE_DEPARTMENT.get(form_audience(form_type))
     if required_dept and _user_department(user) != required_dept:
-        raise HTTPException(
-            status_code=403,
-            detail=f"Only a{'n' if required_dept == 'hod' else ''} {required_dept.upper()} can submit this form.",
-        )
+        # An explicit schedule beats the audience rule. The doer picker lets an admin send
+        # Culture/Ownership/Accountability to an MD (or HR, or an implementor), and the mail
+        # goes out and the link opens — but this check knew nothing about that choice, so the
+        # form was filled in and then refused at Save. Whoever was actually scheduled to fill
+        # it may submit it; everyone else still needs the matching role.
+        if not await _has_explicit_assignment(company_id, respondent_id, form_type, period):
+            raise HTTPException(
+                status_code=403,
+                detail=f"Only a{'n' if required_dept == 'hod' else ''} {required_dept.upper()} can submit this form.",
+            )
 
 
 def _require_form_type(form_type: str) -> dict:
@@ -236,9 +265,18 @@ async def my_forms(current_user: dict = Depends(get_current_user)):
     uid = str(current_user.get("_id") or "")
     dept = _user_department(current_user)  # governance role (hod/md), governance_role-aware
 
-    # Which forms can this respondent fill (by audience)?
+    # Which forms can this respondent fill: the ones their governance role owns, plus any they
+    # were explicitly scheduled for. This list is meant to be schedule-driven, but it was built
+    # from the role alone — so a form handed to an MD (or HR, or an implementor) through the
+    # doer picker never appeared here, and the only way in was the emailed link. The mailing
+    # side and the submit check both honour an explicit choice; this now agrees with them.
+    assigned_types = set()
+    if company_id:
+        from app.services.tpms_form_link_service import ASSIGNMENT_COLLECTION
+        assigned_types = set(await get_collection(ASSIGNMENT_COLLECTION).distinct(
+            "form_type", {"company_id": company_id, "respondent_id": uid}))
     eligible = [ft for ft in _FORM_TYPE_ORDER
-                if AUDIENCE_DEPARTMENT.get(form_audience(ft)) == dept]
+                if AUDIENCE_DEPARTMENT.get(form_audience(ft)) == dept or ft in assigned_types]
     if not eligible or not company_id:
         return {"forms": []}
 
@@ -539,7 +577,7 @@ async def submit_ratings(
         company_id = current_user.get("company_id") or ""
         hod_id = _self_id(current_user)
         hod_name = _user_display_name(current_user)
-    _enforce_client_scope(current_user, company_id, hod_id, form_type)
+    await _enforce_client_scope(current_user, company_id, hod_id, form_type, payload.period)
 
     # Valid members = the company's own roster (staff + learners). Criteria are validated
     # against the live master above; members must be validated too so a client can't inject
@@ -705,7 +743,7 @@ async def submit_feedback(
         company_id = current_user.get("company_id") or ""
         md_id = _self_id(current_user)
         md_name = _user_display_name(current_user)
-    _enforce_client_scope(current_user, company_id, md_id, form_type)
+    await _enforce_client_scope(current_user, company_id, md_id, form_type, payload.period)
 
     key = _feedback_key(form_type, company_id, payload.period, md_id)
     existing = await get_collection(submission_collection(form_type)).find_one(key)

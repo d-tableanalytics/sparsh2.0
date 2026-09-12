@@ -172,13 +172,26 @@ async def _load_all_companies() -> Dict[str, dict]:
             *[str(x).strip() for x in (c.get("smops_ids") or [])],
             *[resolve(x) for x in (c.get("smops_ids") or [])],
         ) if k}
+        # `smops_ids` — the "Assign SMOP" field, a real staff id per assignee — is the actual OM
+        # assignment. `owner` is a free-text field filled in at company onboarding (labelled
+        # plain "Owner" in the UI), which in practice ends up holding the client's own MD/promoter
+        # name, not an internal OM — so it must never be the PRIMARY source for the OM column. It
+        # only stands in when a company has no SMOP assigned yet, same as before this fix.
+        smops = [sid for sid in (str(x).strip() for x in (c.get("smops_ids") or [])) if sid]
+        smop_names = [staff.get(sid, sid) for sid in smops]
         out[cid] = {
             "name": c.get("name") or cid,
-            # Prefer the resolved id so the OM filter and the OM league group by the SAME key
-            # the dropdown submits; fall back to the raw value so unmatched owners keep the
-            # grouping and label they have today.
-            "om_key": owner_id or owner,
-            "om_name": staff.get(owner_id) or staff.get(owner, owner),
+            # OM identity, in order of trust: the assigned SMOP, then an `owner` that RESOLVES
+            # to a real staff member (the convention from before the SMOP field existed).
+            #
+            # An `owner` matching no staff record is deliberately dropped rather than displayed.
+            # It is free text captured at onboarding under a plain "Owner" label, so in practice
+            # it holds the CLIENT's own MD/promoter — someone who is not an OM and does not work
+            # here. Showing it put client MD names in the OM column and bucketed the OM league
+            # under outsiders. Unmatched now means "no OM assigned yet": the grid renders "—" and
+            # the league skips the company (see the `if om_key` guards below).
+            "om_key": smops[0] if smops else owner_id,
+            "om_name": ", ".join(smop_names) if smop_names else (staff.get(owner_id) or ""),
             "om_keys": om_keys,
         }
     return out
@@ -755,7 +768,8 @@ async def get_staff_dashboard(user: dict, scope: dict) -> dict:
     events = await _load_events(allowed)
     # NB: no om_filter here — `allowed` already carries it, and it carries it CORRECTLY.
     # _narrow_to_om matches the full ownership set (owner + admin_id + smops_ids), while
-    # _accumulate's own om filter compares against `om_key` alone, i.e. the owner field.
+    # _accumulate's own om filter compares against `om_key` alone — the assigned SMOP, or the
+    # owner field when no SMOP is assigned.
     # Passing it again therefore re-filtered on the narrower rule and dropped every event for
     # a company this OM runs but does not own — which is why the card could read 0 clients
     # while the grid beneath it listed their clients and the escalation count was non-zero.

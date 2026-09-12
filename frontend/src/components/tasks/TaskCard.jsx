@@ -51,10 +51,12 @@ const TaskCard = ({
       </div>
 
       {/* Recurring tab: the repeat rule + how far through the series this doer is. Same
-          component the list rows used, so the two views state a series identically. */}
+          component the list rows used, so the two views state a series identically. Next-due
+          and Ends are suppressed here — the footer badge below already carries the series' end
+          date (see its own comment), so both chips would just repeat it. */}
       {series && (
         <div className="px-4 pb-2">
-          <RecurrenceDetail task={task} series={series} />
+          <RecurrenceDetail task={task} series={series} showNextDue={false} showEnds={false} />
         </div>
       )}
 
@@ -79,9 +81,12 @@ const TaskCard = ({
       <div className="mt-auto px-4 py-2.5 border-t border-[var(--border)] flex flex-wrap items-center gap-x-3 gap-y-1.5">
         <CategoryPill name={task.category} />
         <PriorityPill priority={task.priority} />
-        {task.end && (
-          <span className={`inline-flex items-center gap-1 text-[10px] font-bold whitespace-nowrap ${task.isOverdue ? 'text-[var(--accent-red)]' : 'text-[var(--text-muted)]'}`}>
-            <CalendarDays size={11} /> {formatDate(task.end)}
+        {/* Recurring tab: this card stands for the whole series, so this badge shows when the
+            CHECKLIST itself ends (series.seriesEnd), not just the one occurrence happening to
+            be primary right now — same substitution the list view's Due Date column makes. */}
+        {(series ? series.seriesEnd : task.end) && (
+          <span className={`inline-flex items-center gap-1 text-[10px] font-bold whitespace-nowrap ${!series && task.isOverdue ? 'text-[var(--accent-red)]' : 'text-[var(--text-muted)]'}`}>
+            <CalendarDays size={11} /> {formatDate(series ? series.seriesEnd : task.end)}
           </span>
         )}
         {!series && (

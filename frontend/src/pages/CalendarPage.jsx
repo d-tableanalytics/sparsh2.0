@@ -900,7 +900,14 @@ const CalendarPage = () => {
                 const res = await api.get(`/calendar/events?view_mode=${viewMode}`);
                 setDayEvents(eventsOnDay(summaryDate, mapApiEvents(res.data)));
             }
-        } catch (err) { console.error(err); showError("Communication Failure: The session architect could not be reached."); }
+        } catch (err) {
+            console.error(err);
+            // Surface the backend's real reason (e.g. "Complete all check points before
+            // completing this task") instead of a generic failure message, so the user knows
+            // what's blocking Complete rather than assuming the request just didn't land.
+            const detail = err.response?.data?.detail;
+            showError(typeof detail === 'string' && detail ? detail : "Communication Failure: The session architect could not be reached.");
+        }
     };
 
     const handleSave = async () => {
