@@ -11,7 +11,7 @@ import {
   KpiTile, usePaged, Pager,
 } from '../../features/tpms/common/dashboardKit';
 import {
-  getIrmScores, recalculateIrm,
+  getIrmScores, recalculateIrm, saveKpiScore,
   importIrmAttendance, exportIrmAttendance, getIrmAttendanceTemplate, saveIrmConfig,
 } from '../../services/irmApi';
 import { createTask } from '../../services/taskApi';
@@ -78,7 +78,77 @@ const FinalScore = ({ value, hasData }) => {
 };
 
 /** The expanded row — the calculation, parameter by parameter. */
-const Breakdown = ({ row, columns }) => (
+/**
+ * The achievement box on a custom KPI.
+ *
+ * Every other parameter is read from data the ERP already holds, so its cell is a readout. A
+ * custom KPI has no such source: the number is reported by the person being scored, which is
+ * the only place in IRM where the subject of a score writes to it. Their WEIGHTAGE stays
+ * admin-only — what a KPI is worth is not theirs to set, only what they did against it.
+ */
+const KpiScoreEntry = ({ companyId, personId, period, param, canEdit, onSaved }) => {
+  const [value, setValue] = useState(param.achievement == null ? '' : String(param.achievement));
+  const [note, setNote] = useState(param.note || '');
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState('');
+
+  const dirty = String(param.achievement ?? '') !== value.trim() || (param.note || '') !== note;
+
+  const save = async () => {
+    const num = Number(value);
+    if (value.trim() === '' || Number.isNaN(num) || num < 0 || num > 100) {
+      setErr('Enter a number from 0 to 100.');
+      return;
+    }
+    setSaving(true);
+    setErr('');
+    try {
+      await saveKpiScore(companyId, personId, param.code, period, num, note);
+      onSaved?.();
+    } catch (e) {
+      setErr(errText(e, 'Could not save that score.'));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (!canEdit) {
+    return (
+      <p className="mt-2 text-[11px] text-[var(--text-muted)]">
+        {param.achievement == null
+          ? 'Waiting to be filled in by this person.'
+          : `Filled in by ${param.filed_by || 'them'}.`}
+        {param.note ? ` "${param.note}"` : ''}
+      </p>
+    );
+  }
+
+  return (
+    <div className="mt-2.5 space-y-1.5">
+      <div className="flex items-center gap-1.5">
+        <input type="number" min={0} max={100} step={1} value={value} disabled={saving}
+          onChange={(e) => setValue(e.target.value)} placeholder="0-100"
+          aria-label={`${param.name} achievement percent`}
+          className="w-20 px-2 py-1.5 rounded-lg bg-[var(--input-bg)] border border-[var(--input-border)] text-[12.5px] font-bold text-right tabular-nums outline-none focus:border-[var(--accent-indigo)]" />
+        <span className="text-[11px] font-bold text-[var(--text-muted)]">%</span>
+        <input type="text" value={note} disabled={saving} maxLength={300}
+          onChange={(e) => setNote(e.target.value)} placeholder="Note (optional)"
+          aria-label={`${param.name} note`}
+          className="flex-1 min-w-0 px-2 py-1.5 rounded-lg bg-[var(--input-bg)] border border-[var(--input-border)] text-[11.5px] font-semibold outline-none focus:border-[var(--accent-indigo)]" />
+        <button type="button" onClick={save} disabled={saving || !dirty}
+          className="shrink-0 px-2.5 py-1.5 rounded-lg bg-[var(--accent-indigo)] text-white text-[11.5px] font-bold disabled:opacity-40 transition-opacity">
+          {saving ? '…' : 'Save'}
+        </button>
+      </div>
+      {err && <p className="text-[10.5px] font-bold text-[var(--accent-red)]">{err}</p>}
+      {!err && param.filed_by && (
+        <p className="text-[10.5px] text-[var(--text-muted)]">Last filled by {param.filed_by}.</p>
+      )}
+    </div>
+  );
+};
+
+const Breakdown = ({ row, columns, companyId, period, canFillFor, onScoreSaved }) => (
   <div className="px-4 py-4 bg-[var(--input-bg)]/40 border-t border-[var(--border)]">
     <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
       {row.parameters.map((p) => (
@@ -129,10 +199,21 @@ const Breakdown = ({ row, columns }) => (
             <div className="flex items-center justify-between gap-2">
               <dt className="text-[var(--text-muted)]">Achievement %</dt>
               <dd className="font-bold tabular-nums" style={{ color: scoreColor(p.achievement) }}>
-                {fmtPct(p.achievement, 'No data')}
+                {fmtPct(p.achievement, p.source === 'manual' ? 'Not filled in' : 'No data')}
               </dd>
             </div>
           </dl>
+
+          {p.source === 'manual' && (
+            <KpiScoreEntry
+              companyId={companyId}
+              personId={row.person_id}
+              period={period}
+              param={p}
+              canEdit={canFillFor?.(row.person_id)}
+              onSaved={onScoreSaved}
+            />
+          )}
 
           {/* The formula, with this person's numbers substituted in. */}
           <div className="mt-2.5 pt-2.5 border-t border-[var(--border)]">
@@ -392,19 +473,31 @@ const CreateTaskModal = ({ companyId, period, people, columns, onClose, onCreate
   // Seeded from the person's CURRENT weightages, so opening the editor shows what they are
   // on today rather than an empty form that would silently reset them. Derived, not stored:
   // a state seeded from an effect re-renders twice and drifts when the scores reload.
+  // The rows on THIS person's sheet. `columns` is the COMPANY column, which by design holds
+  // only the five built-in parameters - a custom KPI is given to named people, so it lives on
+  // their row and nowhere else. Seeding the editor from `columns` therefore left a custom KPI
+  // out of the accordion entirely and made the total read as less than 100%, because the row
+  // holding the difference was not on screen. Falls back to the company column before anybody
+  // is picked, which is what the collapsed accordion previews.
+  const sheet = useMemo(() => {
+    const own = person?.parameters;
+    if (!own?.length) return columns;
+    return own.map((c) => ({ code: c.code, name: c.name, weightage: c.weightage, custom: c.custom }));
+  }, [person, columns]);
+
   const column = useMemo(() => {
     const stored = person?.weightages || {};
     const seed = Object.fromEntries(
-      columns.map((c) => [c.code, String(stored[c.code] ?? c.weightage ?? 0)]));
+      sheet.map((c) => [c.code, String(stored[c.code] ?? c.weightage ?? 0)]));
     return { ...seed, ...(edits[form.person] || {}) };
-  }, [person, columns, edits, form.person]);
+  }, [person, sheet, edits, form.person]);
 
   const setCell = (code, value) => setEdits((prev) => ({
     ...prev, [form.person]: { ...(prev[form.person] || {}), [code]: value },
   }));
 
   const columnTotal = Math.round(
-    columns.reduce((s, c) => s + (Number(column[c.code]) || 0), 0) * 100) / 100;
+    sheet.reduce((s, c) => s + (Number(column[c.code]) || 0), 0) * 100) / 100;
   const columnValid = Math.abs(columnTotal - 100) < 0.01;
 
   const submit = async (e) => {
@@ -431,7 +524,7 @@ const CreateTaskModal = ({ companyId, period, people, columns, onClose, onCreate
       if (tuning) {
         await saveIrmConfig(
           companyId,
-          columns.map((c) => ({ code: c.code, weightage: Number(column[c.code]) || 0 })),
+          sheet.map((c) => ({ code: c.code, weightage: Number(column[c.code]) || 0 })),
           form.person,
         );
       }
@@ -524,9 +617,16 @@ const CreateTaskModal = ({ companyId, period, people, columns, onClose, onCreate
                   Saved as this person&rsquo;s own column — everyone else stays on the company
                   default. Must total 100%.
                 </p>
-                {columns.map((c) => (
+                {sheet.map((c) => (
                   <div key={c.code} className="flex items-center justify-between gap-3">
-                    <span className="text-[12px] font-bold truncate">{c.name}</span>
+                    <span className="text-[12px] font-bold truncate flex items-center gap-1.5">
+                      {c.name}
+                      {c.custom && (
+                        <span className="shrink-0 text-[9px] font-black uppercase tracking-wider px-1.5 py-0.5 rounded bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)]">
+                          KPI
+                        </span>
+                      )}
+                    </span>
                     <input type="number" min={0} max={100} step={1} value={column[c.code] ?? ''}
                       onChange={(e) => setCell(c.code, e.target.value)}
                       className="w-24 px-2.5 py-1.5 rounded-lg bg-[var(--input-bg)] border border-[var(--input-border)] text-[13px] font-bold text-right tabular-nums outline-none focus:border-[var(--accent-indigo)]" />
@@ -597,6 +697,15 @@ const IRMPage = () => {
   const rows = data?.rows || [];
   const columns = data?.parameters || [];
   const paged = usePaged(rows, 12);
+
+  // Who may type a KPI achievement: the person it is about, or an administrator correcting
+  // it. Deliberately the same rule the backend enforces in routes/irm.file_kpi_score — this
+  // only decides whether the box is rendered, never whether the write is allowed.
+  const selfId = String(user?._id || user?.id || '');
+  const canFillKpi = useCallback(
+    (personId) => String(personId) === selfId || canEdit,
+    [selfId, canEdit],
+  );
 
   const recalc = async () => {
     setBusy(true);
@@ -786,7 +895,9 @@ const IRMPage = () => {
                                 exit={{ height: 0, opacity: 0 }}
                                 className="overflow-hidden"
                               >
-                                <Breakdown row={row} columns={columns} />
+                                <Breakdown row={row} columns={columns}
+                                  companyId={companyId} period={period}
+                                  canFillFor={canFillKpi} onScoreSaved={reload} />
                               </MotionDiv>
                             </td>
                           </tr>
