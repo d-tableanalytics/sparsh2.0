@@ -19,9 +19,10 @@ recalculation job to wait for and no weightage literal anywhere in the maths. Se
 app/services/irm_service.py.
 
 The four parameters map onto data the ERP already captures:
-  task           → the person's own tasks: self-assigned, or a recurring task/checklist
-                   (however it was assigned to them) — see irm_service._is_irm_delegated
+  task           → RECURRING tasks/checklists, however they were assigned — see
+                   irm_service._irm_bucket
   delegation     → a ONE-TIME task someone else hand-assigned to the person
+                   (a one-time task a person set for themselves scores in NEITHER)
   culture        → TPMS `culture` rating matrix (their HOD's 0-5 ratings of them)
   accountability → TPMS `accountability` rating matrix (same shape)
 """

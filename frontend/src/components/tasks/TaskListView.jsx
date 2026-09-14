@@ -664,11 +664,13 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
                 <SortableTh label={scope === 'delegated' ? 'Assigned To' : 'Assigned By'} sortKey={null} />
                 <SortableTh label="Priority" sortKey={null} />
                 <SortableTh label="Status" sortKey={null} />
+                {/* Created before due: a task is raised, then it falls due, so the dates read
+                    left to right in the order they happen. */}
+                <SortableTh label="Created On" sortKey="createdAt" activeKey={sortKey} dir={sortDir} onSort={handleSort} />
                 {/* The Recurring tab's cell below this header shows the CHECKLIST's end date
                     (seriesEnd), not a per-occurrence due date — "Due Date" would misdescribe it,
                     so the header follows the same tab-based switch as the cell. */}
                 <SortableTh label={showRecurrenceDetail ? 'End Date' : 'Due Date'} sortKey="end" activeKey={sortKey} dir={sortDir} onSort={handleSort} />
-                <SortableTh label="Created On" sortKey="createdAt" activeKey={sortKey} dir={sortDir} onSort={handleSort} />
                 <SortableTh label="Actions" sortKey={null} align="right" />
               </tr>
             </thead>
@@ -731,6 +733,7 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
                       <td className="px-4 py-3"><AssigneeCell name={counterpartOf(task)} /></td>
                       <td className="px-4 py-3"><PriorityPill priority={task.priority} /></td>
                       <td className="px-4 py-3">{renderStatusCell(task)}</td>
+                      <td className="px-4 py-3"><DateCell value={task.createdAt} /></td>
                       {/* Recurring tab: this row stands for the whole series, so "Due Date"
                           shows when the CHECKLIST itself ends (seriesEnd), not just the one
                           occurrence happening to be primary right now. Delegated (one-time)
@@ -741,7 +744,6 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
                           overdue={seriesInfo ? false : task.isOverdue}
                         />
                       </td>
-                      <td className="px-4 py-3"><DateCell value={task.createdAt} /></td>
                       <td className="px-4 py-3 text-right">
                         <RowActionsMenu
                           open={openMenuId === group.key}

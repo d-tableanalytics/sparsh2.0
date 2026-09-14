@@ -52,12 +52,14 @@ export const SUMMARY_CARD_ORDER = [
   ['delayed', EXTRA_CARD_CONFIG.delayed],
 ];
 
-// 9-card order used on the task list pages (My/Delegated/Subscribed/All/Deleted Tasks) —
-// matches the reference design (no In Time / Delayed there, those are dashboard-only metrics).
+// Card order used on the task list pages (My/Delegated/Subscribed/All/Deleted Tasks) — no
+// In Time / Delayed here, those are dashboard-only metrics. Pending is not shown either: a
+// task sits at Pending only until someone opens it, so the card counted a queue nobody works
+// from, between Total and the statuses that describe actual progress. The Group Dashboard
+// keeps its own Pending card (GROUP_DASHBOARD_CARD_ORDER), where the backlog is the point.
 export const LIST_CARD_ORDER = [
   ['totalTasks', EXTRA_CARD_CONFIG.totalTasks],
   ['overdue', EXTRA_CARD_CONFIG.overdue],
-  ['pending', STATUS_CONFIG.pending],
   ['accepted', STATUS_CONFIG.accepted],
   ['dependentOnOthers', STATUS_CONFIG.dependent_on_others],
   ['blocked', STATUS_CONFIG.blocked],
