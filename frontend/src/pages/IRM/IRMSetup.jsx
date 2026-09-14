@@ -3,12 +3,14 @@ import { Link, useNavigate } from 'react-router-dom';
 import {
   SlidersHorizontal, Save, RotateCcw, AlertTriangle, CheckCircle2, RefreshCw,
   Percent, ShieldAlert, Gauge, Calculator, ArrowLeft, Clock, Undo2,
+  Plus, Pencil, Trash2, X, Target,
 } from 'lucide-react';
 import {
   DashboardHero, HeaderSelect, HeroButton, Section, Th, Td, TableShell,
 } from '../../features/tpms/common/dashboardKit';
 import {
   getIrmConfig, saveIrmConfig, saveIrmShift, getIrmPeople, clearIrmPersonConfig,
+  getIrmKpis, createIrmKpi, updateIrmKpi, deleteIrmKpi,
 } from '../../services/irmApi';
 import {
   canEditWeightages, errText, fmtNum, scoreColor, useAsync, useIrmCompany,
@@ -25,6 +27,378 @@ import {
    Saving takes effect immediately — scores are derived from this config on every read,
    so there is no recalculation to wait for.
    ───────────────────────────────────────────────────────────── */
+
+
+/* ─────────────────────────────────────────────────────────────
+   Custom KPIs.
+
+   The five built-in parameters measure things the ERP already records, so they are the same
+   for everybody. A custom KPI measures something it does not — so it is given to NAMED people
+   and its number is reported by the person being scored.
+
+   Giving somebody a KPI necessarily changes their column: the weightage has to come from
+   somewhere, and which parameter gives it up is a judgement about what matters — not
+   arithmetic. So it is asked, not assumed. The default leaves every column alone and lets the
+   admin place the number themselves; the two automatic modes are there when the split really
+   is mechanical.
+   ───────────────────────────────────────────────────────────── */
+// Manual is the default deliberately: re-cutting somebody's weightage column is a decision,
+// and a default that does it quietly is the kind of help you only notice once it has changed
+// a number you had chosen on purpose.
+const BLANK_KPI = {
+  name: '', description: '', weightage: '10', person_ids: [],
+  balance: 'manual', balance_from: '',
+};
+
+const BALANCE_CHOICES = [
+  {
+    id: 'manual',
+    label: "I'll set the columns myself",
+    hint: 'Nobody\u2019s weightages are touched. Each assignee\u2019s column will read over 100% until you edit it here, and the board flags it until you do.',
+  },
+  {
+    id: 'from',
+    label: 'Take it out of one parameter',
+    hint: 'That parameter drops by the KPI\u2019s weightage. Everything else stays exactly as you set it.',
+  },
+  {
+    id: 'spread',
+    label: 'Spread across the others',
+    hint: 'Every other parameter scales down in proportion, keeping their relative sizes.',
+  },
+];
+
+const KpiEditor = ({ draft, setDraft, people, parameters, saving, onSave, onCancel, isEdit }) => {
+  const toggle = (pid) => setDraft((d) => ({
+    ...d,
+    person_ids: d.person_ids.includes(pid)
+      ? d.person_ids.filter((x) => x !== pid)
+      : [...d.person_ids, pid],
+  }));
+  const weight = Number(draft.weightage);
+  const needsSource = draft.balance === 'from';
+  const source = parameters.find((x) => x.code === draft.balance_from);
+  // "Take it from Task" is only honest if Task has that much to give. Saying so up front beats
+  // emptying the parameter and leaving the column short for somebody to discover later.
+  const sourceShort = needsSource && source && Number(source.weightage) < weight;
+  const valid = draft.name.trim() && weight >= 0 && weight < 100
+    && draft.person_ids.length > 0 && (!needsSource || Boolean(draft.balance_from));
+
+  return (
+    <div className="rounded-xl border border-[var(--accent-indigo-border)] bg-[var(--accent-indigo-bg)]/30 p-4 space-y-3">
+      <div className="grid gap-3 sm:grid-cols-[1fr_auto]">
+        <label className="flex flex-col gap-1">
+          <span className="text-[10.5px] font-black uppercase tracking-wide text-[var(--text-muted)]">KPI name</span>
+          <input type="text" value={draft.name} maxLength={60} disabled={saving || isEdit}
+            onChange={(e) => setDraft((d) => ({ ...d, name: e.target.value }))}
+            placeholder="e.g. Client Calls"
+            title={isEdit ? 'The name is fixed once created, so filed scores stay attached' : undefined}
+            className="px-3 py-2 rounded-lg bg-[var(--input-bg)] border border-[var(--input-border)] text-[13px] font-bold outline-none focus:border-[var(--accent-indigo)] disabled:opacity-60" />
+        </label>
+        <label className="flex flex-col gap-1">
+          <span className="text-[10.5px] font-black uppercase tracking-wide text-[var(--text-muted)]">Weightage</span>
+          <div className="flex items-center gap-1.5">
+            <input type="number" min={0} max={99} step={1} value={draft.weightage} disabled={saving}
+              onChange={(e) => setDraft((d) => ({ ...d, weightage: e.target.value }))}
+              className="w-24 px-3 py-2 rounded-lg bg-[var(--input-bg)] border border-[var(--input-border)] text-[13px] font-bold text-right tabular-nums outline-none focus:border-[var(--accent-indigo)]" />
+            <span className="text-[12px] font-bold text-[var(--text-muted)]">%</span>
+          </div>
+        </label>
+      </div>
+
+      <label className="flex flex-col gap-1">
+        <span className="text-[10.5px] font-black uppercase tracking-wide text-[var(--text-muted)]">
+          What it measures <span className="font-semibold normal-case tracking-normal">(shown to the person filling it in)</span>
+        </span>
+        <input type="text" value={draft.description} maxLength={300} disabled={saving}
+          onChange={(e) => setDraft((d) => ({ ...d, description: e.target.value }))}
+          placeholder="e.g. Calls logged against the monthly target"
+          className="px-3 py-2 rounded-lg bg-[var(--input-bg)] border border-[var(--input-border)] text-[12.5px] font-semibold outline-none focus:border-[var(--accent-indigo)]" />
+      </label>
+
+      <div>
+        <div className="flex items-baseline justify-between gap-2 mb-1.5">
+          <span className="text-[10.5px] font-black uppercase tracking-wide text-[var(--text-muted)]">
+            Who carries it
+          </span>
+          <span className="text-[11px] font-bold text-[var(--text-muted)] tabular-nums">
+            {draft.person_ids.length} selected
+          </span>
+        </div>
+        <div className="max-h-44 overflow-y-auto rounded-lg border border-[var(--border)] bg-[var(--bg-card)] divide-y divide-[var(--border)]">
+          {people.length === 0 && (
+            <p className="px-3 py-3 text-[12px] text-[var(--text-muted)]">No people on this roster.</p>
+          )}
+          {people.map((pp) => (
+            <label key={pp.person_id}
+              className="flex items-center gap-2.5 px-3 py-2 cursor-pointer hover:bg-[var(--input-bg)]">
+              <input type="checkbox" checked={draft.person_ids.includes(pp.person_id)}
+                disabled={saving} onChange={() => toggle(pp.person_id)}
+                className="w-4 h-4 accent-[var(--accent-indigo)] cursor-pointer" />
+              <span className="text-[12.5px] font-bold truncate">{pp.name}</span>
+              {pp.designation && (
+                <span className="text-[10.5px] text-[var(--text-muted)] truncate">{pp.designation}</span>
+              )}
+            </label>
+          ))}
+        </div>
+        <p className="mt-1.5 text-[11px] text-[var(--text-muted)] leading-relaxed">
+          Only these people get the KPI — nobody else&rsquo;s sheet changes. Their column has to
+          find {fmtNum(Number(draft.weightage) || 0)}% for it; choose how below.
+        </p>
+      </div>
+
+      <div>
+        <span className="text-[10.5px] font-black uppercase tracking-wide text-[var(--text-muted)]">
+          Where its {fmtNum(weight || 0)}% comes from
+        </span>
+        <div className="mt-1.5 space-y-1.5">
+          {BALANCE_CHOICES.map((choice) => (
+            <label key={choice.id}
+              className={`flex gap-2.5 px-3 py-2 rounded-lg border cursor-pointer transition-colors ${
+                draft.balance === choice.id
+                  ? 'border-[var(--accent-indigo)] bg-[var(--bg-card)]'
+                  : 'border-[var(--border)] bg-[var(--bg-card)] hover:border-[var(--accent-indigo-border)]'}`}>
+              <input type="radio" name="kpi-balance" checked={draft.balance === choice.id}
+                disabled={saving}
+                onChange={() => setDraft((d) => ({ ...d, balance: choice.id }))}
+                className="mt-0.5 w-4 h-4 shrink-0 accent-[var(--accent-indigo)] cursor-pointer" />
+              <span className="min-w-0">
+                <span className="block text-[12.5px] font-bold">{choice.label}</span>
+                <span className="block text-[11px] text-[var(--text-muted)] leading-relaxed mt-0.5">
+                  {choice.hint}
+                </span>
+                {choice.id === 'from' && draft.balance === 'from' && (
+                  <span className="block mt-2">
+                    <select value={draft.balance_from} disabled={saving}
+                      onChange={(e) => setDraft((d) => ({ ...d, balance_from: e.target.value }))}
+                      aria-label="Parameter to take the weightage from"
+                      className="w-full px-3 py-2 rounded-lg bg-[var(--input-bg)] border border-[var(--input-border)] text-[12.5px] font-bold outline-none focus:border-[var(--accent-indigo)] cursor-pointer">
+                      <option value="">Choose a parameter…</option>
+                      {parameters.filter((x) => !x.custom).map((x) => (
+                        <option key={x.code} value={x.code}>
+                          {x.name} — currently {fmtNum(x.weightage)}%
+                        </option>
+                      ))}
+                    </select>
+                    {sourceShort && (
+                      <span className="block mt-1.5 text-[11px] font-bold text-[var(--accent-orange)] leading-relaxed">
+                        {source.name} only has {fmtNum(source.weightage)}% to give. It will go to
+                        0% and the column will be {fmtNum(weight - Number(source.weightage))}%
+                        short for you to place.
+                      </span>
+                    )}
+                  </span>
+                )}
+              </span>
+            </label>
+          ))}
+        </div>
+      </div>
+
+      <div className="flex items-center justify-end gap-2 pt-1">
+        <button type="button" onClick={onCancel} disabled={saving}
+          className="px-3.5 py-2 rounded-lg text-[12.5px] font-bold text-[var(--text-muted)] hover:bg-[var(--input-bg)] transition-colors disabled:opacity-50">
+          Cancel
+        </button>
+        <button type="button" onClick={onSave} disabled={saving || !valid}
+          className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-[var(--accent-indigo)] text-white text-[12.5px] font-bold shadow-sm hover:opacity-90 transition-opacity disabled:opacity-40">
+          {saving ? <RefreshCw size={13} className="animate-spin" /> : <Save size={13} />}
+          {saving ? 'Saving…' : isEdit ? 'Save changes' : 'Add KPI'}
+        </button>
+      </div>
+    </div>
+  );
+};
+
+const CustomKpiSection = ({ companyId, people, parameters, canEdit, onChanged }) => {
+  const [kpis, setKpis] = useState([]);
+  const [draft, setDraft] = useState(null);       // null = not editing
+  const [editing, setEditing] = useState(null);   // the code being edited
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState('');
+  const [notice, setNotice] = useState('');
+  const [confirming, setConfirming] = useState(null);
+
+  const load = useCallback(async () => {
+    if (!companyId) return;
+    try {
+      setKpis((await getIrmKpis(companyId)).data?.kpis || []);
+    } catch (e) {
+      setErr(errText(e, 'Could not load KPIs.'));
+    }
+  }, [companyId]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const nameOf = (pid) => people.find((x) => x.person_id === pid)?.name || 'someone';
+
+  const save = async () => {
+    setSaving(true);
+    setErr('');
+    try {
+      const payload = {
+        name: draft.name.trim(),
+        description: draft.description.trim(),
+        weightage: Number(draft.weightage) || 0,
+        person_ids: draft.person_ids,
+        balance: draft.balance,
+        balance_from: draft.balance === 'from' ? draft.balance_from : null,
+      };
+      const res = editing
+        ? await updateIrmKpi(companyId, editing, payload)
+        : await createIrmKpi(companyId, payload);
+      const rebalanced = res?.data?.columns_rebalanced ?? 0;
+      setNotice(draft.balance === 'manual'
+        ? `Saved. No weightages were changed — set each person\u2019s column yourself using the scope picker above.`
+        : `Saved. ${rebalanced} column${rebalanced === 1 ? '' : 's'} rebalanced to 100%.`);
+      setDraft(null);
+      setEditing(null);
+      await load();
+      onChanged?.();
+    } catch (e) {
+      setErr(errText(e, 'Could not save that KPI.'));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const remove = async (code) => {
+    setSaving(true);
+    setErr('');
+    try {
+      await deleteIrmKpi(companyId, code);
+      setConfirming(null);
+      await load();
+      onChanged?.();
+    } catch (e) {
+      setErr(errText(e, 'Could not remove that KPI.'));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Section
+      title="Custom KPIs"
+      subtitle={kpis.length
+        ? `${kpis.length} KPI${kpis.length === 1 ? '' : 's'} on top of the five standard parameters`
+        : 'Add a parameter of your own, for the people it applies to'}
+      icon={Target}
+      action={canEdit && !draft && (
+        <button type="button"
+          onClick={() => { setEditing(null); setDraft({ ...BLANK_KPI }); setErr(''); }}
+          className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-[var(--accent-indigo)] text-white text-[12px] font-bold shadow-sm hover:opacity-90 transition-opacity">
+          <Plus size={13} /> Add KPI
+        </button>
+      )}
+    >
+      <div className="px-4 py-4 space-y-3">
+        <p className="text-[12px] text-[var(--text-muted)] leading-relaxed">
+          A custom KPI is scored by the person it belongs to — they fill in their own
+          achievement each month on the IRM board, and you can correct it. Its weightage stays
+          yours to set. Until somebody fills one in it counts as &ldquo;no data&rdquo; and is
+          left out of the score rather than counting as zero.
+        </p>
+
+        {err && (
+          <div className="flex items-start gap-2 rounded-lg border border-[var(--accent-red-border)] bg-[var(--accent-red-bg)] px-3 py-2.5 text-[12px] font-bold text-[var(--accent-red)]">
+            <AlertTriangle size={14} className="mt-0.5 shrink-0" /> {err}
+          </div>
+        )}
+
+        {notice && !draft && (
+          <div className="flex items-start gap-2 rounded-lg border border-[var(--accent-green-border)] bg-[var(--accent-green-bg)] px-3 py-2.5 text-[12px] font-bold text-[var(--accent-green)]">
+            <CheckCircle2 size={14} className="mt-0.5 shrink-0" /> {notice}
+          </div>
+        )}
+
+        {draft && (
+          <KpiEditor draft={draft} setDraft={setDraft} people={people} parameters={parameters}
+            saving={saving} isEdit={Boolean(editing)} onSave={save}
+            onCancel={() => { setDraft(null); setEditing(null); setErr(''); }} />
+        )}
+
+        {kpis.length === 0 && !draft ? (
+          <p className="py-6 text-center text-[12.5px] text-[var(--text-muted)]">
+            No custom KPIs yet. The five standard parameters apply to everyone as they are.
+          </p>
+        ) : (
+          <div className="space-y-2">
+            {kpis.map((k) => (
+              <div key={k.code}
+                className="rounded-xl border border-[var(--border)] bg-[var(--bg-card)] px-3.5 py-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="text-[13px] font-extrabold tracking-tight truncate">{k.name}</span>
+                      <span className="shrink-0 text-[10px] font-bold px-2 py-0.5 rounded-full bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] tabular-nums">
+                        {fmtNum(k.weightage)}%
+                      </span>
+                    </div>
+                    {k.description && (
+                      <p className="text-[11.5px] text-[var(--text-muted)] mt-0.5">{k.description}</p>
+                    )}
+                    <p className="text-[11px] text-[var(--text-muted)] mt-1">
+                      {k.person_count === 0 ? 'Nobody yet' : k.person_ids.slice(0, 4).map(nameOf).join(', ')}
+                      {k.person_count > 4 && ` +${k.person_count - 4} more`}
+                    </p>
+                  </div>
+                  {canEdit && (
+                    <div className="shrink-0 flex items-center gap-1.5">
+                      <button type="button" title="Edit"
+                        onClick={() => {
+                          setEditing(k.code);
+                          setDraft({
+                            name: k.name, description: k.description || '',
+                            weightage: String(k.weightage), person_ids: [...k.person_ids],
+                            // Never carried over from the last edit: how to make room is a
+                            // fresh decision each time, and re-applying "take it from Task"
+                            // on an unrelated rename would raid it again.
+                            balance: 'manual', balance_from: '',
+                          });
+                          setErr('');
+                        }}
+                        className="p-1.5 rounded-lg text-[var(--accent-indigo)] bg-[var(--accent-indigo-bg)] border border-[var(--accent-indigo-border)] hover:opacity-90 transition-opacity">
+                        <Pencil size={12} />
+                      </button>
+                      <button type="button" title="Remove" onClick={() => setConfirming(k)}
+                        className="p-1.5 rounded-lg text-[var(--accent-red)] bg-[var(--accent-red-bg)] border border-[var(--accent-red-border)] hover:opacity-90 transition-opacity">
+                        <Trash2 size={12} />
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {confirming?.code === k.code && (
+                  <div className="mt-3 rounded-lg border border-[var(--accent-red-border)] bg-[var(--accent-red-bg)] px-3 py-2.5">
+                    <p className="text-[12px] font-semibold text-[var(--text-main)] leading-relaxed">
+                      Remove <b>{k.name}</b>? Every score filed against it goes too, and the
+                      {' '}{k.person_count} {k.person_count === 1 ? 'person' : 'people'} carrying it
+                      get its {fmtNum(k.weightage)}% shared back across their other parameters.
+                      This cannot be undone.
+                    </p>
+                    <div className="flex items-center justify-end gap-2 mt-2">
+                      <button type="button" onClick={() => setConfirming(null)} disabled={saving}
+                        className="px-3 py-1.5 rounded-lg text-[12px] font-bold text-[var(--text-muted)] hover:bg-[var(--bg-card)] transition-colors disabled:opacity-50">
+                        Keep it
+                      </button>
+                      <button type="button" onClick={() => remove(k.code)} disabled={saving}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[var(--accent-red)] text-white text-[12px] font-bold hover:opacity-90 transition-opacity disabled:opacity-50">
+                        {saving ? <RefreshCw size={12} className="animate-spin" /> : <Trash2 size={12} />}
+                        Remove
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </Section>
+  );
+};
 
 /** Sample achievement %s used only to illustrate the draft weightages. */
 // Illustrative achievement per parameter, used only to show what the weightages would
@@ -383,6 +757,17 @@ const IRMSetup = () => {
               </div>
             </div>
           </Section>
+
+          {/* This company's own parameters, on top of the five above. Placed directly after
+              them because that is what it extends — and before the Preview, which only ever
+              illustrates the shared five. */}
+          <CustomKpiSection
+            companyId={companyId}
+            people={roster?.people || []}
+            parameters={parameters}
+            canEdit={canEdit}
+            onChanged={reload}
+          />
 
           {/* Live worked example against the draft. */}
           <Section

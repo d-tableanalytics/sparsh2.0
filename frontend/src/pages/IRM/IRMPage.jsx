@@ -4,17 +4,16 @@ import { motion, AnimatePresence } from 'framer-motion';
 import {
   Gauge, RefreshCw, SlidersHorizontal, Users, Target, TrendingUp,
   AlertTriangle, ChevronDown, Percent, Info, Calculator,
-  Clock, Upload, Download, X, Plus,
+  Clock, Upload, Download, X,
 } from 'lucide-react';
 import {
   DashboardHero, HeaderSelect, HeroButton, Section, Th, Td, TableShell,
   KpiTile, usePaged, Pager,
 } from '../../features/tpms/common/dashboardKit';
 import {
-  getIrmScores, recalculateIrm,
-  importIrmAttendance, exportIrmAttendance, getIrmAttendanceTemplate, saveIrmConfig,
+  getIrmScores, recalculateIrm, saveKpiScore,
+  importIrmAttendance, exportIrmAttendance, getIrmAttendanceTemplate,
 } from '../../services/irmApi';
-import { createTask } from '../../services/taskApi';
 import {
   canEditWeightages, canRecalculate, currentPeriod, errText, fmtNum, fmtPct, periodLabel,
   periodOptions, scoreColor, scoreTone, useAsync, useIrmCompany,
@@ -78,7 +77,77 @@ const FinalScore = ({ value, hasData }) => {
 };
 
 /** The expanded row — the calculation, parameter by parameter. */
-const Breakdown = ({ row, columns }) => (
+/**
+ * The achievement box on a custom KPI.
+ *
+ * Every other parameter is read from data the ERP already holds, so its cell is a readout. A
+ * custom KPI has no such source: the number is reported by the person being scored, which is
+ * the only place in IRM where the subject of a score writes to it. Their WEIGHTAGE stays
+ * admin-only — what a KPI is worth is not theirs to set, only what they did against it.
+ */
+const KpiScoreEntry = ({ companyId, personId, period, param, canEdit, onSaved }) => {
+  const [value, setValue] = useState(param.achievement == null ? '' : String(param.achievement));
+  const [note, setNote] = useState(param.note || '');
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState('');
+
+  const dirty = String(param.achievement ?? '') !== value.trim() || (param.note || '') !== note;
+
+  const save = async () => {
+    const num = Number(value);
+    if (value.trim() === '' || Number.isNaN(num) || num < 0 || num > 100) {
+      setErr('Enter a number from 0 to 100.');
+      return;
+    }
+    setSaving(true);
+    setErr('');
+    try {
+      await saveKpiScore(companyId, personId, param.code, period, num, note);
+      onSaved?.();
+    } catch (e) {
+      setErr(errText(e, 'Could not save that score.'));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (!canEdit) {
+    return (
+      <p className="mt-2 text-[11px] text-[var(--text-muted)]">
+        {param.achievement == null
+          ? 'Waiting to be filled in by this person.'
+          : `Filled in by ${param.filed_by || 'them'}.`}
+        {param.note ? ` "${param.note}"` : ''}
+      </p>
+    );
+  }
+
+  return (
+    <div className="mt-2.5 space-y-1.5">
+      <div className="flex items-center gap-1.5">
+        <input type="number" min={0} max={100} step={1} value={value} disabled={saving}
+          onChange={(e) => setValue(e.target.value)} placeholder="0-100"
+          aria-label={`${param.name} achievement percent`}
+          className="w-20 px-2 py-1.5 rounded-lg bg-[var(--input-bg)] border border-[var(--input-border)] text-[12.5px] font-bold text-right tabular-nums outline-none focus:border-[var(--accent-indigo)]" />
+        <span className="text-[11px] font-bold text-[var(--text-muted)]">%</span>
+        <input type="text" value={note} disabled={saving} maxLength={300}
+          onChange={(e) => setNote(e.target.value)} placeholder="Note (optional)"
+          aria-label={`${param.name} note`}
+          className="flex-1 min-w-0 px-2 py-1.5 rounded-lg bg-[var(--input-bg)] border border-[var(--input-border)] text-[11.5px] font-semibold outline-none focus:border-[var(--accent-indigo)]" />
+        <button type="button" onClick={save} disabled={saving || !dirty}
+          className="shrink-0 px-2.5 py-1.5 rounded-lg bg-[var(--accent-indigo)] text-white text-[11.5px] font-bold disabled:opacity-40 transition-opacity">
+          {saving ? '…' : 'Save'}
+        </button>
+      </div>
+      {err && <p className="text-[10.5px] font-bold text-[var(--accent-red)]">{err}</p>}
+      {!err && param.filed_by && (
+        <p className="text-[10.5px] text-[var(--text-muted)]">Last filled by {param.filed_by}.</p>
+      )}
+    </div>
+  );
+};
+
+const Breakdown = ({ row, columns, companyId, period, canFillFor, onScoreSaved }) => (
   <div className="px-4 py-4 bg-[var(--input-bg)]/40 border-t border-[var(--border)]">
     <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
       {row.parameters.map((p) => (
@@ -129,10 +198,21 @@ const Breakdown = ({ row, columns }) => (
             <div className="flex items-center justify-between gap-2">
               <dt className="text-[var(--text-muted)]">Achievement %</dt>
               <dd className="font-bold tabular-nums" style={{ color: scoreColor(p.achievement) }}>
-                {fmtPct(p.achievement, 'No data')}
+                {fmtPct(p.achievement, p.source === 'manual' ? 'Not filled in' : 'No data')}
               </dd>
             </div>
           </dl>
+
+          {p.source === 'manual' && (
+            <KpiScoreEntry
+              companyId={companyId}
+              personId={row.person_id}
+              period={period}
+              param={p}
+              canEdit={canFillFor?.(row.person_id)}
+              onSaved={onScoreSaved}
+            />
+          )}
 
           {/* The formula, with this person's numbers substituted in. */}
           <div className="mt-2.5 pt-2.5 border-t border-[var(--border)]">
@@ -350,221 +430,6 @@ const AttendanceModal = ({ companyId, period, onClose, onImported }) => {
   );
 };
 
-/** Create a task from the scoreboard, weighted.
-    Two different weights meet on this form and are kept visibly apart:
-      • the TASK weight — how much this one task counts inside the Task parameter;
-      • the PERSON column — how the five parameters trade off for this person.
-    The second is optional and edits the same per-person override IRM Setup writes, so
-    nothing here is a second source of truth for it. */
-/** The `start` a task created from this board should carry.
-    IRM buckets a task by the month its `start` falls in (report_service.fetch_tasks filters
-    on exactly that field), so it is anchored to the period being VIEWED rather than to the
-    clock: a task created while looking at August must not land in September and vanish from
-    the board that made it. Midday UTC on the 1st keeps it inside the month whichever way the
-    viewer's timezone leans. */
-const startForPeriod = (period) => {
-  const now = new Date();
-  const thisMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-  if (!period || period === thisMonth) return now.toISOString();
-  const [year, month] = String(period).split('-').map(Number);
-  if (!year || !month) return now.toISOString();
-  return new Date(Date.UTC(year, month - 1, 1, 12, 0, 0)).toISOString();
-};
-
-const CreateTaskModal = ({ companyId, period, people, columns, onClose, onCreated }) => {
-  const [form, setForm] = useState({ title: '', person: '', end: '', weight: '1' });
-  const [tuning, setTuning] = useState(false);
-  // Edits are stored PER PERSON rather than as one column reset by an effect: switching
-  // person then reads its own seed straight away, and nobody's typed figures leak onto
-  // somebody else's sheet.
-  const [edits, setEdits] = useState({});
-  const [saving, setSaving] = useState(false);
-  const [err, setErr] = useState('');
-
-  const person = people.find((p) => p.person_id === form.person);
-
-  useEffect(() => {
-    const onKey = (e) => { if (e.key === 'Escape' && !saving) onClose(); };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [saving, onClose]);
-
-  // Seeded from the person's CURRENT weightages, so opening the editor shows what they are
-  // on today rather than an empty form that would silently reset them. Derived, not stored:
-  // a state seeded from an effect re-renders twice and drifts when the scores reload.
-  const column = useMemo(() => {
-    const stored = person?.weightages || {};
-    const seed = Object.fromEntries(
-      columns.map((c) => [c.code, String(stored[c.code] ?? c.weightage ?? 0)]));
-    return { ...seed, ...(edits[form.person] || {}) };
-  }, [person, columns, edits, form.person]);
-
-  const setCell = (code, value) => setEdits((prev) => ({
-    ...prev, [form.person]: { ...(prev[form.person] || {}), [code]: value },
-  }));
-
-  const columnTotal = Math.round(
-    columns.reduce((s, c) => s + (Number(column[c.code]) || 0), 0) * 100) / 100;
-  const columnValid = Math.abs(columnTotal - 100) < 0.01;
-
-  const submit = async (e) => {
-    e.preventDefault();
-    if (!form.title.trim()) { setErr('Give the task a title.'); return; }
-    if (!form.person) { setErr('Choose who it is for.'); return; }
-    if (tuning && !columnValid) { setErr(`This person's column must total 100% (currently ${columnTotal}%).`); return; }
-
-    setSaving(true);
-    setErr('');
-    try {
-      // The ordinary task API — deliberately not a new endpoint, so a task made here is
-      // the same object Task & Delegation manages, notifications and all.
-      await createTask({
-        title: form.title.trim(),
-        // Required by CalendarEventBase, and it is what decides the task's IRM month.
-        start: startForPeriod(period),
-        end: form.end ? new Date(form.end).toISOString() : null,
-        priority: 'Normal',
-        assigned_to: 'other',
-        target_staff_id: [form.person],
-        irm_weight: Number(form.weight) || 1,
-      });
-      if (tuning) {
-        await saveIrmConfig(
-          companyId,
-          columns.map((c) => ({ code: c.code, weightage: Number(column[c.code]) || 0 })),
-          form.person,
-        );
-      }
-      onCreated?.(person?.name || 'that person', tuning);
-    } catch (ex) {
-      setErr(errText(ex, 'Could not create the task.'));
-      setSaving(false);
-    }
-  };
-
-  const field = 'w-full px-3 py-2 rounded-lg bg-[var(--input-bg)] border border-[var(--input-border)] text-[13px] font-semibold outline-none focus:border-[var(--accent-indigo)] transition-colors';
-
-  return (
-    <MotionDiv className="fixed inset-0 z-50 flex items-center justify-center p-4"
-      initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
-      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={saving ? undefined : onClose} />
-      <MotionDiv role="dialog" aria-modal="true"
-        initial={{ opacity: 0, y: 14, scale: 0.98 }}
-        animate={{ opacity: 1, y: 0, scale: 1 }}
-        exit={{ opacity: 0, y: 14, scale: 0.98 }}
-        transition={{ duration: 0.22, ease: [0.4, 0, 0.2, 1] }}
-        className="relative w-full max-w-lg rounded-2xl border border-[var(--border)] bg-[var(--bg-card)] shadow-xl overflow-hidden max-h-[90vh] flex flex-col">
-        <div className="flex items-center justify-between px-5 py-4 border-b border-[var(--border)] shrink-0">
-          <div className="flex items-center gap-2.5 min-w-0">
-            <span className="w-8 h-8 rounded-lg flex items-center justify-center bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] shrink-0">
-              <Plus size={16} />
-            </span>
-            <h3 className="text-[15px] font-extrabold tracking-tight">Create Task</h3>
-          </div>
-          <button type="button" onClick={onClose} disabled={saving}
-            className="w-8 h-8 rounded-lg flex items-center justify-center text-[var(--text-muted)] hover:bg-[var(--input-bg)] transition-colors disabled:opacity-50">
-            <X size={16} />
-          </button>
-        </div>
-
-        <form onSubmit={submit} className="px-5 py-4 space-y-3.5 overflow-y-auto">
-          <label className="flex flex-col gap-1.5">
-            <span className="text-[11px] font-black uppercase tracking-wide text-[var(--text-muted)]">Title</span>
-            <input value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })}
-              placeholder="What needs doing?" className={field} />
-          </label>
-
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
-            <label className="flex flex-col gap-1.5">
-              <span className="text-[11px] font-black uppercase tracking-wide text-[var(--text-muted)]">For</span>
-              <select value={form.person} onChange={(e) => setForm({ ...form, person: e.target.value })}
-                className={field}>
-                <option value="">Choose a person…</option>
-                {people.map((p) => (
-                  <option key={p.person_id} value={p.person_id}>{p.name}</option>
-                ))}
-              </select>
-            </label>
-            <label className="flex flex-col gap-1.5">
-              <span className="text-[11px] font-black uppercase tracking-wide text-[var(--text-muted)]">Deadline</span>
-              <input type="date" value={form.end} onChange={(e) => setForm({ ...form, end: e.target.value })}
-                className={field} />
-            </label>
-          </div>
-
-          <label className="flex flex-col gap-1.5">
-            <span className="text-[11px] font-black uppercase tracking-wide text-[var(--text-muted)]">
-              Task weight
-            </span>
-            <input type="number" min={0.1} max={10} step={0.1} value={form.weight}
-              onChange={(e) => setForm({ ...form, weight: e.target.value })} className={field} />
-            <span className="text-[10.5px] font-semibold text-[var(--text-muted)]">
-              How much this one task counts inside the Task parameter. 1 is normal; 3 counts
-              for three ordinary tasks. It does not change the person&rsquo;s IRM column.
-            </span>
-          </label>
-
-          <p className="text-[11px] font-semibold text-[var(--text-muted)]">
-            Counts toward <b className="text-[var(--text-main)]">{periodLabel(period)}</b> — the
-            period this board is showing.
-          </p>
-
-          {/* The other kind of weight, kept behind a toggle so the two are never confused. */}
-          <div className="rounded-xl border border-[var(--border)] overflow-hidden">
-            <button type="button" onClick={() => setTuning((t) => !t)} disabled={!form.person}
-              className="w-full flex items-center justify-between gap-2 px-3.5 py-2.5 bg-[var(--input-bg)] text-left disabled:opacity-50">
-              <span className="text-[12px] font-bold">
-                Also adjust {person?.name || 'this person'}&rsquo;s IRM column
-              </span>
-              <ChevronDown size={14} className={`transition-transform ${tuning ? 'rotate-180' : ''}`} />
-            </button>
-            {tuning && form.person && (
-              <div className="px-3.5 py-3 space-y-2.5">
-                <p className="text-[11px] font-semibold text-[var(--text-muted)]">
-                  Saved as this person&rsquo;s own column — everyone else stays on the company
-                  default. Must total 100%.
-                </p>
-                {columns.map((c) => (
-                  <div key={c.code} className="flex items-center justify-between gap-3">
-                    <span className="text-[12px] font-bold truncate">{c.name}</span>
-                    <input type="number" min={0} max={100} step={1} value={column[c.code] ?? ''}
-                      onChange={(e) => setCell(c.code, e.target.value)}
-                      className="w-24 px-2.5 py-1.5 rounded-lg bg-[var(--input-bg)] border border-[var(--input-border)] text-[13px] font-bold text-right tabular-nums outline-none focus:border-[var(--accent-indigo)]" />
-                  </div>
-                ))}
-                <div className="flex items-center justify-between pt-1.5 border-t border-[var(--border)]">
-                  <span className="text-[11px] font-black uppercase tracking-wide text-[var(--text-muted)]">Total</span>
-                  <span className="text-[14px] font-extrabold tabular-nums"
-                    style={{ color: columnValid ? 'var(--accent-green)' : 'var(--accent-red)' }}>
-                    {columnTotal}%
-                  </span>
-                </div>
-              </div>
-            )}
-          </div>
-
-          {err && (
-            <div className="flex items-center gap-2 rounded-lg border border-[var(--accent-red-border)] bg-[var(--accent-red-bg)] px-3 py-2 text-[12px] font-bold text-[var(--accent-red)]">
-              <AlertTriangle size={14} /> {err}
-            </div>
-          )}
-
-          <div className="flex items-center justify-end gap-2 pt-1">
-            <button type="button" onClick={onClose} disabled={saving}
-              className="px-4 py-2 rounded-lg text-[13px] font-bold text-[var(--text-muted)] hover:bg-[var(--input-bg)] transition-colors disabled:opacity-50">
-              Cancel
-            </button>
-            <button type="submit" disabled={saving}
-              className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-[var(--accent-indigo)] text-white text-[13px] font-bold shadow-sm hover:opacity-90 transition-opacity disabled:opacity-40">
-              {saving ? <RefreshCw size={14} className="animate-spin" /> : <Plus size={14} />}
-              {saving ? 'Creating…' : 'Create Task'}
-            </button>
-          </div>
-        </form>
-      </MotionDiv>
-    </MotionDiv>
-  );
-};
 
 const IRMPage = () => {
   const { user, staff, companies, companyId, setCompanyId } = useIrmCompany();
@@ -573,7 +438,6 @@ const IRMPage = () => {
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState('');
   const [showAttendance, setShowAttendance] = useState(false);
-  const [showCreateTask, setShowCreateTask] = useState(false);
 
   // Editing weightages is Super Admin only; refreshing the snapshot is not an edit.
   const canEdit = canEditWeightages(user);
@@ -597,6 +461,15 @@ const IRMPage = () => {
   const rows = data?.rows || [];
   const columns = data?.parameters || [];
   const paged = usePaged(rows, 12);
+
+  // Who may type a KPI achievement: the person it is about, or an administrator correcting
+  // it. Deliberately the same rule the backend enforces in routes/irm.file_kpi_score — this
+  // only decides whether the box is rendered, never whether the write is allowed.
+  const selfId = String(user?._id || user?.id || '');
+  const canFillKpi = useCallback(
+    (personId) => String(personId) === selfId || canEdit,
+    [selfId, canEdit],
+  );
 
   const recalc = async () => {
     setBusy(true);
@@ -636,9 +509,6 @@ const IRMPage = () => {
             Task parameter counts — both belong beside the scoreboard they move. */}
         {canRefresh && !waitingForCompany && (
           <HeroButton icon={Clock} onClick={() => setShowAttendance(true)}>Attendance</HeroButton>
-        )}
-        {canRefresh && !waitingForCompany && (
-          <HeroButton icon={Plus} onClick={() => setShowCreateTask(true)}>Create Task</HeroButton>
         )}
         {canRefresh && <HeroButton icon={RefreshCw} onClick={recalc}>{busy ? 'Working…' : 'Recalculate'}</HeroButton>}
         <HeroButton icon={RefreshCw} onClick={reload}>Refresh</HeroButton>
@@ -786,7 +656,9 @@ const IRMPage = () => {
                                 exit={{ height: 0, opacity: 0 }}
                                 className="overflow-hidden"
                               >
-                                <Breakdown row={row} columns={columns} />
+                                <Breakdown row={row} columns={columns}
+                                  companyId={companyId} period={period}
+                                  canFillFor={canFillKpi} onScoreSaved={reload} />
                               </MotionDiv>
                             </td>
                           </tr>
@@ -807,16 +679,6 @@ const IRMPage = () => {
           <AttendanceModal key="attendance" companyId={companyId} period={period}
             onClose={() => setShowAttendance(false)}
             onImported={() => { setNotice('Attendance imported. Punctuality is recomputed on the next read.'); reload(); }} />
-        )}
-        {showCreateTask && (
-          <CreateTaskModal key="create-task" companyId={companyId} period={period}
-            people={rows} columns={columns}
-            onClose={() => setShowCreateTask(false)}
-            onCreated={(name, tuned) => {
-              setShowCreateTask(false);
-              setNotice(`Task created for ${name}${tuned ? ', and their IRM column saved' : ''}.`);
-              reload();
-            }} />
         )}
       </AnimatePresence>
     </div>

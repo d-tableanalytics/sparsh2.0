@@ -9,6 +9,12 @@ IRM — Individual Result Matrix ▸ API routes (mounted under /api).
   GET  /irm/scores         every person's IRM for a period, fully broken down
   GET  /irm/scores/{id}    one person's IRM
   POST /irm/recalculate    snapshot the current numbers into irm_scores
+  GET  /irm/kpis           the company's custom KPIs and who carries each
+  POST /irm/kpis           define a new KPI and assign it to people
+  PUT  /irm/kpis/{code}    rename / re-weight / re-assign one
+  DEL  /irm/kpis/{code}    remove it, its scores, and its row from every column
+  GET  /irm/kpis/sheet     one person's KPIs + what they have filed for a period
+  PUT  /irm/kpis/{code}/score   file an achievement (the assignee's own, or an admin's)
   PUT  /irm/shift          the shift rule punctuality is measured against
   POST /irm/attendance/import   load punch times from .xlsx/.csv
   GET  /irm/attendance/template the import template, pre-filled with the roster
@@ -39,7 +45,8 @@ from typing import Optional
 
 from app.controllers.auth_controller import get_current_user
 from app.models.irm import (
-    IRM_PARAMETERS, IRMConfigUpdate, IRMShiftUpdate, TOTAL_WEIGHTAGE,
+    IRM_PARAMETERS, IRMConfigUpdate, IRMCustomKpiCreate, IRMCustomKpiUpdate,
+    IRMKpiScoreUpdate, IRMShiftUpdate, TOTAL_WEIGHTAGE,
 )
 from app.services import irm_attendance_service, irm_service
 
@@ -55,6 +62,9 @@ CONFIG_ROLES = STAFF_ROLES | {"clientadmin"}
 # Refreshing the stored snapshot recomputes from data that already exists and changes no
 # configuration, so it stays available to a client's own admin too.
 RECALC_ROLES = STAFF_ROLES | {"clientadmin"}
+# Defining a KPI and deciding its weightage is the same authority as setting weightages, so
+# it reuses CONFIG_ROLES exactly - a clientuser cannot invent a row of their own sheet.
+KPI_ADMIN_ROLES = CONFIG_ROLES
 
 
 def _is_staff(user: dict) -> bool:
@@ -277,6 +287,184 @@ async def read_person_score(
 # punctuality is an evaluation input, so a punch has to trace back to the device export
 # rather than to somebody's recollection of it.
 # ─────────────────────────────────────────────────────────────
+# -------------------------------------------------------------
+# Custom KPIs
+#
+# The five built-in parameters measure things the ERP already records. A custom KPI measures
+# something it does not, so its number is typed in by the person being scored - which is the
+# one place this module lets the subject of a score write to it.
+#
+# The line is drawn at WEIGHTAGE vs ACHIEVEMENT, and it matters:
+#   · weightage  - how much the KPI counts. Admin only, like every other weightage. A person
+#                  who could set their own would be marking their own homework.
+#   · achievement - what they actually did. Theirs to report, with the admin able to correct
+#                  it and every entry stamped with who filed it and when.
+# -------------------------------------------------------------
+def _kpi_admin(user: dict) -> None:
+    if user.get("role") not in KPI_ADMIN_ROLES:
+        raise HTTPException(status_code=403,
+                            detail="Only an administrator can define IRM KPIs.")
+
+
+async def _assert_people_on_roster(company_id: str, person_ids) -> None:
+    """Every person a KPI is given to must be on this company's roster.
+
+    Same reasoning as _assert_on_roster for a single id: an unknown id would sit in the
+    definition looking assigned while scoring nobody, because load_people never returns it.
+    """
+    if not person_ids:
+        return
+    people = await irm_service.load_people(company_id)
+    missing = [pid for pid in person_ids if str(pid) not in people]
+    if missing:
+        raise HTTPException(status_code=404,
+                            detail=f"{len(missing)} of those people are not in this company")
+
+
+@router.get("/kpis")
+async def list_kpis(
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """The company's custom KPIs. A clientuser sees only the ones they carry."""
+    cid = _resolve_company(current_user, company_id)
+    restricted = _visible_person(current_user)
+    rows = []
+    for k in await irm_service.list_custom_kpis(cid):
+        people = [str(x) for x in (k.get("person_ids") or [])]
+        if restricted and restricted not in people:
+            continue
+        rows.append({
+            "code": k.get("code"),
+            "name": k.get("name"),
+            "description": k.get("description") or "",
+            "weightage": round(float(k.get("weightage") or 0), 2),
+            "person_ids": people,
+            "person_count": len(people),
+            "updated_at": k.get("updated_at") or k.get("created_at"),
+            "updated_by": k.get("updated_by") or k.get("created_by"),
+        })
+    return {"company_id": cid, "kpis": rows, "can_manage": current_user.get("role") in KPI_ADMIN_ROLES}
+
+
+@router.post("/kpis")
+async def create_kpi(
+    payload: IRMCustomKpiCreate,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Define a KPI and give it to people.
+
+    `balance` says where its weightage comes from inside each assignee's column - spread
+    across the others, taken out of one named parameter, or left for the admin to set by hand
+    (the default). The response reports how many columns were actually rewritten, so the
+    screen can say what happened rather than leaving it to be discovered.
+    """
+    cid = _resolve_company(current_user, company_id)
+    _kpi_admin(current_user)
+    await _assert_people_on_roster(cid, payload.person_ids)
+    try:
+        doc = await irm_service.create_custom_kpi(cid, payload, current_user)
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return {"ok": True, "code": doc["code"], "name": doc["name"],
+            "balance": payload.balance,
+            "columns_rebalanced": doc.get("columns_rebalanced", 0)}
+
+
+@router.put("/kpis/{code}")
+async def update_kpi(
+    code: str,
+    payload: IRMCustomKpiUpdate,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Rename, re-weight or re-assign a KPI. The code is immutable, so scores already filed
+    against it survive a rename."""
+    cid = _resolve_company(current_user, company_id)
+    _kpi_admin(current_user)
+    await _assert_people_on_roster(cid, payload.person_ids)
+    try:
+        doc = await irm_service.update_custom_kpi(cid, code, payload, current_user)
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return {"ok": True, "code": doc["code"], "name": doc["name"],
+            "balance": payload.balance,
+            "columns_rebalanced": doc.get("columns_rebalanced", 0)}
+
+
+@router.delete("/kpis/{code}")
+async def delete_kpi(
+    code: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Remove a KPI, everything filed against it, and its row from every column."""
+    cid = _resolve_company(current_user, company_id)
+    _kpi_admin(current_user)
+    try:
+        return {"ok": True, **await irm_service.delete_custom_kpi(cid, code, current_user)}
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.get("/kpis/sheet")
+async def read_kpi_sheet(
+    company_id: Optional[str] = Query(None),
+    person_id: Optional[str] = Query(None, description="Defaults to the caller"),
+    period: Optional[str] = Query(None, description="YYYY-MM; defaults to the current month"),
+    current_user: dict = Depends(get_current_user),
+):
+    """One person's custom KPIs and what they have filed - the self-entry screen's payload.
+
+    Defaults to the CALLER, so the common case (somebody filling in their own) needs no id.
+    A clientuser may only ever read their own; anyone else may read a colleague's.
+    """
+    cid = _resolve_company(current_user, company_id)
+    restricted = _visible_person(current_user)
+    target = str(person_id or current_user.get("_id"))
+    if restricted and target != restricted:
+        raise HTTPException(status_code=403, detail="You can only see your own KPIs.")
+    await _assert_on_roster(cid, target)
+    return await irm_service.person_kpi_sheet(cid, target, period or irm_service.current_period())
+
+
+@router.put("/kpis/{code}/score")
+async def file_kpi_score(
+    code: str,
+    payload: IRMKpiScoreUpdate,
+    company_id: Optional[str] = Query(None),
+    person_id: Optional[str] = Query(None, description="Defaults to the caller"),
+    period: Optional[str] = Query(None, description="YYYY-MM; defaults to the current month"),
+    current_user: dict = Depends(get_current_user),
+):
+    """File an achievement for one KPI in one month.
+
+    The assignee files their own; an administrator may file or correct anyone's. Nobody else
+    can write to somebody else's row - a colleague reporting your numbers for you would make
+    the score untraceable, and every entry records who typed it.
+    """
+    cid = _resolve_company(current_user, company_id)
+    target = str(person_id or current_user.get("_id"))
+    is_self = target == str(current_user.get("_id"))
+    if not is_self and current_user.get("role") not in KPI_ADMIN_ROLES:
+        raise HTTPException(status_code=403,
+                            detail="You can only fill in your own KPI score.")
+    await _assert_on_roster(cid, target)
+    try:
+        doc = await irm_service.set_kpi_score(
+            cid, target, code, period or irm_service.current_period(),
+            payload.achievement, payload.note, current_user)
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except PermissionError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"ok": True, "code": code, "person_id": target,
+            "period": doc["period"], "achievement": doc["achievement"]}
+
+
 @router.put("/shift")
 async def update_shift(
     payload: IRMShiftUpdate,

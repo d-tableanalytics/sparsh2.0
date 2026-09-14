@@ -111,6 +111,46 @@ export const exportIrmAttendance = (companyId, period) =>
   });
 
 /** Refresh the stored snapshot. Reads are always live, so this is for history only. */
+// ── Custom KPIs ──
+// Company-defined parameters given to chosen people. The five built-in parameters read data
+// the ERP already holds; these are reported by the person being scored.
+
+/** Every custom KPI for a company (a clientuser sees only the ones they carry). */
+export const getIrmKpis = (companyId) =>
+  api.get('/irm/kpis', { params: { company_id: companyId || undefined } });
+
+/** Define a KPI and assign it. The assignees' columns are re-fitted to 100% server-side. */
+export const createIrmKpi = (companyId, payload) =>
+  api.post('/irm/kpis', payload, { params: { company_id: companyId || undefined } });
+
+/** Rename / re-weight / re-assign. The code never changes, so filed scores survive a rename. */
+export const updateIrmKpi = (companyId, code, payload) =>
+  api.put(`/irm/kpis/${code}`, payload, { params: { company_id: companyId || undefined } });
+
+/** Remove a KPI, its scores, and its row from every column. */
+export const deleteIrmKpi = (companyId, code) =>
+  api.delete(`/irm/kpis/${code}`, { params: { company_id: companyId || undefined } });
+
+/** One person's KPIs plus whatever they have filed for a period. Defaults to the caller. */
+export const getIrmKpiSheet = (companyId, personId, period) =>
+  api.get('/irm/kpis/sheet', {
+    params: {
+      company_id: companyId || undefined,
+      person_id: personId || undefined,
+      period: period || undefined,
+    },
+  });
+
+/** File an achievement (0–100) for one KPI in one month. */
+export const saveKpiScore = (companyId, personId, code, period, achievement, note) =>
+  api.put(`/irm/kpis/${code}/score`, { achievement, note: note || '' }, {
+    params: {
+      company_id: companyId || undefined,
+      person_id: personId || undefined,
+      period: period || undefined,
+    },
+  });
+
 export const recalculateIrm = (companyId, period) =>
   api.post('/irm/recalculate', null, {
     params: { company_id: companyId || undefined, period: period || undefined },
