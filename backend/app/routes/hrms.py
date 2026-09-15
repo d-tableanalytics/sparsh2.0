@@ -57,7 +57,8 @@ from app.models.hrms import InterviewMediaIn
 from app.models.hrms import (
     PRINTABLE_DOCUMENTS,
     CommSendIn, CommTemplateUpdate, InterviewWindowIn, InterviewWindowUpdate,
-    PolicyApproveIn, PolicyIn, PolicyRevisionIn, PreboardingTouchpointIn, PurgeApproveIn,
+    PolicyApplicabilityIn, PolicyApproveIn, PolicyDocumentIn, PolicyIn, PolicyRevisionIn,
+    PreboardingTouchpointIn, PurgeApproveIn,
     SalaryBandIn, SalaryBandUpdate, ShortlistReviewIn, ShortlistReviewUpdate, TalentPoolIn,
 )
 # ── Phase EXIT-1 — Exit Management (§7.18, §22.2, §7.21) ──
@@ -88,13 +89,18 @@ from app.models.hrms import (
 )
 # ── Phase PAY-1 — Payroll, Salary Advance & Variable Pay (§7.13-7.15, §22.7) ──
 from app.models.hrms import (
-    AdvancePolicyIn, PayrollApprovalIn, PayrollRecordAdjustIn, PayrollRunCreateIn,
+    AdvancePolicyIn, PayrollAdjustmentsIn, PayrollApprovalIn, PayrollRecordAdjustIn,
+    PayrollRunCreateIn,
     SalaryAdvanceActionIn, SalaryAdvanceIn, SalaryComponentIn, SalaryStructureIn,
     VariablePayApprovalIn, VariablePayHoldActionIn, VariablePayPolicyIn,
     VariablePayQuarterCreateIn, VariablePayRecordIn,
 )
+# ── Phase PAYSLIP-1 (§22.7, §22.7 Payslip Template Configuration) ──
+from app.models.hrms import PayslipTemplateIn
 # ── Phase PIP-1 — Performance Improvement Plan (§22.5) ──
 from app.models.hrms import PipCreateIn, PipDecisionIn, PipReviewIn
+# ── Phase GMP-1 — Group Mediclaim Policy ──
+from app.models.hrms import GmpIn
 from app.models.hrms import GovernanceRoleIn
 from app.models.hrms import LetterGenerateIn, LetterPreviewIn, LetterReissueIn, LetterTemplateIn
 from app.models.hrms import (
@@ -156,8 +162,12 @@ from app.services import hrms_retirement_service as retirement_mgmt
 from app.services import hrms_payroll_service as payroll_mgmt
 from app.services import hrms_salary_advance_service as advance_mgmt
 from app.services import hrms_variable_pay_service as vp_mgmt
+# ── Phase PAYSLIP-1 ──
+from app.services import hrms_payslip_service as payslip_mgmt
 # ── Phase PIP-1 ──
 from app.services import hrms_pip_service as pip_mgmt
+# ── Phase GMP-1 ──
+from app.services import hrms_gmp_service as gmp_mgmt
 from app.services import hrms_access_admin_service as access_admin_mgmt
 from app.services import hrms_letter_service as letter_mgmt
 from app.services import hrms_orientation_service as orientation_mgmt
@@ -3189,6 +3199,29 @@ async def register_policy(
         current_user, _company(current_user, company_id), body.model_dump())
 
 
+@router.get("/policies/mine")
+async def my_policies(
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """§22.6 — the employee-facing HR Policy Library: every published policy applicable to
+    the caller, each flagged with whether THEY have acknowledged the current version.
+    Declared before /policies/{policy_key} so the static path wins."""
+    _require(current_user, Cap.POLICY_READ)
+    return await policies.my_policies(current_user, _company(current_user, company_id))
+
+
+@router.get("/policies/acknowledgements/summary")
+async def get_acknowledgement_dashboard(
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """§22.12 — pending/completed acknowledgement counts across every policy requiring one.
+    Declared before /policies/{policy_key} so the static path wins."""
+    _require(current_user, Cap.POLICY_WRITE)
+    return await policies.acknowledgement_dashboard(_company(current_user, company_id))
+
+
 @router.get("/policies/{policy_key}")
 async def get_policy(
     policy_key: str,
@@ -3227,6 +3260,56 @@ async def approve_policy_revision(
     _require(current_user, Cap.POLICY_APPROVE)
     return await policies.approve_revision(
         current_user, _company(current_user, company_id), policy_key, body.model_dump())
+
+
+@router.patch("/policies/{policy_key}/applicability")
+async def update_policy_applicability(
+    policy_key: str,
+    body: PolicyApplicabilityIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """§22.6 — category, applicability and acknowledgement settings. Metadata, not a
+    content revision, so `policy.write` alone is enough (no MD approval needed)."""
+    _require(current_user, Cap.POLICY_WRITE)
+    return await policies.update_applicability(
+        current_user, _company(current_user, company_id), policy_key, body.model_dump())
+
+
+@router.post("/policies/{policy_key}/document")
+async def upload_policy_document(
+    policy_key: str,
+    body: PolicyDocumentIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """The policy's own PDF, uploaded directly against the register."""
+    _require(current_user, Cap.POLICY_WRITE)
+    return await policies.upload_policy_document(
+        current_user, _company(current_user, company_id), policy_key, body.model_dump())
+
+
+@router.post("/policies/{policy_key}/acknowledge")
+async def acknowledge_policy(
+    policy_key: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """§22.6 step 227 — the employee's own act."""
+    _require(current_user, Cap.POLICY_ACKNOWLEDGE)
+    return await policies.acknowledge_policy(
+        current_user, _company(current_user, company_id), policy_key)
+
+
+@router.get("/policies/{policy_key}/acknowledgements")
+async def get_policy_acknowledgements(
+    policy_key: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """§22.6 step 230 — HR's completion view for one policy."""
+    _require(current_user, Cap.POLICY_WRITE)
+    return await policies.list_acknowledgements(_company(current_user, company_id), policy_key)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -4824,6 +4907,22 @@ async def adjust_payroll_record(
         body.model_dump(exclude_unset=True))
 
 
+@router.put("/payroll/runs/{period}/records/{employee_code}/adjustments")
+async def set_payroll_adjustments(
+    period: str,
+    employee_code: str,
+    body: PayrollAdjustmentsIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """§22.7 — arbitrary named earning/deduction lines against the salary component master,
+    alongside the fixed PF/ESI/arrears/etc. fields `adjust_payroll_record` already covers."""
+    _require(current_user, Cap.PAYROLL_PROCESS)
+    return await payroll_mgmt.set_adjustments(
+        current_user, _company(current_user, company_id), period, employee_code,
+        body.model_dump())
+
+
 @router.post("/payroll/runs/{period}/decision")
 async def decide_payroll_run(
     period: str,
@@ -4835,6 +4934,54 @@ async def decide_payroll_run(
     _require(current_user, Cap.PAYROLL_APPROVE)
     return await payroll_mgmt.decide_run(
         current_user, _company(current_user, company_id), period, body.model_dump())
+
+
+# ── Phase PAYSLIP-1 (§22.7, SM-HR-031/SM-HR-064) — the itemised payslip ──
+@router.get("/payslips/{period}")
+async def get_payslip(
+    period: str,
+    employee_code: Optional[str] = Query(None),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """An employee reads their OWN payslip (employee_code is ignored and resolved from
+    their own profile — see hrms_payslip_service._resolve_employee_code); HR/Payroll must
+    name one."""
+    _require(current_user, Cap.PAYROLL_READ)
+    return await payslip_mgmt.get_payslip(
+        current_user, _company(current_user, company_id), period, employee_code)
+
+
+@router.get("/payroll/runs/{period}/payslips")
+async def list_payslips(
+    period: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Every payslip in one run — bulk, HR-only (hrms_payslip_service.list_payslips itself
+    rejects an EMPLOYEE-role caller regardless of what the route allows)."""
+    _require(current_user, Cap.PAYROLL_READ)
+    return await payslip_mgmt.list_payslips(current_user, _company(current_user, company_id), period)
+
+
+@router.get("/payslip-template")
+async def get_payslip_template(
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.PAYROLL_READ)
+    return await payslip_mgmt.get_payslip_template(_company(current_user, company_id))
+
+
+@router.put("/payslip-template")
+async def save_payslip_template(
+    body: PayslipTemplateIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.PAYROLL_PROCESS)
+    return await payslip_mgmt.save_payslip_template(
+        current_user, _company(current_user, company_id), body.model_dump())
 
 
 # ── Salary Advance ──
@@ -5132,6 +5279,32 @@ async def decide_pip(
     _require(current_user, Cap.PIP_DECIDE)
     return await pip_mgmt.decide_pip(
         current_user, _company(current_user, company_id), pip_no, body.model_dump())
+
+
+# ─────────────────────────────────────────────────────────────
+# Phase GMP-1 — Group Mediclaim Policy
+# ─────────────────────────────────────────────────────────────
+@router.get("/gmp/{employee_code}")
+async def get_gmp_enrolment(
+    employee_code: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """An employee may read their own enrolment; HR/INTERNAL read the company's."""
+    _require(current_user, Cap.GMP_READ)
+    return await gmp_mgmt.get_gmp(current_user, _company(current_user, company_id), employee_code)
+
+
+@router.put("/gmp/{employee_code}")
+async def save_gmp_enrolment(
+    employee_code: str,
+    body: GmpIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.GMP_WRITE)
+    return await gmp_mgmt.save_gmp(
+        current_user, _company(current_user, company_id), employee_code, body.model_dump())
 
 
 # ─────────────────────────────────────────────────────────────

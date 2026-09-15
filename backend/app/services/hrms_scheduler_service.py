@@ -53,7 +53,8 @@ from typing import Optional
 from app.db.mongodb import get_collection
 from app.models.hrms import (
     COLL_DESIGNATIONS, COLL_JOB_RUNS, COLL_PROBATION_REVIEWS, COLL_PURGE_BATCHES,
-    COLL_REQUISITIONS, JOB_CADENCE_WEEKLY, JOB_ORIENTATION, JOB_POLICY_REVIEW, JOB_PREBOARDING,
+    COLL_REQUISITIONS, JOB_CADENCE_WEEKLY, JOB_ORIENTATION, JOB_POLICY_ACK, JOB_POLICY_REVIEW,
+    JOB_PREBOARDING,
     JOB_PROBATION, JOB_PULSE_SURVEY, JOB_RETENTION, JOB_SLA_SWEEP, MANAGERIAL_LEVELS,
     PROBATION_REMINDED_FIELD, ProbationOutcome,
     PurgeBatchStatus, SCHEDULED_JOBS,
@@ -385,6 +386,14 @@ async def run_pulse_survey_issue(company_id: str) -> dict:
     return await run_issue_sweep(company_id)
 
 
+async def run_policy_acknowledgement_reminders(company_id: str) -> dict:
+    """§22.6 — nudge employees who still owe a required policy acknowledgement. All the
+    decision logic lives in hrms_policy_service.notify_pending_acknowledgements; this is
+    purely the schedule."""
+    from app.services.hrms_policy_service import notify_pending_acknowledgements
+    return await notify_pending_acknowledgements(company_id)
+
+
 JOB_HANDLERS = {
     JOB_SLA_SWEEP:     run_sla_sweep,
     JOB_PROBATION:     run_probation_reminders,
@@ -393,6 +402,7 @@ JOB_HANDLERS = {
     JOB_RETENTION:     run_retention_proposal,
     JOB_ORIENTATION:   run_orientation_escalation,
     JOB_PULSE_SURVEY:  run_pulse_survey_issue,
+    JOB_POLICY_ACK:    run_policy_acknowledgement_reminders,
 }
 
 

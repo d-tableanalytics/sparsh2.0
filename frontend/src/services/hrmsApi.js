@@ -541,10 +541,33 @@ export const getPolicy = (policyKey, params) =>
 export const getPolicyReviewsDue = (params) => api.get('/hrms/policies/due', { params });
 export const registerPolicy = (payload, params) =>
   api.post('/hrms/policies', payload, { params });
+/** The policy's own PDF, stored directly against the register. `file` is
+ *  `{ name, mime_type, data }` with `data` as base64 (optionally a data: URL). */
+export const uploadPolicyDocument = (policyKey, file, params) =>
+  api.post(`/hrms/policies/${policyKey}/document`, { file }, { params });
 export const logPolicyRevision = (policyKey, payload, params) =>
   api.post(`/hrms/policies/${policyKey}/revisions`, payload, { params });
 export const approvePolicyRevision = (policyKey, payload, params) =>
   api.post(`/hrms/policies/${policyKey}/approve`, payload, { params });
+
+// ── Phase POLICY-LIB-1 (§22.6) — the general HR Policy Library + acknowledgement ──
+/** Every published policy applicable to the caller, flagged with their own acknowledgement
+ *  status for its CURRENT version — the employee-facing screen, separate from the HR-side
+ *  register above. */
+export const getMyPolicies = (params) => api.get('/hrms/policies/mine', { params });
+/** Category, applicability (department/employment type) and acknowledgement settings —
+ *  metadata, not a content revision, so this needs no MD approval. */
+export const updatePolicyApplicability = (policyKey, payload, params) =>
+  api.patch(`/hrms/policies/${policyKey}/applicability`, payload, { params });
+/** The employee's own act of acknowledging a published, applicable policy. */
+export const acknowledgePolicy = (policyKey, params) =>
+  api.post(`/hrms/policies/${policyKey}/acknowledge`, null, { params });
+/** HR's completion view — who has acknowledged this policy's current version. */
+export const getPolicyAcknowledgements = (policyKey, params) =>
+  api.get(`/hrms/policies/${policyKey}/acknowledgements`, { params });
+/** §22.12 — pending/completed counts across every policy requiring acknowledgement. */
+export const getAcknowledgementDashboard = (params) =>
+  api.get('/hrms/policies/acknowledgements/summary', { params });
 
 /** The retention purge (SOP §13). Proposals come from `scripts/hrms_retention_purge.py`,
  *  which defaults to a dry run. Approving one REDACTS the personal fields and keeps the ids
@@ -861,8 +884,25 @@ export const listPayrollRecords = (period, params) =>
   api.get(`/hrms/payroll/runs/${period}/records`, { params });
 export const adjustPayrollRecord = (period, employeeCode, payload, params) =>
   api.patch(`/hrms/payroll/runs/${period}/records/${employeeCode}`, payload, { params });
+/** §22.7 — arbitrary named earning/deduction lines against the salary component master,
+ *  alongside (not instead of) adjustPayrollRecord's fixed PF/ESI/arrears/etc. fields.
+ *  `adjustments` is `[{code, amount}]`; replaces the employee's whole list for the period. */
+export const setPayrollAdjustments = (period, employeeCode, adjustments, params) =>
+  api.put(`/hrms/payroll/runs/${period}/records/${employeeCode}/adjustments`,
+    { adjustments }, { params });
 export const decidePayrollRun = (period, payload, params) =>
   api.post(`/hrms/payroll/runs/${period}/decision`, payload, { params });
+
+// ── Phase PAYSLIP-1 (§22.7, SM-HR-031/SM-HR-064) ──
+/** The itemised payslip for one period. An employee always gets their OWN — employee_code
+ *  is ignored for that role server-side; HR/Payroll must pass one. */
+export const getPayslip = (period, params) => api.get(`/hrms/payslips/${period}`, { params });
+/** Every payslip in one run — HR-only bulk view, used for print/download-all. */
+export const listPayslips = (period, params) =>
+  api.get(`/hrms/payroll/runs/${period}/payslips`, { params });
+export const getPayslipTemplate = (params) => api.get('/hrms/payslip-template', { params });
+export const savePayslipTemplate = (payload, params) =>
+  api.put('/hrms/payslip-template', payload, { params });
 
 export const getAdvancePolicy = (params) => api.get('/hrms/advances/policy', { params });
 export const saveAdvancePolicy = (payload, params) =>
@@ -910,6 +950,14 @@ export const addPipReview = (pipNo, payload, params) =>
   api.post(`/hrms/pip/${pipNo}/reviews`, payload, { params });
 export const decidePip = (pipNo, payload, params) =>
   api.post(`/hrms/pip/${pipNo}/decision`, payload, { params });
+
+// ── Phase GMP-1 — Group Mediclaim Policy ──
+/** One current enrolment per employee. An employee reads only their own; HR reads/writes
+ *  the company's. See hrms_gmp_service.py — this is an edited-in-place master, not a
+ *  ledger, so there is no history endpoint. */
+export const getGmp = (employeeCode, params) => api.get(`/hrms/gmp/${employeeCode}`, { params });
+export const saveGmp = (employeeCode, payload, params) =>
+  api.put(`/hrms/gmp/${employeeCode}`, payload, { params });
 
 // ── Phase 360-1 — Employee 360° (§6) ──
 // A pure aggregation over every module that already tracks this employee — no new capability

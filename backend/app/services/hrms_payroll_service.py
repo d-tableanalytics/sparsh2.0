@@ -25,17 +25,20 @@ from fastapi import HTTPException
 
 from app.db.mongodb import get_collection
 from app.models.hrms import (
-    AUDIT_PAYROLL_CALCULATED, AUDIT_PAYROLL_DECIDED, AUDIT_PAYROLL_RECORD_ADJUSTED,
+    AUDIT_PAYROLL_ADJUSTMENTS_SET, AUDIT_PAYROLL_CALCULATED, AUDIT_PAYROLL_DECIDED,
+    AUDIT_PAYROLL_RECORD_ADJUSTED,
     AUDIT_PAYROLL_RUN_CREATED, AUDIT_SALARY_COMPONENT_SAVED, AUDIT_SALARY_STRUCTURE_SAVED,
     COLL_ATTENDANCE, COLL_EMPLOYEE_PROFILES, COLL_PAYROLL_RECORDS, COLL_PAYROLL_RUNS,
     COLL_SALARY_ADVANCES, COLL_SALARY_COMPONENTS, COLL_SALARY_STRUCTURES,
     COLL_VARIABLE_PAY_RECORDS,
     ENTITY_PAYROLL_RUN, ENTITY_SALARY_COMPONENT, ENTITY_SALARY_STRUCTURE,
     MAX_PAYROLL_LIST_PAGE,
-    AdvanceStatus, AttendanceStatus, ComponentType, OPEN_ADVANCE_STATUSES, PayrollRunStatus,
+    AdvanceStatus, AttendanceStatus, ComponentType, HrmsRole, OPEN_ADVANCE_STATUSES,
+    PayrollRunStatus,
 )
 from app.services.hrms_audit_service import audit
 from app.services.hrms_id_service import next_business_id
+from app.utils.hrms_access import hrms_role
 
 
 def _out(doc: dict) -> dict:
@@ -280,6 +283,11 @@ async def calculate_payroll(actor: dict, company_id: str, period: str) -> dict:
             # Statutory + manual figures default to 0 until the maker adjusts them.
             "pf": 0, "esi": 0, "pt": 0, "tds": 0, "arrears": 0, "reimbursements": 0,
             "other_earnings": 0, "other_deductions": 0, "notice_recovery": 0, "remarks": None,
+            # §22.7 — arbitrary named lines against the same component master the salary
+            # structure uses, alongside (not instead of) the fixed fields above. Reset on
+            # recalculation like every other hand-entered figure here: a rerun replaces the
+            # whole record, so the maker re-adds ad-hoc lines after, same as PF/ESI/etc.
+            "adjustments": [],
             "exceptions": exceptions,
             "created_at": now, "updated_at": now,
         }
@@ -296,19 +304,39 @@ async def calculate_payroll(actor: dict, company_id: str, period: str) -> dict:
     return await get_run(actor, company_id, period)
 
 
+def _adjustment_sum(record: dict, component_type: str) -> float:
+    return sum(float(a.get("amount") or 0) for a in (record.get("adjustments") or [])
+              if a.get("component_type") == component_type)
+
+
 def _totals(record: dict) -> dict:
     gross = (record["prorated_gross"] + record["variable_pay_payout"] + record["arrears"]
-            + record["reimbursements"] + record["other_earnings"])
+            + record["reimbursements"] + record["other_earnings"]
+            + _adjustment_sum(record, ComponentType.EARNING.value))
     deductions = (record["pf"] + record["esi"] + record["pt"] + record["tds"]
                  + record["advance_recovery"] + record["notice_recovery"]
-                 + record["other_deductions"])
+                 + record["other_deductions"]
+                 + _adjustment_sum(record, ComponentType.DEDUCTION.value))
     return {"gross_earnings": round(gross, 2), "total_deductions": round(deductions, 2),
            "net_pay": round(gross - deductions, 2)}
 
 
+async def _own_employee_code(actor: dict, company_id: str) -> Optional[str]:
+    profile = await get_collection(COLL_EMPLOYEE_PROFILES).find_one(
+        {"company_id": str(company_id), "user_id": str(actor.get("_id") or "")})
+    return (profile or {}).get("employee_code")
+
+
 async def list_records(actor: dict, company_id: str, period: str) -> list:
-    rows = await get_collection(COLL_PAYROLL_RECORDS).find(
-        {"company_id": str(company_id), "period": period}
+    """An EMPLOYEE caller (PAYROLL_READ granted for self-service payslip access only, see
+    that capability's own comment in models/hrms.py) is scoped to their OWN record — the
+    same enforced-ownership pattern PIP/Letters/Appointments already establish. Every other
+    role holding PAYROLL_READ sees the run's full population, as before."""
+    query = {"company_id": str(company_id), "period": period}
+    if hrms_role(actor) == HrmsRole.EMPLOYEE:
+        own = await _own_employee_code(actor, company_id)
+        query["employee_code"] = own or "__none__"
+    rows = await get_collection(COLL_PAYROLL_RECORDS).find(query
     ).sort("employee_code", 1).to_list(MAX_PAYROLL_LIST_PAGE)
     return [_out(r) for r in rows]
 
@@ -338,6 +366,45 @@ async def adjust_record(actor: dict, company_id: str, period: str, employee_code
         {"_id": record["_id"]}, {"$set": {k: v for k, v in merged.items() if k != "_id"}})
     await audit(actor, AUDIT_PAYROLL_RECORD_ADJUSTED, ENTITY_PAYROLL_RUN, f"{period}:{employee_code}",
                None, company_id)
+    saved = await get_collection(COLL_PAYROLL_RECORDS).find_one({"_id": record["_id"]})
+    return _out(saved)
+
+
+async def set_adjustments(actor: dict, company_id: str, period: str, employee_code: str,
+                          payload: dict) -> dict:
+    """§22.7 — replace this employee's ad-hoc component lines for the period, against the
+    SAME component master the salary structure uses. Additive alongside `adjust_record`'s
+    fixed PF/ESI/arrears/etc. fields, not a replacement for them — a company that never
+    touches this still gets exactly the payroll it had before this phase."""
+    run = await _get_run(company_id, period)
+    if run["status"] == PayrollRunStatus.LOCKED.value:
+        raise HTTPException(status_code=409, detail="Post-lock changes must not directly "
+                                                     "rewrite final payroll (§7.13 BR).")
+    record = await get_collection(COLL_PAYROLL_RECORDS).find_one(
+        {"company_id": str(company_id), "period": period, "employee_code": employee_code})
+    if not record:
+        raise HTTPException(status_code=404, detail="No payroll record for that employee in this run.")
+
+    known = {c["code"]: c for c in await list_salary_components(actor, company_id)}
+    resolved = []
+    for item in payload.get("adjustments") or []:
+        code = item.get("code") if isinstance(item, dict) else item.code
+        amount = item.get("amount") if isinstance(item, dict) else item.amount
+        meta = known.get(code)
+        if not meta:
+            raise HTTPException(status_code=422, detail=f"Unknown salary component '{code}'.")
+        resolved.append({"code": code, "name": meta.get("name"),
+                         "component_type": meta.get("component_type"),
+                         "amount": round(float(amount or 0), 2)})
+
+    merged = {**record, "adjustments": resolved}
+    merged.update(_totals(merged))
+    now = datetime.now(timezone.utc)
+    merged["updated_at"] = now
+    await get_collection(COLL_PAYROLL_RECORDS).update_one(
+        {"_id": record["_id"]}, {"$set": {k: v for k, v in merged.items() if k != "_id"}})
+    await audit(actor, AUDIT_PAYROLL_ADJUSTMENTS_SET, ENTITY_PAYROLL_RUN,
+               f"{period}:{employee_code}", f"{len(resolved)} line(s)", company_id)
     saved = await get_collection(COLL_PAYROLL_RECORDS).find_one({"_id": record["_id"]})
     return _out(saved)
 

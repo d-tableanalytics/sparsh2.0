@@ -582,8 +582,30 @@ async def late_coming_summary(actor: dict, company_id: str, *, employee_code: Op
     rows = await get_collection(COLL_ATTENDANCE).find(
         query, {"work_date": 1, "employee_code": 1, "late_minutes": 1}
     ).sort("work_date", -1).to_list(MAX_ATTENDANCE_LIST_PAGE)
+
+    # Department label per employee_code, joined once for the whole result rather than once
+    # per row — the same batched-lookup reasoning hrms_scheduler_service._managerial_
+    # request_nos already applies for the same shape of problem. A profile stores
+    # department_id, not a resolved name (see hrms_employee_service._compose), so this is
+    # two batched lookups, not one.
+    codes = {r["employee_code"] for r in rows}
+    departments = {}
+    if codes:
+        from app.models.hrms import COLL_DEPARTMENTS
+        profiles = await get_collection(COLL_EMPLOYEE_PROFILES).find(
+            {"company_id": str(company_id), "employee_code": {"$in": list(codes)}},
+            {"employee_code": 1, "department_id": 1}).to_list(len(codes))
+        dept_names = {
+            str(d["_id"]): d.get("name")
+            for d in await get_collection(COLL_DEPARTMENTS).find(
+                {"company_id": str(company_id)}, {"name": 1}).to_list(1000)
+        }
+        departments = {p["employee_code"]: dept_names.get(p.get("department_id"))
+                       for p in profiles}
+
     return {
         "total_late_days": len(rows),
         "dates": [{"work_date": r["work_date"], "employee_code": r["employee_code"],
-                   "late_minutes": r["late_minutes"]} for r in rows],
+                   "late_minutes": r["late_minutes"],
+                   "department": departments.get(r["employee_code"])} for r in rows],
     }

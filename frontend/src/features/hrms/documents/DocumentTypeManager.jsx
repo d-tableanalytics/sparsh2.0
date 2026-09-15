@@ -26,7 +26,7 @@ import {
 const FIELD = 'w-full h-9 px-3 rounded-lg border border-[var(--border)] bg-[var(--input-bg)] text-[13px] text-[var(--text-main)]';
 const LABEL = 'block text-[11px] font-bold uppercase tracking-widest text-[var(--text-muted)] mb-1.5';
 
-const CATEGORIES = ['Identity', 'Educational', 'Employment', 'Statutory', 'Company Issued', 'Other'];
+const CATEGORIES = ['Identity', 'Educational', 'Employment', 'Statutory', 'PSC', 'Company Issued', 'Other'];
 const APPLIES = [['both', 'Both'], ['candidate', 'Candidates'], ['employee', 'Employees']];
 
 const EMPTY = {

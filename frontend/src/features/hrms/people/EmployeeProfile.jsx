@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, UserCircle, Save, Network, LayoutGrid } from 'lucide-react';
+import { ArrowLeft, UserCircle, Save, Network, LayoutGrid, FileText, X } from 'lucide-react';
 import { useNotification } from '../../../context/NotificationContext';
 import { useHrms } from '../HrmsContext';
 import { CAP } from '../access';
@@ -8,8 +8,11 @@ import HrmsPageHeader from '../common/HrmsPageHeader';
 import { HrmsLoading, HrmsError } from '../common/HrmsStates';
 import {
   getEmployee, updateEmployee, getEmployeeHierarchy, getDepartments, getDesignations,
+  getAppointments,
 } from '../../../services/hrmsApi';
 import DocumentPanel from '../documents/DocumentPanel';
+import AppointmentPaper from '../recruitment/AppointmentPaper';
+import GmpPanel from './GmpPanel';
 
 /**
  * HRMS ▸ employee profile.
@@ -29,6 +32,9 @@ const TABS = [
   { key: 'reporting', label: 'Reporting' },
   // Phase 11-R, Item 2 — one of the shared DocumentPanel's two mount points.
   { key: 'documents', label: 'Documents' },
+  // §22.1 — Group Mediclaim Policy: dependants, coverage and enrolment, restricted to HR
+  // write with employee-self read (see GmpPanel).
+  { key: 'gmp', label: 'GMP' },
 ];
 
 const FIELD = 'w-full h-9 px-3 rounded-lg border border-[var(--border)] bg-[var(--input-bg)] text-[13px] text-[var(--text-main)] disabled:opacity-60';
@@ -60,10 +66,13 @@ const EmployeeProfile = () => {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
+  const [appointmentLetter, setAppointmentLetter] = useState(undefined); // undefined = not checked yet
+  const [showLetter, setShowLetter] = useState(false);
 
   const canWrite = can(CAP.EMPLOYEE_WRITE);
   const canSeeSalary = employee && 'base_salary' in employee;
   const canSetSalary = can(CAP.EMPLOYEE_SALARY_WRITE);
+  const canSeeAppointment = can(CAP.APPOINTMENT_READ);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -121,6 +130,18 @@ const EmployeeProfile = () => {
       .catch((err) => showError(err?.response?.data?.detail || 'Could not load the reporting chain.'));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab]);
+
+  // BR-028 — the Appointment Letter, if one was ever raised for this person, downloadable
+  // from their profile. `uk` narrows the company-wide list to this one employee; an
+  // EMPLOYEE-role viewer is additionally self-scoped server-side, so this same call is safe
+  // whether HR opened someone else's profile or the employee opened their own.
+  useEffect(() => {
+    if (!canSeeAppointment || !employee?.source_uk) { setAppointmentLetter(null); return; }
+    getAppointments({ ...scope, uk: employee.source_uk })
+      .then(({ data }) => setAppointmentLetter(data?.appointments?.[0] || null))
+      .catch(() => setAppointmentLetter(null));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [employee?.source_uk, canSeeAppointment]);
 
   const set = (key) => (e) => setForm((f) => ({ ...f, [key]: e.target.value }));
 
@@ -253,6 +274,26 @@ const EmployeeProfile = () => {
               <input id="p-resigned" type="date" value={form.resigned_on} onChange={set('resigned_on')} disabled={!canWrite} className={FIELD} />
             </div>
           </Row>
+
+          {/* BR-028 — downloadable Appointment Letter, surfaced from the employee's own
+              profile rather than only the HR-side Appointments board. */}
+          {appointmentLetter && (
+            <div className="flex items-center justify-between gap-3 rounded-xl border border-[var(--border)] bg-[var(--bg-card)] p-3.5">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <FileText size={16} className="text-[var(--accent-indigo)] shrink-0" />
+                <div className="min-w-0">
+                  <p className="text-[12.5px] font-semibold text-[var(--text-main)] truncate">
+                    Appointment Letter — {appointmentLetter.appointment_no}
+                  </p>
+                  <p className="text-[11px] text-[var(--text-muted)]">{appointmentLetter.status}</p>
+                </div>
+              </div>
+              <button type="button" onClick={() => setShowLetter(true)}
+                className="h-8 px-3 shrink-0 rounded-lg border border-[var(--border)] text-[12px] font-bold text-[var(--text-main)]">
+                View / Print
+              </button>
+            </div>
+          )}
         </div>
       )}
 
@@ -348,6 +389,35 @@ const EmployeeProfile = () => {
             them. One is issued when their onboarding completes.
           </p>
         )
+      )}
+
+      {tab === 'gmp' && (
+        employee?.employee_code ? (
+          <GmpPanel employeeCode={employee.employee_code} employeeName={employee.name} />
+        ) : (
+          <p className="text-[13px] text-[var(--text-muted)]">
+            This employee has no employee code yet, so a GMP enrolment cannot be filed
+            against them.
+          </p>
+        )
+      )}
+
+      {showLetter && appointmentLetter && (
+        <div className="fixed inset-0 z-50 bg-black/60 flex items-start justify-center overflow-y-auto py-8 px-4">
+          <div className="w-full max-w-3xl">
+            <div className="flex justify-end mb-2 gap-2">
+              <button type="button" onClick={() => window.print()}
+                className="h-9 px-3.5 rounded-lg bg-white text-[12px] font-bold text-slate-900">
+                Print / Save as PDF
+              </button>
+              <button type="button" onClick={() => setShowLetter(false)}
+                className="h-9 w-9 rounded-lg bg-white text-slate-900 flex items-center justify-center">
+                <X size={16} />
+              </button>
+            </div>
+            <AppointmentPaper appointment={appointmentLetter} showAcknowledgement={false} />
+          </div>
+        </div>
       )}
 
       {tab === 'reporting' && (

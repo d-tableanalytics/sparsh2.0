@@ -1,12 +1,13 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, LayoutGrid } from 'lucide-react';
+import { ArrowLeft, LayoutGrid, FileText, X } from 'lucide-react';
 import { useHrms } from '../HrmsContext';
 import HrmsPageHeader from '../common/HrmsPageHeader';
 import { HrmsLoading, HrmsError } from '../common/HrmsStates';
 import { getEmployee360 } from '../../../services/hrmsApi';
 import { CARD, SECTION_TITLE, day, attLeaveToneFor } from '../internal/internalKit';
 import { Chip, Facts } from '../internal/internalKit.jsx';
+import AppointmentPaper from '../recruitment/AppointmentPaper';
 
 /**
  * HRMS ▸ Employee 360° (BA/Functional Design §6).
@@ -35,6 +36,7 @@ const Employee360 = () => {
   const [view, setView] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [showLetter, setShowLetter] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true); setError(null);
@@ -261,6 +263,61 @@ const Employee360 = () => {
             </div>
           ) : <Empty label="No absconding cases on record." />}
         </Section>
+      )}
+
+      {/* BR-028 — downloadable Appointment Letter, on the read-oriented 360° view itself
+          rather than only the edit-oriented Profile screen. */}
+      {'appointment' in view && (
+        <Section title="Appointment Letter">
+          {view.appointment ? (
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <p className="text-[12.5px] font-semibold text-[var(--text-main)]">
+                  {view.appointment.appointment_no}
+                </p>
+                <p className="text-[11px] text-[var(--text-muted)]">{view.appointment.status}</p>
+              </div>
+              <button type="button" onClick={() => setShowLetter(true)}
+                className="h-8 px-3 rounded-lg border border-[var(--border)] text-[12px] font-bold text-[var(--text-main)] flex items-center gap-1.5">
+                <FileText size={13} /> View / Print
+              </button>
+            </div>
+          ) : <Empty label="No appointment letter on file." />}
+        </Section>
+      )}
+
+      {/* §22 "GMP section" ── */}
+      {'gmp' in view && (
+        <Section title="Group Mediclaim Policy">
+          {view.gmp ? (
+            <Facts items={[
+              { label: 'Status', value: view.gmp.status },
+              { label: 'Insurer', value: view.gmp.insurer },
+              { label: 'Policy number', value: view.gmp.policy_number },
+              { label: 'Sum insured', value: view.gmp.sum_insured != null
+                  ? `₹${Number(view.gmp.sum_insured).toLocaleString('en-IN')}` : '—' },
+              { label: 'Dependants', value: (view.gmp.dependents || []).length || '0' },
+            ]} />
+          ) : <Empty label="No GMP enrolment on file." />}
+        </Section>
+      )}
+
+      {showLetter && view.appointment && (
+        <div className="fixed inset-0 z-50 bg-black/60 flex items-start justify-center overflow-y-auto py-8 px-4">
+          <div className="w-full max-w-3xl">
+            <div className="flex justify-end mb-2 gap-2">
+              <button type="button" onClick={() => window.print()}
+                className="h-9 px-3.5 rounded-lg bg-white text-[12px] font-bold text-slate-900">
+                Print / Save as PDF
+              </button>
+              <button type="button" onClick={() => setShowLetter(false)}
+                className="h-9 w-9 rounded-lg bg-white text-slate-900 flex items-center justify-center">
+                <X size={16} />
+              </button>
+            </div>
+            <AppointmentPaper appointment={view.appointment} showAcknowledgement={false} />
+          </div>
+        </div>
       )}
     </div>
   );

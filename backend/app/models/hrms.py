@@ -223,6 +223,8 @@ COLL_ABSCONDING_CASES   = "hrms_absconding_cases"
 # hrms_designations/hrms_employee_profiles already uses.
 COLL_SALARY_COMPONENTS = "hrms_salary_components"
 COLL_SALARY_STRUCTURES = "hrms_salary_structures"
+# ── Phase PAYSLIP-1 (SM-HR-064) ── one payslip header/footer template per company.
+COLL_PAYROLL_TEMPLATES = "hrms_payroll_templates"
 COLL_SALARY_ADVANCES   = "hrms_salary_advances"
 COLL_VARIABLE_PAY_QUARTERS    = "hrms_variable_pay_quarters"
 COLL_VARIABLE_PAY_RECORDS     = "hrms_variable_pay_records"
@@ -236,6 +238,11 @@ COLL_VARIABLE_PAY_HOLD_LEDGER = "hrms_variable_pay_hold_ledger"
 # Employee 360° performance history (§22.5 step 222) — Employee 360° itself (§6) is a
 # separate, larger gap this phase does not build.
 COLL_PIP_RECORDS = "hrms_pip_records"
+
+# ── Phase GMP-1 — Group Mediclaim Policy (§22 employee profile "GMP section") ──
+# One current enrolment per employee, HR-administered in place — not an effective-dated
+# history, the same shape Employee Profile's own personal/statutory fields already take.
+COLL_GMP_RECORDS = "hrms_gmp_records"
 
 # ── Phase LETTER-1 — HR Letter / Document Generator (SM-HR-041) ──
 # Templates are HR-authored, mutable text (the same "operator edits the wording" model as
@@ -723,6 +730,7 @@ HRMS_INDEXES = [
     # ── Phase PAY-1 — Payroll, Salary Advance & Variable Pay ──
     (COLL_SALARY_COMPONENTS, [("company_id", 1), ("code", 1)],
      {"unique": True, "name": "uniq_company_code"}),
+    (COLL_PAYROLL_TEMPLATES, [("company_id", 1)], {"unique": True, "name": "uniq_payroll_template"}),
     (COLL_SALARY_STRUCTURES, [("company_id", 1), ("employee_code", 1), ("effective_from", 1)],
      {"name": "by_employee_effective"}),
     (COLL_PAYROLL_RUNS, [("company_id", 1), ("period", 1)],
@@ -746,6 +754,10 @@ HRMS_INDEXES = [
      {"unique": True, "name": "uniq_pip_no"}),
     (COLL_PIP_RECORDS, [("company_id", 1), ("employee_code", 1)], {"name": "by_employee"}),
     (COLL_PIP_RECORDS, [("company_id", 1), ("status", 1)], {"name": "by_company_status"}),
+
+    # ── Phase GMP-1 ── one enrolment per employee.
+    (COLL_GMP_RECORDS, [("company_id", 1), ("employee_code", 1)],
+     {"unique": True, "name": "uniq_gmp_employee"}),
 
     # ── Phase LETTER-1 — HR Letter / Document Generator ──
     (COLL_LETTER_TEMPLATES, [("company_id", 1), ("key", 1)],
@@ -1189,6 +1201,13 @@ class Cap(str, Enum):
     PULSE_READ   = "pulse.read"
     PULSE_MANAGE = "pulse.manage"
     PULSE_SUBMIT = "pulse.submit"
+    # ── Phase GMP-1 — Group Mediclaim Policy (§22, employee profile "GMP section") ──
+    # One current enrolment per employee, HR-administered — the same "master, edited in
+    # place, no approval tier the BA doc does not name" shape Employee Profile's own
+    # personal/statutory fields already take. READ is row-scoped exactly like PIP_READ/
+    # LETTER_READ: an employee sees their own enrolment, HR/INTERNAL see the company's.
+    GMP_READ  = "gmp.read"
+    GMP_WRITE = "gmp.write"
     # ── Later phases append their capabilities here. ──
 
 
@@ -1237,6 +1256,9 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
         # Read only, for the same reason OFFER_SEND is withheld: issuing an appointment
         # letter commits the client to employing somebody.
         Cap.APPOINTMENT_READ,
+        # Read only, the same boundary as employee.salary.* above: Sparsh staff may see a
+        # client's GMP enrolment to support the module, not administer their insurance.
+        Cap.GMP_READ,
         # Setting up an engagement is administrative support work, not a governance
         # decision about the client's hiring -- the same line that gives INTERNAL
         # LINK_MANAGE and DOCUMENT_WRITE but withholds every approval.
@@ -1501,6 +1523,9 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
         # ── Phase PULSE-1 ── §22.4 step 213: "HR dashboard shows completion rate, average
         # scores, common issues and follow-up status" — HR is the one role the doc names.
         Cap.PULSE_READ, Cap.PULSE_MANAGE,
+        # ── Phase GMP-1 ── HR administers the one HR Policy-adjacent record the BA doc
+        # names no separate approval tier for.
+        Cap.GMP_READ, Cap.GMP_WRITE,
     },
     # A hiring manager reads their own corner of the directory (enforced by row scoping in
     # hrms_employee_service, not by this set) and never sees pay. They RAISE requisitions --
@@ -1624,6 +1649,11 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
         # employee is entitled to read; SOP §14 exists to keep it current and visible. It is
         # the register, not the workflow -- no write of any kind comes with it.
         Cap.POLICY_READ,
+        # ── Phase POLICY-LIB-1 (§22.6) ── an employee's own act of acknowledging a
+        # published, applicable policy (step 227) — the same self-service-act pattern
+        # PIP_ACKNOWLEDGE/PULSE_SUBMIT already establish. Row/applicability-scoped in
+        # hrms_policy_service.acknowledge_policy, not merely capability-gated.
+        Cap.POLICY_ACKNOWLEDGE,
         # ── Phase ORIENT-1 ── §22.3 step 202: "Employee sees planned sessions in My
         # Onboarding" — row-scoped to their own assignment in hrms_orientation_service, the
         # same enforced-ownership pattern Phase ATT-1 established (not merely capability-
@@ -1665,6 +1695,20 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
         # already establishes above. There is no LETTER_MANAGE here: an employee reads their
         # own correspondence, they do not issue it to themselves.
         Cap.LETTER_READ,
+        # ── §22 Employee Profile / BR-028 ── "Appointment Letter must remain downloadable
+        # from Employee 360 to authorised users after joining." Row-scoped in
+        # hrms_appointment_service._scope_filter to the one letter raised against this
+        # employee's own hiring record, the same self-view LETTER_READ establishes above.
+        Cap.APPOINTMENT_READ,
+        # ── Phase PAYSLIP-1 (§22.7, SM-HR-031) ── an employee reads their own payslip.
+        # Row-scoped in hrms_payroll_service.list_records / hrms_payslip_service.get_payslip
+        # to their own employee_code, the same enforced self-view PIP_READ establishes — NOT
+        # a blanket grant to the HR-facing payroll-run/records screens' other data.
+        Cap.PAYROLL_READ,
+        # ── Phase GMP-1 ── an employee reads their own Group Mediclaim enrolment — the
+        # same self-view PIP_READ/LETTER_READ already establish. No GMP_WRITE: this stays
+        # HR-administered, the employee does not edit their own coverage or dependants.
+        Cap.GMP_READ,
         # ── Phase PULSE-1 ── §22.4 step 210: the employee completes their own pulse survey.
         # PULSE_READ is row-scoped to their own response the same way PIP_READ is scoped
         # above; PULSE_SUBMIT is the separate self-service completion act.
@@ -4090,6 +4134,8 @@ class DocumentCategory(str, Enum):
     EMPLOYMENT     = "Employment"
     STATUTORY      = "Statutory"
     COMPANY_ISSUED = "Company Issued"
+    # §22.1/BR-029 — Sparsh Magic's own document category, alongside the generic ones above.
+    PSC            = "PSC"
     OTHER          = "Other"
 
 
@@ -5614,6 +5660,10 @@ DEFAULT_POLICIES = [
 AUDIT_POLICY_REGISTERED = "policy registered"
 AUDIT_POLICY_REVISED    = "policy revision logged"
 AUDIT_POLICY_APPROVED   = "policy revision approved"
+# ── Phase POLICY-LIB-1 (§22.6) ──
+AUDIT_POLICY_APPLICABILITY_SAVED = "policy applicability/category saved"
+AUDIT_POLICY_ACKNOWLEDGED        = "policy acknowledged by employee"
+AUDIT_POLICY_DOCUMENT_UPLOADED   = "policy document uploaded"
 ENTITY_POLICY = "policy"
 
 
@@ -5707,6 +5757,10 @@ JOB_POLICY_REVIEW = "policy_review"
 JOB_RETENTION     = "retention_propose"
 JOB_ORIENTATION   = "orientation_escalation"
 JOB_PULSE_SURVEY  = "pulse_survey_issue"
+# ── Phase POLICY-LIB-1 (§22.6) ── weekly, the same cadence JOB_POLICY_REVIEW already uses
+# for the same reason: an unacknowledged policy stays unacknowledged, so a daily nudge would
+# be noise, not a governance signal.
+JOB_POLICY_ACK    = "policy_acknowledgement_reminders"
 
 # (key, label, cadence, utc_hour)
 SCHEDULED_JOBS = [
@@ -5717,6 +5771,7 @@ SCHEDULED_JOBS = [
     (JOB_RETENTION,     "retention purge proposal",       JOB_CADENCE_WEEKLY, 3),
     (JOB_ORIENTATION,   "orientation escalation sweep",    JOB_CADENCE_DAILY,  7),
     (JOB_PULSE_SURVEY,  "30/90-day pulse survey issuance", JOB_CADENCE_DAILY,  7),
+    (JOB_POLICY_ACK,    "policy acknowledgement reminders", JOB_CADENCE_WEEKLY, 8),
 ]
 
 
@@ -5904,8 +5959,8 @@ class PolicyIn(BaseModel):
     # hrms_policy_service.py for why these are added fields, not a rewrite.
     category: Optional[str] = None                # Leave/Attendance/Conduct/... or a
                                                     # client-defined string (BA doc step 223)
-    department_id: Optional[str] = None            # applicability filter; unset = company-wide
-    employment_type: Optional[str] = None          # applicability filter; unset = all types
+    department_ids: List[str] = Field(default_factory=list)   # empty = company-wide
+    employment_types: List[str] = Field(default_factory=list) # empty = every employment type
     acknowledgement_required: bool = False
     acceptance_due_days: Optional[int] = None      # days from publish an employee has to ack
 
@@ -5915,6 +5970,25 @@ class PolicyRevisionIn(BaseModel):
     summary_of_change: str
     effective_date: Optional[str] = None
     document_id: Optional[str] = None
+
+
+class PolicyDocumentIn(BaseModel):
+    """§22.6 — the policy's own PDF, uploaded directly against the register rather than
+    through the candidate/employee document register (hrms_document_service._resolve_owner
+    accepts only those two owner types, and a policy file needs none of that register's
+    verification workflow — see hrms_policy_service.upload_policy_document)."""
+    file: UploadIn
+
+
+class PolicyApplicabilityIn(BaseModel):
+    """§22.6 — metadata-only update: category, applicability filters, acknowledgement
+    settings. Deliberately a separate, smaller model from PolicyIn: this is not a content
+    revision and does not need MD approval, so it must not accept `title`/`version`."""
+    category: Optional[str] = None
+    department_ids: List[str] = Field(default_factory=list)
+    employment_types: List[str] = Field(default_factory=list)
+    acknowledgement_required: bool = False
+    acceptance_due_days: Optional[int] = None
 
 
 class PolicyApproveIn(BaseModel):
@@ -7287,6 +7361,7 @@ AUDIT_SALARY_STRUCTURE_SAVED = "salary structure saved"
 AUDIT_PAYROLL_RUN_CREATED    = "payroll run created"
 AUDIT_PAYROLL_CALCULATED     = "payroll calculated"
 AUDIT_PAYROLL_RECORD_ADJUSTED = "payroll record adjusted"
+AUDIT_PAYROLL_ADJUSTMENTS_SET = "payroll ad-hoc components set"
 AUDIT_PAYROLL_DECIDED        = "payroll run decided"
 AUDIT_ADVANCE_REQUESTED = "salary advance requested"
 AUDIT_ADVANCE_ACTIONED  = "salary advance actioned"
@@ -7322,6 +7397,14 @@ class SalaryStructureIn(BaseModel):
     components: list[SalaryStructureComponentIn]
 
 
+class PayslipTemplateIn(BaseModel):
+    """SM-HR-064 — deliberately thin; see hrms_payslip_service.py's module docstring for
+    why full statutory/component theming waits on the payroll workshop §7.13 itself names."""
+    company_name: Optional[str] = None
+    header_note: Optional[str] = None
+    footer_note: Optional[str] = None
+
+
 class PayrollRunCreateIn(BaseModel):
     period: str                                     # YYYY-MM
 
@@ -7340,6 +7423,21 @@ class PayrollRecordAdjustIn(BaseModel):
     other_deductions: Optional[float] = None
     notice_recovery: Optional[float] = None
     remarks: Optional[str] = None
+
+
+class PayrollAdjustmentItemIn(BaseModel):
+    """One ad-hoc line, against the SAME component master the recurring salary structure
+    already uses (§22.7) — arbitrary named earnings/deductions, not the fixed handful of
+    buckets PayrollRecordAdjustIn still covers alongside this."""
+    code: str
+    amount: float
+
+
+class PayrollAdjustmentsIn(BaseModel):
+    """Replaces this employee's whole ad-hoc component list for the period — the same
+    "replace in place" convention save_salary_structure already uses, so re-submitting a
+    corrected list never leaves a stale row behind."""
+    adjustments: list[PayrollAdjustmentItemIn] = []
 
 
 class PayrollApprovalIn(BaseModel):
@@ -7466,6 +7564,31 @@ class PipDecisionIn(BaseModel):
     extension_date: Optional[str] = None            # only meaningful when closure_result is Extended
     next_action: Optional[str] = None
     remarks: Optional[str] = None
+
+
+# ─────────────────────────────────────────────────────────────
+# Phase GMP-1 — Group Mediclaim Policy
+# ─────────────────────────────────────────────────────────────
+class GmpDependentIn(BaseModel):
+    name: str
+    relation: Optional[str] = None
+    date_of_birth: Optional[str] = None
+
+
+class GmpIn(BaseModel):
+    """HR's upsert of one employee's GMP enrolment. Replaces the record in place —
+    see hrms_gmp_service.py for why this is a current-state master, not a ledger."""
+    insurer: Optional[str] = None
+    policy_number: Optional[str] = None
+    sum_insured: Optional[float] = None
+    enrolled_on: Optional[str] = None
+    status: str = "Active"                       # Active / Inactive
+    dependents: list[GmpDependentIn] = []
+    remarks: Optional[str] = None
+
+
+ENTITY_GMP = "gmp_record"
+AUDIT_GMP_SAVED = "GMP enrolment saved"
 
 
 # ─────────────────────────────────────────────────────────────

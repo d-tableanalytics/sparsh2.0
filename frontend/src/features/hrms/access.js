@@ -279,6 +279,11 @@ export const CAP = {
   PULSE_READ: 'pulse.read',
   PULSE_MANAGE: 'pulse.manage',
   PULSE_SUBMIT: 'pulse.submit',
+  // ── Phase GMP-1 — Group Mediclaim Policy ──
+  GMP_READ: 'gmp.read',
+  GMP_WRITE: 'gmp.write',
+  // ── Phase POLICY-LIB-1 (§22.6) — the employee's own act of acknowledging a policy. ──
+  POLICY_ACKNOWLEDGE: 'policy.acknowledge',
 };
 
 /** Sparsh internal user rather than a client-side one. Same precedence the backend uses

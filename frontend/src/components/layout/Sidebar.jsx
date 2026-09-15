@@ -32,6 +32,10 @@ import {
   GraduationCap,
   // ── Phase PULSE-1 ── 30/90-Day Pulse Survey.
   HeartPulse,
+  // Onboarding (Pre-boarding → Joining) — the same icon HrmsWorkspaceBar's own
+  // "Onboarding" tab already uses, so the sidebar entry and the in-pipeline tab read as
+  // the same stage rather than two different ones.
+  UserPlus,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { canAccessTaskManagement } from '../../utils/taskAccess';
@@ -187,55 +191,93 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
     // a job request. They are stages like any other.
     '/hrms/job-requests', '/hrms/cv-sharing', '/hrms/background-checks'];
 
+  // Ordered to follow the BA doc's own Employee Lifecycle (§5: Workforce Need -> MRF ->
+  // Recruitment -> Offer -> Pre-boarding -> Joining -> Probation -> Active Employment ->
+  // Growth -> Conduct -> Exit Initiation -> Notice/Handover -> F&F -> Closure), not by
+  // build phase. Previously this list was ordered roughly by the phase that added each
+  // entry, which put Probation and Exit Management ahead of Attendance/Payroll and
+  // Orientation near the very end — the opposite of the order a lifecycle reads in.
   const hrmsSubmodules = [
     { name: 'Dashboard', path: '/hrms/dashboard', icon: BarChart3 },
     { name: 'Employees', path: '/hrms/employees', icon: Users },
+
+    // ── Stages 02-05: MRF -> Recruitment -> Offer ──
     // Recruitment is visible to everyone: any HRMS user may raise a requisition, and whoever
-    // raises one becomes its hiring manager (the module's documented design intent).
+    // raises one becomes its hiring manager (the module's documented design intent). Opens
+    // the workspace tab strip, which carries every pipeline stage from requisition through
+    // Appointments (see HrmsWorkspaceBar.jsx) — Talent Pool and Shared Candidates below are
+    // sourcing/client surfaces that feed the same pipeline without being a stage in it.
     {
       name: 'Recruitment', path: '/hrms/requisitions', icon: ClipboardList,
       match: (p) => HRMS_WORKSPACE.some((r) => p === r || p.startsWith(`${r}/`)),
     },
-    // Phase 11-R, Item 2 — the document register has ONE home, and it is the sidebar
-    // (it is not a hiring stage, so it is deliberately absent from the workspace strip).
+    // ── Phase INT-2 ── a search across candidates rather than a step in one hire.
+    { name: 'Talent Pool', path: '/hrms/talent-pool', icon: Bookmark },
+    // Phase 12 — a client's own read-only view of candidates shared with them. Deliberately
+    // NOT in the workspace tab strip's "Client hiring" group (that group is Sparsh staff's
+    // own pipeline view); this is the one entry point a client-side user has to their board.
+    { name: 'Shared Candidates', path: '/hrms/shared-candidates', icon: Users },
+
+    // ── Stages 06-07: Pre-boarding -> Joining (Onboarding) ──
+    // Onboarding previously had NO entry point outside the workspace tab strip, which
+    // itself only renders once you are already on a pipeline route (HrmsWorkspace.jsx:
+    // "renders itself as null outside the recruitment pipeline") — so a user landing
+    // anywhere else in HRMS (Dashboard, Employees, ...) had no way to discover it existed.
+    // It is the same board the workspace tab strip's "Onboarding" tab already links to
+    // (`/hrms/onboarding`), not a second screen — this is a second DOOR into it, the same
+    // relationship 'Recruitment' above already has with the tab strip's own 'Hiring Req'.
+    { name: 'Onboarding', path: '/hrms/onboarding', icon: UserPlus },
+    // ── Phase INT-2 ── post-offer engagement tracking for the same pre-boarding window,
+    // not itself a pipeline stage.
+    { name: 'Pre-boarding', path: '/hrms/preboarding', icon: HeartHandshake },
+    // Phase 11-R, Item 2 — the document register has ONE home, and it is the sidebar (not a
+    // hiring stage, so deliberately absent from the workspace strip). KYC/joining documents
+    // are verified here during onboarding, and every document type stays reachable from the
+    // same place afterward.
     { name: 'Documents', path: '/hrms/documents', icon: FolderOpen },
-    // ── Internal track ── GOVERNANCE, not pipeline: probation is a post-hire employment
-    // event and the exception log is a control surface. Both are deliberately absent from
-    // the workspace tab strip, which owns the hiring stages (the two lists stay disjoint).
+    // ── Phase ORIENT-1 ── §22.3: assigned "on employee activation" — i.e. right after
+    // joining. An employee reaches their own record ("My Onboarding") through this entry.
+    { name: 'Orientation & Training', path: '/hrms/orientation', icon: GraduationCap },
+    // ── Phase PULSE-1 ── 30/90-day check-ins, issued automatically from date of joining —
+    // the first health-check after Orientation, so it follows immediately after.
+    { name: 'Pulse Surveys', path: '/hrms/pulse-surveys', icon: HeartPulse },
+
+    // ── Stage 08: Probation ──
     { name: 'Probation', path: '/hrms/probation', icon: CalendarClock },
-    { name: 'Exceptions', path: '/hrms/exceptions', icon: ShieldAlert },
-    // ── Phase EXIT-1 ── resignation/notice, handover, clearance and F&F. A post-hire
-    // employment event like Probation above, not a hiring stage, so it lives here rather
-    // than the workspace tab strip. `match` also lights this up on the detail route.
+
+    // ── Stage 09: Active Employment ──
+    // ── Phase ATT-1 ── daily capture, regularisation, Outdoor Duty and monthly closure.
+    { name: 'Attendance', path: '/hrms/attendance', icon: Clock },
+    { name: 'Leave & C-Off', path: '/hrms/leave', icon: CalendarCheck },
+    // ── Phase PAY-1 ── component-driven payroll, salary advance and variable pay.
+    { name: 'Payroll', path: '/hrms/payroll', icon: Wallet },
+
+    // ── Stages 10-11: Growth / Conduct ──
+    // ── Phase PIP-1 ── objectives, support, reviews and outcome for a Performance
+    // Improvement Plan.
+    { name: 'PIP', path: '/hrms/pip', icon: TrendingDown },
+    // ── Phase MOVE-1 ── promotions/transfers (Growth) and discipline/absconding/retirement
+    // alerts (Conduct) — one screen covers both stages.
+    { name: 'Movements & Discipline', path: '/hrms/movements', icon: GitBranch },
+
+    // ── Cross-cutting reference, used throughout Active Employment/Growth ──
+    // ── Phase LETTER-1 ── controlled correspondence (confirmation, revision, warning, etc.)
+    // — HR manages the template register and issues letters, an employee reads their own.
+    { name: 'Letters', path: '/hrms/letters', icon: FileCog },
+    // ── Phase POLICY-LIB-1 (§22.6) ── every employee's own view of the policies that
+    // apply to them, separate from the HR-only 'Policy Register' further down (which
+    // administers the register rather than reading it).
+    { name: 'HR Policy Library', path: '/hrms/policy-library', icon: BookMarked },
+
+    // ── Stages 12-15: Exit Initiation -> Notice/Handover -> F&F -> Closure ──
+    // ── Phase EXIT-1 ── `match` also lights this up on the detail route.
     {
       name: 'Exit Management', path: '/hrms/separations', icon: UserMinus,
       match: (p) => p === '/hrms/separations' || p.startsWith('/hrms/separations/'),
     },
-    // ── Phase ATT-1 ── daily capture, regularisation, Outdoor Duty and monthly closure —
-    // a post-hire operational surface like Probation/Exit above, not a hiring stage.
-    { name: 'Attendance', path: '/hrms/attendance', icon: Clock },
-    { name: 'Leave & C-Off', path: '/hrms/leave', icon: CalendarCheck },
-    // ── Phase MOVE-1 ── promotions/transfers, discipline, absconding and retirement
-    // alerts — the same post-hire-operational reasoning as every entry above it.
-    { name: 'Movements & Discipline', path: '/hrms/movements', icon: GitBranch },
-    // ── Phase PAY-1 ── component-driven payroll, salary advance and variable pay.
-    { name: 'Payroll', path: '/hrms/payroll', icon: Wallet },
-    // ── Phase PIP-1 ── objectives, support, reviews and outcome for a Performance
-    // Improvement Plan.
-    { name: 'PIP', path: '/hrms/pip', icon: TrendingDown },
-    // ── Phase LETTER-1 ── controlled correspondence (confirmation, revision, warning, etc.)
-    // — HR manages the template register and issues letters, an employee reads their own.
-    { name: 'Letters', path: '/hrms/letters', icon: FileCog },
-    // ── Phase ORIENT-1 ── plan assignment, scheduling and completion tracking — an
-    // employee reaches their own record ("My Onboarding") through this same entry.
-    { name: 'Orientation & Training', path: '/hrms/orientation', icon: GraduationCap },
-    // ── Phase PULSE-1 ── 30/90-day check-ins, issued automatically from date of joining.
-    { name: 'Pulse Surveys', path: '/hrms/pulse-surveys', icon: HeartPulse },
-    // ── Phase INT-2 ── governance and sourcing surfaces, deliberately NOT in the tab
-    // strip. Pre-boarding is post-offer engagement rather than a pipeline stage; the
-    // talent pool is a search across candidates rather than a step in one hire.
-    { name: 'Pre-boarding', path: '/hrms/preboarding', icon: HeartHandshake },
-    { name: 'Talent Pool', path: '/hrms/talent-pool', icon: Bookmark },
+
+    // ── Governance, not a lifecycle stage: an internal-hiring control surface. ──
+    { name: 'Exceptions', path: '/hrms/exceptions', icon: ShieldAlert },
     ...(isHrmsAdminUser ? [
       { name: 'Departments', path: '/hrms/departments', icon: Building2 },
       { name: 'Designations', path: '/hrms/designations', icon: Briefcase },

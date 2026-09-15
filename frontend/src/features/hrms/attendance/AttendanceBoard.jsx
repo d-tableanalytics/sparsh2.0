@@ -11,6 +11,7 @@ import {
   requestRegularization, getRegularizations, actOnRegularization,
   requestOd, getOdRequests, actOnOd,
   getClosureDashboard, lockPeriod, unlockPeriod,
+  getLateComingSummary,
 } from '../../../services/hrmsApi';
 import { FIELD, LABEL, TEXTAREA, day, attLeaveToneFor } from '../internal/internalKit';
 import { Btn, Chip, Facts, Modal, RecordList } from '../internal/internalKit.jsx';
@@ -25,7 +26,7 @@ import { Btn, Chip, Facts, Modal, RecordList } from '../internal/internalKit.jsx
  * views onto the same rolling operational data.
  */
 
-const TABS = ['Attendance', 'Regularizations', 'Outdoor Duty', 'Monthly Closure'];
+const TABS = ['Attendance', 'Regularizations', 'Outdoor Duty', 'Late Coming', 'Monthly Closure'];
 
 const EXCEPTION_TYPES = ['Missing Punch', 'Wrong Time', 'Forgot to Mark', 'System Error', 'Other'];
 
@@ -151,9 +152,156 @@ const AttendanceBoard = () => {
         <OdTab scope={scope} companyId={companyId} can={can}
           showSuccess={showSuccess} showError={showError} />
       )}
+      {tab === 'Late Coming' && (
+        <LateComingTab scope={scope} companyId={companyId} />
+      )}
       {tab === 'Monthly Closure' && (
         <ClosureTab scope={scope} companyId={companyId} can={can}
           showSuccess={showSuccess} showError={showError} />
+      )}
+    </div>
+  );
+};
+
+// ── Late Coming tab (§22.9) ──
+const LateComingTab = ({ scope, companyId }) => {
+  const [period, setPeriod] = useState(new Date().toISOString().slice(0, 7));
+  const [summary, setSummary] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [focusEmployee, setFocusEmployee] = useState(null);
+
+  const load = useCallback(async () => {
+    if (!companyId) { setLoading(false); return; }
+    setLoading(true); setError(null);
+    try {
+      const [year, month] = period.split('-').map(Number);
+      const lastDay = new Date(year, month, 0).getDate();
+      const { data } = await getLateComingSummary({
+        ...scope, start_date: `${period}-01`, end_date: `${period}-${String(lastDay).padStart(2, '0')}`,
+      });
+      setSummary(data);
+    } catch (err) {
+      setError(err?.response?.data?.detail || 'Could not load the late-coming summary.');
+    } finally {
+      setLoading(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [companyId, period]);
+
+  useEffect(() => { load(); setFocusEmployee(null); }, [load]);
+
+  const dates = summary?.dates || [];
+  const shown = focusEmployee ? dates.filter((d) => d.employee_code === focusEmployee) : dates;
+  const lateByDate = shown.reduce((acc, d) => {
+    (acc[d.work_date] = acc[d.work_date] || []).push(d);
+    return acc;
+  }, {});
+  const byEmployee = dates.reduce((acc, d) => {
+    acc[d.employee_code] = (acc[d.employee_code] || 0) + 1;
+    return acc;
+  }, {});
+  const employeeRows = Object.entries(byEmployee).sort((a, b) => b[1] - a[1]);
+  const byDepartment = dates.reduce((acc, d) => {
+    const key = d.department || 'Unassigned';
+    acc[key] = (acc[key] || 0) + 1;
+    return acc;
+  }, {});
+  const departmentRows = Object.entries(byDepartment).sort((a, b) => b[1] - a[1]);
+
+  const [year, month] = period.split('-').map(Number);
+  const firstWeekday = new Date(year, month - 1, 1).getDay();
+  const daysInMonth = new Date(year, month, 0).getDate();
+  const cells = [...Array(firstWeekday).fill(null),
+    ...Array.from({ length: daysInMonth }, (_, i) => i + 1)];
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-end gap-3 justify-between">
+        <div>
+          <label className={LABEL} htmlFor="late-period">Period</label>
+          <input id="late-period" type="month" value={period} className={`${FIELD} max-w-[200px]`}
+            onChange={(e) => setPeriod(e.target.value)} />
+        </div>
+        {focusEmployee && (
+          <Btn onClick={() => setFocusEmployee(null)}>Clear filter ({focusEmployee})</Btn>
+        )}
+      </div>
+
+      {loading && <HrmsLoading label="Loading late-coming data…" />}
+      {error && !loading && <HrmsError message={error} onRetry={load} />}
+
+      {!loading && !error && summary && (
+        <div className="space-y-4">
+          <div className="rounded-xl border border-[var(--border)] bg-[var(--bg-card)] p-4">
+            <p className="text-[10.5px] font-bold uppercase tracking-widest text-[var(--text-muted)]">
+              Total Late-Coming Days{focusEmployee ? ` · ${focusEmployee}` : ''}
+            </p>
+            <p className="mt-1 text-[24px] font-bold text-[var(--text-main)]">
+              {focusEmployee ? shown.length : summary.total_late_days}
+            </p>
+          </div>
+
+          {/* Calendar grid — each late date highlighted, clickable for the day's detail. */}
+          <div>
+            <p className={LABEL}>Calendar</p>
+            <div className="grid grid-cols-7 gap-1.5 text-center">
+              {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map((d) => (
+                <div key={d} className="text-[10.5px] font-bold text-[var(--text-muted)] pb-1">{d}</div>
+              ))}
+              {cells.map((day, i) => {
+                if (!day) return <div key={`blank-${i}`} />;
+                const dateStr = `${period}-${String(day).padStart(2, '0')}`;
+                const hits = lateByDate[dateStr];
+                return (
+                  <div key={dateStr} title={hits ? hits.map((h) => `${h.employee_code}: ${h.late_minutes}m`).join(', ') : undefined}
+                    className={`h-14 rounded-lg border text-[11.5px] flex flex-col items-center justify-center gap-0.5
+                      ${hits
+                        ? 'border-[var(--accent-red)]/40 bg-[var(--accent-red-bg)] text-[var(--accent-red)] font-bold'
+                        : 'border-[var(--border)] text-[var(--text-muted)]'}`}>
+                    <span>{day}</span>
+                    {hits && <span className="text-[10px]">{hits.length} late</span>}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Late Coming Analytics — by department and by employee, for whoever can see
+              more than their own record. */}
+          {departmentRows.length > 1 && (
+            <div>
+              <p className={LABEL}>By Department</p>
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                {departmentRows.map(([dept, count]) => (
+                  <div key={dept} className="rounded-lg border border-[var(--border)] bg-[var(--bg-card)] px-3 py-2">
+                    <p className="text-[11.5px] font-semibold text-[var(--text-main)] truncate">{dept}</p>
+                    <p className="text-[10.5px] text-[var(--text-muted)]">{count} late day(s)</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          {employeeRows.length > 0 && (
+            <div>
+              <p className={LABEL}>By Employee</p>
+              <div className="space-y-1.5">
+                {employeeRows.map(([code, count]) => (
+                  <button key={code} type="button" onClick={() => setFocusEmployee(code)}
+                    className="w-full flex items-center justify-between rounded-lg border border-[var(--border)]
+                      bg-[var(--bg-card)] px-3 py-2 text-left hover:border-[var(--accent-indigo)]">
+                    <span className="text-[12.5px] font-semibold text-[var(--text-main)]">{code}</span>
+                    <Chip tone={count >= 5 ? 'bad' : count >= 2 ? 'warn' : 'neutral'}>{count} day(s)</Chip>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {!dates.length && (
+            <HrmsEmpty icon={Clock} title="No late-coming days in this period" />
+          )}
+        </div>
       )}
     </div>
   );

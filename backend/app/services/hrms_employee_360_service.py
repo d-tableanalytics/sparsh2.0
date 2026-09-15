@@ -118,4 +118,19 @@ async def get_employee_360(actor: dict, company_id: str, user_id: str) -> dict:
         view["pulse_surveys"] = await pulse_mgmt.list_responses(
             actor, company_id, employee_code=employee_code, limit=10)
 
+    # ── BR-028 — the Appointment Letter, if one was ever raised. Appointments are keyed by
+    # candidate `uk`, not employee_code — profile["source_uk"] is the join hrms_onboarding_
+    # service stamps at Employee ID generation, the same link hrms_appointment_service's own
+    # EMPLOYEE self-scope resolves independently.
+    if can(actor, Cap.APPOINTMENT_READ) and profile.get("source_uk"):
+        from app.services import hrms_appointment_service as appointment_mgmt
+        letters = await appointment_mgmt.list_appointments(
+            actor, company_id, uk=profile["source_uk"])
+        view["appointment"] = (letters.get("appointments") or [None])[0]
+
+    # ── Phase GMP-1 (§22 "GMP section") ──
+    if can(actor, Cap.GMP_READ):
+        from app.services import hrms_gmp_service as gmp_mgmt
+        view["gmp"] = await gmp_mgmt.get_gmp(actor, company_id, employee_code)
+
     return view
