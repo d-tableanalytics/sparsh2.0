@@ -4,6 +4,11 @@ from datetime import datetime
 
 class CompanyBase(BaseModel):
     name: str
+    # Prefix for this company's usernames ("People to Process" -> "PTP" -> "PTP_Users001").
+    # Derived from the name on first use and stored, so correcting a typo in the company name
+    # later cannot silently renumber everybody. Editable: no rule reads every name the way its
+    # own people do.
+    username_prefix: Optional[str] = None
     domain: Optional[str] = None
     owner: Optional[str] = None
     smop_id: Optional[str] = None
@@ -41,6 +46,7 @@ class CompanyCreate(CompanyBase):
 
 class CompanyUpdate(BaseModel):
     name: Optional[str] = None
+    username_prefix: Optional[str] = None
     owner: Optional[str] = None
     smop_id: Optional[str] = None
     smop: Optional[str] = None

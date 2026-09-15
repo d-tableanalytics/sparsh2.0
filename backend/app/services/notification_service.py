@@ -228,7 +228,10 @@ UPCOMING_REMINDER_HTML_TEMPLATE = """<!DOCTYPE html>
 DEFAULT_TEMPLATES = {
     "user_creation_email": {
         "subject": "Welcome to Sparsh 2.0 - Your Account Details",
-        "body": "Hello {{name}},\n\nWelcome to Sparsh 2.0! Your account has been created successfully.\n\nCredentials:\nEmail: {{email}}\nTemporary Password: {{password}}\n\nYou can login here: {{login_url}}\n\nRegards,\nTeam Sparsh"
+        # The username leads because it is the credential guaranteed to be unique: somebody
+        # holding an account in two client companies shares an email between them, so an email
+        # alone no longer tells them which account this message is about.
+        "body": "Hello {{name}},\n\nWelcome to Sparsh 2.0! Your account has been created successfully.\n\nCredentials:\nUsername: {{username}}\nEmail: {{email}}\nTemporary Password: {{password}}\n\nYou can sign in with either your username or your email. If you have an account with more than one company, use your username - it belongs to this one only.\n\nYou can login here: {{login_url}}\n\nRegards,\nTeam Sparsh"
     },
     "task_created_email": {
         "subject": "New Task Assigned: {{task_name}}",

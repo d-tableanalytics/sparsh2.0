@@ -12,6 +12,11 @@ class UserRole(str, Enum):
 
 class UserBase(BaseModel):
     email: EmailStr
+    # Company-scoped login identity, e.g. "PTP_Users001". Unique where email is not: the same
+    # person may hold an account in two client companies under one address. Optional on the
+    # model because it is ISSUED at creation rather than supplied — see
+    # services/username_service.assign_username.
+    username: Optional[str] = None
     first_name: Optional[str] = None
     last_name: Optional[str] = None
     full_name: Optional[str] = None # Derivable or stored
@@ -55,6 +60,9 @@ class UserCreate(UserBase):
 
 class UserResponse(UserBase):
     id: str = Field(alias="_id")
+    # Declared explicitly as well as inherited: FastAPI drops any field a response model does
+    # not name, and without this the username would be stripped from /users/me — so the client
+    # could never show somebody the credential they are meant to sign in with.
     created_at: datetime = Field(default_factory=datetime.utcnow)
     orm_enabled: Optional[bool] = True  # Company-level ORM module access
     tpms_enabled: Optional[bool] = False  # Company-level TPMS module access (opt-in)

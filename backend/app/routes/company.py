@@ -8,6 +8,7 @@ from app.controllers.auth_controller import get_current_user, get_password_hash
 from app.services.notification_service import send_notification_from_template, send_company_registration_email
 from bson import ObjectId
 from app.services.activity_log_service import log_activity
+from app.services.username_service import assign_username
 from app.utils.tpms_access import TOGGLE_ROLES as TPMS_TOGGLE_ROLES
 from app.models.hrms import (
     AUDIT_MODULE_DISABLED, AUDIT_MODULE_ENABLED, ENTITY_COMPANY,
@@ -89,6 +90,9 @@ async def onboard_company(request: CompanyOnboardingRequest, background_tasks: B
         ln = admin_dict.get("last_name") or ""
         admin_dict["full_name"] = f"{fn} {ln}".strip()
     
+    # Every account gets its company-scoped login name at the moment it is created, so
+    # there is never a user who cannot be told how to sign in.
+    await assign_username(admin_dict, admin_dict.get("company_id"))
     admin_result = await users_collection.insert_one(admin_dict)
     admin_id = str(admin_result.inserted_id)
     
@@ -422,6 +426,7 @@ async def bulk_create_users(company_id: str, users: List[UserCreate], background
             ln = user_dict.get("last_name") or ""
             user_dict["full_name"] = f"{fn} {ln}".strip()
         
+        await assign_username(user_dict, company_id)
         res = await users_collection.insert_one(user_dict)
         user_dict["_id"] = str(res.inserted_id)
         
@@ -433,6 +438,7 @@ async def bulk_create_users(company_id: str, users: List[UserCreate], background
             context={
                 "name": user_dict.get("first_name", "Learner"),
                 "email": user_dict["email"],
+                "username": user_dict.get("username") or "",
                 "password": raw_password,
                 "role": "Learner",
                 "login_url": "http://localhost:5173/login"
@@ -658,6 +664,7 @@ async def import_users_xlsx(company_id: str, background_tasks: BackgroundTasks, 
                 "created_at": datetime.now(timezone.utc)
             }
             
+            await assign_username(user_dict, company_id)
             res = await users_collection.insert_one(user_dict)
             new_uid = str(res.inserted_id)
             user_dict["_id"] = new_uid
@@ -677,6 +684,7 @@ async def import_users_xlsx(company_id: str, background_tasks: BackgroundTasks, 
                 context={
                     "name": user_dict.get("first_name", "Learner"),
                     "email": user_dict["email"],
+                    "username": user_dict.get("username") or "",
                     "password": raw_password,
                     "role": "Learner",
                     "login_url": "http://localhost:5173/login"

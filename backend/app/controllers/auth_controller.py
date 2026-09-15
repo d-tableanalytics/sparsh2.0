@@ -6,8 +6,12 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from app.config.settings import settings
 from app.db.mongodb import get_collection
+from bson import ObjectId
+import logging
 from app.models.auth import TokenData
 from app.models.user import UserRole
+
+logger = logging.getLogger(__name__)
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/auth/token")
@@ -30,27 +34,59 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
 
 async def get_user_from_token(token: str) -> Optional[dict]:
     """Decode a JWT and resolve the user doc (staff first, then learners).
-    Returns None on any failure. Used where the token can't come from the
-    Authorization header — e.g. the SSE stream endpoint reads it from a query
-    param because EventSource can't set headers."""
+
+    The subject is the user's `_id`. It used to be their EMAIL, which was safe only while an
+    address identified exactly one account — and it no longer does: one person may legitimately
+    hold an account in two client companies under the same mailbox. Resolving by email would
+    have handed both sessions whichever document Mongo returned first, so somebody would have
+    been silently signed into the wrong company's data with a perfectly valid token.
+
+    An email subject is still accepted so that tokens issued before this change keep working
+    until they expire — nobody is signed out by the deploy. That path is unambiguous by
+    definition: it can only have been issued when the address was unique, and if it has since
+    been reused the lookup is refused rather than guessed at.
+
+    Returns None on any failure. Used where the token can't come from the Authorization
+    header — e.g. the SSE stream endpoint reads it from a query param because EventSource
+    can't set headers.
+    """
     if not token:
         return None
     try:
         payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
-        email = payload.get("sub")
-        if not email:
+        subject = payload.get("sub")
+        if not subject:
             return None
     except JWTError:
         return None
 
-    user = await get_collection("staff").find_one({"email": email})
-    if user:
-        user["_source_collection"] = "staff"
-    else:
-        user = await get_collection("learners").find_one({"email": email})
-        if user:
-            user["_source_collection"] = "learners"
-    return user
+    subject = str(subject)
+    # A 24-character hex string is an ObjectId; anything else is a legacy email subject.
+    if ObjectId.is_valid(subject) and "@" not in subject:
+        oid = ObjectId(subject)
+        for coll in ("staff", "learners"):
+            user = await get_collection(coll).find_one({"_id": oid})
+            if user:
+                user["_source_collection"] = coll
+                return user
+        return None
+
+    # ─── Legacy token: subject is an email ───
+    matches = []
+    for coll in ("staff", "learners"):
+        async for doc in get_collection(coll).find({"email": subject}):
+            doc["_source_collection"] = coll
+            matches.append(doc)
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        # The address has been reused since this token was issued, so it no longer names one
+        # account. Refusing sends them back to the login screen to pick, which is the only
+        # honest answer — picking one for them is how the wrong company's data gets served.
+        logger.warning(
+            "Legacy token rejected: '%s' now matches %d accounts. The holder must sign in "
+            "again, with their username.", subject, len(matches))
+    return None
 
 
 async def get_current_user(token: str = Depends(oauth2_scheme)):

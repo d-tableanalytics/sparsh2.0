@@ -10,7 +10,8 @@ import {
   ArrowLeft, Pencil, Trash2, Download, Upload, Plus, User, UserCheck, Lock,
   CheckCircle2, XCircle, PauseCircle, ChevronDown, Save, X,
   FileSpreadsheet, AlertTriangle, ExternalLink, Layers, Calendar,
-  Target, BookOpen, ChevronRight, CheckCircle, Circle, UploadCloud, FileText, Bot, Inbox
+  Target, BookOpen, ChevronRight, CheckCircle, Circle, UploadCloud, FileText, Bot, Inbox,
+  KeyRound
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import ORMReportTab from '../components/company/ORMReportTab';
@@ -202,6 +203,46 @@ const CompanyDetails = () => {
 
   const [company, setCompany] = useState(null);
   const [users, setUsers] = useState([]);
+  // Which member's username is currently being issued, so only that row's button spins.
+  const [issuingUsername, setIssuingUsername] = useState(null);
+  const [issuingAll, setIssuingAll] = useState(false);
+
+  /** Issue one member the next username in this company ("PTP_Users004"). */
+  const handleIssueUsername = async (u) => {
+    setIssuingUsername(u._id);
+    try {
+      const res = await api.post(`/users/${u._id}/username`);
+      const username = res.data?.username;
+      // Patched in place rather than refetching the whole company: the roster can be long and
+      // the only thing that changed is one cell.
+      setUsers((prev) => prev.map((x) => (x._id === u._id ? { ...x, username } : x)));
+      showSuccess(`${u.full_name || u.email} can now sign in as ${username}`);
+    } catch (err) {
+      showError(err.response?.data?.detail || 'Could not create a username.');
+    } finally {
+      setIssuingUsername(null);
+    }
+  };
+
+  /** Issue usernames to everyone in this company who has none. */
+  const handleIssueAllUsernames = async () => {
+    setIssuingAll(true);
+    try {
+      const res = await api.post('/users/usernames/backfill', null, {
+        params: { company_id: companyId, dry_run: false },
+      });
+      const n = res.data?.assigned ?? 0;
+      showSuccess(n
+        ? `Created ${n} username${n === 1 ? '' : 's'}.`
+        : 'Everyone here already has a username.');
+      const refreshed = await api.get(`/companies/${companyId}/users`);
+      setUsers(refreshed.data);
+    } catch (err) {
+      showError(err.response?.data?.detail || 'Could not create usernames.');
+    } finally {
+      setIssuingAll(false);
+    }
+  };
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState('dashboard');
   const [editMode, setEditMode] = useState(false);
@@ -853,6 +894,14 @@ const CompanyDetails = () => {
                       <button onClick={() => fileInputRef.current?.click()} className="h-8 px-3 bg-[var(--accent-orange-bg)] border border-[var(--accent-orange-border)] text-[var(--accent-orange)] rounded-lg text-[11px] font-bold flex items-center gap-1.5 hover:opacity-80 transition-all">
                         <Upload size={12} /> Import
                       </button>
+                      {users.some((u) => !u.username) && (
+                        <button onClick={handleIssueAllUsernames} disabled={issuingAll}
+                          title="Give every member here a login username"
+                          className="h-8 px-3 bg-[var(--accent-indigo-bg)] border border-[var(--accent-indigo-border)] text-[var(--accent-indigo)] rounded-lg text-[11px] font-bold flex items-center gap-1.5 hover:opacity-80 transition-all disabled:opacity-50">
+                          <KeyRound size={12} />
+                          {issuingAll ? 'Creating…' : `Create ${users.filter((u) => !u.username).length} Username${users.filter((u) => !u.username).length === 1 ? '' : 's'}`}
+                        </button>
+                      )}
                       <button onClick={() => setShowAddUser(true)} className="h-8 px-3 bg-[var(--btn-primary)] text-white rounded-lg text-[11px] font-bold flex items-center gap-1.5 hover:bg-[var(--btn-primary-hover)] transition-all">
                         <Plus size={12} /> Add User
                       </button>
@@ -877,6 +926,7 @@ const CompanyDetails = () => {
                     <tr className="bg-[var(--table-header-bg)] border-b border-[var(--border)]">
                       <th className="px-5 py-3 text-left text-[11px] font-bold text-[var(--text-muted)] uppercase tracking-wider">Name</th>
                       <th className="px-5 py-3 text-left text-[11px] font-bold text-[var(--text-muted)] uppercase tracking-wider">Email</th>
+                      <th className="px-5 py-3 text-left text-[11px] font-bold text-[var(--text-muted)] uppercase tracking-wider">Username</th>
                       <th className="px-5 py-3 text-left text-[11px] font-bold text-[var(--text-muted)] uppercase tracking-wider">Level</th>
                       <th className="px-5 py-3 text-left text-[11px] font-bold text-[var(--text-muted)] uppercase tracking-wider">Reporting Manager</th>
                       <th className="px-5 py-3 text-left text-[11px] font-bold text-[var(--text-muted)] uppercase tracking-wider">Role</th>
@@ -905,6 +955,19 @@ const CompanyDetails = () => {
                           </td>
                           <td className="px-5 py-2.5 text-[12px] text-[var(--text-muted)]">{u.email}</td>
                           <td className="px-5 py-2.5">
+                            {u.username ? (
+                              <span className="font-mono text-[11.5px] font-bold text-[var(--text-main)]">{u.username}</span>
+                            ) : canUpdate ? (
+                              <button onClick={() => handleIssueUsername(u)} disabled={issuingUsername === u._id}
+                                title="Create a company username this person can sign in with"
+                                className="px-2 py-0.5 rounded-md text-[10px] font-bold text-[var(--accent-indigo)] bg-[var(--accent-indigo-bg)] border border-[var(--accent-indigo-border)] hover:opacity-80 transition-all disabled:opacity-50">
+                                {issuingUsername === u._id ? 'Creating…' : '+ Create'}
+                              </button>
+                            ) : (
+                              <span className="text-[11px] text-[var(--text-muted)]">—</span>
+                            )}
+                          </td>
+                          <td className="px-5 py-2.5">
                             <span className="px-2 py-0.5 bg-indigo-50 text-[var(--accent-indigo)] border border-indigo-100 rounded-md text-[10px] font-bold uppercase">{u.level || '—'}</span>
                           </td>
                           <td className="px-5 py-2.5 text-[12px] text-[var(--text-muted)] font-medium">{mgrDisplay}</td>
@@ -927,7 +990,7 @@ const CompanyDetails = () => {
                       );
                     })}
                     {users.length === 0 && (
-                      <tr><td colSpan={9} className="px-5 py-12 text-center text-[var(--text-muted)] text-[13px]">No users yet. Add users or import via template.</td></tr>
+                      <tr><td colSpan={10} className="px-5 py-12 text-center text-[var(--text-muted)] text-[13px]">No users yet. Add users or import via template.</td></tr>
                     )}
                   </tbody>
                 </table>

@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, Query, status, BackgroundTasks
 from typing import List, Optional
 from app.models.user import UserResponse, UserRole
 from app.controllers.auth_controller import (
@@ -583,3 +583,187 @@ async def get_user_analytics(user_id: str, current_user: dict = Depends(get_curr
             {"name": "Other", "value": 0}
         ]
     }
+
+
+# ═════════════════════════════════════════════════════════════
+# Usernames
+#
+# A company-scoped login identity ("PTP_Users001") that is unique where an email is not: the
+# same person may hold an account in two client companies under one address. Issued
+# automatically at creation; these endpoints exist for the accounts that predate the feature,
+# and for correcting a company's prefix.
+# ═════════════════════════════════════════════════════════════
+USERNAME_ADMIN_ROLES = {"superadmin", "admin"}
+
+
+def _username_admin(current_user: dict) -> None:
+    if (current_user.get("role") or "").lower() not in USERNAME_ADMIN_ROLES:
+        raise HTTPException(status_code=403,
+                            detail="Only Admin / Super Admin can manage usernames.")
+
+
+@router.get("/usernames/status")
+async def username_status(current_user: dict = Depends(get_current_user)):
+    """How many accounts still have no username, and what each company's prefix is.
+
+    Read-only, so the backfill can be reviewed before it is run rather than discovered
+    afterwards.
+    """
+    _username_admin(current_user)
+    from app.services.username_service import USER_COLLECTIONS, derive_prefix
+
+    missing, total = 0, 0
+    for coll in USER_COLLECTIONS:
+        total += await get_collection(coll).count_documents({})
+        missing += await get_collection(coll).count_documents(
+            {"username": {"$in": [None, ""]}})
+
+    companies = []
+    for c in await get_collection("companies").find({}, {"name": 1, "username_prefix": 1}).to_list(500):
+        stored = c.get("username_prefix")
+        companies.append({
+            "company_id": str(c["_id"]),
+            "name": c.get("name"),
+            "prefix": stored or derive_prefix(c.get("name")),
+            "is_set": bool(stored),
+        })
+    companies.sort(key=lambda x: (x["name"] or "").lower())
+    return {"total_users": total, "missing_username": missing,
+            "have_username": total - missing, "companies": companies}
+
+
+@router.post("/usernames/backfill")
+async def username_backfill(
+    company_id: Optional[str] = Query(None, description="Limit to one company"),
+    dry_run: bool = Query(True, description="Preview without writing"),
+    current_user: dict = Depends(get_current_user),
+):
+    """Issue a username to every account that has none. Admin only.
+
+    Defaults to a DRY RUN: this writes a login credential onto hundreds of live accounts, so
+    the default is to show what it would do and require `dry_run=false` to mean it.
+
+    Idempotent — an account that already has a username is skipped, so running it twice is
+    harmless and a half-finished run can simply be repeated.
+    """
+    _username_admin(current_user)
+    from app.services.username_service import backfill_usernames
+
+    result = await backfill_usernames(company_id, dry_run=dry_run)
+    # The full list is useful for a handful and unreadable for hundreds; the caller gets a
+    # sample plus the counts, and can page the roster itself for the rest.
+    sample = result.pop("usernames", [])[:25]
+    return {**result, "sample": sample}
+
+
+@router.put("/usernames/prefix/{company_id}")
+async def set_username_prefix(
+    company_id: str,
+    payload: dict,
+    current_user: dict = Depends(get_current_user),
+):
+    """Change a company's username prefix. Admin only.
+
+    Only affects usernames issued FROM NOW ON. Existing ones are left exactly as they are:
+    they are credentials people have been given, and silently rewriting them would lock those
+    accounts out with nothing on screen to say why.
+    """
+    _username_admin(current_user)
+    import re as _re
+    from app.services.username_service import PREFIX_MAX, PREFIX_MIN
+
+    prefix = str(payload.get("prefix") or "").strip().upper()
+    if not _re.fullmatch(rf"[A-Z0-9]{{{PREFIX_MIN},{PREFIX_MAX}}}", prefix):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Prefix must be {PREFIX_MIN}-{PREFIX_MAX} letters or digits, no spaces.")
+
+    try:
+        oid = ObjectId(company_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid company id")
+
+    clash = await get_collection("companies").find_one(
+        {"_id": {"$ne": oid}, "username_prefix": prefix})
+    if clash:
+        raise HTTPException(
+            status_code=409,
+            detail=f"'{prefix}' is already used by {clash.get('name')}. "
+                   "A prefix has to name one company on its own.")
+
+    res = await get_collection("companies").update_one(
+        {"_id": oid}, {"$set": {"username_prefix": prefix}})
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Company not found")
+    return {"ok": True, "company_id": company_id, "prefix": prefix,
+            "note": "Applies to usernames issued from now on; existing ones are unchanged."}
+
+
+@router.post("/{user_id}/username")
+async def issue_username(
+    user_id: str,
+    payload: Optional[dict] = None,
+    current_user: dict = Depends(get_current_user),
+):
+    """Issue a username to one team member. Admin only.
+
+    Two ways to call it:
+      · no body  — the next free name in that member's company ("PTP_Users004")
+      · {"username": "..."} — a specific one, for the rare case a company wants their own
+        convention. Checked for uniqueness across both user collections before it is stored.
+
+    A member who ALREADY has a username keeps it: this returns theirs unchanged rather than
+    minting a second. Replacing one is a separate, explicit act (`{"username": ...}`), because
+    a username is a credential somebody has been given — quietly reissuing it would lock them
+    out with nothing on screen to explain why.
+    """
+    _username_admin(current_user)
+    import re as _re
+    from app.services.username_service import (
+        USER_COLLECTIONS, next_username, username_exists,
+    )
+
+    try:
+        oid = ObjectId(user_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid user id")
+
+    target, coll = None, None
+    for c in USER_COLLECTIONS:
+        target = await get_collection(c).find_one({"_id": oid})
+        if target:
+            coll = c
+            break
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    requested = str((payload or {}).get("username") or "").strip()
+    existing = str(target.get("username") or "").strip()
+
+    if requested:
+        # 3-40 characters of letters, digits, dot, dash or underscore. Nothing with a space or
+        # an "@", so a username can never be mistaken for an email at the login prompt — the
+        # two are resolved differently and an ambiguous one would be a puzzle to debug.
+        if not _re.fullmatch(r"[A-Za-z0-9._-]{3,40}", requested):
+            raise HTTPException(
+                status_code=400,
+                detail="A username may use 3-40 letters, digits, dot, dash or underscore, "
+                       "with no spaces or @.")
+        if await username_exists(requested, exclude_id=user_id):
+            raise HTTPException(status_code=409,
+                                detail=f"'{requested}' is already taken by another account.")
+        username = requested
+    elif existing:
+        return {"ok": True, "username": existing, "created": False,
+                "note": "This member already has a username."}
+    else:
+        username = await next_username(target.get("company_id"))
+
+    await get_collection(coll).update_one({"_id": oid}, {"$set": {"username": username}})
+    await log_activity(current_user, "Issue Username", coll,
+                       f"{target.get('full_name') or target.get('email')} -> {username}",
+                       meta={"user_id": user_id, "username": username})
+    return {"ok": True, "username": username, "created": True,
+            "replaced": existing or None,
+            "note": (f"Replaced '{existing}'. Tell them their new username — the old one no "
+                     f"longer signs in.") if existing else None}
