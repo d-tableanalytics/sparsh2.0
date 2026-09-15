@@ -53,8 +53,8 @@ from typing import Optional
 from app.db.mongodb import get_collection
 from app.models.hrms import (
     COLL_DESIGNATIONS, COLL_JOB_RUNS, COLL_PROBATION_REVIEWS, COLL_PURGE_BATCHES,
-    COLL_REQUISITIONS, JOB_CADENCE_WEEKLY, JOB_POLICY_REVIEW, JOB_PREBOARDING,
-    JOB_PROBATION, JOB_RETENTION, JOB_SLA_SWEEP, MANAGERIAL_LEVELS,
+    COLL_REQUISITIONS, JOB_CADENCE_WEEKLY, JOB_ORIENTATION, JOB_POLICY_REVIEW, JOB_PREBOARDING,
+    JOB_PROBATION, JOB_PULSE_SURVEY, JOB_RETENTION, JOB_SLA_SWEEP, MANAGERIAL_LEVELS,
     PROBATION_REMINDED_FIELD, ProbationOutcome,
     PurgeBatchStatus, SCHEDULED_JOBS,
 )
@@ -369,12 +369,30 @@ async def run_retention_proposal(company_id: str) -> dict:
             "batch_no": batch.get("batch_no")}
 
 
+async def run_orientation_escalation(company_id: str) -> dict:
+    """§22.3 step 207 — escalate assignments with an open mandatory item past the
+    company's escalation window. All the decision logic lives in
+    hrms_orientation_service.run_escalation_sweep; this is purely the schedule."""
+    from app.services.hrms_orientation_service import run_escalation_sweep
+    return await run_escalation_sweep(company_id)
+
+
+async def run_pulse_survey_issue(company_id: str) -> dict:
+    """§22.4 steps 208-209 — issue 30/90-day pulse surveys to employees who just reached a
+    milestone. All the decision logic lives in hrms_pulse_service.run_issue_sweep; this is
+    purely the schedule."""
+    from app.services.hrms_pulse_service import run_issue_sweep
+    return await run_issue_sweep(company_id)
+
+
 JOB_HANDLERS = {
     JOB_SLA_SWEEP:     run_sla_sweep,
     JOB_PROBATION:     run_probation_reminders,
     JOB_PREBOARDING:   run_preboarding_reminders,
     JOB_POLICY_REVIEW: run_policy_review,
     JOB_RETENTION:     run_retention_proposal,
+    JOB_ORIENTATION:   run_orientation_escalation,
+    JOB_PULSE_SURVEY:  run_pulse_survey_issue,
 }
 
 

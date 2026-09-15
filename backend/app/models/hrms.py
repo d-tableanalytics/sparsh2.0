@@ -113,6 +113,11 @@ COLL_SURVEYS             = "hrms_surveys"                # SOP §10 new-hire exp
 COLL_SURVEY_RESPONSES    = "hrms_survey_responses"
 COLL_POLICIES            = "hrms_policies"               # SOP §14 policy register
 COLL_POLICY_REVISIONS    = "hrms_policy_revisions"
+# ── Phase POLICY-LIB-1 (§22.6) ── one row per (policy_key, version, employee_code) — keyed
+# by VERSION so an employee's acknowledgement of v1 never satisfies v2's requirement, which
+# is what "policy updates can trigger re-acknowledgement" (BA doc step 229) reduces to: a
+# fresh version simply creates fresh Pending rows, no separate re-ack mechanism needed.
+COLL_POLICY_ACKNOWLEDGEMENTS = "hrms_policy_acknowledgements"
 COLL_PURGE_BATCHES       = "hrms_purge_batches"          # SOP §13 retention purge proposals
 
 # ── Phase INT-3 ── the scheduled-job ledger (SOP §12 reminders and escalations).
@@ -157,6 +162,105 @@ COLL_PUNCH_SEGMENTS   = "hrms_punch_segments"
 COLL_ATTENDANCE_CORRECTIONS = "hrms_attendance_corrections"
 COLL_PAYROLL_RUNS     = "hrms_payroll_runs"
 COLL_PAYROLL_RECORDS  = "hrms_payroll_records"
+
+# ── Phase EXIT-1 — Exit Management (BA/Functional Design §7.18, §22.2, §7.21) ──
+#
+# One row per departing employee (COLL_SEPARATIONS), with child collections for the work a
+# separation spawns: handover tasks, departmental clearance, asset returns and access
+# clearance are each their own collection rather than arrays nested on the separation,
+# because each is independently assigned, independently actioned and independently overdue —
+# the same reason onboarding tasks are not stored inside the onboarding record either.
+COLL_SEPARATIONS       = "hrms_separations"
+COLL_HANDOVER_TASKS    = "hrms_handover_tasks"
+COLL_CLEARANCE_TASKS   = "hrms_clearance_tasks"
+COLL_ASSET_RETURNS     = "hrms_asset_returns"
+COLL_ACCESS_CLEARANCES = "hrms_access_clearances"
+COLL_EXIT_INTERVIEWS   = "hrms_exit_interviews"
+COLL_FNF_SETTLEMENTS   = "hrms_fnf_settlements"
+
+# ── Phase ATT-1 — Attendance & Leave (BA/Functional Design §7.8-7.12, §22.8-22.9) ──
+# COLL_ATTENDANCE, COLL_PUNCH_SEGMENTS, COLL_ATTENDANCE_CORRECTIONS, COLL_LEAVES and
+# COLL_LEAVE_BALANCES already existed above as unreferenced placeholders (the gap analysis'
+# own finding) — this phase is the first to actually provision and write them. Four more are
+# new: OD is its own workflow step in the BA doc (§7.8 step 59), not a kind of correction; a
+# lock is a fact about a PERIOD, not about any one attendance row, so it cannot live on
+# COLL_ATTENDANCE without turning every row in a locked month into a lock record; leave
+# TYPES are configuration (entitlement/accrual/carry-forward), the same reason
+# hrms_salary_bands is separate from an actual negotiation round; and C-Off is a ledger of
+# individually-expiring EARNED BATCHES (§7.11), a materially different shape from the
+# single-balance-per-year COLL_LEAVE_BALANCES tracks for CL/SL/EL.
+COLL_OD_REQUESTS       = "hrms_od_requests"
+COLL_ATTENDANCE_LOCKS  = "hrms_attendance_locks"
+COLL_LEAVE_TYPES       = "hrms_leave_types"
+COLL_COFF_LEDGER       = "hrms_coff_ledger"
+
+# ── Phase MOVE-1 — Employee Movements & Discipline (§7.16, §7.17, §7.19, §7.20) ──
+# Each movement/case is its OWN row, never edited into a prior one — "Never overwrite
+# historical organisation/compensation state" (§7.16 BR) is satisfied by construction: the
+# employee's LIVE profile holds the current value (as it already does for department_id/
+# designation_id/base_salary), and every past movement stays exactly as it was applied.
+COLL_EMPLOYEE_MOVEMENTS = "hrms_employee_movements"
+# Discipline is deliberately its own collection rather than folded into movements or
+# exceptions: §7.17 requires its own confidentiality tier (POSH cases restricted even from
+# ordinary managers), which a shared collection would make one query-filter away from a leak.
+COLL_DISCIPLINE_CASES   = "hrms_discipline_cases"
+# §7.19's warning ladder (flag -> contact -> First/Second/Final Warning) is a case with its
+# own SLA clock, materially different from a plain attendance exception, so it is not folded
+# into hrms_attendance_corrections either.
+COLL_ABSCONDING_CASES   = "hrms_absconding_cases"
+# No new collection for §7.20: retirement is a proactive ALERT computed from the employee's
+# own DOB (no state to store beyond the company's configured retirement age, itself kept in
+# hrms_settings next to shift_policy), and demise/missing's nominee/legal documentation is
+# exit-type-specific data on the SAME separation record hrms_separations already carries (a
+# small addition to Exit Management), not a parallel record of the same case.
+
+# ── Phase PAY-1 — Payroll, Salary Advance & Variable Pay (§7.13-7.15, §22.7) ──
+# COLL_PAYROLL_RUNS and COLL_PAYROLL_RECORDS already existed above as unreferenced
+# placeholders since Phase 1 (the gap analysis' own finding) — this phase is the first to
+# provision and write them. §22.7 requires payroll to be COMPONENT-DRIVEN rather than a fixed
+# set of fields, so a salary structure is its own small master (COLL_SALARY_COMPONENTS) plus
+# a per-employee assignment (COLL_SALARY_STRUCTURES), the same "master + assignment" split
+# hrms_designations/hrms_employee_profiles already uses.
+COLL_SALARY_COMPONENTS = "hrms_salary_components"
+COLL_SALARY_STRUCTURES = "hrms_salary_structures"
+COLL_SALARY_ADVANCES   = "hrms_salary_advances"
+COLL_VARIABLE_PAY_QUARTERS    = "hrms_variable_pay_quarters"
+COLL_VARIABLE_PAY_RECORDS     = "hrms_variable_pay_records"
+COLL_VARIABLE_PAY_HOLD_LEDGER = "hrms_variable_pay_hold_ledger"
+
+# ── Phase PIP-1 — Performance Improvement Plan (§22.5) ──
+# One row per plan, holding its own objectives/support items and an append-only review log
+# as embedded arrays (each is small, bounded, and always read together with the plan — the
+# same reasoning MOVE-1's investigation_log lives ON the discipline case rather than in its
+# own collection). PIP stays its own restricted record, visible only in an authorised
+# Employee 360° performance history (§22.5 step 222) — Employee 360° itself (§6) is a
+# separate, larger gap this phase does not build.
+COLL_PIP_RECORDS = "hrms_pip_records"
+
+# ── Phase LETTER-1 — HR Letter / Document Generator (SM-HR-041) ──
+# Templates are HR-authored, mutable text (the same "operator edits the wording" model as
+# COLL_COMM_TEMPLATES) — there is deliberately no per-template version history, because the
+# thing the BA doc requires be immutable is the ISSUED LETTER, not the template that produced
+# it. An issued/reissued letter freezes its own rendered_body and template_version snapshot,
+# so it stays reproducible even after HR later edits the template.
+COLL_LETTER_TEMPLATES = "hrms_letter_templates"
+COLL_LETTERS          = "hrms_letters"
+
+# ── Phase ORIENT-1 — Orientation & Training (§22.3) ──
+# A plan TEMPLATE (optionally filtered to a department/designation — see the phase's own
+# service docstring for why location/level filters are a documented follow-up, not built
+# here) and one ASSIGNMENT per employee, created once at activation by merging every
+# matching template's items. The assignment is the employee's own record from there — later
+# edits to a template do not retroactively change an already-assigned employee's items,
+# the same "a generated thing is a snapshot" reasoning Phase LETTER-1 applies to a letter.
+COLL_ORIENTATION_PLANS       = "hrms_orientation_plans"
+COLL_ORIENTATION_ASSIGNMENTS = "hrms_orientation_assignments"
+
+# ── Phase PULSE-1 — 30/90-Day Pulse Survey (§22.4) ──
+# One row per employee per milestone ("30"/"90"), IDENTIFIABLE by design — see the Cap enum's
+# own comment for why this is a separate module from the existing anonymous survey system
+# rather than a new SurveyKind on it.
+COLL_PULSE_RESPONSES = "hrms_pulse_responses"
 
 
 # ─────────────────────────────────────────────────────────────
@@ -496,6 +600,174 @@ HRMS_INDEXES = [
     (COLL_BACKGROUND_CHECKS, [("company_id", 1), ("uk", 1)], {"name": "by_candidate"}),
     (COLL_BACKGROUND_CHECKS, [("company_id", 1), ("status", 1)],
      {"name": "by_company_status"}),
+    # ── Phase EXIT-1 — Exit Management ──
+    # Compound, not a plain unique index on sep_no alone: sep_no is minted from a
+    # PER-COMPANY counter (counter_key), so two different companies legitimately mint the
+    # same "SEP-2026-001" — a global unique index rejects the second company's case
+    # outright. This was the exact bug Phase ATT-1's uniq_leave_no shipped with and had to
+    # fix live (confirmed by a real collision between two test companies); fixed here the
+    # same way once found. The NAME is kept as `uniq_sep_no` (not renamed) so
+    # _ensure_hrms_collections' existing by-name reconciliation (see its docstring) drops
+    # and recreates it automatically on every deployment.
+    (COLL_SEPARATIONS, [("company_id", 1), ("sep_no", 1)], {"unique": True, "name": "uniq_sep_no"}),
+    (COLL_SEPARATIONS, [("company_id", 1), ("employee_code", 1)],
+     {"name": "by_company_employee"}),
+    # Listing "who is exiting" is always filtered to what is still open — the ledger of
+    # closed cases is history, not a queue anyone works from day to day.
+    (COLL_SEPARATIONS, [("company_id", 1), ("stage", 1)], {"name": "by_company_stage"}),
+    (COLL_HANDOVER_TASKS, [("company_id", 1), ("sep_no", 1)], {"name": "by_separation"}),
+    (COLL_HANDOVER_TASKS, [("company_id", 1), ("owner_id", 1), ("status", 1)],
+     {"name": "by_owner_status"}),
+    (COLL_CLEARANCE_TASKS, [("company_id", 1), ("sep_no", 1)], {"name": "by_separation"}),
+    # "My pending clearances" is the one screen a task owner actually opens.
+    (COLL_CLEARANCE_TASKS, [("company_id", 1), ("owner_type", 1), ("status", 1)],
+     {"name": "by_owner_type_status"}),
+    (COLL_ASSET_RETURNS, [("company_id", 1), ("sep_no", 1)], {"name": "by_separation"}),
+    (COLL_ACCESS_CLEARANCES, [("company_id", 1), ("sep_no", 1)], {"name": "by_separation"}),
+    # One interview per case — a re-run overwrites rather than accumulating duplicates.
+    (COLL_EXIT_INTERVIEWS, [("company_id", 1), ("sep_no", 1)],
+     {"unique": True, "name": "uniq_sep_interview"}),
+    # One F&F row per case for the same reason — the settlement is a single evolving
+    # document (draft → approved → paid), never a history of attempts.
+    (COLL_FNF_SETTLEMENTS, [("company_id", 1), ("sep_no", 1)],
+     {"unique": True, "name": "uniq_sep_fnf"}),
+    # ── Phase ATT-1 — Attendance & Leave ──
+    # One attendance row per employee per work date — the daily engine's whole output. The
+    # regularisation flow updates this row in place (preserving the original in
+    # COLL_PUNCH_SEGMENTS); it never inserts a second row for the same day.
+    (COLL_ATTENDANCE, [("company_id", 1), ("employee_code", 1), ("work_date", 1)],
+     {"unique": True, "name": "uniq_company_employee_date"}),
+    # The monthly-closure dashboard's own query: every exception in a period, company-wide.
+    (COLL_ATTENDANCE, [("company_id", 1), ("work_date", 1), ("status", 1)],
+     {"name": "by_company_date_status"}),
+    (COLL_PUNCH_SEGMENTS, [("company_id", 1), ("employee_code", 1), ("work_date", 1)],
+     {"name": "by_employee_date"}),
+    # Compound on (company_id, req_no): req_no is minted from a PER-COMPANY counter (see
+    # counter_key), so two different companies legitimately mint the same "REG-2026-001" —
+    # a plain unique index on req_no alone would reject the second company's row outright.
+    # Every other business-id index in this phase follows the same (company_id, <no>) shape
+    # for the same reason (see leave_no below, which had exactly this bug before the fix).
+    (COLL_ATTENDANCE_CORRECTIONS, [("company_id", 1), ("req_no", 1)],
+     {"unique": True, "name": "uniq_company_req_no"}),
+    (COLL_ATTENDANCE_CORRECTIONS, [("company_id", 1), ("employee_code", 1), ("work_date", 1)],
+     {"name": "by_employee_date"}),
+    # The approver's queue: everything still awaiting a decision, company-wide.
+    (COLL_ATTENDANCE_CORRECTIONS, [("company_id", 1), ("status", 1)],
+     {"name": "by_company_status"}),
+    (COLL_OD_REQUESTS, [("company_id", 1), ("od_no", 1)],
+     {"unique": True, "name": "uniq_company_od_no"}),
+    (COLL_OD_REQUESTS, [("company_id", 1), ("employee_code", 1), ("od_date", 1)],
+     {"name": "by_employee_date"}),
+    (COLL_OD_REQUESTS, [("company_id", 1), ("status", 1)], {"name": "by_company_status"}),
+    # One lock row per company per calendar period — the fact a month is closed, not a
+    # property of any one attendance row (so 2,000 employees' rows do not need editing to
+    # lock or unlock a period).
+    (COLL_ATTENDANCE_LOCKS, [("company_id", 1), ("period", 1)],
+     {"unique": True, "name": "uniq_company_period"}),
+    # Compound, not a plain unique index on leave_no alone: leave_no is minted from a
+    # PER-COMPANY counter, so two different companies legitimately mint the same
+    # "LV-2026-001" and a global unique index would reject the second company's application
+    # outright — confirmed live (a throwaway test company and a real company both reached
+    # their own LV-2026-002 and the second write was rejected until this was scoped). The
+    # NAME is kept as `uniq_leave_no` (not renamed) so _ensure_hrms_collections' existing
+    # by-name reconciliation (see its docstring) drops and recreates it automatically on
+    # every deployment, rather than leaving the old global-unique index orphaned alongside
+    # a differently-named new one.
+    (COLL_LEAVES, [("company_id", 1), ("leave_no", 1)], {"unique": True, "name": "uniq_leave_no"}),
+    (COLL_LEAVES, [("company_id", 1), ("employee_code", 1), ("start_date", 1)],
+     {"name": "by_employee_start"}),
+    (COLL_LEAVES, [("company_id", 1), ("status", 1)], {"name": "by_company_status"}),
+    (COLL_LEAVE_BALANCES, [("company_id", 1), ("employee_code", 1), ("leave_type", 1),
+                           ("year", 1)],
+     {"unique": True, "name": "uniq_employee_type_year"}),
+    # One row per (company, leave-type code) — the leave-type MASTER, same shape as
+    # hrms_salary_bands: configuration, not a per-employee or per-request record.
+    (COLL_LEAVE_TYPES, [("company_id", 1), ("code", 1)],
+     {"unique": True, "name": "uniq_company_code"}),
+    (COLL_COFF_LEDGER, [("company_id", 1), ("employee_code", 1), ("status", 1)],
+     {"name": "by_employee_status"}),
+    # FIFO consumption by nearest expiry is the workflow's own rule (§7.11 step 81); this is
+    # the index that query actually walks.
+    (COLL_COFF_LEDGER, [("company_id", 1), ("employee_code", 1), ("expiry_date", 1)],
+     {"name": "by_employee_expiry"}),
+
+    # ── Phase MOVE-1 — Employee Movements & Discipline ──
+    # Compound on (company_id, <no>) throughout, NOT a plain unique index on the business id
+    # alone: every one of these numbers is minted from a PER-COMPANY counter (counter_key),
+    # so two different companies legitimately mint the same "MOV-2026-001" — a global unique
+    # index would reject the second company's row outright. This is the exact bug Phase
+    # ATT-1's uniq_leave_no shipped with and had to fix live; every new business-id index
+    # from here on is compound from the start.
+    (COLL_EMPLOYEE_MOVEMENTS, [("company_id", 1), ("move_no", 1)],
+     {"unique": True, "name": "uniq_move_no"}),
+    (COLL_EMPLOYEE_MOVEMENTS, [("company_id", 1), ("employee_code", 1), ("effective_date", 1)],
+     {"name": "by_employee_effective"}),
+    # The scheduler's own query: everything approved but not yet applied, whose effective
+    # date has arrived — see hrms_movement_service.apply_due_movements.
+    (COLL_EMPLOYEE_MOVEMENTS, [("company_id", 1), ("status", 1), ("effective_date", 1)],
+     {"name": "by_company_status_effective"}),
+    (COLL_DISCIPLINE_CASES, [("company_id", 1), ("case_no", 1)],
+     {"unique": True, "name": "uniq_case_no"}),
+    (COLL_DISCIPLINE_CASES, [("company_id", 1), ("status", 1)], {"name": "by_company_status"}),
+    # A person's OWN discipline history — read through the persons_involved array, since a
+    # case is filed against (or by) somebody, not owned by one "employee_code" field the way
+    # a leave request is.
+    (COLL_DISCIPLINE_CASES, [("company_id", 1), ("persons_involved.employee_code", 1)],
+     {"name": "by_person"}),
+    (COLL_ABSCONDING_CASES, [("company_id", 1), ("case_no", 1)],
+     {"unique": True, "name": "uniq_absconding_case_no"}),
+    (COLL_ABSCONDING_CASES, [("company_id", 1), ("employee_code", 1)],
+     {"name": "by_company_employee"}),
+    (COLL_ABSCONDING_CASES, [("company_id", 1), ("status", 1)], {"name": "by_company_status"}),
+
+    # ── Phase PAY-1 — Payroll, Salary Advance & Variable Pay ──
+    (COLL_SALARY_COMPONENTS, [("company_id", 1), ("code", 1)],
+     {"unique": True, "name": "uniq_company_code"}),
+    (COLL_SALARY_STRUCTURES, [("company_id", 1), ("employee_code", 1), ("effective_from", 1)],
+     {"name": "by_employee_effective"}),
+    (COLL_PAYROLL_RUNS, [("company_id", 1), ("period", 1)],
+     {"unique": True, "name": "uniq_company_period"}),
+    (COLL_PAYROLL_RECORDS, [("company_id", 1), ("period", 1), ("employee_code", 1)],
+     {"unique": True, "name": "uniq_period_employee"}),
+    (COLL_SALARY_ADVANCES, [("company_id", 1), ("adv_no", 1)],
+     {"unique": True, "name": "uniq_adv_no"}),
+    (COLL_SALARY_ADVANCES, [("company_id", 1), ("employee_code", 1), ("quarter", 1)],
+     {"name": "by_employee_quarter"}),
+    (COLL_SALARY_ADVANCES, [("company_id", 1), ("status", 1)], {"name": "by_company_status"}),
+    (COLL_VARIABLE_PAY_QUARTERS, [("company_id", 1), ("quarter", 1)],
+     {"unique": True, "name": "uniq_company_quarter"}),
+    (COLL_VARIABLE_PAY_RECORDS, [("company_id", 1), ("quarter", 1), ("employee_code", 1)],
+     {"unique": True, "name": "uniq_quarter_employee"}),
+    (COLL_VARIABLE_PAY_HOLD_LEDGER, [("company_id", 1), ("employee_code", 1), ("status", 1)],
+     {"name": "by_employee_status"}),
+
+    # ── Phase PIP-1 — Performance Improvement Plan ──
+    (COLL_PIP_RECORDS, [("company_id", 1), ("pip_no", 1)],
+     {"unique": True, "name": "uniq_pip_no"}),
+    (COLL_PIP_RECORDS, [("company_id", 1), ("employee_code", 1)], {"name": "by_employee"}),
+    (COLL_PIP_RECORDS, [("company_id", 1), ("status", 1)], {"name": "by_company_status"}),
+
+    # ── Phase LETTER-1 — HR Letter / Document Generator ──
+    (COLL_LETTER_TEMPLATES, [("company_id", 1), ("key", 1)],
+     {"unique": True, "name": "uniq_company_template_key"}),
+    (COLL_LETTERS, [("company_id", 1), ("letter_no", 1)],
+     {"unique": True, "name": "uniq_letter_no"}),
+    (COLL_LETTERS, [("company_id", 1), ("employee_code", 1)], {"name": "by_employee"}),
+    (COLL_LETTERS, [("company_id", 1), ("series_no", 1)], {"name": "by_series"}),
+
+    # ── Phase ORIENT-1 — Orientation & Training ──
+    (COLL_ORIENTATION_PLANS, [("company_id", 1), ("active", 1)], {"name": "by_company_active"}),
+    (COLL_ORIENTATION_ASSIGNMENTS, [("company_id", 1), ("employee_code", 1)],
+     {"unique": True, "name": "uniq_company_employee"}),
+    (COLL_ORIENTATION_ASSIGNMENTS, [("company_id", 1), ("overall_status", 1)],
+     {"name": "by_company_status"}),
+
+    # ── Phase PULSE-1 — 30/90-Day Pulse Survey ──
+    (COLL_PULSE_RESPONSES, [("company_id", 1), ("employee_code", 1), ("milestone", 1)],
+     {"unique": True, "name": "uniq_company_employee_milestone"}),
+    (COLL_PULSE_RESPONSES, [("company_id", 1), ("status", 1)], {"name": "by_company_status"}),
+    (COLL_PULSE_RESPONSES, [("company_id", 1), ("follow_up_required", 1)],
+     {"name": "by_company_follow_up"}),
     # ── Later phases append their indexes here, one phase at a time. ──
 ]
 
@@ -743,6 +1015,12 @@ class Cap(str, Enum):
     POLICY_READ    = "policy.read"
     POLICY_WRITE   = "policy.write"
     POLICY_APPROVE = "policy.approve"
+    # ── Phase POLICY-LIB-1 (§22.6) ── the employee's own act of acknowledging a published
+    # policy (step 227) — a separate self-service capability, the same "distinct capability
+    # for the subject's own act" pattern PIP_ACKNOWLEDGE/LEAVE_APPLY/PULSE_SUBMIT establish.
+    # The HR "review access"/dashboard side (step 230) reuses POLICY_WRITE rather than adding
+    # a second one: whoever may administer the register may already see who has acknowledged.
+    POLICY_ACKNOWLEDGE = "policy.acknowledge"
     # Executing a retention purge (SOP §13). MD only, and the same standard as probation
     # confirmation because both destroy or end something.
     RETENTION_PURGE = "retention.purge"
@@ -780,6 +1058,137 @@ class Cap(str, Enum):
     # company that wants a senior recruiter to control what leaves the building can grant
     # the first two widely and this one narrowly.
     INTERVIEW_MEDIA = "interview.media"
+    # ── Phase EXIT-1 — Exit Management (§7.18, §22.2, §7.21) ──
+    # Modelled on the same separation of duties the rest of this module already draws: HR
+    # runs the process end to end ("R"), the reporting manager is the one sign-off the BA doc
+    # names explicitly (handover acceptance), and Finance/the MD hold the two irreversible
+    # money gates — a notice waiver and the F&F payout — for the same reason OFFER_APPROVE and
+    # REQUISITION_APPROVE_MD are held apart from whoever prepares the numbers behind them.
+    SEPARATION_READ     = "separation.read"
+    SEPARATION_INITIATE = "separation.initiate"    # raise a case on someone else's behalf
+    SEPARATION_MANAGE   = "separation.manage"      # notice decision, revised LWD, stage moves
+    SEPARATION_APPROVE  = "separation.approve"     # waiver / early release (BR-016)
+    HANDOVER_READ       = "handover.read"
+    HANDOVER_WRITE      = "handover.write"
+    HANDOVER_APPROVE    = "handover.approve"       # the reporting manager's acceptance
+    CLEARANCE_READ      = "clearance.read"
+    CLEARANCE_MANAGE    = "clearance.manage"       # open the clearance/asset/access tasks
+    CLEARANCE_ACT       = "clearance.act"          # clear, reject or confirm ONE task
+    EXIT_INTERVIEW_READ  = "exit_interview.read"
+    EXIT_INTERVIEW_WRITE = "exit_interview.write"
+    FNF_READ    = "fnf.read"
+    FNF_PREPARE = "fnf.prepare"                    # maker
+    FNF_APPROVE = "fnf.approve"                    # checker (BR-021)
+    # ── Phase ATT-1 — Attendance & Leave (§7.8-7.12, §22.8-22.9) ──
+    # MARK is HR (or an eventual import job) writing the day's status directly — the only
+    # write path until a real punch source exists (§7.8: "current policy references
+    # Biometric... future source may be API/mobile"). REGULARIZE_REQUEST is the self-service
+    # act every role gets, the same reasoning SEPARATION_INITIATE already established: taking
+    # attendance is universal, not an HR-only administrative act. REGULARIZE_APPROVE is
+    # deliberately ONE capability covering both the manager's first look and HR's second
+    # (§7.9 step 68: "HR second-level approval is applied for configured exception types") —
+    # the SERVICE enforces the two-stage order, this just says who may ever act on the queue,
+    # the same shape CLEARANCE_ACT already uses for one capability across many task owners.
+    ATTENDANCE_READ              = "attendance.read"
+    ATTENDANCE_MARK              = "attendance.mark"
+    ATTENDANCE_REGULARIZE_REQUEST = "attendance.regularize_request"
+    ATTENDANCE_REGULARIZE_APPROVE = "attendance.regularize_approve"
+    ATTENDANCE_LOCK              = "attendance.lock"          # monthly closure (§7.12)
+    OD_REQUEST = "od.request"
+    OD_APPROVE = "od.approve"
+    LEAVE_READ         = "leave.read"
+    LEAVE_APPLY        = "leave.apply"             # self-service, same reasoning as above
+    LEAVE_APPROVE       = "leave.approve"
+    LEAVE_POLICY_MANAGE = "leave.policy_manage"    # leave-type entitlements, C-Off expiry
+    COFF_EARN_REQUEST = "coff.earn_request"        # claim approved work on a holiday/weekly-off
+    COFF_APPROVE      = "coff.approve"             # covers both the earn credit and the use debit
+    # ── Phase MOVE-1 — Employee Movements & Discipline (§7.16, §7.17, §7.19, §7.20) ──
+    MOVEMENT_READ     = "movement.read"
+    MOVEMENT_INITIATE = "movement.initiate"        # raise a promotion/transfer/grade/comp change
+    MOVEMENT_APPROVE  = "movement.approve"
+    # Discipline is split the same way Exit's F&F is: MANAGE is the committee's
+    # investigation/recommendation work ("R"), DECIDE is management's separate
+    # approve-and-implement act ("A") — BR-021's maker/checker shape, applied here because
+    # §7.17 draws the same line explicitly ("Committee records... Recommendation...
+    # Authorised management approves/implements").
+    DISCIPLINE_READ    = "discipline.read"
+    DISCIPLINE_MANAGE  = "discipline.manage"
+    DISCIPLINE_DECIDE  = "discipline.decide"
+    # A SEPARATE, narrower pair for POSH/sexual-harassment matters — the BA doc is explicit
+    # that these "should not be treated as ordinary manager-visible discipline cases"
+    # (§7.17 BR). Holding DISCIPLINE_MANAGE does NOT imply DISCIPLINE_POSH_MANAGE; the two
+    # are checked independently at the service layer, the same isolation EXIT-1's
+    # SEPARATION_APPROVE draws from SEPARATION_MANAGE.
+    DISCIPLINE_POSH_READ   = "discipline.posh_read"
+    DISCIPLINE_POSH_MANAGE = "discipline.posh_manage"
+    ABSCONDING_READ   = "absconding.read"
+    ABSCONDING_MANAGE = "absconding.manage"        # flag, log contact attempts, send warnings
+    ABSCONDING_DECIDE = "absconding.decide"        # the authorised final action (§7.19 step 153)
+    # §7.20: the proactive "who retires soon" alert is its own read, distinct from
+    # SEPARATION_READ — it surfaces ACTIVE employees nobody has separated yet. Once HR acts,
+    # retirement/demise/missing are exit_type values Exit Management (Phase EXIT-1) already
+    # handles end to end; no further capability is needed there.
+    RETIREMENT_ALERT_READ = "retirement_alert.read"
+    # ── Phase PAY-1 — Payroll, Salary Advance & Variable Pay (§7.13-7.15, §22.7) ──
+    # PROCESS is the maker's whole run (create, import, calculate, resolve exceptions,
+    # rerun); APPROVE is the checker's separate sign-off that also locks the run — the same
+    # maker/checker split BR-021 draws for F&F, named explicitly here too ("Payroll Maker...
+    # Payroll/Finance Approver").
+    PAYROLL_READ    = "payroll.read"
+    PAYROLL_PROCESS = "payroll.process"
+    PAYROLL_APPROVE = "payroll.approve"
+    SALARY_STRUCTURE_READ   = "salary_structure.read"
+    SALARY_STRUCTURE_MANAGE = "salary_structure.manage"
+    # REQUEST is the self-service act every role gets (the same reasoning LEAVE_APPLY /
+    # SEPARATION_INITIATE already established). APPROVE is the normal Reporting-Manager/HR
+    # tier; APPROVE_EMERGENCY is the separate, narrower "Director HR / Finance" tier §7.14
+    # names for the emergency route — deliberately its own capability, not a flag on the
+    # normal one, the same isolation SEPARATION_APPROVE draws from SEPARATION_MANAGE.
+    ADVANCE_READ    = "advance.read"
+    ADVANCE_REQUEST = "advance.request"
+    ADVANCE_APPROVE = "advance.approve"
+    ADVANCE_APPROVE_EMERGENCY = "advance.approve_emergency"
+    # PROCESS (HR/Performance Owner, "R") creates the quarter, imports scores and computes
+    # the split; APPROVE (Finance/Management, "A") confirms the batch — again BR-021's
+    # shape. HOLD_MANAGE is the SEPARATE act of releasing or forfeiting the held 25% at
+    # FY-end/milestone (§7.15 step 119) — a different decision, at a different time, from
+    # the quarterly batch approval.
+    VARIABLE_PAY_READ        = "variable_pay.read"
+    VARIABLE_PAY_PROCESS     = "variable_pay.process"
+    VARIABLE_PAY_APPROVE     = "variable_pay.approve"
+    VARIABLE_PAY_HOLD_MANAGE = "variable_pay.hold_manage"
+    # ── Phase PIP-1 — Performance Improvement Plan (§22.5) ──
+    # MANAGE covers everything a manager/HR does day to day (initiate, capture objectives/
+    # support, record review notes, step 218) — DECIDE is the separate, narrower act of
+    # recording the plan's final outcome (step 220), because "Separation Recommended" is one
+    # of the four possible outcomes and a manager should not be the one sign-off away from
+    # triggering that. ACKNOWLEDGE is the employee's own self-service act (step 217), the
+    # same reasoning LEAVE_APPLY/SEPARATION_INITIATE already established.
+    PIP_READ        = "pip.read"
+    PIP_MANAGE      = "pip.manage"
+    PIP_DECIDE      = "pip.decide"
+    PIP_ACKNOWLEDGE = "pip.acknowledge"
+    # ── Phase LETTER-1 — HR Letter / Document Generator (SM-HR-041) ──
+    # READ is row-scoped in the service exactly like EMPLOYEE_READ/PIP_READ: an employee
+    # holding it sees only letters addressed to them, HR/MD/INTERNAL see the company's own.
+    # MANAGE covers the template register plus preview/generate/issue/reissue — the BA doc
+    # names one user for this whole screen ("Users: HR") and draws no separate sign-off tier
+    # the way Discipline/Payroll/PIP do, so there is no third capability here.
+    LETTER_READ   = "letter.read"
+    LETTER_MANAGE = "letter.manage"
+    # ── Phase PULSE-1 — 30/90-Day Pulse Survey (§22.4) ──
+    # A DIFFERENT capability from SURVEY_READ/WRITE on purpose, not a reuse: the existing
+    # survey module (induction/probation feedback) is deliberately ANONYMOUS — responses are
+    # never linkable to a person, and SURVEY_READ has only ever meant "may see the aggregate".
+    # A pulse survey is the opposite by design (§22.4 step 212 needs to know WHO scored low
+    # enough to need a follow-up, step 214 links results into their OWN Employee 360°), so
+    # granting that under the existing capability would silently widen what every current
+    # SURVEY_READ holder can see. PULSE_SUBMIT is the employee's own self-service completion
+    # action, the same "separate capability for the subject's own act" pattern
+    # PIP_ACKNOWLEDGE/LEAVE_APPLY already establish.
+    PULSE_READ   = "pulse.read"
+    PULSE_MANAGE = "pulse.manage"
+    PULSE_SUBMIT = "pulse.submit"
     # ── Later phases append their capabilities here. ──
 
 
@@ -864,6 +1273,9 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
         Cap.SHARE_READ, Cap.SHARE_WRITE,
         Cap.BACKGROUND_READ, Cap.BACKGROUND_WRITE,
         Cap.INTERVIEW_MEDIA,
+        # ── Phase LETTER-1 ── read only, the same "support observes, does not issue
+        # controlled correspondence" line APPOINTMENT_READ/OFFER_READ already draw.
+        Cap.LETTER_READ,
     },
     HrmsRole.MD: {
         Cap.MODULE_ACCESS, Cap.MODULE_ADMIN, Cap.AUDIT_READ,
@@ -922,6 +1334,44 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
         Cap.SHARE_READ, Cap.SHARE_WRITE, Cap.SHARE_RESPOND,
         Cap.BACKGROUND_READ, Cap.BACKGROUND_WRITE, Cap.BACKGROUND_APPROVE,
         Cap.INTERVIEW_MEDIA,
+        # ── Phase EXIT-1 ── the MD holds every one of these, on the same reasoning as the
+        # blocks above: a governance chain whose final authority cannot act is a trap. The
+        # notice waiver and the F&F approval are the MD's alone if there is no separate
+        # Finance user — the same fallback FINANCE's absence already implies elsewhere.
+        Cap.SEPARATION_READ, Cap.SEPARATION_INITIATE, Cap.SEPARATION_MANAGE,
+        Cap.SEPARATION_APPROVE,
+        Cap.HANDOVER_READ, Cap.HANDOVER_WRITE, Cap.HANDOVER_APPROVE,
+        Cap.CLEARANCE_READ, Cap.CLEARANCE_MANAGE, Cap.CLEARANCE_ACT,
+        Cap.EXIT_INTERVIEW_READ, Cap.EXIT_INTERVIEW_WRITE,
+        Cap.FNF_READ, Cap.FNF_PREPARE, Cap.FNF_APPROVE,
+        # ── Phase ATT-1 ── same reasoning as every block above: the MD holds every one of
+        # these so the governance chain's top rung can always act, including in a company
+        # with no separate HR user.
+        Cap.ATTENDANCE_READ, Cap.ATTENDANCE_MARK,
+        Cap.ATTENDANCE_REGULARIZE_REQUEST, Cap.ATTENDANCE_REGULARIZE_APPROVE,
+        Cap.ATTENDANCE_LOCK,
+        Cap.OD_REQUEST, Cap.OD_APPROVE,
+        Cap.LEAVE_READ, Cap.LEAVE_APPLY, Cap.LEAVE_APPROVE, Cap.LEAVE_POLICY_MANAGE,
+        Cap.COFF_EARN_REQUEST, Cap.COFF_APPROVE,
+        # ── Phase MOVE-1 ── same reasoning as every block above: the top of the ladder holds
+        # every one of these, including the POSH tier — a company with no separate HR user
+        # must still be able to run a sensitive case rather than have it stall unheard.
+        Cap.MOVEMENT_READ, Cap.MOVEMENT_INITIATE, Cap.MOVEMENT_APPROVE,
+        Cap.DISCIPLINE_READ, Cap.DISCIPLINE_MANAGE, Cap.DISCIPLINE_DECIDE,
+        Cap.DISCIPLINE_POSH_READ, Cap.DISCIPLINE_POSH_MANAGE,
+        Cap.ABSCONDING_READ, Cap.ABSCONDING_MANAGE, Cap.ABSCONDING_DECIDE,
+        Cap.RETIREMENT_ALERT_READ,
+        # ── Phase PAY-1 ── same reasoning as every block above: the top of the ladder holds
+        # every one of these, including both money gates, so a company with no separate
+        # Finance user can still run payroll and variable pay to completion.
+        Cap.PAYROLL_READ, Cap.PAYROLL_PROCESS, Cap.PAYROLL_APPROVE,
+        Cap.SALARY_STRUCTURE_READ, Cap.SALARY_STRUCTURE_MANAGE,
+        Cap.ADVANCE_READ, Cap.ADVANCE_REQUEST, Cap.ADVANCE_APPROVE, Cap.ADVANCE_APPROVE_EMERGENCY,
+        Cap.VARIABLE_PAY_READ, Cap.VARIABLE_PAY_PROCESS, Cap.VARIABLE_PAY_APPROVE,
+        Cap.VARIABLE_PAY_HOLD_MANAGE,
+        Cap.PIP_READ, Cap.PIP_MANAGE, Cap.PIP_DECIDE, Cap.PIP_ACKNOWLEDGE,
+        Cap.LETTER_READ, Cap.LETTER_MANAGE,
+        Cap.PULSE_READ, Cap.PULSE_MANAGE,
     },
     HrmsRole.HR: {
         Cap.MODULE_ACCESS, Cap.AUDIT_READ,
@@ -994,6 +1444,63 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
         Cap.SHARE_READ, Cap.SHARE_WRITE,
         Cap.BACKGROUND_READ, Cap.BACKGROUND_WRITE, Cap.BACKGROUND_APPROVE,
         Cap.INTERVIEW_MEDIA,
+        # ── Phase EXIT-1 ── HR runs the process end to end: raises/records a case, drives
+        # notice and handover, opens and manages clearance/asset/access tasks, and prepares
+        # F&F. Deliberately ABSENT, each for the reason the RACI states outright:
+        #   SEPARATION_APPROVE -- the written approval a waiver/early-release needs (BR-016).
+        #   HANDOVER_APPROVE   -- the reporting manager's own sign-off on a handover item.
+        #   FNF_APPROVE        -- HR/Payroll prepares ("R"); Finance approves ("A"), the same
+        #                         maker/checker split BR-021 asks for explicitly.
+        Cap.SEPARATION_READ, Cap.SEPARATION_INITIATE, Cap.SEPARATION_MANAGE,
+        Cap.HANDOVER_READ, Cap.HANDOVER_WRITE,
+        Cap.CLEARANCE_READ, Cap.CLEARANCE_MANAGE, Cap.CLEARANCE_ACT,
+        Cap.EXIT_INTERVIEW_READ, Cap.EXIT_INTERVIEW_WRITE,
+        Cap.FNF_READ, Cap.FNF_PREPARE,
+        # ── Phase ATT-1 ── HR runs this end to end too: marks/corrects attendance, is the
+        # second-level regularisation approver (§7.9 step 68), locks the monthly period
+        # (§7.12 steps 84-88), approves leave and C-Off, and owns the leave-type/policy
+        # register (§22.8) since nobody else in this matrix is positioned to freeze those
+        # numbers once the client confirms them.
+        Cap.ATTENDANCE_READ, Cap.ATTENDANCE_MARK,
+        Cap.ATTENDANCE_REGULARIZE_REQUEST, Cap.ATTENDANCE_REGULARIZE_APPROVE,
+        Cap.ATTENDANCE_LOCK,
+        Cap.OD_REQUEST, Cap.OD_APPROVE,
+        Cap.LEAVE_READ, Cap.LEAVE_APPLY, Cap.LEAVE_APPROVE, Cap.LEAVE_POLICY_MANAGE,
+        Cap.COFF_EARN_REQUEST, Cap.COFF_APPROVE,
+        # ── Phase MOVE-1 ── HR runs movements, discipline and absconding end to end,
+        # including the POSH tier (HR is the one non-Management role the doc trusts with
+        # sensitive cases). Deliberately ABSENT, each for the reason the RACI states outright:
+        #   DISCIPLINE_DECIDE / ABSCONDING_DECIDE -- "Authorised management approves/
+        #   implements" (§7.17 step 133) and "authorised final decision" (§7.19 step 153) are
+        #   Management's sign-off, the same maker/checker split BR-021 already draws for F&F.
+        Cap.MOVEMENT_READ, Cap.MOVEMENT_INITIATE, Cap.MOVEMENT_APPROVE,
+        Cap.DISCIPLINE_READ, Cap.DISCIPLINE_MANAGE,
+        Cap.DISCIPLINE_POSH_READ, Cap.DISCIPLINE_POSH_MANAGE,
+        Cap.ABSCONDING_READ, Cap.ABSCONDING_MANAGE,
+        Cap.RETIREMENT_ALERT_READ,
+        # ── Phase PAY-1 ── HR/Payroll is the maker throughout ("Payroll Maker", "HR/
+        # Performance Owner"), and holds the NORMAL advance-approval tier the doc names
+        # alongside the reporting manager. Deliberately ABSENT, each for the reason the RACI
+        # states outright:
+        #   PAYROLL_APPROVE / VARIABLE_PAY_APPROVE -- "Payroll/Finance Approver" and
+        #   "Finance/Management" are the checker, the same split BR-021 already draws.
+        #   ADVANCE_APPROVE_EMERGENCY -- named as "Director HR / Finance" specifically, a
+        #   narrower tier than plain HR.
+        #   VARIABLE_PAY_HOLD_MANAGE -- releasing/forfeiting held pay is a Finance-level
+        #   call at FY-end, not a routine HR act.
+        Cap.PAYROLL_READ, Cap.PAYROLL_PROCESS,
+        Cap.SALARY_STRUCTURE_READ, Cap.SALARY_STRUCTURE_MANAGE,
+        Cap.ADVANCE_READ, Cap.ADVANCE_APPROVE,
+        Cap.VARIABLE_PAY_READ, Cap.VARIABLE_PAY_PROCESS,
+        # ── Phase PIP-1 ── HR is the process owner throughout ("HR monitors overdue
+        # reviews and plan expiry", step 219) and, unlike Discipline/Payroll, the doc names
+        # no separate Management sign-off tier for PIP — HR holds the outcome decision too.
+        Cap.PIP_READ, Cap.PIP_MANAGE, Cap.PIP_DECIDE,
+        # ── Phase LETTER-1 ── "Users: HR" is the BA doc's own line for this screen.
+        Cap.LETTER_READ, Cap.LETTER_MANAGE,
+        # ── Phase PULSE-1 ── §22.4 step 213: "HR dashboard shows completion rate, average
+        # scores, common issues and follow-up status" — HR is the one role the doc names.
+        Cap.PULSE_READ, Cap.PULSE_MANAGE,
     },
     # A hiring manager reads their own corner of the directory (enforced by row scoping in
     # hrms_employee_service, not by this set) and never sees pay. They RAISE requisitions --
@@ -1041,7 +1548,10 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
         # they cannot plan against; changing it is Management's act.
         Cap.SETTINGS_READ,
         Cap.PROBATION_READ, Cap.PROBATION_REVIEW, Cap.PROBATION_CONFIRM,
-        Cap.INDUCTION_READ,
+        # ── Phase ORIENT-1 ── §22.3 step 201 names "HR/Manager" as who schedules orientation
+        # sessions and assigns a trainer/facilitator — WRITE, not just the Day-1 checklist
+        # read this capability started as.
+        Cap.INDUCTION_READ, Cap.INDUCTION_WRITE,
         # May RAISE an exception, never approve one -- Annexure B puts exception approval
         # with Management/Finance.
         Cap.EXCEPTION_READ, Cap.EXCEPTION_WRITE,
@@ -1056,6 +1566,51 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
         # ── Phase 12 ── a hiring manager SEES the background verification behind a hire
         # they are accountable for, and neither records nor approves one.
         Cap.BACKGROUND_READ,
+        # ── Phase EXIT-1 ── the reporting manager reviews a departing report's case and is
+        # the one required sign-off the BA doc names explicitly: accepting (or rejecting) a
+        # submitted handover item (§22.2 step 191). They also act on whatever departmental
+        # clearance task lands on them, the same way any clearance owner does. No
+        # SEPARATION_MANAGE/INITIATE, no HANDOVER_WRITE (that is HR's plan to build, not the
+        # manager's), no FNF_* — a manager is not part of the money chain.
+        Cap.SEPARATION_READ,
+        Cap.HANDOVER_READ, Cap.HANDOVER_APPROVE,
+        Cap.CLEARANCE_READ, Cap.CLEARANCE_ACT,
+        Cap.EXIT_INTERVIEW_READ,
+        # ── Phase MOVE-1 ── the reporting manager/HOD is the named INITIATOR for their own
+        # reports (§7.16 actors: "Reporting Manager / HOD, HR..."), and is named alongside
+        # HR as an absconding actor too (§7.19). No MOVEMENT_APPROVE — a manager proposing
+        # their own report's promotion is not also that request's approver. No
+        # DISCIPLINE_DECIDE/ABSCONDING_DECIDE/POSH caps — those stay Management/HR's, the
+        # same reason a manager never held SEPARATION_APPROVE. DISCIPLINE_MANAGE is
+        # deliberately ABSENT too: the doc names "Employee / Manager" as who a complaint may
+        # be reported BY, but building safe raise-a-complaint self-service (confidentiality,
+        # anonymity) is a documented follow-up, not something to half-build here — the same
+        # honesty EXIT-1's ownership-check gap already models.
+        Cap.MOVEMENT_READ, Cap.MOVEMENT_INITIATE,
+        Cap.ABSCONDING_READ, Cap.ABSCONDING_MANAGE,
+        Cap.RETIREMENT_ALERT_READ,
+        # ── Phase PAY-1 ── the reporting manager holds the NORMAL advance-approval tier the
+        # doc names explicitly ("Reporting Manager/HR"), for their own reports (row-scoped in
+        # the service, not by this set). No PAYROLL_*/VARIABLE_PAY_*/SALARY_STRUCTURE_* — a
+        # manager is not part of the payroll chain at all, the same reason it never held
+        # EMPLOYEE_SALARY_WRITE.
+        Cap.ADVANCE_READ, Cap.ADVANCE_APPROVE,
+        # ── Phase PIP-1 ── the manager initiates a PIP against their own report and records
+        # periodic review notes (steps 215, 218) — row-scoped in the service. No PIP_DECIDE:
+        # the final outcome (one option being "Separation Recommended") stays HR's, the same
+        # reason a manager never held DISCIPLINE_DECIDE either.
+        Cap.PIP_READ, Cap.PIP_MANAGE,
+        # ── Phase ATT-1 ── the reporting manager is the named first-level approver in every
+        # one of these workflows (§7.9 step 66, §7.10 step 73, §7.11 step 82, §22.9's own
+        # team view) for their reports, enforced by row scoping in the service, not by this
+        # set. Also has the self-service caps every role gets for their OWN record. No MARK
+        # (HR's act, not a manager's), no ATTENDANCE_LOCK or LEAVE_POLICY_MANAGE — neither is
+        # named as a manager act anywhere in §7.8-7.12 or §22.8.
+        Cap.ATTENDANCE_READ,
+        Cap.ATTENDANCE_REGULARIZE_REQUEST, Cap.ATTENDANCE_REGULARIZE_APPROVE,
+        Cap.OD_REQUEST, Cap.OD_APPROVE,
+        Cap.LEAVE_READ, Cap.LEAVE_APPLY, Cap.LEAVE_APPROVE,
+        Cap.COFF_EARN_REQUEST, Cap.COFF_APPROVE,
     },
     # Self-service, plus the deliberate exception that ANY employee may raise a hiring
     # requisition (FRONTEND_ANALYSIS §5: "anyone may raise a hiring requisition"). Reading
@@ -1069,6 +1624,56 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
         # employee is entitled to read; SOP §14 exists to keep it current and visible. It is
         # the register, not the workflow -- no write of any kind comes with it.
         Cap.POLICY_READ,
+        # ── Phase ORIENT-1 ── §22.3 step 202: "Employee sees planned sessions in My
+        # Onboarding" — row-scoped to their own assignment in hrms_orientation_service, the
+        # same enforced-ownership pattern Phase ATT-1 established (not merely capability-
+        # gated the way EXIT-1's self-service caps are still documented as pending).
+        Cap.INDUCTION_READ,
+        # ── Phase EXIT-1 ── an employee raises their own resignation (§7.18 step 137) and
+        # completes their own exit interview (§22.2 step 195) — the same self-service
+        # exception REQUISITION_CREATE above already makes for "anyone may raise a hiring
+        # requisition". SCOPE NOTE: EXIT-1 does not yet check that the case/interview an
+        # employee writes to is their OWN — that ownership check is a documented follow-up,
+        # not a decision that this is safe to skip permanently. Read access and asset-return
+        # self-initiation are deliberately NOT granted here yet for the same reason: they stay
+        # HR-mediated (SEPARATION_READ, CLEARANCE_MANAGE) until that check lands.
+        Cap.SEPARATION_INITIATE, Cap.EXIT_INTERVIEW_WRITE,
+        # ── Phase ATT-1 ── an employee sees and requests their OWN attendance, leave and
+        # C-Off, and raises their own regularisation/OD requests (§7.9 step 63, §7.10 step
+        # 70, §7.11 step 80, §22.9's calendar). Unlike EXIT-1's self-service caps, ownership
+        # scoping for these IS enforced at the service layer (see hrms_attendance_service /
+        # hrms_leave_service `_scope_to_self`) — an employee's list/get calls are filtered to
+        # their own employee_code, not merely gated by the capability.
+        Cap.ATTENDANCE_READ, Cap.ATTENDANCE_REGULARIZE_REQUEST,
+        Cap.OD_REQUEST,
+        Cap.LEAVE_READ, Cap.LEAVE_APPLY,
+        Cap.COFF_EARN_REQUEST,
+        # ── Phase PAY-1 ── an employee requests their own salary advance (§7.14 step 100),
+        # the same self-service reasoning LEAVE_APPLY already established. No ADVANCE_READ:
+        # unlike attendance/leave, Phase PAY-1 does not yet build the "list my own advances"
+        # self-view — a documented follow-up, the same honesty EXIT-1's ownership-check note
+        # models, not an oversight.
+        Cap.ADVANCE_REQUEST,
+        # ── Phase PIP-1 ── an employee needs to SEE their own PIP before they can
+        # acknowledge it — granting ACKNOWLEDGE without READ would be a dead-end control
+        # with no screen that reaches it. Unlike EXIT-1's ownership-check gap, this one is
+        # not deferred: hrms_pip_service scopes an EMPLOYEE caller's list/get to their own
+        # employee_code, the same enforced pattern Phase ATT-1 established.
+        Cap.PIP_READ, Cap.PIP_ACKNOWLEDGE,
+        # ── Phase LETTER-1 ── read-only, row-scoped in hrms_letter_service to letters
+        # addressed to this employee's own employee_code — the same self-view PIP_READ
+        # already establishes above. There is no LETTER_MANAGE here: an employee reads their
+        # own correspondence, they do not issue it to themselves.
+        Cap.LETTER_READ,
+        # ── Phase PULSE-1 ── §22.4 step 210: the employee completes their own pulse survey.
+        # PULSE_READ is row-scoped to their own response the same way PIP_READ is scoped
+        # above; PULSE_SUBMIT is the separate self-service completion act.
+        Cap.PULSE_READ, Cap.PULSE_SUBMIT,
+        # ── Phase MOVE-1 ── deliberately NOTHING here. §7.16 movements are proposed BY a
+        # manager/HR, not by the employee they concern (unlike leave/attendance, this is not
+        # self-service). §7.17 names "Employee" as a complaint-raising actor, but self-service
+        # raise-a-complaint needs confidentiality/anonymity handling this phase does not yet
+        # build — a documented follow-up, not an oversight (see the MANAGER block's note).
     },
     # ── A user of a CLIENT ORGANISATION ──
     #
@@ -1159,6 +1764,24 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
         Cap.POLICY_READ,
         # Deliberately ABSENT: SHORTLIST_* and PREBOARDING_*. Both are about WHO fills a
         # role and whether they still want it -- the hiring judgement Finance never holds.
+        # ── Phase EXIT-1 ── the checker on the one gate BR-021 asks for by name: F&F
+        # approval. Finance also acts on its own departmental clearance item (loans, company
+        # dues) the same way any clearance owner does. No SEPARATION_MANAGE/INITIATE, no
+        # HANDOVER_*, no FNF_PREPARE — Finance approves the number, HR/Payroll builds it.
+        Cap.SEPARATION_READ,
+        Cap.CLEARANCE_READ, Cap.CLEARANCE_ACT,
+        Cap.FNF_READ, Cap.FNF_APPROVE,
+        # ── Phase PAY-1 ── Finance is the checker the doc names explicitly on all three
+        # money gates ("Payroll/Finance Approver", "Director HR / Finance" for emergency
+        # advances, "Finance/Management" on variable pay) and the one role trusted with
+        # releasing or forfeiting held variable pay at FY-end. SALARY_STRUCTURE_READ
+        # mirrors EMPLOYEE_SALARY_READ just above: Finance sees what payroll is BUILT from
+        # (to judge the numbers it approves) without holding SALARY_STRUCTURE_MANAGE, the
+        # same "visibility without write" split that comment already draws.
+        Cap.PAYROLL_READ, Cap.PAYROLL_APPROVE,
+        Cap.SALARY_STRUCTURE_READ,
+        Cap.ADVANCE_READ, Cap.ADVANCE_APPROVE_EMERGENCY,
+        Cap.VARIABLE_PAY_READ, Cap.VARIABLE_PAY_APPROVE, Cap.VARIABLE_PAY_HOLD_MANAGE,
     },
 }
 
@@ -1224,6 +1847,41 @@ ID_FORMATS = {
     # profit_recruitment), which is stable across versions in a way a minted number is not.
     # No "comm_log" sequence either: the log is append-only volume, and a business id on
     # every email would burn a counter for a record nobody ever cites by number.
+    # ── Phase EXIT-1 ──
+    "separation":   ("SEP", True, 3),   # SEP-2026-001
+    "asset_return": ("AST", True, 3),   # AST-2026-001
+    "fnf":          ("FNF", True, 3),   # FNF-2026-001
+    # No sequence for handover/clearance/access-clearance items or the exit interview: they
+    # are child rows of a separation (see COLL_HANDOVER_TASKS etc.) and are addressed by their
+    # own ObjectId plus the separation's sep_no, the same convention onboarding checklist
+    # items already use.
+    # ── Phase ATT-1 ──
+    "leave": ("LV", True, 3),   # LV-2026-001 — covers CL/SL/EL and C-Off USE requests alike,
+                                 # since §22.8 puts C-Off in the same leave dropdown as the rest.
+    "regularization": ("REG", True, 3),   # REG-2026-001
+    "od":            ("OD",  True, 3),    # OD-2026-001
+    # No sequence for attendance rows, C-Off ledger batches or the monthly lock: attendance is
+    # addressed by (employee_code, work_date), a lock by (company_id, period), and a C-Off
+    # batch is a ledger line nobody cites by number — the same reasoning COLL_COMM_LOG's
+    # absence above already states.
+    # ── Phase MOVE-1 ──
+    "movement":         ("MOV",  True, 3),   # MOV-2026-001
+    "discipline_case":  ("DSC",  True, 3),   # DSC-2026-001
+    "absconding_case":  ("ABS",  True, 3),   # ABS-2026-001
+    # ── Phase PAY-1 ──
+    "advance": ("ADV", True, 3),   # ADV-2026-001
+    # No sequence for payroll runs (addressed by (company_id, period)), payroll records
+    # (addressed by (period, employee_code)), variable pay quarters (addressed by
+    # (company_id, quarter)) or variable pay records/hold ledger rows (child data of a
+    # quarter) — none of these is a document anybody cites by a minted number.
+    # ── Phase PIP-1 ──
+    "pip": ("PIP", True, 3),   # PIP-2026-001
+    # ── Phase LETTER-1 ──
+    "letter": ("LTR", True, 3),   # LTR-2026-001
+    # ── Phase ORIENT-1 ── no sequence for the ASSIGNMENT: it is addressed by employee_code,
+    # one per employee, the same "no business id for a per-employee child row" convention
+    # leave balances and salary structures already use.
+    "orientation_plan": ("ORP", True, 3),   # ORP-2026-001
 }
 
 
@@ -5047,6 +5705,8 @@ JOB_PROBATION     = "probation_reminders"
 JOB_PREBOARDING   = "preboarding_reminders"
 JOB_POLICY_REVIEW = "policy_review"
 JOB_RETENTION     = "retention_propose"
+JOB_ORIENTATION   = "orientation_escalation"
+JOB_PULSE_SURVEY  = "pulse_survey_issue"
 
 # (key, label, cadence, utc_hour)
 SCHEDULED_JOBS = [
@@ -5055,6 +5715,8 @@ SCHEDULED_JOBS = [
     (JOB_PREBOARDING,   "pre-boarding contact reminders", JOB_CADENCE_DAILY,  8),
     (JOB_POLICY_REVIEW, "policy review reminders",        JOB_CADENCE_WEEKLY, 8),
     (JOB_RETENTION,     "retention purge proposal",       JOB_CADENCE_WEEKLY, 3),
+    (JOB_ORIENTATION,   "orientation escalation sweep",    JOB_CADENCE_DAILY,  7),
+    (JOB_PULSE_SURVEY,  "30/90-day pulse survey issuance", JOB_CADENCE_DAILY,  7),
 ]
 
 
@@ -5238,6 +5900,14 @@ class PolicyIn(BaseModel):
     owner_role: Optional[str] = None
     next_review_due: Optional[str] = None         # defaults to +POLICY_REVIEW_MONTHS
     document_id: Optional[str] = None             # a doc_no in the document register
+    # ── Phase POLICY-LIB-1 (§22.6) ── additive; see that phase's module docstring in
+    # hrms_policy_service.py for why these are added fields, not a rewrite.
+    category: Optional[str] = None                # Leave/Attendance/Conduct/... or a
+                                                    # client-defined string (BA doc step 223)
+    department_id: Optional[str] = None            # applicability filter; unset = company-wide
+    employment_type: Optional[str] = None          # applicability filter; unset = all types
+    acknowledgement_required: bool = False
+    acceptance_due_days: Optional[int] = None      # days from publish an employee has to ack
 
 
 class PolicyRevisionIn(BaseModel):
@@ -5674,3 +6344,1400 @@ class InterviewMediaIn(BaseModel):
     external_url: Optional[str] = None          # a link to where it already lives
     notes: Optional[str] = None
     duration_minutes: Optional[int] = None       # recordings only; for the player's label
+
+
+# =============================================================
+# Phase EXIT-1 — Exit Management (BA/Functional Design §7.18, §22.2, §7.21)
+#
+# Employee submits (or HR records) a resignation → notice is calculated from status and
+# designation level → HR/manager records acceptance, with an MD/Finance approval gate on any
+# waiver → a Handover Plan and departmental Clearance/Asset-Return/Access-Clearance tasks run
+# in parallel → an Exit Interview is captured → Finance approves the F&F → the case closes and
+# the employee moves to Alumni.
+#
+# F&F HAS NO PAYROLL ENGINE BEHIND IT (see §7.13 — unbuilt). FnfInput below therefore captures
+# the figures a real payroll run would otherwise supply, entered by hand, so the settlement can
+# still be prepared, reviewed and approved with a proper maker/checker gate — it cannot compute
+# LOP, PF or TDS from first principles, because nothing in this codebase does yet.
+# =============================================================
+class ExitType(str, Enum):
+    RESIGNATION  = "Resignation"
+    TERMINATION  = "Termination"
+    RETIREMENT   = "Retirement"
+    ABSCONDING   = "Absconding"
+    DEMISE       = "Demise"
+    MISSING      = "Missing"
+    CONTRACT_END = "End of Contract"
+
+
+class SeparationStage(str, Enum):
+    INITIATED          = "Initiated"
+    NOTICE_IN_PROGRESS = "Notice in Progress"
+    HANDOVER_CLEARANCE = "Handover & Clearance"
+    FNF_PENDING        = "F&F Pending"
+    FNF_APPROVED       = "F&F Approved"
+    SETTLED            = "Settled"
+    CLOSED             = "Closed"
+    WITHDRAWN          = "Withdrawn"
+
+
+# A separation is DONE working through once it reaches one of these — used to enforce "one
+# open case per employee" without a unique index (a rehired-and-separated-again employee
+# legitimately gets a second row, which a unique (company, employee_code) index would forbid).
+CLOSED_SEPARATION_STAGES = {SeparationStage.CLOSED.value, SeparationStage.WITHDRAWN.value}
+
+
+class ClearanceOwnerType(str, Enum):
+    MANAGER = "Manager"
+    HR      = "HR"
+    IT      = "IT"
+    ADMIN   = "Admin"
+    FINANCE = "Finance"
+    OTHER   = "Other"
+
+
+class ClearanceStatus(str, Enum):
+    PENDING  = "Pending"
+    CLEARED  = "Cleared"
+    REJECTED = "Rejected"
+    WAIVED   = "Waived"
+
+
+class HandoverStatus(str, Enum):
+    PENDING   = "Pending"
+    SUBMITTED = "Submitted"   # the doer marked it done; awaiting manager acceptance
+    ACCEPTED  = "Accepted"
+    REJECTED  = "Rejected"
+
+
+class AssetReturnStatus(str, Enum):
+    PENDING             = "Pending"
+    RETURNED            = "Returned"
+    PARTIALLY_RETURNED  = "Partially Returned"
+    LOST                = "Lost"
+    DAMAGED             = "Damaged"
+    WAIVED              = "Waived"
+
+
+class AccessSystemType(str, Enum):
+    EMAIL           = "Email"
+    APPLICATIONS    = "Applications"
+    VPN             = "VPN"
+    CLIENT_SYSTEMS  = "Client Systems"
+    PHYSICAL_ACCESS = "Physical Access"
+    CARDS_KEYS      = "Cards / Keys"
+    OTHER           = "Other"
+
+
+class AccessClearanceStatus(str, Enum):
+    PENDING        = "Pending"
+    DISABLED       = "Disabled"
+    NOT_APPLICABLE = "Not Applicable"
+
+
+class FnfStatus(str, Enum):
+    DRAFT    = "Draft"
+    PREPARED = "Prepared"   # maker done, awaiting Finance
+    APPROVED = "Approved"   # Finance approved; not yet paid
+    PAID     = "Paid"
+    REJECTED = "Rejected"   # sent back to the maker
+
+
+# ── §7.18 / BR-016 notice matrix ──
+# Probation: L1 nil, L2 3 days, L3 7, L4 15, L5+ 20.  Confirmed: L1-L3 15, L4 30, L5+ 45.
+# "Level" is Designation.level (1-based ascending seniority) — the same field the BA doc's
+# "L1...L5+" shorthand already matches without inventing a second seniority scale.
+NOTICE_DAYS_PROBATION        = {1: 0, 2: 3, 3: 7, 4: 15}
+NOTICE_DAYS_PROBATION_L5PLUS = 20
+NOTICE_DAYS_CONFIRMED_L1_L3  = 15
+NOTICE_DAYS_CONFIRMED_L4     = 30
+NOTICE_DAYS_CONFIRMED_L5PLUS = 45
+
+# A designation with no `level` set falls back to this band — the same reasoning
+# DesignationLevel gives for defaulting an unset band to "mid", pointed the other way: absent
+# data should read as the outcome that is safest for the COMPANY, since notice is what the
+# company is owed, not the employee. The service surfaces `notice_basis` alongside the
+# calculated figure so HR can see when a number rests on this default rather than a real level.
+DEFAULT_DESIGNATION_LEVEL_FOR_NOTICE = 1
+
+
+def notice_days_for(on_probation: bool, level: Optional[int]) -> int:
+    """Contractual notice, in days, from the BA doc's table (§7.18, BR-016).
+
+    Pure function: whether the person is still on probation is an I/O question the SERVICE
+    resolves (the latest hrms_probation_reviews outcome for their employee_code) — this is
+    only the arithmetic, status + level -> days, kept separate so it can be tested without a
+    database and reused anywhere the figure is needed (initiation, recalculation, display).
+    """
+    lvl = level if level and level >= 1 else DEFAULT_DESIGNATION_LEVEL_FOR_NOTICE
+    if on_probation:
+        return NOTICE_DAYS_PROBATION_L5PLUS if lvl >= 5 else NOTICE_DAYS_PROBATION.get(lvl, NOTICE_DAYS_PROBATION[4])
+    if lvl >= 5:
+        return NOTICE_DAYS_CONFIRMED_L5PLUS
+    if lvl == 4:
+        return NOTICE_DAYS_CONFIRMED_L4
+    return NOTICE_DAYS_CONFIRMED_L1_L3
+
+
+ENTITY_SEPARATION       = "separation"
+ENTITY_HANDOVER         = "handover_task"
+ENTITY_CLEARANCE        = "clearance_task"
+ENTITY_ASSET_RETURN     = "asset_return"
+ENTITY_ACCESS_CLEARANCE = "access_clearance"
+ENTITY_EXIT_INTERVIEW   = "exit_interview"
+ENTITY_FNF              = "fnf_settlement"
+
+AUDIT_SEPARATION_INITIATED     = "separation initiated"
+AUDIT_SEPARATION_DECIDED       = "separation acceptance recorded"
+AUDIT_SEPARATION_WAIVED        = "notice waiver / early release approved"
+AUDIT_SEPARATION_WITHDRAWN     = "separation withdrawn"
+AUDIT_SEPARATION_CLOSED        = "separation closed -- employee moved to alumni"
+AUDIT_HANDOVER_CREATED         = "handover task created"
+AUDIT_HANDOVER_UPDATED         = "handover task updated"
+AUDIT_HANDOVER_ACCEPTED        = "handover task accepted by manager"
+AUDIT_CLEARANCE_CREATED        = "clearance task created"
+AUDIT_CLEARANCE_ACTIONED       = "clearance task actioned"
+AUDIT_ASSET_RETURN_CREATED     = "asset return request created"
+AUDIT_ASSET_RETURN_UPDATED     = "asset return request updated"
+AUDIT_ACCESS_CLEARANCE_CREATED = "access clearance task created"
+AUDIT_ACCESS_CLEARANCE_UPDATED = "access clearance task updated"
+AUDIT_EXIT_INTERVIEW_SAVED     = "exit interview recorded"
+AUDIT_FNF_SAVED                = "F&F settlement saved"
+AUDIT_FNF_APPROVED             = "F&F settlement approved"
+AUDIT_FNF_REJECTED             = "F&F settlement sent back to maker"
+AUDIT_FNF_PAID                 = "F&F settlement marked paid"
+
+# A case must clear every mandatory task before F&F, unless HR formally waives one (BR-025).
+# The cap exists for the same reason MAX_HOLIDAYS does: a runaway import or a scripted client
+# must not be able to turn one case into an unbounded scan.
+MAX_TASKS_PER_SEPARATION = 200
+
+
+class ResignationIn(BaseModel):
+    """§7.18 step 137: what the departing person (or HR, raising on their behalf) supplies.
+    Notice is CALCULATED from status + designation level, never typed in here — see
+    notice_days_for and hrms_exit_service.initiate_separation."""
+    employee_code: str
+    exit_type: ExitType = ExitType.RESIGNATION
+    resignation_date: Optional[str] = None       # YYYY-MM-DD; defaults to today
+    reason: Optional[str] = None
+    proposed_lwd: Optional[str] = None           # YYYY-MM-DD
+
+
+class SeparationDecisionIn(BaseModel):
+    """§7.18 steps 140-141: HR/manager records acceptance and any revision. A waiver or
+    shortfall recorded here does not take effect until SeparationApprovalIn confirms it."""
+    revised_lwd: Optional[str] = None
+    waiver_days: Optional[int] = None            # notice days being waived
+    shortfall_days: Optional[int] = None         # notice days short, for recovery at F&F
+    remarks: Optional[str] = None
+
+
+class SeparationApprovalIn(BaseModel):
+    """The written approval BR-016 requires before a waiver or early release takes effect."""
+    approved: bool
+    remarks: Optional[str] = None
+
+
+class HandoverTaskIn(BaseModel):
+    """§22.2 handover screen fields."""
+    task: str
+    description: Optional[str] = None
+    assigned_to: Optional[str] = None            # successor / receiving employee (user id)
+    owner_id: Optional[str] = None               # defaults to the reporting manager
+    due_date: Optional[str] = None
+    attachment: Optional[str] = None             # a link; base64 uploads use the document register
+
+
+class HandoverTaskUpdate(BaseModel):
+    task: Optional[str] = None
+    description: Optional[str] = None
+    assigned_to: Optional[str] = None
+    owner_id: Optional[str] = None
+    due_date: Optional[str] = None
+    attachment: Optional[str] = None
+    status: Optional[HandoverStatus] = None
+    completion_evidence: Optional[str] = None
+    remarks: Optional[str] = None
+
+
+class HandoverAcceptIn(BaseModel):
+    """The reporting manager's sign-off (or rejection) on a submitted item."""
+    accepted: bool
+    remarks: Optional[str] = None
+
+
+class ClearanceTaskIn(BaseModel):
+    owner_type: ClearanceOwnerType
+    owner_id: Optional[str] = None
+    task: str
+    due_date: Optional[str] = None
+
+
+class ClearanceActionIn(BaseModel):
+    status: ClearanceStatus
+    recovery_amount: Optional[float] = None      # feeds the F&F preview when set
+    evidence: Optional[str] = None
+    remarks: Optional[str] = None
+
+
+class AssetReturnIn(BaseModel):
+    """§22.2 Asset Return Request fields."""
+    asset_id: Optional[str] = None
+    category: Optional[str] = None
+    description: str
+    issued_date: Optional[str] = None
+    expected_return_date: Optional[str] = None
+
+
+class AssetReturnUpdate(BaseModel):
+    returned_date: Optional[str] = None
+    condition: Optional[str] = None
+    missing_or_damaged: Optional[bool] = None
+    recovery_amount: Optional[float] = None
+    received_by: Optional[str] = None
+    attachment: Optional[str] = None
+    status: Optional[AssetReturnStatus] = None
+    remarks: Optional[str] = None
+
+
+class AccessClearanceIn(BaseModel):
+    system_type: AccessSystemType
+    description: Optional[str] = None
+    owner_id: Optional[str] = None
+
+
+class AccessClearanceUpdate(BaseModel):
+    status: AccessClearanceStatus
+    remarks: Optional[str] = None
+
+
+class ExitInterviewIn(BaseModel):
+    reason: Optional[str] = None
+    manager_rating: Optional[int] = None         # 1-5
+    team_rating: Optional[int] = None
+    work_rating: Optional[int] = None
+    compensation_rating: Optional[int] = None
+    comments: Optional[str] = None
+    rehire_recommendation: Optional[bool] = None
+
+
+class FnfInput(BaseModel):
+    """§7.21 F&F inputs, entered by hand because no payroll engine exists yet (§7.13).
+
+    Every figure is kept as its OWN line rather than one lump sum, so the printed settlement
+    can show its working — the same reason task_credit keeps achieved/assigned instead of only
+    a percentage. Asset/clearance recoveries are NOT entered here: the service rolls those up
+    automatically from the case's own asset-return and clearance records (§22.2 step 196) and
+    adds them to whatever this model supplies.
+    """
+    payable_days: Optional[float] = None
+    leave_encashment: Optional[float] = None
+    notice_pay_or_shortfall: Optional[float] = None   # negative = recovery from the employee
+    advance_recovery: Optional[float] = None          # positive = deducted from the settlement
+    variable_pay_hold_release: Optional[float] = None
+    other_earnings: Optional[float] = None
+    other_deductions: Optional[float] = None
+    remarks: Optional[str] = None
+
+
+class FnfDecisionIn(BaseModel):
+    approved: bool
+    remarks: Optional[str] = None
+
+
+class FnfPaidIn(BaseModel):
+    paid_on: Optional[str] = None
+    reference: Optional[str] = None
+
+
+# =============================================================
+# Phase ATT-1 — Attendance & Leave (BA/Functional Design §7.8-7.12, §22.8-22.9)
+#
+# Attendance is captured (manually by HR/manager for now — see ATTENDANCE_MARK) → the daily
+# engine derives status/late-minutes/worked-minutes against the company's configured shift and
+# grace → exceptions are regularised (employee proposes → manager → HR) → HR locks the month,
+# freezing an immutable snapshot for payroll to consume later. Leave runs in parallel: apply →
+# manager → HR → ledger update; C-Off is its own earn-then-use ledger of individually-expiring
+# batches, exposed inside the same leave dropdown per §22.8.
+#
+# POLICY NUMBERS ARE NOT FROZEN. The document says so explicitly and more than once: "final
+# deduction/half-day logic must be frozen before build" (§7.8), "Leave policy currently
+# contains conflicting CL quantum wording; final values must be confirmed" (§7.10), "Policy
+# text contains both a 60-day statement and an apparent '32 months' phrase; final expiry rule
+# is a mandatory policy-freeze item" (§7.11), and §22.8 names EL's accrual/carry-forward/lapse/
+# encashment/notice-period rules as undefined and required "before development". So — exactly
+# like FnfInput above, which exists because §7.13's payroll engine is unbuilt — none of those
+# figures are hardcoded into logic here. DEFAULT_SHIFT_POLICY and a seeded hrms_leave_types row
+# per code carry the numbers the document DOES mention ("current policy references...") as
+# ADJUSTABLE DEFAULTS, editable via LEAVE_POLICY_MANAGE, with `policy_confirmed: bool = False`
+# surfaced so HR/Management see plainly that these are placeholders, not the client's sign-off.
+# =============================================================
+class AttendanceStatus(str, Enum):
+    PRESENT     = "Present"
+    ABSENT      = "Absent"
+    HALF_DAY    = "Half Day"
+    ON_LEAVE    = "On Leave"
+    ON_OD       = "On OD"
+    WEEKLY_OFF  = "Weekly Off"
+    HOLIDAY     = "Holiday"
+    PENDING     = "Pending"     # work date has passed with no capture yet — a monthly-lock exception
+
+
+class CorrectionExceptionType(str, Enum):
+    MISSING_PUNCH  = "Missing Punch"
+    WRONG_TIME     = "Wrong Time"
+    FORGOT_TO_MARK = "Forgot to Mark"
+    SYSTEM_ERROR   = "System Error"
+    OTHER          = "Other"
+
+
+class CorrectionStatus(str, Enum):
+    PENDING          = "Pending"            # awaiting the reporting manager
+    MANAGER_APPROVED = "Manager Approved"   # awaiting HR's second-level sign-off
+    APPROVED         = "Approved"           # HR-final; attendance row recalculated
+    REJECTED         = "Rejected"
+    RETURNED         = "Returned"           # sent back to the employee with a comment
+
+
+class OdStatus(str, Enum):
+    PENDING  = "Pending"
+    APPROVED = "Approved"
+    REJECTED = "Rejected"
+
+
+class LockStatus(str, Enum):
+    OPEN   = "Open"
+    LOCKED = "Locked"
+
+
+class LeaveStatus(str, Enum):
+    PENDING          = "Pending"
+    MANAGER_APPROVED = "Manager Approved"
+    APPROVED         = "Approved"
+    REJECTED         = "Rejected"
+    RETURNED         = "Returned"
+    CANCELLED        = "Cancelled"          # withdrawn after approval; restores the balance
+
+
+class LeaveHalfSession(str, Enum):
+    FIRST_HALF  = "First Half"
+    SECOND_HALF = "Second Half"
+
+
+class CoffLedgerStatus(str, Enum):
+    PENDING_APPROVAL = "Pending Approval"   # earn claim awaiting sign-off
+    AVAILABLE        = "Available"          # credited and unused
+    USED             = "Used"
+    EXPIRED          = "Expired"
+    REJECTED         = "Rejected"
+
+
+# A correction/leave/C-Off request is DONE once it reaches one of these — mirrors
+# CLOSED_SEPARATION_STAGES: needed to tell "still working through the queue" apart from
+# history without a second boolean that could drift out of sync with status.
+OPEN_CORRECTION_STATUSES = {CorrectionStatus.PENDING.value, CorrectionStatus.MANAGER_APPROVED.value}
+OPEN_LEAVE_STATUSES = {LeaveStatus.PENDING.value, LeaveStatus.MANAGER_APPROVED.value}
+
+# §7.8: "current policy references 9:30 AM-6:30 PM, five-minute daily grace and 60-minute
+# monthly buffer" — an ADJUSTABLE DEFAULT (see module docstring), read by the service when a
+# company has not configured its own shift policy yet, never compiled into the status
+# calculation as a constant.
+DEFAULT_SHIFT_POLICY = {
+    "shift_start": "09:30",
+    "shift_end": "18:30",
+    "daily_grace_minutes": 5,
+    "monthly_buffer_minutes": 60,
+    "half_day_threshold_minutes": 240,   # worked less than half a shift -> Half Day, not Present
+}
+
+# §22.8: leave types the dropdown must offer, seeded per company at first use. Every numeric
+# policy value here is the ADJUSTABLE DEFAULT the doc's "current policy references" implies,
+# not a frozen figure — see the module docstring.
+DEFAULT_LEAVE_TYPES = [
+    {"code": "CL", "name": "Casual Leave", "annual_entitlement": 12,
+     "accrual_frequency": "Annual", "carry_forward_ceiling": 0, "allow_encashment": False,
+     "requires_attachment_after_days": None, "notice_period_restricted": True},
+    {"code": "SL", "name": "Sick Leave", "annual_entitlement": 12,
+     "accrual_frequency": "Annual", "carry_forward_ceiling": 0, "allow_encashment": False,
+     "requires_attachment_after_days": 2, "notice_period_restricted": True},
+    {"code": "EL", "name": "Earned Leave", "annual_entitlement": 15,
+     "accrual_frequency": "Annual", "carry_forward_ceiling": 30, "allow_encashment": True,
+     "requires_attachment_after_days": None, "notice_period_restricted": True},
+    {"code": "C-Off", "name": "Compensatory Off", "annual_entitlement": 0,
+     "accrual_frequency": "None", "carry_forward_ceiling": 0, "allow_encashment": False,
+     "requires_attachment_after_days": None, "notice_period_restricted": False,
+     "coff_expiry_days": 60},
+]
+
+
+def compute_daily_status(*, scheduled_in: str, scheduled_out: str,
+                          actual_in: Optional[str], actual_out: Optional[str],
+                          daily_grace_minutes: int, half_day_threshold_minutes: int) -> dict:
+    """The §7.8 daily engine's arithmetic, pure — no DB, no clock, testable standalone
+    (matches notice_days_for's discipline in Phase EXIT-1). All timing PARAMETERS come from
+    the caller's policy lookup; nothing here is a hardcoded company number.
+
+    Times are "HH:MM" 24-hour strings. Returns worked_minutes/late_minutes/status; never
+    raises on missing punches — that is a legitimate day-state (Absent), not an error.
+    """
+    def _mins(hhmm: str) -> int:
+        h, m = hhmm.split(":")
+        return int(h) * 60 + int(m)
+
+    if not actual_in:
+        return {"status": AttendanceStatus.ABSENT.value, "worked_minutes": 0, "late_minutes": 0}
+
+    sched_in_m = _mins(scheduled_in)
+    in_m = _mins(actual_in)
+    late_minutes = max(0, in_m - sched_in_m - daily_grace_minutes)
+
+    if not actual_out:
+        # Present with an open/missing out-punch — the daily status still resolves; the
+        # missing out-punch itself becomes a regularisation candidate (§7.8 step 61).
+        return {"status": AttendanceStatus.PRESENT.value, "worked_minutes": 0,
+                "late_minutes": late_minutes}
+
+    out_m = _mins(actual_out)
+    worked_minutes = max(0, out_m - in_m)
+    status = (AttendanceStatus.HALF_DAY.value if worked_minutes < half_day_threshold_minutes
+              else AttendanceStatus.PRESENT.value)
+    return {"status": status, "worked_minutes": worked_minutes, "late_minutes": late_minutes}
+
+
+ENTITY_ATTENDANCE   = "attendance"
+ENTITY_CORRECTION   = "attendance_correction"
+ENTITY_OD           = "od_request"
+ENTITY_ATT_LOCK     = "attendance_lock"
+ENTITY_LEAVE_TYPE   = "leave_type"
+ENTITY_LEAVE_REQUEST = "leave_request"
+ENTITY_COFF         = "coff_ledger"
+
+AUDIT_ATTENDANCE_MARKED       = "attendance marked"
+AUDIT_CORRECTION_REQUESTED    = "attendance regularisation requested"
+AUDIT_CORRECTION_ACTIONED     = "attendance regularisation actioned"
+AUDIT_OD_REQUESTED            = "outdoor duty requested"
+AUDIT_OD_ACTIONED             = "outdoor duty actioned"
+AUDIT_ATTENDANCE_LOCKED       = "monthly attendance locked"
+AUDIT_ATTENDANCE_UNLOCKED     = "monthly attendance unlocked"
+AUDIT_LEAVE_TYPE_SAVED        = "leave type configuration saved"
+AUDIT_LEAVE_APPLIED           = "leave applied"
+AUDIT_LEAVE_ACTIONED          = "leave actioned"
+AUDIT_LEAVE_CANCELLED         = "leave cancelled"
+AUDIT_LEAVE_BALANCE_ADJUSTED  = "leave balance adjusted"
+AUDIT_COFF_EARN_REQUESTED     = "compensatory off earn requested"
+AUDIT_COFF_EARN_ACTIONED      = "compensatory off earn actioned"
+
+# A runaway import/scripted client must not be able to force an unbounded scan when computing
+# "how many open corrections/leave requests does this company have" — same reasoning as
+# MAX_TASKS_PER_SEPARATION and MAX_HOLIDAYS.
+MAX_ATTENDANCE_LIST_PAGE = 500
+
+
+class AttendanceMarkIn(BaseModel):
+    """HR/manager records a day's raw punches (or an explicit non-worked status) for one
+    employee. The service derives status/worked/late from this — none of that is typed in
+    here, the same discipline notice_days_for's caller-supplies-nothing-computed rule keeps."""
+    employee_code: str
+    work_date: str                               # YYYY-MM-DD
+    actual_in: Optional[str] = None              # "HH:MM"
+    actual_out: Optional[str] = None
+    override_status: Optional[AttendanceStatus] = None   # explicit Weekly Off / Holiday / Leave
+    notes: Optional[str] = None
+
+
+class RegularizationIn(BaseModel):
+    """§7.9 step 63-64: the employee's own correction request."""
+    employee_code: str
+    work_date: str
+    exception_type: CorrectionExceptionType
+    proposed_in: Optional[str] = None
+    proposed_out: Optional[str] = None
+    reason: str
+    evidence: Optional[str] = None               # a link; base64 uploads use the document register
+
+
+class RegularizationActionIn(BaseModel):
+    decision: CorrectionStatus                   # Manager Approved / Approved / Rejected / Returned
+    remarks: Optional[str] = None
+
+
+class OdRequestIn(BaseModel):
+    employee_code: str
+    od_date: str
+    purpose: str
+    location: Optional[str] = None
+
+
+class OdActionIn(BaseModel):
+    approved: bool
+    remarks: Optional[str] = None
+
+
+class AttendanceLockIn(BaseModel):
+    period: str                                   # YYYY-MM
+
+
+class AttendanceUnlockIn(BaseModel):
+    """Post-lock changes need authorised adjustment (§7.12 BR) — a reason is mandatory so the
+    audit trail carries WHY a closed period was reopened, not just that it was."""
+    reason: str
+
+
+class LeaveTypeConfigIn(BaseModel):
+    """§22.8 leave-type master. Every numeric field is a POLICY VALUE the document explicitly
+    marks unconfirmed for CL/SL/EL/C-Off — see the module docstring. Saving this does not
+    imply client sign-off; `policy_confirmed` is a separate, explicit flag for that."""
+    code: str
+    name: str
+    annual_entitlement: float = 0
+    accrual_frequency: str = "Annual"             # Annual | Monthly | None
+    carry_forward_ceiling: float = 0
+    allow_encashment: bool = False
+    requires_attachment_after_days: Optional[int] = None
+    notice_period_restricted: bool = False
+    coff_expiry_days: Optional[int] = None        # only meaningful for the C-Off row
+    policy_confirmed: bool = False
+    active: bool = True
+
+
+class LeaveApplyIn(BaseModel):
+    employee_code: str
+    leave_type: str                                # a hrms_leave_types `code`
+    start_date: str
+    end_date: str
+    half_day: bool = False
+    half_session: Optional[LeaveHalfSession] = None
+    reason: Optional[str] = None
+    attachment: Optional[str] = None
+
+
+class LeaveActionIn(BaseModel):
+    decision: LeaveStatus                          # Manager Approved / Approved / Rejected / Returned
+    remarks: Optional[str] = None
+
+
+class LeaveCancelIn(BaseModel):
+    reason: str
+
+
+class LeaveBalanceAdjustIn(BaseModel):
+    """HR manual correction to a balance (opening balance import, goodwill grant, an error
+    fix) — kept as its own audited act rather than letting anyone edit the ledger row
+    directly, the same reason F&F's recoveries are rolled up rather than hand-edited."""
+    employee_code: str
+    leave_type: str
+    year: int
+    adjustment_days: float
+    reason: str
+
+
+class CoffEarnIn(BaseModel):
+    """§7.11 steps 77-78: a claim that approved work was done on a weekly off/holiday."""
+    employee_code: str
+    earned_for_date: str                           # the holiday/weekly-off actually worked
+    note: Optional[str] = None
+
+
+class CoffEarnActionIn(BaseModel):
+    approved: bool
+    remarks: Optional[str] = None
+
+
+# =============================================================
+# Phase MOVE-1 — Employee Movements & Discipline
+# (BA/Functional Design §7.16, §7.17, §7.19, §7.20)
+#
+# Movement: a promotion/transfer/manager/designation/grade/location/compensation change is
+# proposed against the employee's CURRENT value (captured by the service, never client-
+# supplied — the same "the server computes, the caller never asserts" discipline
+# notice_days_for established) -> approved -> applied on its effective date, updating the
+# live profile while the movement record itself becomes the permanent, never-edited history
+# entry (§7.16 BR: "Never overwrite historical organisation/compensation state").
+#
+# Discipline: a confidential case runs case -> investigation -> recommendation -> management
+# decision -> closure, with a SEPARATE, narrower capability pair for POSH/harassment matters
+# (§7.17 BR: "should not be treated as ordinary manager-visible discipline case"). Self-service
+# complaint-raising (the doc names "Employee" as one of the triggering actors) is NOT built in
+# this pass — it needs confidentiality/anonymity handling this phase does not attempt, and is
+# a documented follow-up rather than a silent gap, the same honesty EXIT-1's ownership-check
+# note already models.
+#
+# Absconding: 3 consecutive unexplained days -> flag -> logged contact attempts -> a two-stage
+# warning ladder (First/Second, each gated on a configurable window since it has elapsed) ->
+# an authorised final decision that either resolves the case or hands off into Exit Management
+# (initiate_separation with exit_type=Absconding).
+#
+# Retirement/Demise/Missing: deliberately the THINNEST of the four, because the document itself
+# says so ("Exact retirement age is not fixed... must be confirmed", "Legal/benefit handling...
+# should follow approved HR/legal guidance"). Retirement gets a proactive alert (DOB + a
+# configurable retirement age, the same adjustable-default pattern DEFAULT_SHIFT_POLICY uses)
+# rather than a new case collection; demise/missing get a small nominee/legal-documentation
+# extension to the EXISTING separation record (NomineeDetailsIn below), because Exit Management
+# (Phase EXIT-1) already runs the rest of that case end to end via its exit_type values.
+# =============================================================
+class MovementType(str, Enum):
+    PROMOTION            = "Promotion"
+    TRANSFER             = "Transfer"
+    MANAGER_CHANGE       = "Manager Change"
+    DESIGNATION_CHANGE   = "Designation Change"
+    GRADE_CHANGE         = "Grade Change"
+    LOCATION_CHANGE      = "Location Change"
+    COMPENSATION_CHANGE  = "Compensation Change"
+
+
+class MovementStatus(str, Enum):
+    PENDING  = "Pending"
+    APPROVED = "Approved"     # awaiting its effective date
+    REJECTED = "Rejected"
+    APPLIED  = "Applied"      # effective date reached; live profile updated
+
+
+# Movement types the SERVICE can actually apply to a real field today. Grade and Location
+# have no canonical field anywhere in this codebase yet (the earlier gap analysis flagged
+# this absence) — those two are recorded and approved like any other movement, but applying
+# one updates only the movement record's own history, not a live profile field, and the
+# service says so explicitly in what it returns rather than silently doing nothing.
+MOVEMENT_APPLIABLE_TYPES = {
+    MovementType.DESIGNATION_CHANGE.value, MovementType.PROMOTION.value,
+    MovementType.MANAGER_CHANGE.value, MovementType.COMPENSATION_CHANGE.value,
+}
+
+
+class DisciplineCategory(str, Enum):
+    MISCONDUCT         = "Misconduct"
+    ATTENDANCE         = "Attendance"
+    INSUBORDINATION    = "Insubordination"
+    HARASSMENT         = "Harassment"
+    POSH               = "POSH"
+    POLICY_VIOLATION   = "Policy Violation"
+    OTHER              = "Other"
+
+
+# A case in either of these categories is ALWAYS Restricted, regardless of what the caller
+# passes — §7.17 BR is not a suggestion the UI can override.
+POSH_CATEGORIES = {DisciplineCategory.HARASSMENT.value, DisciplineCategory.POSH.value}
+
+
+class ConfidentialityLevel(str, Enum):
+    STANDARD   = "Standard"
+    RESTRICTED = "Restricted"
+
+
+class DisciplineStatus(str, Enum):
+    REPORTED               = "Reported"
+    UNDER_INVESTIGATION    = "Under Investigation"
+    RECOMMENDATION_RECORDED = "Recommendation Recorded"
+    DECIDED                = "Decided"
+    CLOSED                 = "Closed"
+
+
+class DisciplineOutcome(str, Enum):
+    WARNING     = "Warning"
+    CENSURE     = "Censure"
+    SHOW_CAUSE  = "Show Cause"
+    TERMINATION = "Termination"
+    NO_ACTION   = "No Action"
+    OTHER       = "Other"
+
+
+class PersonRole(str, Enum):
+    COMPLAINANT = "Complainant"
+    RESPONDENT  = "Respondent"
+    WITNESS     = "Witness"
+
+
+class AbscondingStatus(str, Enum):
+    FLAGGED                   = "Flagged"
+    FIRST_WARNING_SENT        = "First Warning Sent"
+    SECOND_WARNING_SENT       = "Second Warning Sent"
+    FINAL_ACTION              = "Final Action"
+    RETURNED_TO_WORK          = "Returned to Work"
+    CONVERTED_TO_SEPARATION   = "Converted to Separation"
+
+
+OPEN_ABSCONDING_STATUSES = {
+    AbscondingStatus.FLAGGED.value, AbscondingStatus.FIRST_WARNING_SENT.value,
+    AbscondingStatus.SECOND_WARNING_SENT.value, AbscondingStatus.FINAL_ACTION.value,
+}
+
+# §7.19 BR: "Current policy uses 3 consecutive working days and two 7-day warning windows
+# before final action" — an ADJUSTABLE DEFAULT (same discipline as DEFAULT_SHIFT_POLICY),
+# read from hrms_settings, never compiled in as a constant the service enforces blindly.
+DEFAULT_ABSCONDING_POLICY = {
+    "unexplained_absence_days": 3,
+    "warning_window_days": 7,
+}
+
+# §7.20 BR: "Exact retirement age is not fixed in the supplied text excerpt and must be
+# confirmed" — this default is explicitly a placeholder, more so than any other number in
+# this module, and is surfaced to HR as such wherever it is shown.
+DEFAULT_RETIREMENT_AGE = 60
+# How far ahead of the retirement date HR is alerted — again adjustable, not frozen.
+DEFAULT_RETIREMENT_ALERT_MONTHS = 6
+
+
+ENTITY_MOVEMENT   = "employee_movement"
+ENTITY_DISCIPLINE = "discipline_case"
+ENTITY_ABSCONDING = "absconding_case"
+
+AUDIT_MOVEMENT_INITIATED = "employee movement initiated"
+AUDIT_MOVEMENT_ACTIONED  = "employee movement actioned"
+AUDIT_MOVEMENT_APPLIED   = "employee movement applied"
+AUDIT_DISCIPLINE_CREATED       = "discipline case created"
+AUDIT_DISCIPLINE_INVESTIGATED  = "discipline case investigation note added"
+AUDIT_DISCIPLINE_RECOMMENDED   = "discipline case recommendation recorded"
+AUDIT_DISCIPLINE_DECIDED       = "discipline case decided"
+AUDIT_DISCIPLINE_CLOSED        = "discipline case closed"
+AUDIT_ABSCONDING_FLAGGED   = "absconding case flagged"
+AUDIT_ABSCONDING_CONTACT   = "absconding contact attempt logged"
+AUDIT_ABSCONDING_WARNING   = "absconding warning sent"
+AUDIT_ABSCONDING_DECIDED   = "absconding case final action recorded"
+AUDIT_NOMINEE_DETAILS_SAVED = "nominee/legal details saved"
+
+MAX_MOVEMENT_LIST_PAGE = 500
+
+
+class MovementIn(BaseModel):
+    """§7.16 step 120-122: the initiator names WHAT changes and to WHAT, never the current
+    value — the service looks that up itself, the same discipline notice_days_for already
+    established for calculated figures."""
+    employee_code: str
+    movement_type: MovementType
+    to_value: str                                # the proposed designation_id / user_id /
+                                                   # amount / free-text location or grade
+    effective_date: str                           # YYYY-MM-DD
+    reason: Optional[str] = None
+    supporting_document: Optional[str] = None     # a link; base64 uploads use the document register
+
+
+class MovementActionIn(BaseModel):
+    approved: bool
+    remarks: Optional[str] = None
+
+
+class DisciplinePersonIn(BaseModel):
+    employee_code: str
+    role: PersonRole
+
+
+class DisciplineCaseIn(BaseModel):
+    category: DisciplineCategory
+    persons_involved: list[DisciplinePersonIn]
+    description: str
+    confidentiality_level: Optional[ConfidentialityLevel] = None   # auto-derived if omitted
+
+
+class DisciplineInvestigationIn(BaseModel):
+    note: str
+    evidence: Optional[str] = None
+
+
+class DisciplineRecommendationIn(BaseModel):
+    recommendation: str
+
+
+class DisciplineDecisionIn(BaseModel):
+    outcome: DisciplineOutcome
+    remarks: Optional[str] = None
+
+
+class DisciplineCloseIn(BaseModel):
+    retention_classification: Optional[str] = None
+    remarks: Optional[str] = None
+
+
+class AbscondingFlagIn(BaseModel):
+    employee_code: str
+    flagged_date: Optional[str] = None            # YYYY-MM-DD; defaults to today
+    notes: Optional[str] = None
+
+
+class AbscondingContactIn(BaseModel):
+    method: str                                    # Call / Email / Letter / Other — configurable, free text
+    outcome: Optional[str] = None
+    postal_tracking_ref: Optional[str] = None       # captured when a physical letter is used
+
+
+class AbscondingWarningIn(BaseModel):
+    remarks: Optional[str] = None
+
+
+class AbscondingFinalActionIn(BaseModel):
+    resolution: str                                 # "Returned to Work" or "Converted to Separation"
+    remarks: Optional[str] = None
+
+
+class RetirementPolicyIn(BaseModel):
+    retirement_age: int
+    alert_months_ahead: int = DEFAULT_RETIREMENT_ALERT_MONTHS
+
+
+class NomineeDetailsIn(BaseModel):
+    """§7.20 step 157: demise/missing nominee and legal documentation, captured on the
+    separation record itself (exit_type Demise/Missing) — not a parallel case."""
+    nominee_name: Optional[str] = None
+    nominee_relation: Optional[str] = None
+    nominee_contact: Optional[str] = None
+    legal_document_ref: Optional[str] = None
+    notes: Optional[str] = None
+
+
+# =============================================================
+# Phase PAY-1 — Payroll, Salary Advance & Variable Pay
+# (BA/Functional Design §7.13-7.15, §22.7)
+#
+# Payroll is COMPONENT-DRIVEN (§22.7): a salary structure is a list of {component, amount}
+# rows against a small configurable component master, not a fixed set of hardcoded fields.
+# A payroll run imports each employee's structure, prorates it against Attendance's locked
+# payable/LOP days (Phase ATT-1), auto-rolls-up open salary-advance recovery and the
+# quarter's approved variable-pay payout the same way F&F auto-rolls-up asset/clearance
+# recoveries, and takes every STATUTORY figure (PF/ESI/PT/TDS) by hand — §7.13's own BR says
+# "Detailed statutory and salary-component configuration requires payroll workshop", so no
+# Indian statutory formula is compiled in here, the same reasoning FnfInput's hand-entered
+# figures already follow for the same missing-payroll-engine gap.
+#
+# IRM scores are ALSO taken by hand for Variable Pay, despite an IRM module already existing
+# elsewhere in this codebase: that module keys on its own `person_id`, not this module's
+# `employee_code`, and the BA doc itself offers "Import/enter" as two acceptable paths (step
+# 111) — wiring the two together is a real, separate integration this phase does not attempt,
+# a documented follow-up rather than a silent gap.
+# =============================================================
+class ComponentType(str, Enum):
+    EARNING   = "Earning"
+    DEDUCTION = "Deduction"
+
+
+class PayrollRunStatus(str, Enum):
+    DRAFT      = "Draft"
+    CALCULATED = "Calculated"
+    APPROVED   = "Approved"
+    LOCKED     = "Locked"
+    REJECTED   = "Rejected"     # sent back to the maker with a comment
+
+
+class AdvanceStatus(str, Enum):
+    PENDING    = "Pending"
+    APPROVED   = "Approved"
+    REJECTED   = "Rejected"
+    RECOVERING = "Recovering"   # disbursed; payroll is deducting the recovery
+    CLOSED     = "Closed"       # fully recovered
+
+
+OPEN_ADVANCE_STATUSES = {AdvanceStatus.PENDING.value, AdvanceStatus.APPROVED.value,
+                        AdvanceStatus.RECOVERING.value}
+
+
+class VariablePayQuarterStatus(str, Enum):
+    DRAFT      = "Draft"
+    CALCULATED = "Calculated"
+    APPROVED   = "Approved"
+    CLOSED     = "Closed"
+
+
+class HoldLedgerStatus(str, Enum):
+    HELD      = "Held"
+    RELEASED  = "Released"
+    FORFEITED = "Forfeited"
+
+
+# §7.14 BR: "Current policy baseline: 40% of gross, 20th-25th, once per quarter, confirmed
+# employees, next-month deduction." An adjustable default (the same discipline
+# DEFAULT_SHIFT_POLICY / DEFAULT_ABSCONDING_POLICY already established), read from
+# hrms_settings, never compiled into the eligibility check as a literal number.
+DEFAULT_ADVANCE_POLICY = {
+    "max_percent_of_gross": 40,
+    "window_start_day": 20,
+    "window_end_day": 25,
+}
+
+# §7.15 BR: "Current policy: ORM >=80%, IRM >=70%; 75% payable quarterly and 25% held."
+DEFAULT_VARIABLE_PAY_POLICY = {
+    "orm_threshold": 80.0,
+    "irm_threshold": 70.0,
+    "payable_percent": 75,
+    "held_percent": 25,
+}
+
+
+def variable_pay_multiplier(irm_score: float) -> float:
+    """§7.15 BR's multiplier table, pure — no DB, no clock (same discipline notice_days_for
+    established): "IRM 70-84.99% uses IRM%, 85%=100%, 85.01-90%=105%, >90%=115%." Returns a
+    fraction (e.g. 0.75, not 75) so the caller multiplies it straight against the target
+    amount. Callers below the IRM threshold never reach this — that gate is checked first.
+    """
+    if irm_score > 90:
+        return 1.15
+    if irm_score > 85:
+        return 1.05
+    if irm_score == 85:
+        return 1.0
+    return irm_score / 100.0
+
+
+ENTITY_SALARY_COMPONENT = "salary_component"
+ENTITY_SALARY_STRUCTURE = "salary_structure"
+ENTITY_PAYROLL_RUN      = "payroll_run"
+ENTITY_ADVANCE          = "salary_advance"
+ENTITY_VARIABLE_PAY_QUARTER = "variable_pay_quarter"
+ENTITY_HOLD_LEDGER          = "variable_pay_hold"
+
+AUDIT_SALARY_COMPONENT_SAVED = "salary component saved"
+AUDIT_SALARY_STRUCTURE_SAVED = "salary structure saved"
+AUDIT_PAYROLL_RUN_CREATED    = "payroll run created"
+AUDIT_PAYROLL_CALCULATED     = "payroll calculated"
+AUDIT_PAYROLL_RECORD_ADJUSTED = "payroll record adjusted"
+AUDIT_PAYROLL_DECIDED        = "payroll run decided"
+AUDIT_ADVANCE_REQUESTED = "salary advance requested"
+AUDIT_ADVANCE_ACTIONED  = "salary advance actioned"
+AUDIT_VP_QUARTER_CREATED = "variable pay quarter created"
+AUDIT_VP_RECORD_SAVED    = "variable pay record saved"
+AUDIT_VP_CALCULATED      = "variable pay calculated"
+AUDIT_VP_DECIDED         = "variable pay quarter decided"
+AUDIT_VP_HOLD_ACTIONED   = "variable pay hold actioned"
+
+MAX_PAYROLL_LIST_PAGE = 500
+
+
+class SalaryComponentIn(BaseModel):
+    code: str
+    name: str
+    component_type: ComponentType
+    statutory: bool = False
+    active: bool = True
+
+
+class SalaryStructureComponentIn(BaseModel):
+    code: str
+    amount: float
+
+
+class SalaryStructureIn(BaseModel):
+    """§7.16-adjacent, but NOT a movement: this is the detailed component breakdown behind
+    the single `base_salary` figure a Compensation Change movement updates — the two stay in
+    step by convention (HR updates both), not by a foreign key, the same loose coupling
+    hrms_employee_profiles.legacy_department has to the masters."""
+    employee_code: str
+    effective_from: str                            # YYYY-MM-DD
+    components: list[SalaryStructureComponentIn]
+
+
+class PayrollRunCreateIn(BaseModel):
+    period: str                                     # YYYY-MM
+
+
+class PayrollRecordAdjustIn(BaseModel):
+    """Every STATUTORY and manually-known figure for one employee in one run — entered by
+    hand because no statutory engine exists yet (§7.13 BR). Salary-advance recovery and the
+    quarter's approved variable pay are NOT here: the service rolls those up automatically."""
+    pf: Optional[float] = None
+    esi: Optional[float] = None
+    pt: Optional[float] = None
+    tds: Optional[float] = None
+    arrears: Optional[float] = None
+    reimbursements: Optional[float] = None
+    other_earnings: Optional[float] = None
+    other_deductions: Optional[float] = None
+    notice_recovery: Optional[float] = None
+    remarks: Optional[str] = None
+
+
+class PayrollApprovalIn(BaseModel):
+    approved: bool
+    remarks: Optional[str] = None
+
+
+class AdvancePolicyIn(BaseModel):
+    max_percent_of_gross: float = 40
+    window_start_day: int = 20
+    window_end_day: int = 25
+
+
+class SalaryAdvanceIn(BaseModel):
+    employee_code: str
+    amount: float
+    reason: Optional[str] = None
+
+
+class SalaryAdvanceActionIn(BaseModel):
+    approved: bool
+    remarks: Optional[str] = None
+
+
+class VariablePayPolicyIn(BaseModel):
+    orm_threshold: float = 80.0
+    irm_threshold: float = 70.0
+    payable_percent: float = 75
+    held_percent: float = 25
+
+
+class VariablePayQuarterCreateIn(BaseModel):
+    quarter: str                                    # e.g. "2026-Q1"
+    orm_score: float
+
+
+class VariablePayRecordIn(BaseModel):
+    employee_code: str
+    irm_score: float
+    quarterly_target_amount: float
+
+
+class VariablePayApprovalIn(BaseModel):
+    approved: bool
+    remarks: Optional[str] = None
+
+
+class VariablePayHoldActionIn(BaseModel):
+    action: str                                      # "Release" or "Forfeit"
+    remarks: Optional[str] = None
+
+
+# =============================================================
+# Phase PIP-1 — Performance Improvement Plan (BA/Functional Design §22.5)
+#
+# Manager/HR initiates a PIP with objectives and support actions -> the employee
+# acknowledges it -> the manager records periodic review notes -> at plan end HR (there is
+# no separate Management sign-off tier named for PIP, unlike Discipline/Payroll) records the
+# outcome. Objectives, support items and the review log are embedded arrays on the plan
+# itself, the same "small, bounded, always read together" reasoning Phase MOVE-1's
+# discipline investigation_log already follows, rather than three more child collections.
+# =============================================================
+class PipStatus(str, Enum):
+    DRAFT  = "Draft"          # created, awaiting the employee's acknowledgement
+    ACTIVE = "Active"         # acknowledged; reviews may be recorded
+    CLOSED = "Closed"
+
+
+class PipClosureResult(str, Enum):
+    SUCCESSFULLY_CLOSED       = "Successfully Closed"
+    EXTENDED                  = "Extended"
+    FURTHER_ACTION_REQUIRED   = "Further Action Required"
+    SEPARATION_RECOMMENDED    = "Separation Recommended"
+
+
+ENTITY_PIP = "pip_record"
+
+AUDIT_PIP_INITIATED     = "PIP initiated"
+AUDIT_PIP_ACKNOWLEDGED  = "PIP acknowledged by employee"
+AUDIT_PIP_REVIEW_ADDED  = "PIP review note added"
+AUDIT_PIP_DECIDED       = "PIP outcome recorded"
+
+MAX_PIP_LIST_PAGE = 500
+
+
+class PipObjectiveIn(BaseModel):
+    target_standard: str
+    measure: Optional[str] = None
+    weight: Optional[str] = None
+    due_date: Optional[str] = None
+
+
+class PipSupportIn(BaseModel):
+    action: str
+    owner: Optional[str] = None
+    target_date: Optional[str] = None
+
+
+class PipCreateIn(BaseModel):
+    """§22.5 steps 215-216."""
+    employee_code: str
+    review_reference: Optional[str] = None          # the performance review / PSC this refers to
+    issue_category: Optional[str] = None
+    gap_statement: str
+    start_date: str
+    target_end_date: str
+    review_frequency: Optional[str] = None          # e.g. "Monthly" — free text, no fixed enum given
+    objectives: list[PipObjectiveIn] = []
+    support: list[PipSupportIn] = []
+
+
+class PipReviewIn(BaseModel):
+    """§22.5 step 218."""
+    progress: str
+    evidence: Optional[str] = None
+    manager_comments: Optional[str] = None
+    employee_comments: Optional[str] = None
+
+
+class PipDecisionIn(BaseModel):
+    """§22.5 step 220."""
+    closure_result: PipClosureResult
+    final_rating: Optional[str] = None
+    extension_date: Optional[str] = None            # only meaningful when closure_result is Extended
+    next_action: Optional[str] = None
+    remarks: Optional[str] = None
+
+
+# ─────────────────────────────────────────────────────────────
+# Phase ACCESS-1 — User / Role / Permission Administration (SM-HR-051)
+# ─────────────────────────────────────────────────────────────
+# What this phase builds vs. defers, and why:
+#
+#   BUILT — governance_role assignment. `hrms_role()` has always resolved a client-side
+#   user's HRMS role from their `governance_role` field (HOD/HR/FINANCE/MD → MANAGER/HR/
+#   FINANCE/MD), but nothing anywhere ever WROTE that field except a one-off migration
+#   script — the BA doc's "assign" action (SM-HR-051) had no endpoint at all. This phase
+#   is that endpoint.
+#
+#   BUILT — the read-only role/capability matrix ("review access"), served from
+#   ROLE_CAPABILITIES itself so it can never drift from what the gates actually enforce.
+#
+#   REUSED, not rebuilt — "disable" (the BA doc's other primary action) already exists as
+#   PATCH /users/{id}/status on the base platform, gated the same way (superadmin/admin/
+#   the company's own clientadmin) this phase's own MODULE_ADMIN gate resolves to for
+#   those same roles. Re-implementing account activation here would be a second, competing
+#   write path over the same `is_active` field.
+#
+#   DEFERRED, explicitly, as workshop items rather than a silent gap — matching this
+#   module's established treatment of anything the BA doc names but does not specify a
+#   concrete rule for (see DEFAULT_ADVANCE_POLICY etc.): field/tab-level permission and
+#   configurable data scope (today's model is all-or-nothing at the capability level,
+#   company/client-scoped by tenancy — not a per-user configurable subset) and delegation
+#   (temporary permission handoff to a proxy). Both are genuinely new subsystems, not gaps
+#   in something already there, and the BA doc gives no rule for how either should behave.
+ENTITY_ACCESS = "user_access"
+
+AUDIT_GOVERNANCE_ROLE_CHANGED = "Governance role changed"
+
+# Assignable via this screen. "CLIENT" is deliberately excluded — it is the stamp a
+# CLIENT-COMPANY participant gets (see hrms_access.CLIENT_TENANT_FIELD), never a role a
+# tenant assigns to its own people.
+ASSIGNABLE_GOVERNANCE_ROLES = {"MD", "HR", "FINANCE", "HOD", "IMPLEMENTOR"}
+
+
+class GovernanceRoleIn(BaseModel):
+    """SM-HR-051. Empty string / None clears the assignment (falls back to EMPLOYEE)."""
+    governance_role: Optional[str] = None
+
+
+# ─────────────────────────────────────────────────────────────
+# Phase LETTER-1 — HR Letter / Document Generator (SM-HR-041)
+# ─────────────────────────────────────────────────────────────
+# Offer and Appointment letters already exist (render_offer_body / render_appointment_body)
+# but deliberately produce HTML the browser prints, never a stored file — correct for THOSE
+# two, which are always regenerable from the live offer/appointment record. SM-HR-041 is for
+# every OTHER piece of controlled correspondence (confirmation, revision, warning, relieving,
+# and whatever else HR needs), where there is no single source-of-truth record to regenerate
+# from — the letter's rendered content IS the record, so it must actually be produced, stored
+# and made immutable once issued. That is the one real gap this phase closes; it does not
+# touch Offer/Appointment.
+#
+# Templates are HR-authored, mutable, `format_map`-based text (render_comm_body, already used
+# by Offer/Appointment/Comm — no new merge-field syntax invented here). This phase seeds NO
+# canned legal wording: unlike the notification/comm templates the module already ships,
+# actual employee-correspondence text (a confirmation letter's exact clauses, a warning
+# letter's language) is company- and jurisdiction-specific, and putting invented legal
+# copy in front of a real employee is a much larger mistake than an empty template list HR
+# fills in themselves — the same reasoning that kept fabricated policy text out of Phase
+# ACCESS-1 and out of the HR Policy Library below.
+class LetterStatus(str, Enum):
+    DRAFT      = "Draft"        # generated, not yet issued — still regenerable in place
+    ISSUED     = "Issued"       # locked: rendered_body and file are immutable from here
+    SUPERSEDED = "Superseded"   # replaced by a reissue; content is retained for audit
+
+
+ENTITY_LETTER = "letter"
+ENTITY_LETTER_TEMPLATE = "letter_template"
+
+AUDIT_LETTER_TEMPLATE_SAVED = "Letter template saved"
+AUDIT_LETTER_GENERATED      = "Letter generated"
+AUDIT_LETTER_ISSUED         = "Letter issued"
+AUDIT_LETTER_REISSUED       = "Letter reissued"
+
+
+class LetterTemplateIn(BaseModel):
+    """HR authors the wording; there is no seeded default (see the phase note above)."""
+    title: str
+    body: str                            # format_map style, e.g. "Dear {employee_name}, ..."
+    merge_fields: list[str] = []         # informational only — hints the UI, never enforced
+    active: bool = True
+
+
+class LetterGenerateIn(BaseModel):
+    """SM-HR-041's "generate" action. `effective_date` defaults to today when omitted.
+    `letter_no` regenerates an EXISTING Draft in place (only while it is still Draft) instead
+    of minting a new one — the one point before `issue` where content may still change."""
+    template_key: str
+    employee_code: str
+    letter_no: Optional[str] = None
+    effective_date: Optional[str] = None
+    approver_name: Optional[str] = None
+    approver_designation: Optional[str] = None
+    extra_fields: dict = {}               # merge values the employee record cannot supply
+
+
+class LetterPreviewIn(LetterGenerateIn):
+    """Same shape as generate — preview renders identically, it just never persists."""
+    pass
+
+
+class LetterReissueIn(LetterGenerateIn):
+    """SM-HR-041's "reissue" action. A reason is mandatory: reissuing a controlled letter is
+    a correction to something already issued under someone's name, not a routine edit."""
+    reason: str
+
+
+# ─────────────────────────────────────────────────────────────
+# Phase ORIENT-1 — Orientation & Training (§22.3, screen SM-HR-057)
+# ─────────────────────────────────────────────────────────────
+# What this phase builds vs. defers, and why:
+#
+#   BUILT — a plan TEMPLATE register (optionally filtered to a department and/or
+#   designation), auto-assignment of every matching template's items into one ASSIGNMENT per
+#   employee at activation (§22.3 step 200), HR/Manager scheduling a trainer and date per
+#   item (step 201), completion/waiver tracking with mandatory items staying open until one
+#   or the other (step 204), and a daily escalation sweep for mandatory items still open past
+#   a configurable number of days (step 207), built on the existing job-runner skeleton
+#   (hrms_scheduler_service.py) rather than a second scheduling mechanism.
+#
+#   BUILT — "My Onboarding" (step 202) as the employee's own row-scoped view of the SAME
+#   screen HR/Manager use, not a separate page — the identical pattern hrms_pip_service and
+#   hrms_letter_service already establish for "one board, scoped by role" rather than a
+#   second frontend surface per audience.
+#
+#   REUSES the capability this module already declared for the Day-1 checklist
+#   (Cap.INDUCTION_READ/WRITE) rather than inventing a new one — see the Cap enum's own
+#   comment for why its scope was broadened rather than left a dead pair.
+#
+#   DEFERRED, explicitly: filtering a plan by LOCATION or GRADE/LEVEL (the BA doc's "based on
+#   company/unit, role, department, location or level", step 200). Department and
+#   designation are the two dimensions an employee profile already carries in this codebase;
+#   location and a separate grade/level master do not exist anywhere yet (confirmed: no
+#   COLL_LOCATIONS, no standalone level master), and inventing one here — rather than as
+#   part of whatever future phase builds SM-HR-049's organisation masters — would be scope
+#   creep into a different gap. A plan with neither filter set applies company-wide, which
+#   covers the common case in the meantime.
+class OrientationItemStatus(str, Enum):
+    PENDING   = "Pending"
+    SCHEDULED = "Scheduled"
+    COMPLETED = "Completed"
+    WAIVED    = "Waived"
+
+
+ENTITY_ORIENTATION_PLAN       = "orientation_plan"
+ENTITY_ORIENTATION_ASSIGNMENT = "orientation_assignment"
+
+AUDIT_ORIENTATION_PLAN_SAVED      = "Orientation plan saved"
+AUDIT_ORIENTATION_ASSIGNED        = "Orientation plan assigned"
+AUDIT_ORIENTATION_ITEM_SCHEDULED  = "Orientation session scheduled"
+AUDIT_ORIENTATION_ITEM_COMPLETED  = "Orientation item completed"
+AUDIT_ORIENTATION_ITEM_WAIVED     = "Orientation item waived"
+AUDIT_ORIENTATION_ESCALATED       = "Orientation escalated to HR"
+
+# Adjustable default, not frozen policy — like DEFAULT_ABSCONDING_POLICY's day-counts, the BA
+# doc says escalation happens on "incomplete mandatory orientation" (step 207) without naming
+# a number of days, so this ships as a sensible default rather than a hardcoded one.
+DEFAULT_ORIENTATION_ESCALATION_DAYS = 14
+
+# The field guarding against a second escalation notice for the same assignment — the same
+# "burn on the record, not in process memory" pattern PROBATION_REMINDED_FIELD established.
+ORIENTATION_ESCALATED_FIELD = "escalated"
+
+
+class OrientationPlanItemIn(BaseModel):
+    topic: str
+    mandatory: bool = True
+    trainer_hint: Optional[str] = None      # a suggested role/person; the actual trainer is
+                                             # named when the session is scheduled (step 201)
+    materials_url: Optional[str] = None     # step 205: training materials/policies linked
+    sequence: int = 0
+
+
+class OrientationPlanIn(BaseModel):
+    """A plan applies company-wide when both filters are left unset; setting one narrows it
+    to that department and/or designation. See the phase note above for why location/level
+    are not filter dimensions here."""
+    title: str
+    department_id: Optional[str] = None
+    designation_id: Optional[str] = None
+    items: list[OrientationPlanItemIn] = []
+    active: bool = True
+
+
+class OrientationScheduleIn(BaseModel):
+    """§22.3 step 201."""
+    item_id: str
+    trainer: str
+    scheduled_at: str      # ISO date/datetime string — free text is not offered here because
+                           # the escalation sweep reads it as a date
+
+
+class OrientationCompleteIn(BaseModel):
+    """§22.3 step 203."""
+    item_id: str
+    remarks: Optional[str] = None
+
+
+class OrientationWaiveIn(BaseModel):
+    """§22.3 step 204: a mandatory item may be formally waived instead of completed."""
+    item_id: str
+    reason: str
+
+
+# ─────────────────────────────────────────────────────────────
+# Phase PULSE-1 — 30/90-Day Pulse Survey (§22.4, screen SM-HR-058)
+# ─────────────────────────────────────────────────────────────
+# A DELIBERATELY SEPARATE module from hrms_survey_service.py (Phase INT-2's induction/
+# probation feedback), not an extension of it — see the Cap.PULSE_READ/MANAGE/SUBMIT comment
+# above for the reasoning: that module's anonymity guarantee (responses are never linkable
+# to a person, aggregates suppressed below SURVEY_MIN_RESPONSES) is load-bearing for its two
+# existing kinds, and this phase's requirements are the opposite of that guarantee by design
+# — step 212 needs to know WHO scored low enough to need a follow-up, step 214 links a
+# result into that SAME person's Employee 360°. Bolting an identifiable mode onto an
+# anonymous-by-contract module would risk weakening a guarantee real responses already rely
+# on; a parallel, narrowly-scoped module cannot.
+#
+# What this phase builds vs. defers:
+#
+#   BUILT — a DOJ-anchored, automatic 30-day and 90-day issuance (step 208-209), built on
+#   the existing job-runner skeleton (hrms_scheduler_service.py), guarded by the response
+#   row's own existence (one per employee per milestone — the unique index above) so it
+#   fires exactly once per milestone even if onboarding tasks close early (BR-027).
+#
+#   BUILT — employee self-completion (step 210), a low-score follow-up flag with one HR
+#   notification per response (step 212), and an HR completion-rate/average-score summary
+#   (step 213, minus "common issues" — free-text theme extraction is a workshop item, not a
+#   rule this phase can encode).
+#
+#   DEFERRED, explicitly: "Response visibility is configurable according to final HR policy"
+#   (step 211) — the BA doc itself says the rule is not yet decided, so this phase ships the
+#   simplest concrete default (HR/MD see identified responses; nobody else does) rather than
+#   inventing a configurable-visibility system for a policy that does not exist yet.
+class PulseMilestone(str, Enum):
+    DAY_30 = "30"
+    DAY_90 = "90"
+
+
+class PulseResponseStatus(str, Enum):
+    ISSUED    = "Issued"
+    SUBMITTED = "Submitted"
+
+
+ENTITY_PULSE_RESPONSE = "pulse_response"
+
+AUDIT_PULSE_ISSUED       = "Pulse survey issued"
+AUDIT_PULSE_SUBMITTED    = "Pulse survey submitted"
+AUDIT_PULSE_CONFIG_SAVED = "Pulse survey questions saved"
+AUDIT_PULSE_FOLLOW_UP    = "Pulse survey follow-up flagged"
+
+# Adjustable defaults, not frozen policy — the same DEFAULT_ABSCONDING_POLICY-style pattern.
+# The BA doc gives the 30/90-day milestones themselves as fixed (step 208), but names no
+# specific question set or low-score threshold, so both ship as company-editable defaults.
+DEFAULT_PULSE_QUESTIONS = [
+    "How would you rate your onboarding experience so far?",
+    "Do you have the tools and information you need to do your job?",
+    "How connected do you feel to your team?",
+    "How likely are you to recommend this as a good place to work?",
+]
+DEFAULT_PULSE_LOW_SCORE_THRESHOLD = 3.0   # out of 5 — at or below this, a follow-up is flagged
+
+
+class PulseConfigIn(BaseModel):
+    questions: list[str]
+
+
+class PulseSubmitIn(BaseModel):
+    """§22.4 step 210. `scores` keys are the question text itself (order-independent,
+    survives a question-list edit between issuance and submission without index drift)."""
+    scores: dict[str, float]
+    comment: Optional[str] = None

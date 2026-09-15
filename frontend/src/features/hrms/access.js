@@ -204,6 +204,81 @@ export const CAP = {
   // Attaching the interview report and recording — a disclosure decision, so a separate
   // capability from scheduling or evaluating an interview.
   INTERVIEW_MEDIA: 'interview.media',
+  // ── Phase EXIT-1 — Exit Management (§7.18, §22.2, §7.21) ──
+  // HR runs the process end to end; the reporting manager holds the one sign-off the BA doc
+  // names explicitly (handover acceptance); Finance/the MD hold the two money gates (a
+  // notice waiver, and the F&F payout) — see the ROLE_CAPABILITIES comments in
+  // backend/app/models/hrms.py for the full RACI this mirrors.
+  SEPARATION_READ: 'separation.read',
+  SEPARATION_INITIATE: 'separation.initiate',
+  SEPARATION_MANAGE: 'separation.manage',
+  SEPARATION_APPROVE: 'separation.approve',
+  HANDOVER_READ: 'handover.read',
+  HANDOVER_WRITE: 'handover.write',
+  HANDOVER_APPROVE: 'handover.approve',
+  CLEARANCE_READ: 'clearance.read',
+  CLEARANCE_MANAGE: 'clearance.manage',
+  CLEARANCE_ACT: 'clearance.act',
+  EXIT_INTERVIEW_READ: 'exit_interview.read',
+  EXIT_INTERVIEW_WRITE: 'exit_interview.write',
+  FNF_READ: 'fnf.read',
+  FNF_PREPARE: 'fnf.prepare',
+  FNF_APPROVE: 'fnf.approve',
+  // ── Phase ATT-1 — Attendance & Leave (§7.8-7.12, §22.8-22.9) ──
+  // See ROLE_CAPABILITIES in backend/app/models/hrms.py for the full RACI this mirrors.
+  ATTENDANCE_READ: 'attendance.read',
+  ATTENDANCE_MARK: 'attendance.mark',
+  ATTENDANCE_REGULARIZE_REQUEST: 'attendance.regularize_request',
+  ATTENDANCE_REGULARIZE_APPROVE: 'attendance.regularize_approve',
+  ATTENDANCE_LOCK: 'attendance.lock',
+  OD_REQUEST: 'od.request',
+  OD_APPROVE: 'od.approve',
+  LEAVE_READ: 'leave.read',
+  LEAVE_APPLY: 'leave.apply',
+  LEAVE_APPROVE: 'leave.approve',
+  LEAVE_POLICY_MANAGE: 'leave.policy_manage',
+  COFF_EARN_REQUEST: 'coff.earn_request',
+  COFF_APPROVE: 'coff.approve',
+  // ── Phase MOVE-1 — Employee Movements & Discipline (§7.16, §7.17, §7.19, §7.20) ──
+  // See ROLE_CAPABILITIES in backend/app/models/hrms.py for the full RACI this mirrors.
+  MOVEMENT_READ: 'movement.read',
+  MOVEMENT_INITIATE: 'movement.initiate',
+  MOVEMENT_APPROVE: 'movement.approve',
+  DISCIPLINE_READ: 'discipline.read',
+  DISCIPLINE_MANAGE: 'discipline.manage',
+  DISCIPLINE_DECIDE: 'discipline.decide',
+  DISCIPLINE_POSH_READ: 'discipline.posh_read',
+  DISCIPLINE_POSH_MANAGE: 'discipline.posh_manage',
+  ABSCONDING_READ: 'absconding.read',
+  ABSCONDING_MANAGE: 'absconding.manage',
+  ABSCONDING_DECIDE: 'absconding.decide',
+  RETIREMENT_ALERT_READ: 'retirement_alert.read',
+  // ── Phase PAY-1 — Payroll, Salary Advance & Variable Pay (§7.13-7.15, §22.7) ──
+  // See ROLE_CAPABILITIES in backend/app/models/hrms.py for the full RACI this mirrors.
+  PAYROLL_READ: 'payroll.read',
+  PAYROLL_PROCESS: 'payroll.process',
+  PAYROLL_APPROVE: 'payroll.approve',
+  SALARY_STRUCTURE_READ: 'salary_structure.read',
+  SALARY_STRUCTURE_MANAGE: 'salary_structure.manage',
+  ADVANCE_READ: 'advance.read',
+  ADVANCE_REQUEST: 'advance.request',
+  ADVANCE_APPROVE: 'advance.approve',
+  ADVANCE_APPROVE_EMERGENCY: 'advance.approve_emergency',
+  VARIABLE_PAY_READ: 'variable_pay.read',
+  VARIABLE_PAY_PROCESS: 'variable_pay.process',
+  VARIABLE_PAY_APPROVE: 'variable_pay.approve',
+  VARIABLE_PAY_HOLD_MANAGE: 'variable_pay.hold_manage',
+  // ── Phase PIP-1 — Performance Improvement Plan (§22.5) ──
+  // See ROLE_CAPABILITIES in backend/app/models/hrms.py for the full RACI this mirrors.
+  PIP_READ: 'pip.read',
+  PIP_MANAGE: 'pip.manage',
+  PIP_DECIDE: 'pip.decide',
+  PIP_ACKNOWLEDGE: 'pip.acknowledge',
+  LETTER_READ: 'letter.read',
+  LETTER_MANAGE: 'letter.manage',
+  PULSE_READ: 'pulse.read',
+  PULSE_MANAGE: 'pulse.manage',
+  PULSE_SUBMIT: 'pulse.submit',
 };
 
 /** Sparsh internal user rather than a client-side one. Same precedence the backend uses

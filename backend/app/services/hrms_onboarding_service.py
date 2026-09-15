@@ -628,6 +628,20 @@ async def generate_employee_id(actor: dict, company_id: str, onb_no: str) -> dic
         except Exception as e:
             print(f"[WARN] HRMS could not open probation for {employee_code}: {e}")
 
+    # ── Phase ORIENT-1 ── §22.3 step 200: "On employee activation, system assigns an
+    # onboarding orientation/training plan". Unlike probation above, this runs for BOTH
+    # tracks — the BA doc draws no internal/client distinction here, and it is a no-op
+    # (returns None) when no matching plan template exists yet, so it costs nothing for a
+    # company that has not set one up. Best-effort for the same reason: an Employee ID
+    # already issued must not be undone by a plan-assignment failure.
+    try:
+        from app.services.hrms_orientation_service import assign_on_activation
+        await assign_on_activation(
+            actor, company_id, employee_code,
+            department_id=doc.get("department_id"), designation_id=doc.get("designation_id"))
+    except Exception as e:
+        print(f"[WARN] HRMS could not assign an orientation plan for {employee_code}: {e}")
+
     await audit(actor, AUDIT_EMPLOYEE_ID_ISSUED, ENTITY_ONBOARDING, onb_no,
                 f"{employee_code} for {doc.get('candidate_name')}", company_id)
     await notify_hrms_role(

@@ -21,6 +21,16 @@ export const getHrmsHealth = () => api.get('/hrms/health');
  *  company regardless of the company_id param. */
 export const getHrmsAudit = (params) => api.get('/hrms/audit', { params });
 
+// ── Phase ACCESS-1 — User / Role / Permission Administration (SM-HR-051) ──
+/** Read-only role -> capability table, served from the backend's own ROLE_CAPABILITIES
+ *  so "review access" can never show something the gates do not actually enforce. */
+export const getHrmsRoleMatrix = () => api.get('/hrms/access/role-matrix');
+/** Assign (or clear, with an empty string) the governance ladder position that
+ *  hrms_role() resolves a client-side user's HRMS role from. */
+export const setGovernanceRole = (userId, governanceRole, params) =>
+  api.put(`/hrms/access/employees/${userId}/governance-role`,
+    { governance_role: governanceRole || null }, { params });
+
 // ── Company module toggle (Admin / Super Admin only) ──
 /** Switch HRMS on or off for a company. Lives here rather than in a company client
  *  because the capability and the 403 copy are HRMS's, not Company Management's. */
@@ -644,3 +654,313 @@ export const getSharedCandidateHub = (shareNo, params) =>
 /** A link to one interview's report or recording, authorised by the share. */
 export const getShareInterviewMedia = (shareNo, interviewNo, kind, params) =>
   api.get(`/hrms/shares/${shareNo}/interviews/${interviewNo}/${kind}`, { params });
+
+// ── Phase EXIT-1 — Exit Management (§7.18, §22.2, §7.21) ──
+// Resignation submitted -> notice calculated -> HR/manager records acceptance (an approval
+// gate applies if it waives or shortens the calculated notice) -> Handover Plan and
+// departmental Clearance/Asset-Return/Access-Clearance tasks run in parallel -> Exit
+// Interview -> F&F prepared and approved -> the case closes. See hrms_exit_service.py.
+export const getSeparations = (params) => api.get('/hrms/separations', { params });
+export const getSeparation = (sepNo, params) =>
+  api.get(`/hrms/separations/${sepNo}`, { params });
+export const initiateSeparation = (payload, params) =>
+  api.post('/hrms/separations', payload, { params });
+export const decideSeparation = (sepNo, payload, params) =>
+  api.patch(`/hrms/separations/${sepNo}/decision`, payload, { params });
+export const approveSeparation = (sepNo, payload, params) =>
+  api.post(`/hrms/separations/${sepNo}/approve`, payload, { params });
+export const withdrawSeparation = (sepNo, remarks, params) =>
+  api.post(`/hrms/separations/${sepNo}/withdraw`, null, { params: { ...params, remarks } });
+export const closeSeparation = (sepNo, force, params) =>
+  api.post(`/hrms/separations/${sepNo}/close`, null, { params: { ...params, force } });
+
+/** Handover Plan (§22.2 step 190-191). */
+export const getHandoverTasks = (sepNo, params) =>
+  api.get(`/hrms/separations/${sepNo}/handover`, { params });
+export const createHandoverTask = (sepNo, payload, params) =>
+  api.post(`/hrms/separations/${sepNo}/handover`, payload, { params });
+export const updateHandoverTask = (sepNo, taskId, payload, params) =>
+  api.patch(`/hrms/separations/${sepNo}/handover/${taskId}`, payload, { params });
+/** The reporting manager's sign-off on a submitted item. */
+export const acceptHandoverTask = (sepNo, taskId, payload, params) =>
+  api.post(`/hrms/separations/${sepNo}/handover/${taskId}/accept`, payload, { params });
+
+/** Departmental Clearance — the five standard tasks (Manager/HR/IT/Admin/Finance) are seeded
+ *  automatically once HR records the notice decision. */
+export const getClearanceTasks = (sepNo, params) =>
+  api.get(`/hrms/separations/${sepNo}/clearance`, { params });
+export const createClearanceTask = (sepNo, payload, params) =>
+  api.post(`/hrms/separations/${sepNo}/clearance`, payload, { params });
+export const actOnClearanceTask = (sepNo, taskId, payload, params) =>
+  api.patch(`/hrms/separations/${sepNo}/clearance/${taskId}`, payload, { params });
+
+/** Asset Return Requests. */
+export const getAssetReturns = (sepNo, params) =>
+  api.get(`/hrms/separations/${sepNo}/asset-returns`, { params });
+export const createAssetReturn = (sepNo, payload, params) =>
+  api.post(`/hrms/separations/${sepNo}/asset-returns`, payload, { params });
+export const updateAssetReturn = (sepNo, astNo, payload, params) =>
+  api.patch(`/hrms/separations/${sepNo}/asset-returns/${astNo}`, payload, { params });
+
+/** Access Clearance (email, applications, VPN, client systems, physical access, cards/keys). */
+export const getAccessClearances = (sepNo, params) =>
+  api.get(`/hrms/separations/${sepNo}/access-clearance`, { params });
+export const createAccessClearance = (sepNo, payload, params) =>
+  api.post(`/hrms/separations/${sepNo}/access-clearance`, payload, { params });
+export const updateAccessClearance = (sepNo, itemId, payload, params) =>
+  api.patch(`/hrms/separations/${sepNo}/access-clearance/${itemId}`, payload, { params });
+
+/** Exit Interview — one per case; a re-submit corrects the same record. */
+export const getExitInterview = (sepNo, params) =>
+  api.get(`/hrms/separations/${sepNo}/exit-interview`, { params });
+export const saveExitInterview = (sepNo, payload, params) =>
+  api.put(`/hrms/separations/${sepNo}/exit-interview`, payload, { params });
+
+/** Full & Final Settlement. No payroll engine exists behind this yet (§7.13) — see
+ *  FnfInput's docstring in models/hrms.py for what it can and cannot compute. */
+export const getFnf = (sepNo, params) => api.get(`/hrms/separations/${sepNo}/fnf`, { params });
+export const saveFnf = (sepNo, payload, params) =>
+  api.put(`/hrms/separations/${sepNo}/fnf`, payload, { params });
+export const approveFnf = (sepNo, payload, params) =>
+  api.post(`/hrms/separations/${sepNo}/fnf/approve`, payload, { params });
+export const markFnfPaid = (sepNo, payload, params) =>
+  api.post(`/hrms/separations/${sepNo}/fnf/paid`, payload, { params });
+
+// ── Phase ATT-1 — Attendance & Leave (§7.8-7.12, §22.8-22.9) ──
+// Daily capture -> the engine derives status/late-minutes against the company's shift policy
+// -> exceptions are regularised (employee -> manager -> HR) -> HR locks the month. Leave runs
+// in parallel: apply -> manager -> HR -> ledger; C-Off is its own earn-then-use ledger. See
+// hrms_attendance_service.py / hrms_leave_service.py.
+export const getShiftPolicy = (params) => api.get('/hrms/attendance/shift-policy', { params });
+export const saveShiftPolicy = (payload, params) =>
+  api.put('/hrms/attendance/shift-policy', payload, { params });
+
+export const markAttendance = (payload, params) =>
+  api.post('/hrms/attendance/mark', payload, { params });
+export const getAttendance = (params) => api.get('/hrms/attendance', { params });
+export const getLateComingSummary = (params) =>
+  api.get('/hrms/attendance/late-coming', { params });
+
+export const requestRegularization = (payload, params) =>
+  api.post('/hrms/attendance/regularizations', payload, { params });
+export const getRegularizations = (params) =>
+  api.get('/hrms/attendance/regularizations', { params });
+export const actOnRegularization = (reqNo, payload, params) =>
+  api.patch(`/hrms/attendance/regularizations/${reqNo}`, payload, { params });
+
+export const requestOd = (payload, params) => api.post('/hrms/attendance/od', payload, { params });
+export const getOdRequests = (params) => api.get('/hrms/attendance/od', { params });
+export const actOnOd = (odNo, payload, params) =>
+  api.post(`/hrms/attendance/od/${odNo}/action`, payload, { params });
+
+/** §7.12 monthly closure — what is still open, then lock/unlock the period. */
+export const getClosureDashboard = (period, params) =>
+  api.get(`/hrms/attendance/closure/${period}`, { params });
+export const lockPeriod = (period, params) =>
+  api.post(`/hrms/attendance/closure/${period}/lock`, null, { params });
+export const unlockPeriod = (period, reason, params) =>
+  api.post(`/hrms/attendance/closure/${period}/unlock`, { reason }, { params });
+
+/** §22.8 leave-type policy register — NOT frozen; see LeaveTypeConfigIn's docstring. */
+export const getLeaveTypes = (params) => api.get('/hrms/leave/types', { params });
+export const saveLeaveType = (code, payload, params) =>
+  api.put(`/hrms/leave/types/${code}`, payload, { params });
+
+export const getLeaveBalances = (employeeCode, year, params) =>
+  api.get(`/hrms/leave/balances/${employeeCode}`, { params: { ...params, year } });
+export const adjustLeaveBalance = (payload, params) =>
+  api.post('/hrms/leave/balances/adjust', payload, { params });
+
+export const applyLeave = (payload, params) => api.post('/hrms/leave', payload, { params });
+export const getLeaves = (params) => api.get('/hrms/leave', { params });
+export const actOnLeave = (leaveNo, payload, params) =>
+  api.patch(`/hrms/leave/${leaveNo}`, payload, { params });
+export const cancelLeave = (leaveNo, reason, params) =>
+  api.post(`/hrms/leave/${leaveNo}/cancel`, { reason }, { params });
+
+/** §7.11 Compensatory Off — earn (approved work on a holiday) then use (a leave application
+ *  of type "C-Off", debited FIFO by nearest expiry). */
+export const requestCoffEarn = (payload, params) => api.post('/hrms/coff/earn', payload, { params });
+export const getCoffLedger = (params) => api.get('/hrms/coff/ledger', { params });
+export const actOnCoffEarn = (batchId, payload, params) =>
+  api.post(`/hrms/coff/earn/${batchId}/action`, payload, { params });
+
+// ── Phase MOVE-1 — Employee Movements & Discipline (§7.16, §7.17, §7.19, §7.20) ──
+// A movement is proposed against the employee's current value (looked up server-side) ->
+// approved -> applied on its effective date. Discipline runs case -> investigation ->
+// recommendation -> management decision -> closure, with POSH cases in a separate,
+// narrower-access tier. Absconding is a 3-day-absence flag -> contact log -> two-stage
+// warning ladder -> a final decision that resolves the case or hands off to Exit Management.
+// Retirement is a proactive alert; demise/missing nominee details live on the separation
+// record itself. See hrms_movement_service.py / hrms_discipline_service.py /
+// hrms_absconding_service.py / hrms_retirement_service.py.
+export const initiateMovement = (payload, params) => api.post('/hrms/movements', payload, { params });
+export const getMovements = (params) => api.get('/hrms/movements', { params });
+export const actOnMovement = (moveNo, payload, params) =>
+  api.patch(`/hrms/movements/${moveNo}`, payload, { params });
+
+export const createDisciplineCase = (payload, params) => api.post('/hrms/discipline', payload, { params });
+export const getDisciplineCases = (params) => api.get('/hrms/discipline', { params });
+export const getDisciplineCase = (caseNo, params) =>
+  api.get(`/hrms/discipline/${caseNo}`, { params });
+export const addDisciplineInvestigationNote = (caseNo, payload, params) =>
+  api.post(`/hrms/discipline/${caseNo}/investigate`, payload, { params });
+export const recordDisciplineRecommendation = (caseNo, payload, params) =>
+  api.post(`/hrms/discipline/${caseNo}/recommend`, payload, { params });
+export const decideDisciplineCase = (caseNo, payload, params) =>
+  api.post(`/hrms/discipline/${caseNo}/decide`, payload, { params });
+export const closeDisciplineCase = (caseNo, payload, params) =>
+  api.post(`/hrms/discipline/${caseNo}/close`, payload, { params });
+export const getDisciplineEmployeeSummary = (employeeCode, params) =>
+  api.get(`/hrms/discipline/employee/${employeeCode}/summary`, { params });
+
+export const getAbscondingPolicy = (params) => api.get('/hrms/absconding/policy', { params });
+export const saveAbscondingPolicy = (payload, params) =>
+  api.put('/hrms/absconding/policy', payload, { params });
+export const flagAbscondingCase = (payload, params) => api.post('/hrms/absconding', payload, { params });
+export const getAbscondingCases = (params) => api.get('/hrms/absconding', { params });
+export const getAbscondingCase = (caseNo, params) =>
+  api.get(`/hrms/absconding/${caseNo}`, { params });
+export const logAbscondingContact = (caseNo, payload, params) =>
+  api.post(`/hrms/absconding/${caseNo}/contact`, payload, { params });
+export const sendAbscondingWarning = (caseNo, stage, payload, params) =>
+  api.post(`/hrms/absconding/${caseNo}/warning/${stage}`, payload, { params });
+export const absconderFinalAction = (caseNo, payload, params) =>
+  api.post(`/hrms/absconding/${caseNo}/final-action`, payload, { params });
+
+export const getRetirementPolicy = (params) => api.get('/hrms/retirement/policy', { params });
+export const saveRetirementPolicy = (payload, params) =>
+  api.put('/hrms/retirement/policy', payload, { params });
+export const getUpcomingRetirements = (params) => api.get('/hrms/retirement/upcoming', { params });
+
+/** §7.20 step 157 — demise/missing nominee & legal documentation, on the separation record. */
+export const saveNomineeDetails = (sepNo, payload, params) =>
+  api.put(`/hrms/separations/${sepNo}/nominee-details`, payload, { params });
+
+// ── Phase PAY-1 — Payroll, Salary Advance & Variable Pay (§7.13-7.15, §22.7) ──
+// Payroll is component-driven (§22.7): a salary structure is a list of {component, amount}
+// against a small configurable master. A run imports each employee's structure, prorates it
+// against Attendance's locked payable/LOP days, auto-rolls-up open salary-advance recovery
+// and the quarter's approved variable pay, and takes every statutory figure (PF/ESI/PT/TDS)
+// by hand — no statutory engine exists (§7.13 BR). See hrms_payroll_service.py /
+// hrms_salary_advance_service.py / hrms_variable_pay_service.py.
+export const listSalaryComponents = (params) => api.get('/hrms/salary-components', { params });
+export const saveSalaryComponent = (code, payload, params) =>
+  api.put(`/hrms/salary-components/${code}`, payload, { params });
+export const saveSalaryStructure = (payload, params) =>
+  api.put('/hrms/salary-structures', payload, { params });
+export const getSalaryStructureHistory = (employeeCode, params) =>
+  api.get(`/hrms/salary-structures/${employeeCode}`, { params });
+
+export const createPayrollRun = (payload, params) => api.post('/hrms/payroll/runs', payload, { params });
+export const listPayrollRuns = (params) => api.get('/hrms/payroll/runs', { params });
+export const getPayrollRun = (period, params) => api.get(`/hrms/payroll/runs/${period}`, { params });
+export const calculatePayroll = (period, params) =>
+  api.post(`/hrms/payroll/runs/${period}/calculate`, null, { params });
+export const listPayrollRecords = (period, params) =>
+  api.get(`/hrms/payroll/runs/${period}/records`, { params });
+export const adjustPayrollRecord = (period, employeeCode, payload, params) =>
+  api.patch(`/hrms/payroll/runs/${period}/records/${employeeCode}`, payload, { params });
+export const decidePayrollRun = (period, payload, params) =>
+  api.post(`/hrms/payroll/runs/${period}/decision`, payload, { params });
+
+export const getAdvancePolicy = (params) => api.get('/hrms/advances/policy', { params });
+export const saveAdvancePolicy = (payload, params) =>
+  api.put('/hrms/advances/policy', payload, { params });
+export const checkAdvanceEligibility = (employeeCode, params) =>
+  api.get(`/hrms/advances/eligibility/${employeeCode}`, { params });
+export const requestAdvance = (payload, params) => api.post('/hrms/advances', payload, { params });
+export const listAdvances = (params) => api.get('/hrms/advances', { params });
+export const getAdvance = (advNo, params) => api.get(`/hrms/advances/${advNo}`, { params });
+export const actOnAdvance = (advNo, payload, params) =>
+  api.post(`/hrms/advances/${advNo}/action`, payload, { params });
+export const actOnAdvanceEmergency = (advNo, payload, params) =>
+  api.post(`/hrms/advances/${advNo}/action-emergency`, payload, { params });
+
+export const getVariablePayPolicy = (params) => api.get('/hrms/variable-pay/policy', { params });
+export const saveVariablePayPolicy = (payload, params) =>
+  api.put('/hrms/variable-pay/policy', payload, { params });
+export const createVariablePayQuarter = (payload, params) =>
+  api.post('/hrms/variable-pay/quarters', payload, { params });
+export const listVariablePayQuarters = (params) => api.get('/hrms/variable-pay/quarters', { params });
+export const getVariablePayQuarter = (quarter, params) =>
+  api.get(`/hrms/variable-pay/quarters/${quarter}`, { params });
+export const saveVariablePayRecord = (quarter, payload, params) =>
+  api.post(`/hrms/variable-pay/quarters/${quarter}/records`, payload, { params });
+export const listVariablePayRecords = (quarter, params) =>
+  api.get(`/hrms/variable-pay/quarters/${quarter}/records`, { params });
+export const calculateVariablePay = (quarter, params) =>
+  api.post(`/hrms/variable-pay/quarters/${quarter}/calculate`, null, { params });
+export const decideVariablePayQuarter = (quarter, payload, params) =>
+  api.post(`/hrms/variable-pay/quarters/${quarter}/decision`, payload, { params });
+export const listVariablePayHoldLedger = (params) =>
+  api.get('/hrms/variable-pay/hold-ledger', { params });
+export const actOnVariablePayHold = (holdId, payload, params) =>
+  api.post(`/hrms/variable-pay/hold-ledger/${holdId}/action`, payload, { params });
+
+// ── Phase PIP-1 — Performance Improvement Plan (§22.5) ──
+// Manager/HR initiates with objectives/support -> employee acknowledges -> the manager
+// records periodic review notes -> HR records the final outcome. See hrms_pip_service.py.
+export const initiatePip = (payload, params) => api.post('/hrms/pip', payload, { params });
+export const listPips = (params) => api.get('/hrms/pip', { params });
+export const getPip = (pipNo, params) => api.get(`/hrms/pip/${pipNo}`, { params });
+export const acknowledgePip = (pipNo, params) =>
+  api.post(`/hrms/pip/${pipNo}/acknowledge`, null, { params });
+export const addPipReview = (pipNo, payload, params) =>
+  api.post(`/hrms/pip/${pipNo}/reviews`, payload, { params });
+export const decidePip = (pipNo, payload, params) =>
+  api.post(`/hrms/pip/${pipNo}/decision`, payload, { params });
+
+// ── Phase 360-1 — Employee 360° (§6) ──
+// A pure aggregation over every module that already tracks this employee — no new capability
+// gate. The base profile call decides who may open it at all; each section inside is
+// included only if the caller separately holds that section's own read capability, so a
+// missing key means "not authorised to see this", not "empty". See hrms_employee_360_service.py.
+export const getEmployee360 = (userId, params) => api.get(`/hrms/employees/${userId}/360`, { params });
+
+// ── Phase ORIENT-1 — Orientation & Training (§22.3, screen SM-HR-057) ──
+// One board, scoped by role: HR/Manager manage plan templates and every assignment; an
+// employee's own read is row-scoped server-side to just their own record ("My Onboarding").
+export const getOrientationPlans = (params) => api.get('/hrms/orientation/plans', { params });
+export const createOrientationPlan = (payload, params) =>
+  api.post('/hrms/orientation/plans', payload, { params });
+export const updateOrientationPlan = (planNo, payload, params) =>
+  api.put(`/hrms/orientation/plans/${planNo}`, payload, { params });
+export const listOrientationAssignments = (params) =>
+  api.get('/hrms/orientation/assignments', { params });
+export const getOrientationAssignment = (employeeCode, params) =>
+  api.get(`/hrms/orientation/assignments/${employeeCode}`, { params });
+export const scheduleOrientationItem = (employeeCode, payload, params) =>
+  api.post(`/hrms/orientation/assignments/${employeeCode}/schedule`, payload, { params });
+export const completeOrientationItem = (employeeCode, payload, params) =>
+  api.post(`/hrms/orientation/assignments/${employeeCode}/complete`, payload, { params });
+export const waiveOrientationItem = (employeeCode, payload, params) =>
+  api.post(`/hrms/orientation/assignments/${employeeCode}/waive`, payload, { params });
+
+// ── Phase PULSE-1 — 30/90-Day Pulse Survey (§22.4, screen SM-HR-058) ──
+// Identifiable by design (see the backend Cap.PULSE_READ comment for why this is NOT the
+// same capability as the existing anonymous survey module). One board, scoped by role.
+export const getPulseConfig = (params) => api.get('/hrms/pulse-surveys/config', { params });
+export const savePulseConfig = (questions, params) =>
+  api.put('/hrms/pulse-surveys/config', { questions }, { params });
+export const getPulseSummary = (params) => api.get('/hrms/pulse-surveys/summary', { params });
+export const listPulseSurveys = (params) => api.get('/hrms/pulse-surveys', { params });
+export const getPulseSurvey = (employeeCode, milestone, params) =>
+  api.get(`/hrms/pulse-surveys/${employeeCode}/${milestone}`, { params });
+export const submitPulseSurvey = (employeeCode, milestone, payload, params) =>
+  api.post(`/hrms/pulse-surveys/${employeeCode}/${milestone}/submit`, payload, { params });
+
+// ── Phase LETTER-1 — HR Letter / Document Generator (SM-HR-041) ──
+// Preview renders nothing to storage. Generate produces a Draft (pass `letter_no` back in
+// to regenerate that SAME draft in place). Issue locks it — from there only Reissue can
+// change anything, which supersedes the old letter and creates a new Issued one.
+export const getLetterTemplates = (params) => api.get('/hrms/letters/templates', { params });
+export const saveLetterTemplate = (key, payload, params) =>
+  api.put(`/hrms/letters/templates/${key}`, payload, { params });
+export const previewLetter = (payload, params) => api.post('/hrms/letters/preview', payload, { params });
+export const generateLetter = (payload, params) => api.post('/hrms/letters', payload, { params });
+export const listLetters = (params) => api.get('/hrms/letters', { params });
+export const getLetter = (letterNo, params) => api.get(`/hrms/letters/${letterNo}`, { params });
+export const issueLetter = (letterNo, params) => api.post(`/hrms/letters/${letterNo}/issue`, null, { params });
+export const reissueLetter = (letterNo, payload, params) =>
+  api.post(`/hrms/letters/${letterNo}/reissue`, payload, { params });
