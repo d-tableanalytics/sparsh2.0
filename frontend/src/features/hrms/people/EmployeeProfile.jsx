@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, UserCircle, Save, Network } from 'lucide-react';
+import { ArrowLeft, UserCircle, Save, Network, LayoutGrid } from 'lucide-react';
 import { useNotification } from '../../../context/NotificationContext';
 import { useHrms } from '../HrmsContext';
 import { CAP } from '../access';
@@ -103,10 +103,16 @@ const EmployeeProfile = () => {
   useEffect(() => { load(); }, [load]);
 
   useEffect(() => {
+    // Depend on the COMPANY ID specifically, not the whole `scope` object: on a cold page
+    // load `companyId` resolves asynchronously (HrmsContext fetches it after mount), and an
+    // empty-array effect fired before that captured `scope={}` forever, 400ing both calls
+    // silently and leaving these dropdowns permanently empty. `company_id` is a stable
+    // primitive, so this re-fires exactly once when it actually resolves, not on every render.
+    if (!scope.company_id) return;
     getDepartments(scope).then(({ data }) => setDepartments(data?.departments || [])).catch(() => {});
     getDesignations(scope).then(({ data }) => setDesignations(data?.designations || [])).catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [scope.company_id]);
 
   useEffect(() => {
     if (tab !== 'reporting' || hierarchy) return;
@@ -155,6 +161,10 @@ const EmployeeProfile = () => {
             <button type="button" onClick={() => navigate('/hrms/employees')}
               className="h-9 px-3.5 rounded-lg border border-[var(--border)] text-[12px] font-bold text-[var(--text-muted)] flex items-center gap-1.5">
               <ArrowLeft size={14} /> Directory
+            </button>
+            <button type="button" onClick={() => navigate(`/hrms/employees/${userId}/360`)}
+              className="h-9 px-3.5 rounded-lg border border-[var(--border)] text-[12px] font-bold text-[var(--text-muted)] flex items-center gap-1.5">
+              <LayoutGrid size={14} /> 360° View
             </button>
             {canWrite && (
               <button type="button" onClick={save} disabled={saving}

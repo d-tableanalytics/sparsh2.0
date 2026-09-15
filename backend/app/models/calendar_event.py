@@ -72,9 +72,11 @@ class CalendarEventBase(BaseModel):
     # ─── Task Management module additions (additive/optional; events are unaffected) ───
     # Richer workflow state for type=="task" docs only. The legacy `status` field
     # (schedule/completed/canceled/reschedule) stays authoritative for the Calendar page;
-    # the Task Management dashboard/lists read `workflow_status`, falling back to "pending"
-    # for any task created before this field existed.
-    workflow_status: str = "pending" # pending, accepted, in_progress, dependent_on_others, blocked, verification, completed
+    # the Task Management dashboard/lists read `workflow_status`. A task starts In Progress —
+    # it is live from the moment it is raised — and "pending" is kept in the accepted values
+    # only so documents that already hold it still validate (tasks._resolve_workflow_status
+    # reads those as In Progress).
+    workflow_status: str = "in_progress" # accepted, in_progress, dependent_on_others, blocked, verification, completed
     watchers: Optional[List[str]] = [] # user ids "in the loop" / subscribed to this task
     tags: Optional[List[str]] = []
     group_id: Optional[str] = None # Task Group this task belongs to (Groups sub-module); None = ungrouped

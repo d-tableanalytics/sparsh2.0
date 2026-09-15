@@ -82,6 +82,8 @@ import HrmsHome from './features/hrms/HrmsHome';
 import HrmsWorkspace from './features/hrms/HrmsWorkspace';
 import EmployeeDirectory from './features/hrms/people/EmployeeDirectory';
 import EmployeeProfile from './features/hrms/people/EmployeeProfile';
+// ── Phase 360-1 — Employee 360° (§6) ──
+import Employee360 from './features/hrms/people/Employee360';
 import MasterManager from './features/hrms/people/MasterManager';
 import RequisitionList from './features/hrms/recruitment/RequisitionList';
 import JdLibrary from './features/hrms/recruitment/JdLibrary';
@@ -132,6 +134,28 @@ import TalentPool from './features/hrms/internal/TalentPool';
 import PolicyRegister from './features/hrms/internal/PolicyRegister';
 import SalaryBandManager from './features/hrms/people/SalaryBandManager';
 import SurveyPage from './pages/hrms/public/SurveyPage';
+// ── Phase EXIT-1 — Exit Management (§7.18, §22.2, §7.21) ──
+import SeparationBoard from './features/hrms/exit/SeparationBoard';
+import SeparationDetail from './features/hrms/exit/SeparationDetail';
+// ── Phase ATT-1 — Attendance & Leave (§7.8-7.12, §22.8-22.9) ──
+import AttendanceBoard from './features/hrms/attendance/AttendanceBoard';
+import LeaveBoard from './features/hrms/leave/LeaveBoard';
+// ── Phase MOVE-1 — Employee Movements & Discipline (§7.16, §7.17, §7.19, §7.20) ──
+import MovementsBoard from './features/hrms/movements/MovementsBoard';
+// ── Phase PAY-1 — Payroll, Salary Advance & Variable Pay (§7.13-7.15, §22.7) ──
+import PayrollBoard from './features/hrms/payroll/PayrollBoard';
+// ── Phase PIP-1 — Performance Improvement Plan (§22.5) ──
+import PipBoard from './features/hrms/pip/PipBoard';
+// ── SM-HR-052 — Audit Viewer ──
+import AuditViewer from './features/hrms/admin/AuditViewer';
+// ── SM-HR-051 — User / Role / Permission Administration ──
+import RoleAccessAdmin from './features/hrms/admin/RoleAccessAdmin';
+// ── Phase LETTER-1 — HR Letter / Document Generator (SM-HR-041) ──
+import LetterBoard from './features/hrms/letters/LetterBoard';
+// ── Phase ORIENT-1 — Orientation & Training (§22.3) ──
+import OrientationBoard from './features/hrms/orientation/OrientationBoard';
+// ── Phase PULSE-1 — 30/90-Day Pulse Survey (§22.4) ──
+import PulseSurveyBoard from './features/hrms/pulse/PulseSurveyBoard';
 import TpmsCalendar from './features/tpms/calendar/TpmsCalendar';
 import AssignedFormPage from './features/tpms/forms/AssignedFormPage';
 import ClientDashboard from './features/tpms/client/ClientDashboard';
@@ -344,6 +368,9 @@ const AppRoutes = () => {
         {/* People — employee master, departments and designations (Phase 2). */}
         <Route path="employees"          element={<EmployeeDirectory />} />
         <Route path="employees/:userId"  element={<EmployeeProfile />} />
+        {/* Phase 360-1 — Employee 360° (§6): nested under the same profile route so the
+            workspace's own nav stays lit. */}
+        <Route path="employees/:userId/360" element={<Employee360 />} />
         <Route path="departments"        element={<MasterManager kind="department" />} />
         <Route path="designations"       element={<MasterManager kind="designation" />} />
         {/* Recruitment — requisitions + their co-approved job descriptions (Phase 3). */}
@@ -392,6 +419,32 @@ const AppRoutes = () => {
         <Route path="shared-candidates"    element={<SharedCandidates />} />
         <Route path="probation"            element={<ProbationBoard />} />
         <Route path="exceptions"           element={<ExceptionLog />} />
+        {/* Phase EXIT-1 — Exit Management (§7.18, §22.2, §7.21). Post-hire employment
+            events, like Probation above, so it sits in the sidebar rather than the
+            workspace tab strip. */}
+        <Route path="separations"          element={<SeparationBoard />} />
+        <Route path="separations/:sepNo"   element={<SeparationDetail />} />
+        {/* Phase ATT-1 — Attendance & Leave (§7.8-7.12, §22.8-22.9). Post-hire operational
+            data, like Exit Management above, so it sits in the sidebar. */}
+        <Route path="attendance"           element={<AttendanceBoard />} />
+        <Route path="leave"                element={<LeaveBoard />} />
+        {/* Phase MOVE-1 — Employee Movements & Discipline (§7.16, §7.17, §7.19, §7.20). */}
+        <Route path="movements"            element={<MovementsBoard />} />
+        {/* Phase PAY-1 — Payroll, Salary Advance & Variable Pay (§7.13-7.15, §22.7). */}
+        <Route path="payroll"              element={<PayrollBoard />} />
+        {/* Phase PIP-1 — Performance Improvement Plan (§22.5). */}
+        <Route path="pip"                  element={<PipBoard />} />
+        {/* Phase LETTER-1 — HR Letter / Document Generator (SM-HR-041). */}
+        <Route path="letters"              element={<LetterBoard />} />
+        {/* Phase ORIENT-1 — Orientation & Training (§22.3). */}
+        <Route path="orientation"          element={<OrientationBoard />} />
+        {/* Phase PULSE-1 — 30/90-Day Pulse Survey (§22.4). */}
+        <Route path="pulse-surveys"        element={<PulseSurveyBoard />} />
+        {/* SM-HR-052 — Audit Viewer. The read API and Cap.AUDIT_READ gate already existed;
+            this is the first screen to call it. */}
+        <Route path="audit"                element={<AuditViewer />} />
+        {/* SM-HR-051 — User / Role / Permission Administration. */}
+        <Route path="access"               element={<RoleAccessAdmin />} />
         {/* ── Phase INT-2 ── the remaining SOP controls. `shortlist-reviews` is a hiring
             stage and lives in the workspace tab strip; the rest are governance and live in
             the sidebar. The two navigations stay disjoint. */}

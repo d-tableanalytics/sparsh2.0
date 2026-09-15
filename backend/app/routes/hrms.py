@@ -60,6 +60,47 @@ from app.models.hrms import (
     PolicyApproveIn, PolicyIn, PolicyRevisionIn, PreboardingTouchpointIn, PurgeApproveIn,
     SalaryBandIn, SalaryBandUpdate, ShortlistReviewIn, ShortlistReviewUpdate, TalentPoolIn,
 )
+# ── Phase EXIT-1 — Exit Management (§7.18, §22.2, §7.21) ──
+from app.models.hrms import (
+    AccessClearanceIn, AccessClearanceUpdate,
+    AssetReturnIn, AssetReturnUpdate,
+    ClearanceActionIn, ClearanceTaskIn,
+    ExitInterviewIn,
+    FnfDecisionIn, FnfInput, FnfPaidIn,
+    HandoverAcceptIn, HandoverTaskIn, HandoverTaskUpdate,
+    ResignationIn, SeparationApprovalIn, SeparationDecisionIn,
+)
+# ── Phase ATT-1 — Attendance & Leave (§7.8-7.12, §22.8-22.9) ──
+from app.models.hrms import (
+    AttendanceLockIn, AttendanceMarkIn, AttendanceUnlockIn,
+    CoffEarnActionIn, CoffEarnIn,
+    LeaveActionIn, LeaveApplyIn, LeaveBalanceAdjustIn, LeaveCancelIn, LeaveTypeConfigIn,
+    OdActionIn, OdRequestIn,
+    RegularizationActionIn, RegularizationIn,
+)
+# ── Phase MOVE-1 — Employee Movements & Discipline (§7.16, §7.17, §7.19, §7.20) ──
+from app.models.hrms import (
+    AbscondingContactIn, AbscondingFinalActionIn, AbscondingFlagIn, AbscondingWarningIn,
+    DisciplineCaseIn, DisciplineCloseIn, DisciplineDecisionIn, DisciplineInvestigationIn,
+    DisciplineRecommendationIn,
+    MovementActionIn, MovementIn,
+    NomineeDetailsIn, RetirementPolicyIn,
+)
+# ── Phase PAY-1 — Payroll, Salary Advance & Variable Pay (§7.13-7.15, §22.7) ──
+from app.models.hrms import (
+    AdvancePolicyIn, PayrollApprovalIn, PayrollRecordAdjustIn, PayrollRunCreateIn,
+    SalaryAdvanceActionIn, SalaryAdvanceIn, SalaryComponentIn, SalaryStructureIn,
+    VariablePayApprovalIn, VariablePayHoldActionIn, VariablePayPolicyIn,
+    VariablePayQuarterCreateIn, VariablePayRecordIn,
+)
+# ── Phase PIP-1 — Performance Improvement Plan (§22.5) ──
+from app.models.hrms import PipCreateIn, PipDecisionIn, PipReviewIn
+from app.models.hrms import GovernanceRoleIn
+from app.models.hrms import LetterGenerateIn, LetterPreviewIn, LetterReissueIn, LetterTemplateIn
+from app.models.hrms import (
+    OrientationCompleteIn, OrientationPlanIn, OrientationScheduleIn, OrientationWaiveIn,
+)
+from app.models.hrms import PulseConfigIn, PulseSubmitIn
 from app.services import hrms_analytics_service as analytics
 from app.services import hrms_employee_service as employees
 from app.services import hrms_masters_service as masters
@@ -101,6 +142,28 @@ from app.services import hrms_background_service as background
 from app.services import hrms_interview_media_service as interview_media
 from app.services import hrms_job_request_service as job_requests
 from app.services import hrms_share_service as shares
+# ── Phase EXIT-1 ──
+from app.services import hrms_exit_service as exit_mgmt
+# ── Phase ATT-1 ──
+from app.services import hrms_attendance_service as attendance_mgmt
+from app.services import hrms_leave_service as leave_mgmt
+# ── Phase MOVE-1 ──
+from app.services import hrms_movement_service as movement_mgmt
+from app.services import hrms_discipline_service as discipline_mgmt
+from app.services import hrms_absconding_service as absconding_mgmt
+from app.services import hrms_retirement_service as retirement_mgmt
+# ── Phase PAY-1 ──
+from app.services import hrms_payroll_service as payroll_mgmt
+from app.services import hrms_salary_advance_service as advance_mgmt
+from app.services import hrms_variable_pay_service as vp_mgmt
+# ── Phase PIP-1 ──
+from app.services import hrms_pip_service as pip_mgmt
+from app.services import hrms_access_admin_service as access_admin_mgmt
+from app.services import hrms_letter_service as letter_mgmt
+from app.services import hrms_orientation_service as orientation_mgmt
+from app.services import hrms_pulse_service as pulse_mgmt
+# ── Phase 360-1 — Employee 360° (§6) ──
+from app.services import hrms_employee_360_service as employee_360_mgmt
 from app.services.hrms_audit_service import read_audit
 from app.utils.hrms_access import (
     NO_ACCESS_MESSAGE, can, capabilities_for, ensure_hrms_enabled, hrms_role,
@@ -3682,3 +3745,1714 @@ async def client_interview_media(
     _require(current_user, Cap.SHARE_READ)
     return await shares.interview_media_link(
         current_user, _company(current_user, company_id), share_no, interview_no, kind)
+
+
+# ─────────────────────────────────────────────────────────────
+# Phase EXIT-1 — Exit Management (§7.18, §22.2, §7.21)
+# ─────────────────────────────────────────────────────────────
+@router.post("/separations", status_code=201)
+async def initiate_separation(
+    body: ResignationIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """§7.18 step 137. Notice is calculated, never supplied — see notice_days_for."""
+    _require(current_user, Cap.SEPARATION_INITIATE)
+    return await exit_mgmt.initiate_separation(
+        current_user, _company(current_user, company_id), body.model_dump())
+
+
+@router.get("/separations")
+async def list_separations(
+    stage: Optional[str] = Query(None),
+    employee_code: Optional[str] = Query(None),
+    limit: int = Query(100, ge=1, le=200),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.SEPARATION_READ)
+    return await exit_mgmt.list_separations(
+        current_user, _company(current_user, company_id),
+        stage=stage, employee_code=employee_code, limit=limit)
+
+
+@router.get("/separations/{sep_no}")
+async def get_separation(
+    sep_no: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.SEPARATION_READ)
+    return await exit_mgmt.get_separation(current_user, _company(current_user, company_id), sep_no)
+
+
+@router.patch("/separations/{sep_no}/decision")
+async def decide_separation(
+    sep_no: str,
+    body: SeparationDecisionIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """§7.18 steps 140-142: HR/manager records acceptance. Also opens the standard
+    departmental clearance tasks the first time this is called (§22.2 step 192)."""
+    _require(current_user, Cap.SEPARATION_MANAGE)
+    return await exit_mgmt.decide_separation(
+        current_user, _company(current_user, company_id), sep_no, body.model_dump())
+
+
+@router.post("/separations/{sep_no}/approve")
+async def approve_separation(
+    sep_no: str,
+    body: SeparationApprovalIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """The written approval BR-016 requires before a waiver/early release takes effect."""
+    _require(current_user, Cap.SEPARATION_APPROVE)
+    return await exit_mgmt.approve_separation(
+        current_user, _company(current_user, company_id), sep_no, body.model_dump())
+
+
+@router.post("/separations/{sep_no}/withdraw")
+async def withdraw_separation(
+    sep_no: str,
+    remarks: Optional[str] = Query(None),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.SEPARATION_MANAGE)
+    return await exit_mgmt.withdraw_separation(
+        current_user, _company(current_user, company_id), sep_no, remarks)
+
+
+@router.post("/separations/{sep_no}/close")
+async def close_separation(
+    sep_no: str,
+    force: bool = Query(False, description="Override incomplete handover/clearance/F&F — BR-025"),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """§22.2 step 199: employee access deactivated, record moves to Alumni/Separated."""
+    _require(current_user, Cap.SEPARATION_MANAGE)
+    return await exit_mgmt.close_separation(
+        current_user, _company(current_user, company_id), sep_no, force=force)
+
+
+# ── Handover Plan ──
+@router.post("/separations/{sep_no}/handover", status_code=201)
+async def create_handover_task(
+    sep_no: str,
+    body: HandoverTaskIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.HANDOVER_WRITE)
+    return await exit_mgmt.create_handover_task(
+        current_user, _company(current_user, company_id), sep_no, body.model_dump())
+
+
+@router.get("/separations/{sep_no}/handover")
+async def list_handover_tasks(
+    sep_no: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.HANDOVER_READ)
+    return await exit_mgmt.list_handover_tasks(
+        current_user, _company(current_user, company_id), sep_no)
+
+
+@router.patch("/separations/{sep_no}/handover/{task_id}")
+async def update_handover_task(
+    sep_no: str,
+    task_id: str,
+    body: HandoverTaskUpdate,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.HANDOVER_WRITE)
+    return await exit_mgmt.update_handover_task(
+        current_user, _company(current_user, company_id), sep_no, task_id,
+        body.model_dump(exclude_unset=True))
+
+
+@router.post("/separations/{sep_no}/handover/{task_id}/accept")
+async def accept_handover_task(
+    sep_no: str,
+    task_id: str,
+    body: HandoverAcceptIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """§22.2 step 191: the reporting manager's sign-off."""
+    _require(current_user, Cap.HANDOVER_APPROVE)
+    return await exit_mgmt.accept_handover_task(
+        current_user, _company(current_user, company_id), sep_no, task_id, body.model_dump())
+
+
+# ── Departmental Clearance ──
+@router.post("/separations/{sep_no}/clearance", status_code=201)
+async def create_clearance_task(
+    sep_no: str,
+    body: ClearanceTaskIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """The five standard tasks (Manager/HR/IT/Admin/Finance) are seeded automatically by
+    /decision — this is for '... and any other configured function' (§22.2)."""
+    _require(current_user, Cap.CLEARANCE_MANAGE)
+    return await exit_mgmt.create_clearance_task(
+        current_user, _company(current_user, company_id), sep_no, body.model_dump())
+
+
+@router.get("/separations/{sep_no}/clearance")
+async def list_clearance_tasks(
+    sep_no: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.CLEARANCE_READ)
+    return await exit_mgmt.list_clearance_tasks(
+        current_user, _company(current_user, company_id), sep_no)
+
+
+@router.patch("/separations/{sep_no}/clearance/{task_id}")
+async def act_on_clearance_task(
+    sep_no: str,
+    task_id: str,
+    body: ClearanceActionIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """The task's owner clears, rejects or waives it."""
+    _require(current_user, Cap.CLEARANCE_ACT)
+    return await exit_mgmt.act_on_clearance_task(
+        current_user, _company(current_user, company_id), sep_no, task_id, body.model_dump())
+
+
+# ── Asset Return Requests ──
+@router.post("/separations/{sep_no}/asset-returns", status_code=201)
+async def create_asset_return(
+    sep_no: str,
+    body: AssetReturnIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """§22.2: the doc allows the employee OR HR to initiate this. SCOPE NOTE (EXIT-1): only
+    the HR-side capability is wired so far — see the EMPLOYEE role comment in models/hrms.py
+    for why self-initiation is not yet granted."""
+    _require(current_user, Cap.CLEARANCE_MANAGE)
+    return await exit_mgmt.create_asset_return(
+        current_user, _company(current_user, company_id), sep_no, body.model_dump())
+
+
+@router.get("/separations/{sep_no}/asset-returns")
+async def list_asset_returns(
+    sep_no: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.CLEARANCE_READ)
+    return await exit_mgmt.list_asset_returns(
+        current_user, _company(current_user, company_id), sep_no)
+
+
+@router.patch("/separations/{sep_no}/asset-returns/{ast_no}")
+async def update_asset_return(
+    sep_no: str,
+    ast_no: str,
+    body: AssetReturnUpdate,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """HR/Admin confirms receipt and condition."""
+    _require(current_user, Cap.CLEARANCE_ACT)
+    return await exit_mgmt.update_asset_return(
+        current_user, _company(current_user, company_id), sep_no, ast_no,
+        body.model_dump(exclude_unset=True))
+
+
+# ── Access Clearance ──
+@router.post("/separations/{sep_no}/access-clearance", status_code=201)
+async def create_access_clearance(
+    sep_no: str,
+    body: AccessClearanceIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.CLEARANCE_MANAGE)
+    return await exit_mgmt.create_access_clearance(
+        current_user, _company(current_user, company_id), sep_no, body.model_dump())
+
+
+@router.get("/separations/{sep_no}/access-clearance")
+async def list_access_clearances(
+    sep_no: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.CLEARANCE_READ)
+    return await exit_mgmt.list_access_clearances(
+        current_user, _company(current_user, company_id), sep_no)
+
+
+@router.patch("/separations/{sep_no}/access-clearance/{item_id}")
+async def update_access_clearance(
+    sep_no: str,
+    item_id: str,
+    body: AccessClearanceUpdate,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.CLEARANCE_ACT)
+    return await exit_mgmt.update_access_clearance(
+        current_user, _company(current_user, company_id), sep_no, item_id, body.model_dump())
+
+
+# ── Exit Interview ──
+@router.put("/separations/{sep_no}/exit-interview")
+async def save_exit_interview(
+    sep_no: str,
+    body: ExitInterviewIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.EXIT_INTERVIEW_WRITE)
+    return await exit_mgmt.save_exit_interview(
+        current_user, _company(current_user, company_id), sep_no, body.model_dump())
+
+
+@router.get("/separations/{sep_no}/exit-interview")
+async def get_exit_interview(
+    sep_no: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.EXIT_INTERVIEW_READ)
+    doc = await exit_mgmt.get_exit_interview(current_user, _company(current_user, company_id), sep_no)
+    if not doc:
+        raise HTTPException(status_code=404, detail="No exit interview recorded yet.")
+    return doc
+
+
+# ── Full & Final Settlement ──
+@router.put("/separations/{sep_no}/fnf")
+async def save_fnf(
+    sep_no: str,
+    body: FnfInput,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """§7.21: the maker half of BR-021. No payroll engine exists (§7.13) — see FnfInput's
+    docstring for what this can and cannot compute."""
+    _require(current_user, Cap.FNF_PREPARE)
+    return await exit_mgmt.save_fnf(
+        current_user, _company(current_user, company_id), sep_no, body.model_dump())
+
+
+@router.get("/separations/{sep_no}/fnf")
+async def get_fnf(
+    sep_no: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.FNF_READ)
+    return await exit_mgmt.get_fnf(current_user, _company(current_user, company_id), sep_no)
+
+
+@router.post("/separations/{sep_no}/fnf/approve")
+async def approve_fnf(
+    sep_no: str,
+    body: FnfDecisionIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Finance's checker gate (BR-021)."""
+    _require(current_user, Cap.FNF_APPROVE)
+    return await exit_mgmt.approve_fnf(
+        current_user, _company(current_user, company_id), sep_no, body.model_dump())
+
+
+@router.post("/separations/{sep_no}/fnf/paid")
+async def mark_fnf_paid(
+    sep_no: str,
+    body: FnfPaidIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Recording the payment run, after Finance has already approved the total."""
+    _require(current_user, Cap.FNF_PREPARE)
+    return await exit_mgmt.mark_fnf_paid(
+        current_user, _company(current_user, company_id), sep_no, body.model_dump())
+
+
+# ─────────────────────────────────────────────────────────────
+# Phase ATT-1 — Attendance & Leave (§7.8-7.12, §22.8-22.9)
+# ─────────────────────────────────────────────────────────────
+@router.get("/attendance/shift-policy")
+async def get_shift_policy(
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.ATTENDANCE_READ)
+    return await attendance_mgmt.get_shift_policy(_company(current_user, company_id))
+
+
+@router.put("/attendance/shift-policy")
+async def save_shift_policy(
+    body: dict,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """§7.8's timing/grace numbers, adjustable — see the Phase ATT-1 module docstring."""
+    _require(current_user, Cap.LEAVE_POLICY_MANAGE)
+    return await attendance_mgmt.save_shift_policy(
+        current_user, _company(current_user, company_id), body)
+
+
+@router.post("/attendance/mark", status_code=201)
+async def mark_attendance(
+    body: AttendanceMarkIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.ATTENDANCE_MARK)
+    return await attendance_mgmt.mark_attendance(
+        current_user, _company(current_user, company_id), body.model_dump())
+
+
+@router.get("/attendance")
+async def list_attendance(
+    employee_code: Optional[str] = Query(None),
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    limit: int = Query(100, ge=1, le=500),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.ATTENDANCE_READ)
+    return await attendance_mgmt.list_attendance(
+        current_user, _company(current_user, company_id), employee_code=employee_code,
+        start_date=start_date, end_date=end_date, status=status, limit=limit)
+
+
+@router.get("/attendance/late-coming")
+async def late_coming_summary(
+    employee_code: Optional[str] = Query(None),
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """§22.9: calendar marker + monthly late-coming card data."""
+    _require(current_user, Cap.ATTENDANCE_READ)
+    return await attendance_mgmt.late_coming_summary(
+        current_user, _company(current_user, company_id), employee_code=employee_code,
+        start_date=start_date, end_date=end_date)
+
+
+@router.post("/attendance/regularizations", status_code=201)
+async def request_regularization(
+    body: RegularizationIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """§7.9 step 63-64: self-service, the same reasoning SEPARATION_INITIATE established."""
+    _require(current_user, Cap.ATTENDANCE_REGULARIZE_REQUEST)
+    return await attendance_mgmt.request_regularization(
+        current_user, _company(current_user, company_id), body.model_dump())
+
+
+@router.get("/attendance/regularizations")
+async def list_regularizations(
+    status: Optional[str] = Query(None),
+    employee_code: Optional[str] = Query(None),
+    limit: int = Query(100, ge=1, le=500),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.ATTENDANCE_REGULARIZE_REQUEST)
+    return await attendance_mgmt.list_regularizations(
+        current_user, _company(current_user, company_id), status=status,
+        employee_code=employee_code, limit=limit)
+
+
+@router.patch("/attendance/regularizations/{req_no}")
+async def act_on_regularization(
+    req_no: str,
+    body: RegularizationActionIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """§7.9 steps 66-68: manager first, HR final — see hrms_attendance_service for the order."""
+    _require(current_user, Cap.ATTENDANCE_REGULARIZE_APPROVE)
+    return await attendance_mgmt.act_on_regularization(
+        current_user, _company(current_user, company_id), req_no, body.model_dump())
+
+
+@router.post("/attendance/od", status_code=201)
+async def request_od(
+    body: OdRequestIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.OD_REQUEST)
+    return await attendance_mgmt.request_od(
+        current_user, _company(current_user, company_id), body.model_dump())
+
+
+@router.get("/attendance/od")
+async def list_od_requests(
+    status: Optional[str] = Query(None),
+    employee_code: Optional[str] = Query(None),
+    limit: int = Query(100, ge=1, le=500),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.OD_REQUEST)
+    return await attendance_mgmt.list_od_requests(
+        current_user, _company(current_user, company_id), status=status,
+        employee_code=employee_code, limit=limit)
+
+
+@router.post("/attendance/od/{od_no}/action")
+async def act_on_od(
+    od_no: str,
+    body: OdActionIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.OD_APPROVE)
+    return await attendance_mgmt.act_on_od(
+        current_user, _company(current_user, company_id), od_no, body.model_dump())
+
+
+@router.get("/attendance/closure/{period}")
+async def closure_dashboard(
+    period: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """§7.12 steps 84-85: what is still open before this period can be locked."""
+    _require(current_user, Cap.ATTENDANCE_LOCK)
+    return await attendance_mgmt.closure_dashboard(
+        current_user, _company(current_user, company_id), period)
+
+
+@router.post("/attendance/closure/{period}/lock")
+async def lock_period(
+    period: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.ATTENDANCE_LOCK)
+    return await attendance_mgmt.lock_period(
+        current_user, _company(current_user, company_id), period)
+
+
+@router.post("/attendance/closure/{period}/unlock")
+async def unlock_period(
+    period: str,
+    body: AttendanceUnlockIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Post-lock changes require an authorised, reasoned reopen (§7.12 BR)."""
+    _require(current_user, Cap.ATTENDANCE_LOCK)
+    return await attendance_mgmt.unlock_period(
+        current_user, _company(current_user, company_id), period, body.reason)
+
+
+# ── §22.8 — leave-type policy register ──
+@router.get("/leave/types")
+async def list_leave_types(
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.LEAVE_READ)
+    return await leave_mgmt.list_leave_types(current_user, _company(current_user, company_id))
+
+
+@router.put("/leave/types/{code}")
+async def save_leave_type(
+    code: str,
+    body: LeaveTypeConfigIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Policy values only — see the Phase ATT-1 module docstring for why none of these
+    numbers are frozen defaults baked into logic."""
+    _require(current_user, Cap.LEAVE_POLICY_MANAGE)
+    payload = body.model_dump()
+    payload["code"] = code
+    return await leave_mgmt.save_leave_type(
+        current_user, _company(current_user, company_id), payload)
+
+
+@router.get("/leave/balances/{employee_code}")
+async def get_leave_balances(
+    employee_code: str,
+    year: Optional[int] = Query(None),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.LEAVE_READ)
+    return await leave_mgmt.get_leave_balances(
+        current_user, _company(current_user, company_id), employee_code, year)
+
+
+@router.post("/leave/balances/adjust")
+async def adjust_leave_balance(
+    body: LeaveBalanceAdjustIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.LEAVE_POLICY_MANAGE)
+    return await leave_mgmt.adjust_leave_balance(
+        current_user, _company(current_user, company_id), body.model_dump())
+
+
+@router.post("/leave", status_code=201)
+async def apply_leave(
+    body: LeaveApplyIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """§7.10 step 70: self-service, the same reasoning SEPARATION_INITIATE established."""
+    _require(current_user, Cap.LEAVE_APPLY)
+    return await leave_mgmt.apply_leave(
+        current_user, _company(current_user, company_id), body.model_dump())
+
+
+@router.get("/leave")
+async def list_leaves(
+    status: Optional[str] = Query(None),
+    employee_code: Optional[str] = Query(None),
+    leave_type: Optional[str] = Query(None),
+    limit: int = Query(100, ge=1, le=500),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.LEAVE_READ)
+    return await leave_mgmt.list_leaves(
+        current_user, _company(current_user, company_id), status=status,
+        employee_code=employee_code, leave_type=leave_type, limit=limit)
+
+
+@router.patch("/leave/{leave_no}")
+async def act_on_leave(
+    leave_no: str,
+    body: LeaveActionIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """§7.10 steps 73-75: manager first, HR final."""
+    _require(current_user, Cap.LEAVE_APPROVE)
+    return await leave_mgmt.act_on_leave(
+        current_user, _company(current_user, company_id), leave_no, body.model_dump())
+
+
+@router.post("/leave/{leave_no}/cancel")
+async def cancel_leave(
+    leave_no: str,
+    body: LeaveCancelIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """§7.10 step 76: controlled withdrawal, restoring the balance (or C-Off batches) it
+    consumed."""
+    _require(current_user, Cap.LEAVE_APPLY)
+    return await leave_mgmt.cancel_leave(
+        current_user, _company(current_user, company_id), leave_no, body.reason)
+
+
+# ── §7.11 — Compensatory Off ──
+@router.post("/coff/earn", status_code=201)
+async def request_coff_earn(
+    body: CoffEarnIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.COFF_EARN_REQUEST)
+    return await leave_mgmt.request_coff_earn(
+        current_user, _company(current_user, company_id), body.model_dump())
+
+
+@router.get("/coff/ledger")
+async def list_coff_ledger(
+    employee_code: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    limit: int = Query(100, ge=1, le=500),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.LEAVE_READ)
+    return await leave_mgmt.list_coff_ledger(
+        current_user, _company(current_user, company_id), employee_code=employee_code,
+        status=status, limit=limit)
+
+
+@router.post("/coff/earn/{batch_id}/action")
+async def act_on_coff_earn(
+    batch_id: str,
+    body: CoffEarnActionIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.COFF_APPROVE)
+    return await leave_mgmt.act_on_coff_earn(
+        current_user, _company(current_user, company_id), batch_id, body.model_dump())
+
+
+# ─────────────────────────────────────────────────────────────
+# Phase MOVE-1 — Employee Movements & Discipline (§7.16, §7.17, §7.19, §7.20)
+# ─────────────────────────────────────────────────────────────
+@router.post("/movements", status_code=201)
+async def initiate_movement(
+    body: MovementIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """§7.16 steps 120-122. The current value is looked up server-side, never supplied."""
+    _require(current_user, Cap.MOVEMENT_INITIATE)
+    return await movement_mgmt.initiate_movement(
+        current_user, _company(current_user, company_id), body.model_dump())
+
+
+@router.get("/movements")
+async def list_movements(
+    employee_code: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    limit: int = Query(100, ge=1, le=500),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Also catches up any approved movement whose effective date has arrived — there is no
+    scheduler in this codebase, so a page load is what applies a due movement (§7.16 step 125).
+    """
+    _require(current_user, Cap.MOVEMENT_READ)
+    resolved_company = _company(current_user, company_id)
+    await movement_mgmt.apply_due_movements(resolved_company)
+    return await movement_mgmt.list_movements(
+        current_user, resolved_company, employee_code=employee_code, status=status, limit=limit)
+
+
+@router.patch("/movements/{move_no}")
+async def act_on_movement(
+    move_no: str,
+    body: MovementActionIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.MOVEMENT_APPROVE)
+    return await movement_mgmt.act_on_movement(
+        current_user, _company(current_user, company_id), move_no, body.model_dump())
+
+
+# ── Discipline / Redressal ──
+@router.post("/discipline", status_code=201)
+async def create_discipline_case(
+    body: DisciplineCaseIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """§7.17 step 128. A POSH/Harassment category is ALWAYS Restricted regardless of what is
+    passed, and creating one additionally requires DISCIPLINE_POSH_* — enforced inside the
+    service, since the capability needed depends on the case's OWN category, not a fixed one
+    this route can check up front."""
+    _require(current_user, Cap.DISCIPLINE_MANAGE)
+    return await discipline_mgmt.create_case(
+        current_user, _company(current_user, company_id), body.model_dump())
+
+
+@router.get("/discipline")
+async def list_discipline_cases(
+    status: Optional[str] = Query(None),
+    employee_code: Optional[str] = Query(None),
+    limit: int = Query(100, ge=1, le=500),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Restricted/POSH cases are silently excluded for a caller without POSH access — see
+    hrms_discipline_service.list_cases."""
+    _require(current_user, Cap.DISCIPLINE_READ)
+    return await discipline_mgmt.list_cases(
+        current_user, _company(current_user, company_id), status=status,
+        employee_code=employee_code, limit=limit)
+
+
+@router.get("/discipline/{case_no}")
+async def get_discipline_case(
+    case_no: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.DISCIPLINE_READ)
+    return await discipline_mgmt.get_case(
+        current_user, _company(current_user, company_id), case_no)
+
+
+@router.post("/discipline/{case_no}/investigate")
+async def add_investigation_note(
+    case_no: str,
+    body: DisciplineInvestigationIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.DISCIPLINE_MANAGE)
+    return await discipline_mgmt.add_investigation_note(
+        current_user, _company(current_user, company_id), case_no, body.model_dump())
+
+
+@router.post("/discipline/{case_no}/recommend")
+async def record_recommendation(
+    case_no: str,
+    body: DisciplineRecommendationIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.DISCIPLINE_MANAGE)
+    return await discipline_mgmt.record_recommendation(
+        current_user, _company(current_user, company_id), case_no, body.model_dump())
+
+
+@router.post("/discipline/{case_no}/decide")
+async def decide_discipline_case(
+    case_no: str,
+    body: DisciplineDecisionIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """§7.17 step 133: management's separate approve-and-implement act."""
+    _require(current_user, Cap.DISCIPLINE_DECIDE)
+    return await discipline_mgmt.decide_case(
+        current_user, _company(current_user, company_id), case_no, body.model_dump())
+
+
+@router.post("/discipline/{case_no}/close")
+async def close_discipline_case(
+    case_no: str,
+    body: DisciplineCloseIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.DISCIPLINE_MANAGE)
+    return await discipline_mgmt.close_case(
+        current_user, _company(current_user, company_id), case_no, body.model_dump())
+
+
+@router.get("/discipline/employee/{employee_code}/summary")
+async def discipline_employee_summary(
+    employee_code: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """§7.17 step 136: the permission-controlled summary Employee 360° will eventually
+    embed — full 360° aggregation (§6) is a separate gap this does not close."""
+    _require(current_user, Cap.DISCIPLINE_READ)
+    return await discipline_mgmt.employee_summary(
+        current_user, _company(current_user, company_id), employee_code)
+
+
+# ── Absconding / Abandonment ──
+@router.get("/absconding/policy")
+async def get_absconding_policy(
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.ABSCONDING_READ)
+    return await absconding_mgmt.get_absconding_policy(_company(current_user, company_id))
+
+
+@router.put("/absconding/policy")
+async def save_absconding_policy(
+    body: dict,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """§7.19's day-count/window numbers, adjustable — see DEFAULT_ABSCONDING_POLICY. Gated on
+    ABSCONDING_MANAGE (not DECIDE): this is routine policy configuration, the same level HR
+    holds for LEAVE_POLICY_MANAGE, not the case-by-case final-action sign-off."""
+    _require(current_user, Cap.ABSCONDING_MANAGE)
+    return await absconding_mgmt.save_absconding_policy(
+        current_user, _company(current_user, company_id), body)
+
+
+@router.post("/absconding", status_code=201)
+async def flag_absconding_case(
+    body: AbscondingFlagIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.ABSCONDING_MANAGE)
+    return await absconding_mgmt.flag_case(
+        current_user, _company(current_user, company_id), body.model_dump())
+
+
+@router.get("/absconding")
+async def list_absconding_cases(
+    status: Optional[str] = Query(None),
+    employee_code: Optional[str] = Query(None),
+    limit: int = Query(100, ge=1, le=500),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.ABSCONDING_READ)
+    return await absconding_mgmt.list_cases(
+        current_user, _company(current_user, company_id), status=status,
+        employee_code=employee_code, limit=limit)
+
+
+@router.get("/absconding/{case_no}")
+async def get_absconding_case(
+    case_no: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.ABSCONDING_READ)
+    return await absconding_mgmt.get_case(
+        current_user, _company(current_user, company_id), case_no)
+
+
+@router.post("/absconding/{case_no}/contact")
+async def log_absconding_contact(
+    case_no: str,
+    body: AbscondingContactIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.ABSCONDING_MANAGE)
+    return await absconding_mgmt.log_contact_attempt(
+        current_user, _company(current_user, company_id), case_no, body.model_dump())
+
+
+@router.post("/absconding/{case_no}/warning/{stage}")
+async def send_absconding_warning(
+    case_no: str,
+    stage: str,
+    body: AbscondingWarningIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """§7.19 steps 150-152. `stage` is 'First' or 'Second'; the service enforces the
+    configured window has elapsed since the prior stage."""
+    _require(current_user, Cap.ABSCONDING_MANAGE)
+    return await absconding_mgmt.send_warning(
+        current_user, _company(current_user, company_id), case_no, stage, body.model_dump())
+
+
+@router.post("/absconding/{case_no}/final-action")
+async def absconding_final_action(
+    case_no: str,
+    body: AbscondingFinalActionIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """§7.19 step 153: the authorised final decision — resolves the case or hands off to
+    Exit Management (exit_type=Absconding)."""
+    _require(current_user, Cap.ABSCONDING_DECIDE)
+    return await absconding_mgmt.final_action(
+        current_user, _company(current_user, company_id), case_no, body.model_dump())
+
+
+# ── Retirement alert (§7.20) ──
+@router.get("/retirement/policy")
+async def get_retirement_policy(
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.RETIREMENT_ALERT_READ)
+    return await retirement_mgmt.get_retirement_policy(_company(current_user, company_id))
+
+
+@router.put("/retirement/policy")
+async def save_retirement_policy(
+    body: RetirementPolicyIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """The retirement age itself is NOT frozen by the BA doc — see RetirementPolicyIn."""
+    _require(current_user, Cap.MOVEMENT_APPROVE)
+    return await retirement_mgmt.save_retirement_policy(
+        current_user, _company(current_user, company_id), body.model_dump())
+
+
+@router.get("/retirement/upcoming")
+async def list_upcoming_retirements(
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.RETIREMENT_ALERT_READ)
+    return await retirement_mgmt.list_upcoming_retirements(
+        current_user, _company(current_user, company_id))
+
+
+# ── §7.20 step 157 — Demise/Missing nominee & legal documentation ──
+@router.put("/separations/{sep_no}/nominee-details")
+async def save_nominee_details(
+    sep_no: str,
+    body: NomineeDetailsIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.SEPARATION_MANAGE)
+    return await exit_mgmt.save_nominee_details(
+        current_user, _company(current_user, company_id), sep_no, body.model_dump())
+
+
+# ─────────────────────────────────────────────────────────────
+# Phase PAY-1 — Payroll, Salary Advance & Variable Pay (§7.13-7.15, §22.7)
+# ─────────────────────────────────────────────────────────────
+@router.get("/salary-components")
+async def list_salary_components(
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.SALARY_STRUCTURE_READ)
+    return await payroll_mgmt.list_salary_components(
+        current_user, _company(current_user, company_id))
+
+
+@router.put("/salary-components/{code}")
+async def save_salary_component(
+    code: str,
+    body: SalaryComponentIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """§22.7: payroll is component-driven, not a fixed set of fields — this is the master."""
+    _require(current_user, Cap.SALARY_STRUCTURE_MANAGE)
+    payload = body.model_dump()
+    payload["code"] = code
+    return await payroll_mgmt.save_salary_component(
+        current_user, _company(current_user, company_id), payload)
+
+
+@router.put("/salary-structures")
+async def save_salary_structure(
+    body: SalaryStructureIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.SALARY_STRUCTURE_MANAGE)
+    return await payroll_mgmt.save_salary_structure(
+        current_user, _company(current_user, company_id), body.model_dump())
+
+
+@router.get("/salary-structures/{employee_code}")
+async def get_salary_structure_history(
+    employee_code: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Full history, newest first — a structure is never edited in place (§7.16's "never
+    overwrite" discipline applies here too)."""
+    _require(current_user, Cap.SALARY_STRUCTURE_READ)
+    return await payroll_mgmt.list_structure_history(
+        current_user, _company(current_user, company_id), employee_code)
+
+
+# ── Payroll runs ──
+@router.post("/payroll/runs", status_code=201)
+async def create_payroll_run(
+    body: PayrollRunCreateIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.PAYROLL_PROCESS)
+    return await payroll_mgmt.create_run(
+        current_user, _company(current_user, company_id), body.model_dump())
+
+
+@router.get("/payroll/runs")
+async def list_payroll_runs(
+    limit: int = Query(100, ge=1, le=500),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.PAYROLL_READ)
+    return await payroll_mgmt.list_runs(current_user, _company(current_user, company_id), limit)
+
+
+@router.get("/payroll/runs/{period}")
+async def get_payroll_run(
+    period: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.PAYROLL_READ)
+    return await payroll_mgmt.get_run(current_user, _company(current_user, company_id), period)
+
+
+@router.post("/payroll/runs/{period}/calculate")
+async def calculate_payroll(
+    period: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """§7.13 steps 91-94, safe to call again to rerun after resolving exceptions (step 96)."""
+    _require(current_user, Cap.PAYROLL_PROCESS)
+    return await payroll_mgmt.calculate_payroll(
+        current_user, _company(current_user, company_id), period)
+
+
+@router.get("/payroll/runs/{period}/records")
+async def list_payroll_records(
+    period: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.PAYROLL_READ)
+    return await payroll_mgmt.list_records(
+        current_user, _company(current_user, company_id), period)
+
+
+@router.patch("/payroll/runs/{period}/records/{employee_code}")
+async def adjust_payroll_record(
+    period: str,
+    employee_code: str,
+    body: PayrollRecordAdjustIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """The maker's hand-entered statutory/one-off figures — no statutory engine exists yet
+    (§7.13 BR: "requires payroll workshop")."""
+    _require(current_user, Cap.PAYROLL_PROCESS)
+    return await payroll_mgmt.adjust_record(
+        current_user, _company(current_user, company_id), period, employee_code,
+        body.model_dump(exclude_unset=True))
+
+
+@router.post("/payroll/runs/{period}/decision")
+async def decide_payroll_run(
+    period: str,
+    body: PayrollApprovalIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """§7.13 steps 97-98: the checker's approval also locks the run."""
+    _require(current_user, Cap.PAYROLL_APPROVE)
+    return await payroll_mgmt.decide_run(
+        current_user, _company(current_user, company_id), period, body.model_dump())
+
+
+# ── Salary Advance ──
+@router.get("/advances/policy")
+async def get_advance_policy(
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.ADVANCE_READ)
+    return await advance_mgmt.get_advance_policy(_company(current_user, company_id))
+
+
+@router.put("/advances/policy")
+async def save_advance_policy(
+    body: AdvancePolicyIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """§7.14's 40%/window/quarter numbers, adjustable — see DEFAULT_ADVANCE_POLICY."""
+    _require(current_user, Cap.ADVANCE_APPROVE)
+    return await advance_mgmt.save_advance_policy(
+        current_user, _company(current_user, company_id), body.model_dump())
+
+
+@router.get("/advances/eligibility/{employee_code}")
+async def check_advance_eligibility(
+    employee_code: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Shown before the request form even opens (§7.14 steps 101-104)."""
+    _require(current_user, Cap.ADVANCE_REQUEST)
+    return await advance_mgmt.check_eligibility(
+        current_user, _company(current_user, company_id), employee_code)
+
+
+@router.post("/advances", status_code=201)
+async def request_advance(
+    body: SalaryAdvanceIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.ADVANCE_REQUEST)
+    return await advance_mgmt.request_advance(
+        current_user, _company(current_user, company_id), body.model_dump())
+
+
+@router.get("/advances")
+async def list_advances(
+    status: Optional[str] = Query(None),
+    employee_code: Optional[str] = Query(None),
+    limit: int = Query(100, ge=1, le=500),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.ADVANCE_READ)
+    return await advance_mgmt.list_advances(
+        current_user, _company(current_user, company_id), status=status,
+        employee_code=employee_code, limit=limit)
+
+
+@router.get("/advances/{adv_no}")
+async def get_advance(
+    adv_no: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.ADVANCE_READ)
+    return await advance_mgmt.get_advance(current_user, _company(current_user, company_id), adv_no)
+
+
+@router.post("/advances/{adv_no}/action")
+async def act_on_advance(
+    adv_no: str,
+    body: SalaryAdvanceActionIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """The normal Reporting-Manager/HR approval tier (§7.14 step 106)."""
+    _require(current_user, Cap.ADVANCE_APPROVE)
+    return await advance_mgmt.act_on_advance(
+        current_user, _company(current_user, company_id), adv_no, body.model_dump())
+
+
+@router.post("/advances/{adv_no}/action-emergency")
+async def act_on_advance_emergency(
+    adv_no: str,
+    body: SalaryAdvanceActionIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """The separate "Director HR / Finance" emergency route §7.14 names explicitly."""
+    _require(current_user, Cap.ADVANCE_APPROVE_EMERGENCY)
+    return await advance_mgmt.act_on_advance(
+        current_user, _company(current_user, company_id), adv_no, body.model_dump())
+
+
+# ── Variable Pay Quarterly ──
+@router.get("/variable-pay/policy")
+async def get_variable_pay_policy(
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.VARIABLE_PAY_READ)
+    return await vp_mgmt.get_variable_pay_policy(_company(current_user, company_id))
+
+
+@router.put("/variable-pay/policy")
+async def save_variable_pay_policy(
+    body: VariablePayPolicyIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """§7.15's ORM/IRM thresholds and 75/25 split, adjustable — see DEFAULT_VARIABLE_PAY_POLICY."""
+    _require(current_user, Cap.VARIABLE_PAY_APPROVE)
+    return await vp_mgmt.save_variable_pay_policy(
+        current_user, _company(current_user, company_id), body.model_dump())
+
+
+@router.post("/variable-pay/quarters", status_code=201)
+async def create_variable_pay_quarter(
+    body: VariablePayQuarterCreateIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.VARIABLE_PAY_PROCESS)
+    return await vp_mgmt.create_quarter(
+        current_user, _company(current_user, company_id), body.model_dump())
+
+
+@router.get("/variable-pay/quarters")
+async def list_variable_pay_quarters(
+    limit: int = Query(50, ge=1, le=200),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.VARIABLE_PAY_READ)
+    return await vp_mgmt.list_quarters(current_user, _company(current_user, company_id), limit)
+
+
+@router.get("/variable-pay/quarters/{quarter}")
+async def get_variable_pay_quarter(
+    quarter: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.VARIABLE_PAY_READ)
+    return await vp_mgmt.get_quarter(current_user, _company(current_user, company_id), quarter)
+
+
+@router.post("/variable-pay/quarters/{quarter}/records", status_code=201)
+async def save_variable_pay_record(
+    quarter: str,
+    body: VariablePayRecordIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """§7.15 step 111: enter (or re-enter) one employee's IRM score and quarterly target."""
+    _require(current_user, Cap.VARIABLE_PAY_PROCESS)
+    return await vp_mgmt.save_record(
+        current_user, _company(current_user, company_id), quarter, body.model_dump())
+
+
+@router.get("/variable-pay/quarters/{quarter}/records")
+async def list_variable_pay_records(
+    quarter: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.VARIABLE_PAY_READ)
+    return await vp_mgmt.list_records(current_user, _company(current_user, company_id), quarter)
+
+
+@router.post("/variable-pay/quarters/{quarter}/calculate")
+async def calculate_variable_pay(
+    quarter: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.VARIABLE_PAY_PROCESS)
+    return await vp_mgmt.calculate_quarter(
+        current_user, _company(current_user, company_id), quarter)
+
+
+@router.post("/variable-pay/quarters/{quarter}/decision")
+async def decide_variable_pay_quarter(
+    quarter: str,
+    body: VariablePayApprovalIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.VARIABLE_PAY_APPROVE)
+    return await vp_mgmt.decide_quarter(
+        current_user, _company(current_user, company_id), quarter, body.model_dump())
+
+
+@router.get("/variable-pay/hold-ledger")
+async def list_variable_pay_hold_ledger(
+    employee_code: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    limit: int = Query(200, ge=1, le=500),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.VARIABLE_PAY_READ)
+    return await vp_mgmt.list_hold_ledger(
+        current_user, _company(current_user, company_id), employee_code=employee_code,
+        status=status, limit=limit)
+
+
+@router.post("/variable-pay/hold-ledger/{hold_id}/action")
+async def act_on_variable_pay_hold(
+    hold_id: str,
+    body: VariablePayHoldActionIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """§7.15 step 119: release or forfeit at FY-end/an eligibility milestone."""
+    _require(current_user, Cap.VARIABLE_PAY_HOLD_MANAGE)
+    return await vp_mgmt.act_on_hold(
+        current_user, _company(current_user, company_id), hold_id, body.model_dump())
+
+
+# ─────────────────────────────────────────────────────────────
+# Phase PIP-1 — Performance Improvement Plan (§22.5)
+# ─────────────────────────────────────────────────────────────
+@router.post("/pip", status_code=201)
+async def initiate_pip(
+    body: PipCreateIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.PIP_MANAGE)
+    return await pip_mgmt.initiate_pip(
+        current_user, _company(current_user, company_id), body.model_dump())
+
+
+@router.get("/pip")
+async def list_pips(
+    employee_code: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    limit: int = Query(100, ge=1, le=500),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.PIP_READ)
+    return await pip_mgmt.list_pips(
+        current_user, _company(current_user, company_id), employee_code=employee_code,
+        status=status, limit=limit)
+
+
+@router.get("/pip/{pip_no}")
+async def get_pip(
+    pip_no: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.PIP_READ)
+    return await pip_mgmt.get_pip(current_user, _company(current_user, company_id), pip_no)
+
+
+@router.post("/pip/{pip_no}/acknowledge")
+async def acknowledge_pip(
+    pip_no: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """§22.5 step 217 — self-service, enforced to the plan's OWN employee."""
+    _require(current_user, Cap.PIP_ACKNOWLEDGE)
+    return await pip_mgmt.acknowledge_pip(
+        current_user, _company(current_user, company_id), pip_no)
+
+
+@router.post("/pip/{pip_no}/reviews", status_code=201)
+async def add_pip_review(
+    pip_no: str,
+    body: PipReviewIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """§22.5 step 218."""
+    _require(current_user, Cap.PIP_MANAGE)
+    return await pip_mgmt.add_review(
+        current_user, _company(current_user, company_id), pip_no, body.model_dump())
+
+
+@router.post("/pip/{pip_no}/decision")
+async def decide_pip(
+    pip_no: str,
+    body: PipDecisionIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """§22.5 step 220."""
+    _require(current_user, Cap.PIP_DECIDE)
+    return await pip_mgmt.decide_pip(
+        current_user, _company(current_user, company_id), pip_no, body.model_dump())
+
+
+# ─────────────────────────────────────────────────────────────
+# Phase 360-1 — Employee 360° (§6)
+# ─────────────────────────────────────────────────────────────
+@router.get("/employees/{user_id}/360")
+async def get_employee_360(
+    user_id: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """One aggregated workspace over every module that already tracks this employee.
+    No new capability gate: the base profile call decides who may open this at all (an
+    inherent right for their own record, EMPLOYEE_READ otherwise), and each section inside
+    is included only if the caller separately holds that section's own read capability —
+    the same "restricted, permission-controlled summary" every source module already
+    promises on its own screen."""
+    return await employee_360_mgmt.get_employee_360(
+        current_user, _company(current_user, company_id), user_id)
+
+
+# ─────────────────────────────────────────────────────────────
+# Phase ACCESS-1 — User / Role / Permission Administration (SM-HR-051)
+# ─────────────────────────────────────────────────────────────
+@router.get("/access/role-matrix")
+async def hrms_role_matrix(current_user: dict = Depends(get_current_user)):
+    """Read-only "review access" table — which capabilities each HRMS role holds, sourced
+    directly from ROLE_CAPABILITIES so it can never drift from what the gates enforce."""
+    _require(current_user, Cap.MODULE_ADMIN)
+    return access_admin_mgmt.get_role_matrix()
+
+
+@router.put("/access/employees/{user_id}/governance-role")
+async def hrms_set_governance_role(
+    user_id: str,
+    body: GovernanceRoleIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Assign the HOD/HR/FINANCE/MD governance ladder position that `hrms_role()` resolves
+    a client-side user's HRMS role from. Gated on MODULE_ADMIN, the same capability the
+    module's own settings-administration surfaces resolve to — matching the BA doc's
+    "Users: System Admin" line for this screen."""
+    _require(current_user, Cap.MODULE_ADMIN)
+    return await access_admin_mgmt.set_governance_role(
+        current_user, user_id, _company(current_user, company_id), body.governance_role)
+
+
+# ─────────────────────────────────────────────────────────────
+# Phase LETTER-1 — HR Letter / Document Generator (SM-HR-041)
+# ─────────────────────────────────────────────────────────────
+@router.get("/letters/templates")
+async def list_letter_templates(
+    include_inactive: bool = Query(False),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.LETTER_MANAGE)
+    return {"templates": await letter_mgmt.list_templates(
+        _company(current_user, company_id), include_inactive=include_inactive)}
+
+
+@router.put("/letters/templates/{key}")
+async def save_letter_template(
+    key: str,
+    body: LetterTemplateIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.LETTER_MANAGE)
+    return await letter_mgmt.save_template(
+        current_user, _company(current_user, company_id), key, body.model_dump())
+
+
+@router.post("/letters/preview")
+async def preview_letter(
+    body: LetterPreviewIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Preview — a pure render, nothing persisted."""
+    _require(current_user, Cap.LETTER_MANAGE)
+    return await letter_mgmt.preview_letter(
+        current_user, _company(current_user, company_id), body.model_dump())
+
+
+@router.post("/letters", status_code=201)
+async def generate_letter(
+    body: LetterGenerateIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Generate — produces a Draft, still regenerable until issued."""
+    _require(current_user, Cap.LETTER_MANAGE)
+    return await letter_mgmt.generate_letter(
+        current_user, _company(current_user, company_id), body.model_dump())
+
+
+@router.get("/letters")
+async def list_letters(
+    employee_code: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    limit: int = Query(100, ge=1, le=500),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.LETTER_READ)
+    return {"letters": await letter_mgmt.list_letters(
+        current_user, _company(current_user, company_id),
+        employee_code=employee_code, status=status, limit=limit)}
+
+
+@router.get("/letters/{letter_no}")
+async def get_letter(
+    letter_no: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.LETTER_READ)
+    return await letter_mgmt.get_letter(
+        current_user, _company(current_user, company_id), letter_no)
+
+
+@router.post("/letters/{letter_no}/issue")
+async def issue_letter(
+    letter_no: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Issue — the point of no return; from here the letter is immutable."""
+    _require(current_user, Cap.LETTER_MANAGE)
+    return await letter_mgmt.issue_letter(
+        current_user, _company(current_user, company_id), letter_no)
+
+
+@router.post("/letters/{letter_no}/reissue", status_code=201)
+async def reissue_letter(
+    letter_no: str,
+    body: LetterReissueIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Reissue — supersedes this letter and issues a new version."""
+    _require(current_user, Cap.LETTER_MANAGE)
+    return await letter_mgmt.reissue_letter(
+        current_user, _company(current_user, company_id), letter_no, body.model_dump())
+
+
+# ─────────────────────────────────────────────────────────────
+# Phase ORIENT-1 — Orientation & Training (§22.3, screen SM-HR-057)
+# ─────────────────────────────────────────────────────────────
+@router.get("/orientation/plans")
+async def list_orientation_plans(
+    include_inactive: bool = Query(False),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.INDUCTION_WRITE)
+    return {"plans": await orientation_mgmt.list_plans(
+        _company(current_user, company_id), include_inactive=include_inactive)}
+
+
+@router.post("/orientation/plans", status_code=201)
+async def create_orientation_plan(
+    body: OrientationPlanIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.INDUCTION_WRITE)
+    return await orientation_mgmt.save_plan(
+        current_user, _company(current_user, company_id), None, body.model_dump())
+
+
+@router.put("/orientation/plans/{plan_no}")
+async def update_orientation_plan(
+    plan_no: str,
+    body: OrientationPlanIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.INDUCTION_WRITE)
+    return await orientation_mgmt.save_plan(
+        current_user, _company(current_user, company_id), plan_no, body.model_dump())
+
+
+@router.get("/orientation/assignments")
+async def list_orientation_assignments(
+    status: Optional[str] = Query(None),
+    limit: int = Query(100, ge=1, le=500),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.INDUCTION_READ)
+    return {"assignments": await orientation_mgmt.list_assignments(
+        current_user, _company(current_user, company_id), status=status, limit=limit)}
+
+
+@router.get("/orientation/assignments/{employee_code}")
+async def get_orientation_assignment(
+    employee_code: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.INDUCTION_READ)
+    return await orientation_mgmt.get_assignment(
+        current_user, _company(current_user, company_id), employee_code)
+
+
+@router.post("/orientation/assignments/{employee_code}/schedule")
+async def schedule_orientation_item(
+    employee_code: str,
+    body: OrientationScheduleIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """§22.3 step 201."""
+    _require(current_user, Cap.INDUCTION_WRITE)
+    return await orientation_mgmt.schedule_item(
+        current_user, _company(current_user, company_id), employee_code,
+        body.item_id, body.trainer, body.scheduled_at)
+
+
+@router.post("/orientation/assignments/{employee_code}/complete")
+async def complete_orientation_item(
+    employee_code: str,
+    body: OrientationCompleteIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """§22.3 step 203."""
+    _require(current_user, Cap.INDUCTION_WRITE)
+    return await orientation_mgmt.complete_item(
+        current_user, _company(current_user, company_id), employee_code,
+        body.item_id, body.remarks)
+
+
+@router.post("/orientation/assignments/{employee_code}/waive")
+async def waive_orientation_item(
+    employee_code: str,
+    body: OrientationWaiveIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """§22.3 step 204."""
+    _require(current_user, Cap.INDUCTION_WRITE)
+    return await orientation_mgmt.waive_item(
+        current_user, _company(current_user, company_id), employee_code,
+        body.item_id, body.reason)
+
+
+# ─────────────────────────────────────────────────────────────
+# Phase PULSE-1 — 30/90-Day Pulse Survey (§22.4, screen SM-HR-058)
+# ─────────────────────────────────────────────────────────────
+@router.get("/pulse-surveys/config")
+async def get_pulse_config(
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.PULSE_MANAGE)
+    return {"questions": await pulse_mgmt.get_questions(_company(current_user, company_id))}
+
+
+@router.put("/pulse-surveys/config")
+async def save_pulse_config(
+    body: PulseConfigIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.PULSE_MANAGE)
+    return {"questions": await pulse_mgmt.save_questions(
+        current_user, _company(current_user, company_id), body.questions)}
+
+
+@router.get("/pulse-surveys/summary")
+async def get_pulse_summary(
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """§22.4 step 213."""
+    _require(current_user, Cap.PULSE_MANAGE)
+    return await pulse_mgmt.get_summary(_company(current_user, company_id))
+
+
+@router.get("/pulse-surveys")
+async def list_pulse_surveys(
+    employee_code: Optional[str] = Query(None),
+    milestone: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    follow_up_only: bool = Query(False),
+    limit: int = Query(100, ge=1, le=500),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.PULSE_READ)
+    return {"surveys": await pulse_mgmt.list_responses(
+        current_user, _company(current_user, company_id), employee_code=employee_code,
+        milestone=milestone, status=status, follow_up_only=follow_up_only, limit=limit)}
+
+
+@router.get("/pulse-surveys/{employee_code}/{milestone}")
+async def get_pulse_survey(
+    employee_code: str,
+    milestone: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.PULSE_READ)
+    return await pulse_mgmt.get_response(
+        current_user, _company(current_user, company_id), employee_code, milestone)
+
+
+@router.post("/pulse-surveys/{employee_code}/{milestone}/submit")
+async def submit_pulse_survey(
+    employee_code: str,
+    milestone: str,
+    body: PulseSubmitIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """§22.4 step 210 — self-service, enforced to the survey's OWN employee."""
+    _require(current_user, Cap.PULSE_SUBMIT)
+    return await pulse_mgmt.submit_response(
+        current_user, _company(current_user, company_id), employee_code, milestone,
+        body.scores, body.comment)

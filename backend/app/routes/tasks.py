@@ -117,13 +117,24 @@ def _period_to_range(period: Optional[str], start_date: Optional[str], end_date:
 
 
 def _resolve_workflow_status(doc: dict) -> str:
+    """A task's working status. Nothing resolves to "pending".
+
+    A task begins In Progress the moment it is raised (calendar_events.create_event), and
+    Pending is not one of the statuses anyone can choose (SELECTABLE_STATUSES), so it only
+    ever arose two ways: a document written before `workflow_status` existed, and a handful of
+    rows that stored the old default. Both are the same thing in practice — work that has been
+    handed over and not yet finished — so both read as In Progress rather than sitting in a
+    state the task pages no longer even show a card for.
+
+    Read-side only: the stored value is left exactly as it is.
+    """
     ws = doc.get("workflow_status")
-    if ws in WORKFLOW_STATUSES:
+    if ws in WORKFLOW_STATUSES and ws != "pending":
         return ws
     # Legacy fallback for tasks created before workflow_status existed
     if doc.get("status") == "completed":
         return "completed"
-    return "pending"
+    return "in_progress"
 
 
 def _parse_iso(value):
@@ -524,8 +535,13 @@ async def tasks_dashboard(
         "dependentOnOthers": 0, "blocked": 0, "inProgress": 0,
         "verification": 0, "completed": 0, "inTime": 0, "delayed": 0,
     }
+    # A reopened task is in progress again — the status only records that it has been round
+    # once. Without this it fell through to the default bucket and was counted as work nobody
+    # had started. The default is the same bucket for the same reason: every task has to land
+    # on a card the page actually shows, and "pending" is no longer one of them.
     status_key_map = {
         "pending": "pending", "accepted": "accepted", "in_progress": "inProgress",
+        "in_progress_reopened": "inProgress",
         "dependent_on_others": "dependentOnOthers", "blocked": "blocked",
         "verification": "verification", "completed": "completed",
     }
@@ -535,7 +551,7 @@ async def tasks_dashboard(
     for doc in docs:
         ws = _resolve_workflow_status(doc)
         summary["totalTasks"] += 1
-        summary[status_key_map.get(ws, "pending")] += 1
+        summary[status_key_map.get(ws, "inProgress")] += 1
         if _is_overdue(doc, ws, now):
             summary["overdue"] += 1
         timing = _completion_timing(doc)

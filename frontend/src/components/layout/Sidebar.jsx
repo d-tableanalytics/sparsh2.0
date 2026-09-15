@@ -10,8 +10,28 @@ import {
   Award, SlidersHorizontal, FolderOpen, FileCog, CalendarClock, ShieldAlert,
   // ── Phase INT-2 ── the remaining Internal Recruitment SOP surfaces.
   HeartHandshake, Bookmark, Scale, Mail, BookMarked,
+  // ── Phase EXIT-1 ── Exit Management. Not LogOut — that icon is already the literal
+  // sign-out control further down this file, and reusing it here for "someone else is
+  // leaving the company" would read as the wrong action entirely.
+  UserMinus,
+  // ── Phase ATT-1 ── Attendance & Leave. Clock (daily capture) and CalendarCheck (leave
+  // approval) rather than CalendarDays/CalendarClock, which already mean "a calendar of
+  // events" and "Probation" respectively elsewhere in this file.
+  Clock, CalendarCheck,
+  // ── Phase MOVE-1 ── Employee Movements & Discipline. GitBranch is already imported above
+  // (used for TPMS's Implementation Tracker) and is reused here — a movement literally is a
+  // person's record forking into a new state with the old one kept as history.
+  // ── Phase PAY-1 ── Payroll, Salary Advance & Variable Pay. Wallet is not yet imported
+  // elsewhere in this file.
+  Wallet,
+  // ── Phase PIP-1 ── Performance Improvement Plan.
+  TrendingDown,
   // Notification Templates.
   BellRing,
+  // ── Phase ORIENT-1 ── Orientation & Training.
+  GraduationCap,
+  // ── Phase PULSE-1 ── 30/90-Day Pulse Survey.
+  HeartPulse,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { canAccessTaskManagement } from '../../utils/taskAccess';
@@ -184,6 +204,33 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
     // the workspace tab strip, which owns the hiring stages (the two lists stay disjoint).
     { name: 'Probation', path: '/hrms/probation', icon: CalendarClock },
     { name: 'Exceptions', path: '/hrms/exceptions', icon: ShieldAlert },
+    // ── Phase EXIT-1 ── resignation/notice, handover, clearance and F&F. A post-hire
+    // employment event like Probation above, not a hiring stage, so it lives here rather
+    // than the workspace tab strip. `match` also lights this up on the detail route.
+    {
+      name: 'Exit Management', path: '/hrms/separations', icon: UserMinus,
+      match: (p) => p === '/hrms/separations' || p.startsWith('/hrms/separations/'),
+    },
+    // ── Phase ATT-1 ── daily capture, regularisation, Outdoor Duty and monthly closure —
+    // a post-hire operational surface like Probation/Exit above, not a hiring stage.
+    { name: 'Attendance', path: '/hrms/attendance', icon: Clock },
+    { name: 'Leave & C-Off', path: '/hrms/leave', icon: CalendarCheck },
+    // ── Phase MOVE-1 ── promotions/transfers, discipline, absconding and retirement
+    // alerts — the same post-hire-operational reasoning as every entry above it.
+    { name: 'Movements & Discipline', path: '/hrms/movements', icon: GitBranch },
+    // ── Phase PAY-1 ── component-driven payroll, salary advance and variable pay.
+    { name: 'Payroll', path: '/hrms/payroll', icon: Wallet },
+    // ── Phase PIP-1 ── objectives, support, reviews and outcome for a Performance
+    // Improvement Plan.
+    { name: 'PIP', path: '/hrms/pip', icon: TrendingDown },
+    // ── Phase LETTER-1 ── controlled correspondence (confirmation, revision, warning, etc.)
+    // — HR manages the template register and issues letters, an employee reads their own.
+    { name: 'Letters', path: '/hrms/letters', icon: FileCog },
+    // ── Phase ORIENT-1 ── plan assignment, scheduling and completion tracking — an
+    // employee reaches their own record ("My Onboarding") through this same entry.
+    { name: 'Orientation & Training', path: '/hrms/orientation', icon: GraduationCap },
+    // ── Phase PULSE-1 ── 30/90-day check-ins, issued automatically from date of joining.
+    { name: 'Pulse Surveys', path: '/hrms/pulse-surveys', icon: HeartPulse },
     // ── Phase INT-2 ── governance and sourcing surfaces, deliberately NOT in the tab
     // strip. Pre-boarding is post-offer engagement rather than a pipeline stage; the
     // talent pool is a search across candidates rather than a step in one hire.
@@ -207,6 +254,14 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
       // stage, so it stays out of the workspace tab strip. The `settings.write`
       // capability is the real control -- this list only decides visibility.
       { name: 'HRMS Settings', path: '/hrms/settings', icon: SlidersHorizontal },
+      // ── SM-HR-052 ── the audit trail every write path in this module has already been
+      // logging to since Phase 1 — this is its first screen. Admin-only visibility here;
+      // the real control is still Cap.AUDIT_READ on the route itself.
+      { name: 'Audit Viewer', path: '/hrms/audit', icon: ScrollText },
+      // ── SM-HR-051 ── governance-role assignment, account disable and the read-only
+      // role/capability matrix. Admin-only visibility here too; the real control is
+      // Cap.MODULE_ADMIN on the route itself.
+      { name: 'Role & Access', path: '/hrms/access', icon: UserCog },
     ] : []),
   ];
 
