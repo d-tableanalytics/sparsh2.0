@@ -16,8 +16,8 @@ const isSameDay = (a, b) => a && b && a.getFullYear() === b.getFullYear() && a.g
 // Date, which is only a series boundary (the recurring engine skips holiday occurrences).
 // `disablePast`: when true, any date before today is un-selectable — used for due-date fields.
 // `remarkLabel`: when set, a remark box is shown under the picker and its text is passed as the
-// 2nd argument to `onApply(iso, remark)` — used by the assigner's Reopen action, which must
-// carry both a new deadline and a mandatory reason. `remarkRequired` gates Done on it.
+// 2nd argument to `onApply(iso, remark)` — used by the assigner's Reopen action, which carries
+// both a new deadline and an optional reason. `remarkRequired` (opt-in) gates Done on it.
 // `dateOnly`: when true, the DATE/TIME tabs and the time input are hidden — only a date is
 // picked. Used by the Todo Repeat End Date, where the series stop is decided purely by date
 // (the time is ignored), so a time picker would only mislead.

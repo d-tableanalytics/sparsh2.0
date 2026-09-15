@@ -883,7 +883,7 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
         categories={categories} tags={tagOptions} onTaxonomyChanged={fetchTaxonomy} groupId={groupId} />
       <TaskDetailsModal isOpen={!!detailsTaskId} taskId={detailsTaskId} scope={scope} onClose={() => setDetailsTaskId(null)} onChanged={fetchTasks}
         onEdit={(t) => { setDetailsTaskId(null); setEditingTask(t); setModalOpen(true); }} />
-      {/* Reopen (from Pending Verification): a NEW deadline + a mandatory reason, then the task
+      {/* Reopen (from Pending Verification): a NEW deadline + an optional reason, then the task
           goes back to the assignee for rework. */}
       <MiniDatePicker
         isOpen={!!reopenTarget}
@@ -893,7 +893,7 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
         onApply={(iso, remark) => handleReopenWithDeadline(iso, remark)}
         holidayDates={holidayDates} weeklyOffs={WEEKLY_OFFS} onBlocked={showError}
         disablePast
-        remarkLabel="Reason for Reopening" remarkRequired
+        remarkLabel="Reason for Reopening"
       />
       {/* Doer Name + Reason capture for Dependent on Other / Blocked (from either list dropdown). */}
       <StatusReasonModal

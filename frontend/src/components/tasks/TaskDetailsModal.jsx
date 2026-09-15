@@ -1031,10 +1031,8 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, scope, onChanged, onEdit })
         to the deadline, and the assignee's "Revise" option in their working dropdown — the
         latter is how a doer shifts a delegation they can't finish in time.
 
-        The reason is MANDATORY either way: a date that moves without a stated cause leaves the
-        assigner with a changed commitment and no explanation, which is the whole point of
-        recording the shift. `remarkRequired` blocks Done until it's typed, and the backend
-        rejects a reasonless revision too, so the API can't be used to skip it. */}
+        The reason is optional — the picker no longer blocks Done on it, and the backend accepts
+        a reasonless revision too. */}
     <MiniDatePicker
       isOpen={deadlinePickerOpen}
       onClose={() => setDeadlinePickerOpen(false)}
@@ -1043,11 +1041,11 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, scope, onChanged, onEdit })
       onApply={(iso, remark) => handleReviseDeadline(iso, remark)}
       holidayDates={holidayDates} weeklyOffs={WEEKLY_OFFS} onBlocked={showError}
       disablePast
-      remarkLabel="Reason for Revision" remarkRequired
+      remarkLabel="Reason for Revision"
     />
 
-    {/* Reopen picker — the assigner must set a NEW deadline and give a mandatory reason; only
-        then is the task handed back to the assignee for rework. */}
+    {/* Reopen picker — the assigner sets a NEW deadline and may optionally give a reason; then
+        the task is handed back to the assignee for rework. */}
     <MiniDatePicker
       isOpen={reopenPickerOpen}
       onClose={() => setReopenPickerOpen(false)}
@@ -1056,7 +1054,7 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, scope, onChanged, onEdit })
       onApply={(iso, remark) => handleReopenWithDeadline(iso, remark)}
       holidayDates={holidayDates} weeklyOffs={WEEKLY_OFFS} onBlocked={showError}
       disablePast
-      remarkLabel="Reason for Reopening" remarkRequired
+      remarkLabel="Reason for Reopening"
     />
 
     {/* Doer Name + Reason capture for Dependent on Other / Blocked. */}
