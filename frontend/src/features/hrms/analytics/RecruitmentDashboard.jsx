@@ -67,7 +67,7 @@ const bandKpis = (kpis) => {
 };
 
 const RecruitmentDashboard = () => {
-  const { scope, companyId } = useHrms();
+  const { scope, companyId, isInternal } = useHrms();
 
   const [range, setRange] = useState({ from: '', to: '' });
   const [data, setData] = useState(null);
@@ -92,7 +92,12 @@ const RecruitmentDashboard = () => {
   const [masters, setMasters] = useState({ departments: [], designations: [] });
 
   useEffect(() => {
-    if (!companyId) return;
+    // The "which client is this for" filter only means anything for Sparsh staff, who
+    // recruit FOR other companies. A client-side company never does — their own reqs never
+    // carry another company's client_id — so this list would be every OTHER company on the
+    // platform shown to a reader who has no reason to see who else uses the module. Never
+    // fetched for a client-side caller, not just hidden once it arrives.
+    if (!companyId || !isInternal) return;
     // These rows are the ERP's Companies, projected to `{ client_id, name }` by the API —
     // HRMS keeps no client list of its own. Failing quietly is correct: losing the filter is
     // better than an error banner over figures that are perfectly readable without it.
@@ -100,7 +105,7 @@ const RecruitmentDashboard = () => {
       .then(({ data: d }) => setClients(d?.clients || []))
       .catch(() => setClients([]));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [companyId]);
+  }, [companyId, isInternal]);
 
   const selectedClient = clients.find((c) => c.client_id === clientId);
 
@@ -188,7 +193,12 @@ const RecruitmentDashboard = () => {
         title="Recruitment analytics"
         subtitle={selectedClient
           ? `${selectedClient.name} · ${data?.range ? `${data.range.from} to ${data.range.to}` : ''}`
-          : (data?.range ? `All clients · ${data.range.from} to ${data.range.to}`
+          // "All clients" only means something from Sparsh's multi-client vantage point —
+          // a client-side company's own dashboard is just their own hiring, not a
+          // comparison, so it gets the plain date range instead.
+          : (data?.range
+            ? (isInternal ? `All clients · ${data.range.from} to ${data.range.to}`
+              : `${data.range.from} to ${data.range.to}`)
             : 'Hiring at a glance')}
         actions={<RangePicker value={range} onChange={setRange} />}
       />
@@ -200,8 +210,11 @@ const RecruitmentDashboard = () => {
           the server — nothing below is filtered in the browser.
 
           "All clients" is not a wider scope than the default — it IS the default, and it
-          turns on the per-client comparison table below. */}
-      {clients.length > 0 && (
+          turns on the per-client comparison table below.
+
+          Sparsh staff only: see the effect above for why a client-side company never gets
+          this list fetched in the first place. */}
+      {isInternal && clients.length > 0 && (
         <div className="flex items-center gap-2.5 flex-wrap rounded-xl border border-[var(--border)] bg-[var(--bg-card)] px-4 py-3">
           <label htmlFor="d-client" className="text-[11px] font-bold uppercase tracking-widest text-[var(--text-muted)]">
             Client
@@ -228,21 +241,30 @@ const RecruitmentDashboard = () => {
       {/* ── Internal track ── the SOP §10 KPI block.
           A separate toggle from the client filter because it answers a different question:
           the client filter asks "how is this client's hiring going", this asks "is our own
-          recruitment policy being followed". */}
-      <div className="flex items-center gap-2 flex-wrap">
-        <label htmlFor="d-track" className="text-[11px] font-bold uppercase tracking-widest text-[var(--text-muted)]">
-          View
-        </label>
-        <select
-          id="d-track"
-          value={track}
-          onChange={(e) => setTrack(e.target.value)}
-          className="h-9 px-3 rounded-lg border border-[var(--border)] bg-[var(--input-bg)] text-[13px] text-[var(--text-main)]"
-        >
-          <option value="">Recruitment overview</option>
-          <option value="internal">Internal policy compliance (SOP KPIs)</option>
-        </select>
-      </div>
+          recruitment policy being followed".
+
+          Sparsh staff only: the Internal Recruitment SOP is Sparsh Magic's own governance
+          document (position scorecards, phone screen, shortlisting committee — the same
+          track HrmsWorkspaceBar's "Internal hiring" group and INTERNAL_TRACK_ONLY_CAPS
+          already keep out of a client-side user's reach elsewhere in the module). With one
+          option left there is nothing to toggle, so the selector itself is dropped rather
+          than shown disabled. */}
+      {isInternal && (
+        <div className="flex items-center gap-2 flex-wrap">
+          <label htmlFor="d-track" className="text-[11px] font-bold uppercase tracking-widest text-[var(--text-muted)]">
+            View
+          </label>
+          <select
+            id="d-track"
+            value={track}
+            onChange={(e) => setTrack(e.target.value)}
+            className="h-9 px-3 rounded-lg border border-[var(--border)] bg-[var(--input-bg)] text-[13px] text-[var(--text-main)]"
+          >
+            <option value="">Recruitment overview</option>
+            <option value="internal">Internal policy compliance (SOP KPIs)</option>
+          </select>
+        </div>
+      )}
 
       {data?.scoped_to_own_requisitions && <ScopeNotice />}
 
@@ -293,7 +315,9 @@ const RecruitmentDashboard = () => {
               <p className="mb-4 text-[11.5px] text-[var(--text-muted)]">
                 {selectedClient
                   ? `Every CV raised against ${selectedClient.name}'s requisitions.`
-                  : 'Every CV in scope, across all clients and in-house requisitions.'}
+                  : (isInternal
+                    ? 'Every CV in scope, across all clients and in-house requisitions.'
+                    : 'Every CV raised against your own requisitions.')}
               </p>
               <CvFunnel stages={data.cv_funnel} />
             </section>
@@ -367,8 +391,10 @@ const RecruitmentDashboard = () => {
 
           {/* ── Phase 11-R, Item 4 — the per-client comparison ──
               Shown only in the "all clients" view: with one client selected the KPIs above
-              already ARE that client's figures, and a one-row comparison is noise. */}
-          {!clientId && data.client_comparison?.length > 0 && (
+              already ARE that client's figures, and a one-row comparison is noise. Sparsh
+              staff only, for the same reason: a client-side company's own reqs never carry
+              another company's client_id, so this would always be a single un-telling row. */}
+          {isInternal && !clientId && data.client_comparison?.length > 0 && (
             <section className={CARD}>
               <p className={`${SECTION_TITLE} mb-3`}>Client comparison</p>
               <div className="overflow-x-auto">

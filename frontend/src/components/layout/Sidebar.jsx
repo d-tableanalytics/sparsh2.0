@@ -32,10 +32,6 @@ import {
   GraduationCap,
   // ── Phase PULSE-1 ── 30/90-Day Pulse Survey.
   HeartPulse,
-  // Onboarding (Pre-boarding → Joining) — the same icon HrmsWorkspaceBar's own
-  // "Onboarding" tab already uses, so the sidebar entry and the in-pipeline tab read as
-  // the same stage rather than two different ones.
-  UserPlus,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { canAccessTaskManagement } from '../../utils/taskAccess';
@@ -219,14 +215,10 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
     { name: 'Shared Candidates', path: '/hrms/shared-candidates', icon: Users },
 
     // ── Stages 06-07: Pre-boarding -> Joining (Onboarding) ──
-    // Onboarding previously had NO entry point outside the workspace tab strip, which
-    // itself only renders once you are already on a pipeline route (HrmsWorkspace.jsx:
-    // "renders itself as null outside the recruitment pipeline") — so a user landing
-    // anywhere else in HRMS (Dashboard, Employees, ...) had no way to discover it existed.
-    // It is the same board the workspace tab strip's "Onboarding" tab already links to
-    // (`/hrms/onboarding`), not a second screen — this is a second DOOR into it, the same
-    // relationship 'Recruitment' above already has with the tab strip's own 'Hiring Req'.
-    { name: 'Onboarding', path: '/hrms/onboarding', icon: UserPlus },
+    // Onboarding's sidebar entry point was removed again: it duplicated the workspace tab
+    // strip's own 'Onboarding' tab (`/hrms/onboarding`, in the "Both tracks" group), which
+    // is reachable from 'Recruitment' above the same way 'Hiring Req' is — so this was a
+    // second door to the same room, not a second room.
     // ── Phase INT-2 ── post-offer engagement tracking for the same pre-boarding window,
     // not itself a pipeline stage.
     { name: 'Pre-boarding', path: '/hrms/preboarding', icon: HeartHandshake },

@@ -306,7 +306,13 @@ HRMS_INDEXES = [
     (COLL_DESIGNATIONS, [("company_id", 1), ("name", 1)],     {"unique": True, "name": "uniq_company_name"}),
 
     # ── Phase 3: requisitions + job descriptions ──
-    (COLL_REQUISITIONS, [("request_no", 1)],                  {"unique": True, "name": "uniq_request_no"}),
+    # Composite with company_id, not a bare unique: next_business_id mints request_no PER
+    # COMPANY (see counter_key's own docstring), so two companies legitimately both reach
+    # "HR-REQ-2026-021" -- a bare unique index refuses the second one's insert with an
+    # E11000 the moment both counters reach the same number. Same class of bug as
+    # uniq_assessment_no below, just an earlier phase that predates that fix.
+    (COLL_REQUISITIONS, [("company_id", 1), ("request_no", 1)],
+                                                              {"unique": True, "name": "uniq_request_no"}),
     (COLL_REQUISITIONS, [("company_id", 1), ("approval_status", 1)],
                                                               {"name": "by_company_approval"}),
     (COLL_REQUISITIONS, [("company_id", 1), ("closing_status", 1)],
@@ -315,7 +321,11 @@ HRMS_INDEXES = [
                                                               {"name": "by_company_creator"}),
     (COLL_REQUISITIONS, [("company_id", 1), ("department_id", 1)],
                                                               {"name": "by_company_department"}),
-    (COLL_JOB_DESCRIPTIONS, [("jd_no", 1)],                   {"unique": True, "name": "uniq_jd_no"}),
+    # Same per-company-sequence issue as request_no above -- reproduced live as
+    # "E11000 ... uniq_jd_no dup key: { jd_no: 'JD-2026-021' }" once two companies' JD
+    # counters both reached 021.
+    (COLL_JOB_DESCRIPTIONS, [("company_id", 1), ("jd_no", 1)],
+                                                              {"unique": True, "name": "uniq_jd_no"}),
     (COLL_JOB_DESCRIPTIONS, [("request_no", 1)],              {"name": "by_request"}),
     (COLL_JOB_DESCRIPTIONS, [("company_id", 1), ("status", 1)],
                                                               {"name": "by_company_status"}),
@@ -326,7 +336,9 @@ HRMS_INDEXES = [
     (COLL_JOB_POSTINGS, [("company_id", 1), ("live_status", 1)],
                                                               {"name": "by_company_live"}),
     (COLL_JOB_POSTINGS, [("request_no", 1)],                  {"name": "by_request"}),
-    (COLL_CANDIDATES,   [("uk", 1)],                          {"unique": True, "name": "uniq_uk"}),
+    # Composite with company_id -- uk is minted per company by next_business_id, same as
+    # every other business id in this file.
+    (COLL_CANDIDATES,   [("company_id", 1), ("uk", 1)],       {"unique": True, "name": "uniq_uk"}),
     (COLL_CANDIDATES,   [("company_id", 1), ("application_status", 1)],
                                                               {"name": "by_company_status"}),
     (COLL_CANDIDATES,   [("posting_code", 1)],                {"name": "by_posting"}),
@@ -340,7 +352,14 @@ HRMS_INDEXES = [
                                                                "name": "ttl_expires"}),
 
     # ── Phase 6: assessments ──
-    (COLL_ASSESSMENTS, [("assessment_no", 1)],                {"unique": True, "name": "uniq_assessment_no"}),
+    # Compound with company_id, not a bare unique on assessment_no: next_business_id scopes
+    # its counter PER COMPANY (counter_key's own docstring -- "a client must not be able to
+    # infer another client's hiring volume from gaps in their own numbering"), so two
+    # different companies legitimately mint the same "ASM-2026-008". A bare unique index
+    # rejected the second company's insert with a 500 (E11000) the moment both companies'
+    # counters reached the same number -- reconciled the same way Phase 9 fixed uniq_user.
+    (COLL_ASSESSMENTS, [("company_id", 1), ("assessment_no", 1)],
+                                                              {"unique": True, "name": "uniq_assessment_no"}),
     # The access code is the ONLY credential protecting a candidate's submission, so it is
     # both unique and indexed -- every public request looks up by it.
     (COLL_ASSESSMENTS, [("access_code", 1)],                  {"unique": True, "name": "uniq_access_code"}),
@@ -349,7 +368,9 @@ HRMS_INDEXES = [
     (COLL_ASSESSMENTS, [("request_no", 1)],                   {"name": "by_request"}),
 
     # ── Phase 7: interviews ──
-    (COLL_INTERVIEWS, [("interview_no", 1)],                  {"unique": True, "name": "uniq_interview_no"}),
+    # Composite with company_id -- interview_no is minted per company.
+    (COLL_INTERVIEWS, [("company_id", 1), ("interview_no", 1)],
+                                                              {"unique": True, "name": "uniq_interview_no"}),
     (COLL_INTERVIEWS, [("uk", 1)],                            {"name": "by_candidate"}),
     (COLL_INTERVIEWS, [("company_id", 1), ("status", 1)],     {"name": "by_company_status"}),
     # The board groups by day, so the feed always sorts on this.
@@ -359,7 +380,8 @@ HRMS_INDEXES = [
     (COLL_INTERVIEWS, [("interviewer_id", 1)],                {"name": "by_interviewer"}),
 
     # ── Phase 8: offers ──
-    (COLL_OFFERS, [("offer_no", 1)],                          {"unique": True, "name": "uniq_offer_no"}),
+    # Composite with company_id -- offer_no is minted per company.
+    (COLL_OFFERS, [("company_id", 1), ("offer_no", 1)],       {"unique": True, "name": "uniq_offer_no"}),
     # The access code is the candidate's only credential; every public request looks it up.
     (COLL_OFFERS, [("access_code", 1)],                       {"unique": True, "name": "uniq_access_code"}),
     (COLL_OFFERS, [("uk", 1)],                                {"name": "by_candidate"}),
@@ -367,12 +389,18 @@ HRMS_INDEXES = [
     (COLL_OFFERS, [("request_no", 1)],                        {"name": "by_request"}),
 
     # ── Phase 9: onboarding ──
-    (COLL_ONBOARDING, [("onb_no", 1)],                        {"unique": True, "name": "uniq_onb_no"}),
+    # Composite with company_id -- onb_no is minted per company.
+    (COLL_ONBOARDING, [("company_id", 1), ("onb_no", 1)],     {"unique": True, "name": "uniq_onb_no"}),
     (COLL_ONBOARDING, [("access_code", 1)],                   {"unique": True, "name": "uniq_access_code"}),
-    (COLL_ONBOARDING, [("uk", 1)],                            {"unique": True, "name": "uniq_candidate"}),
+    # Composite with company_id -- uk is per-company too (see uniq_uk above), so without
+    # this a candidate from one company blocks a same-numbered candidate from another
+    # company from ever starting onboarding.
+    (COLL_ONBOARDING, [("company_id", 1), ("uk", 1)],         {"unique": True, "name": "uniq_candidate"}),
     (COLL_ONBOARDING, [("company_id", 1), ("status", 1)],     {"name": "by_company_status"}),
-    # Sparse: the id is minted partway through, so most rows have none yet.
-    (COLL_ONBOARDING, [("employee_id", 1)],                   {"unique": True, "sparse": True,
+    # Sparse: the id is minted partway through, so most rows have none yet. Composite with
+    # company_id -- employee_id is minted per company by next_business_id, same as every
+    # other business id in this file.
+    (COLL_ONBOARDING, [("company_id", 1), ("employee_id", 1)], {"unique": True, "sparse": True,
                                                                "name": "uniq_employee_id"}),
 
     # -- Phase 10: date-ranged analytics ------------------------------------------
@@ -388,14 +416,17 @@ HRMS_INDEXES = [
     # The registry is looked up by CODE on every public request (the revocation guard), so
     # that index is unique and is the hot one. The rest serve the Link Manager's filters.
     (COLL_LINKS, [("code", 1)],                               {"unique": True, "name": "uniq_code"}),
-    (COLL_LINKS, [("link_id", 1)],                            {"unique": True, "name": "uniq_link_id"}),
+    # Composite with company_id -- link_id (unlike code, a random token) is minted per
+    # company by next_business_id, same as every other business id in this file.
+    (COLL_LINKS, [("company_id", 1), ("link_id", 1)],         {"unique": True, "name": "uniq_link_id"}),
     (COLL_LINKS, [("company_id", 1), ("kind", 1), ("status", 1)],
                                                               {"name": "by_company_kind_status"}),
     (COLL_LINKS, [("company_id", 1), ("created_at", -1)],     {"name": "by_company_created"}),
     (COLL_LINKS, [("target_id", 1)],                          {"name": "by_target"}),
     (COLL_LINKS, [("request_no", 1)],                         {"name": "by_request"}),
 
-    (COLL_DOCUMENTS, [("doc_no", 1)],                         {"unique": True, "name": "uniq_doc_no"}),
+    # Composite with company_id -- doc_no is minted per company.
+    (COLL_DOCUMENTS, [("company_id", 1), ("doc_no", 1)],      {"unique": True, "name": "uniq_doc_no"}),
     (COLL_DOCUMENTS, [("company_id", 1), ("owner_type", 1), ("owner_id", 1)],
                                                               {"name": "by_owner"}),
     (COLL_DOCUMENTS, [("company_id", 1), ("status", 1)],      {"name": "by_company_status"}),
@@ -407,11 +438,14 @@ HRMS_INDEXES = [
 
     # One appointment letter per candidate, enforced at the DB level: the letter confirms
     # joining terms, and two of them for one person is a contradiction, not a workflow.
-    (COLL_APPOINTMENTS, [("appointment_no", 1)],              {"unique": True,
+    # Composite with company_id -- appointment_no and uk are both per-company (uk per
+    # uniq_uk above), same fix as requisitions/JDs/candidates/interviews/offers/onboarding.
+    (COLL_APPOINTMENTS, [("company_id", 1), ("appointment_no", 1)],
+                                                              {"unique": True,
                                                                "name": "uniq_appointment_no"}),
     (COLL_APPOINTMENTS, [("access_code", 1)],                 {"unique": True,
                                                                "name": "uniq_access_code"}),
-    (COLL_APPOINTMENTS, [("uk", 1)],                          {"unique": True,
+    (COLL_APPOINTMENTS, [("company_id", 1), ("uk", 1)],       {"unique": True,
                                                                "name": "uniq_candidate"}),
     (COLL_APPOINTMENTS, [("company_id", 1), ("status", 1)],   {"name": "by_company_status"}),
     (COLL_APPOINTMENTS, [("request_no", 1)],                  {"name": "by_request"}),
@@ -424,7 +458,9 @@ HRMS_INDEXES = [
      {"name": "by_company_track"}),
 
     # ── Client engagements ──
-    (COLL_CLIENT_ENGAGEMENTS, [("engagement_id", 1)],   {"unique": True,
+    # Composite with company_id -- engagement_id is minted per (vendor) company.
+    (COLL_CLIENT_ENGAGEMENTS, [("company_id", 1), ("engagement_id", 1)],
+                                                         {"unique": True,
                                                          "name": "uniq_engagement_id"}),
     # One engagement per (tenant, client). A second would mean two answers to "are they our
     # client", and two member lists to keep in step.
@@ -437,18 +473,24 @@ HRMS_INDEXES = [
     # ── Internal recruitment track ──
     # One scorecard per requisition -- the uniqueness IS the rule, exactly as it is for
     # sanctioned strength.
-    (COLL_POSITION_SCORECARDS, [("scr_no", 1)],               {"unique": True,
+    # Composite with company_id -- scr_no is minted per company.
+    (COLL_POSITION_SCORECARDS, [("company_id", 1), ("scr_no", 1)],
+                                                              {"unique": True,
                                                                "name": "uniq_scr_no"}),
     (COLL_POSITION_SCORECARDS, [("company_id", 1), ("request_no", 1)],
      {"unique": True, "name": "uniq_company_request"}),
 
-    (COLL_REFERENCE_CHECKS, [("ref_no", 1)],                  {"unique": True,
+    # Composite with company_id -- ref_no is minted per company.
+    (COLL_REFERENCE_CHECKS, [("company_id", 1), ("ref_no", 1)],
+                                                              {"unique": True,
                                                                "name": "uniq_ref_no"}),
     # A candidate may have SEVERAL referees, so this is deliberately not unique.
     (COLL_REFERENCE_CHECKS, [("company_id", 1), ("uk", 1)],   {"name": "by_company_candidate"}),
     (COLL_REFERENCE_CHECKS, [("request_no", 1)],              {"name": "by_request"}),
 
-    (COLL_PROBATION_REVIEWS, [("prb_no", 1)],                 {"unique": True,
+    # Composite with company_id -- prb_no is minted per company.
+    (COLL_PROBATION_REVIEWS, [("company_id", 1), ("prb_no", 1)],
+                                                              {"unique": True,
                                                                "name": "uniq_prb_no"}),
     # One live probation per employee. A second term after an extension updates this record
     # rather than opening a competing one.
@@ -457,7 +499,8 @@ HRMS_INDEXES = [
     # `GET /probation/due` sorts on this, and it is the field the SLA breach sweep reads.
     (COLL_PROBATION_REVIEWS, [("company_id", 1), ("ends_on", 1)], {"name": "by_company_end"}),
 
-    (COLL_EXCEPTIONS, [("exc_no", 1)],                        {"unique": True,
+    # Composite with company_id -- exc_no is minted per company.
+    (COLL_EXCEPTIONS, [("company_id", 1), ("exc_no", 1)],     {"unique": True,
                                                                "name": "uniq_exc_no"}),
     # The gate checks read this exact shape: "is there an APPROVED exception of this type
     # for this requisition (and candidate)".
@@ -471,7 +514,9 @@ HRMS_INDEXES = [
      {"unique": True, "name": "uniq_company_position"}),
 
     # ── Phase INT-2 ──
-    (COLL_SHORTLIST_REVIEWS, [("slr_no", 1)],                {"unique": True,
+    # Composite with company_id -- slr_no is minted per company.
+    (COLL_SHORTLIST_REVIEWS, [("company_id", 1), ("slr_no", 1)],
+                                                              {"unique": True,
                                                               "name": "uniq_slr_no"}),
     # The gate on `Selected` asks "is there a committee record covering this candidate on
     # this requisition", so both are indexed. Deliberately NOT unique: a second intake on
@@ -485,7 +530,8 @@ HRMS_INDEXES = [
     (COLL_INTERVIEW_WINDOWS, [("company_id", 1), ("department_id", 1), ("weekday", 1)],
      {"name": "by_company_department_day"}),
 
-    (COLL_PREBOARDING, [("pbt_no", 1)],                      {"unique": True,
+    # Composite with company_id -- pbt_no is minted per company.
+    (COLL_PREBOARDING, [("company_id", 1), ("pbt_no", 1)],   {"unique": True,
                                                               "name": "uniq_pbt_no"}),
     # `GET /preboarding/due` reads the LATEST touchpoint per candidate, so this is the
     # index it sorts on.
@@ -496,7 +542,8 @@ HRMS_INDEXES = [
     # One ACTIVE band per (department, designation, grade) is a rule the service enforces
     # rather than the index, because a superseded band stays on file with its own
     # effective dates -- uniqueness here would make history impossible to keep.
-    (COLL_SALARY_BANDS, [("band_no", 1)],                    {"unique": True,
+    # Composite with company_id -- band_no is minted per company.
+    (COLL_SALARY_BANDS, [("company_id", 1), ("band_no", 1)], {"unique": True,
                                                               "name": "uniq_band_no"}),
     (COLL_SALARY_BANDS,
      [("company_id", 1), ("department_id", 1), ("designation_id", 1), ("status", 1)],
@@ -509,10 +556,12 @@ HRMS_INDEXES = [
      {"name": "by_company_candidate_recent"}),
     (COLL_COMM_LOG, [("request_no", 1)],                     {"name": "by_request"}),
 
-    (COLL_SURVEYS, [("srv_no", 1)],                          {"unique": True,
+    # Composite with company_id -- srv_no and srp_no are both minted per company.
+    (COLL_SURVEYS, [("company_id", 1), ("srv_no", 1)],       {"unique": True,
                                                               "name": "uniq_srv_no"}),
     (COLL_SURVEYS, [("company_id", 1), ("kind", 1)],         {"name": "by_company_kind"}),
-    (COLL_SURVEY_RESPONSES, [("srp_no", 1)],                 {"unique": True,
+    (COLL_SURVEY_RESPONSES, [("company_id", 1), ("srp_no", 1)],
+                                                              {"unique": True,
                                                               "name": "uniq_srp_no"}),
     # One response per instrument per employee. The uniqueness IS the de-duplication, and
     # it is the only reason `employee_code` is stored at all -- see SURVEY_MIN_RESPONSES.
@@ -528,7 +577,8 @@ HRMS_INDEXES = [
     (COLL_POLICY_REVISIONS, [("company_id", 1), ("policy_key", 1), ("version", 1)],
      {"unique": True, "name": "uniq_company_policy_version"}),
 
-    (COLL_PURGE_BATCHES, [("batch_no", 1)],                  {"unique": True,
+    # Composite with company_id -- batch_no is minted per company.
+    (COLL_PURGE_BATCHES, [("company_id", 1), ("batch_no", 1)], {"unique": True,
                                                               "name": "uniq_batch_no"}),
     (COLL_PURGE_BATCHES, [("company_id", 1), ("status", 1)], {"name": "by_company_status"}),
 
@@ -544,7 +594,8 @@ HRMS_INDEXES = [
     # ── Phase INT-4: telephonic screening ──
     # NOT unique on (company, candidate): a second call happens (the first was cut off, the
     # candidate asked to be rung back), and the gate asks whether ANY screen passed.
-    (COLL_TELEPHONIC, [("tel_no", 1)],                       {"unique": True,
+    # Composite with company_id -- tel_no is minted per company.
+    (COLL_TELEPHONIC, [("company_id", 1), ("tel_no", 1)],    {"unique": True,
                                                               "name": "uniq_tel_no"}),
     (COLL_TELEPHONIC, [("company_id", 1), ("uk", 1)],        {"name": "by_candidate"}),
     (COLL_TELEPHONIC, [("company_id", 1), ("outcome", 1)],   {"name": "by_company_outcome"}),
@@ -1831,6 +1882,52 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
 
 
 # ─────────────────────────────────────────────────────────────
+# The Internal Recruitment SOP's own controls — Sparsh Magic hiring for itself
+# ─────────────────────────────────────────────────────────────
+# HrmsWorkspaceBar's "Internal hiring" tab group (Overview, Internal reqs, Scorecards,
+# Phone screen, Shortlisting, References, Negotiation) runs on these ten capabilities.
+# They stay in ROLE_CAPABILITIES above unchanged -- MD/HR/MANAGER/FINANCE still need them
+# to run Sparsh's OWN governance ladder when a Sparsh staff member holds one of those
+# governance roles -- but `capabilities_for()` strips this exact set from any CLIENT-SIDE
+# user, whatever governance role their own company's Role & Access screen has them at.
+#
+# Why a strip rather than a smaller ROLE_CAPABILITIES to begin with: MD/HR/MANAGER/
+# FINANCE/EMPLOYEE are the SAME role identities a client company's own users resolve to
+# (hrms_role() maps governance_role -> these same enum members, with no separate "client
+# MD" role) -- so the capability SET a rung carries has to differ by who the caller is,
+# not just by rung. A client's HOD approving THEIR OWN requisitions still needs everything
+# else that rung holds; they never need Sparsh's internal scorecard/phone-screen/
+# shortlisting-committee/reference-check/negotiation controls, which exist to run the
+# Internal Recruitment SOP (Annexure B/C) for Sparsh's own headcount, not a client's.
+INTERNAL_TRACK_ONLY_CAPS: Set[Cap] = {
+    Cap.SCORECARD_READ, Cap.SCORECARD_WRITE, Cap.SCORECARD_APPROVE,
+    Cap.TELEPHONIC_READ, Cap.TELEPHONIC_WRITE,
+    Cap.SHORTLIST_READ, Cap.SHORTLIST_WRITE,
+    Cap.REFERENCE_READ, Cap.REFERENCE_WRITE,
+    Cap.NEGOTIATION_READ, Cap.NEGOTIATION_WRITE,
+}
+
+
+# ─────────────────────────────────────────────────────────────
+# Sparsh's own side of the Client Hiring conversation
+# ─────────────────────────────────────────────────────────────
+# The CLIENT role's own comment (above, where it deliberately omits these) already states
+# the design: "no SHARE_WRITE (a client can never share a CV onward, to anyone), no
+# JOB_REQUEST_REVIEW (accepting their own request would make Sparsh's review a formality)".
+# A client raises a job request and responds to the CVs shared with them (JOB_REQUEST_READ/
+# WRITE, SHARE_READ/RESPOND — left untouched); reviewing/accepting/declining/converting that
+# SAME request, sharing a CV onward, and running background verification are Sparsh's own
+# triage of it, for the identical reason INTERNAL_TRACK_ONLY_CAPS exists just above: MD/HR/
+# MANAGER are the same role identities a client's own governance ladder resolves to, so
+# these five have to be stripped by WHO the caller is, not left keyed to rung alone.
+CLIENT_TRACK_SPARSH_ONLY_CAPS: Set[Cap] = {
+    Cap.JOB_REQUEST_REVIEW,
+    Cap.SHARE_WRITE,
+    Cap.BACKGROUND_READ, Cap.BACKGROUND_WRITE, Cap.BACKGROUND_APPROVE,
+}
+
+
+# ─────────────────────────────────────────────────────────────
 # Audit actions
 # ─────────────────────────────────────────────────────────────
 AUDIT_MODULE_ENABLED  = "hrms module enabled"
@@ -2639,7 +2736,9 @@ class RequisitionIn(BaseModel):
     qualification: str
     essential_skills: str
     required_date: str                    # YYYY-MM-DD
-    assignee_id: str                      # who will run the recruitment
+    # No longer collected at raise time (removed from every requisition-raising form) -- a
+    # requisition left unassigned is not incomplete; see create_requisition's own note.
+    assignee_id: Optional[str] = None     # who will run the recruitment, once named
     offering_ctc: Optional[float] = None
     urgency_level: Urgency = Urgency.MEDIUM
     work_location: WorkLocation = WorkLocation.OFFICE
@@ -3582,6 +3681,10 @@ class OfferIn(BaseModel):
     location: Optional[str] = None
     content: Optional[str] = None           # defaults to DEFAULT_OFFER_BODY
     send_now: bool = False                  # create and send in one action
+    # Undeclared here, this field was silently dropped by Pydantic before the service ever
+    # saw it -- `send_now=True` with a typed signature still failed the "authorised
+    # signatory" check every time, because the service always read `None`.
+    signature: Optional[str] = None         # authorised signatory, required when send_now
 
 
 class OfferUpdate(BaseModel):

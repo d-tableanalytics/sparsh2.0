@@ -501,6 +501,7 @@ const RequisitionList = () => {
       {showForm && (
         <RequisitionFormModal
           existing={editing}
+          fixedTrack="client"
           onClose={() => { setShowForm(false); setEditing(null); }}
           onSaved={() => { setShowForm(false); setEditing(null); refresh(); }}
         />

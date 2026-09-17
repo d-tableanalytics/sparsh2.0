@@ -11,7 +11,7 @@ import HrmsScopeBar from '../common/HrmsScopeBar';
 import { HrmsLoading, HrmsError, HrmsEmpty } from '../common/HrmsStates';
 import {
   getCandidates, getCandidate, updateCandidate, deleteCandidate, createCandidate,
-  recordClientResponse,
+  recordClientResponse, getRequisitions,
 } from '../../../services/hrmsApi';
 import { CandidateJourneyModal } from './CandidateJourney';
 
@@ -344,22 +344,47 @@ const AddModal = ({ onClose, onCreated }) => {
   const [form, setForm] = useState({
     candidate_name: '', can_email: '', can_contact: '', source: 'Referral',
     total_experience: '', qualification: '', expected_ctc: '',
+    // request_no is optional — a candidate added here with none stays unlinked, exactly as
+    // before. When set, the server both records it AND re-checks the same sourcing-budget
+    // gate a job posting is held to (SOP §11); this picker only makes an already-supported
+    // field reachable from the UI, it does not relax anything server-side.
+    request_no: '',
     // ── Phase 11-R, Item 5 ── the SAME referral fields the public form captures, validated
     // by the same server-side resolver. A referral HR types onto a walk-in CV must be as
     // reportable as one an applicant declared, or the referral figures count two things.
     is_referral: false, referred_by: '', referral_source: '',
     referrer_employee_code: '', referral_relation: '',
   });
+  const [requisitions, setRequisitions] = useState([]);
   const [saving, setSaving] = useState(false);
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
   const FIELD = 'w-full h-9 px-3 rounded-lg border border-[var(--border)] bg-[var(--input-bg)] text-[13px] text-[var(--text-main)]';
   const LABEL = 'block text-[11px] font-bold uppercase tracking-widest text-[var(--text-muted)] mb-1.5';
 
+  useEffect(() => {
+    getRequisitions({ ...scope, closing_status: 'Open', limit: 200 })
+      .then(({ data }) => setRequisitions(data?.requisitions || []))
+      .catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const submit = async (e) => {
     e.preventDefault();
     setSaving(true);
     try {
-      await createCandidate(form, scope);
+      // The referral fields are collapsed/blank by default (is_referral: false), but the
+      // backend's `referral_source` is `Optional[ReferralSource]` -- it accepts a real enum
+      // value or nothing at all, not an empty string. Sending the blank default 422s on
+      // EVERY non-referral add, so those fields are only included when actually referred.
+      const { is_referral, referred_by, referral_source, referrer_employee_code,
+        referral_relation, ...rest } = form;
+      const payload = { ...rest, request_no: form.request_no || null, is_referral };
+      if (is_referral) {
+        Object.assign(payload, {
+          referred_by, referral_source, referrer_employee_code, referral_relation,
+        });
+      }
+      await createCandidate(payload, scope);
       showSuccess('Candidate added');
       onCreated();
     } catch (err) {
@@ -387,6 +412,21 @@ const AddModal = ({ onClose, onCreated }) => {
           <div>
             <label className={LABEL} htmlFor="c-name">Full name *</label>
             <input id="c-name" required value={form.candidate_name} onChange={set('candidate_name')} className={FIELD} />
+          </div>
+          <div>
+            <label className={LABEL} htmlFor="c-req">Requisition</label>
+            <select id="c-req" value={form.request_no} onChange={set('request_no')} className={FIELD}>
+              <option value="">Not linked to a requisition yet</option>
+              {requisitions.map((r) => (
+                <option key={r.request_no} value={r.request_no}>
+                  {r.request_no} — {r.designation_name || r.department_name || 'Untitled'}
+                </option>
+              ))}
+            </select>
+            <p className="mt-1 text-[11px] text-[var(--text-muted)]">
+              Attaches this CV to that requisition's pipeline. Leave unset for a general CV
+              on file — this cannot be changed once the candidate is added.
+            </p>
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>

@@ -77,6 +77,14 @@ export const HrmsProvider = ({ children }) => {
     // Company scope
     companyId,
     companies,
+    /** The currently-selected company's own name — e.g. "Sparsh Magic" when operating as
+     *  that tenant, "People to Process" when operating as that one. The internal track's
+     *  copy ("raise an internal requisition", "no client involved") reads from this rather
+     *  than a hardcoded brand name, because "internal" means THIS company's own headcount,
+     *  whichever company that is — every tenant runs the same track, not just Sparsh Magic
+     *  (see hrms_requisition_service.create_requisition and its test coverage). Empty
+     *  while the company list hasn't loaded yet; callers fall back to generic wording. */
+    companyName: (companies.find((c) => c.id === companyId) || {}).name || '',
     // Client users cannot switch scope — the server pins them regardless, so the UI must
     // not pretend otherwise.
     setCompanyId: health?.is_internal ? setCompanyId : () => {},

@@ -612,7 +612,12 @@ async def create_requisition(actor: dict, company_id: str, payload: dict) -> dic
         jd_payload = jd_payload.model_dump(exclude_unset=True)
 
     clean = await _validate_requisition(payload, company_id, partial=False)
-    for required in ("department_id", "designation_id", "assignee_id", "required_date"):
+    # Assignee (recruiter) is no longer collected at raise time -- removed from every
+    # requisition-creation form (the direct raise, and converting an accepted job request).
+    # A requisition left unassigned is not a broken one: every downstream reader already
+    # treats `assignee_id` as optional (e.g. hrms_posting_service only notifies "if
+    # req.get('assignee_id')"), so nothing else needed to change.
+    for required in ("department_id", "designation_id", "required_date"):
         if required not in clean:
             label = required.replace("_id", "").replace("_", " ").capitalize()
             raise HTTPException(status_code=422, detail=f"{label} is required.")

@@ -255,8 +255,10 @@ const ConveneModal = ({ scope, busy, setBusy, onClose, onDone, onError }) => {
     getRequisitions({ ...scope, track: 'internal' })
       .then(({ data }) => setReqs(data?.requisitions || []))
       .catch(() => setReqs([]));
+    // A committee member needs a real login account — a profile onboarded before the
+    // person has one (`pending_user_link`) has no `user_id`, so it cannot be picked here.
     getEmployees(scope)
-      .then(({ data }) => setPeople(data?.employees || []))
+      .then(({ data }) => setPeople((data?.employees || []).filter((e) => e.user_id)))
       .catch(() => setPeople([]));
   }, [scope]);
 

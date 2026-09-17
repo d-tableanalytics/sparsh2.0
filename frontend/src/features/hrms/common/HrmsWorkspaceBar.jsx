@@ -6,6 +6,8 @@ import {
   BadgeCheck, Building, Target, PhoneCall, Users2, Phone, Scale,
   Inbox, Share2, ShieldCheck, Briefcase, LayoutDashboard,
 } from 'lucide-react';
+import { useHrms } from '../HrmsContext';
+import { CAP } from '../access';
 
 /**
  * HRMS ▸ workspace bar.
@@ -31,8 +33,24 @@ import {
  * strip is now three labelled groups, and the breadcrumb names the group — the reader can
  * always see which track they are working in, which is the whole of that requirement.
  *
- * The grouping is presentational. It adds no route, hides nothing, and gates nothing:
- * capability filtering stays where it belongs, on the screens and the API.
+ * "Internal hiring" is hidden outright for any client-side caller (`isInternal`, from
+ * GET /hrms/health) — it runs Sparsh Magic's OWN Internal Recruitment SOP (position
+ * scorecards, the phone screen, the shortlisting committee, reference checks, salary
+ * negotiation), which no client company's user should see exists, let alone navigate into.
+ * This mirrors the boundary `capabilities_for()` already enforces server-side via
+ * INTERNAL_TRACK_ONLY_CAPS — see backend/app/utils/hrms_access.py.
+ *
+ * Every OTHER tab, in every group, is shown only when the caller actually holds the
+ * capability its screen requires (`TAB_CAP` below, one entry per tab, mirroring each
+ * route's own `_require(...)` in backend/app/routes/hrms.py exactly). A tab with `cap: null`
+ * has no capability gate on its route (Interviews: "seeing the interview you were booked
+ * for is an inherent right", per that route's own docstring) and always shows. This is a
+ * UX kindness layered on a check the API already enforces, not a new security boundary —
+ * a screen that somehow renders anyway still gets nothing back from the API. The point is
+ * that a user should never see a tab whose screen tells them "you do not have access" the
+ * moment they click it (see the People to Process incident this replaced: a plain Employee
+ * saw the full three-group tab strip, including CV sharing and Verification, and only found
+ * out those were not for them after clicking through).
  */
 
 const GROUPS = [
@@ -43,19 +61,22 @@ const GROUPS = [
     // the vacancy belongs to, which is exactly why there is one HRMS and not two.
     hint: 'The shared pipeline — same screens whoever the vacancy belongs to.',
     tabs: [
-      { label: 'Hiring Req',       to: '/hrms/requisitions', icon: ClipboardList },
-      { label: 'Job Descriptions', to: '/hrms/jd',           icon: ScrollText },
-      { label: 'Job Postings',     to: '/hrms/postings',     icon: Megaphone },
-      { label: 'Candidates',       to: '/hrms/candidates',   icon: UserCircle },
-      { label: 'HR Screening',     to: '/hrms/screening',    icon: ClipboardCheck },
-      { label: 'Assessments',      to: '/hrms/assessments',  icon: ListChecks },
-      { label: 'Interviews',       to: '/hrms/interviews',   icon: CalendarDays },
-      { label: 'Offers',           to: '/hrms/offers',       icon: FileSignature },
+      { label: 'Hiring Req',       to: '/hrms/requisitions', icon: ClipboardList, cap: CAP.REQUISITION_READ },
+      { label: 'Job Descriptions', to: '/hrms/jd',           icon: ScrollText,    cap: CAP.JD_READ },
+      { label: 'Job Postings',     to: '/hrms/postings',     icon: Megaphone,     cap: CAP.POSTING_READ },
+      { label: 'Candidates',       to: '/hrms/candidates',   icon: UserCircle,    cap: CAP.CANDIDATE_READ },
+      { label: 'HR Screening',     to: '/hrms/screening',    icon: ClipboardCheck, cap: CAP.CANDIDATE_SCREEN },
+      { label: 'Assessments',      to: '/hrms/assessments',  icon: ListChecks,    cap: CAP.ASSESSMENT_READ },
+      // No cap: GET /interviews is deliberately ungated on the API — "seeing the interview
+      // you were booked for is an inherent right ... that must not be revocable by a
+      // permission edit" (routes/hrms.py list_interviews docstring).
+      { label: 'Interviews',       to: '/hrms/interviews',   icon: CalendarDays,  cap: null },
+      { label: 'Offers',           to: '/hrms/offers',       icon: FileSignature, cap: CAP.OFFER_READ },
       // Between Offers and Onboarding, which is where it sits in the real process: the
       // letter is issued after the offer is accepted and before joining.
-      { label: 'Appointments',     to: '/hrms/appointments', icon: BadgeCheck },
-      { label: 'Onboarding',       to: '/hrms/onboarding',   icon: UserPlus },
-      { label: 'Reports',          to: '/hrms/reports',      icon: PieChart },
+      { label: 'Appointments',     to: '/hrms/appointments', icon: BadgeCheck,    cap: CAP.APPOINTMENT_READ },
+      { label: 'Onboarding',       to: '/hrms/onboarding',   icon: UserPlus,      cap: CAP.ONBOARDING_READ },
+      { label: 'Reports',          to: '/hrms/reports',      icon: PieChart,      cap: CAP.ANALYTICS_READ },
     ],
   },
   {
@@ -64,18 +85,18 @@ const GROUPS = [
     hint: "Sparsh Magic's own vacancies, governed by the Internal Recruitment SOP.",
     tabs: [
       // The way in: what is waiting on whom, across every open internal position.
-      { label: 'Overview',         to: '/hrms/internal-hiring', icon: LayoutDashboard },
-      { label: 'Internal reqs',    to: '/hrms/internal-requisitions', icon: Building },
-      { label: 'Scorecards',       to: '/hrms/scorecards',   icon: Target },
+      { label: 'Overview',         to: '/hrms/internal-hiring', icon: LayoutDashboard, cap: CAP.REQUISITION_READ },
+      { label: 'Internal reqs',    to: '/hrms/internal-requisitions', icon: Building,  cap: CAP.REQUISITION_READ },
+      { label: 'Scorecards',       to: '/hrms/scorecards',   icon: Target,         cap: CAP.SCORECARD_READ },
       // The telephonic screen (SOP step 5) sits between CV screening and the panel, and
       // gates interview scheduling.
-      { label: 'Phone screen',     to: '/hrms/telephonic-screening', icon: Phone },
+      { label: 'Phone screen',     to: '/hrms/telephonic-screening', icon: Phone, cap: CAP.TELEPHONIC_READ },
       // The shortlisting committee (SOP §5) sits between screening and the final
       // interview, and gates `Selected`.
-      { label: 'Shortlisting',     to: '/hrms/shortlist-reviews', icon: Users2 },
-      { label: 'References',       to: '/hrms/reference-checks', icon: PhoneCall },
+      { label: 'Shortlisting',     to: '/hrms/shortlist-reviews', icon: Users2,   cap: CAP.SHORTLIST_READ },
+      { label: 'References',       to: '/hrms/reference-checks', icon: PhoneCall, cap: CAP.REFERENCE_READ },
       // Salary negotiation (SOP step 9) sits between the final interview and the offer.
-      { label: 'Negotiation',      to: '/hrms/negotiations', icon: Scale },
+      { label: 'Negotiation',      to: '/hrms/negotiations', icon: Scale,         cap: CAP.NEGOTIATION_READ },
     ],
   },
   {
@@ -86,9 +107,13 @@ const GROUPS = [
       // A request becomes a requisition, a CV goes to a client, verification gates the
       // offer. The client's OWN screens are not here: a client sees its own navigation,
       // not Sparsh's pipeline.
-      { label: 'Job requests',     to: '/hrms/job-requests', icon: Inbox },
-      { label: 'CV sharing',       to: '/hrms/cv-sharing',   icon: Share2 },
-      { label: 'Verification',     to: '/hrms/background-checks', icon: ShieldCheck },
+      { label: 'Job requests',     to: '/hrms/job-requests', icon: Inbox,         cap: CAP.JOB_REQUEST_READ },
+      // Sparsh-only in both directions: CAP.SHARE_WRITE and CAP.BACKGROUND_READ are in
+      // CLIENT_TRACK_SPARSH_ONLY_CAPS (backend/app/models/hrms.py) and stripped from every
+      // client-side caller regardless of governance role, so these two never show for a
+      // client company's own user of any rank.
+      { label: 'CV sharing',       to: '/hrms/cv-sharing',   icon: Share2,        cap: CAP.SHARE_WRITE },
+      { label: 'Verification',     to: '/hrms/background-checks', icon: ShieldCheck, cap: CAP.BACKGROUND_READ },
     ],
   },
 ];
@@ -106,15 +131,38 @@ const GROUP_TONE = {
 
 const HrmsWorkspaceBar = () => {
   const { pathname } = useLocation();
+  const { isInternal, can, companyName } = useHrms();
+
+  // GROUPS is a module-level constant, so its hint text can't name the current company —
+  // "internal" means whichever company is operating (People to Process's own headcount is
+  // just as much "internal" as Sparsh Magic's), so the static "Sparsh Magic" wording is
+  // substituted for the active company's own name here, at render time.
+  const name = companyName || 'This company';
+  const HINT_OVERRIDE = {
+    internal: `${name}'s own vacancies, governed by the Internal Recruitment SOP.`,
+    client: `Vacancies raised by a client company, filled by ${name}.`,
+  };
+
+  // Client-side users (any company's clientadmin/clientuser, whatever governance role
+  // they hold) never see the Internal Recruitment SOP group — see the file header.
+  // Within what's left, each tab shows only when the caller holds its own screen's
+  // capability (`cap: null` — Interviews — always shows). A group left with no visible
+  // tabs is dropped entirely rather than shown as an empty label.
+  const visibleGroups = (isInternal ? GROUPS : GROUPS.filter((g) => g.key !== 'internal'))
+    .map((group) => ({ ...group, tabs: group.tabs.filter((t) => !t.cap || can(t.cap)) }))
+    .filter((group) => group.tabs.length > 0);
 
   let active = null;
   let activeGroup = null;
-  for (const group of GROUPS) {
+  for (const group of visibleGroups) {
     const hit = group.tabs.find((t) => owns(t, pathname));
     if (hit) { active = hit; activeGroup = group; break; }
   }
 
   // Employee and master screens are a different job — they keep their plain page header.
+  // A client-side user who reaches an internal-track URL directly (the API already 403s
+  // it) also lands here: no group owns the route, so the bar renders nothing rather than
+  // a breadcrumb for a track they cannot see.
   if (!active) return null;
 
   return (
@@ -139,7 +187,7 @@ const HrmsWorkspaceBar = () => {
             </span>
           </div>
           <p className="text-[11.5px] text-[var(--text-muted)] mt-0.5">
-            {activeGroup.hint}
+            {HINT_OVERRIDE[activeGroup.key] || activeGroup.hint}
           </p>
         </div>
       </div>
@@ -147,7 +195,7 @@ const HrmsWorkspaceBar = () => {
       {/* A rule under the identity row so the strip reads as tabs belonging to this
           workspace, rather than a row of buttons floating in a card. */}
       <nav className="mt-3 pt-2.5 pb-2.5 border-t border-[var(--border)] flex items-center gap-1 overflow-x-auto no-scrollbar">
-        {GROUPS.map((group, gi) => (
+        {visibleGroups.map((group, gi) => (
           <React.Fragment key={group.key}>
             {gi > 0 && (
               <span aria-hidden="true"

@@ -60,6 +60,11 @@ const SeparationBoard = () => {
   useEffect(() => { load(); }, [load]);
 
   const visible = rows.filter((r) => (showClosed ? true : OPEN_STAGES.includes(r.stage)));
+  // How many the "open only" default is currently hiding — surfaced on the checkbox and,
+  // when it's the whole reason the list looks empty, on the empty state's own action button.
+  // Without this a fully-closed board reads as "no data" rather than "filtered", which is
+  // exactly the confusion this screen kept causing.
+  const closedCount = rows.length - rows.filter((r) => OPEN_STAGES.includes(r.stage)).length;
 
   const columns = [
     { key: 'who', label: 'Employee',
@@ -141,6 +146,11 @@ const SeparationBoard = () => {
           <input type="checkbox" checked={showClosed}
             onChange={(e) => setShowClosed(e.target.checked)} />
           Show closed / withdrawn cases
+          {!loading && closedCount > 0 && (
+            <span className="px-1.5 py-0.5 rounded-full bg-[var(--input-bg)] text-[11px] font-bold text-[var(--text-muted)]">
+              {closedCount}
+            </span>
+          )}
         </label>
       </div>
 
@@ -154,10 +164,16 @@ const SeparationBoard = () => {
         ) : (
           <HrmsEmpty
             icon={UserMinus}
-            title={showClosed ? 'No separations recorded yet' : 'No open separations'}
+            title={showClosed ? 'No separations recorded yet'
+              : `No open separations${closedCount ? ` — ${closedCount} closed` : ''}`}
             hint={showClosed
               ? 'Initiate one when an employee resigns, retires, or is separated.'
-              : 'Every case here has been closed or withdrawn — tick the box above to see them.'}
+              : closedCount
+                ? 'Every case here has already been closed or withdrawn.'
+                : 'Nothing has been initiated yet.'}
+            action={!showClosed && closedCount > 0 && (
+              <Btn onClick={() => setShowClosed(true)}>Show the {closedCount} closed case{closedCount === 1 ? '' : 's'}</Btn>
+            )}
           />
         )
       )}

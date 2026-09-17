@@ -34,8 +34,9 @@ from fastapi import Depends, HTTPException
 from app.controllers.auth_controller import get_current_user
 from app.db.mongodb import get_collection
 from app.models.hrms import (
-    CLIENT_ROLES, GOVERNANCE_TO_HRMS, INTERNAL_OWNER_ROLES, INTERNAL_STAFF_ROLES,
-    ROLE_CAPABILITIES, TOGGLE_ROLES, Cap, HrmsRole,
+    CLIENT_ROLES, CLIENT_TRACK_SPARSH_ONLY_CAPS, GOVERNANCE_TO_HRMS, INTERNAL_OWNER_ROLES,
+    INTERNAL_STAFF_ROLES, INTERNAL_TRACK_ONLY_CAPS, ROLE_CAPABILITIES, TOGGLE_ROLES, Cap,
+    HrmsRole,
 )
 from app.models.hrms import COLL_CLIENT_ENGAGEMENTS, ENGAGEMENT_GRANTS_SCOPE
 
@@ -278,13 +279,26 @@ def capabilities_for(user: dict) -> Set[Cap]:
     ADMIN holds everything implicitly — deliberately resolved as "all of Cap" rather than
     a maintained list, so a capability added in a later phase can never accidentally lock
     the module owner out of their own system.
+
+    A CLIENT-SIDE user never holds an Internal Recruitment SOP capability, nor Sparsh's own
+    side of the Client Hiring conversation, whatever governance role they resolve to. MD/HR/
+    MANAGER/FINANCE are shared role IDENTITIES between a client company's own governance
+    ladder and Sparsh's — hrms_role() has no separate "client MD" enum member — so the track
+    boundary has to be enforced here, by who the caller is, not by which rung
+    ROLE_CAPABILITIES grants it to. See INTERNAL_TRACK_ONLY_CAPS and
+    CLIENT_TRACK_SPARSH_ONLY_CAPS in models/hrms.py for exactly which capabilities these are
+    and why. Internal Sparsh staff (INTERNAL/ADMIN) are untouched.
     """
     role = hrms_role(user)
     if role is None:
         return set()
     if role == HrmsRole.ADMIN:
         return set(Cap)
-    return set(ROLE_CAPABILITIES.get(role, set()))
+    caps = set(ROLE_CAPABILITIES.get(role, set()))
+    if is_client_side_user(user):
+        caps -= INTERNAL_TRACK_ONLY_CAPS
+        caps -= CLIENT_TRACK_SPARSH_ONLY_CAPS
+    return caps
 
 
 def can(user: dict, capability: Cap) -> bool:

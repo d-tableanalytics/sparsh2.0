@@ -8,7 +8,7 @@ import { HrmsLoading, HrmsError, HrmsEmpty } from '../common/HrmsStates';
 import { useNotification } from '../../../context/NotificationContext';
 import {
   getJobRequests, createJobRequest, actOnJobRequest, convertJobRequest,
-  withdrawJobRequest, getClients, getDepartments, getDesignations, getLinkableUsers,
+  withdrawJobRequest, getClients, getDepartments, getDesignations,
 } from '../../../services/hrmsApi';
 import { FIELD, LABEL, TEXTAREA, day } from '../internal/internalKit';
 import { Btn, Chip, Facts, Modal } from '../internal/internalKit.jsx';
@@ -455,9 +455,8 @@ const RaiseModal = ({ scope, canChooseClient, onClose, onDone, onError }) => {
 const ConvertModal = ({ scope, request, onClose, onDone, onError }) => {
   const [departments, setDepartments] = useState([]);
   const [designations, setDesignations] = useState([]);
-  const [people, setPeople] = useState([]);
   const [form, setForm] = useState({
-    department_id: '', designation_id: '', assignee_id: '',
+    department_id: '', designation_id: '',
     required_date: request.target_date || '',
     vacancy: request.positions || 1,
     offering_ctc: request.budget_max || '',
@@ -472,8 +471,6 @@ const ConvertModal = ({ scope, request, onClose, onDone, onError }) => {
     getDesignations(scope)
       .then(({ data }) => setDesignations((data?.designations || []).filter((d) => d.active)))
       .catch(() => {});
-    getLinkableUsers(scope)
-      .then(({ data }) => setPeople(data?.users || data?.employees || [])).catch(() => {});
   }, [scope]);
 
   const submit = async (e) => {
@@ -530,18 +527,6 @@ const ConvertModal = ({ scope, request, onClose, onDone, onError }) => {
               <option value="">Select…</option>
               {designations.map((d) => (
                 <option key={d._id || d.id} value={d._id || d.id}>{d.name}</option>
-              ))}
-            </select>
-          </div>
-          <div>
-            <label className={LABEL} htmlFor="cv-owner">Who will run it *</label>
-            <select id="cv-owner" className={FIELD} required value={form.assignee_id}
-                    onChange={set('assignee_id')}>
-              <option value="">Select…</option>
-              {people.map((p) => (
-                <option key={p._id || p.user_id} value={p._id || p.user_id}>
-                  {p.full_name || p.employee_name || p.email}
-                </option>
               ))}
             </select>
           </div>

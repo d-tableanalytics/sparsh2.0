@@ -253,26 +253,41 @@ const Detail = ({ onbNo, onClose, onChanged }) => {
                 )}
               </section>
 
-              {/* Joining details */}
+              {/* Joining details. A viewer who lacks ONBOARDING_WRITE sees the same facts as
+                  plain text rather than a greyed-out input/select they might mistake for an
+                  interactive control that simply isn't responding. */}
               <section className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label className={LABEL} htmlFor="d-join">Joining date</label>
-                  <input id="d-join" type="date" className={FIELD} disabled={!mayWrite || busy}
-                    value={row.joining_date || ''}
-                    onChange={(e) => run(
-                      () => updateOnboarding(onbNo, { joining_date: e.target.value }, scope))} />
+                  {mayWrite ? (
+                    <input id="d-join" type="date" className={FIELD} disabled={busy}
+                      value={row.joining_date || ''}
+                      onChange={(e) => run(
+                        () => updateOnboarding(onbNo, { joining_date: e.target.value }, scope))} />
+                  ) : (
+                    <p className="h-9 flex items-center text-[13px] text-[var(--text-main)]">
+                      {fmtDate(row.joining_date)}
+                    </p>
+                  )}
                 </div>
                 <div>
                   <label className={LABEL} htmlFor="d-bg">Background verification</label>
-                  <select id="d-bg" className={FIELD} disabled={!mayWrite || busy}
-                    value={row.bg_verification || 'Pending'}
-                    onChange={(e) => run(
-                      () => updateOnboardingBg(onbNo, { bg_verification: e.target.value }, scope),
-                      'Background check updated')}>
-                    {['Pending', 'In Progress', 'Cleared', 'Flagged'].map((v) => (
-                      <option key={v} value={v}>{v}</option>
-                    ))}
-                  </select>
+                  {mayWrite ? (
+                    <select id="d-bg" className={FIELD} disabled={busy}
+                      value={row.bg_verification || 'Pending'}
+                      onChange={(e) => run(
+                        () => updateOnboardingBg(onbNo, { bg_verification: e.target.value }, scope),
+                        'Background check updated')}>
+                      {['Pending', 'In Progress', 'Cleared', 'Flagged'].map((v) => (
+                        <option key={v} value={v}>{v}</option>
+                      ))}
+                    </select>
+                  ) : (
+                    <p className={`h-9 flex items-center text-[13px] font-semibold ${
+                      BG_TONE[row.bg_verification] || 'text-[var(--text-main)]'}`}>
+                      {row.bg_verification || 'Pending'}
+                    </p>
+                  )}
                   {row.bg_verification === 'Flagged' && (
                     <p className="text-[11.5px] text-[var(--accent-red)] mt-1 flex items-center gap-1">
                       <ShieldAlert size={12} /> An Employee ID cannot be issued while flagged.
@@ -316,6 +331,11 @@ const Detail = ({ onbNo, onClose, onChanged }) => {
                   <div className="h-full bg-[var(--accent-indigo)] transition-all"
                     style={{ width: `${row.progress?.percent ?? 0}%` }} />
                 </div>
+                {!mayWrite && (
+                  <p className="text-[11px] text-[var(--text-muted)] mb-2">
+                    Read-only — you can see the checklist but not update it.
+                  </p>
+                )}
                 <ul className="space-y-1">
                   {(row.checklist || []).map((item) => {
                     const owned = SYSTEM_ITEMS.has(item.key);
@@ -344,8 +364,12 @@ const Detail = ({ onbNo, onClose, onChanged }) => {
                 </ul>
               </section>
 
-              {/* The handover */}
-              {mayGenerate && !row.employee_id && (
+              {/* The handover. Blockers are server prose explaining exactly what is still
+                  missing — the single most common source of "the system is broken" tickets
+                  per this screen's own note above, so every viewer sees them, not only the
+                  one holding ONBOARDING_GENERATE_ID. Only the button itself — the
+                  irreversible act — is gated on that narrower capability. */}
+              {!row.employee_id && (
                 <section className="rounded-xl border border-[var(--border)] p-4 space-y-2">
                   <p className="text-[13px] font-bold text-[var(--text-main)]">
                     Create the employee record
@@ -359,12 +383,18 @@ const Detail = ({ onbNo, onClose, onChanged }) => {
                       {blockers.map((b) => <li key={b}>• {b}</li>)}
                     </ul>
                   )}
-                  <button type="button" disabled={busy || blockers.length > 0}
-                    onClick={() => run(() => generateEmployeeId(onbNo, scope),
-                      'Employee ID issued')}
-                    className={`${BTN} bg-[var(--accent-indigo)] text-white flex items-center gap-1.5`}>
-                    <BadgeCheck size={14} /> Generate Employee ID
-                  </button>
+                  {mayGenerate ? (
+                    <button type="button" disabled={busy || blockers.length > 0}
+                      onClick={() => run(() => generateEmployeeId(onbNo, scope),
+                        'Employee ID issued')}
+                      className={`${BTN} bg-[var(--accent-indigo)] text-white flex items-center gap-1.5`}>
+                      <BadgeCheck size={14} /> Generate Employee ID
+                    </button>
+                  ) : blockers.length === 0 ? (
+                    <p className="text-[11.5px] text-[var(--text-muted)]">
+                      Ready — this needs someone with permission to issue the Employee ID.
+                    </p>
+                  ) : null}
                 </section>
               )}
             </>

@@ -114,6 +114,10 @@ const CvSharingBoard = () => {
     }
   };
 
+  // Toggle the expanded "Stages" ladder for one share, collapsing it if it's already open.
+  const toggleJourney = (share) =>
+    setOpenShare((cur) => (cur === share.share_no ? null : share.share_no));
+
   const pull = async (share) => {
     setBusy(true);
     try {

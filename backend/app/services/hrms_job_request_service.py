@@ -39,7 +39,9 @@ from app.models.hrms import (
 )
 from app.services.hrms_audit_service import audit
 from app.services.hrms_id_service import next_business_id
-from app.utils.hrms_access import can, is_client_scoped_user, scope_client_ids
+from app.utils.hrms_access import (
+    can, is_client_scoped_user, is_client_side_user, scope_client_ids,
+)
 
 ENTITY_JOB_REQUEST = "client job request"
 
@@ -93,6 +95,16 @@ async def _resolve_client(actor: dict, company_id: str, requested: Optional[str]
     For a CLIENT user the answer comes from their engagements and a requested id is
     IGNORED, not honoured -- that is what stops a crafted body raising a request against
     somebody else's account. Sparsh staff must name one, because they act for many.
+
+    A THIRD case sits between those two: a client-side caller (clientadmin/clientuser)
+    whose OWN company has HRMS switched on directly, rather than being admitted as a
+    participant in Sparsh's tenant. `is_client_scoped_user` is specifically the engagement
+    path (HrmsRole.CLIENT via the CLIENT_TENANT_FIELD stamp) and is false here -- this
+    caller resolves through the ordinary governance ladder instead (MD/HR/HOD/Employee) --
+    so without this branch they fall into the Sparsh-staff case below and get asked to name
+    a client from every company on the platform for a request about their OWN vacancy.
+    Their own company_id is both the tenant AND the vacancy's subject in this case, the
+    same way it already is everywhere else this shape of caller appears in the module.
     """
     if is_client_scoped_user(actor):
         allowed = await scope_client_ids(actor, company_id)
@@ -105,6 +117,8 @@ async def _resolve_client(actor: dict, company_id: str, requested: Optional[str]
             client_id = str(requested)          # they belong to several; honour the choice
         else:
             client_id = allowed[0]
+    elif is_client_side_user(actor):
+        client_id = str(company_id)
     else:
         client_id = str(requested or "").strip()
         if not client_id:

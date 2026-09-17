@@ -28,7 +28,7 @@ const MODES = ['Phone', 'Email', 'Letter', 'In Person'];
 const OUTCOMES = ['Positive', 'Negative', 'Unable to Verify'];
 
 const ReferenceCheckBoard = () => {
-  const { scope, companyId, can } = useHrms();
+  const { scope, companyId, companyName, can } = useHrms();
   const { showSuccess, showError } = useNotification();
 
   const [rows, setRows] = useState([]);
@@ -126,7 +126,8 @@ const ReferenceCheckBoard = () => {
       <HrmsPageHeader
         icon={PhoneCall}
         title="Reference checks"
-        subtitle="Required before an internal offer — Sparsh Magic carries the employment risk directly"
+        subtitle={`Required before an internal offer — ${companyName || 'this company'} `
+          + 'carries the employment risk directly'}
         actions={canWrite && (
           <Btn tone="primary" onClick={() => setAdding(true)}>
             <Plus size={14} /> Record a check

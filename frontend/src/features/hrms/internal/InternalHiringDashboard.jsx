@@ -142,7 +142,7 @@ const Tile = ({ label, value, tone = 'neutral' }) => (
 );
 
 const InternalHiringDashboard = () => {
-  const { scope, companyId } = useHrms();
+  const { scope, companyId, companyName } = useHrms();
   const navigate = useNavigate();
 
   const [rows, setRows] = useState([]);
@@ -203,7 +203,7 @@ const InternalHiringDashboard = () => {
           Internal hiring
         </h1>
         <p className="mt-0.5 text-[12.5px] text-[var(--text-muted)]">
-          Sparsh Magic&rsquo;s own vacancies — no client involved.
+          {companyName || 'This company'}&rsquo;s own vacancies — no client involved.
         </p>
       </div>
 
@@ -269,9 +269,9 @@ const InternalHiringDashboard = () => {
         {rows.length === 0 ? (
           <HrmsEmpty
             title="No internal requisitions yet"
-            hint="Raise one on the Internal reqs screen. Sparsh Magic's own vacancies run
-                  through HR verification, budget approval and a position scorecard before
-                  sourcing begins."
+            hint={`Raise one on the Internal reqs screen. ${companyName || 'This company'}'s `
+              + 'own vacancies run through HR verification, budget approval and a position '
+              + 'scorecard before sourcing begins.'}
           />
         ) : (
           <>
