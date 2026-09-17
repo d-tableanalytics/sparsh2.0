@@ -35,7 +35,8 @@ from app.db.mongodb import get_collection
 from app.models.hrms import (
     AUDIT_APPOINTMENT_ACK, AUDIT_APPOINTMENT_CANCELLED, AUDIT_APPOINTMENT_EDITED,
     AUDIT_APPOINTMENT_GENERATED, AUDIT_APPOINTMENT_OPENED, AUDIT_APPOINTMENT_SENT,
-    AUDIT_STAGE_CHANGED, COLL_APPOINTMENTS, COLL_CANDIDATES, COLL_OFFERS,
+    AUDIT_STAGE_CHANGED, COLL_APPOINTMENTS, COLL_CANDIDATES, COLL_EMPLOYEE_PROFILES,
+    COLL_OFFERS,
     COLL_REQUISITIONS, DEFAULT_APPOINTMENT_BODY, EDITABLE_APPOINTMENT_STATUSES,
     ENTITY_APPOINTMENT, ENTITY_CANDIDATE, AppStatus, AppointmentStatus, Cap, HrmsRole,
     LinkKind, OfferStatus, can_transition, is_iso_date, render_appointment_body,
@@ -101,10 +102,25 @@ def _validate_joining(value: str) -> str:
 # -------------------------------------------------------------
 # Scoping
 # -------------------------------------------------------------
+async def _own_source_uk(actor: dict, company_id: str) -> Optional[str]:
+    profile = await get_collection(COLL_EMPLOYEE_PROFILES).find_one(
+        {"company_id": str(company_id), "user_id": str(actor.get("_id") or "")})
+    return (profile or {}).get("source_uk")
+
+
 async def _scope_filter(actor: dict, company_id: str) -> dict:
     """MANAGER narrowing — identical rule and identical fail-closed behaviour to
-    hrms_candidate_service._scope_filter."""
-    if hrms_role(actor) != HrmsRole.MANAGER:
+    hrms_candidate_service._scope_filter.
+
+    An EMPLOYEE caller (self-service "download my Appointment Letter" from their own
+    profile) is scoped to the ONE letter raised against their own hiring record — resolved
+    via the `source_uk` an employee profile is stamped with at onboarding (Phase 9). Fails
+    CLOSED, the same PIP/Letters/ATT-1 pattern: no linked candidate record, no letter."""
+    role = hrms_role(actor)
+    if role == HrmsRole.EMPLOYEE:
+        own_uk = await _own_source_uk(actor, company_id)
+        return {"uk": own_uk or "__none__"}
+    if role != HrmsRole.MANAGER:
         return {}
     rows = await get_collection(COLL_REQUISITIONS).find(
         {"company_id": str(company_id), "created_by": str(actor.get("_id") or "")},
@@ -127,11 +143,15 @@ async def _require_visible(actor: dict, company_id: str, appointment_no: str) ->
 async def list_appointments(actor: dict, company_id: str, *, status: str = None,
                             uk: str = None, search: str = None, limit: int = 200) -> dict:
     query = {"company_id": str(company_id)}
-    query.update(await _scope_filter(actor, company_id))
     if status:
         query["status"] = status
     if uk:
         query["uk"] = uk
+    # Scope is applied LAST and therefore wins over a caller-supplied `uk` — an EMPLOYEE
+    # caller's self-scope (see _scope_filter) must narrow to their own record even if the
+    # request also passed a `uk` (HR viewing a DIFFERENT employee's profile passes one too;
+    # for an EMPLOYEE-role viewer that value is untrusted input, not a grant).
+    query.update(await _scope_filter(actor, company_id))
     if search:
         import re
         safe = re.escape(search.strip())

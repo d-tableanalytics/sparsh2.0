@@ -132,6 +132,7 @@ import ShortlistCommittee from './features/hrms/internal/ShortlistCommittee';
 import PreboardingBoard from './features/hrms/internal/PreboardingBoard';
 import TalentPool from './features/hrms/internal/TalentPool';
 import PolicyRegister from './features/hrms/internal/PolicyRegister';
+import PolicyLibrary from './features/hrms/policy/PolicyLibrary';
 import SalaryBandManager from './features/hrms/people/SalaryBandManager';
 import SurveyPage from './pages/hrms/public/SurveyPage';
 // ── Phase EXIT-1 — Exit Management (§7.18, §22.2, §7.21) ──
@@ -455,6 +456,7 @@ const AppRoutes = () => {
         {/* Candidate communications are managed in Notification Templates. */}
         <Route path="communications"       element={<Navigate to="/notification-templates/email?module=hrms" replace />} />
         <Route path="policies"             element={<PolicyRegister />} />
+        <Route path="policy-library"       element={<PolicyLibrary />} />
         {/* Phase INT-5 — the per-company rule set. Governance, not a hiring stage, so
             it lives in the sidebar and NOT in the workspace tab strip. */}
         <Route path="settings"             element={<HrmsSettings />} />

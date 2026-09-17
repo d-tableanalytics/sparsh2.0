@@ -37,12 +37,16 @@ const ACTIONS = [
   { key: 'forward',   label: 'Forward',   icon: Forward,  needsRecipient: true },
   // ── Phase 11-R, Item 4 ── distinct from Forward on purpose. Forward assigns an INTERNAL
   // owner and moves nobody; this sends the CV OUT to the hiring client for their verdict,
-  // and opens a client-share record the dashboard reports on.
+  // and opens a client-share record the dashboard reports on. Sparsh's own act, same as the
+  // CV Sharing workspace tab — gated on `share.write` here too so a client-side HR/MD (who
+  // can screen their own candidates but was never meant to be the one sharing them outward)
+  // doesn't see a button for the one screening action that isn't theirs to take.
   {
     key: 'share_with_client',
     label: 'Share with client',
     icon: Share2,
     needsClientContact: true,
+    cap: CAP.SHARE_WRITE,
   },
   { key: 'reject',    label: 'Reject',    icon: XCircle,  needsRemark: true },
 ];
@@ -88,8 +92,11 @@ const ScreeningBoard = () => {
 
   useEffect(() => {
     if (!companyId) return;
+    // "Forward to" needs a real login account — a profile onboarded before the person has
+    // one (`pending_user_link`) has no `user_id`, and its option would fall back to the
+    // person's NAME as the submitted value, which the server rejects as an invalid id.
     getEmployees({ ...scope, limit: 500 })
-      .then(({ data }) => setPeople(data?.employees || []))
+      .then(({ data }) => setPeople((data?.employees || []).filter((e) => e.user_id)))
       .catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [companyId]);
@@ -275,7 +282,7 @@ const ScreeningBoard = () => {
         <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-40 flex items-center gap-2 px-4 py-2.5 rounded-2xl bg-[var(--text-main)] shadow-2xl">
           <span className="text-[12px] font-bold text-[var(--bg-card)]">{selected.size} selected</span>
           <span className="w-px h-5 bg-white/20" />
-          {ACTIONS.map((a) => (
+          {ACTIONS.filter((a) => !a.cap || can(a.cap)).map((a) => (
             <button key={a.key} type="button" disabled={busy} onClick={() => openAction(a.key)}
               className="px-2.5 py-1 rounded-lg bg-white/10 text-[var(--bg-card)] text-[11.5px] font-bold flex items-center gap-1 hover:bg-white/20 disabled:opacity-50">
               <a.icon size={12} /> {a.label}

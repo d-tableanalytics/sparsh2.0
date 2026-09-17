@@ -32,6 +32,31 @@ const FIELD = 'w-full h-9 px-3 rounded-lg border border-[var(--border)] bg-[var(
 const AREA = 'w-full px-3 py-2 rounded-lg border border-[var(--border)] bg-[var(--input-bg)] text-[13px] text-[var(--text-main)] resize-none disabled:opacity-60';
 const LABEL = 'block text-[11px] font-bold uppercase tracking-widest text-[var(--text-muted)] mb-1.5';
 
+// A field renders editable only when the viewer holds JD_WRITE AND the JD isn't locked —
+// otherwise it shows the same value as plain text, rather than an input the viewer might
+// try to type into and wonder why nothing happens.
+const JdField = ({ id, label, value, onChange, editable }) => (
+  <div>
+    <label className={LABEL} htmlFor={id}>{label}</label>
+    {editable ? (
+      <input id={id} value={value} onChange={onChange} className={FIELD} />
+    ) : (
+      <p className="h-9 flex items-center text-[13px] text-[var(--text-main)] truncate">{value || '—'}</p>
+    )}
+  </div>
+);
+
+const JdArea = ({ id, label, value, onChange, editable, rows = 3 }) => (
+  <div>
+    <label className={LABEL} htmlFor={id}>{label}</label>
+    {editable ? (
+      <textarea id={id} rows={rows} value={value} onChange={onChange} className={AREA} />
+    ) : (
+      <p className="text-[13px] text-[var(--text-main)] whitespace-pre-wrap">{value || '—'}</p>
+    )}
+  </div>
+);
+
 const JdLibrary = () => {
   const { can, scope, companyId } = useHrms();
   const { showSuccess, showError } = useNotification();
@@ -201,44 +226,24 @@ const JdLibrary = () => {
                 )}
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <div>
-                    <label className={LABEL} htmlFor="jd-title">Title</label>
-                    <input id="jd-title" value={form.title} onChange={set('title')} disabled={locked || !canWrite} className={FIELD} />
-                  </div>
-                  <div>
-                    <label className={LABEL} htmlFor="jd-loc">Location</label>
-                    <input id="jd-loc" value={form.location} onChange={set('location')} disabled={locked || !canWrite} className={FIELD} />
-                  </div>
-                  <div>
-                    <label className={LABEL} htmlFor="jd-exp">Experience</label>
-                    <input id="jd-exp" value={form.experience} onChange={set('experience')} disabled={locked || !canWrite} className={FIELD} />
-                  </div>
-                  <div>
-                    <label className={LABEL} htmlFor="jd-ctc">CTC</label>
-                    <input id="jd-ctc" value={form.ctc} onChange={set('ctc')} disabled={locked || !canWrite} className={FIELD} />
-                  </div>
+                  <JdField id="jd-title" label="Title" value={form.title} onChange={set('title')}
+                    editable={canWrite && !locked} />
+                  <JdField id="jd-loc" label="Location" value={form.location} onChange={set('location')}
+                    editable={canWrite && !locked} />
+                  <JdField id="jd-exp" label="Experience" value={form.experience} onChange={set('experience')}
+                    editable={canWrite && !locked} />
+                  <JdField id="jd-ctc" label="CTC" value={form.ctc} onChange={set('ctc')}
+                    editable={canWrite && !locked} />
                 </div>
 
-                <div>
-                  <label className={LABEL} htmlFor="jd-resp">Responsibilities</label>
-                  <textarea id="jd-resp" rows={5} value={form.responsibilities} onChange={set('responsibilities')}
-                    disabled={locked || !canWrite} className={AREA} />
-                </div>
-                <div>
-                  <label className={LABEL} htmlFor="jd-skills">Skills</label>
-                  <textarea id="jd-skills" rows={2} value={form.skills} onChange={set('skills')}
-                    disabled={locked || !canWrite} className={AREA} />
-                </div>
-                <div>
-                  <label className={LABEL} htmlFor="jd-qual">Qualifications</label>
-                  <textarea id="jd-qual" rows={2} value={form.qualifications} onChange={set('qualifications')}
-                    disabled={locked || !canWrite} className={AREA} />
-                </div>
-                <div>
-                  <label className={LABEL} htmlFor="jd-ben">Benefits</label>
-                  <textarea id="jd-ben" rows={2} value={form.benefits} onChange={set('benefits')}
-                    disabled={locked || !canWrite} className={AREA} />
-                </div>
+                <JdArea id="jd-resp" label="Responsibilities" rows={5} value={form.responsibilities}
+                  onChange={set('responsibilities')} editable={canWrite && !locked} />
+                <JdArea id="jd-skills" label="Skills" value={form.skills} onChange={set('skills')}
+                  editable={canWrite && !locked} />
+                <JdArea id="jd-qual" label="Qualifications" value={form.qualifications} onChange={set('qualifications')}
+                  editable={canWrite && !locked} />
+                <JdArea id="jd-ben" label="Benefits" value={form.benefits} onChange={set('benefits')}
+                  editable={canWrite && !locked} />
               </div>
             )}
           </div>

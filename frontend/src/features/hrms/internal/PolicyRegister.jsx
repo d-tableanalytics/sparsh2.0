@@ -7,10 +7,54 @@ import HrmsScopeBar from '../common/HrmsScopeBar';
 import { HrmsLoading, HrmsError, HrmsEmpty } from '../common/HrmsStates';
 import { useNotification } from '../../../context/NotificationContext';
 import {
-  getPolicies, getPolicy, logPolicyRevision, approvePolicyRevision,
+  getPolicies, getPolicy, logPolicyRevision, approvePolicyRevision, registerPolicy,
+  updatePolicyApplicability, getPolicyAcknowledgements, getAcknowledgementDashboard,
+  getDepartments, uploadPolicyDocument,
 } from '../../../services/hrmsApi';
 import { FIELD, LABEL, TEXTAREA, day } from './internalKit';
 import { Btn, Chip, Facts, Modal, RecordList, SignatureField } from './internalKit.jsx';
+
+const EMPLOYMENT_TYPES = ['Full-time', 'Part-time', 'Contract', 'Intern', 'Consultant'];
+const MAX_MB = 15;
+
+/** Same read-as-base64 shape DocumentPanel.jsx uses for every other HRMS upload. */
+const readFile = (file) => new Promise((resolve, reject) => {
+  if (file.size > MAX_MB * 1024 * 1024) {
+    reject(new Error(`That file is larger than ${MAX_MB} MB.`));
+    return;
+  }
+  const reader = new FileReader();
+  reader.onload = () => resolve({
+    name: file.name,
+    mime_type: file.type || 'application/octet-stream',
+    data: String(reader.result).split(',')[1] || '',
+  });
+  reader.onerror = () => reject(new Error('That file could not be read.'));
+  reader.readAsDataURL(file);
+});
+
+const MultiCheck = ({ label, options, value, onChange, optionLabel = (o) => o, optionValue = (o) => o }) => (
+  <div>
+    <label className={LABEL}>{label}</label>
+    <div className="flex flex-wrap gap-1.5">
+      {options.map((opt) => {
+        const v = optionValue(opt);
+        const checked = value.includes(v);
+        return (
+          <button key={v} type="button"
+            onClick={() => onChange(checked ? value.filter((x) => x !== v) : [...value, v])}
+            className={`px-2.5 h-7 rounded-full border text-[11.5px] font-semibold transition-colors
+              ${checked
+                ? 'border-[var(--accent-indigo)] bg-[var(--accent-indigo)]/10 text-[var(--accent-indigo)]'
+                : 'border-[var(--border)] text-[var(--text-muted)]'}`}>
+            {optionLabel(opt)}
+          </button>
+        );
+      })}
+    </div>
+    {!options.length && <p className="text-[11px] text-[var(--text-muted)]">None configured.</p>}
+  </div>
+);
 
 /**
  * HRMS ▸ the policy register and its review cycle (SOP §14).
@@ -46,6 +90,8 @@ const PolicyRegister = () => {
   const [error, setError] = useState(null);
   const [open, setOpen] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [ackDash, setAckDash] = useState(null);
 
   const canWrite = can(CAP.POLICY_WRITE);
   const canApprove = can(CAP.POLICY_APPROVE);
@@ -67,6 +113,12 @@ const PolicyRegister = () => {
   }, [companyId]);
 
   useEffect(() => { load(); }, [load]);
+
+  useEffect(() => {
+    if (!companyId || !canWrite) return;
+    getAcknowledgementDashboard(scope).then(({ data }) => setAckDash(data)).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [companyId, canWrite]);
 
   const openPolicy = async (policyKey) => {
     try {
@@ -119,6 +171,11 @@ const PolicyRegister = () => {
         icon={BookMarked}
         title="Policy register"
         subtitle="Which version governs, when it is next due for review, and what changed last time (SOP section 14)."
+        actions={canWrite && (
+          <Btn tone="primary" onClick={() => setCreating(true)}>
+            <Plus size={14} /> New policy
+          </Btn>
+        )}
       />
       <HrmsScopeBar />
 
@@ -136,6 +193,25 @@ const PolicyRegister = () => {
             Nothing is blocked by this. A lapsed review is a conversation to have, not a
             reason to stop hiring.
           </p>
+        </div>
+      )}
+
+      {/* §22.12 — "HR policy acknowledgement pending/completed" dashboard. */}
+      {ackDash && ackDash.policies.length > 0 && (
+        <div className="rounded-xl border border-[var(--border)] bg-[var(--bg-card)] p-4">
+          <p className="text-[11px] font-bold uppercase tracking-widest text-[var(--text-muted)] mb-2">
+            Acknowledgement completion ({ackDash.total_pending} pending)
+          </p>
+          <div className="space-y-1.5">
+            {ackDash.policies.map((p) => (
+              <div key={p.policy_key} className="flex items-center justify-between text-[12.5px]">
+                <span className="text-[var(--text-main)]">{p.title} (v{p.version})</span>
+                <Chip tone={p.pending === 0 ? 'good' : 'warn'}>
+                  {p.acknowledged}/{p.applicable} acknowledged
+                </Chip>
+              </div>
+            ))}
+          </div>
         </div>
       )}
 
@@ -188,7 +264,123 @@ const PolicyRegister = () => {
           onError={showError}
         />
       )}
+      {creating && (
+        <NewPolicyModal
+          scope={scope}
+          onClose={() => setCreating(false)}
+          onDone={() => { setCreating(false); load(); }}
+          onSuccess={showSuccess}
+          onError={showError}
+        />
+      )}
     </div>
+  );
+};
+
+const NewPolicyModal = ({ scope, onClose, onDone, onSuccess, onError }) => {
+  const [policyKey, setPolicyKey] = useState('');
+  const [title, setTitle] = useState('');
+  const [category, setCategory] = useState('');
+  const [ownerRole, setOwnerRole] = useState('');
+  const [departments, setDepartments] = useState([]);
+  const [departmentIds, setDepartmentIds] = useState([]);
+  const [employmentTypes, setEmploymentTypes] = useState([]);
+  const [ackRequired, setAckRequired] = useState(false);
+  const [acceptanceDueDays, setAcceptanceDueDays] = useState('');
+  const [file, setFile] = useState(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    getDepartments(scope).then(({ data }) => setDepartments(data?.departments || [])).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const submit = async () => {
+    if (!policyKey.trim() || !title.trim()) {
+      onError('A policy needs a key and a title.');
+      return;
+    }
+    setBusy(true);
+    try {
+      const { data: policy } = await registerPolicy({
+        policy_key: policyKey.trim(), title: title.trim(),
+        category: category.trim() || undefined,
+        owner_role: ownerRole.trim() || undefined,
+        department_ids: departmentIds,
+        employment_types: employmentTypes,
+        acknowledgement_required: ackRequired,
+        acceptance_due_days: acceptanceDueDays ? Number(acceptanceDueDays) : undefined,
+      }, scope);
+      if (file) {
+        const uploaded = await readFile(file);
+        await uploadPolicyDocument(policy.policy_key, uploaded, scope);
+      }
+      onSuccess('Policy registered.');
+      onDone();
+    } catch (err) {
+      onError(err?.response?.data?.detail || err?.message || 'Could not register the policy.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal title="New policy" labelledBy="new-policy-title" onClose={onClose}
+      subtitle="Category and applicability decide who sees this in their own HR Policy Library."
+      footer={(
+        <>
+          <Btn onClick={onClose} disabled={busy}>Cancel</Btn>
+          <Btn tone="primary" onClick={submit} disabled={busy}>{busy ? 'Working…' : 'Register'}</Btn>
+        </>
+      )}
+    >
+      <div className="grid grid-cols-2 gap-3">
+        <div>
+          <label className={LABEL} htmlFor="np-key">Key *</label>
+          <input id="np-key" className={FIELD} value={policyKey}
+            onChange={(e) => setPolicyKey(e.target.value)} placeholder="leave_policy" />
+        </div>
+        <div>
+          <label className={LABEL} htmlFor="np-title">Title *</label>
+          <input id="np-title" className={FIELD} value={title}
+            onChange={(e) => setTitle(e.target.value)} placeholder="Leave Policy" />
+        </div>
+        <div>
+          <label className={LABEL} htmlFor="np-category">Category</label>
+          <input id="np-category" className={FIELD} value={category}
+            onChange={(e) => setCategory(e.target.value)}
+            placeholder="Leave / Attendance / Conduct / …" />
+        </div>
+        <div>
+          <label className={LABEL} htmlFor="np-owner">Owner role</label>
+          <input id="np-owner" className={FIELD} value={ownerRole}
+            onChange={(e) => setOwnerRole(e.target.value)} placeholder="HR" />
+        </div>
+        <div>
+          <label className={LABEL} htmlFor="np-due">Acceptance due (days)</label>
+          <input id="np-due" type="number" min="0" className={FIELD} value={acceptanceDueDays}
+            onChange={(e) => setAcceptanceDueDays(e.target.value)} placeholder="e.g. 14" />
+        </div>
+      </div>
+
+      <MultiCheck label="Departments (none selected = company-wide)" value={departmentIds}
+        onChange={setDepartmentIds} options={departments}
+        optionValue={(d) => d.id} optionLabel={(d) => d.name} />
+      <MultiCheck label="Employment types (none selected = all)" value={employmentTypes}
+        onChange={setEmploymentTypes} options={EMPLOYMENT_TYPES} />
+
+      <label className="flex items-center gap-2 text-[12.5px] text-[var(--text-main)]">
+        <input type="checkbox" checked={ackRequired} onChange={(e) => setAckRequired(e.target.checked)} />
+        Employees must acknowledge this policy
+      </label>
+
+      <div>
+        <label className={LABEL} htmlFor="np-file">Policy document (PDF)</label>
+        <input id="np-file" type="file" accept="application/pdf"
+          onChange={(e) => setFile(e.target.files?.[0] || null)}
+          className="block w-full text-[12px] text-[var(--text-muted)]" />
+      </div>
+    </Modal>
   );
 };
 
@@ -201,8 +393,57 @@ const PolicyModal = ({
   const [summary, setSummary] = useState('');
   const [signature, setSignature] = useState('');
   const [approveVersion, setApproveVersion] = useState('');
+  const [category, setCategory] = useState(policy.category || '');
+  const [ackRequired, setAckRequired] = useState(!!policy.acknowledgement_required);
+  const [acceptanceDueDays, setAcceptanceDueDays] = useState(policy.acceptance_due_days ?? '');
+  const [departments, setDepartments] = useState([]);
+  const [departmentIds, setDepartmentIds] = useState(policy.department_ids || []);
+  const [employmentTypes, setEmploymentTypes] = useState(policy.employment_types || []);
+  const [file, setFile] = useState(null);
+  const [acks, setAcks] = useState(null);
 
   const pending = (policy.revisions || []).filter((r) => !r.approved_at);
+
+  useEffect(() => {
+    if (mode !== 'applicability' || departments.length) return;
+    getDepartments(scope).then(({ data }) => setDepartments(data?.departments || [])).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode]);
+
+  const saveApplicability = async () => {
+    setBusy(true);
+    try {
+      await updatePolicyApplicability(policy.policy_key, {
+        category: category.trim() || undefined,
+        department_ids: departmentIds,
+        employment_types: employmentTypes,
+        acknowledgement_required: ackRequired,
+        acceptance_due_days: acceptanceDueDays === '' ? undefined : Number(acceptanceDueDays),
+      }, scope);
+      if (file) {
+        const uploaded = await readFile(file);
+        await uploadPolicyDocument(policy.policy_key, uploaded, scope);
+        setFile(null);
+      }
+      onSuccess('Applicability saved.');
+      setMode('history');
+      onChanged();
+    } catch (err) {
+      onError(err?.response?.data?.detail || err?.message || 'Could not save applicability.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const loadAcks = async () => {
+    setMode('acknowledgements');
+    try {
+      const { data } = await getPolicyAcknowledgements(policy.policy_key, scope);
+      setAcks(data);
+    } catch (err) {
+      onError(err?.response?.data?.detail || 'Could not load acknowledgements.');
+    }
+  };
 
   const draft = async () => {
     setBusy(true);
@@ -258,15 +499,27 @@ const PolicyModal = ({
               Approve
             </Btn>
           )}
+          {mode === 'applicability' && (
+            <Btn tone="primary" disabled={busy} onClick={saveApplicability}>
+              {busy ? 'Saving…' : 'Save'}
+            </Btn>
+          )}
         </>
       )}
     >
       <Facts items={[
         { label: 'Key', value: policy.policy_key },
         { label: 'Owner', value: policy.owner_role },
+        { label: 'Category', value: policy.category || '— company-wide —' },
         { label: 'Next review', value: day(policy.next_review_due) },
         { label: 'Status', value: policy.status },
       ]} />
+      {policy.document_url && (
+        <a href={policy.document_url} target="_blank" rel="noreferrer"
+          className="inline-block text-[12px] font-bold text-[var(--accent-indigo)]">
+          View policy document{policy.document_file_name ? ` (${policy.document_file_name})` : ''}
+        </a>
+      )}
       {policy.review_note && (
         <p className={`text-[12px] ${policy.review_status === 'overdue'
           ? 'text-[var(--accent-red)]' : 'text-[var(--text-muted)]'}`}>
@@ -276,7 +529,7 @@ const PolicyModal = ({
 
       {mode === 'history' && (
         <>
-          <div className="flex gap-2">
+          <div className="flex flex-wrap gap-2">
             {canWrite && <Btn onClick={() => setMode('draft')}>
               <Plus size={14} /> Log a revision
             </Btn>}
@@ -288,6 +541,8 @@ const PolicyModal = ({
                 Approve a revision
               </Btn>
             )}
+            {canWrite && <Btn onClick={() => setMode('applicability')}>Applicability</Btn>}
+            {canWrite && <Btn onClick={loadAcks}>Acknowledgements</Btn>}
           </div>
 
           <div>
@@ -364,6 +619,67 @@ const PolicyModal = ({
             hint="This changes which version of the policy the company is held to."
           />
         </>
+      )}
+
+      {mode === 'applicability' && (
+        <>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className={LABEL} htmlFor="policy-category">Category</label>
+              <input id="policy-category" className={FIELD} value={category}
+                onChange={(e) => setCategory(e.target.value)}
+                placeholder="Leave / Attendance / Conduct / …" />
+            </div>
+            <div>
+              <label className={LABEL} htmlFor="policy-due">Acceptance due (days)</label>
+              <input id="policy-due" type="number" min="0" className={FIELD}
+                value={acceptanceDueDays} onChange={(e) => setAcceptanceDueDays(e.target.value)} />
+            </div>
+          </div>
+
+          <MultiCheck label="Departments (none selected = company-wide)" value={departmentIds}
+            onChange={setDepartmentIds} options={departments}
+            optionValue={(d) => d.id} optionLabel={(d) => d.name} />
+          <MultiCheck label="Employment types (none selected = all)" value={employmentTypes}
+            onChange={setEmploymentTypes} options={EMPLOYMENT_TYPES} />
+
+          <label className="flex items-center gap-2 text-[12.5px] text-[var(--text-main)]">
+            <input type="checkbox" checked={ackRequired}
+              onChange={(e) => setAckRequired(e.target.checked)} />
+            Employees must acknowledge this policy
+          </label>
+
+          <div>
+            <label className={LABEL} htmlFor="policy-file">
+              {policy.document_url ? 'Replace policy document (PDF)' : 'Upload policy document (PDF)'}
+            </label>
+            <input id="policy-file" type="file" accept="application/pdf"
+              onChange={(e) => setFile(e.target.files?.[0] || null)}
+              className="block w-full text-[12px] text-[var(--text-muted)]" />
+          </div>
+        </>
+      )}
+
+      {mode === 'acknowledgements' && (
+        <div>
+          <p className={LABEL}>
+            Acknowledged v{policy.version} ({acks?.total ?? '…'})
+          </p>
+          {!acks ? (
+            <p className="text-[12.5px] text-[var(--text-muted)]">Loading…</p>
+          ) : acks.acknowledgements.length ? (
+            <ul className="space-y-1.5">
+              {acks.acknowledgements.map((a) => (
+                <li key={a.employee_code} className="flex items-center justify-between text-[12.5px]">
+                  <span className="text-[var(--text-main)]">{a.employee_name || a.employee_code}</span>
+                  <span className="text-[11px] text-[var(--text-muted)]">{day(a.acknowledged_at)}</span>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="text-[12.5px] text-[var(--text-muted)]">No one has acknowledged this version yet.</p>
+          )}
+        </div>
       )}
     </Modal>
   );

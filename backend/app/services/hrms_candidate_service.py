@@ -36,6 +36,11 @@ from app.models.hrms import (
     MAX_BULK_SCREEN, PHONE_RE, PIPELINE_COLUMNS, SCREEN_ACTIONS, AppStatus, Cap, HrmsRole,
     ScreenAction, allowed_next_statuses, can_transition, is_iso_date,
 )
+# ── The record-backed stages (see assert_stage_has_backing_record below) ──
+from app.models.hrms import (
+    AppointmentStatus, COLL_APPOINTMENTS, COLL_ONBOARDING, COLL_OFFERS, OfferStatus,
+    COLL_PROBATION_REVIEWS, OnboardStatus, ProbationOutcome,
+)
 from app.models.hrms import (
     AUDIT_CLIENT_RESPONSE, AUDIT_CLIENT_SHARED, CLIENT_RESPONSE_STATUS, ClientShareStatus,
 )
@@ -343,6 +348,70 @@ async def assert_selectable(actor: Optional[dict], company_id: str,
     await assert_final_round_complete(company_id, candidate, req)
 
 
+# Stages that are supposed to be the SIDE EFFECT of a real action elsewhere -- an offer
+# actually sent, actually accepted, an appointment letter actually issued, an onboarding
+# case actually opened, an employee ID actually generated -- never a value someone can just
+# hand-set on the candidate. `Selected` already has its own two-control gate above
+# (assert_selectable); this closes the same hole for everything the lifecycle graph legally
+# allows AFTER it. Without this, `PATCH /candidates/{uk}` would walk a candidate straight
+# through Offer Generated -> Offer Accepted -> Pre-Onboarding -> Joined by name alone, with
+# no offer, letter, onboarding case or employee record ever created to back any of it --
+# and, past Selected, there is no legal transition back to undo the mistake.
+async def assert_stage_has_backing_record(company_id: str, uk: str, target: str) -> None:
+    company_id = str(company_id)
+    if target == AppStatus.OFFER_GENERATED.value:
+        if not await get_collection(COLL_OFFERS).find_one(
+                {"uk": uk, "company_id": company_id,
+                 "status": {"$ne": OfferStatus.DRAFT.value}}):
+            raise HTTPException(
+                status_code=409, detail="No offer has actually been sent to this candidate.")
+    elif target == AppStatus.OFFER_ACCEPTED.value:
+        if not await get_collection(COLL_OFFERS).find_one(
+                {"uk": uk, "company_id": company_id, "status": OfferStatus.ACCEPTED.value}):
+            raise HTTPException(
+                status_code=409, detail="This candidate has not accepted an offer.")
+    elif target == AppStatus.APPOINTMENT_LETTER_SENT.value:
+        if not await get_collection(COLL_APPOINTMENTS).find_one(
+                {"uk": uk, "company_id": company_id,
+                 "status": {"$in": [AppointmentStatus.SENT.value,
+                                    AppointmentStatus.PENDING_ACK.value,
+                                    AppointmentStatus.ACKNOWLEDGED.value]}}):
+            raise HTTPException(
+                status_code=409,
+                detail="No appointment letter has actually been sent to this candidate.")
+    elif target == AppStatus.PRE_ONBOARDING.value:
+        if not await get_collection(COLL_ONBOARDING).find_one(
+                {"uk": uk, "company_id": company_id}):
+            raise HTTPException(
+                status_code=409, detail="Onboarding has not been started for this candidate.")
+    elif target == AppStatus.JOINED.value:
+        if not await get_collection(COLL_ONBOARDING).find_one(
+                {"uk": uk, "company_id": company_id, "employee_id": {"$ne": None}}):
+            raise HTTPException(
+                status_code=409,
+                detail="No Employee ID has actually been generated for this candidate.")
+    # ── Phase INT-15 ── these two were missing from the original sweep: `Employee Created`
+    # and `Probation Confirmed` are both legal FORWARD_TRANSITIONS targets past `Joined` (see
+    # POST_HIRE_STATUSES), so without a check here the same hole the docstring above describes
+    # was still open one step further down the graph -- `PATCH` could hand-set a candidate all
+    # the way to "Employee Created" with no onboarding checklist ever completed, or to
+    # "Probation Confirmed" with no probation review ever decided.
+    elif target == AppStatus.EMPLOYEE_CREATED.value:
+        if not await get_collection(COLL_ONBOARDING).find_one(
+                {"uk": uk, "company_id": company_id,
+                 "status": OnboardStatus.COMPLETED.value}):
+            raise HTTPException(
+                status_code=409,
+                detail="Onboarding has not actually been completed for this candidate.")
+    elif target == AppStatus.PROBATION_CONFIRMED.value:
+        if not await get_collection(COLL_PROBATION_REVIEWS).find_one(
+                {"uk": uk, "company_id": company_id,
+                 "outcome": ProbationOutcome.CONFIRMED.value}):
+            raise HTTPException(
+                status_code=409,
+                detail="This candidate's probation has not actually been confirmed.")
+
+
 async def update_candidate(actor: dict, company_id: str, uk: str, payload: dict) -> dict:
     """Edit a candidate, including moving their stage.
 
@@ -418,6 +487,8 @@ async def update_candidate(actor: dict, company_id: str, uk: str, payload: dict)
             # written so a refusal cannot leave a half-moved candidate behind.
             if target == AppStatus.SELECTED.value:
                 await assert_selectable(actor, company_id, current)
+            else:
+                await assert_stage_has_backing_record(company_id, uk, target)
             updates["application_status"] = target
             stage_from, stage_to = current_status, target
 

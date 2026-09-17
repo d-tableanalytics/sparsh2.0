@@ -57,7 +57,7 @@ const GATES = {
 };
 
 const InternalRequisitionList = () => {
-  const { scope, companyId, can } = useHrms();
+  const { scope, companyId, companyName, can } = useHrms();
   const navigate = useNavigate();
   const { showSuccess, showError } = useNotification();
 
@@ -221,7 +221,8 @@ const InternalRequisitionList = () => {
       <HrmsPageHeader
         icon={Building}
         title="Internal requisitions"
-        subtitle="Sparsh Magic's own vacancies — budget approved internally, no client"
+        subtitle={`${companyName || 'This company'}'s own vacancies — budget approved `
+          + 'internally, no client'}
         actions={can(CAP.REQUISITION_CREATE) && (
           <Btn tone="primary" onClick={() => setRaising(true)}>
             <Plus size={14} /> Raise
@@ -263,13 +264,14 @@ const InternalRequisitionList = () => {
           empty={<HrmsEmpty
             icon={Building}
             title="No internal requisitions"
-            hint="Raise one and switch the hiring track to Sparsh Magic (internal)."
+            hint="Raise one with the button above — it's created on the internal track."
           />}
         />
       )}
 
       {raising && (
         <RequisitionFormModal
+          fixedTrack="internal"
           onClose={() => setRaising(false)}
           onSaved={() => { setRaising(false); load(); }}
         />

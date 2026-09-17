@@ -22,8 +22,8 @@ const FIELD = 'w-full h-9 px-3 rounded-lg border border-[var(--border)] bg-[var(
 const AREA = 'w-full px-3 py-2 rounded-lg border border-[var(--border)] bg-[var(--input-bg)] text-[13px] text-[var(--text-main)] resize-none';
 const LABEL = 'block text-[11px] font-bold uppercase tracking-widest text-[var(--text-muted)] mb-1.5';
 
-const RequisitionFormModal = ({ existing, onClose, onSaved }) => {
-  const { scope } = useHrms();
+const RequisitionFormModal = ({ existing, onClose, onSaved, fixedTrack }) => {
+  const { scope, companyName } = useHrms();
   const { showSuccess, showError } = useNotification();
   const isEdit = !!existing;
 
@@ -33,10 +33,12 @@ const RequisitionFormModal = ({ existing, onClose, onSaved }) => {
   const [saving, setSaving] = useState(false);
   const [form, setForm] = useState({
     // ── Which hiring track this vacancy runs on ──
-    // Defaults to `client`, so the form behaves exactly as it always has unless somebody
-    // deliberately switches it. IMMUTABLE once raised: the server refuses a change, because
-    // an approval granted under one track's rules means nothing under the other's.
-    requisition_track: existing?.requisition_track || 'client',
+    // `fixedTrack` is set by the page that opened this modal (Internal Hiring vs Client
+    // Hiring are separate screens — see RequisitionList / InternalRequisitionList), so the
+    // track picker below never renders and there is nothing to default here. When editing,
+    // the existing record's own track always wins — it is immutable once raised. Falling
+    // back to 'client' keeps this safe if the modal is ever opened without either.
+    requisition_track: existing?.requisition_track || fixedTrack || 'client',
     department_id: existing?.department_id || '',
     designation_id: existing?.designation_id || '',
     vacancy: existing?.vacancy ?? 1,
@@ -44,7 +46,6 @@ const RequisitionFormModal = ({ existing, onClose, onSaved }) => {
     qualification: existing?.qualification || '',
     essential_skills: existing?.essential_skills || '',
     required_date: existing?.required_date || '',
-    assignee_id: existing?.assignee_id || '',
     offering_ctc: existing?.offering_ctc ?? '',
     urgency_level: existing?.urgency_level || 'Medium',
     work_location: existing?.work_location || 'Office',
@@ -91,7 +92,14 @@ const RequisitionFormModal = ({ existing, onClose, onSaved }) => {
   useEffect(() => {
     getDepartments(scope).then(({ data }) => setDepartments((data?.departments || []).filter((d) => d.active))).catch(() => {});
     getDesignations(scope).then(({ data }) => setDesignations((data?.designations || []).filter((d) => d.active))).catch(() => {});
-    getEmployees({ ...scope, limit: 500 }).then(({ data }) => setPeople(data?.employees || [])).catch(() => {});
+    // Assignee and "replacing" both need a real login account — the server validates
+    // whoever is picked against the `learners` collection. A profile created at onboarding
+    // before the person has a login (`pending_user_link`) has no `user_id` at all, and
+    // offering it here meant its option fell back to the person's NAME as the submitted
+    // value, which the server then rejected as "Invalid assignee id."
+    getEmployees({ ...scope, limit: 500 })
+      .then(({ data }) => setPeople((data?.employees || []).filter((e) => e.user_id)))
+      .catch(() => {});
     // Phase 11-R, Item 4. The options are the ERP's Companies — there is no separate client
     // master. Failing quietly is correct: the form works perfectly without a client.
     getClients(scope).then(({ data }) => setClients(data?.clients || [])).catch(() => {});
@@ -203,7 +211,13 @@ const RequisitionFormModal = ({ existing, onClose, onSaved }) => {
               Two radios rather than a dropdown: there are exactly two, and the choice
               changes which approvals the requisition will need, so it deserves to be
               visible rather than folded into a select. Disabled when editing, because the
-              server refuses a change and offering one would be a lie. */}
+              server refuses a change and offering one would be a lie.
+
+              Hidden entirely when the caller pins the track (`fixedTrack`): Internal Hiring
+              and Client Hiring are separate pages now, so which track this is was already
+              decided by which "Raise" button was clicked, and offering a picker here just
+              invites raising the wrong kind of requisition from the wrong screen. */}
+          {!fixedTrack && (
           <fieldset className="rounded-xl border border-[var(--border)] p-3.5">
             <legend className="px-1.5 text-[11px] font-bold uppercase tracking-widest text-[var(--text-muted)]">
               Hiring track
@@ -212,7 +226,8 @@ const RequisitionFormModal = ({ existing, onClose, onSaved }) => {
               {[
                 { value: 'client', label: 'For a client',
                   hint: 'The client owns the budget and gives the verdict on CVs.' },
-                { value: 'internal', label: 'Sparsh Magic (internal)',
+                { value: 'internal',
+                  label: companyName ? `${companyName} (internal)` : 'In-house (internal)',
                   hint: 'Budget approved internally. No client, and no CVs shared out.' },
               ].map((option) => (
                 <label
@@ -253,6 +268,7 @@ const RequisitionFormModal = ({ existing, onClose, onSaved }) => {
               </p>
             )}
           </fieldset>
+          )}
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
@@ -291,13 +307,6 @@ const RequisitionFormModal = ({ existing, onClose, onSaved }) => {
               <label className={LABEL} htmlFor="r-qual">Qualification *</label>
               <input id="r-qual" required value={form.qualification} onChange={set('qualification')}
                 placeholder="e.g. B.Com" className={FIELD} />
-            </div>
-            <div>
-              <label className={LABEL} htmlFor="r-assignee">Assignee (recruiter) *</label>
-              <select id="r-assignee" required value={form.assignee_id} onChange={set('assignee_id')} className={FIELD}>
-                <option value="">Select…</option>
-                {people.map((p) => <option key={p.user_id} value={p.user_id}>{p.name}</option>)}
-              </select>
             </div>
             <div>
               <label className={LABEL} htmlFor="r-ctc">Offered CTC (annual)</label>

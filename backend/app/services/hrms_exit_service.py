@@ -49,12 +49,13 @@ from app.models.hrms import (
     ENTITY_EXIT_INTERVIEW, ENTITY_FNF, ENTITY_HANDOVER, ENTITY_SEPARATION,
     MAX_TASKS_PER_SEPARATION,
     AccessClearanceStatus, AssetReturnStatus, ClearanceOwnerType, ClearanceStatus,
-    EmploymentStatus, ExitType, FnfStatus, HandoverStatus, ProbationOutcome,
+    EmploymentStatus, ExitType, FnfStatus, HandoverStatus, HrmsRole, ProbationOutcome,
     SeparationStage,
     notice_days_for,
 )
 from app.services.hrms_audit_service import audit
 from app.services.hrms_id_service import next_business_id
+from app.utils.hrms_access import hrms_role
 
 USER_COLLECTIONS = ("learners", "staff")
 
@@ -253,9 +254,19 @@ async def initiate_separation(actor: dict, company_id: str, payload: dict) -> di
 
     # §7.18 step 142: status moves to Notice Period the moment the case is opened — the
     # obligation exists from here, whatever HR later decides about a waiver.
-    from app.services.hrms_employee_service import update_profile
-    await update_profile(actor, profile["user_id"],
-                         {"employment_status": EmploymentStatus.ON_NOTICE.value}, company_id)
+    #
+    # A profile never linked to a portal login (Phase 9's employee.link_user is a separate,
+    # optional step — see hrms_employee_service.link_user) has no `user_id`, and
+    # update_profile looks a profile up BY user_id, so there is nothing for it to find. The
+    # separation record above already carries employment_status_at_exit correctly either
+    # way; this is only the sync onto the login-linked profile row, which simply does not
+    # exist yet for an unlinked employee. Skipping it (rather than `profile["user_id"]`,
+    # which raised an unhandled KeyError -> 500 here) is the same "no linked account yet"
+    # case this codebase already treats as normal elsewhere.
+    if profile.get("user_id"):
+        from app.services.hrms_employee_service import update_profile
+        await update_profile(actor, profile["user_id"],
+                             {"employment_status": EmploymentStatus.ON_NOTICE.value}, company_id)
 
     await audit(actor, AUDIT_SEPARATION_INITIATED, ENTITY_SEPARATION, sep_no,
                f"{employee_code}, {exit_type}, calculated notice {calculated_days}d "
@@ -469,8 +480,23 @@ async def accept_handover_task(actor: dict, company_id: str, sep_no: str, task_i
                                payload: dict) -> dict:
     """§22.2 step 191: the reporting manager's sign-off. The one place in this module a
     capability check alone is not enough — a manager may only accept work on THEIR OWN
-    report's case, enforced by the caller matching `sep.reporting_manager_id` against actor."""
+    report's case, enforced by the caller matching `sep.reporting_manager_id` against actor.
+
+    Enforced here, not just documented: `Cap.HANDOVER_APPROVE` is a role-wide grant (every
+    HOD/Manager in the company holds it, the same as every other capability in this module),
+    so without this check any manager could accept or reject a handover on any OTHER
+    manager's report — exactly the cross-department mistake the docstring above already
+    claimed was impossible. MD (and internal staff via the ADMIN implicit-grant) are exempt,
+    the same override authority they hold everywhere else in this module (the named manager
+    may be unavailable, on leave, or the one leaving)."""
     task = await _get_handover_task(company_id, sep_no, task_id)
+    if hrms_role(actor) is HrmsRole.MANAGER:
+        sep = await _get_separation(company_id, sep_no)
+        manager_id = str(sep.get("reporting_manager_id") or "")
+        if not manager_id or manager_id != str(actor.get("_id") or ""):
+            raise HTTPException(
+                status_code=403,
+                detail="Only this employee's reporting manager may accept or reject their handover.")
     accepted = bool(payload.get("accepted"))
     updates = {
         "status": HandoverStatus.ACCEPTED.value if accepted else HandoverStatus.REJECTED.value,

@@ -223,6 +223,8 @@ COLL_ABSCONDING_CASES   = "hrms_absconding_cases"
 # hrms_designations/hrms_employee_profiles already uses.
 COLL_SALARY_COMPONENTS = "hrms_salary_components"
 COLL_SALARY_STRUCTURES = "hrms_salary_structures"
+# ── Phase PAYSLIP-1 (SM-HR-064) ── one payslip header/footer template per company.
+COLL_PAYROLL_TEMPLATES = "hrms_payroll_templates"
 COLL_SALARY_ADVANCES   = "hrms_salary_advances"
 COLL_VARIABLE_PAY_QUARTERS    = "hrms_variable_pay_quarters"
 COLL_VARIABLE_PAY_RECORDS     = "hrms_variable_pay_records"
@@ -236,6 +238,11 @@ COLL_VARIABLE_PAY_HOLD_LEDGER = "hrms_variable_pay_hold_ledger"
 # Employee 360° performance history (§22.5 step 222) — Employee 360° itself (§6) is a
 # separate, larger gap this phase does not build.
 COLL_PIP_RECORDS = "hrms_pip_records"
+
+# ── Phase GMP-1 — Group Mediclaim Policy (§22 employee profile "GMP section") ──
+# One current enrolment per employee, HR-administered in place — not an effective-dated
+# history, the same shape Employee Profile's own personal/statutory fields already take.
+COLL_GMP_RECORDS = "hrms_gmp_records"
 
 # ── Phase LETTER-1 — HR Letter / Document Generator (SM-HR-041) ──
 # Templates are HR-authored, mutable text (the same "operator edits the wording" model as
@@ -299,7 +306,13 @@ HRMS_INDEXES = [
     (COLL_DESIGNATIONS, [("company_id", 1), ("name", 1)],     {"unique": True, "name": "uniq_company_name"}),
 
     # ── Phase 3: requisitions + job descriptions ──
-    (COLL_REQUISITIONS, [("request_no", 1)],                  {"unique": True, "name": "uniq_request_no"}),
+    # Composite with company_id, not a bare unique: next_business_id mints request_no PER
+    # COMPANY (see counter_key's own docstring), so two companies legitimately both reach
+    # "HR-REQ-2026-021" -- a bare unique index refuses the second one's insert with an
+    # E11000 the moment both counters reach the same number. Same class of bug as
+    # uniq_assessment_no below, just an earlier phase that predates that fix.
+    (COLL_REQUISITIONS, [("company_id", 1), ("request_no", 1)],
+                                                              {"unique": True, "name": "uniq_request_no"}),
     (COLL_REQUISITIONS, [("company_id", 1), ("approval_status", 1)],
                                                               {"name": "by_company_approval"}),
     (COLL_REQUISITIONS, [("company_id", 1), ("closing_status", 1)],
@@ -308,7 +321,11 @@ HRMS_INDEXES = [
                                                               {"name": "by_company_creator"}),
     (COLL_REQUISITIONS, [("company_id", 1), ("department_id", 1)],
                                                               {"name": "by_company_department"}),
-    (COLL_JOB_DESCRIPTIONS, [("jd_no", 1)],                   {"unique": True, "name": "uniq_jd_no"}),
+    # Same per-company-sequence issue as request_no above -- reproduced live as
+    # "E11000 ... uniq_jd_no dup key: { jd_no: 'JD-2026-021' }" once two companies' JD
+    # counters both reached 021.
+    (COLL_JOB_DESCRIPTIONS, [("company_id", 1), ("jd_no", 1)],
+                                                              {"unique": True, "name": "uniq_jd_no"}),
     (COLL_JOB_DESCRIPTIONS, [("request_no", 1)],              {"name": "by_request"}),
     (COLL_JOB_DESCRIPTIONS, [("company_id", 1), ("status", 1)],
                                                               {"name": "by_company_status"}),
@@ -319,7 +336,9 @@ HRMS_INDEXES = [
     (COLL_JOB_POSTINGS, [("company_id", 1), ("live_status", 1)],
                                                               {"name": "by_company_live"}),
     (COLL_JOB_POSTINGS, [("request_no", 1)],                  {"name": "by_request"}),
-    (COLL_CANDIDATES,   [("uk", 1)],                          {"unique": True, "name": "uniq_uk"}),
+    # Composite with company_id -- uk is minted per company by next_business_id, same as
+    # every other business id in this file.
+    (COLL_CANDIDATES,   [("company_id", 1), ("uk", 1)],       {"unique": True, "name": "uniq_uk"}),
     (COLL_CANDIDATES,   [("company_id", 1), ("application_status", 1)],
                                                               {"name": "by_company_status"}),
     (COLL_CANDIDATES,   [("posting_code", 1)],                {"name": "by_posting"}),
@@ -333,7 +352,14 @@ HRMS_INDEXES = [
                                                                "name": "ttl_expires"}),
 
     # ── Phase 6: assessments ──
-    (COLL_ASSESSMENTS, [("assessment_no", 1)],                {"unique": True, "name": "uniq_assessment_no"}),
+    # Compound with company_id, not a bare unique on assessment_no: next_business_id scopes
+    # its counter PER COMPANY (counter_key's own docstring -- "a client must not be able to
+    # infer another client's hiring volume from gaps in their own numbering"), so two
+    # different companies legitimately mint the same "ASM-2026-008". A bare unique index
+    # rejected the second company's insert with a 500 (E11000) the moment both companies'
+    # counters reached the same number -- reconciled the same way Phase 9 fixed uniq_user.
+    (COLL_ASSESSMENTS, [("company_id", 1), ("assessment_no", 1)],
+                                                              {"unique": True, "name": "uniq_assessment_no"}),
     # The access code is the ONLY credential protecting a candidate's submission, so it is
     # both unique and indexed -- every public request looks up by it.
     (COLL_ASSESSMENTS, [("access_code", 1)],                  {"unique": True, "name": "uniq_access_code"}),
@@ -342,7 +368,9 @@ HRMS_INDEXES = [
     (COLL_ASSESSMENTS, [("request_no", 1)],                   {"name": "by_request"}),
 
     # ── Phase 7: interviews ──
-    (COLL_INTERVIEWS, [("interview_no", 1)],                  {"unique": True, "name": "uniq_interview_no"}),
+    # Composite with company_id -- interview_no is minted per company.
+    (COLL_INTERVIEWS, [("company_id", 1), ("interview_no", 1)],
+                                                              {"unique": True, "name": "uniq_interview_no"}),
     (COLL_INTERVIEWS, [("uk", 1)],                            {"name": "by_candidate"}),
     (COLL_INTERVIEWS, [("company_id", 1), ("status", 1)],     {"name": "by_company_status"}),
     # The board groups by day, so the feed always sorts on this.
@@ -352,7 +380,8 @@ HRMS_INDEXES = [
     (COLL_INTERVIEWS, [("interviewer_id", 1)],                {"name": "by_interviewer"}),
 
     # ── Phase 8: offers ──
-    (COLL_OFFERS, [("offer_no", 1)],                          {"unique": True, "name": "uniq_offer_no"}),
+    # Composite with company_id -- offer_no is minted per company.
+    (COLL_OFFERS, [("company_id", 1), ("offer_no", 1)],       {"unique": True, "name": "uniq_offer_no"}),
     # The access code is the candidate's only credential; every public request looks it up.
     (COLL_OFFERS, [("access_code", 1)],                       {"unique": True, "name": "uniq_access_code"}),
     (COLL_OFFERS, [("uk", 1)],                                {"name": "by_candidate"}),
@@ -360,12 +389,18 @@ HRMS_INDEXES = [
     (COLL_OFFERS, [("request_no", 1)],                        {"name": "by_request"}),
 
     # ── Phase 9: onboarding ──
-    (COLL_ONBOARDING, [("onb_no", 1)],                        {"unique": True, "name": "uniq_onb_no"}),
+    # Composite with company_id -- onb_no is minted per company.
+    (COLL_ONBOARDING, [("company_id", 1), ("onb_no", 1)],     {"unique": True, "name": "uniq_onb_no"}),
     (COLL_ONBOARDING, [("access_code", 1)],                   {"unique": True, "name": "uniq_access_code"}),
-    (COLL_ONBOARDING, [("uk", 1)],                            {"unique": True, "name": "uniq_candidate"}),
+    # Composite with company_id -- uk is per-company too (see uniq_uk above), so without
+    # this a candidate from one company blocks a same-numbered candidate from another
+    # company from ever starting onboarding.
+    (COLL_ONBOARDING, [("company_id", 1), ("uk", 1)],         {"unique": True, "name": "uniq_candidate"}),
     (COLL_ONBOARDING, [("company_id", 1), ("status", 1)],     {"name": "by_company_status"}),
-    # Sparse: the id is minted partway through, so most rows have none yet.
-    (COLL_ONBOARDING, [("employee_id", 1)],                   {"unique": True, "sparse": True,
+    # Sparse: the id is minted partway through, so most rows have none yet. Composite with
+    # company_id -- employee_id is minted per company by next_business_id, same as every
+    # other business id in this file.
+    (COLL_ONBOARDING, [("company_id", 1), ("employee_id", 1)], {"unique": True, "sparse": True,
                                                                "name": "uniq_employee_id"}),
 
     # -- Phase 10: date-ranged analytics ------------------------------------------
@@ -381,14 +416,17 @@ HRMS_INDEXES = [
     # The registry is looked up by CODE on every public request (the revocation guard), so
     # that index is unique and is the hot one. The rest serve the Link Manager's filters.
     (COLL_LINKS, [("code", 1)],                               {"unique": True, "name": "uniq_code"}),
-    (COLL_LINKS, [("link_id", 1)],                            {"unique": True, "name": "uniq_link_id"}),
+    # Composite with company_id -- link_id (unlike code, a random token) is minted per
+    # company by next_business_id, same as every other business id in this file.
+    (COLL_LINKS, [("company_id", 1), ("link_id", 1)],         {"unique": True, "name": "uniq_link_id"}),
     (COLL_LINKS, [("company_id", 1), ("kind", 1), ("status", 1)],
                                                               {"name": "by_company_kind_status"}),
     (COLL_LINKS, [("company_id", 1), ("created_at", -1)],     {"name": "by_company_created"}),
     (COLL_LINKS, [("target_id", 1)],                          {"name": "by_target"}),
     (COLL_LINKS, [("request_no", 1)],                         {"name": "by_request"}),
 
-    (COLL_DOCUMENTS, [("doc_no", 1)],                         {"unique": True, "name": "uniq_doc_no"}),
+    # Composite with company_id -- doc_no is minted per company.
+    (COLL_DOCUMENTS, [("company_id", 1), ("doc_no", 1)],      {"unique": True, "name": "uniq_doc_no"}),
     (COLL_DOCUMENTS, [("company_id", 1), ("owner_type", 1), ("owner_id", 1)],
                                                               {"name": "by_owner"}),
     (COLL_DOCUMENTS, [("company_id", 1), ("status", 1)],      {"name": "by_company_status"}),
@@ -400,11 +438,14 @@ HRMS_INDEXES = [
 
     # One appointment letter per candidate, enforced at the DB level: the letter confirms
     # joining terms, and two of them for one person is a contradiction, not a workflow.
-    (COLL_APPOINTMENTS, [("appointment_no", 1)],              {"unique": True,
+    # Composite with company_id -- appointment_no and uk are both per-company (uk per
+    # uniq_uk above), same fix as requisitions/JDs/candidates/interviews/offers/onboarding.
+    (COLL_APPOINTMENTS, [("company_id", 1), ("appointment_no", 1)],
+                                                              {"unique": True,
                                                                "name": "uniq_appointment_no"}),
     (COLL_APPOINTMENTS, [("access_code", 1)],                 {"unique": True,
                                                                "name": "uniq_access_code"}),
-    (COLL_APPOINTMENTS, [("uk", 1)],                          {"unique": True,
+    (COLL_APPOINTMENTS, [("company_id", 1), ("uk", 1)],       {"unique": True,
                                                                "name": "uniq_candidate"}),
     (COLL_APPOINTMENTS, [("company_id", 1), ("status", 1)],   {"name": "by_company_status"}),
     (COLL_APPOINTMENTS, [("request_no", 1)],                  {"name": "by_request"}),
@@ -417,7 +458,9 @@ HRMS_INDEXES = [
      {"name": "by_company_track"}),
 
     # ── Client engagements ──
-    (COLL_CLIENT_ENGAGEMENTS, [("engagement_id", 1)],   {"unique": True,
+    # Composite with company_id -- engagement_id is minted per (vendor) company.
+    (COLL_CLIENT_ENGAGEMENTS, [("company_id", 1), ("engagement_id", 1)],
+                                                         {"unique": True,
                                                          "name": "uniq_engagement_id"}),
     # One engagement per (tenant, client). A second would mean two answers to "are they our
     # client", and two member lists to keep in step.
@@ -430,18 +473,24 @@ HRMS_INDEXES = [
     # ── Internal recruitment track ──
     # One scorecard per requisition -- the uniqueness IS the rule, exactly as it is for
     # sanctioned strength.
-    (COLL_POSITION_SCORECARDS, [("scr_no", 1)],               {"unique": True,
+    # Composite with company_id -- scr_no is minted per company.
+    (COLL_POSITION_SCORECARDS, [("company_id", 1), ("scr_no", 1)],
+                                                              {"unique": True,
                                                                "name": "uniq_scr_no"}),
     (COLL_POSITION_SCORECARDS, [("company_id", 1), ("request_no", 1)],
      {"unique": True, "name": "uniq_company_request"}),
 
-    (COLL_REFERENCE_CHECKS, [("ref_no", 1)],                  {"unique": True,
+    # Composite with company_id -- ref_no is minted per company.
+    (COLL_REFERENCE_CHECKS, [("company_id", 1), ("ref_no", 1)],
+                                                              {"unique": True,
                                                                "name": "uniq_ref_no"}),
     # A candidate may have SEVERAL referees, so this is deliberately not unique.
     (COLL_REFERENCE_CHECKS, [("company_id", 1), ("uk", 1)],   {"name": "by_company_candidate"}),
     (COLL_REFERENCE_CHECKS, [("request_no", 1)],              {"name": "by_request"}),
 
-    (COLL_PROBATION_REVIEWS, [("prb_no", 1)],                 {"unique": True,
+    # Composite with company_id -- prb_no is minted per company.
+    (COLL_PROBATION_REVIEWS, [("company_id", 1), ("prb_no", 1)],
+                                                              {"unique": True,
                                                                "name": "uniq_prb_no"}),
     # One live probation per employee. A second term after an extension updates this record
     # rather than opening a competing one.
@@ -450,7 +499,8 @@ HRMS_INDEXES = [
     # `GET /probation/due` sorts on this, and it is the field the SLA breach sweep reads.
     (COLL_PROBATION_REVIEWS, [("company_id", 1), ("ends_on", 1)], {"name": "by_company_end"}),
 
-    (COLL_EXCEPTIONS, [("exc_no", 1)],                        {"unique": True,
+    # Composite with company_id -- exc_no is minted per company.
+    (COLL_EXCEPTIONS, [("company_id", 1), ("exc_no", 1)],     {"unique": True,
                                                                "name": "uniq_exc_no"}),
     # The gate checks read this exact shape: "is there an APPROVED exception of this type
     # for this requisition (and candidate)".
@@ -464,7 +514,9 @@ HRMS_INDEXES = [
      {"unique": True, "name": "uniq_company_position"}),
 
     # ── Phase INT-2 ──
-    (COLL_SHORTLIST_REVIEWS, [("slr_no", 1)],                {"unique": True,
+    # Composite with company_id -- slr_no is minted per company.
+    (COLL_SHORTLIST_REVIEWS, [("company_id", 1), ("slr_no", 1)],
+                                                              {"unique": True,
                                                               "name": "uniq_slr_no"}),
     # The gate on `Selected` asks "is there a committee record covering this candidate on
     # this requisition", so both are indexed. Deliberately NOT unique: a second intake on
@@ -478,7 +530,8 @@ HRMS_INDEXES = [
     (COLL_INTERVIEW_WINDOWS, [("company_id", 1), ("department_id", 1), ("weekday", 1)],
      {"name": "by_company_department_day"}),
 
-    (COLL_PREBOARDING, [("pbt_no", 1)],                      {"unique": True,
+    # Composite with company_id -- pbt_no is minted per company.
+    (COLL_PREBOARDING, [("company_id", 1), ("pbt_no", 1)],   {"unique": True,
                                                               "name": "uniq_pbt_no"}),
     # `GET /preboarding/due` reads the LATEST touchpoint per candidate, so this is the
     # index it sorts on.
@@ -489,7 +542,8 @@ HRMS_INDEXES = [
     # One ACTIVE band per (department, designation, grade) is a rule the service enforces
     # rather than the index, because a superseded band stays on file with its own
     # effective dates -- uniqueness here would make history impossible to keep.
-    (COLL_SALARY_BANDS, [("band_no", 1)],                    {"unique": True,
+    # Composite with company_id -- band_no is minted per company.
+    (COLL_SALARY_BANDS, [("company_id", 1), ("band_no", 1)], {"unique": True,
                                                               "name": "uniq_band_no"}),
     (COLL_SALARY_BANDS,
      [("company_id", 1), ("department_id", 1), ("designation_id", 1), ("status", 1)],
@@ -502,10 +556,12 @@ HRMS_INDEXES = [
      {"name": "by_company_candidate_recent"}),
     (COLL_COMM_LOG, [("request_no", 1)],                     {"name": "by_request"}),
 
-    (COLL_SURVEYS, [("srv_no", 1)],                          {"unique": True,
+    # Composite with company_id -- srv_no and srp_no are both minted per company.
+    (COLL_SURVEYS, [("company_id", 1), ("srv_no", 1)],       {"unique": True,
                                                               "name": "uniq_srv_no"}),
     (COLL_SURVEYS, [("company_id", 1), ("kind", 1)],         {"name": "by_company_kind"}),
-    (COLL_SURVEY_RESPONSES, [("srp_no", 1)],                 {"unique": True,
+    (COLL_SURVEY_RESPONSES, [("company_id", 1), ("srp_no", 1)],
+                                                              {"unique": True,
                                                               "name": "uniq_srp_no"}),
     # One response per instrument per employee. The uniqueness IS the de-duplication, and
     # it is the only reason `employee_code` is stored at all -- see SURVEY_MIN_RESPONSES.
@@ -521,7 +577,8 @@ HRMS_INDEXES = [
     (COLL_POLICY_REVISIONS, [("company_id", 1), ("policy_key", 1), ("version", 1)],
      {"unique": True, "name": "uniq_company_policy_version"}),
 
-    (COLL_PURGE_BATCHES, [("batch_no", 1)],                  {"unique": True,
+    # Composite with company_id -- batch_no is minted per company.
+    (COLL_PURGE_BATCHES, [("company_id", 1), ("batch_no", 1)], {"unique": True,
                                                               "name": "uniq_batch_no"}),
     (COLL_PURGE_BATCHES, [("company_id", 1), ("status", 1)], {"name": "by_company_status"}),
 
@@ -537,7 +594,8 @@ HRMS_INDEXES = [
     # ── Phase INT-4: telephonic screening ──
     # NOT unique on (company, candidate): a second call happens (the first was cut off, the
     # candidate asked to be rung back), and the gate asks whether ANY screen passed.
-    (COLL_TELEPHONIC, [("tel_no", 1)],                       {"unique": True,
+    # Composite with company_id -- tel_no is minted per company.
+    (COLL_TELEPHONIC, [("company_id", 1), ("tel_no", 1)],    {"unique": True,
                                                               "name": "uniq_tel_no"}),
     (COLL_TELEPHONIC, [("company_id", 1), ("uk", 1)],        {"name": "by_candidate"}),
     (COLL_TELEPHONIC, [("company_id", 1), ("outcome", 1)],   {"name": "by_company_outcome"}),
@@ -723,6 +781,7 @@ HRMS_INDEXES = [
     # ── Phase PAY-1 — Payroll, Salary Advance & Variable Pay ──
     (COLL_SALARY_COMPONENTS, [("company_id", 1), ("code", 1)],
      {"unique": True, "name": "uniq_company_code"}),
+    (COLL_PAYROLL_TEMPLATES, [("company_id", 1)], {"unique": True, "name": "uniq_payroll_template"}),
     (COLL_SALARY_STRUCTURES, [("company_id", 1), ("employee_code", 1), ("effective_from", 1)],
      {"name": "by_employee_effective"}),
     (COLL_PAYROLL_RUNS, [("company_id", 1), ("period", 1)],
@@ -746,6 +805,10 @@ HRMS_INDEXES = [
      {"unique": True, "name": "uniq_pip_no"}),
     (COLL_PIP_RECORDS, [("company_id", 1), ("employee_code", 1)], {"name": "by_employee"}),
     (COLL_PIP_RECORDS, [("company_id", 1), ("status", 1)], {"name": "by_company_status"}),
+
+    # ── Phase GMP-1 ── one enrolment per employee.
+    (COLL_GMP_RECORDS, [("company_id", 1), ("employee_code", 1)],
+     {"unique": True, "name": "uniq_gmp_employee"}),
 
     # ── Phase LETTER-1 — HR Letter / Document Generator ──
     (COLL_LETTER_TEMPLATES, [("company_id", 1), ("key", 1)],
@@ -1189,6 +1252,13 @@ class Cap(str, Enum):
     PULSE_READ   = "pulse.read"
     PULSE_MANAGE = "pulse.manage"
     PULSE_SUBMIT = "pulse.submit"
+    # ── Phase GMP-1 — Group Mediclaim Policy (§22, employee profile "GMP section") ──
+    # One current enrolment per employee, HR-administered — the same "master, edited in
+    # place, no approval tier the BA doc does not name" shape Employee Profile's own
+    # personal/statutory fields already take. READ is row-scoped exactly like PIP_READ/
+    # LETTER_READ: an employee sees their own enrolment, HR/INTERNAL see the company's.
+    GMP_READ  = "gmp.read"
+    GMP_WRITE = "gmp.write"
     # ── Later phases append their capabilities here. ──
 
 
@@ -1237,6 +1307,9 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
         # Read only, for the same reason OFFER_SEND is withheld: issuing an appointment
         # letter commits the client to employing somebody.
         Cap.APPOINTMENT_READ,
+        # Read only, the same boundary as employee.salary.* above: Sparsh staff may see a
+        # client's GMP enrolment to support the module, not administer their insurance.
+        Cap.GMP_READ,
         # Setting up an engagement is administrative support work, not a governance
         # decision about the client's hiring -- the same line that gives INTERNAL
         # LINK_MANAGE and DOCUMENT_WRITE but withholds every approval.
@@ -1501,6 +1574,9 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
         # ── Phase PULSE-1 ── §22.4 step 213: "HR dashboard shows completion rate, average
         # scores, common issues and follow-up status" — HR is the one role the doc names.
         Cap.PULSE_READ, Cap.PULSE_MANAGE,
+        # ── Phase GMP-1 ── HR administers the one HR Policy-adjacent record the BA doc
+        # names no separate approval tier for.
+        Cap.GMP_READ, Cap.GMP_WRITE,
     },
     # A hiring manager reads their own corner of the directory (enforced by row scoping in
     # hrms_employee_service, not by this set) and never sees pay. They RAISE requisitions --
@@ -1624,6 +1700,11 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
         # employee is entitled to read; SOP §14 exists to keep it current and visible. It is
         # the register, not the workflow -- no write of any kind comes with it.
         Cap.POLICY_READ,
+        # ── Phase POLICY-LIB-1 (§22.6) ── an employee's own act of acknowledging a
+        # published, applicable policy (step 227) — the same self-service-act pattern
+        # PIP_ACKNOWLEDGE/PULSE_SUBMIT already establish. Row/applicability-scoped in
+        # hrms_policy_service.acknowledge_policy, not merely capability-gated.
+        Cap.POLICY_ACKNOWLEDGE,
         # ── Phase ORIENT-1 ── §22.3 step 202: "Employee sees planned sessions in My
         # Onboarding" — row-scoped to their own assignment in hrms_orientation_service, the
         # same enforced-ownership pattern Phase ATT-1 established (not merely capability-
@@ -1665,6 +1746,20 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
         # already establishes above. There is no LETTER_MANAGE here: an employee reads their
         # own correspondence, they do not issue it to themselves.
         Cap.LETTER_READ,
+        # ── §22 Employee Profile / BR-028 ── "Appointment Letter must remain downloadable
+        # from Employee 360 to authorised users after joining." Row-scoped in
+        # hrms_appointment_service._scope_filter to the one letter raised against this
+        # employee's own hiring record, the same self-view LETTER_READ establishes above.
+        Cap.APPOINTMENT_READ,
+        # ── Phase PAYSLIP-1 (§22.7, SM-HR-031) ── an employee reads their own payslip.
+        # Row-scoped in hrms_payroll_service.list_records / hrms_payslip_service.get_payslip
+        # to their own employee_code, the same enforced self-view PIP_READ establishes — NOT
+        # a blanket grant to the HR-facing payroll-run/records screens' other data.
+        Cap.PAYROLL_READ,
+        # ── Phase GMP-1 ── an employee reads their own Group Mediclaim enrolment — the
+        # same self-view PIP_READ/LETTER_READ already establish. No GMP_WRITE: this stays
+        # HR-administered, the employee does not edit their own coverage or dependants.
+        Cap.GMP_READ,
         # ── Phase PULSE-1 ── §22.4 step 210: the employee completes their own pulse survey.
         # PULSE_READ is row-scoped to their own response the same way PIP_READ is scoped
         # above; PULSE_SUBMIT is the separate self-service completion act.
@@ -1783,6 +1878,52 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
         Cap.ADVANCE_READ, Cap.ADVANCE_APPROVE_EMERGENCY,
         Cap.VARIABLE_PAY_READ, Cap.VARIABLE_PAY_APPROVE, Cap.VARIABLE_PAY_HOLD_MANAGE,
     },
+}
+
+
+# ─────────────────────────────────────────────────────────────
+# The Internal Recruitment SOP's own controls — Sparsh Magic hiring for itself
+# ─────────────────────────────────────────────────────────────
+# HrmsWorkspaceBar's "Internal hiring" tab group (Overview, Internal reqs, Scorecards,
+# Phone screen, Shortlisting, References, Negotiation) runs on these ten capabilities.
+# They stay in ROLE_CAPABILITIES above unchanged -- MD/HR/MANAGER/FINANCE still need them
+# to run Sparsh's OWN governance ladder when a Sparsh staff member holds one of those
+# governance roles -- but `capabilities_for()` strips this exact set from any CLIENT-SIDE
+# user, whatever governance role their own company's Role & Access screen has them at.
+#
+# Why a strip rather than a smaller ROLE_CAPABILITIES to begin with: MD/HR/MANAGER/
+# FINANCE/EMPLOYEE are the SAME role identities a client company's own users resolve to
+# (hrms_role() maps governance_role -> these same enum members, with no separate "client
+# MD" role) -- so the capability SET a rung carries has to differ by who the caller is,
+# not just by rung. A client's HOD approving THEIR OWN requisitions still needs everything
+# else that rung holds; they never need Sparsh's internal scorecard/phone-screen/
+# shortlisting-committee/reference-check/negotiation controls, which exist to run the
+# Internal Recruitment SOP (Annexure B/C) for Sparsh's own headcount, not a client's.
+INTERNAL_TRACK_ONLY_CAPS: Set[Cap] = {
+    Cap.SCORECARD_READ, Cap.SCORECARD_WRITE, Cap.SCORECARD_APPROVE,
+    Cap.TELEPHONIC_READ, Cap.TELEPHONIC_WRITE,
+    Cap.SHORTLIST_READ, Cap.SHORTLIST_WRITE,
+    Cap.REFERENCE_READ, Cap.REFERENCE_WRITE,
+    Cap.NEGOTIATION_READ, Cap.NEGOTIATION_WRITE,
+}
+
+
+# ─────────────────────────────────────────────────────────────
+# Sparsh's own side of the Client Hiring conversation
+# ─────────────────────────────────────────────────────────────
+# The CLIENT role's own comment (above, where it deliberately omits these) already states
+# the design: "no SHARE_WRITE (a client can never share a CV onward, to anyone), no
+# JOB_REQUEST_REVIEW (accepting their own request would make Sparsh's review a formality)".
+# A client raises a job request and responds to the CVs shared with them (JOB_REQUEST_READ/
+# WRITE, SHARE_READ/RESPOND — left untouched); reviewing/accepting/declining/converting that
+# SAME request, sharing a CV onward, and running background verification are Sparsh's own
+# triage of it, for the identical reason INTERNAL_TRACK_ONLY_CAPS exists just above: MD/HR/
+# MANAGER are the same role identities a client's own governance ladder resolves to, so
+# these five have to be stripped by WHO the caller is, not left keyed to rung alone.
+CLIENT_TRACK_SPARSH_ONLY_CAPS: Set[Cap] = {
+    Cap.JOB_REQUEST_REVIEW,
+    Cap.SHARE_WRITE,
+    Cap.BACKGROUND_READ, Cap.BACKGROUND_WRITE, Cap.BACKGROUND_APPROVE,
 }
 
 
@@ -2595,7 +2736,9 @@ class RequisitionIn(BaseModel):
     qualification: str
     essential_skills: str
     required_date: str                    # YYYY-MM-DD
-    assignee_id: str                      # who will run the recruitment
+    # No longer collected at raise time (removed from every requisition-raising form) -- a
+    # requisition left unassigned is not incomplete; see create_requisition's own note.
+    assignee_id: Optional[str] = None     # who will run the recruitment, once named
     offering_ctc: Optional[float] = None
     urgency_level: Urgency = Urgency.MEDIUM
     work_location: WorkLocation = WorkLocation.OFFICE
@@ -3538,6 +3681,10 @@ class OfferIn(BaseModel):
     location: Optional[str] = None
     content: Optional[str] = None           # defaults to DEFAULT_OFFER_BODY
     send_now: bool = False                  # create and send in one action
+    # Undeclared here, this field was silently dropped by Pydantic before the service ever
+    # saw it -- `send_now=True` with a typed signature still failed the "authorised
+    # signatory" check every time, because the service always read `None`.
+    signature: Optional[str] = None         # authorised signatory, required when send_now
 
 
 class OfferUpdate(BaseModel):
@@ -4090,6 +4237,8 @@ class DocumentCategory(str, Enum):
     EMPLOYMENT     = "Employment"
     STATUTORY      = "Statutory"
     COMPANY_ISSUED = "Company Issued"
+    # §22.1/BR-029 — Sparsh Magic's own document category, alongside the generic ones above.
+    PSC            = "PSC"
     OTHER          = "Other"
 
 
@@ -5614,6 +5763,10 @@ DEFAULT_POLICIES = [
 AUDIT_POLICY_REGISTERED = "policy registered"
 AUDIT_POLICY_REVISED    = "policy revision logged"
 AUDIT_POLICY_APPROVED   = "policy revision approved"
+# ── Phase POLICY-LIB-1 (§22.6) ──
+AUDIT_POLICY_APPLICABILITY_SAVED = "policy applicability/category saved"
+AUDIT_POLICY_ACKNOWLEDGED        = "policy acknowledged by employee"
+AUDIT_POLICY_DOCUMENT_UPLOADED   = "policy document uploaded"
 ENTITY_POLICY = "policy"
 
 
@@ -5707,6 +5860,10 @@ JOB_POLICY_REVIEW = "policy_review"
 JOB_RETENTION     = "retention_propose"
 JOB_ORIENTATION   = "orientation_escalation"
 JOB_PULSE_SURVEY  = "pulse_survey_issue"
+# ── Phase POLICY-LIB-1 (§22.6) ── weekly, the same cadence JOB_POLICY_REVIEW already uses
+# for the same reason: an unacknowledged policy stays unacknowledged, so a daily nudge would
+# be noise, not a governance signal.
+JOB_POLICY_ACK    = "policy_acknowledgement_reminders"
 
 # (key, label, cadence, utc_hour)
 SCHEDULED_JOBS = [
@@ -5717,6 +5874,7 @@ SCHEDULED_JOBS = [
     (JOB_RETENTION,     "retention purge proposal",       JOB_CADENCE_WEEKLY, 3),
     (JOB_ORIENTATION,   "orientation escalation sweep",    JOB_CADENCE_DAILY,  7),
     (JOB_PULSE_SURVEY,  "30/90-day pulse survey issuance", JOB_CADENCE_DAILY,  7),
+    (JOB_POLICY_ACK,    "policy acknowledgement reminders", JOB_CADENCE_WEEKLY, 8),
 ]
 
 
@@ -5904,8 +6062,8 @@ class PolicyIn(BaseModel):
     # hrms_policy_service.py for why these are added fields, not a rewrite.
     category: Optional[str] = None                # Leave/Attendance/Conduct/... or a
                                                     # client-defined string (BA doc step 223)
-    department_id: Optional[str] = None            # applicability filter; unset = company-wide
-    employment_type: Optional[str] = None          # applicability filter; unset = all types
+    department_ids: List[str] = Field(default_factory=list)   # empty = company-wide
+    employment_types: List[str] = Field(default_factory=list) # empty = every employment type
     acknowledgement_required: bool = False
     acceptance_due_days: Optional[int] = None      # days from publish an employee has to ack
 
@@ -5915,6 +6073,25 @@ class PolicyRevisionIn(BaseModel):
     summary_of_change: str
     effective_date: Optional[str] = None
     document_id: Optional[str] = None
+
+
+class PolicyDocumentIn(BaseModel):
+    """§22.6 — the policy's own PDF, uploaded directly against the register rather than
+    through the candidate/employee document register (hrms_document_service._resolve_owner
+    accepts only those two owner types, and a policy file needs none of that register's
+    verification workflow — see hrms_policy_service.upload_policy_document)."""
+    file: UploadIn
+
+
+class PolicyApplicabilityIn(BaseModel):
+    """§22.6 — metadata-only update: category, applicability filters, acknowledgement
+    settings. Deliberately a separate, smaller model from PolicyIn: this is not a content
+    revision and does not need MD approval, so it must not accept `title`/`version`."""
+    category: Optional[str] = None
+    department_ids: List[str] = Field(default_factory=list)
+    employment_types: List[str] = Field(default_factory=list)
+    acknowledgement_required: bool = False
+    acceptance_due_days: Optional[int] = None
 
 
 class PolicyApproveIn(BaseModel):
@@ -7287,6 +7464,7 @@ AUDIT_SALARY_STRUCTURE_SAVED = "salary structure saved"
 AUDIT_PAYROLL_RUN_CREATED    = "payroll run created"
 AUDIT_PAYROLL_CALCULATED     = "payroll calculated"
 AUDIT_PAYROLL_RECORD_ADJUSTED = "payroll record adjusted"
+AUDIT_PAYROLL_ADJUSTMENTS_SET = "payroll ad-hoc components set"
 AUDIT_PAYROLL_DECIDED        = "payroll run decided"
 AUDIT_ADVANCE_REQUESTED = "salary advance requested"
 AUDIT_ADVANCE_ACTIONED  = "salary advance actioned"
@@ -7322,6 +7500,14 @@ class SalaryStructureIn(BaseModel):
     components: list[SalaryStructureComponentIn]
 
 
+class PayslipTemplateIn(BaseModel):
+    """SM-HR-064 — deliberately thin; see hrms_payslip_service.py's module docstring for
+    why full statutory/component theming waits on the payroll workshop §7.13 itself names."""
+    company_name: Optional[str] = None
+    header_note: Optional[str] = None
+    footer_note: Optional[str] = None
+
+
 class PayrollRunCreateIn(BaseModel):
     period: str                                     # YYYY-MM
 
@@ -7340,6 +7526,21 @@ class PayrollRecordAdjustIn(BaseModel):
     other_deductions: Optional[float] = None
     notice_recovery: Optional[float] = None
     remarks: Optional[str] = None
+
+
+class PayrollAdjustmentItemIn(BaseModel):
+    """One ad-hoc line, against the SAME component master the recurring salary structure
+    already uses (§22.7) — arbitrary named earnings/deductions, not the fixed handful of
+    buckets PayrollRecordAdjustIn still covers alongside this."""
+    code: str
+    amount: float
+
+
+class PayrollAdjustmentsIn(BaseModel):
+    """Replaces this employee's whole ad-hoc component list for the period — the same
+    "replace in place" convention save_salary_structure already uses, so re-submitting a
+    corrected list never leaves a stale row behind."""
+    adjustments: list[PayrollAdjustmentItemIn] = []
 
 
 class PayrollApprovalIn(BaseModel):
@@ -7466,6 +7667,31 @@ class PipDecisionIn(BaseModel):
     extension_date: Optional[str] = None            # only meaningful when closure_result is Extended
     next_action: Optional[str] = None
     remarks: Optional[str] = None
+
+
+# ─────────────────────────────────────────────────────────────
+# Phase GMP-1 — Group Mediclaim Policy
+# ─────────────────────────────────────────────────────────────
+class GmpDependentIn(BaseModel):
+    name: str
+    relation: Optional[str] = None
+    date_of_birth: Optional[str] = None
+
+
+class GmpIn(BaseModel):
+    """HR's upsert of one employee's GMP enrolment. Replaces the record in place —
+    see hrms_gmp_service.py for why this is a current-state master, not a ledger."""
+    insurer: Optional[str] = None
+    policy_number: Optional[str] = None
+    sum_insured: Optional[float] = None
+    enrolled_on: Optional[str] = None
+    status: str = "Active"                       # Active / Inactive
+    dependents: list[GmpDependentIn] = []
+    remarks: Optional[str] = None
+
+
+ENTITY_GMP = "gmp_record"
+AUDIT_GMP_SAVED = "GMP enrolment saved"
 
 
 # ─────────────────────────────────────────────────────────────

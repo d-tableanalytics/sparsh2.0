@@ -83,7 +83,11 @@ const ScheduleModal = ({ onClose, onScheduled }) => {
   useEffect(() => {
     Promise.all([
       getSchedulableCandidates(scope).then(({ data }) => setPeople(data?.candidates || [])),
-      getEmployees({ ...scope, limit: 500 }).then(({ data }) => setStaff(data?.employees || [])),
+      // The interviewer needs a real login account — a profile onboarded before the person
+      // has one (`pending_user_link`) has no `user_id`, and its option would fall back to
+      // the person's NAME as the submitted value, which the server rejects as an invalid id.
+      getEmployees({ ...scope, limit: 500 })
+        .then(({ data }) => setStaff((data?.employees || []).filter((e) => e.user_id))),
     ]).catch((err) => showError(err?.response?.data?.detail || 'Could not load options.'))
       .finally(() => setLoading(false));
     // eslint-disable-next-line react-hooks/exhaustive-deps

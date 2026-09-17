@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import {
-  FileSignature, Plus, X, Copy, Check, Send, Ban, Trash2, Eye, History, Printer,
+  FileSignature, Plus, X, Copy, Check, Send, Ban, Trash2, Eye, History, Printer, ShieldCheck,
 } from 'lucide-react';
 import { useNotification } from '../../../context/NotificationContext';
 import { useHrms } from '../HrmsContext';
@@ -9,8 +9,8 @@ import HrmsPageHeader from '../common/HrmsPageHeader';
 import HrmsScopeBar from '../common/HrmsScopeBar';
 import { HrmsLoading, HrmsError, HrmsEmpty } from '../common/HrmsStates';
 import {
-  getOffers, getOfferableCandidates, createOffer, updateOffer, sendOffer, revokeOffer,
-  deleteOffer, offerUrlFor,
+  getOffers, getOfferableCandidates, createOffer, updateOffer, sendOffer, approveOffer,
+  revokeOffer, deleteOffer, offerUrlFor,
 } from '../../../services/hrmsApi';
 import OfferPaper from './OfferPaper';
 
@@ -186,10 +186,35 @@ const EditorModal = ({ offer: initial, onClose, onChanged }) => {
   const [preview, setPreview] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
   const [saving, setSaving] = useState(false);
+  // Management/Finance's separate sign-off (Annexure B) — its own signature box, not the
+  // one used to send the letter, because approving and sending are two different people's
+  // acts even when the same person happens to hold both capabilities.
+  const [approveSig, setApproveSig] = useState('');
+  const [approving, setApproving] = useState(false);
 
   const isDraft = offer.status === 'Draft';
   const canWrite = can(CAP.OFFER_WRITE);
   const canSend = can(CAP.OFFER_SEND);
+  const canApprove = can(CAP.OFFER_APPROVE);
+  const approval = offer.offer_approval;
+
+  const approveIt = async () => {
+    if (!approveSig.trim()) return showError('Type your name to sign this approval.');
+    setApproving(true);
+    try {
+      const { data } = await approveOffer(offer.offer_no, { signature: approveSig.trim() }, scope);
+      setOffer(data);
+      showSuccess('Offer approved');
+      onChanged();
+    } catch (err) {
+      // Surfaced verbatim on purpose: on a client-track offer the server explains that
+      // approval is an internal-track control and the client approves it instead, which is
+      // a more useful answer than a client-side guess at every offer's track ahead of time.
+      showError(err?.response?.data?.detail || 'Could not approve.');
+    } finally {
+      setApproving(false);
+    }
+  };
 
   const save = async () => {
     setSaving(true);
@@ -260,6 +285,37 @@ const EditorModal = ({ offer: initial, onClose, onChanged }) => {
             <div className="mx-5 mt-4 p-3 rounded-lg bg-[var(--input-bg)] text-[12px] text-[var(--text-muted)] print:hidden">
               This offer has been sent, so the letter is frozen — the candidate may be
               reading it. Revoke it and raise a new one if the terms have changed.
+            </div>
+          )}
+
+          {/* Management/Finance sign-off (internal-track offers only — Annexure B). Only
+              relevant while still a Draft; once sent, whether it was approved is history,
+              not something to act on. */}
+          {isDraft && approval?.approved_at && (
+            <div className="mx-5 mt-4 p-3 rounded-lg bg-[var(--accent-green-bg,var(--input-bg))] text-[12px] text-[var(--accent-green,var(--text-main))] flex items-center gap-2 print:hidden">
+              <ShieldCheck size={14} />
+              Approved by {approval.approved_by_name}
+              {approval.approved_at ? ` · ${new Date(approval.approved_at).toLocaleDateString()}` : ''}
+            </div>
+          )}
+          {isDraft && !approval?.approved_at && canApprove && (
+            <div className="mx-5 mt-4 p-3.5 rounded-lg border border-[var(--accent-indigo)] bg-[var(--accent-indigo-bg)] print:hidden space-y-2">
+              <p className="text-[12.5px] font-semibold text-[var(--accent-indigo)] flex items-center gap-1.5">
+                <ShieldCheck size={14} /> Awaiting your approval
+              </p>
+              <p className="text-[11.5px] text-[var(--text-muted)]">
+                Only relevant for an internal-track offer — a client-track one is the
+                client's own call, not Sparsh's.
+              </p>
+              <div className="flex items-center gap-2">
+                <input value={approveSig} onChange={(e) => setApproveSig(e.target.value)}
+                  placeholder="Type your name to sign"
+                  className="flex-1 h-9 px-3 rounded-lg border border-[var(--border)] bg-[var(--bg-card)] text-[13px] text-[var(--text-main)]" />
+                <button type="button" disabled={approving || !approveSig.trim()} onClick={approveIt}
+                  className="h-9 px-3.5 rounded-lg bg-[var(--accent-indigo)] text-white text-[12px] font-bold disabled:opacity-50 whitespace-nowrap">
+                  {approving ? 'Approving…' : 'Approve'}
+                </button>
+              </div>
             </div>
           )}
 
@@ -463,6 +519,12 @@ const OfferBoard = () => {
               </div>
 
               <p className="text-[12.5px] text-[var(--text-main)]">{o.designation}</p>
+
+              {o.status === 'Draft' && o.offer_approval?.approved_at && (
+                <p className="text-[11px] font-semibold text-[var(--accent-green,var(--accent-indigo))] flex items-center gap-1">
+                  <ShieldCheck size={11} /> Approved by {o.offer_approval.approved_by_name}
+                </p>
+              )}
 
               <div className={`grid ${data.ctc_visible ? 'grid-cols-2' : 'grid-cols-1'} gap-2 text-center`}>
                 {data.ctc_visible && (

@@ -35,12 +35,17 @@ from fastapi import HTTPException
 
 from app.db.mongodb import get_collection
 from app.models.hrms import (
-    AUDIT_POLICY_APPROVED, AUDIT_POLICY_REGISTERED, AUDIT_POLICY_REVISED, COLL_POLICIES,
-    COLL_POLICY_REVISIONS, DEFAULT_POLICIES, ENTITY_POLICY, POLICY_REVIEW_MONTHS,
+    AUDIT_POLICY_ACKNOWLEDGED, AUDIT_POLICY_APPLICABILITY_SAVED,
+    AUDIT_POLICY_APPROVED, AUDIT_POLICY_DOCUMENT_UPLOADED, AUDIT_POLICY_REGISTERED,
+    AUDIT_POLICY_REVISED,
+    COLL_EMPLOYEE_PROFILES, COLL_POLICIES, COLL_POLICY_ACKNOWLEDGEMENTS,
+    COLL_POLICY_REVISIONS, DEFAULT_POLICIES, DOCUMENT_URL_TTL_SECONDS, ENTITY_POLICY,
+    HrmsRole, POLICY_REVIEW_MONTHS,
     POLICY_REVIEW_NOTICE_DAYS, PolicyStatus, is_iso_date,
 )
 from app.services.hrms_audit_service import audit
-from app.utils.hrms_public_guard import clean_text
+from app.utils.hrms_access import hrms_role
+from app.utils.hrms_public_guard import clean_text, decode_upload
 
 POLICY_KEY_MAX = 60
 
@@ -90,6 +95,16 @@ def _days_until(target: str) -> Optional[int]:
     return (due.date() - datetime.now(timezone.utc).date()).days
 
 
+def _signed_document_url(doc: dict) -> Optional[str]:
+    """A fresh signed URL minted on every read, never stored — the same reasoning
+    hrms_letter_service._signed_url applies: the URL expires, the object must not."""
+    key = doc.get("document_s3_key")
+    if not key:
+        return None
+    from app.services.s3_service import get_signed_url
+    return get_signed_url(key, expires_in=DOCUMENT_URL_TTL_SECONDS)
+
+
 def _review_state(doc: dict) -> dict:
     """Where a policy sits in its review cycle. DERIVED on read, never stored.
 
@@ -128,7 +143,7 @@ async def list_policies(company_id: str, *, include_withdrawn: bool = False) -> 
     if not include_withdrawn:
         query["status"] = {"$ne": PolicyStatus.WITHDRAWN.value}
     rows = await coll.find(query).sort("policy_key", 1).to_list(100)
-    out = [{**_out(r), **_review_state(r)} for r in rows]
+    out = [{**_out(r), **_review_state(r), "document_url": _signed_document_url(r)} for r in rows]
     return {
         "policies": out,
         "total": len(out),
@@ -169,7 +184,7 @@ async def get_policy(company_id: str, policy_key: str) -> Optional[dict]:
     revisions = await get_collection(COLL_POLICY_REVISIONS).find(
         {"company_id": str(company_id), "policy_key": policy_key}).sort(
         "changed_at", -1).to_list(200)
-    return {**_out(doc), **_review_state(doc),
+    return {**_out(doc), **_review_state(doc), "document_url": _signed_document_url(doc),
             # SOP §14's "Modification History table", newest first.
             "revisions": [_out(r) for r in revisions]}
 
@@ -219,6 +234,26 @@ async def notify_due_reviews(actor: Optional[dict], company_id: str) -> dict:
 # =============================================================
 # Write
 # =============================================================
+def _applicability_fields(payload: dict) -> dict:
+    """§22.6 step 223/224's additive fields (PolicyIn) — category + applicability filters +
+    the acknowledgement settings. Pulled into one place so `register_policy` and
+    `update_applicability` build the exact same shape.
+
+    Applicability is MULTI-select: a policy naming several departments or several
+    employment types is one policy applying to a union of groups, not several near-
+    identical policies. An empty list means "every department" / "every employment type" —
+    the same "unset = company-wide" convention the single-value fields used before this."""
+    return {
+        "category": clean_text(payload.get("category"), limit=60) or None,
+        "department_ids": [clean_text(d, limit=40) for d in (payload.get("department_ids") or [])
+                           if clean_text(d, limit=40)],
+        "employment_types": [clean_text(t, limit=40) for t in (payload.get("employment_types") or [])
+                             if clean_text(t, limit=40)],
+        "acknowledgement_required": bool(payload.get("acknowledgement_required", False)),
+        "acceptance_due_days": payload.get("acceptance_due_days"),
+    }
+
+
 async def register_policy(actor: dict, company_id: str, payload: dict) -> dict:
     """Add a policy to the register."""
     policy_key = clean_text(payload.get("policy_key"), limit=POLICY_KEY_MAX)
@@ -263,6 +298,7 @@ async def register_policy(actor: dict, company_id: str, payload: dict) -> dict:
         "registered_by": str(actor.get("_id") or ""),
         "registered_by_name": _actor_name(actor),
         "created_at": now,
+        **_applicability_fields(payload),
     }
     await coll.insert_one(dict(doc))
     await audit(actor, AUDIT_POLICY_REGISTERED, ENTITY_POLICY, policy_key,
@@ -390,3 +426,247 @@ async def approve_revision(actor: dict, company_id: str, policy_key: str,
     await audit(actor, AUDIT_POLICY_APPROVED, ENTITY_POLICY, policy_key,
                 f"v{version} approved and in force from {effective}", company_id)
     return await get_policy(company_id, policy_key)
+
+
+async def upload_policy_document(actor: dict, company_id: str, policy_key: str,
+                                 payload: dict) -> dict:
+    """The policy's own PDF, stored directly against the register — not through the
+    candidate/employee document register (hrms_document_service._resolve_owner accepts only
+    those two owner types, and a policy file needs none of that register's Pending/Verified/
+    Rejected review workflow). Replaces any previous file; the register's own revision
+    history is what tracks "what changed", not a second version list on the file itself."""
+    policy = await get_collection(COLL_POLICIES).find_one(
+        {"company_id": str(company_id), "policy_key": policy_key})
+    if not policy:
+        raise HTTPException(status_code=404, detail="That policy is not in the register.")
+
+    raw, name, mime = decode_upload(payload.get("file"), label="Policy document")
+    if not raw:
+        raise HTTPException(status_code=422, detail="Attach a file.")
+
+    import io
+    from app.services.s3_service import upload_file_to_s3_with_key
+    try:
+        result = upload_file_to_s3_with_key(io.BytesIO(raw), f"hrmspolicy_{name}", mime)
+    except Exception as e:
+        print(f"[WARN] HRMS policy document upload failed: {e}")
+        raise HTTPException(
+            status_code=503, detail="The document could not be uploaded right now.")
+    s3_key = result.get("key") if isinstance(result, dict) else None
+    if not s3_key:
+        raise HTTPException(status_code=503, detail="The document could not be uploaded right now.")
+
+    now = datetime.now(timezone.utc)
+    await get_collection(COLL_POLICIES).update_one(
+        {"company_id": str(company_id), "policy_key": policy_key},
+        {"$set": {"document_s3_key": s3_key, "document_file_name": name,
+                  "document_uploaded_at": now, "updated_at": now}})
+    await audit(actor, AUDIT_POLICY_DOCUMENT_UPLOADED, ENTITY_POLICY, policy_key, name, company_id)
+    return await get_policy(company_id, policy_key)
+
+
+# =============================================================
+# Phase POLICY-LIB-1 (§22.6) — applicability + employee acknowledgement
+# =============================================================
+async def update_applicability(actor: dict, company_id: str, policy_key: str,
+                                payload: dict) -> dict:
+    """Category + applicability + acknowledgement settings (PolicyIn's additive fields) are
+    METADATA, not content — HR may change who a policy applies to and whether it needs
+    acknowledging without that being a content REVISION requiring MD approval. `policy.write`
+    is enough, the same authority that drafts a revision in the first place."""
+    policy = await get_collection(COLL_POLICIES).find_one(
+        {"company_id": str(company_id), "policy_key": policy_key})
+    if not policy:
+        raise HTTPException(status_code=404, detail="That policy is not in the register.")
+
+    updates = _applicability_fields(payload)
+    updates["updated_at"] = datetime.now(timezone.utc)
+    await get_collection(COLL_POLICIES).update_one(
+        {"company_id": str(company_id), "policy_key": policy_key}, {"$set": updates})
+    await audit(actor, AUDIT_POLICY_APPLICABILITY_SAVED, ENTITY_POLICY, policy_key,
+                updates.get("category"), company_id)
+    return await get_policy(company_id, policy_key)
+
+
+async def _own_profile(company_id: str, actor: dict) -> Optional[dict]:
+    return await get_collection(COLL_EMPLOYEE_PROFILES).find_one(
+        {"company_id": str(company_id), "user_id": str(actor.get("_id") or "")})
+
+
+def _applies_to(policy: dict, profile: Optional[dict]) -> bool:
+    """An EMPTY department_ids/employment_types list on a policy means company-wide; a
+    non-empty one must contain the employee's own value — multi-select, so "Sales OR
+    Support" is one policy, not two. Fails CLOSED for a caller with no linked profile — the
+    same "no profile, no self-service" rule PIP/Letters/Appointments already follow."""
+    if not profile:
+        return False
+    depts = policy.get("department_ids") or []
+    if depts and profile.get("department_id") not in depts:
+        return False
+    types = policy.get("employment_types") or []
+    if types and profile.get("employment_type") not in types:
+        return False
+    return True
+
+
+async def my_policies(actor: dict, company_id: str) -> dict:
+    """§22.6 step 226-227: the employee-facing HR Policy Library. Every IN_FORCE policy
+    applicable to this caller, each flagged with whether THEY have acknowledged the CURRENT
+    version — so a re-published policy (BR-034) reopens as pending for everyone again."""
+    profile = await _own_profile(company_id, actor)
+    listing = await list_policies(company_id)
+    acks = get_collection(COLL_POLICY_ACKNOWLEDGEMENTS)
+
+    out = []
+    for p in listing["policies"]:
+        if not _applies_to(p, profile):
+            continue
+        ack = await acks.find_one({
+            "company_id": str(company_id), "policy_key": p["policy_key"],
+            "version": p["version"], "employee_code": (profile or {}).get("employee_code"),
+        })
+        out.append({**p, "acknowledged": bool(ack), "acknowledged_at": (ack or {}).get("acknowledged_at")})
+    pending = sum(1 for p in out
+                  if p.get("acknowledgement_required") and not p["acknowledged"])
+    return {"policies": out, "total": len(out), "pending_acknowledgement": pending}
+
+
+async def acknowledge_policy(actor: dict, company_id: str, policy_key: str) -> dict:
+    """§22.6 step 227 — the employee's own act. One row per (policy, VERSION, employee): a
+    republished version is unacknowledged again (BR-034), not silently carried forward."""
+    policy = await get_collection(COLL_POLICIES).find_one(
+        {"company_id": str(company_id), "policy_key": policy_key})
+    if not policy:
+        raise HTTPException(status_code=404, detail="That policy is not in the register.")
+    profile = await _own_profile(company_id, actor)
+    if not profile or not profile.get("employee_code"):
+        raise HTTPException(
+            status_code=403, detail="You have no linked employee profile to acknowledge with.")
+    if not _applies_to(policy, profile):
+        raise HTTPException(status_code=403, detail="This policy does not apply to you.")
+
+    now = datetime.now(timezone.utc)
+    employee_code = profile["employee_code"]
+    await get_collection(COLL_POLICY_ACKNOWLEDGEMENTS).update_one(
+        {"company_id": str(company_id), "policy_key": policy_key,
+         "version": policy["version"], "employee_code": employee_code},
+        {"$set": {"acknowledged_at": now, "employee_name": _actor_name(actor)},
+         "$setOnInsert": {"company_id": str(company_id), "policy_key": policy_key,
+                          "version": policy["version"], "employee_code": employee_code,
+                          "created_at": now}},
+        upsert=True,
+    )
+    await audit(actor, AUDIT_POLICY_ACKNOWLEDGED, ENTITY_POLICY, policy_key,
+                f"v{policy['version']}", company_id)
+    return {"policy_key": policy_key, "version": policy["version"], "acknowledged_at": now}
+
+
+async def notify_pending_acknowledgements(company_id: str) -> dict:
+    """§22.6's acceptance_due_days field, actually acted on. Driven WEEKLY by
+    hrms_scheduler_service, the same cadence and the same reasoning `notify_due_reviews`
+    already uses above: an unacknowledged policy stays unacknowledged, so a daily nudge
+    would be noise rather than a governance signal.
+
+    No per-employee "already reminded" guard beyond the weekly cadence itself — the same
+    boundary `run_policy_review`'s own reminder already accepts as sufficient; acknowledging
+    stops the reminder outright, which is a stronger guarantee than a "reminded once" flag
+    would give."""
+    from app.services.hrms_notify_service import notify_hrms_role, notify_user
+
+    listing = await list_policies(company_id)
+    required = [p for p in listing["policies"] if p.get("acknowledgement_required")]
+    if not required:
+        return {"policies_checked": 0, "employees_notified": 0}
+
+    profiles = await get_collection(COLL_EMPLOYEE_PROFILES).find(
+        {"company_id": str(company_id), "employment_status": "Active"}).to_list(5000)
+    acks = get_collection(COLL_POLICY_ACKNOWLEDGEMENTS)
+
+    pending_by_employee: dict = {}
+    for policy in required:
+        applicable = [p for p in profiles if _applies_to(policy, p)]
+        if not applicable:
+            continue
+        acked = {a["employee_code"] for a in await acks.find(
+            {"company_id": str(company_id), "policy_key": policy["policy_key"],
+             "version": policy["version"]}, {"employee_code": 1}).to_list(5000)}
+        for profile in applicable:
+            code = profile.get("employee_code")
+            if not code or code in acked:
+                continue
+            pending_by_employee.setdefault(code, []).append(policy["title"])
+
+    notified = 0
+    for profile in profiles:
+        code = profile.get("employee_code")
+        titles = pending_by_employee.get(code)
+        if not titles or not profile.get("user_id"):
+            continue
+        await notify_user(
+            str(profile["user_id"]),
+            f"{len(titles)} polic{'y needs' if len(titles) == 1 else 'ies need'} your acknowledgement",
+            "\n".join(titles), kind="warning", link="/hrms/policy-library", email=True)
+        notified += 1
+
+    if pending_by_employee:
+        await notify_hrms_role(
+            company_id, ["HR"],
+            f"{len(pending_by_employee)} employee(s) have a policy still to acknowledge",
+            f"Across {len(required)} polic{'y' if len(required) == 1 else 'ies'} requiring "
+            f"acknowledgement. See each policy's Acknowledgements view for who.",
+            kind="info", link="/hrms/policies", email=False)
+
+    return {"policies_checked": len(required), "employees_notified": notified}
+
+
+async def acknowledgement_dashboard(company_id: str) -> dict:
+    """§22.12 — "HR policy acknowledgement pending/completed", company-wide. One row per
+    policy requiring acknowledgement: how many of the people it applies to have acknowledged
+    its CURRENT version versus how many have not. The per-policy Acknowledgements view
+    (`list_acknowledgements`) is who; this is the rollup HR's dashboard actually asks for."""
+    listing = await list_policies(company_id)
+    required = [p for p in listing["policies"] if p.get("acknowledgement_required")]
+    if not required:
+        return {"policies": [], "total_pending": 0}
+
+    profiles = await get_collection(COLL_EMPLOYEE_PROFILES).find(
+        {"company_id": str(company_id), "employment_status": "Active"},
+        {"employee_code": 1, "department_id": 1, "employment_type": 1}).to_list(5000)
+    acks = get_collection(COLL_POLICY_ACKNOWLEDGEMENTS)
+
+    rows = []
+    total_pending = 0
+    for policy in required:
+        applicable = [p for p in profiles if _applies_to(policy, p)]
+        applicable_codes = {p.get("employee_code") for p in applicable if p.get("employee_code")}
+        acked = {a["employee_code"] for a in await acks.find(
+            {"company_id": str(company_id), "policy_key": policy["policy_key"],
+             "version": policy["version"]}, {"employee_code": 1}).to_list(5000)}
+        # Only an acknowledgement from someone CURRENTLY applicable counts toward this
+        # policy's completion — an old ack from someone the policy no longer covers (a
+        # department transfer, say) should not inflate the count.
+        acked_count = len(acked & applicable_codes)
+        pending = len(applicable_codes) - acked_count
+        total_pending += pending
+        rows.append({
+            "policy_key": policy["policy_key"], "title": policy["title"],
+            "version": policy["version"], "applicable": len(applicable_codes),
+            "acknowledged": acked_count, "pending": pending,
+        })
+    return {"policies": rows, "total_pending": total_pending}
+
+
+async def list_acknowledgements(company_id: str, policy_key: str) -> dict:
+    """§22.6 step 230 — HR's "review access"/completion dashboard for one policy: every
+    acknowledgement on file for its CURRENT version. Reuses `policy.write`; whoever may
+    administer the register may already see who has acknowledged it (see Cap.POLICY_
+    ACKNOWLEDGE's own comment in models/hrms.py for why this does not get its own capability)."""
+    policy = await get_collection(COLL_POLICIES).find_one(
+        {"company_id": str(company_id), "policy_key": policy_key})
+    if not policy:
+        raise HTTPException(status_code=404, detail="That policy is not in the register.")
+    rows = await get_collection(COLL_POLICY_ACKNOWLEDGEMENTS).find(
+        {"company_id": str(company_id), "policy_key": policy_key, "version": policy["version"]}
+    ).sort("acknowledged_at", -1).to_list(2000)
+    return {"policy_key": policy_key, "version": policy["version"],
+            "acknowledgements": [_out(r) for r in rows], "total": len(rows)}

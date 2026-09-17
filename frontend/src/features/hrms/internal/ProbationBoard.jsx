@@ -152,6 +152,15 @@ const ProbationBoard = () => {
   );
 
   const decided = all.filter((r) => r.outcome !== 'Pending');
+  // `due` only ever returns Pending rows that are already overdue or within the 30-day
+  // horizon — a Pending review whose end date is further out than that (the normal case for
+  // someone who just joined) matched neither group and, since it is not Decided either,
+  // vanished from the screen entirely despite being a real, live probation. This is that
+  // remainder: still Pending, just not due yet.
+  const overdueNos = new Set((due?.overdue || []).map((r) => r.prb_no));
+  const dueSoonNos = new Set((due?.due_soon || []).map((r) => r.prb_no));
+  const notYetDue = all.filter((r) => r.outcome === 'Pending'
+    && !overdueNos.has(r.prb_no) && !dueSoonNos.has(r.prb_no));
 
   return (
     <div className="space-y-6">
@@ -175,9 +184,13 @@ const ProbationBoard = () => {
             title="Due soon" tone="warn" rows={due?.due_soon}
             hint="Falling due in the next 30 days."
           />
+          <Group
+            title="On probation" tone="neutral" rows={notYetDue}
+            hint="Review not due for more than 30 days yet."
+          />
           <Group title="Decided" tone="neutral" rows={decided} />
 
-          {!due?.overdue?.length && !due?.due_soon?.length && !decided.length && (
+          {!due?.overdue?.length && !due?.due_soon?.length && !notYetDue.length && !decided.length && (
             <HrmsEmpty
               icon={CalendarClock}
               title="No probation reviews yet"
