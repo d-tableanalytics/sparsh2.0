@@ -9,6 +9,7 @@ import {
 } from '../../../services/hrmsApi';
 import { CARD, day, money } from './internalKit';
 import { Chip, Facts } from './internalKit.jsx';
+import { REQUISITION_SOP_LABEL, sopLabelFor } from './sopLabels';
 
 /**
  * HRMS ▸ internal hiring ▸ one position, end to end (spec §29).
@@ -124,33 +125,6 @@ const InternalRequisitionDetail = () => {
   if (error) return <HrmsError message={error} onRetry={load} />;
   if (!req) return <HrmsEmpty title="Not found" hint={`No requisition ${requestNo}.`} />;
 
-  // A client requisition reached through this URL would render under an "Internal hiring"
-  // heading with an approval timeline it never runs -- every gate permanently "todo",
-  // because the client track's chain is HR review then MD. Say so and point at the screen
-  // that does describe it, rather than drawing a picture that is quietly wrong.
-  if ((req.requisition_track || 'client') !== 'internal') {
-    return (
-      <div className="space-y-4">
-        <button type="button" onClick={() => navigate('/hrms/internal-requisitions')}
-                className="inline-flex items-center gap-1.5 text-[12px] font-bold
-                           text-[var(--text-muted)] hover:text-[var(--text-main)]">
-          <ArrowLeft size={14} /> Internal requisitions
-        </button>
-        <HrmsEmpty
-          title={`${requestNo} is a client requisition`}
-          hint="It is being filled for a client company, so it runs the client approval
-                chain and has no position scorecard, reference-check gate or probation."
-          action={(
-            <Link to="/hrms/requisitions"
-                  className="text-[12px] font-bold text-[var(--accent-indigo)]">
-              Open it on Hiring Req
-            </Link>
-          )}
-        />
-      </div>
-    );
-  }
-
   const status = req.approval_status;
   const approved = status === 'Approved';
   const rejected = status === 'Rejected';
@@ -216,11 +190,18 @@ const InternalRequisitionDetail = () => {
               {requestNo}
             </p>
           </div>
-          <div className="flex flex-wrap items-center gap-1.5">
-            <Chip tone="accent">Internal hiring</Chip>
-            <Chip tone={approved ? 'good' : rejected ? 'bad' : 'warn'}>{status}</Chip>
-            {req.closing_status && req.closing_status !== 'Open' && (
-              <Chip tone="neutral">{req.closing_status}</Chip>
+          <div className="text-right">
+            <div className="flex flex-wrap items-center justify-end gap-1.5">
+              <Chip tone="accent">Internal hiring</Chip>
+              <Chip tone={approved ? 'good' : rejected ? 'bad' : 'warn'}>{status}</Chip>
+              {req.closing_status && req.closing_status !== 'Open' && (
+                <Chip tone="neutral">{req.closing_status}</Chip>
+              )}
+            </div>
+            {sopLabelFor(status, REQUISITION_SOP_LABEL) && (
+              <p className="mt-1 text-[10.5px] text-[var(--text-muted)] italic">
+                SOP: {sopLabelFor(status, REQUISITION_SOP_LABEL)}
+              </p>
             )}
           </div>
         </div>
@@ -285,15 +266,27 @@ const InternalRequisitionDetail = () => {
                   <p className="font-mono text-[11px] text-[var(--text-muted)] mb-2">
                     {scorecard.scr_no}
                   </p>
-                  <ul className="space-y-1.5">
+                  <ul className="space-y-2">
                     {(scorecard.criteria || []).map((c) => (
-                      <li key={c.label}
-                          className="flex items-baseline justify-between gap-3 text-[12.5px]">
-                        <span className="text-[var(--text-main)]">{c.label}</span>
-                        <span className="text-[var(--text-muted)] whitespace-nowrap">
-                          weight {c.weight}
-                          {Number(c.max_score) !== 5 ? ` · out of ${c.max_score}` : ''}
-                        </span>
+                      <li key={c.label} className="text-[12.5px]">
+                        <div className="flex items-baseline justify-between gap-3">
+                          <span className="text-[var(--text-main)] font-semibold">{c.label}</span>
+                          <span className="text-[var(--text-muted)] whitespace-nowrap">
+                            weight {c.weight}
+                            {Number(c.max_score) !== 5 ? ` · out of ${c.max_score}` : ''}
+                          </span>
+                        </div>
+                        {c.expected_level && (
+                          <p className="text-[11.5px] text-[var(--text-main)]">
+                            Expected: {c.expected_level}
+                          </p>
+                        )}
+                        {c.evaluation_criteria && (
+                          <p className="text-[11.5px] text-[var(--text-muted)]">{c.evaluation_criteria}</p>
+                        )}
+                        {c.remarks && (
+                          <p className="text-[11px] italic text-[var(--text-muted)]">Remarks: {c.remarks}</p>
+                        )}
                       </li>
                     ))}
                   </ul>

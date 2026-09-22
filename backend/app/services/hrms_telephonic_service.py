@@ -43,7 +43,7 @@ from app.db.mongodb import get_collection
 from app.models.hrms import (
     AUDIT_TELEPHONIC_RECORDED, AUDIT_TELEPHONIC_UPDATED, AppStatus, COLL_CANDIDATES,
     COLL_INTERVIEWS, COLL_REQUISITIONS, COLL_TELEPHONIC, ENTITY_TELEPHONIC, RETENTION_YEARS,
-    RequisitionTrack, TELEPHONIC_CLEARS_INTERVIEW, TELEPHONIC_CRITERIA,
+    REQUISITION_TRACK_INTERNAL, TELEPHONIC_CLEARS_INTERVIEW, TELEPHONIC_CRITERIA,
     TELEPHONIC_RATING_MAX, TELEPHONIC_RATING_MIN, TELEPHONIC_STATUS_FOR_OUTCOME,
     TelephonicOutcome, can_transition, is_iso_date, score_band,
 )
@@ -284,8 +284,8 @@ async def assert_telephonic_cleared(company_id: str, candidate: dict, req: dict)
     off-system. A skipped screening stage is a deviation from the process the SOP describes,
     and the SOP already names the mechanism for those — the exception log.
     """
-    track = (req or {}).get("requisition_track") or RequisitionTrack.CLIENT.value
-    if track != RequisitionTrack.INTERNAL.value:
+    track = (req or {}).get("requisition_track")
+    if track != REQUISITION_TRACK_INTERNAL:
         return
 
     uk = candidate.get("uk")
@@ -462,7 +462,7 @@ async def screenable_candidates(actor: dict, company_id: str) -> list:
     """
     reqs = await get_collection(COLL_REQUISITIONS).find(
         {"company_id": str(company_id),
-         "requisition_track": RequisitionTrack.INTERNAL.value},
+         "requisition_track": REQUISITION_TRACK_INTERNAL},
         {"request_no": 1, "designation_name": 1}).to_list(2000)
     request_nos = [r["request_no"] for r in reqs if r.get("request_no")]
     designation = {r["request_no"]: r.get("designation_name") for r in reqs}

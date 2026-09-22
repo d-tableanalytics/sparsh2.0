@@ -166,70 +166,123 @@ async def main() -> None:
             HR, COMPANY, {"jd_no": "JD-9999"}), 404)
         await expect_http("no JD selected", PS.create_posting(HR, COMPANY, {}), 422)
 
-        section("One posting, one link")
+        section("Channels: at least one is required")
+        await expect_http("no channel selected", PS.create_posting(
+            HR, COMPANY, {"jd_no": "JD-2026-001"}), 422, "at least one recruitment channel")
+        await expect_http("an unrecognised channel", PS.create_posting(
+            HR, COMPANY, {"jd_no": "JD-2026-001", "channels": ["Carrier Pigeon"]}),
+            422, "not a recognised recruitment channel")
+
+        section("Create drafts, publish separately")
         res = await PS.create_posting(HR, COMPANY, {
-            "jd_no": "JD-2026-001", "requires_assessment": True})
+            "jd_no": "JD-2026-001", "requires_assessment": True,
+            "channels": ["Job Portals", "Internal Database"]})
         posting = res["posting"]
         live_code = posting["posting_code"]
-        check("publishing creates exactly one row", res["created"] == 1)
+        check("creating drafts exactly one row", res["created"] == 1)
         check("code matches the public pattern",
               M.POSTING_CODE_RE.match(live_code) is not None)
         check("no platform is stored on the posting", "platform" not in posting)
         check("an auto posting carries no external url", posting["external_url"] is None)
         check("assessment flag stored", posting["requires_assessment"] is True)
-        check("starts Live", posting["live_status"] == M.LiveStatus.LIVE.value)
-        check("publish audited", any(a["action"] == M.AUDIT_POSTING_CREATED for a in audit_log.docs))
+        check("channels stored, de-duplicated and sorted",
+              posting["channels"] == sorted({"Job Portals", "Internal Database"}))
+        check("opens as Draft, not live immediately",
+              posting["live_status"] == M.LiveStatus.DRAFT.value)
+        check("posting_date is not set until it is actually published",
+              posting["posting_date"] is None)
+        check("creation audited", any(a["action"] == M.AUDIT_POSTING_CREATED for a in audit_log.docs))
+
+        published = await PS.publish_posting(HR, COMPANY, live_code)
+        check("publishing takes it Live", published["live_status"] == M.LiveStatus.LIVE.value)
+        check("posting_date is stamped at publish time", published["posting_date"] == PS._today())
+        check("publish audited",
+              any(a["action"] == M.AUDIT_POSTING_PUBLISHED for a in audit_log.docs))
+        await expect_http("publishing an already-live posting again", PS.publish_posting(
+            HR, COMPANY, live_code), 409, "only a draft posting")
+
+        section("Executive Search needs Management's approval before it can publish")
+        exec_draft = await PS.create_posting(HR, COMPANY, {
+            "jd_no": "JD-2026-003", "channels": ["Executive Search"]})
+        check("opens Pending Management Approval, not Draft",
+              exec_draft["posting"]["live_status"] == M.LiveStatus.PENDING_APPROVAL.value)
+        await expect_http("publishing before Management clears it", PS.publish_posting(
+            HR, COMPANY, exec_draft["posting"]["posting_code"]), 409, "management")
+        MD = {"_id": "md", "role": "clientuser", "_source_collection": "learners",
+              "company_id": COMPANY, "governance_role": "MD", "full_name": "Mona MD"}
+        cleared = await PS.approve_exec_search(MD, COMPANY, exec_draft["posting"]["posting_code"])
+        check("approval moves it to Draft, not straight to Live",
+              cleared["live_status"] == M.LiveStatus.DRAFT.value)
+        check("approval is audited",
+              any(a["action"] == M.AUDIT_POSTING_EXEC_APPROVED for a in audit_log.docs))
+        exec_live = await PS.publish_posting(MD, COMPANY, exec_draft["posting"]["posting_code"])
+        check("now publishes normally", exec_live["live_status"] == M.LiveStatus.LIVE.value)
+        await PS.update_posting(MD, COMPANY, exec_draft["posting"]["posting_code"],
+                                {"live_status": M.LiveStatus.CLOSED.value})
 
         section("One LIVE link per JD")
-        await expect_http("republishing a JD that is already live", PS.create_posting(
-            HR, COMPANY, {"jd_no": "JD-2026-001"}), 409, "already published")
-        tmp = await PS.create_posting(HR, COMPANY, {"jd_no": "JD-2026-003"})
-        await PS.update_posting(HR, COMPANY, tmp["posting"]["posting_code"],
-                                {"live_status": M.LiveStatus.CLOSED.value})
-        again = await PS.create_posting(HR, COMPANY, {"jd_no": "JD-2026-003"})
+        draft2 = await PS.create_posting(HR, COMPANY, {
+            "jd_no": "JD-2026-001", "channels": ["Job Portals"]})
+        check("a second draft for an already-live JD may still be created",
+              draft2["created"] == 1)
+        await expect_http("publishing it while the first is live", PS.publish_posting(
+            HR, COMPANY, draft2["posting"]["posting_code"]), 409, "already published")
+        tmp = await PS.create_posting(HR, COMPANY, {
+            "jd_no": "JD-2026-003", "channels": ["Job Portals"]})
+        tmp_code = tmp["posting"]["posting_code"]
+        await PS.publish_posting(HR, COMPANY, tmp_code)
+        await PS.update_posting(HR, COMPANY, tmp_code, {"live_status": M.LiveStatus.CLOSED.value})
+        again = await PS.create_posting(HR, COMPANY, {
+            "jd_no": "JD-2026-003", "channels": ["Job Portals"]})
+        again_published = await PS.publish_posting(HR, COMPANY, again["posting"]["posting_code"])
         check("closing the posting frees the JD to be published again",
-              again["created"] == 1
-              and again["posting"]["posting_code"] != tmp["posting"]["posting_code"])
+              again["created"] == 1 and again_published["posting_code"] != tmp_code)
 
         section("External link validation")
         before = len(postings.docs)
         await expect_http("external mode with no url", PS.create_posting(
-            HR, COMPANY, {"jd_no": "JD-2026-004", "apply_link_mode": "external",
-                          "external_url": ""}), 422, "enter the application link")
+            HR, COMPANY, {"jd_no": "JD-2026-004", "channels": ["Job Portals"],
+                          "apply_link_mode": "external", "external_url": ""}),
+            422, "enter the application link")
         await expect_http("external url without a scheme", PS.create_posting(
-            HR, COMPANY, {"jd_no": "JD-2026-004", "apply_link_mode": "external",
-                          "external_url": "naukri.com/x"}), 422, "http")
+            HR, COMPANY, {"jd_no": "JD-2026-004", "channels": ["Job Portals"],
+                          "apply_link_mode": "external", "external_url": "naukri.com/x"}),
+            422, "http")
         await expect_http("javascript: url rejected", PS.create_posting(
-            HR, COMPANY, {"jd_no": "JD-2026-004", "apply_link_mode": "external",
+            HR, COMPANY, {"jd_no": "JD-2026-004", "channels": ["Job Portals"],
+                          "apply_link_mode": "external",
                           "external_url": "javascript:alert(1)"}), 422, "http")
         check("a rejected publish writes no row", len(postings.docs) == before)
         ext_res = await PS.create_posting(HR, COMPANY, {
-            "jd_no": "JD-2026-004", "apply_link_mode": "external",
+            "jd_no": "JD-2026-004", "channels": ["Job Portals"], "apply_link_mode": "external",
             "external_url": "https://naukri.example/job/1"})
         ext_code = ext_res["posting"]["posting_code"]
         check("an external posting keeps its url",
               ext_res["posting"]["external_url"] == "https://naukri.example/job/1")
+        await PS.publish_posting(HR, COMPANY, ext_code)
 
         section("Client-previewed codes")
         res2 = await PS.create_posting(HR, COMPANY, {
-            "jd_no": "JD-2026-005", "code": "JB-ABC123"})
+            "jd_no": "JD-2026-005", "channels": ["Job Portals"], "code": "JB-ABC123"})
         check("a valid unused preview code is honoured",
               res2["posting"]["posting_code"] == "JB-ABC123")
         res3 = await PS.create_posting(HR, COMPANY, {
-            "jd_no": "JD-2026-006", "code": "JB-ABC123"})
+            "jd_no": "JD-2026-006", "channels": ["Job Portals"], "code": "JB-ABC123"})
         check("a DUPLICATE preview code is replaced, not reused",
               res3["posting"]["posting_code"] != "JB-ABC123")
         res4 = await PS.create_posting(HR, COMPANY, {
-            "jd_no": "JD-2026-007", "code": "not-a-code"})
+            "jd_no": "JD-2026-007", "channels": ["Job Portals"], "code": "not-a-code"})
         check("a malformed preview code is replaced",
               M.POSTING_CODE_RE.match(res4["posting"]["posting_code"]) is not None)
+        await PS.publish_posting(HR, COMPANY, res2["posting"]["posting_code"])
 
         section("Expiry")
         await expect_http("expiry in the past", PS.create_posting(
-            HR, COMPANY, {"jd_no": "JD-2026-008", "expiry_date": "2020-01-01"}),
-            422, "past")
+            HR, COMPANY, {"jd_no": "JD-2026-008", "channels": ["Job Portals"],
+                          "expiry_date": "2020-01-01"}), 422, "past")
         await expect_http("malformed expiry", PS.create_posting(
-            HR, COMPANY, {"jd_no": "JD-2026-008", "expiry_date": "01-01-2030"}), 422)
+            HR, COMPANY, {"jd_no": "JD-2026-008", "channels": ["Job Portals"],
+                          "expiry_date": "01-01-2030"}), 422)
 
         expired_code = res2["posting"]["posting_code"]
         await postings.update_one({"posting_code": expired_code},
@@ -278,7 +331,9 @@ async def main() -> None:
             base = {"candidate_name": "Asha Rao", "can_email": "Asha@Example.com",
                     "can_contact": "+91 98765 43210", "declaration": True,
                     "total_experience": "4 years", "certificates": [],
-                    "referral_source": "Job Portal"}
+                    "referral_source": "Job Portal",
+                    "resume": {"name": "cv.pdf", "mime_type": "application/pdf",
+                               "data": b64(PDF)}}
             base.update(over)
             return base
 

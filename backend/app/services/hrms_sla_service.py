@@ -53,7 +53,7 @@ from app.db.mongodb import get_collection
 from app.models.hrms import (
     ANCHOR_DATE, ANCHOR_MILESTONE, AUDIT_SLA_BREACHED, COLL_ONBOARDING,
     COLL_PROBATION_REVIEWS, COLL_REQUISITIONS, ENTITY_REQUISITION, SLA_MILESTONES,
-    STAMPABLE_MILESTONES, ProbationOutcome, RequisitionTrack,
+    STAMPABLE_MILESTONES, ProbationOutcome, REQUISITION_TRACK_INTERNAL,
 )
 from app.services.hrms_audit_service import audit
 
@@ -176,12 +176,11 @@ async def sla_for(company_id: str, req: dict, *, config: dict = None,
     caller is usually a screen rendering whatever it was given, and an error for "this track
     has no SLA" would be an exception used as a value.
     """
-    track = (req or {}).get("requisition_track") or RequisitionTrack.CLIENT.value
-    if track != RequisitionTrack.INTERNAL.value:
+    track = (req or {}).get("requisition_track")
+    if track != REQUISITION_TRACK_INTERNAL:
         return {"request_no": (req or {}).get("request_no"),
                 "applicable": False,
-                "reason": ("SLA targets are an internal-track control. A client requisition "
-                           "runs to the client's timeline, not Sparsh Magic's."),
+                "reason": "Legacy client-track requisition: not part of hiring.",
                 "milestones": []}
 
     actuals = req.get("sla_actuals") or {}
@@ -402,8 +401,8 @@ async def stamp_if_internal(actor: Optional[dict], company_id: str, request_no: 
             {"request_no": request_no, "company_id": str(company_id)})
         if not req:
             return
-        track = req.get("requisition_track") or RequisitionTrack.CLIENT.value
-        if track != RequisitionTrack.INTERNAL.value:
+        track = req.get("requisition_track")
+        if track != REQUISITION_TRACK_INTERNAL:
             return
         if not await stamp(company_id, request_no, key, when=when):
             return
@@ -474,7 +473,7 @@ async def sweep_open_breaches(actor: Optional[dict], company_id: str, *,
     """
     reqs = await get_collection(COLL_REQUISITIONS).find(
         {"company_id": str(company_id),
-         "requisition_track": RequisitionTrack.INTERNAL.value,
+         "requisition_track": REQUISITION_TRACK_INTERNAL,
          "closing_status": "Open"}).to_list(1000)
 
     # Resolved ONCE for the whole sweep. Reading it inside the loop would be one settings

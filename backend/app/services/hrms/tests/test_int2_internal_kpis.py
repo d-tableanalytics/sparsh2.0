@@ -138,18 +138,18 @@ async def main() -> None:
     onboardings = FakeCollection([
         {"onb_no": "ONB-2026-001", "company_id": COMPANY,
          "request_no": "HR-REQ-2026-001", "employee_id": "EMP-2026-001",
-         "joining_date": date_ago(100), "checklist": M.seed_checklist("internal")},
+         "joining_date": date_ago(100), "checklist": M.seed_checklist()},
         {"onb_no": "ONB-2026-002", "company_id": COMPANY,
          "request_no": "HR-REQ-2026-001", "employee_id": "EMP-2026-002",
-         "joining_date": date_ago(95), "checklist": M.seed_checklist("internal")},
+         "joining_date": date_ago(95), "checklist": M.seed_checklist()},
         # Joined last week -- the denominator-honesty case.
         {"onb_no": "ONB-2026-003", "company_id": COMPANY,
          "request_no": "HR-REQ-2026-001", "employee_id": "EMP-2026-003",
-         "joining_date": date_ago(7), "checklist": M.seed_checklist("internal")},
+         "joining_date": date_ago(7), "checklist": M.seed_checklist()},
         # No joining date at all -- reported as excluded rather than guessed at.
         {"onb_no": "ONB-2026-004", "company_id": COMPANY,
          "request_no": "HR-REQ-2026-001", "employee_id": "EMP-2026-004",
-         "checklist": M.seed_checklist("internal")},
+         "checklist": M.seed_checklist()},
     ])
     profiles = FakeCollection([
         # Still here after 100 days -- retained.

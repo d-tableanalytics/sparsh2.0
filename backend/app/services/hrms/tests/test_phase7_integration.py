@@ -263,7 +263,11 @@ def main() -> None:
 
         section("SWEEP: still nothing else public")
         intended_prefixes = ("/api/hrms/public/", "/api/auth/")
-        intended_exact = {"/api/assistant/health", "/api/assistant/ready"}
+        # Meta's WhatsApp webhook verification handshake: unauthenticated by protocol
+        # (Meta GETs it before it will POST), and the POST alongside it is HMAC-signed,
+        # which is the actual control. This GET only echoes back a challenge it was sent.
+        intended_exact = {"/api/assistant/health", "/api/assistant/ready",
+                          "/api/leadership/whatsapp-status"}
         leaked, checked = [], 0
         for route in app.routes:
             path = getattr(route, "path", "")

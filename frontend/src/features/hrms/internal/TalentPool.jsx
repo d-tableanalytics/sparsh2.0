@@ -234,7 +234,7 @@ const SourceModal = ({ candidate, scope, busy, setBusy, onClose, onDone, onError
   const [requestNo, setRequestNo] = useState('');
 
   useEffect(() => {
-    getRequisitions({ ...scope, track: 'internal' })
+    getRequisitions({ ...scope })
       .then(({ data }) => setReqs(data?.requisitions || []))
       .catch(() => setReqs([]));
   }, [scope]);

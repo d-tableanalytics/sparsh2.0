@@ -242,7 +242,7 @@ async def main() -> None:
         await expect_http(
             "logging a touchpoint against a client-track joiner",
             PBT.record_touchpoint(HR, COMPANY, {"candidate_uk": "CAN-100"}),
-            409, "client requisition")
+            409, "legacy client-track")
         await expect_http(
             "logging one against somebody still interviewing",
             PBT.record_touchpoint(HR, COMPANY, {"candidate_uk": "CAN-004"}),

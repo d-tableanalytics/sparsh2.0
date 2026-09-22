@@ -274,7 +274,25 @@ async def record_check(actor: dict, company_id: str, payload: dict) -> dict:
     # be reopened with a Flagged result and still read as cleared, which is the failure this
     # whole gate exists to prevent.
     await _void_approval_if_signed(actor, company_id, uk, check_type, status)
+    # ── §7.5 Stage 4 ── "Result / Status -> Onboarding Case Updated". The onboarding
+    # case reads its background status off these records rather than holding its own, so
+    # every write here pushes the derived result onto any open case.
+    await _sync_case(company_id, uk)
     return await get_check(company_id, bgv_no)
+
+
+async def _sync_case(company_id: str, uk: str) -> None:
+    """Update the candidate's open onboarding case with this verification result.
+
+    Best-effort and late-imported: the check itself is already recorded, and a case that
+    could not be updated must not undo it. Silent when the candidate has no open case,
+    which is the normal situation for verification run before the offer.
+    """
+    try:
+        from app.services.hrms_onboarding_service import sync_verification
+        await sync_verification(company_id, uk)
+    except Exception as e:                          # pragma: no cover - defensive
+        print(f"[WARN] HRMS onboarding case not synced for {uk}: {e}")
 
 
 async def _void_approval_if_signed(actor: dict, company_id: str, uk: str,
@@ -348,6 +366,10 @@ async def update_check(actor: dict, company_id: str, bgv_no: str, payload: dict)
             actor, company_id, current["uk"],
             BackgroundCheckType(current["check_type"]),
             BackgroundCheckStatus(updates["status"]))
+    # ── §7.5 Stage 4 ── "Result / Status -> Onboarding Case Updated". The onboarding
+    # case reads its background status off these records rather than holding its own, so
+    # every write here pushes the derived result onto any open case.
+    await _sync_case(company_id, current["uk"])
     return await get_check(company_id, bgv_no)
 
 
@@ -422,6 +444,10 @@ async def decide_verification(actor: dict, company_id: str, uk: str,
                 + (f": {approval['remarks']}" if approval.get("remarks") else ""),
                 company_id)
     await _notify_decision(company_id, candidate, decision, approval)
+    # ── §7.5 Stage 4 ── "Result / Status -> Onboarding Case Updated". The onboarding
+    # case reads its background status off these records rather than holding its own, so
+    # every write here pushes the derived result onto any open case.
+    await _sync_case(company_id, uk)
     return await verification_state(company_id, uk)
 
 

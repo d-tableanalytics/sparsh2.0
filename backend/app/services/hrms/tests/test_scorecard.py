@@ -87,7 +87,7 @@ async def main() -> None:
         # A client-track requisition, which may never have one.
         {"request_no": "HR-REQ-2026-003", "company_id": COMPANY,
          "requisition_track": "client", "designation_name": "Analyst",
-         "created_by": U_HOD, "approval_status": M.ReqApproval.PENDING_MD.value,
+         "created_by": U_HOD, "approval_status": "Pending MD Approval",
          "closing_status": "Open", "vacancy": 1, "created_at": NOW},
     ])
     candidates = FakeCollection([
@@ -208,7 +208,7 @@ async def main() -> None:
             "a scorecard for a CLIENT-track requisition",
             SC.create_scorecard(HR, COMPANY,
                                 {"request_no": "HR-REQ-2026-003", "criteria": CRITERIA}),
-            409, "client requisition")
+            409, "legacy client-track")
         await expect_http(
             "a scorecard with no criteria",
             SC.create_scorecard(HR, COMPANY,

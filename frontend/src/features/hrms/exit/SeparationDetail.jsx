@@ -101,6 +101,19 @@ const SeparationDetail = () => {
   const canClearanceManage = can(CAP.CLEARANCE_MANAGE);
   const canClearanceAct = can(CAP.CLEARANCE_ACT);
   const canInterviewWrite = can(CAP.EXIT_INTERVIEW_WRITE);
+
+  // Built here rather than inline so the Exit Interview section can tell "no record" from
+  // "a record with nothing this screen can show" -- see that section for why that matters.
+  const interviewFacts = !interview ? [] : [
+    { label: 'Reason', value: interview.reason },
+    { label: 'Manager Rating', value: interview.manager_rating },
+    { label: 'Team Rating', value: interview.team_rating },
+    { label: 'Work Rating', value: interview.work_rating },
+    { label: 'Compensation Rating', value: interview.compensation_rating },
+    { label: 'Rehire Recommended', value: interview.rehire_recommendation == null ? null
+      : (interview.rehire_recommendation ? 'Yes' : 'No') },
+    interview.comments ? { label: 'Comments', value: interview.comments } : null,
+  ].filter((i) => i && i.value != null && i.value !== '');
   const canFnfPrepare = can(CAP.FNF_PREPARE);
   const canFnfApprove = can(CAP.FNF_APPROVE);
 
@@ -392,19 +405,23 @@ const SeparationDetail = () => {
             {interview ? 'Edit' : 'Record'}
           </Btn>
         )}>
-        {interview ? (
-          <Facts items={[
-            { label: 'Reason', value: interview.reason },
-            { label: 'Manager Rating', value: interview.manager_rating },
-            { label: 'Team Rating', value: interview.team_rating },
-            { label: 'Work Rating', value: interview.work_rating },
-            { label: 'Compensation Rating', value: interview.compensation_rating },
-            { label: 'Rehire Recommended', value: interview.rehire_recommendation == null ? null
-              : (interview.rehire_recommendation ? 'Yes' : 'No') },
-            interview.comments ? { label: 'Comments', value: interview.comments } : null,
-          ]} />
-        ) : (
+        {/* Three states, not two. A record can EXIST and still carry none of the fields
+            this screen knows how to show -- there are exit interviews in the database
+            written to an older shape (primary_reason / overall_experience / would_rejoin
+            rather than reason / *_rating / rehire_recommendation). `Facts` drops every
+            null, so those rendered as an empty box directly under a summary tile
+            announcing "Recorded", which reads as a broken page rather than an old record.
+            Say what is actually true instead. */}
+        {!interview ? (
           <p className="text-[12px] text-[var(--text-muted)] py-3">Not recorded yet.</p>
+        ) : interviewFacts.length ? (
+          <Facts items={interviewFacts} />
+        ) : (
+          <p className="text-[12px] text-[var(--text-muted)] py-3">
+            An interview is on record for this case, but none of its answers are in the
+            fields this screen reads &mdash; it was saved in an earlier format. Re-record
+            it to bring it up to date.
+          </p>
         )}
       </Section>
 

@@ -58,7 +58,8 @@ const ApplyPage = () => {
   const [form, setForm] = useState({
     candidate_name: '', can_email: '', can_contact: '',
     current_location: '', total_experience: '', qualification: '',
-    current_company: '', current_ctc: '', expected_ctc: '', notice_period: '',
+    current_company: '', current_designation: '',
+    current_ctc: '', expected_ctc: '', notice_period: '',
     linkedin: '', portfolio: '', cover_note: '', declaration: false,
     // ── Phase INT-2 (SOP §11) ── the acknowledgements an INTERNAL vacancy asks for. The
     // form only renders them when the server sends them (`job.acknowledgements`), so a
@@ -124,6 +125,10 @@ const ApplyPage = () => {
   const submit = async (e) => {
     e.preventDefault();
     setError('');
+    if (!resume) {
+      setError('Please attach your resume.');
+      return;
+    }
     if (!form.declaration) {
       setError('Please confirm that the information provided is accurate.');
       return;
@@ -313,6 +318,11 @@ const ApplyPage = () => {
                 <input id="a-company" value={form.current_company} onChange={set('current_company')} className={FIELD} />
               </div>
               <div>
+                <label className={LABEL} htmlFor="a-desig">Current designation</label>
+                <input id="a-desig" value={form.current_designation} onChange={set('current_designation')}
+                  placeholder="e.g. Senior Analyst" className={FIELD} />
+              </div>
+              <div>
                 <label className={LABEL} htmlFor="a-cctc">Current CTC</label>
                 <input id="a-cctc" value={form.current_ctc} onChange={set('current_ctc')} className={FIELD} />
               </div>
@@ -321,8 +331,12 @@ const ApplyPage = () => {
                 <input id="a-ectc" value={form.expected_ctc} onChange={set('expected_ctc')} className={FIELD} />
               </div>
               <div>
-                <label className={LABEL} htmlFor="a-li">LinkedIn / portfolio</label>
+                <label className={LABEL} htmlFor="a-li">LinkedIn profile</label>
                 <input id="a-li" value={form.linkedin} onChange={set('linkedin')} className={FIELD} />
+              </div>
+              <div>
+                <label className={LABEL} htmlFor="a-pf">Portfolio / website</label>
+                <input id="a-pf" value={form.portfolio} onChange={set('portfolio')} className={FIELD} />
               </div>
             </div>
           </div>
@@ -333,7 +347,7 @@ const ApplyPage = () => {
             </h3>
             <div className="space-y-3">
               <div>
-                <label className={LABEL} htmlFor="a-resume">Resume (PDF or Word, max {MAX_MB} MB)</label>
+                <label className={LABEL} htmlFor="a-resume">Resume (PDF or Word, max {MAX_MB} MB) *</label>
                 <label htmlFor="a-resume"
                   className="flex items-center gap-2 h-10 px-3 rounded-lg border border-dashed border-slate-300 bg-slate-50 text-[13px] text-slate-500 cursor-pointer hover:border-slate-400">
                   <Upload size={15} />

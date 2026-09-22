@@ -43,7 +43,7 @@ from app.models.hrms import (
     COLL_JOB_POSTINGS, COLL_OFFERS, COLL_ONBOARDING, COLL_POSITION_SCORECARDS,
     COLL_PROBATION_REVIEWS, COLL_REQUISITIONS, COLL_SHORTLIST_REVIEWS, SLA_MILESTONES,
     COLL_DESIGNATIONS, STAGE_RANK, ExceptionStatus, InterviewStatus, OfferStatus,
-    ProbationOutcome, RequisitionTrack, ScorecardStatus, ShortlistOutcome,
+    ProbationOutcome, REQUISITION_TRACK_INTERNAL, ScorecardStatus, ShortlistOutcome,
     designation_level,
 )
 
@@ -133,7 +133,7 @@ async def tracker(actor: dict, company_id: str, *, status: str = None,
     skip = max(0, int(skip or 0))
 
     query = {"company_id": str(company_id),
-             "requisition_track": RequisitionTrack.INTERNAL.value}
+             "requisition_track": REQUISITION_TRACK_INTERNAL}
     query.update(_visibility_filter(actor))
     if status:
         query["approval_status"] = status

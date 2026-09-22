@@ -60,14 +60,20 @@ async def main() -> None:
     import app.routes.hrms as ROUTES
     from app.models import hrms as M
 
-    OPERATOR = str(ObjectId())      # Sparsh Magic's own company -- the HRMS tenant
+    OPERATOR = str(ObjectId())      # the in-house company -- the one HRMS tenant
     CLIENT_CO = str(ObjectId())     # a client organisation, no HRMS records of its own
     EMPTY_CO = str(ObjectId())      # a company that has never touched HRMS
 
+    # `is_internal` marks the single company the ERP is operated in-house by. HRMS needs
+    # BOTH it and `hrms_enabled`, so a client company cannot be switched into the module
+    # -- see utils/hrms_access.is_hrms_enabled. Only the operator carries it.
     companies = FakeCollection([
-        {"_id": ObjectId(OPERATOR), "name": "People to Process", "hrms_enabled": False},
-        {"_id": ObjectId(CLIENT_CO), "name": "Acme Manufacturing", "hrms_enabled": False},
-        {"_id": ObjectId(EMPTY_CO), "name": "Unrelated Co", "hrms_enabled": False},
+        {"_id": ObjectId(OPERATOR), "name": "People to Process", "hrms_enabled": False,
+         "is_internal": True},
+        {"_id": ObjectId(CLIENT_CO), "name": "Acme Manufacturing", "hrms_enabled": False,
+         "is_internal": False},
+        {"_id": ObjectId(EMPTY_CO), "name": "Unrelated Co", "hrms_enabled": False,
+         "is_internal": False},
     ])
     # The operator owns the records. A client is named INSIDE a requisition's `client_id`,
     # never as its `company_id` -- which is why reading the data cannot mistake one for the
@@ -140,24 +146,6 @@ async def main() -> None:
         await expect_http(
             "a client contact whose engagement is in a switched-off tenant",
             ACCESS.ensure_hrms_enabled(client_side(CLIENT_CO)), 403)
-        # An engagement is the client-hiring way in, and it must not open while the tenant
-        # has the module off -- that check reads `hrms_enabled_company_ids`, not the
-        # fallback, and this proves the two did not get confused.
-        await store["hrms_client_engagements"].insert_one(
-            {"_id": ObjectId(), "company_id": OPERATOR, "client_id": CLIENT_CO,
-             "engagement_no": "CLI-ENG-2026-001",
-             "status": M.EngagementStatus.ACTIVE.value,
-             "member_user_ids": []})
-        member = client_side(CLIENT_CO)
-        await store["hrms_client_engagements"].update_one(
-            {"engagement_no": "CLI-ENG-2026-001"},
-            {"$set": {"member_user_ids": [str(member["_id"])]}})
-        check("a real engagement member still resolves to NO tenant while HRMS is off",
-              await ACCESS.client_participant_tenant(member) is None)
-        await expect_http(
-            "...and is refused at the door",
-            ACCESS.ensure_hrms_enabled(member), 403)
-
         client_list = await ROUTES.hrms_companies(client_side(CLIENT_CO))
         check("a client-side user's selector still shows only their own company",
               [r["id"] for r in client_list["companies"]] == [CLIENT_CO])
@@ -172,10 +160,11 @@ async def main() -> None:
         back = await ROUTES.hrms_companies(staff())
         check("the selector reports the module as ON",
               back["companies"][0]["hrms_enabled"] is True)
-        check("the client contact's engagement now resolves to the tenant",
-              await ACCESS.client_participant_tenant(member) == OPERATOR)
-        check("and they are admitted",
-              await ACCESS.ensure_hrms_enabled(member) is None)
+        # HRMS is an IN-HOUSE system: it recruits this company's own staff. A user of a
+        # client company is refused even while the operator has the module ON.
+        await expect_http(
+            "a client-company user is refused even so -- HRMS is not for clients",
+            ACCESS.ensure_hrms_enabled(client_side(CLIENT_CO)), 403)
 
         # With a company enabled, the fallback must NOT widen the list: a company holding
         # records but switched off is no longer offered, because there is now a real answer.

@@ -114,7 +114,12 @@ async def main() -> None:
     import app.services.hrms_employee_service as ES
     import app.services.hrms_audit_service as AUD
     import app.services.hrms_id_service as IDS
-    for mod in (OB, ES, AUD, IDS):
+    # §7.5 Stage 4: the onboarding case reads its background status THROUGH the
+    # background service, so that service has to see the same fake store.
+    import app.services.hrms_background_service as BGV
+    import app.services.hrms_probation_service as PB
+    import app.services.hrms_reference_service as REF
+    for mod in (OB, ES, AUD, IDS, BGV, REF, PB):
         mod.get_collection = mongo.get_collection
 
     sent = []
@@ -148,8 +153,18 @@ async def main() -> None:
            "company_id": COMPANY, "governance_role": "IMPLEMENTOR"}
     INTERNAL = {"_id": "st", "role": "admin", "_source_collection": "staff"}
 
-    def upload(name="pan.pdf", mime="application/pdf", data="aGVsbG8="):
-        return {"name": name, "mime_type": mime, "data": data}
+    def upload(name="pan.pdf", mime="application/pdf", data="aGVsbG8=", doc_type=None):
+        d = {"name": name, "mime_type": mime, "data": data}
+        if doc_type:
+            d["doc_type"] = doc_type
+        return d
+
+    # One upload per REQUIRED joining document (§7.5). The submission is refused while any
+    # required type is missing, so the happy path has to satisfy the catalogue.
+    def required_uploads():
+        return [upload(name=f"doc{i}.pdf", doc_type=label)
+                for i, label in enumerate(
+                    k for k, required in M.ONBOARD_DOC_TYPES.items() if required)]
 
     GOOD = {"pan": "abcde1234f", "aadhaar": "1234 5678 9012",
             "date_of_birth": "1995-04-17", "gender": "Female",
@@ -157,7 +172,7 @@ async def main() -> None:
             "emergency_contact_name": "Ravi", "emergency_contact_phone": "9000000000",
             "emergency_contact_relation": "Father",
             "references": [{"name": "Prof R", "relation": "Mentor", "phone": "9111111111"}],
-            "documents": [upload()]}
+            "documents": required_uploads()}
 
     def submission(**over):
         d = {k: v for k, v in GOOD.items()}
@@ -227,12 +242,12 @@ async def main() -> None:
         check("background check starts Pending",
               ob1["bg_verification"] == M.BgVerification.PENDING.value)
         check("access code is 128-bit", len(ob1["access_code"]) >= 20)
-        check("checklist seeded with every declared item",
-              len(ob1["checklist"]) == len(M.ONBOARD_CHECKLIST) == 12)
+        check("checklist seeded with every declared item, induction items appended",
+              len(ob1["checklist"]) == len(M.ONBOARD_CHECKLIST) + len(M.INDUCTION_CHECKLIST))
         check("no checklist item starts done",
               not any(i["done"] for i in ob1["checklist"]))
-        check("progress reports 0 of 12",
-              ob1["progress"] == {"done": 0, "total": 12, "percent": 0})
+        check("progress reports 0 of the full checklist",
+              ob1["progress"] == {"done": 0, "total": len(ob1["checklist"]), "percent": 0})
         check("designation taken from the ACCEPTED OFFER, not the requisition",
               ob1["designation"] == "Senior Analyst")
         check("joining date inherited from the offer", ob1["joining_date"] == FUTURE)
@@ -267,7 +282,8 @@ async def main() -> None:
         check("list returns the onboarding", len(listed) == 1)
         check("access_code ABSENT from the list payload", "access_code" not in listed[0])
         check("submission ABSENT from the list payload", "submission" not in listed[0])
-        check("progress present on the list row", listed[0]["progress"]["total"] == 12)
+        check("progress present on the list row",
+              listed[0]["progress"]["total"] == len(M.ONBOARD_CHECKLIST) + len(M.INDUCTION_CHECKLIST))
         detail = await OB.get_onboarding(HR, COMPANY, no1)
         check("access_code present on the DETAIL payload", bool(detail.get("access_code")))
 
@@ -354,7 +370,12 @@ async def main() -> None:
         check("reference recorded", len(stored["submission"]["references"]) == 1)
         check("document stored with its source",
               stored["documents"][0]["source"] == "candidate")
-        check("document actually uploaded", uploaded == ["onboard_pan.pdf"])
+        check("every required document actually uploaded",
+              uploaded == [f"onboard_doc{i}.pdf" for i in range(len(uploaded))]
+              and len(uploaded) == sum(1 for r in M.ONBOARD_DOC_TYPES.values() if r))
+        check("each stored document carries its type",
+              sorted(d["doc_type"] for d in stored["documents"])
+              == sorted(k for k, r in M.ONBOARD_DOC_TYPES.items() if r))
         check("submission audited",
               any(x["action"] == M.AUDIT_ONBOARD_SUBMITTED for x in audit_log.docs))
         check("HR notified of the submission",
@@ -429,6 +450,78 @@ async def main() -> None:
         await expect_http("generating an ID before the documents are verified",
                           OB.generate_employee_id(HR, COMPANY, no1), 409, "not been verified")
 
+        # ── §7.5 Stage 3 -- per-document verification ──
+        section("Document verification (§7.5 Stage 3)")
+        tasks = {t["doc_type"]: t
+                 for t in (await OB.get_onboarding(HR, COMPANY, no1))["document_tasks"]}
+        check("every uploaded document starts Pending",
+              all(t["status"] == M.DocStatus.PENDING.value
+                  for t in tasks.values() if t["uploaded"]))
+        check("an uploaded document records its version",
+              tasks["PAN card"]["version"] == 1)
+
+        await expect_http("a verdict on a document nobody uploaded",
+                          OB.review_document(HR, COMPANY, no1,
+                                             {"doc_type": "No such document",
+                                              "status": M.DocStatus.VERIFIED}),
+                          404, "uploaded")
+        await expect_http("an unknown verdict",
+                          OB.review_document(HR, COMPANY, no1,
+                                             {"doc_type": "PAN card", "status": "Maybe"}),
+                          422, "Pending, Verified, Rejected or Exception")
+        await expect_http("rejecting with no reason",
+                          OB.review_document(HR, COMPANY, no1,
+                                             {"doc_type": "PAN card",
+                                              "status": M.DocStatus.REJECTED}),
+                          422, "Say why")
+        await expect_http("an exception with no reason",
+                          OB.review_document(HR, COMPANY, no1,
+                                             {"doc_type": "PAN card",
+                                              "status": M.DocStatus.EXCEPTION}),
+                          422, "Say why")
+
+        rejected = await OB.review_document(
+            HR, COMPANY, no1, {"doc_type": "PAN card", "status": M.DocStatus.REJECTED,
+                               "note": "The scan is unreadable."})
+        pan = next(d for d in rejected["documents"] if d["doc_type"] == "PAN card")
+        check("a rejection is recorded on the document",
+              pan["status"] == M.DocStatus.REJECTED.value)
+        check("who reviewed it is recorded", pan["reviewed_by"] == "Hana HR")
+        check("the reason is kept", pan["review_note"] == "The scan is unreadable.")
+        check("the verdict is appended to the document's history",
+              [h["status"] for h in pan["history"]]
+              == [M.DocStatus.PENDING.value, M.DocStatus.REJECTED.value])
+
+        await expect_http("verifying the file while a mandatory document is rejected",
+                          OB.verify_documents(HR, COMPANY, no1), 409, "rejected")
+
+        # A replacement arrives: the old version is RETAINED, the new one is v2 and starts
+        # unreviewed again.
+        await OB.add_documents(HR, COMPANY, no1,
+                               {"documents": [upload(name="pan-v2.pdf",
+                                                     doc_type="PAN card")]})
+        after = await OB.get_onboarding(HR, COMPANY, no1)
+        pans = [d for d in after["documents"] if d["doc_type"] == "PAN card"]
+        check("the replaced version is retained, not overwritten", len(pans) == 2)
+        check("the replacement is version 2",
+              sorted(d["version"] for d in pans) == [1, 2])
+        check("the superseded version keeps its rejection",
+              next(d for d in pans if d["version"] == 1)["status"]
+              == M.DocStatus.REJECTED.value)
+        check("the task row reads the CURRENT version",
+              next(t for t in after["document_tasks"]
+                   if t["doc_type"] == "PAN card")["status"]
+              == M.DocStatus.PENDING.value)
+
+        for label in (k for k, req in M.ONBOARD_DOC_TYPES.items() if req):
+            await OB.review_document(HR, COMPANY, no1,
+                                     {"doc_type": label, "status": M.DocStatus.VERIFIED})
+
+        # An OPTIONAL document left Pending must not block anybody.
+        check("an optional document left pending is not a blocker",
+              not any("Previous employment" in b
+                      for b in (await OB.get_onboarding(HR, COMPANY, no1))["id_blockers"]))
+
         verified = await OB.verify_documents(HR, COMPANY, no1)
         check("verification sets pre-status to Verified",
               verified["pre_status"] == M.PreOnboardStatus.VERIFIED.value)
@@ -439,10 +532,154 @@ async def main() -> None:
         check("verification audited",
               any(x["action"] == M.AUDIT_ONBOARD_VERIFIED for x in audit_log.docs))
 
+        # ── §7.5 Stage 4 -- BGV lives INSIDE the onboarding case ──
+        section("BGV / reference verification (§7.5 Stage 4)")
+        case = await OB.get_onboarding(HR, COMPANY, no1)
+        check("the case carries a verification block",
+              isinstance(case.get("verification"), dict))
+        check("with nothing recorded, the case shows no checks",
+              case["verification"]["checks"] == [])
+
+        bgv = store[M.COLL_BACKGROUND_CHECKS]
+        await bgv.insert_one({
+            "bgv_no": "BGV-TEST-1", "company_id": COMPANY, "uk": "CAN-001",
+            "check_type": list(M.REQUIRED_BACKGROUND_CHECKS)[0].value,
+            "status": M.BackgroundCheckStatus.FLAGGED.value,
+            "created_at": "2026-01-01T00:00:00+00:00"})
+
+        await OB.sync_verification(COMPANY, "CAN-001")
+        synced = await OB.get_onboarding(HR, COMPANY, no1)
+        check("a flagged check drives the case to Flagged",
+              synced["bg_verification"] == M.BgVerification.FLAGGED.value)
+        check("bg_cleared un-ticks with it",
+              next(i for i in synced["checklist"]
+                   if i["key"] == "bg_cleared")["done"] is False)
+        check("the case shows the check itself, not just a status",
+              len(synced["verification"]["checks"]) == 1)
+        check("and says which check is flagged",
+              len(synced["verification"]["flagged"]) == 1)
+
+        await expect_http("typing over a status the records own",
+                          OB.update_bg(HR, COMPANY, no1,
+                                       {"bg_verification": M.BgVerification.CLEARED}),
+                          409, "follows it")
+
+        # Clear it the only way that works: through the record.
+        await bgv.update_one({"bgv_no": "BGV-TEST-1"},
+                             {"$set": {"status": M.BackgroundCheckStatus.CLEARED.value}})
+        await OB.sync_verification(COMPANY, "CAN-001")
+        after = await OB.get_onboarding(HR, COMPANY, no1)
+        check("clearing the check moves the case off Flagged",
+              after["bg_verification"] != M.BgVerification.FLAGGED.value)
+
+        # Back to a clean slate so the rest of the run is unaffected.
+        await bgv.delete_one({"bgv_no": "BGV-TEST-1"})
+        await OB.update_bg(HR, COMPANY, no1,
+                           {"bg_verification": M.BgVerification.CLEARED})
+        check("with no verification file, the field is settable again",
+              (await OB.get_onboarding(HR, COMPANY, no1))["bg_verification"]
+              == M.BgVerification.CLEARED.value)
+
+        # ── §7.5 Stage 5 -- onboarding completeness ──
+        section("Onboarding completeness (§7.5 Stage 5)")
+        comp = (await OB.get_onboarding(HR, COMPANY, no1))["completeness"]
+        group_keys = [g["key"] for g in comp["groups"]]
+        check("all six groups the BA document names are scored",
+              group_keys == ["documents", "personal", "bank", "statutory", "bgv", "tasks"])
+        check("the percentage is derived from the items, not stored",
+              comp["percent"] == int(round(comp["done"] * 100 / comp["total"])))
+        check("it is not yet complete -- joining tasks are outstanding",
+              comp["percent"] < 100)
+        check("every unmet item is named, not just counted",
+              len(comp["missing"]) == comp["total"] - comp["done"])
+        check("each missing entry says which group it belongs to",
+              all(":" in m for m in comp["missing"]))
+
+        check("documents scored from the verified/exception set",
+              next(g for g in comp["groups"] if g["key"] == "documents")["percent"] == 100)
+        check("bank details read off the submission",
+              next(g for g in comp["groups"] if g["key"] == "bank")["percent"] == 100)
+        check("a joiner with no UAN is not marked incomplete for it",
+              next(g for g in comp["groups"] if g["key"] == "statutory")["percent"] == 100)
+        check("BGV counts as met when this company runs no checks for them",
+              next(g for g in comp["groups"] if g["key"] == "bgv")["percent"] == 100)
+
+        # Ticking a human task moves the number, and only by that one item.
+        before = comp["percent"]
+        await OB.set_checklist(HR, COMPANY, no1,
+                               {"key": "email_created", "done": True})
+        after_comp = (await OB.get_onboarding(HR, COMPANY, no1))["completeness"]
+        check("completing one task raises the percentage",
+              after_comp["percent"] > before)
+        check("and removes exactly that item from the missing list",
+              len(after_comp["missing"]) == len(comp["missing"]) - 1)
+
+        listed = await OB.list_onboardings(HR, COMPANY)
+        row = next(r for r in listed if r["onb_no"] == no1)
+        check("the board carries the same figure, so HR can scan for who is behind",
+              row["completeness"]["percent"] == after_comp["percent"])
+        check("the list still withholds the submission it computed from",
+              "submission" not in row)
+
         await OB.update_details(HR, COMPANY, no1, {"joining_date": None})
         await expect_http("generating an ID with no joining date",
                           OB.generate_employee_id(HR, COMPANY, no1), 409, "joining date")
         await OB.update_details(HR, COMPANY, no1, {"joining_date": FUTURE})
+
+        # ── §7.5 Stage 6 -- joining day ──
+        section("Joining day (§7.5 Stage 6)")
+        await expect_http("issuing an ID before anybody confirmed they turned up",
+                          OB.generate_employee_id(HR, COMPANY, no1), 409,
+                          "Joining has not been confirmed")
+        await expect_http("confirming with no date",
+                          OB.confirm_joining(HR, COMPANY, no1, {"actual_doj": ""}),
+                          422, "YYYY-MM-DD")
+        await expect_http("confirming a joining that has not happened yet",
+                          OB.confirm_joining(HR, COMPANY, no1, {"actual_doj": FUTURE}),
+                          422, "cannot be in the future")
+
+        TODAY = __import__("datetime").datetime.now(
+            __import__("datetime").timezone.utc).strftime("%Y-%m-%d")
+        joined = await OB.confirm_joining(HR, COMPANY, no1, {
+            "actual_doj": TODAY, "note": "Reported at 9am.",
+            "unit": "Head Office", "grade": "L3", "work_location": "Indore",
+            "employment_type": M.EmploymentType.FULL_TIME,
+            "employment_status": M.EmploymentStatus.ACTIVE,
+            "payroll_group": "Monthly - India"})
+        check("the ACTUAL joining date is recorded", joined["actual_doj"] == TODAY)
+        check("and kept apart from the planned date",
+              joined["joining_date"] == FUTURE and joined["actual_doj"] != FUTURE)
+        check("who confirmed it is recorded",
+              joined["joining_confirmed_by"] == "Hana HR")
+        check("the assignment is held on the case",
+              joined["grade"] == "L3" and joined["payroll_group"] == "Monthly - India")
+
+        # ── §7.5 Stage 8 -- IT / Admin / Manager tasks ──
+        section("Joining tasks by owner (§7.5 Stage 8)")
+        items = {i["key"]: i for i in joined["checklist"]}
+        check("IT owns the account and access tasks",
+              items["email_created"]["owner"] == M.TASK_OWNER_IT
+              and items["system_access"]["owner"] == M.TASK_OWNER_IT)
+        check("asset issue is IT's, workspace is Admin's",
+              items["asset_issued"]["owner"] == M.TASK_OWNER_IT
+              and items["workspace"]["owner"] == M.TASK_OWNER_ADMIN)
+        check("induction and the team introduction are the manager's",
+              items["induction"]["owner"] == M.TASK_OWNER_MANAGER
+              and items["buddy_assigned"]["owner"] == M.TASK_OWNER_MANAGER)
+        check("HR keeps the items it actually owns",
+              items["offer_signed"]["owner"] == M.TASK_OWNER_HR
+              and items["bg_cleared"]["owner"] == M.TASK_OWNER_HR)
+
+        check("confirming joining assigns every IT/Admin/Manager task",
+              all(i["assigned_at"] for i in joined["checklist"]
+                  if i["owner"] in M.TASKS_ASSIGNED_AT_JOINING))
+        check("HR's own items are NOT assigned by joining -- they ran from case open",
+              all(i["assigned_at"] is None for i in joined["checklist"]
+                  if i["owner"] == M.TASK_OWNER_HR))
+        check("the owners are told what is now theirs",
+              any("IT tasks" in t for _, _, t in sent)
+              or any("IT tasks" in str(x) for x in sent))
+
         check("no blockers remain",
               (await OB.get_onboarding(HR, COMPANY, no1))["can_generate_id"] is True)
 
@@ -467,7 +704,42 @@ async def main() -> None:
         check("traceable back to the candidate", profile["source_uk"] == "CAN-001")
         check("employment starts Active",
               profile["employment_status"] == M.EmploymentStatus.ACTIVE.value)
-        check("joining date carried across", profile["joined_on"] == FUTURE)
+        # §7.5 Stage 6: the employee starts from the date they ACTUALLY joined, not the
+        # date that was planned. Tenure, probation and payroll all run off this.
+        check("the ACTUAL joining date is what the employee record carries",
+              profile["joined_on"] == TODAY and profile["joined_on"] != FUTURE)
+        check("the assignment made at joining carried across",
+              profile["grade"] == "L3"
+              and profile["work_location"] == "Indore"
+              and profile["payroll_group"] == "Monthly - India"
+              and profile["unit"] == "Head Office")
+        # ── §7.5 Stage 9 -- conversion keeps the recruitment history ──
+        check("the candidate record still exists after conversion",
+              await candidates.find_one({"uk": "CAN-001", "company_id": COMPANY})
+              is not None)
+        check("the employee points back to the candidate they came from",
+              profile["source_uk"] == "CAN-001")
+        by_code = await ES.get_employee_by_code(HR, COMPANY, emp_code)
+        check("a joiner with no login can still be opened by employee code",
+              by_code is not None and by_code["employee_code"] == emp_code)
+        check("and that view carries the link back to recruitment",
+              by_code["source_uk"] == "CAN-001")
+
+        # ── §7.5 Stage 10 -- probation opens at joining, for EVERY joiner ──
+        prb = await store[M.COLL_PROBATION_REVIEWS].find_one(
+            {"company_id": COMPANY, "employee_code": emp_code})
+        check("a probation review is opened automatically at joining",
+              prb is not None)
+        check("and the onboarding carries the internal track discriminator",
+              (await onboardings.find_one({"onb_no": no1})).get("requisition_track")
+              == "internal")
+        check("it runs from the ACTUAL joining date, not the planned one",
+              prb["started_on"] == TODAY and prb["started_on"] != FUTURE)
+        check("the end date is derived from the configured policy",
+              prb["ends_on"] == PB._add_months(TODAY, M.DEFAULT_PROBATION_MONTHS))
+        check("and it opens Pending -- joining confirms nobody",
+              prb["outcome"] == M.ProbationOutcome.PENDING.value)
+
         check("department carried across", profile["department_id"] == DEPT)
         check("PAN carried from the submission", profile["pan"] == "ABCDE1234F")
         check("bank details carried from the submission",
@@ -522,7 +794,8 @@ async def main() -> None:
             if not item["done"] and item["key"] not in M.SYSTEM_CHECKLIST_KEYS:
                 current = await OB.set_checklist(HR, COMPANY, no1,
                                                  {"key": item["key"], "done": True})
-        check("every item is done", current["progress"]["done"] == 12)
+        check("every item is done",
+              current["progress"]["done"] == current["progress"]["total"])
         check("onboarding auto-completes",
               current["status"] == M.OnboardStatus.COMPLETED.value)
         check("candidate reaches Employee Created",

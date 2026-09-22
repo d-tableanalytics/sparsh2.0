@@ -85,6 +85,31 @@ def _out(doc: dict) -> dict:
     return doc
 
 
+def _seniority(value):
+    """The SOP's seniority band for a designation, validated.
+
+    This field was accepted by DesignationIn and DesignationUpdate, passed through the
+    route, and then silently dropped here -- so it could not be set through the API at all.
+    Every designation therefore read as the default band, which quietly disabled two rules
+    stated in terms of it: the panel composition for senior roles, and the mandatory
+    Management final round before a managerial candidate can be selected. A control that
+    cannot be configured is a control that never fires.
+
+    None means "leave it unset", which `designation_level()` reads as the default band.
+    """
+    from app.models.hrms import DesignationLevel
+    raw = getattr(value, "value", value)
+    if raw is None or raw == "":
+        return None
+    try:
+        return DesignationLevel(raw).value
+    except ValueError:
+        raise HTTPException(
+            status_code=422,
+            detail=("Seniority must be one of: "
+                    + ", ".join(level.value for level in DesignationLevel) + "."))
+
+
 async def list_masters(kind: str, company_id: str, include_inactive: bool = False) -> list:
     coll_name, _entity, _actions, _ref = _spec(kind)
     query = {"company_id": str(company_id)}
@@ -136,6 +161,10 @@ async def create_master(kind: str, company_id: str, payload: dict, actor: dict) 
     else:
         level = payload.get("level")
         doc["level"] = int(level) if level is not None else None
+        # The SOP's band, separate from the numeric grade above on purpose: `level` is an
+        # integer a company numbers however it likes, and the four fixed bands are what the
+        # panel and final-round rules are actually written in terms of.
+        doc["designation_level"] = _seniority(payload.get("designation_level"))
 
     try:
         result = await coll.insert_one(doc)
@@ -181,6 +210,10 @@ async def update_master(kind: str, company_id: str, master_id: str, payload: dic
         updates["head_user_id"] = payload["head_user_id"] or None
     if kind == "designation" and payload.get("level") is not None:
         updates["level"] = int(payload["level"])
+    # Present-but-None is meaningful here: it clears the band back to the default, which is
+    # why this tests for the KEY rather than for a truthy value.
+    if kind == "designation" and "designation_level" in payload:
+        updates["designation_level"] = _seniority(payload["designation_level"])
 
     if not updates:
         raise HTTPException(status_code=400, detail="No fields to update.")

@@ -32,6 +32,25 @@ const CATEGORIES = [
   { value: 'culture_fit', label: 'Culture fit' },
 ];
 
+/** The five rows the Position Scorecard template names, pre-filled so a new scorecard opens
+ *  in the standard shape. They are a STARTING POINT, not a fixed list: each row can be
+ *  renamed, reweighted or removed, and extra rows added. Categories are pre-matched to the
+ *  row so the weighted maths and the category filter agree with the wording. */
+const TEMPLATE_ROWS = [
+  { label: 'Technical / Job Skill', category: 'skill' },
+  { label: 'Relevant Experience', category: 'experience' },
+  { label: 'Role Competency', category: 'skill' },
+  { label: 'Communication / Professional Skill', category: 'skill' },
+  { label: 'Culture-Fit Expectations', category: 'culture_fit' },
+].map((r) => ({
+  ...r, expected_level: '', evaluation_criteria: '', weight: 1, max_score: 5, remarks: '',
+}));
+
+const emptyRow = () => ({
+  label: '', category: 'skill', expected_level: '', evaluation_criteria: '',
+  weight: 1, max_score: 5, remarks: '',
+});
+
 const ScorecardLibrary = () => {
   const { scope, companyId, can } = useHrms();
   const { showSuccess, showError } = useNotification();
@@ -76,10 +95,19 @@ const ScorecardLibrary = () => {
       ) },
     { key: 'criteria', label: 'Criteria',
       render: (r) => (
-        <span className="text-[var(--text-muted)]">
-          {(r.criteria || []).length} criteria
-          {r.managerial ? ' · managerial' : ''}
-        </span>
+        <div className="flex items-center gap-1.5 flex-wrap">
+          <span className="px-2 py-0.5 rounded-md bg-[var(--input-bg)] text-[11.5px] font-bold text-[var(--text-main)]">
+            {(r.criteria || []).length}
+          </span>
+          <span className="text-[var(--text-muted)]">
+            {(r.criteria || []).length === 1 ? 'criterion' : 'criteria'}
+          </span>
+          {r.managerial && (
+            <span className="px-2 py-0.5 rounded-md bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] text-[10.5px] font-bold">
+              Managerial
+            </span>
+          )}
+        </div>
       ) },
     { key: 'created', label: 'Drafted',
       render: (r) => (
@@ -139,6 +167,28 @@ const ScorecardLibrary = () => {
       />
       <HrmsScopeBar />
 
+      {!loading && !error && rows.length > 0 && (
+        <div className="grid grid-cols-3 gap-3">
+          {[['Awaiting approval', rows.filter((r) => r.status !== 'Approved').length,
+             'var(--accent-orange)'],
+            ['Approved', rows.filter((r) => r.status === 'Approved').length,
+             'var(--accent-green)'],
+            ['Managerial roles', rows.filter((r) => r.managerial).length,
+             'var(--accent-indigo)']].map(([label, value, tone]) => (
+            <div key={label}
+              className="relative p-3.5 pl-4 rounded-xl border border-[var(--border)] bg-[var(--bg-card)] overflow-hidden">
+              <span className="absolute left-0 top-0 bottom-0 w-1" style={{ background: tone }} />
+              <p className="text-[10.5px] font-bold uppercase tracking-widest text-[var(--text-muted)]">
+                {label}
+              </p>
+              <p className="mt-1.5 text-[22px] font-bold leading-none" style={{ color: tone }}>
+                {value}
+              </p>
+            </div>
+          ))}
+        </div>
+      )}
+
       {loading && <HrmsLoading label="Loading scorecards…" />}
       {error && !loading && <HrmsError message={error} onRetry={load} />}
 
@@ -175,21 +225,23 @@ const ScorecardLibrary = () => {
   );
 };
 
-/** The builder. Criteria are rows you add and remove; the weight column shows what each one
- *  is actually worth as a share of the total, recomputed as you type. */
+/** The builder, laid out as the Position Scorecard template itself: a numbered row per
+ *  competency, with the requisition's own facts shown read-only above it. The five rows the
+ *  template names are pre-filled so a scorecard starts from the standard shape rather than
+ *  a blank page; any of them can be renamed or removed, and more can be added. */
 const ScorecardBuilder = ({ scope, onClose, onDone, showSuccess, showError }) => {
   const [reqs, setReqs] = useState([]);
   const [requestNo, setRequestNo] = useState('');
   const [title, setTitle] = useState('');
   const [managerial, setManagerial] = useState(false);
   const [notes, setNotes] = useState('');
-  const [criteria, setCriteria] = useState([
-    { label: '', category: 'skill', weight: 1, max_score: 5 },
-  ]);
+  const [criteria, setCriteria] = useState(() => TEMPLATE_ROWS.map((r) => ({ ...r })));
   const [busy, setBusy] = useState(false);
 
+  const chosen = reqs.find((r) => r.request_no === requestNo);
+
   useEffect(() => {
-    getRequisitions({ ...scope, track: 'internal', limit: 200 })
+    getRequisitions({ ...scope, limit: 200 })
       .then(({ data }) => setReqs(data?.requisitions || []))
       .catch(() => setReqs([]));
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -251,6 +303,28 @@ const ScorecardBuilder = ({ scope, onClose, onDone, showSuccess, showError }) =>
         </select>
       </div>
 
+      {/* The template's header block — read straight off the chosen requisition so the
+          scorecard cannot disagree with the role it is scoring. */}
+      <div className="rounded-lg border border-[var(--border)] bg-[var(--input-bg)] p-3
+                      grid grid-cols-2 gap-x-4 gap-y-2">
+        {[
+          ['Position', chosen?.designation_name],
+          ['Department', chosen?.department_name],
+          ['Requisition ID', chosen?.request_no],
+          ['Prepared By', 'HR'],
+          ['Approved By', managerial ? 'HOD + Management' : 'HOD'],
+        ].map(([label, value]) => (
+          <div key={label}>
+            <span className="block text-[10px] font-bold uppercase tracking-widest text-[var(--text-muted)]">
+              {label}
+            </span>
+            <span className="text-[12.5px] font-semibold text-[var(--text-main)]">
+              {value || '—'}
+            </span>
+          </div>
+        ))}
+      </div>
+
       <div>
         <label className={LABEL} htmlFor="scr-title">Title</label>
         <input id="scr-title" value={title} onChange={(e) => setTitle(e.target.value)}
@@ -272,17 +346,26 @@ const ScorecardBuilder = ({ scope, onClose, onDone, showSuccess, showError }) =>
       </label>
 
       <div className="space-y-2">
-        <p className={LABEL}>Criteria *</p>
+        <div className="flex items-baseline justify-between gap-2">
+          <p className={`${LABEL} mb-0`}>Competencies *</p>
+          <p className="text-[11px] text-[var(--text-muted)]">
+            Score (1–5) is filled per candidate at evaluation, not here.
+          </p>
+        </div>
         {criteria.map((row, index) => (
           <div key={index}
             className="rounded-lg border border-[var(--border)] p-2.5 space-y-2">
-            <div className="flex gap-2">
+            <div className="flex gap-2 items-center">
+              <span className="shrink-0 h-9 w-7 grid place-items-center rounded-md
+                bg-[var(--input-bg)] text-[11.5px] font-bold text-[var(--text-muted)]">
+                {index + 1}
+              </span>
               <input
-                aria-label={`Criterion ${index + 1} label`}
-                value={row.label} className={FIELD} placeholder="e.g. SQL"
+                aria-label={`Row ${index + 1} competency or skill`}
+                value={row.label} className={FIELD} placeholder="Competency / Skill"
                 onChange={(e) => setRow(index, 'label', e.target.value)}
               />
-              <button type="button" aria-label={`Remove criterion ${index + 1}`}
+              <button type="button" aria-label={`Remove row ${index + 1}`}
                 onClick={() => setCriteria((rows) => rows.filter((_, i) => i !== index))}
                 disabled={criteria.length === 1}
                 className="shrink-0 h-9 w-9 grid place-items-center rounded-lg
@@ -291,8 +374,20 @@ const ScorecardBuilder = ({ scope, onClose, onDone, showSuccess, showError }) =>
                 <Trash2 size={14} />
               </button>
             </div>
+            <input
+              aria-label={`Row ${index + 1} requirement or expected level`}
+              value={row.expected_level} className={FIELD}
+              placeholder="Requirement / Expected Level — the bar for this row"
+              onChange={(e) => setRow(index, 'expected_level', e.target.value)}
+            />
+            <input
+              aria-label={`Row ${index + 1} evaluation criteria`}
+              value={row.evaluation_criteria} className={FIELD}
+              placeholder="Evaluation Criteria — how it is measured"
+              onChange={(e) => setRow(index, 'evaluation_criteria', e.target.value)}
+            />
             <div className="grid grid-cols-3 gap-2">
-              <select aria-label={`Criterion ${index + 1} category`}
+              <select aria-label={`Row ${index + 1} category`}
                 value={row.category} className={FIELD}
                 onChange={(e) => setRow(index, 'category', e.target.value)}>
                 {CATEGORIES.map((c) => (
@@ -300,7 +395,7 @@ const ScorecardBuilder = ({ scope, onClose, onDone, showSuccess, showError }) =>
                 ))}
               </select>
               <input type="number" min="0.5" step="0.5"
-                aria-label={`Criterion ${index + 1} weight`}
+                aria-label={`Row ${index + 1} weightage`}
                 value={row.weight} className={FIELD}
                 onChange={(e) => setRow(index, 'weight', e.target.value)} />
               <div className="grid place-items-center rounded-lg bg-[var(--input-bg)]
@@ -310,19 +405,34 @@ const ScorecardBuilder = ({ scope, onClose, onDone, showSuccess, showError }) =>
                   : '—'}
               </div>
             </div>
+            <input
+              aria-label={`Row ${index + 1} remarks`}
+              value={row.remarks} className={FIELD} placeholder="Remarks (optional)"
+              onChange={(e) => setRow(index, 'remarks', e.target.value)}
+            />
           </div>
         ))}
-        <Btn onClick={() => setCriteria((rows) =>
-          [...rows, { label: '', category: 'skill', weight: 1, max_score: 5 }])}>
-          <Plus size={13} /> Add criterion
+        <Btn onClick={() => setCriteria((rows) => [...rows, emptyRow()])}>
+          <Plus size={13} /> Add competency
         </Btn>
       </div>
 
       <div>
-        <label className={LABEL} htmlFor="scr-notes">Notes</label>
+        <label className={LABEL} htmlFor="scr-notes">HR Remarks</label>
         <textarea id="scr-notes" rows={2} value={notes} className={TEXTAREA}
-          onChange={(e) => setNotes(e.target.value)} />
+          onChange={(e) => setNotes(e.target.value)}
+          placeholder="HR's own note on this scorecard" />
       </div>
+
+      {/* The template's footer, stated rather than collected: both are produced by the
+          system later, and a blank box for them here would invite HR to write a verdict
+          before anyone has been interviewed. */}
+      <p className="text-[11px] text-[var(--text-muted)]">
+        <strong>Overall Score</strong> and the <strong>Final Recommendation</strong>
+        {' '}(Strong / Consider / Hold / Reject) are computed from these weights when a
+        candidate is scored against this scorecard. <strong>HOD Remarks</strong> are captured
+        on the approval itself.
+      </p>
     </Modal>
   );
 };
@@ -375,13 +485,26 @@ const ApproveModal = ({ row, scope, onClose, onDone, showSuccess, showError }) =
         <p className="text-[11px] font-bold uppercase tracking-widest text-[var(--text-muted)]">
           Criteria
         </p>
-        <ul className="mt-2 space-y-1.5">
+        <ul className="mt-2 space-y-2">
           {(row.criteria || []).map((c) => (
-            <li key={c.label} className="flex items-baseline justify-between gap-3 text-[12.5px]">
-              <span className="text-[var(--text-main)]">{c.label}</span>
-              <span className="text-[var(--text-muted)] shrink-0">
-                weight {c.weight} · out of {c.max_score}
-              </span>
+            <li key={c.label} className="text-[12.5px]">
+              <div className="flex items-baseline justify-between gap-3">
+                <span className="text-[var(--text-main)] font-semibold">{c.label}</span>
+                <span className="text-[var(--text-muted)] shrink-0">
+                  weight {c.weight} · out of {c.max_score}
+                </span>
+              </div>
+              {c.expected_level && (
+                <p className="text-[11.5px] text-[var(--text-main)]">
+                  Expected: {c.expected_level}
+                </p>
+              )}
+              {c.evaluation_criteria && (
+                <p className="text-[11.5px] text-[var(--text-muted)]">{c.evaluation_criteria}</p>
+              )}
+              {c.remarks && (
+                <p className="text-[11px] italic text-[var(--text-muted)]">Remarks: {c.remarks}</p>
+              )}
             </li>
           ))}
         </ul>

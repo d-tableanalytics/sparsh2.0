@@ -48,12 +48,13 @@ from app.models.hrms import (
     PublicOnboardIn,
 )
 # ── Phase INT-2 ── the sixth public surface.
-from app.models.hrms import SurveyResponseIn
+from app.models.hrms import ClientApplicationIn, SurveyResponseIn
 from app.services import hrms_appointment_service as appointments
 from app.services import hrms_assessment_service as assessments
 from app.services import hrms_link_service as links
 from app.services import hrms_offer_service as offers
 from app.services import hrms_onboarding_service as onboarding
+from app.services import hrms_client_posting_service as client_postings
 from app.services import hrms_posting_service as postings
 from app.services import hrms_survey_service as surveys
 from app.utils.hrms_public_guard import (
@@ -271,3 +272,37 @@ async def public_survey_submit(code: str, body: SurveyResponseIn, request: Reque
     result = await surveys.submit_public_survey(code, body.model_dump())
     await links.record_consumed(code)
     return result
+
+
+# ─────────────────────────────────────────────────────────────
+# Client Hiring — a client company's vacancy, advertised by Sparsh
+#
+# Separate from /apply above, which is Sparsh Magic's OWN recruitment. Same public
+# contract, same rate limits, same opaque 404 on a bad code — but a different collection
+# and a different tenant, because a client's advert and Sparsh's own must never be served
+# by one lookup.
+#
+# NOT gated by the link service: an internal apply link is issued per posting and tracked
+# for opens, whereas a client vacancy code is simply the address of a public advert.
+# ─────────────────────────────────────────────────────────────
+@router.get("/client-apply/{code}")
+async def public_client_job_ad(code: str, request: Request):
+    """The advert behind a client vacancy link."""
+    code = validate_posting_code(code)
+    await enforce_rate_limit("view", client_ip(request))
+    return await client_postings.get_public_client_posting(code)
+
+
+@router.post("/client-apply/{code}")
+async def public_client_apply(code: str, body: ClientApplicationIn, request: Request):
+    """Apply to a client vacancy.
+
+    Creates an ordinary client candidate at SOURCED, so the recruiter's existing chain
+    picks it up unchanged. Rate limited per IP and per vacancy, like the internal surface:
+    neither one abusive client nor a flood against one popular ad can fill the database.
+    """
+    code = validate_posting_code(code)
+    ip = client_ip(request)
+    await enforce_rate_limit("apply", ip)
+    await enforce_rate_limit("apply-posting", code)
+    return await client_postings.submit_client_application(code, body.model_dump())

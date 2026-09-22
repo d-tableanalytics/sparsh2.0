@@ -1,36 +1,143 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useLocation } from 'react-router-dom';
 import {
   Wallet, Target, CalendarDays, PhoneCall, FileSignature, ShieldCheck,
-  ClipboardCheck, AlertTriangle, ArrowRight,
+  ClipboardCheck, AlertTriangle, ArrowRight, Briefcase, Users2, Clock, UserCircle,
+  Check, ChevronDown, GitBranch, ChevronRight, Plus,
 } from 'lucide-react';
 import { useHrms } from '../HrmsContext';
+import { CAP } from '../access';
 import { HrmsLoading, HrmsError, HrmsEmpty } from '../common/HrmsStates';
 import { getInternalTracker } from '../../../services/hrmsApi';
+import RequisitionFormModal from '../recruitment/RequisitionFormModal';
 import { CARD, day } from './internalKit';
-import { Chip } from './internalKit.jsx';
+import { Chip, Btn, Tile, FlowAccordion } from './internalKit.jsx';
 
 /**
- * HRMS ▸ internal hiring ▸ what needs doing (spec §7).
+ * The Internal Recruitment SOP's own step sequence (Annexure B / §3-§7), one row per
+ * screen this track actually uses to clear that step. Several SOP steps share a screen
+ * (e.g. Probation Monitoring + Review sit on the same board, Joining + Day-1 Induction
+ * are both driven from the Onboarding checklist) — this lists the SCREEN, not a
+ * one-to-one restating of every SOP line, so a step here always lands somewhere real
+ * rather than on a page that doesn't exist.
  *
- * The queue screen answers "what can I do to THIS requisition". This one answers the
- * question a person actually arrives with: *where is the work*. Across every open internal
- * position, what is waiting on somebody, and on whom.
- *
- * -- Why this reads the tracker instead of a new endpoint ------------------------------------
- * `GET /internal-requisitions/tracker` already returns, per requisition, the approval state,
- * the budget, the scorecard, the pipeline counts, the offer, the probation and the SLA. That
- * is every figure on this page. A `/dashboard/counts` endpoint would be a second definition
- * of the same numbers, and the two would eventually disagree — the tracker would say four
- * interviews pending and the dashboard three, and nobody would know which was lying.
- *
- * So the counting happens here, over one payload, and the tiles and the table below them are
- * guaranteed to be about the same rows.
- *
- * -- Why every tile is a link ---------------------------------------------------------------
- * A count nobody can act on is decoration. Each tile navigates to the screen that clears it,
- * so "Budget approval required 3" is the beginning of doing the three, not a note about them.
+ * Several of these screens live in the sidebar (Pre-boarding, Probation) rather than this
+ * workspace's own tab strip (see HrmsWorkspaceBar.jsx and Sidebar.jsx's hrmsSubmodules) —
+ * that split is deliberate (day-to-day hiring screens vs. broader lifecycle governance),
+ * so this tracker exists precisely to give the SOP's own order ONE place to read
+ * end-to-end regardless of which nav surface a step's screen actually sits in.
  */
+const SOP_STAGES = [
+  { n: '1', label: 'Requisition', to: '/hrms/internal-requisitions' },
+  // Its own step, not folded into Step 1 — SOP §Step 2 makes this a mandatory gate in its
+  // own right ("no internal role may be sourced without written headcount and budget
+  // approval"), cleared by Management/Finance, not the HOD who raises the requisition.
+  { n: '2', label: 'Headcount & Budget Approval', to: '/hrms/internal-requisitions' },
+  { n: '3', label: 'Scorecard / JD', to: '/hrms/scorecards' },
+  { n: '4–5', label: 'Sourcing', to: '/hrms/postings' },
+  { n: '6', label: 'CV Screening', to: '/hrms/screening' },
+  { n: '7', label: 'Phone Screen', to: '/hrms/telephonic-screening' },
+  { n: '8', label: 'Assessment', to: '/hrms/assessments' },
+  { n: '9', label: 'Panel Interview', to: '/hrms/interviews' },
+  { n: '10', label: 'Shortlist Committee', to: '/hrms/shortlist-reviews' },
+  { n: '11', label: 'Management Interview', to: '/hrms/interviews' },
+  { n: '12', label: 'Reference Check', to: '/hrms/reference-checks' },
+  { n: '13', label: 'Negotiation', to: '/hrms/negotiations' },
+  // Not a numbered SOP step — a gate. The server refuses to create an offer until every
+  // check has cleared and HR has signed the file off, so it belongs in the strip ahead of
+  // Offer even though the SOP does not give it a number of its own.
+  { n: '⚑', label: 'Verification', to: '/hrms/background-checks',
+    title: 'Gate — checks must clear before an offer can be raised' },
+  { n: '14–15', label: 'Offer', to: '/hrms/offers' },
+  { n: '16', label: 'Pre-boarding', to: '/hrms/preboarding' },
+  { n: '17', label: 'Joining & Induction', to: '/hrms/onboarding' },
+  { n: '18–19', label: 'Probation', to: '/hrms/probation' },
+  { n: '20–21', label: 'Closure', to: '/hrms/probation' },
+];
+
+/**
+ * A connected stepper rather than a row of plain pills — the visual is doing the same job
+ * "1 → 2 → 3" numbering did before, just reading as a single continuous process instead of
+ * a list of unrelated buttons. Purely navigational: the number is the SOP's own step, the
+ * dot is not a live progress indicator (a requisition does not move through this rail the
+ * way it moves through the Kanban board below), so no state is computed here.
+ */
+const StageTracker = () => {
+  const navigate = useNavigate();
+  const { pathname } = useLocation();
+  return (
+    <section aria-labelledby="stages-heading" className={`${CARD} !p-4`}>
+      <h2 id="stages-heading"
+          className="text-[10.5px] font-bold uppercase tracking-widest
+                     text-[var(--text-muted)] mb-3">
+        Recruitment stages — Internal Recruitment SOP
+      </h2>
+      <div className="flex items-start overflow-x-auto no-scrollbar pb-1 -mx-1 px-1">
+        {SOP_STAGES.map((s, i) => {
+          const isHere = pathname === s.to || pathname.startsWith(`${s.to}/`);
+          return (
+            <React.Fragment key={s.label}>
+              <button
+                type="button"
+                onClick={() => navigate(s.to)}
+                title={s.title || `Step ${s.n}`}
+                className="group shrink-0 flex flex-col items-center gap-1.5 w-[92px] text-center"
+              >
+                <span className={`h-8 w-8 rounded-full grid place-items-center text-[11px]
+                  font-bold border-2 transition-colors ${
+                  isHere
+                    ? 'border-[var(--accent-indigo)] bg-[var(--accent-indigo)] text-white'
+                    : 'border-[var(--border)] bg-[var(--bg-card)] text-[var(--text-muted)] '
+                      + 'group-hover:border-[var(--accent-indigo)] group-hover:text-[var(--accent-indigo)]'
+                }`}>
+                  {s.n}
+                </span>
+                <span className={`text-[10.5px] font-bold leading-tight transition-colors ${
+                  isHere ? 'text-[var(--accent-indigo)]' : 'text-[var(--text-muted)] group-hover:text-[var(--text-main)]'
+                }`}>
+                  {s.label}
+                </span>
+              </button>
+              {i < SOP_STAGES.length - 1 && (
+                <span aria-hidden="true"
+                  className="shrink-0 w-6 h-[2px] mt-4 bg-[var(--border)]" />
+              )}
+            </React.Fragment>
+          );
+        })}
+      </div>
+    </section>
+  );
+};
+
+/**
+ * Who hands off to whom, restated as a compact flow rather than the SOP's own prose — the
+ * same twelve handoffs, collapsed by default so it reads as a reference to open when needed
+ * rather than something to scroll past on every visit.
+ */
+const APPROVAL_FLOW = [
+  { actor: 'HOD', action: 'Raises the internal requisition — role, reporting line, business justification.' },
+  { actor: 'Management / Finance', action: 'Approves headcount and budget. Mandatory — nothing is sourced before this.' },
+  { actor: 'HR', action: 'Drafts the JD and position scorecard, sends it to the HOD.' },
+  { actor: 'HOD', action: 'Approves the scorecard — and Management too, for managerial+ roles.' },
+  { actor: 'HR', action: 'Sources, screens, assesses, and coordinates the panel interview.' },
+  { actor: 'HR + HOD', action: 'Act as the shortlisting committee and finalise the candidate.' },
+  { actor: 'Management', action: 'Final interview — managerial and above roles only.' },
+  { actor: 'HR', action: 'Completes the reference check — mandatory for every role.' },
+  { actor: 'Management / Finance', action: 'Approves the offer. Outside the approved budget, this step repeats.' },
+  { actor: 'HR', action: 'Releases the offer letter.' },
+  { actor: 'Candidate', action: 'Accepts, pre-boards, and joins.' },
+  { actor: 'HR → HOD → Management', action: 'Induction, then probation review and confirmation.' },
+];
+
+const ApprovalFlow = () => (
+  <FlowAccordion
+    icon={GitBranch}
+    title="Who approves what — the request flow"
+    subtitle="Every handoff, HOD to close-out, in order."
+    steps={APPROVAL_FLOW}
+  />
+);
 
 /** One pending-action definition: how to count it, where it goes, who clears it. */
 const ACTIONS = [
@@ -129,25 +236,14 @@ const SLA_LABEL = {
   not_started: 'Not started', unknown: 'Unknown',
 };
 
-const Tile = ({ label, value, tone = 'neutral' }) => (
-  <div className={`${CARD} p-3.5`}>
-    <p className="text-[10.5px] font-bold uppercase tracking-widest text-[var(--text-muted)]">
-      {label}
-    </p>
-    <p className={`mt-1 text-[22px] font-bold tabular-nums ${
-      tone === 'bad' ? 'text-[var(--accent-red)]' : 'text-[var(--text-main)]'}`}>
-      {value}
-    </p>
-  </div>
-);
-
 const InternalHiringDashboard = () => {
-  const { scope, companyId, companyName } = useHrms();
+  const { scope, companyId, companyName, can } = useHrms();
   const navigate = useNavigate();
 
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [raising, setRaising] = useState(false);
 
   const load = useCallback(async () => {
     if (!companyId) return;
@@ -197,24 +293,44 @@ const InternalHiringDashboard = () => {
   const outstanding = pending.filter((p) => p.count > 0);
 
   return (
-    <div className="space-y-4">
-      <div>
-        <h1 className="text-[19px] font-bold tracking-tight text-[var(--text-main)]">
-          Internal hiring
-        </h1>
-        <p className="mt-0.5 text-[12.5px] text-[var(--text-muted)]">
-          {companyName || 'This company'}&rsquo;s own vacancies — no client involved.
-        </p>
+    <div className="space-y-5">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-3 min-w-0">
+          <span className="h-11 w-11 rounded-xl bg-[var(--accent-indigo)] text-white
+                           grid place-items-center shrink-0">
+            <Briefcase size={20} />
+          </span>
+          <div className="min-w-0">
+            <h1 className="text-[20px] font-bold tracking-tight text-[var(--text-main)]">
+              Internal hiring
+            </h1>
+            <p className="text-[12.5px] text-[var(--text-muted)]">
+              {companyName || 'This company'}&rsquo;s own vacancies, start to close.
+            </p>
+          </div>
+        </div>
+        {can(CAP.REQUISITION_CREATE) && (
+          <Btn tone="primary" onClick={() => setRaising(true)}>
+            <Plus size={14} /> Raise
+          </Btn>
+        )}
       </div>
 
-      <div className="grid grid-cols-2 lg:grid-cols-5 gap-2.5">
-        <Tile label="Open positions" value={headline.openPositions} />
-        <Tile label="Seats to fill" value={headline.seats} />
-        <Tile label="Awaiting approval" value={headline.awaiting} />
-        <Tile label="Candidates" value={headline.candidates} />
-        <Tile label="SLA overdue" value={headline.overdue}
-              tone={headline.overdue ? 'bad' : 'neutral'} />
+      {/* The two hiring tracks. A switch, not a filter: everything below belongs to
+          Internal Hiring, and Client Hiring is a different set of screens entirely. */}
+
+      <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
+        <Tile label="Open positions" value={headline.openPositions} icon={Briefcase} tone="indigo" />
+        <Tile label="Seats to fill" value={headline.seats} icon={Users2} tone="indigo" />
+        <Tile label="Awaiting approval" value={headline.awaiting} icon={Clock} tone="orange" />
+        <Tile label="Candidates" value={headline.candidates} icon={UserCircle} tone="green" />
+        <Tile label="SLA overdue" value={headline.overdue} icon={AlertTriangle}
+              tone={headline.overdue ? 'red' : 'indigo'} />
       </div>
+
+      <StageTracker />
+
+      <ApprovalFlow />
 
       <section aria-labelledby="pending-heading">
         <h2 id="pending-heading"
@@ -224,20 +340,22 @@ const InternalHiringDashboard = () => {
         </h2>
         {outstanding.length === 0 ? (
           <HrmsEmpty
+            icon={Check}
             title="Nothing is waiting on anybody"
             hint="Every internal position is either approved and running, or closed."
           />
         ) : (
-          <div className="grid gap-2 sm:grid-cols-2">
+          <div className="grid gap-2.5 sm:grid-cols-2">
             {outstanding.map((a) => (
               <button
                 key={a.key} type="button" onClick={() => navigate(a.to)}
-                className={`${CARD} p-3.5 text-left flex items-start gap-3
-                  hover:border-[var(--accent-indigo)] transition-colors`}
+                className={`${CARD} !p-3.5 text-left flex items-start gap-3 border-l-4
+                  border-l-[var(--accent-orange)]
+                  hover:border-[var(--accent-indigo)] hover:shadow-sm transition-all`}
               >
-                <span className="mt-0.5 h-8 w-8 shrink-0 rounded-lg bg-[var(--input-bg)]
+                <span className="mt-0.5 h-9 w-9 shrink-0 rounded-lg bg-[var(--accent-orange-bg)]
                                  grid place-items-center">
-                  <a.icon size={15} className="text-[var(--accent-indigo)]" />
+                  <a.icon size={16} className="text-[var(--accent-orange)]" />
                 </span>
                 <span className="min-w-0 flex-1">
                   <span className="flex items-center gap-2">
@@ -253,7 +371,7 @@ const InternalHiringDashboard = () => {
                     Cleared by {a.who}
                   </span>
                 </span>
-                <ArrowRight size={15} className="text-[var(--text-muted)] mt-1 shrink-0" />
+                <ChevronRight size={16} className="text-[var(--text-muted)] mt-1 shrink-0" />
               </button>
             ))}
           </div>
@@ -269,7 +387,7 @@ const InternalHiringDashboard = () => {
         {rows.length === 0 ? (
           <HrmsEmpty
             title="No internal requisitions yet"
-            hint={`Raise one on the Internal reqs screen. ${companyName || 'This company'}'s `
+            hint={`Raise one on the Requisitions screen. ${companyName || 'This company'}'s `
               + 'own vacancies run through HR verification, budget approval and a position '
               + 'scorecard before sourcing begins.'}
           />
@@ -282,7 +400,7 @@ const InternalHiringDashboard = () => {
                 <li key={r.request_no}>
                   <button type="button"
                           onClick={() => navigate(`/hrms/internal-requisitions/${r.request_no}`)}
-                          className={`${CARD} p-3.5 w-full text-left`}>
+                          className={`${CARD} !p-3.5 w-full text-left`}>
                     <div className="flex items-start justify-between gap-2">
                       <div className="min-w-0">
                         <p className="text-[13px] font-bold text-[var(--text-main)] truncate">
@@ -306,11 +424,11 @@ const InternalHiringDashboard = () => {
               ))}
             </ul>
 
-            <div className={`${CARD} hidden md:block overflow-hidden`}>
+            <div className={`${CARD} !p-0 hidden md:block overflow-hidden`}>
               <table className="w-full text-[12.5px]">
                 <thead>
                   <tr className="text-[10.5px] font-bold uppercase tracking-widest
-                                 text-[var(--text-muted)] border-b border-[var(--border)]">
+                                 text-[var(--text-muted)] bg-[var(--input-bg)] border-b border-[var(--border)]">
                     <th className="text-left px-3.5 py-2.5">Position</th>
                     <th className="text-left px-3.5 py-2.5">Department</th>
                     <th className="text-right px-3.5 py-2.5">Seats</th>
@@ -325,7 +443,7 @@ const InternalHiringDashboard = () => {
                     <tr key={r.request_no}
                         onClick={() => navigate(`/hrms/internal-requisitions/${r.request_no}`)}
                         className="border-b border-[var(--border)] last:border-0
-                                   hover:bg-[var(--input-bg)] cursor-pointer">
+                                   hover:bg-[var(--input-bg)] cursor-pointer transition-colors">
                       <td className="px-3.5 py-2.5">
                         <span className="font-semibold text-[var(--text-main)]">
                           {r.designation_name || '—'}
@@ -371,6 +489,13 @@ const InternalHiringDashboard = () => {
           </>
         )}
       </section>
+
+      {raising && (
+        <RequisitionFormModal
+          onClose={() => setRaising(false)}
+          onSaved={() => { setRaising(false); load(); }}
+        />
+      )}
     </div>
   );
 };

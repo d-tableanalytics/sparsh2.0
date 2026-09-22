@@ -37,8 +37,10 @@ from app.models.hrms import (
     COLL_EMPLOYEE_PROFILES, COLL_ONBOARDING,
     COLL_PROBATION_REVIEWS, COLL_REQUISITIONS, DEFAULT_PROBATION_MONTHS,
     ENTITY_CANDIDATE, ENTITY_PROBATION, ENTITY_REQUISITION, MAX_PROBATION_MONTHS,
-    MIN_PROBATION_MONTHS,
-    RETENTION_YEARS, AppStatus, ProbationOutcome, ReqClosing, RequisitionTrack,
+    MIN_PROBATION_MONTHS, PROBATION_CRITERIA_KEYS, PROBATION_REVIEW_CRITERIA,
+    RECOMMENDATION_OUTCOME,
+    RETENTION_YEARS, AppStatus, HrReviewDecision, ProbationOutcome,
+    ProbationRecommendation, ReqClosing, REQUISITION_TRACK_INTERNAL,
     can_transition, is_iso_date,
 )
 from app.services.hrms_audit_service import audit
@@ -454,6 +456,156 @@ async def assert_statutory_checks_complete(company_id: str, employee: dict) -> N
                    "Clear them before confirming.")))
 
 
+async def submit_review(actor: dict, company_id: str, prb_no: str,
+                        payload: dict) -> dict:
+    """The reporting manager's review and recommendation (7.5 Stage 12).
+
+    A RECOMMENDATION, not a decision. It scores the five criteria the design names and
+    proposes Confirm, Extend or Separate; HR reviews it next and an authorised approver
+    decides. Before Stage 12 the manager's opinion and the company's decision were the
+    same write, which left nowhere for HR to disagree and no record that they had agreed.
+
+    Re-submittable while the review is still open: a manager who scored the wrong person,
+    or who was sent back by HR, corrects it here rather than raising a second review.
+    """
+    coll = get_collection(COLL_PROBATION_REVIEWS)
+    current = await coll.find_one({"prb_no": prb_no, "company_id": str(company_id)})
+    if not current:
+        raise HTTPException(status_code=404, detail="Probation review not found.")
+    if current.get("outcome") != ProbationOutcome.PENDING.value:
+        raise HTTPException(
+            status_code=409,
+            detail=f'{prb_no} was already decided ("{current.get("outcome")}").')
+
+    signature = clean_text(payload.get("signature"), limit=140)
+    if not signature:
+        raise HTTPException(
+            status_code=422,
+            detail="Type your name to sign this review. It decides somebody's employment.")
+
+    raw = getattr(payload.get("recommendation"), "value", payload.get("recommendation"))
+    try:
+        recommendation = ProbationRecommendation(raw)
+    except ValueError:
+        raise HTTPException(
+            status_code=422,
+            detail=("A recommendation must be one of: "
+                    + ", ".join(r.value for r in ProbationRecommendation) + "."))
+
+    scores = {}
+    for key in PROBATION_CRITERIA_KEYS:
+        value = _validate_rating(payload.get(key))
+        if value is None:
+            label = dict(PROBATION_REVIEW_CRITERIA)[key]
+            raise HTTPException(
+                status_code=422,
+                detail=f'Score "{label}" from 1 to 5. A recommendation with no assessment '
+                       f"behind it cannot be reviewed by anybody else.")
+        scores[key] = value
+
+    remarks = clean_text(payload.get("remarks"), limit=2000)
+    if recommendation is not ProbationRecommendation.CONFIRM and not remarks:
+        word = ("extended" if recommendation is ProbationRecommendation.EXTEND
+                else "separated")
+        raise HTTPException(
+            status_code=422,
+            detail=f"Say why you are recommending they be {word}.")
+
+    now = datetime.now(timezone.utc)
+    review = {
+        **scores,
+        "average": round(sum(scores.values()) / len(scores), 2),
+        "recommendation": recommendation.value,
+        "remarks": remarks,
+        "signature": signature,
+        "by": str(actor.get("_id") or ""),
+        "by_name": actor.get("full_name") or actor.get("email"),
+        "at": now,
+    }
+    await coll.update_one(
+        {"prb_no": prb_no, "company_id": str(company_id)},
+        # A fresh recommendation invalidates any HR review of the PREVIOUS one -- HR
+        # endorsed a recommendation, not a record, and the recommendation has changed.
+        {"$set": {"review": review, "hr_review": None,
+                  "rating": review["average"], "updated_at": now}})
+    await audit(actor, AUDIT_PROBATION_CONFIRMED, ENTITY_PROBATION, prb_no,
+                f"manager recommends {recommendation.value} "
+                f"(avg {review['average']})", company_id)
+
+    await _notify_hr_review_due(company_id, current, review)
+    return _out(await coll.find_one({"prb_no": prb_no, "company_id": str(company_id)}))
+
+
+async def _notify_hr_review_due(company_id: str, current: dict, review: dict) -> None:
+    """Tell HR a recommendation is waiting on them. Best-effort."""
+    try:
+        from app.services.hrms_notify_service import notify_hrms_role
+        await notify_hrms_role(
+            company_id, ["HR"],
+            f"Probation recommendation: {current.get('employee_name')}",
+            f"{review['by_name']} recommends {review['recommendation']} for "
+            f"{current.get('employee_name')} ({current.get('prb_no')}). "
+            f"Review it before it goes for approval.",
+            link="/hrms/probation")
+    except Exception as e:                          # pragma: no cover - defensive
+        print(f"[WARN] HR probation notification not sent: {e}")
+
+
+async def hr_review(actor: dict, company_id: str, prb_no: str, payload: dict) -> dict:
+    """HR's step between the manager's recommendation and the authorised approval.
+
+    HR endorses or returns. Returning does NOT decide anything -- it sends the review back
+    to the manager, which is why the recommendation survives and only the endorsement is
+    cleared. An endorsement is what the approver's gate looks for.
+    """
+    coll = get_collection(COLL_PROBATION_REVIEWS)
+    current = await coll.find_one({"prb_no": prb_no, "company_id": str(company_id)})
+    if not current:
+        raise HTTPException(status_code=404, detail="Probation review not found.")
+    if current.get("outcome") != ProbationOutcome.PENDING.value:
+        raise HTTPException(
+            status_code=409,
+            detail=f'{prb_no} was already decided ("{current.get("outcome")}").')
+    if not (current.get("review") or {}).get("recommendation"):
+        raise HTTPException(
+            status_code=409,
+            detail=("There is no manager recommendation to review yet. The reporting "
+                    "manager completes their review first."))
+
+    signature = clean_text(payload.get("signature"), limit=140)
+    if not signature:
+        raise HTTPException(
+            status_code=422, detail="Type your name to sign this review.")
+
+    raw = getattr(payload.get("decision"), "value", payload.get("decision"))
+    try:
+        decision = HrReviewDecision(raw)
+    except ValueError:
+        raise HTTPException(
+            status_code=422,
+            detail="An HR review either endorses the recommendation or returns it.")
+
+    remarks = clean_text(payload.get("remarks"), limit=2000)
+    if decision is HrReviewDecision.RETURNED and not remarks:
+        raise HTTPException(
+            status_code=422,
+            detail="Say what needs to change. A review returned with no reason cannot be "
+                   "acted on.")
+
+    now = datetime.now(timezone.utc)
+    record = {
+        "decision": decision.value, "remarks": remarks, "signature": signature,
+        "by": str(actor.get("_id") or ""),
+        "by_name": actor.get("full_name") or actor.get("email"),
+        "at": now,
+    }
+    await coll.update_one({"prb_no": prb_no, "company_id": str(company_id)},
+                          {"$set": {"hr_review": record, "updated_at": now}})
+    await audit(actor, AUDIT_PROBATION_CONFIRMED, ENTITY_PROBATION, prb_no,
+                f"HR {decision.value.lower()} the recommendation", company_id)
+    return _out(await coll.find_one({"prb_no": prb_no, "company_id": str(company_id)}))
+
+
 async def confirm_probation(actor: dict, company_id: str, prb_no: str,
                             payload: dict) -> dict:
     """Record the probation decision, and close the requisition if it is a confirmation.
@@ -489,6 +641,25 @@ async def confirm_probation(actor: dict, company_id: str, prb_no: str,
         raise HTTPException(
             status_code=422,
             detail="Pending is the starting state, not a decision. Confirm, extend or end it.")
+
+    # ── §7.5 Stage 12 ── the approval chain. Manager recommends, HR reviews, and only then
+    # is there an authorised decision to sign. This is the "written/system confirmation
+    # through the approval process" Stage 10 insists on: reaching the end date is not a
+    # decision, and neither is one person's opinion of it.
+    review = current.get("review") or {}
+    hr = current.get("hr_review") or {}
+    if not review.get("recommendation"):
+        raise HTTPException(
+            status_code=409,
+            detail=("The reporting manager has not completed their review yet. A probation "
+                    "cannot be decided before somebody has assessed it."))
+    if hr.get("decision") != HrReviewDecision.ENDORSED.value:
+        raise HTTPException(
+            status_code=409,
+            detail=("HR has not endorsed this recommendation yet."
+                    if hr.get("decision") != HrReviewDecision.RETURNED.value
+                    else "HR returned this review to the manager. It has to be "
+                         "resubmitted and endorsed before it can be approved."))
 
     remarks = clean_text(payload.get("remarks"), limit=2000)
     now = datetime.now(timezone.utc)
@@ -532,6 +703,28 @@ async def confirm_probation(actor: dict, company_id: str, prb_no: str,
         # 30/15/7/1.
         from app.models.hrms import PROBATION_REMINDED_FIELD
         updates[PROBATION_REMINDED_FIELD] = []
+
+    if outcome is ProbationOutcome.CONFIRMED:
+        # §7.5 Stage 12, Confirm branch. Defaults to the probation end date rather than
+        # today: a decision signed two weeks late still takes effect from the day the
+        # probation actually ended, and pay and benefits run from this date.
+        effective = clean_text(payload.get("effective_from"), limit=10)             or current.get("ends_on")
+        if effective and not is_iso_date(effective):
+            raise HTTPException(
+                status_code=422,
+                detail="The confirmation effective date must be YYYY-MM-DD.")
+        updates["effective_from"] = effective
+
+    if outcome is ProbationOutcome.EXTENDED:
+        # §7.5 Stage 12, Extend branch. An extension that names no next review is how a
+        # probation quietly becomes indefinite, so the date is recorded; it defaults to
+        # the new end date, which is when the next review is actually due.
+        next_review = clean_text(payload.get("next_review_on"), limit=10)
+        if next_review and not is_iso_date(next_review):
+            raise HTTPException(
+                status_code=422,
+                detail="The next review date must be YYYY-MM-DD.")
+        updates["next_review_on"] = next_review or payload.get("extended_to")
 
     if outcome in (ProbationOutcome.TERMINATED, ProbationOutcome.EXTENDED) and not remarks:
         raise HTTPException(
@@ -690,8 +883,8 @@ async def _close_requisition_on_confirmation(actor: dict, company_id: str,
         {"request_no": request_no, "company_id": str(company_id)})
     if not req:
         return False
-    track = req.get("requisition_track") or RequisitionTrack.CLIENT.value
-    if track != RequisitionTrack.INTERNAL.value:
+    track = req.get("requisition_track")
+    if track != REQUISITION_TRACK_INTERNAL:
         return False
     if req.get("closing_status") != ReqClosing.OPEN.value:
         return False

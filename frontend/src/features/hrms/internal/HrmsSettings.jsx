@@ -49,6 +49,7 @@ const HrmsSettings = () => {
   const [busy, setBusy] = useState(false);
 
   const canWrite = can(CAP.SETTINGS_WRITE);
+  const kindOf = (key) => (data?.settings || []).find((s) => s.key === key)?.kind;
 
   const load = useCallback(async () => {
     if (!companyId) { setLoading(false); return; }
@@ -83,6 +84,14 @@ const HrmsSettings = () => {
     const payload = {};
     Object.entries(draft).forEach(([key, value]) => {
       if (typeof value === 'boolean') {
+        payload[key] = value;
+        return;
+      }
+      // An open {label: required?} catalogue. Sent whole and untouched: the server REPLACES
+      // rather than merges it (see hrms_config_service.config_for), which is what lets a
+      // company delete an entry, and the values are booleans that must not be coerced to
+      // numbers by the map branch below.
+      if (kindOf(key) === 'flag_map') {
         payload[key] = value;
         return;
       }
@@ -234,6 +243,13 @@ const HrmsSettings = () => {
                     {' · '}module default: {setting.default.join(', ')}
                   </p>
                 </div>
+              ) : setting.kind === 'flag_map' ? (
+                <FlagMap
+                  setting={setting}
+                  draft={draft[setting.key]}
+                  canWrite={canWrite}
+                  onChange={(next) => setFlag(setting.key, next)}
+                />
               ) : (
                 <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
                   {setting.names.map((name) => {
@@ -308,6 +324,90 @@ const HrmsSettings = () => {
             </p>
           )}
         </>
+      )}
+    </div>
+  );
+};
+
+/**
+ * An OPEN {label: required?} catalogue — the joining documents a new hire uploads, and the
+ * employment documents they sign.
+ *
+ * Unlike every other map on this screen it has no fixed `names`: a company adds a document
+ * its own statutory or client obligations need, and removes one that does not apply. That
+ * is why the whole map is edited as a unit and sent whole — the server REPLACES a flag_map
+ * rather than merging it, which is precisely what makes a deletion stick instead of the
+ * entry reappearing from the module default.
+ *
+ * `draft` is undefined until the first edit, at which point it becomes the entire map; the
+ * value in force is the fallback so an untouched catalogue sends nothing at all.
+ */
+const FlagMap = ({ setting, draft, canWrite, onChange }) => {
+  const [adding, setAdding] = useState('');
+  const current = draft ?? setting.value ?? {};
+  const entries = Object.entries(current);
+
+  const write = (next) => onChange(next);
+  const toggle = (name) => write({ ...current, [name]: !current[name] });
+  const remove = (name) => {
+    const next = { ...current };
+    delete next[name];
+    write(next);
+  };
+  const add = () => {
+    const name = adding.trim();
+    if (!name) return;
+    // Adding a name that already exists would silently overwrite its tick rather than
+    // adding anything, so it is refused by doing nothing visible except clearing the box.
+    if (!(name in current)) write({ ...current, [name]: true });
+    setAdding('');
+  };
+
+  return (
+    <div className="mt-3 space-y-2">
+      {entries.length === 0 && (
+        <p className="text-[12px] text-[var(--text-muted)]">
+          Nothing in this catalogue. Add the first document below.
+        </p>
+      )}
+      {entries.map(([name, required]) => (
+        <div
+          key={name}
+          className="flex items-center gap-3 rounded-lg border border-[var(--border)]
+                     px-3 py-2"
+        >
+          <input
+            id={`cfg-${setting.key}-${name}`}
+            type="checkbox"
+            disabled={!canWrite}
+            checked={Boolean(required)}
+            onChange={() => toggle(name)}
+          />
+          <label
+            htmlFor={`cfg-${setting.key}-${name}`}
+            className="min-w-0 flex-1 text-[12.5px] text-[var(--text-main)]"
+          >
+            {name}
+            <span className="ml-2 text-[11px] text-[var(--text-muted)]">
+              {required ? 'Required' : 'Optional'}
+            </span>
+          </label>
+          {canWrite && (
+            <Btn onClick={() => remove(name)}>Remove</Btn>
+          )}
+        </div>
+      ))}
+      {canWrite && (
+        <div className="flex items-center gap-2 pt-1">
+          <input
+            className={FIELD}
+            placeholder="Add a document…"
+            value={adding}
+            onChange={(e) => setAdding(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); add(); } }}
+          />
+          <Btn onClick={add} disabled={!adding.trim()}>Add</Btn>
+        </div>
       )}
     </div>
   );

@@ -119,7 +119,7 @@ async def main() -> None:
         {"_id": ObjectId(), "request_no": "REQ-2", "company_id": COMPANY,
          "created_by": U_HOD, "vacancy": 2, "department_name": "Delivery",
          "designation_name": "Engineer", "closing_status": M.ReqClosing.OPEN.value,
-         "approval_status": M.ReqApproval.PENDING_MD.value, "created_at": ago(20)},
+         "approval_status": M.ReqApproval.PENDING_BUDGET.value, "created_at": ago(20)},
         {"_id": ObjectId(), "request_no": "REQ-3", "company_id": COMPANY,
          "created_by": U_HR, "vacancy": 1, "department_name": "Analytics",
          "designation_name": "Lead", "closing_status": M.ReqClosing.HIRED.value,

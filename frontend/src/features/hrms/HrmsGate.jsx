@@ -1,7 +1,7 @@
 import React from 'react';
-import { Navigate } from 'react-router-dom';
+import { Navigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
-import { hrmsAccessState, hrmsHome } from './access';
+import { hrmsAccessState, hrmsHome, isClientTrackUser } from './access';
 import { HrmsProvider } from './HrmsContext';
 import HrmsScopeGuard from './common/HrmsScopeGuard';
 
@@ -25,7 +25,7 @@ export const HrmsGate = () => {
   const state = hrmsAccessState(user);
   if (state === 'unknown') return <Resolving />;
   if (state === 'denied') return <Navigate to="/" replace />;
-  return <Navigate to={hrmsHome()} replace />;
+  return <Navigate to={hrmsHome(user)} replace />;
 };
 
 /**
@@ -51,10 +51,19 @@ export const HrmsGate = () => {
  */
 export const RequireHrms = ({ children }) => {
   const { user } = useAuth();
+  const { pathname } = useLocation();
   const state = hrmsAccessState(user);
 
   if (state === 'unknown') return <Resolving />;
   if (state === 'denied') return <Navigate to="/" replace />;
+
+  // A client company's user holds CLIENT_TRACK_CAPS and nothing else, so every HRMS screen
+  // outside Client Hiring would load, fire its requests and answer 403 — including the
+  // module home at /hrms. Sending them to the one track they are entitled to is kinder
+  // than letting them watch a dashboard fail, and it is the same answer the server gives.
+  if (isClientTrackUser(user) && !pathname.startsWith('/hrms/client-')) {
+    return <Navigate to={hrmsHome(user)} replace />;
+  }
 
   // `HrmsScopeGuard` sits INSIDE the provider because it needs the resolved company list.
   // It catches the one state the two layers above cannot see: an internal user who is

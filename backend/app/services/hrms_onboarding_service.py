@@ -32,6 +32,7 @@ Onboarding collects PAN, Aadhaar and bank details. Asking a candidate for those 
 have agreed to join gathers sensitive identity data on somebody who may still say no, so the
 gate is `Offer Accepted` and nothing earlier (see ONBOARDABLE_STATUSES).
 """
+import logging
 import re
 from datetime import datetime, timezone
 from typing import Optional
@@ -45,9 +46,13 @@ from app.models.hrms import (
     AUDIT_ONBOARD_STARTED, AUDIT_ONBOARD_SUBMITTED, AUDIT_ONBOARD_VERIFIED,
     AUDIT_STAGE_CHANGED, CHECKLIST_KEYS, COLL_CANDIDATES, COLL_OFFERS, COLL_ONBOARDING,
     COLL_REQUISITIONS, ENTITY_CANDIDATE, ENTITY_ONBOARDING,
-    IFSC_RE, MAX_ONBOARD_DOCUMENTS, MAX_REFERENCES, ONBOARDABLE_STATUSES, PAN_RE,
-    INDUCTION_CHECKLIST, RequisitionTrack,
-    SYSTEM_CHECKLIST_KEYS, AppStatus, BgVerification, Gender, OfferStatus,
+    EMAIL_RE, IFSC_RE, MAX_ONBOARD_DOCUMENTS, MAX_REFERENCES, ONBOARD_SECTIONS,
+    ONBOARDABLE_STATUSES, PAN_RE,
+    INDUCTION_CHECKLIST, ONBOARD_CANDIDATE_TASKS, REQUISITION_TRACK_INTERNAL,
+    ASSIGNMENT_FIELDS, DOC_SATISFYING_STATUSES, SYSTEM_CHECKLIST_KEYS,
+    TASKS_ASSIGNED_AT_JOINING, TASK_OWNER_ADMIN, TASK_OWNER_IT,
+    TASK_OWNER_MANAGER, task_owner,
+    AppStatus, BgVerification, DocStatus, Gender, OfferStatus,
     OnboardStatus, PreOnboardStatus, can_transition, is_iso_date, seed_checklist,
 )
 from app.services import hrms_employee_service as employees
@@ -57,6 +62,8 @@ from app.services.hrms_notify_service import notify_hrms_role, notify_user
 from app.utils.hrms_public_guard import (
     INVALID_LINK, clean_text, decode_upload, new_access_code,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _out(doc: dict) -> dict:
@@ -171,24 +178,160 @@ async def list_onboardings(actor: dict, company_id: str, *, status: str = None,
             ]
 
     rows = await get_collection(COLL_ONBOARDING).find(query).sort("created_at", -1).to_list(500)
+
+    # ── §7.5 Stage 5 ── the board carries the completeness figure, because the question
+    # "who is behind?" is asked of the LIST. Everything it needs is fetched in two queries
+    # for the whole page rather than two per row.
+    from app.services.hrms_config_service import onboarding_doc_types
+    catalogue = await onboarding_doc_types(company_id)
+    verification_by_uk = await _bulk_verification(
+        company_id, [r.get("uk") for r in rows if r.get("uk")])
+
     out = []
     for row in rows:
         view = _out(row)
+        view["checklist"] = _with_owners(view.get("checklist"))
+        tasks = _document_tasks(view, catalogue)
+        view["document_tasks"] = tasks
+        view["completeness"] = _completeness(
+            view, tasks, verification_by_uk.get(view.get("uk")) or {})
         view["progress"] = _progress(view.get("checklist"))
         # The access code is a credential. It belongs on the detail view (where HR copies the
         # link) and nowhere else -- a list endpoint is the easiest thing to over-share.
         view.pop("access_code", None)
+        # Popped AFTER completeness is computed: the percentage is derived from the
+        # submission, but the submission itself is not a list-view concern.
         view.pop("submission", None)
         out.append(view)
     return out
 
 
+async def _bulk_verification(company_id: str, uks: list) -> dict:
+    """`{uk: {checks, outstanding, cleared}}` for a whole page, in two queries.
+
+    A cut-down `verification_state`: the list only needs "is this joiner's verification
+    clear", not the individual rows. The detail view still reads the full state.
+    """
+    if not uks:
+        return {}
+    try:
+        from app.models.hrms import (
+            APPROVAL_FIELD, BACKGROUND_CLEARS_OFFER, BackgroundApprovalStatus,
+            BackgroundCheckStatus, COLL_BACKGROUND_CHECKS, REQUIRED_BACKGROUND_CHECKS)
+    except ImportError:                             # pragma: no cover - defensive
+        return {}
+
+    try:
+        rows = await get_collection(COLL_BACKGROUND_CHECKS).find(
+            {"company_id": str(company_id), "uk": {"$in": uks}}).sort(
+            "created_at", 1).to_list(5000)
+        people = await get_collection(COLL_CANDIDATES).find(
+            {"company_id": str(company_id), "uk": {"$in": uks}},
+            {"uk": 1, APPROVAL_FIELD: 1}).to_list(5000)
+    except Exception as e:                          # pragma: no cover - defensive
+        logger.warning("Bulk verification unavailable: %s", e)
+        return {}
+
+    latest = {}
+    for row in rows:                                # ascending, so the last write wins
+        latest.setdefault(row.get("uk"), {})[row.get("check_type")] = row
+    approvals = {p.get("uk"): (p.get(APPROVAL_FIELD) or {}) for p in people}
+
+    required = [t.value for t in REQUIRED_BACKGROUND_CHECKS]
+    out = {}
+    for uk in set(uks):
+        by_type = latest.get(uk, {})
+        outstanding, flagged = [], []
+        for check_type in required:
+            row = by_type.get(check_type)
+            if not row:
+                outstanding.append(check_type)
+            elif row.get("status") == BackgroundCheckStatus.FLAGGED.value:
+                flagged.append(check_type)
+            elif row.get("status") not in BACKGROUND_CLEARS_OFFER:
+                outstanding.append(check_type)
+        signed = (approvals.get(uk, {}).get("status")
+                  == BackgroundApprovalStatus.APPROVED.value)
+        out[uk] = {
+            "checks": list(by_type.values()),
+            "outstanding": outstanding if by_type else [],
+            "flagged": flagged,
+            "cleared": bool(by_type) and not outstanding and not flagged and signed,
+        }
+    return out
+
+
+def _with_owners(checklist: list) -> list:
+    """Resolve each item's owner at read time (§7.5 Stage 8).
+
+    Records created before ownership existed have no `owner` on their items. Filling it in
+    here rather than migrating means an old case reads correctly the first time it is
+    opened, and the value is written back the next time the case is saved.
+    """
+    return [{**i, "owner": i.get("owner") or task_owner(i.get("key"))}
+            for i in (checklist or [])]
+
+
 async def get_onboarding(actor: dict, company_id: str, onb_no: str) -> dict:
     doc = _out(await _get(company_id, onb_no))
+    doc["checklist"] = _with_owners(doc.get("checklist"))
     doc["progress"] = _progress(doc.get("checklist"))
-    doc["can_generate_id"] = _id_blockers(doc) == []
-    doc["id_blockers"] = _id_blockers(doc)
+
+    # The same joining-document task list the new hire sees, so HR is chasing the same
+    # named documents rather than counting files -- and so the activation gate below is
+    # judging exactly what the screen is showing.
+    from app.services.hrms_config_service import onboarding_doc_types
+    catalogue = await onboarding_doc_types(company_id)
+    doc["document_tasks"] = _document_tasks(doc, catalogue)
+
+    # ── §7.5 Stage 4 ── the verification file, shown ON the case rather than as a
+    # separate process somewhere else. Read live from the check records, so the case can
+    # never claim a clearance those records do not support.
+    doc["verification"] = await _verification_block(company_id, doc.get("uk"))
+
+    # ── §7.5 Stage 5 ── one number over the five stages above, and the itemised list of
+    # what is still missing behind it.
+    doc["completeness"] = _completeness(
+        doc, doc["document_tasks"], doc["verification"])
+
+    blockers = _id_blockers(doc, doc["document_tasks"])
+    doc["can_generate_id"] = blockers == []
+    doc["id_blockers"] = blockers
     return doc
+
+
+async def _verification_block(company_id: str, uk: str) -> dict:
+    """The BGV and reference position for one joiner, as the onboarding case shows it.
+
+    Both halves of §7.5 Stage 4 in one shape: the background checks with what is still
+    outstanding, and the reference check that cleared them. Defensive because neither is
+    load-bearing for the rest of the case -- a verification module that errors should cost
+    this screen its verification panel, not the whole record.
+    """
+    out = {"checks": [], "outstanding": [], "flagged": [], "approval": None,
+           "reference": None}
+    if not uk:
+        return out
+    try:
+        from app.services.hrms_background_service import verification_state
+        state = await verification_state(company_id, uk)
+        out.update({
+            "checks": state.get("checks") or [],
+            "required": state.get("required") or [],
+            "outstanding": state.get("outstanding") or [],
+            "flagged": state.get("flagged") or [],
+            "checks_complete": state.get("checks_complete"),
+            "approval": state.get("approval"),
+            "cleared": state.get("cleared_for_offer"),
+        })
+    except Exception as e:                          # pragma: no cover - defensive
+        logger.warning("Verification state unavailable for %s: %s", uk, e)
+    try:
+        from app.services.hrms_reference_service import clearing_reference
+        out["reference"] = await clearing_reference(company_id, uk)
+    except Exception as e:                          # pragma: no cover - defensive
+        logger.warning("Reference state unavailable for %s: %s", uk, e)
+    return out
 
 
 async def onboardable_candidates(actor: dict, company_id: str) -> list:
@@ -259,6 +402,26 @@ async def start_onboarding(actor: dict, company_id: str, payload: dict) -> dict:
     onb_no = await next_business_id("onboarding", str(company_id), year)
     now = datetime.now(timezone.utc)
 
+    # The verification file is read HERE, not left to `sync_verification`.
+    #
+    # On the internal track the offer gate refuses to raise an offer until the background
+    # checks are complete and HR has signed them off, and a case is only created once that
+    # offer has been ACCEPTED -- so every sync that could have carried the result across
+    # already ran, harmlessly, before this record existed. Hardcoding Pending here left the
+    # case permanently claiming a clearance had not happened when it had, `update_bg`
+    # refused to correct it by hand ("this joiner has a verification file"), and the §11
+    # statutory gate could then never be satisfied without waiving a check that had in fact
+    # been done. Deriving it makes the new case agree with the records from the first read.
+    from app.services.hrms_background_service import verification_state
+    try:
+        bg_verification = _derive_bg(await verification_state(company_id, uk))
+    except Exception as e:                          # pragma: no cover - defensive
+        # Opening the case matters more than seeding one derived field. If the checks
+        # cannot be read, start at Pending and let `sync_verification` correct it on the
+        # next change, which is exactly what it exists for.
+        print(f"[WARN] HRMS onboarding could not read the verification file: {e}")
+        bg_verification = BgVerification.PENDING.value
+
     doc = {
         "onb_no": onb_no,
         "company_id": str(company_id),
@@ -273,7 +436,7 @@ async def start_onboarding(actor: dict, company_id: str, payload: dict) -> dict:
         "designation_id": (req or {}).get("designation_id"),
         "status": OnboardStatus.PRE_ONBOARDING.value,
         "pre_status": PreOnboardStatus.PENDING.value,
-        "bg_verification": BgVerification.PENDING.value,
+        "bg_verification": bg_verification,
         "bg_note": None,
         "access_code": new_access_code(),
         "joining_date": joining_date,
@@ -282,12 +445,12 @@ async def start_onboarding(actor: dict, company_id: str, payload: dict) -> dict:
         "asset_requirements": None,
         "submission": None,
         "documents": [],
-        # The track rides on the onboarding record so every later read -- the checklist, the
-        # probation opener, the KPI block -- knows which rules apply without re-fetching the
-        # requisition. Defaults to client for a candidate with no requisition at all.
-        "requisition_track": ((req or {}).get("requisition_track")
-                              or RequisitionTrack.CLIENT.value),
-        "checklist": seed_checklist((req or {}).get("requisition_track")),
+        # The track discriminator rides on the onboarding record, as it does on every
+        # record that hangs off a requisition (see REQUISITION_TRACK_INTERNAL).
+        "requisition_track": REQUISITION_TRACK_INTERNAL,
+        "checklist": _set_item(
+            seed_checklist(), "bg_cleared",
+            bg_verification == BgVerification.CLEARED.value, None, now),
         "employee_id": None,
         "created_at": now,
         "created_by": str(actor.get("_id")) if actor and actor.get("_id") else None,
@@ -307,12 +470,56 @@ async def start_onboarding(actor: dict, company_id: str, payload: dict) -> dict:
     await _advance_candidate(actor, company_id, uk, AppStatus.PRE_ONBOARDING)
     await audit(actor, AUDIT_ONBOARD_STARTED, ENTITY_ONBOARDING, onb_no,
                 doc["candidate_name"], company_id)
+
+    # ── BA Functional Design §7.5 ── "Send Secure Onboarding Portal / Task List".
+    #
+    # The step straight after "Create Pre-Joiner Case", so it happens here rather than
+    # waiting for HR to copy the link off the board -- a candidate who accepted on a Friday
+    # should not wait until Monday to learn what we need from them. `send_template` logs a
+    # `Failed` row instead of raising when delivery does not work, which is what makes it
+    # safe to call from inside the acceptance path.
+    portal_sent = await _send_portal_link(company_id, doc)
+
     await notify_hrms_role(
         company_id, ["HR"], f"Onboarding started: {doc['candidate_name']}",
-        f"{onb_no} is open. Send the pre-onboarding form to collect their documents.",
+        (f"{onb_no} is open and the pre-onboarding link has been emailed to them."
+         if portal_sent else
+         f"{onb_no} is open, but the pre-onboarding link could NOT be emailed. "
+         f"Send it from the onboarding board."),
         link="/hrms/onboarding")
 
     return await get_onboarding(actor, company_id, onb_no)
+
+
+async def _send_portal_link(company_id: str, doc: dict) -> bool:
+    """Email the candidate their secure onboarding link and the list of what we need.
+
+    The task list is what the CANDIDATE has to supply, not the onboarding checklist -- that
+    one is HR's own work (issue a laptop, create an email account) and would read as a set of
+    instructions to somebody who cannot act on any of it.
+
+    Returns whether it went out, so HR can be told when it did not.
+    """
+    try:
+        from app.services.hrms_comm_service import send_template
+        from app.services.tpms_form_link_service import configured_base_url
+        base = await configured_base_url()
+        result = await send_template(
+            None, company_id, doc["uk"], "onboarding_portal",
+            variables={
+                "portal_link": f"{base}/onboard/{doc['access_code']}",
+                "task_list": "\n".join(f"  - {task}" for task in ONBOARD_CANDIDATE_TASKS),
+            },
+            automatic=True)
+        # Only "Sent" counts. "Skipped" means there is no address on the record, which is
+        # exactly the case HR needs telling about.
+        return (result or {}).get("status") == "Sent"
+    except Exception as e:
+        # Never the reason a pre-joiner case fails to open: the record, the link and the
+        # checklist all exist by this point, and HR is told below that the email did not go.
+        logger.warning("Could not email the onboarding portal link for %s: %s",
+                       doc.get("onb_no"), e)
+        return False
 
 
 # ─────────────────────────────────────────────────────────────
@@ -365,6 +572,19 @@ async def update_bg(actor: dict, company_id: str, onb_no: str, payload: dict) ->
     except ValueError:
         raise HTTPException(status_code=422, detail="Unknown background-check outcome.")
 
+    # ── §7.5 Stage 4 ── once real verification records exist, they are the answer and this
+    # field is derived from them (`sync_verification`). Letting it be typed over as well
+    # would put two answers in the record and no way to tell which is current -- the same
+    # reason the three system-owned checklist items refuse a manual tick.
+    from app.services.hrms_background_service import verification_state
+    state = await verification_state(company_id, doc.get("uk"))
+    if state.get("checks"):
+        raise HTTPException(
+            status_code=409,
+            detail=("This joiner has a verification file, so their background status "
+                    "follows it. Record the check result on the Verification screen and "
+                    "this case updates itself."))
+
     now = datetime.now(timezone.utc)
     checklist = _set_item(doc.get("checklist") or [], "bg_cleared",
                           outcome == BgVerification.CLEARED, actor, now)
@@ -396,6 +616,15 @@ async def verify_documents(actor: dict, company_id: str, onb_no: str) -> dict:
             detail="There is nothing to verify yet — the candidate has not submitted "
                    "their pre-onboarding form.")
 
+    # This flag is the claim "a human has checked this file". It must not be settable while
+    # a mandatory document is still unreviewed, rejected or absent -- that is the same rule
+    # the three system-owned checklist items follow: never assert what the data contradicts.
+    from app.services.hrms_config_service import onboarding_doc_types
+    outstanding = _document_blockers(
+        _document_tasks(doc, await onboarding_doc_types(company_id)))
+    if outstanding:
+        raise HTTPException(status_code=409, detail=" ".join(outstanding))
+
     now = datetime.now(timezone.utc)
     checklist = _set_item(doc.get("checklist") or [], "documents_verified", True, actor, now)
     await get_collection(COLL_ONBOARDING).update_one(
@@ -405,6 +634,118 @@ async def verify_documents(actor: dict, company_id: str, onb_no: str) -> dict:
                   "checklist": checklist, "updated_at": now}})
     await audit(actor, AUDIT_ONBOARD_VERIFIED, ENTITY_ONBOARDING, onb_no,
                 doc.get("candidate_name"), company_id)
+    return await _refresh(actor, company_id, onb_no)
+
+
+def _derive_bg(state: dict) -> str:
+    """The onboarding case's background status, READ OFF the real check records.
+
+    §7.5 Stage 4 puts BGV inside the onboarding case rather than beside it, and the only
+    way for the case to be inside it is for this value to be derived. It used to be a
+    dropdown somebody set by hand, which meant the case could read "Cleared" while the
+    checks it refers to sat flagged.
+    """
+    if state.get("flagged"):
+        return BgVerification.FLAGGED.value
+    if state.get("cleared_for_offer"):
+        return BgVerification.CLEARED.value
+    if state.get("checks"):
+        return BgVerification.IN_PROGRESS.value
+    return BgVerification.PENDING.value
+
+
+async def sync_verification(company_id: str, uk: str) -> None:
+    """Push the current verification result onto this candidate's open onboarding case.
+
+    "Result / Status -> Onboarding Case Updated", the last edge of the §7.5 Stage 4 flow.
+    Called by the background-check service whenever a check or a sign-off changes, so the
+    case never has to be refreshed by hand and cannot drift from the records.
+
+    Silent when there is no open onboarding: verification also runs BEFORE the offer, long
+    before a case exists, and that is not an error.
+    """
+    coll = get_collection(COLL_ONBOARDING)
+    case = await coll.find_one(
+        {"company_id": str(company_id), "uk": uk,
+         "status": {"$ne": OnboardStatus.COMPLETED.value}})
+    if not case:
+        return
+
+    from app.services.hrms_background_service import verification_state
+    derived = _derive_bg(await verification_state(company_id, uk))
+    if derived == case.get("bg_verification"):
+        return
+
+    now = datetime.now(timezone.utc)
+    checklist = _set_item(case.get("checklist") or [], "bg_cleared",
+                          derived == BgVerification.CLEARED.value, None, now)
+    await coll.update_one(
+        {"onb_no": case["onb_no"], "company_id": str(company_id)},
+        {"$set": {"bg_verification": derived, "checklist": checklist, "updated_at": now}})
+    await audit(None, AUDIT_ONBOARD_BG, ENTITY_ONBOARDING, case["onb_no"],
+                f"{derived} (from the verification file)", company_id)
+
+
+async def review_document(actor: dict, company_id: str, onb_no: str, payload: dict) -> dict:
+    """Record HR's verdict on ONE uploaded document (§7.5 Stage 3).
+
+    Acts on the CURRENT version of that document type. An older version keeps whatever
+    verdict it had when it was superseded -- rewriting it would destroy the reason the
+    document was replaced, which is the more interesting half of the history.
+
+    A rejection and an exception both need a note. "Rejected" with no reason leaves the new
+    hire nothing to act on, and an undertaking that does not say what was accepted, or on
+    what basis, is not an undertaking.
+    """
+    doc = await _get(company_id, onb_no)
+    _assert_open(doc)
+
+    doc_type = clean_text(payload.get("doc_type"), limit=120)
+    if not doc_type:
+        raise HTTPException(status_code=422, detail="Which document is this verdict for?")
+
+    raw = payload.get("status")
+    try:
+        status = DocStatus(getattr(raw, "value", raw))
+    except ValueError:
+        raise HTTPException(
+            status_code=422,
+            detail="A document is Pending, Verified, Rejected or Exception.")
+
+    note = clean_text(payload.get("note"), limit=2000)
+    if status in (DocStatus.REJECTED, DocStatus.EXCEPTION) and not note:
+        raise HTTPException(
+            status_code=422,
+            detail=("Say why. A rejection has to tell the new hire what to fix, and an "
+                    "exception has to record what was accepted and on whose authority."))
+
+    documents = [dict(d) for d in (doc.get("documents") or [])]
+    target = _latest_by_type(documents).get(doc_type)
+    if not target:
+        raise HTTPException(
+            status_code=404,
+            detail=f'No "{doc_type}" has been uploaded for this joiner yet.')
+
+    now = datetime.now(timezone.utc)
+    for entry in documents:
+        if (entry.get("doc_type") == doc_type
+                and int(entry.get("version") or 1) == int(target.get("version") or 1)):
+            entry["status"] = status.value
+            entry["reviewed_by"] = _actor_name(actor)
+            entry["reviewed_at"] = now
+            entry["review_note"] = note
+            entry["history"] = list(entry.get("history") or []) + [{
+                "status": status.value, "note": note,
+                "by": _actor_name(actor), "at": now}]
+            break
+
+    await get_collection(COLL_ONBOARDING).update_one(
+        {"onb_no": onb_no, "company_id": str(company_id)},
+        {"$set": {"documents": documents, "updated_at": now}})
+    await audit(actor, AUDIT_ONBOARD_DOCUMENTS, ENTITY_ONBOARDING, onb_no,
+                f"{doc_type} v{target.get('version') or 1} -> {status.value}"
+                + (f" ({note})" if note else ""),
+                company_id)
     return await _refresh(actor, company_id, onb_no)
 
 
@@ -422,7 +763,10 @@ async def add_documents(actor: dict, company_id: str, onb_no: str, payload: dict
         raise HTTPException(status_code=422, detail="Attach at least one document.")
 
     existing = doc.get("documents") or []
-    stored = await _store_documents(uploads, existing_count=len(existing), source="hr")
+    from app.services.hrms_config_service import onboarding_doc_types
+    stored = await _store_documents(
+        uploads, existing_count=len(existing), source="hr",
+        doc_types=await onboarding_doc_types(company_id), existing=existing)
 
     now = datetime.now(timezone.utc)
     await get_collection(COLL_ONBOARDING).update_one(
@@ -521,7 +865,139 @@ async def _issue_induction_survey(actor: dict, company_id: str, onb_no: str,
 # ─────────────────────────────────────────────────────────────
 # The handover — minting the employee record
 # ─────────────────────────────────────────────────────────────
-def _id_blockers(doc: dict) -> list:
+def _document_tasks(doc: dict, catalogue: dict) -> list:
+    """The joining-document catalogue with this joiner's progress against it.
+
+    One row per document the company asks for, carrying the current version's verdict. This
+    is the single shape the new hire's portal, HR's board and the joining gate all read, so
+    the three cannot disagree about what is outstanding.
+    """
+    latest = _latest_by_type(doc.get("documents") or [])
+    rows = []
+    for label, required in (catalogue or {}).items():
+        current = latest.get(label)
+        rows.append({
+            "doc_type": label,
+            "required": bool(required),
+            "uploaded": current is not None,
+            "version": int(current.get("version") or 1) if current else 0,
+            "status": (current or {}).get("status") or DocStatus.PENDING.value,
+            "review_note": (current or {}).get("review_note"),
+            "reviewed_by": (current or {}).get("reviewed_by"),
+        })
+    return rows
+
+
+def _document_blockers(tasks: list) -> list:
+    """Mandatory documents standing between this joiner and activation (§7.5 Stage 3).
+
+    Verified and Exception both satisfy the gate; Exception is exactly the "controlled
+    continuation where policy permits" case, and it is signed and noted rather than silent.
+    Missing, still Pending and Rejected each read differently because the thing to do about
+    them differs: chase, review, and re-collect.
+    """
+    missing = [t["doc_type"] for t in tasks if t["required"] and not t["uploaded"]]
+    unreviewed = [t["doc_type"] for t in tasks
+                  if t["required"] and t["uploaded"]
+                  and t["status"] == DocStatus.PENDING.value]
+    rejected = [t["doc_type"] for t in tasks
+                if t["required"] and t["status"] == DocStatus.REJECTED.value]
+
+    blockers = []
+    if missing:
+        blockers.append("Mandatory documents not received: " + ", ".join(missing) + ".")
+    if unreviewed:
+        blockers.append("Mandatory documents not yet reviewed: "
+                        + ", ".join(unreviewed) + ".")
+    if rejected:
+        blockers.append("Mandatory documents were rejected and must be replaced: "
+                        + ", ".join(rejected) + ".")
+    return blockers
+
+
+def _completeness(doc: dict, doc_tasks: list, verification: dict) -> dict:
+    """How far this onboarding has actually got, across the six groups §7.5 Stage 5 names.
+
+    Every mandatory item counts once, so the percentage is "how many of the things we need
+    do we have" rather than a weighting somebody tuned. The per-group breakdown matters
+    more than the number: "62%" tells HR to chase, `groups` tells them whom to chase and
+    for what.
+
+    Statutory details are scored on the SECTION having been answered, not on the three
+    numbers being present. A first-time employee has no UAN, no PF account and no ESIC
+    number, and scoring them as missing would permanently cap exactly those joiners below
+    100% for having done nothing wrong.
+    """
+    sub = doc.get("submission") or {}
+    submitted = bool(doc.get("submitted_at")) or doc.get("pre_status") in (
+        PreOnboardStatus.SUBMITTED.value, PreOnboardStatus.VERIFIED.value)
+
+    required_docs = [t for t in doc_tasks if t.get("required")]
+    doc_items = [(t["doc_type"], t.get("status") in DOC_SATISFYING_STATUSES)
+                 for t in required_docs]
+
+    # BGV counts as one item, and is satisfied when the file is clear OR no check has been
+    # raised for this joiner at all -- §7.5 Stage 4 is explicitly "where applicable", and
+    # "not applicable" is not "incomplete".
+    #
+    # Keyed on `checks` alone, deliberately: `verification_state` lists every required type
+    # as outstanding the moment it is asked, including for a joiner nobody has raised a
+    # check against, so reading `outstanding` here would score every such joiner as failing
+    # a step their company never asked for.
+    bgv_ok = (not verification.get("checks")) or bool(verification.get("cleared"))
+
+    human_tasks = [i for i in (doc.get("checklist") or [])
+                   if i.get("key") not in SYSTEM_CHECKLIST_KEYS]
+
+    groups = [
+        {"key": "documents", "label": "Documents", "items": doc_items},
+        {"key": "personal", "label": "Personal details", "items": [
+            ("PAN or Aadhaar", bool(sub.get("pan") or sub.get("aadhaar"))),
+            ("Date of birth", bool(sub.get("date_of_birth"))),
+            ("Current address", bool(sub.get("address"))),
+            ("Emergency contact", bool(sub.get("emergency_contact_name"))),
+        ]},
+        {"key": "bank", "label": "Bank details", "items": [
+            ("Account number", bool(sub.get("bank_account"))),
+            ("IFSC", bool(sub.get("bank_ifsc"))),
+        ]},
+        {"key": "statutory", "label": "Statutory details", "items": [
+            ("Statutory section answered", submitted),
+        ]},
+        {"key": "bgv", "label": "Background verification", "items": [
+            ("Verification cleared", bgv_ok),
+        ]},
+        {"key": "tasks", "label": "Other mandatory tasks", "items": (
+            [("Joining date", bool(doc.get("joining_date")))]
+            + [(i.get("label") or i.get("key"), bool(i.get("done"))) for i in human_tasks]
+        )},
+    ]
+
+    out_groups, missing = [], []
+    done_total = total = 0
+    for g in groups:
+        items = g["items"]
+        done = sum(1 for _, ok in items if ok)
+        gaps = [label for label, ok in items if not ok]
+        done_total += done
+        total += len(items)
+        missing.extend(f"{g['label']}: {label}" for label in gaps)
+        out_groups.append({
+            "key": g["key"], "label": g["label"],
+            "done": done, "total": len(items),
+            "percent": int(round(done * 100 / len(items))) if items else 100,
+            "missing": gaps,
+        })
+
+    return {
+        "percent": int(round(done_total * 100 / total)) if total else 0,
+        "done": done_total, "total": total,
+        "groups": out_groups,
+        "missing": missing,
+    }
+
+
+def _id_blockers(doc: dict, doc_tasks: list = None) -> list:
     """Everything standing between this onboarding and an Employee ID.
 
     Returned as a list rather than a bool so the UI can say *why* the button is disabled.
@@ -537,7 +1013,124 @@ def _id_blockers(doc: dict) -> list:
         blockers.append("Background verification is flagged.")
     if not doc.get("joining_date"):
         blockers.append("A joining date has not been set.")
+    # ── §7.5 Stage 6 ── "HR Verifies Joining -> Confirm Actual DOJ -> Generate Employee
+    # ID". An ID issued for somebody nobody confirmed had turned up is the one thing this
+    # stage exists to prevent.
+    if not doc.get("actual_doj"):
+        blockers.append("Joining has not been confirmed — record the actual date they "
+                        "reported.")
+    blockers.extend(_document_blockers(doc_tasks or []))
     return blockers
+
+
+async def confirm_joining(actor: dict, company_id: str, onb_no: str,
+                          payload: dict) -> dict:
+    """HR confirming somebody actually reported, and on what date (§7.5 Stage 6).
+
+    The step between "we expected them" and "they are an employee". It is separate from
+    issuing the Employee ID because the two answer different questions -- did they turn up,
+    and what are they now -- and because a joiner who starts a week late needs the real
+    date recorded before payroll and probation are computed from it.
+    """
+    doc = await _get(company_id, onb_no)
+    _assert_open(doc)
+
+    if doc.get("employee_id"):
+        raise HTTPException(
+            status_code=409,
+            detail="An Employee ID has already been issued for this joiner.")
+
+    actual = clean_text(payload.get("actual_doj"), limit=10)
+    if not actual or not is_iso_date(actual):
+        raise HTTPException(
+            status_code=422,
+            detail="Enter the date they actually joined, as YYYY-MM-DD.")
+    if actual > datetime.now(timezone.utc).strftime("%Y-%m-%d"):
+        raise HTTPException(
+            status_code=422,
+            detail=("The actual joining date cannot be in the future. Confirm joining on "
+                    "or after the day they report."))
+
+    updates = {
+        "actual_doj": actual,
+        "joining_confirmed_at": datetime.now(timezone.utc),
+        "joining_confirmed_by": _actor_name(actor),
+        "joining_note": clean_text(payload.get("note"), limit=2000),
+    }
+    for field in ASSIGNMENT_FIELDS:
+        value = payload.get(field)
+        value = getattr(value, "value", value)
+        if value is not None:
+            updates[field] = clean_text(value, limit=140) if isinstance(value, str) else value
+
+    now = updates["joining_confirmed_at"]
+    updates["updated_at"] = now
+
+    # ── §7.5 Stage 8 ── "Once joining is confirmed, the system automatically creates
+    # onboarding tasks". The items already exist on the case; what happens here is that the
+    # IT, Admin and Reporting Manager ones become live work with a date on them, and the
+    # people who own them are told. Before this they sat in one undifferentiated list that
+    # read as HR's job and that nobody outside HR was ever told about.
+    checklist = [
+        {**item,
+         "owner": item.get("owner") or task_owner(item.get("key")),
+         "assigned_at": item.get("assigned_at") or (
+             now if (item.get("owner") or task_owner(item.get("key")))
+             in TASKS_ASSIGNED_AT_JOINING else None)}
+        for item in (doc.get("checklist") or [])
+    ]
+    updates["checklist"] = checklist
+
+    await get_collection(COLL_ONBOARDING).update_one(
+        {"onb_no": onb_no, "company_id": str(company_id)}, {"$set": updates})
+    await audit(actor, AUDIT_ONBOARD_DETAILS, ENTITY_ONBOARDING, onb_no,
+                f"joining confirmed for {actual}", company_id)
+    await _notify_joining_tasks(company_id, {**doc, **updates})
+    return await _refresh(actor, company_id, onb_no)
+
+
+async def _notify_joining_tasks(company_id: str, doc: dict) -> None:
+    """Tell IT/Admin and the reporting manager what is now theirs (§7.5 Stage 8).
+
+    Best-effort: joining has already been confirmed and the tasks are already assigned on
+    the record, so a notification that could not be sent must not undo any of it.
+
+    NOTE: this codebase has no IT or Admin role -- HrmsRole stops at HR/Manager/Finance --
+    so those tasks are routed to HR and Admin governance holders rather than to a dedicated
+    IT queue. The task itself still names its true owner, so the work is attributable even
+    though the routing is approximate.
+    """
+    name = doc.get("candidate_name") or doc.get("uk")
+    joined = doc.get("actual_doj")
+    by_owner = {}
+    for item in doc.get("checklist") or []:
+        owner = item.get("owner")
+        if owner in TASKS_ASSIGNED_AT_JOINING and not item.get("done"):
+            by_owner.setdefault(owner, []).append(item.get("label"))
+
+    try:
+        for owner in (TASK_OWNER_IT, TASK_OWNER_ADMIN):
+            tasks = by_owner.get(owner)
+            if not tasks:
+                continue
+            await notify_hrms_role(
+                company_id, ["HR", "admin"],
+                f"{owner} tasks for {name}",
+                f"{name} joined on {joined}. Outstanding {owner} tasks: "
+                + "; ".join(tasks) + ".",
+                link="/hrms/onboarding")
+
+        manager_tasks = by_owner.get(TASK_OWNER_MANAGER)
+        if manager_tasks and doc.get("reporting_manager_id"):
+            await notify_user(
+                doc["reporting_manager_id"],
+                f"Induction tasks for {name}",
+                f"{name} joined on {joined}. Your tasks: "
+                + "; ".join(manager_tasks) + ".",
+                link="/hrms/onboarding")
+    except Exception as e:                          # pragma: no cover - defensive
+        logger.warning("Stage 8 task notifications not sent for %s: %s",
+                       doc.get("onb_no"), e)
 
 
 async def generate_employee_id(actor: dict, company_id: str, onb_no: str) -> dict:
@@ -550,7 +1143,8 @@ async def generate_employee_id(actor: dict, company_id: str, onb_no: str) -> dic
     doc = await _get(company_id, onb_no)
     _assert_open(doc)
 
-    blockers = _id_blockers(doc)
+    from app.services.hrms_config_service import onboarding_doc_types
+    blockers = _id_blockers(doc, _document_tasks(doc, await onboarding_doc_types(company_id)))
     if blockers:
         raise HTTPException(status_code=409, detail=" ".join(blockers))
 
@@ -584,9 +1178,13 @@ async def generate_employee_id(actor: dict, company_id: str, onb_no: str) -> dic
                       "email": doc.get("candidate_email"),
                       "mobile": doc.get("candidate_mobile")},
             source_uk=doc.get("uk"),
-            joined_on=doc.get("joining_date"),
+            # The ACTUAL date, not the planned one -- tenure, probation and payroll all
+            # run from when somebody really started.
+            joined_on=doc.get("actual_doj") or doc.get("joining_date"),
             department_id=doc.get("department_id"),
             designation_id=doc.get("designation_id"),
+            assignment={f: doc.get(f) for f in ASSIGNMENT_FIELDS
+                        if doc.get(f) is not None},
             extra=extra)
     except Exception:
         # The employee record is the point of the operation. If it could not be written, the
@@ -607,26 +1205,32 @@ async def generate_employee_id(actor: dict, company_id: str, onb_no: str) -> dic
     # An Employee ID means the person has joined.
     await _advance_candidate(actor, company_id, doc.get("uk"), AppStatus.JOINED)
 
-    # ── Internal track ── open the probation review now, at joining, rather than leaving it
+    # ── §7.5 Stage 10 ── open the probation review now, at joining, rather than leaving it
     # to be remembered later. A probation record nobody created is a probation nobody
-    # reviews, and `GET /probation/due` is only honest if every internal joiner is in it.
+    # reviews, and `GET /probation/due` is only honest if every joiner is in it.
+    #
+    # Opened for EVERY joiner, not only the internal track. The track guard that used to
+    # be here dated from when a client-track hire was somebody else's payroll; that track
+    # is decommissioned, so all the guard did was silently skip probation for any record
+    # still carrying the old default.
     #
     # Deliberately best-effort: a probation record is important, but failing the handover
     # over it would strand an employee who HAS been created. The warning is loud enough to
     # act on and the record can be opened by hand.
-    if (doc.get("requisition_track") or RequisitionTrack.CLIENT.value) \
-            == RequisitionTrack.INTERNAL.value:
-        try:
-            from app.services.hrms_probation_service import open_probation
-            await open_probation(actor, company_id, {
-                "employee_code": employee_code,
-                "request_no": doc.get("request_no"),
-                "uk": doc.get("uk"),
-                "started_on": doc.get("joining_date"),
-                "reviewer_id": doc.get("reporting_manager_id"),
-            }, silent=True)
-        except Exception as e:
-            print(f"[WARN] HRMS could not open probation for {employee_code}: {e}")
+    try:
+        from app.services.hrms_probation_service import open_probation
+        await open_probation(actor, company_id, {
+            "employee_code": employee_code,
+            "request_no": doc.get("request_no"),
+            "uk": doc.get("uk"),
+            # The ACTUAL joining date. Probation measured from the planned date would end
+            # early for anybody who started late -- the one case where the two differ and
+            # the difference matters most.
+            "started_on": doc.get("actual_doj") or doc.get("joining_date"),
+            "reviewer_id": doc.get("reporting_manager_id"),
+        }, silent=True)
+    except Exception as e:
+        print(f"[WARN] HRMS could not open probation for {employee_code}: {e}")
 
     # ── Phase ORIENT-1 ── §22.3 step 200: "On employee activation, system assigns an
     # onboarding orientation/training plan". Unlike probation above, this runs for BOTH
@@ -680,7 +1284,45 @@ async def _refresh(actor: dict, company_id: str, onb_no: str) -> dict:
 # ─────────────────────────────────────────────────────────────
 # Uploads
 # ─────────────────────────────────────────────────────────────
-async def _store_documents(uploads: list, *, existing_count: int, source: str) -> list:
+def _next_version(existing: list, doc_type: Optional[str]) -> int:
+    """The version number a new upload of `doc_type` takes.
+
+    Re-uploading a document does not overwrite the old one -- §7.5 Stage 3 asks for the
+    version to be retained, and a replaced document is the evidence for why it was replaced.
+    An untyped file has no series to belong to, so it is always v1.
+    """
+    if not doc_type:
+        return 1
+    versions = [int(d.get("version") or 1) for d in existing or []
+                if d.get("doc_type") == doc_type]
+    return (max(versions) + 1) if versions else 1
+
+
+def _latest_by_type(documents: list) -> dict:
+    """The current version of each typed document, keyed by type.
+
+    Superseded versions stay in `documents` but are not what the gate or the UI reads.
+    """
+    latest = {}
+    for d in documents or []:
+        doc_type = d.get("doc_type")
+        if not doc_type:
+            continue
+        current = latest.get(doc_type)
+        if not current or int(d.get("version") or 1) >= int(current.get("version") or 1):
+            latest[doc_type] = d
+    return latest
+
+
+async def _store_documents(uploads: list, *, existing_count: int, source: str,
+                           doc_types: dict = None, existing: list = None) -> list:
+    """Upload and describe each file.
+
+    `doc_type` is carried through when the caller supplies one, which is what turns a pile
+    of files into the answerable "which joining documents are still missing". It is kept
+    optional: HR attaching a one-off letter should not have to invent a category, and the
+    pre-typed catalogue exists for the tasks the new hire is actually set.
+    """
     if existing_count + len(uploads) > MAX_ONBOARD_DOCUMENTS:
         raise HTTPException(
             status_code=422,
@@ -688,7 +1330,15 @@ async def _store_documents(uploads: list, *, existing_count: int, source: str) -
 
     stored = []
     for i, upload in enumerate(uploads):
-        raw, name, mime = decode_upload(upload, label=f"Document {i + 1}")
+        doc_type = None
+        if isinstance(upload, dict):
+            doc_type = clean_text(upload.get("doc_type"), limit=120)
+            if doc_type and doc_types is not None and doc_type not in doc_types:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f'"{doc_type}" is not one of the joining documents this company '
+                           f"asks for.")
+        raw, name, mime = decode_upload(upload, label=doc_type or f"Document {i + 1}")
         if not raw:
             continue
         import io
@@ -700,12 +1350,27 @@ async def _store_documents(uploads: list, *, existing_count: int, source: str) -
             raise HTTPException(
                 status_code=503,
                 detail="Your document could not be uploaded right now. Please try again.")
+        now = datetime.now(timezone.utc)
+        version = _next_version((existing or []) + stored, doc_type)
         stored.append({
             "name": name,
+            "doc_type": doc_type,
+            "version": version,
+            # Every document starts unreviewed. HR moves it from here (§7.5 Stage 3) --
+            # nothing arrives pre-verified, including a file HR uploaded themselves, because
+            # "somebody attached this" and "somebody checked this" are different claims.
+            "status": DocStatus.PENDING.value,
+            "reviewed_by": None,
+            "reviewed_at": None,
+            "review_note": None,
+            "history": [{"status": DocStatus.PENDING.value,
+                         "note": f"Uploaded by {'HR' if source == 'hr' else 'the candidate'}"
+                                 + (f" (v{version})" if version > 1 else ""),
+                         "by": source, "at": now}],
             "key": result.get("key") if isinstance(result, dict) else None,
             "mime_type": mime,
             "source": source,
-            "uploaded_at": datetime.now(timezone.utc),
+            "uploaded_at": now,
         })
     return stored
 
@@ -728,6 +1393,12 @@ async def get_public_onboarding(code: str) -> dict:
             detail="This form is closed. Please contact the HR team if you need to update "
                    "your details.")
 
+    # The upload tasks this company sets, and which of them have already arrived. Sent to
+    # the portal so it can show the list as tasks rather than one anonymous file picker.
+    from app.services.hrms_config_service import onboarding_doc_types
+    catalogue = await onboarding_doc_types(doc.get("company_id"))
+    have = {d.get("doc_type") for d in (doc.get("documents") or []) if d.get("doc_type")}
+
     return {
         "ok": True,
         "already_submitted": doc.get("pre_status") != PreOnboardStatus.PENDING.value,
@@ -737,6 +1408,11 @@ async def get_public_onboarding(code: str) -> dict:
         "submitted_at": doc.get("submitted_at"),
         "max_documents": MAX_ONBOARD_DOCUMENTS,
         "max_references": MAX_REFERENCES,
+        "sections": [dict(s) for s in ONBOARD_SECTIONS],
+        "document_tasks": [
+            {"doc_type": label, "required": bool(required), "uploaded": label in have}
+            for label, required in catalogue.items()
+        ],
     }
 
 
@@ -800,12 +1476,34 @@ def _validate_submission(payload: dict) -> dict:
                 status_code=422, detail="Bank account number must be 6-20 digits.")
         out["bank_account"] = account
 
-    for field, limit in (("address", 500), ("bank_name", 120),
+    # ── §7.5 "Statutory information" ── UAN and ESIC are 12 and 17 digits by definition, so
+    # a typo is catchable here rather than at the first payroll run. All three are optional:
+    # a first-time employee genuinely has none of them, and demanding one would block the
+    # people most likely to be joining their first job.
+    for field, digits, label in (("uan", 12, "UAN"), ("esic_number", 17, "ESIC number")):
+        raw = (payload.get(field) or "").strip().replace(" ", "")
+        if raw:
+            if not raw.isdigit() or len(raw) != digits:
+                raise HTTPException(
+                    status_code=422, detail=f"{label} must be {digits} digits.")
+            out[field] = raw
+
+    for field, limit in (("address", 500), ("permanent_address", 500),
+                         ("personal_email", 180), ("personal_phone", 30),
+                         ("bank_name", 120), ("bank_branch", 140),
+                         ("bank_account_name", 140),
+                         ("pf_number", 40), ("previous_employer", 140),
                          ("emergency_contact_name", 120),
                          ("emergency_contact_phone", 30),
                          ("emergency_contact_relation", 60),
                          ("asset_requirements", 1000)):
         out[field] = clean_text(payload.get(field), limit=limit)
+
+    email = (out.get("personal_email") or "").strip().lower()
+    if email:
+        if not EMAIL_RE.match(email):
+            raise HTTPException(status_code=422, detail="Enter a valid email address.")
+        out["personal_email"] = email
 
     references = payload.get("references") or []
     if len(references) > MAX_REFERENCES:
@@ -837,9 +1535,26 @@ async def submit_public_onboarding(code: str, payload: dict) -> dict:
                    "something needs to change.")
 
     details = _validate_submission(payload)
+
+    from app.services.hrms_config_service import onboarding_doc_types
+    catalogue = await onboarding_doc_types(doc.get("company_id"))
     stored = await _store_documents(payload.get("documents") or [],
                                     existing_count=len(doc.get("documents") or []),
-                                    source="candidate")
+                                    source="candidate", doc_types=catalogue,
+                                    existing=doc.get("documents") or [])
+
+    # Required documents are checked AFTER the uploads are validated but BEFORE the record
+    # is written, so a submission that is refused for a missing document does not leave the
+    # ones that did arrive stranded against a form still marked Pending.
+    have = {d.get("doc_type") for d in
+            (doc.get("documents") or []) + stored if d.get("doc_type")}
+    missing = [label for label, required in catalogue.items()
+               if required and label not in have]
+    if missing:
+        raise HTTPException(
+            status_code=422,
+            detail=("These documents are still needed before you can submit: "
+                    + ", ".join(missing) + "."))
 
     now = datetime.now(timezone.utc)
     # Conditioned on Pending so two rapid submits cannot both write.

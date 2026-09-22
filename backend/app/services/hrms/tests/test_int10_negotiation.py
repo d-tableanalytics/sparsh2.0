@@ -110,7 +110,7 @@ async def main() -> None:
     NOTIFY.notify_hrms_role = fake_role
     NOTIFY.notify_user = fake_user
 
-    INT = M.RequisitionTrack.INTERNAL.value
+    INT = "internal"
     store.setdefault(M.COLL_REQUISITIONS, FakeCollection()).docs.extend([
         {"request_no": "R-BANDED", "company_id": C1, "requisition_track": INT,
          "designation_name": "Ops Executive", "closing_status": "Open",
@@ -263,7 +263,7 @@ async def main() -> None:
                       409, "no approved salary band")
     await expect_http("a round for a CLIENT-track candidate",
                       NG.record_round(HR, C1, {"uk": "CAN-003", "proposed_ctc": 500000}),
-                      409, "client requisition")
+                      409, "legacy client-track")
     await expect_http("an unknown candidate",
                       NG.record_round(HR, C1, {"uk": "CAN-NOPE", "proposed_ctc": 1}), 404)
     await expect_http("no figure",
@@ -295,9 +295,9 @@ async def main() -> None:
         check("the Pydantic boundary refuses NaN too", True)
     check("no refusal wrote a round", (await NG.list_rounds(HR, C1))["total"] == 2)
     preview = await NG.negotiation_for(HR, C1, "CAN-003")
-    check("the comparison surface on a client candidate says the gate does not apply, "
+    check("the comparison surface on a legacy client-track candidate says it is out of scope, "
           "rather than inventing a band",
-          preview["offer_would_pass"] is True and "client" in preview["offer_gate_note"].lower())
+          preview["offer_would_pass"] is False and "legacy" in preview["offer_gate_note"].lower())
     preview = await NG.negotiation_for(HR, C1, "CAN-002")
     # The gate FAILS OPEN on an internal requisition with no band (a pre-band-gate row);
     # the surface must say the same, or it diverges from the thing it previews.

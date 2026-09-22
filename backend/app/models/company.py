@@ -35,6 +35,14 @@ class CompanyBase(BaseModel):
     delegation_enabled: bool = False
     # HRMS module — opt-in per company (a missing flag means OFF, like TPMS/Delegation).
     hrms_enabled: bool = False
+    # The ONE company this ERP is operated in-house by. `hrms_enabled` means different
+    # things depending on this flag: on the in-house tenant it opens the whole HRMS
+    # module, on a client company it opens Client Hiring and nothing else. Deliberately absent from
+    # CompanyUpdate below, and from CompanyCreate's normal path: nothing that edits a
+    # company record generically should be able to set it. See
+    # backend/app/routes/company.py's hrms-access route for the only place this is ever
+    # written, and backend/app/utils/hrms_access.py for where it's read.
+    is_internal: bool = False
 
 class CompanyCreate(CompanyBase):
     pass

@@ -106,29 +106,6 @@ export const CandidateJourneyView = ({ uk }) => {
         </div>
       )}
 
-      {/* ── Phase 11-R, Item 4 ── the client-share record, when the CV has gone out. */}
-      {data.candidate.client_share?.shared_at && (
-        <div className="p-3.5 rounded-xl border border-[var(--border)] bg-[var(--bg-card)]">
-          <p className="text-[10.5px] font-bold uppercase tracking-widest text-[var(--text-muted)]">
-            Shared with client
-          </p>
-          <div className="mt-1.5 space-y-0.5 text-[12.5px] text-[var(--text-main)]">
-            <p>
-              Verdict: <b>{data.candidate.client_share.status || 'Pending'}</b>
-            </p>
-            {data.candidate.client_share.client_contact && (
-              <p className="text-[var(--text-muted)]">
-                Contact: {data.candidate.client_share.client_contact}
-              </p>
-            )}
-            {data.candidate.client_share.remarks && (
-              <p className="text-[var(--text-muted)]">
-                {data.candidate.client_share.remarks}
-              </p>
-            )}
-          </div>
-        </div>
-      )}
 
       <div className="flex items-center gap-1 overflow-x-auto pb-1">
         {data.rail.map((step, i) => (
@@ -187,16 +164,12 @@ export const CandidateJourneyView = ({ uk }) => {
         </ol>
       </div>
 
-      {/* ── Phase INT-15 (spec §30) ── the internal track's own sections. Rendered only
-          for an internal-track candidate: the client track has no position scorecard, no
-          mandatory reference check and no probation, so these would be permanently empty
-          there rather than merely unfilled. */}
-      {data.track === 'internal' && (
-        <InternalCandidatePanels
-          candidate={data.candidate}
-          onChanged={() => setReloads((n) => n + 1)}
-        />
-      )}
+      {/* ── Phase INT-15 (spec §30) ── the hiring facts: position scorecard, reference
+          check and probation. */}
+      <InternalCandidatePanels
+        candidate={data.candidate}
+        onChanged={() => setReloads((n) => n + 1)}
+      />
 
       {/* ── Phase 11-R, Item 2 ── the SAME DocumentPanel the employee profile mounts.
           Collapsed behind a toggle so the journey stays a timeline first: documents are

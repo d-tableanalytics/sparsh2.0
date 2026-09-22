@@ -355,9 +355,11 @@ async def main() -> None:
     cache: dict = {}
     first = await SCH.run_due_jobs(cache, now=NOW)
     ran_jobs = {r["job"] for r in first["ran"]}
-    check("all five jobs ran", ran_jobs == {M.JOB_SLA_SWEEP, M.JOB_PROBATION,
-                                            M.JOB_PREBOARDING, M.JOB_POLICY_REVIEW,
-                                            M.JOB_RETENTION})
+    # Read from the job table rather than a hardcoded set: later phases legitimately add
+    # sweeps (orientation escalation, pulse issuance, policy acknowledgement), and this
+    # line is about "every registered job got its slot", not about how many there are.
+    check("every registered job ran",
+          ran_jobs == {key for key, _label, _cadence, _hour in M.SCHEDULED_JOBS})
     check("only the HRMS-enabled company was swept",
           all(r["company_id"] == C1 for r in first["ran"]))
     check("the disabled company was never touched",
@@ -383,8 +385,9 @@ async def main() -> None:
     calls.clear()
     tomorrow = await SCH.run_due_jobs({}, now=NOW + timedelta(days=1))
     ran_jobs = {r["job"] for r in tomorrow["ran"]}
-    check("the three daily jobs run again tomorrow",
-          ran_jobs == {M.JOB_SLA_SWEEP, M.JOB_PROBATION, M.JOB_PREBOARDING})
+    check("the daily jobs run again tomorrow",
+          ran_jobs == {key for key, _l, cadence, _h in M.SCHEDULED_JOBS
+                       if cadence == M.JOB_CADENCE_DAILY})
     check("the weekly jobs do not", M.JOB_POLICY_REVIEW not in ran_jobs
           and M.JOB_RETENTION not in ran_jobs)
 
@@ -410,8 +413,8 @@ async def main() -> None:
     check("the driver did not raise", isinstance(failed, dict))
     check("the failing job is not reported as run", M.JOB_SLA_SWEEP not in ran_jobs)
     check("every OTHER job still ran -- one failure consumes nobody else's slot",
-          ran_jobs == {M.JOB_PROBATION, M.JOB_PREBOARDING, M.JOB_POLICY_REVIEW,
-                       M.JOB_RETENTION})
+          ran_jobs == {key for key, _l, _c, _h in M.SCHEDULED_JOBS}
+          - {M.JOB_SLA_SWEEP})
     check("the failed job left NO ledger stamp",
           not await SCH.already_ran(C1, M.JOB_SLA_SWEEP, daily))
     check("a successful job DID leave one",

@@ -198,9 +198,9 @@ async def main() -> None:
         check("and lands at Applied like any other",
               row["application_status"] == M.AppStatus.APPLIED.value)
 
-        published = await PS.create_posting(HR, COMPANY, {"jd_no": JD})
-        check("and the posting publishes",
-              bool(published["posting"]["posting_code"]))
+        drafted = await PS.create_posting(HR, COMPANY, {"jd_no": JD, "channels": ["Job Portals"]})
+        check("and the posting can be drafted",
+              bool(drafted["posting"]["posting_code"]))
 
         # =================================================================
         section("The gate is on the REQUISITION, not on the JD's status")
@@ -224,25 +224,9 @@ async def main() -> None:
             409, "has not cleared budget approval")
 
         # =================================================================
-        section("The client track is untouched by any of this")
+        section("A legacy row with no track field is left alone")
         # =================================================================
-        client_req = await RS.create_requisition(HOD, COMPANY, payload())
-        CREQ, CJD = client_req["request_no"], client_req["jd_no"]
-
-        # A client requisition sits at Pending HR Review -- a state that does not appear in
-        # PRE_BUDGET_STATES at all -- so sourcing against it is governed only by the rules it
-        # always had. A candidate may be added to it right away, as before this phase.
-        row = await CS.create_candidate(HR, COMPANY, candidate(request_no=CREQ))
-        check("a candidate may be added to an unapproved CLIENT requisition, as before",
-              row["uk"].startswith("CAN-"))
-
-        await RS.act_on_requisition(HR, COMPANY, CREQ, "hr-approve")
-        await RS.act_on_requisition(MD, COMPANY, CREQ, "md-approve")
-        published = await PS.create_posting(HR, COMPANY, {"jd_no": CJD})
-        check("and its posting publishes on MD approval alone -- no budget gate",
-              bool(published["posting"]["posting_code"]))
-
-        # A requisition raised BEFORE this phase carries no track field at all.
+        # A requisition raised BEFORE the track field existed carries none at all.
         legacy_jd = "JD-LEGACY-1"
         await store[M.COLL_JOB_DESCRIPTIONS].insert_one({
             "jd_no": legacy_jd, "request_no": "HR-REQ-2025-900", "company_id": COMPANY,

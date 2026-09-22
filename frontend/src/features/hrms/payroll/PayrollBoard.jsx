@@ -3,6 +3,7 @@ import { Wallet, Search, Landmark, HandCoins, TrendingUp, X } from 'lucide-react
 import { useHrms } from '../HrmsContext';
 import { CAP } from '../access';
 import HrmsPageHeader from '../common/HrmsPageHeader';
+import BoardTabs from '../common/BoardTabs';
 import HrmsScopeBar from '../common/HrmsScopeBar';
 import { HrmsLoading, HrmsError, HrmsEmpty } from '../common/HrmsStates';
 import { useNotification } from '../../../context/NotificationContext';
@@ -122,22 +123,12 @@ const PayrollBoard = () => {
     <div className="space-y-6">
       <HrmsPageHeader
         icon={Wallet}
-        title="Payroll, Salary Advance & Variable Pay"
+        title="Payroll"
         subtitle="Component-driven payroll, salary advance and the quarterly variable-pay hold ledger."
       />
       <HrmsScopeBar />
 
-      <div className="flex flex-wrap gap-1.5 border-b border-[var(--border)] pb-0.5">
-        {TABS.map((t) => (
-          <button key={t} type="button" onClick={() => setTab(t)}
-            className={`px-3 py-2 text-[12.5px] font-bold rounded-t-lg -mb-px border-b-2
-              ${tab === t
-                ? 'border-[var(--accent-indigo)] text-[var(--accent-indigo)]'
-                : 'border-transparent text-[var(--text-muted)] hover:text-[var(--text-main)]'}`}>
-            {t}
-          </button>
-        ))}
-      </div>
+      <BoardTabs tabs={TABS} value={tab} onChange={setTab} label="Payroll sections" />
 
       {tab === 'Payroll Runs' && (
         <PayrollRunsTab scope={scope} companyId={companyId} can={can}

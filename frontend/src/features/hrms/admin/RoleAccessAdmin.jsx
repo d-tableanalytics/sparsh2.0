@@ -12,8 +12,7 @@ import { Chip } from '../internal/internalKit.jsx';
 const PAGE_SIZE = 50;
 
 // Assignable via this screen — mirrors backend ASSIGNABLE_GOVERNANCE_ROLES (models/hrms.py,
-// Phase ACCESS-1). "CLIENT" is deliberately never an option here: it is the stamp a
-// participant from a CLIENT COMPANY gets, never something a tenant assigns its own people.
+// Phase ACCESS-1).
 const GOVERNANCE_OPTIONS = [
   { value: '', label: '— (Employee)' },
   { value: 'HOD', label: 'HOD (Manager)' },

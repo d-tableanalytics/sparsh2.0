@@ -252,8 +252,18 @@ async def main() -> None:
         check("it records what was requested", snap["requested"] == 1)
         check("it is stamped", snap["evaluated_at"] is not None)
 
+        # The band Management records at the budget gate -- the step the over-sanction
+        # ladder hangs off.
+        BAND = {"approved_headcount": 1, "approved_salary_band_min": 500000,
+                "approved_salary_band_max": 900000}
+
+        async def to_budget_gate(request_no):
+            await RS.act_on_requisition(HR, COMPANY, request_no, "hr-verify")
+            return await RS.act_on_requisition(MD, COMPANY, request_no, "budget-approve",
+                                               budget=BAND)
+
         # =================================================================
-        section("IN-SANCTION requisitions keep the EXISTING chain, byte for byte")
+        section("IN-SANCTION requisitions go straight to the scorecard gate")
         # =================================================================
         await SS.set_sanction(HR, COMPANY, {
             "department_id": DEPT, "designation_id": DESIG, "sanctioned_count": 20})
@@ -262,13 +272,14 @@ async def main() -> None:
               in_sanction["sanction_snapshot"]["is_over_sanction"] is False)
 
         step1 = await RS.act_on_requisition(HR, COMPANY, in_sanction["request_no"],
-                                            "hr-approve")
-        check("HR review goes STRAIGHT to MD, exactly as before this phase",
-              step1["approval_status"] == M.ReqApproval.PENDING_MD.value)
-        check("no escalation chain is built", step1["escalation_chain"] == [])
+                                            "hr-verify")
+        check("HR verification goes to the budget gate",
+              step1["approval_status"] == M.ReqApproval.PENDING_BUDGET.value)
         step2 = await RS.act_on_requisition(MD, COMPANY, in_sanction["request_no"],
-                                            "md-approve")
-        check("MD approves it", step2["approval_status"] == M.ReqApproval.APPROVED.value)
+                                            "budget-approve", budget=BAND)
+        check("budget approval goes STRAIGHT to the scorecard gate",
+              step2["approval_status"] == M.ReqApproval.PENDING_SCORECARD.value)
+        check("no escalation chain is built", step2["escalation_chain"] == [])
 
         # =================================================================
         section("OVER-SANCTION routes through the ladder")
@@ -286,8 +297,8 @@ async def main() -> None:
                   for s in sent))
 
         sent.clear()
-        esc = await RS.act_on_requisition(HR, COMPANY, over["request_no"], "hr-approve")
-        check("HR review routes to PENDING ESCALATION, not to MD",
+        esc = await to_budget_gate(over["request_no"])
+        check("budget approval routes to PENDING ESCALATION, not to the scorecard gate",
               esc["approval_status"] == M.ReqApproval.PENDING_ESCALATION.value)
         chain = esc["escalation_chain"]
         check("the ladder is built from the raiser's reporting line",
@@ -323,22 +334,19 @@ async def main() -> None:
         sent.clear()
         last = await RS.act_on_requisition(MD, COMPANY, over["request_no"],
                                            "escalate-approve", "approved")
-        check("clearing the LAST rung hands over to MD -- never straight to Approved",
-              last["approval_status"] == M.ReqApproval.PENDING_MD.value)
-        check("MD is told the ladder is exhausted",
-              any(s[0] == "role" and "MD" in s[1] for s in sent))
-
-        final = await RS.act_on_requisition(MD, COMPANY, over["request_no"], "md-approve")
-        check("only MD can finally approve it",
-              final["approval_status"] == M.ReqApproval.APPROVED.value)
+        check("clearing the LAST rung hands over to the scorecard gate -- never straight "
+              "to Approved",
+              last["approval_status"] == M.ReqApproval.PENDING_SCORECARD.value)
+        check("HR is told the ladder is exhausted",
+              any(s[0] == "role" and "HR" in s[1] for s in sent))
 
         # =================================================================
         section("test_over_sanction_cannot_reach_approved_without_md")
         # =================================================================
         # The named assertion the phase prompt demands, checked three ways.
-        check("APPROVED is reachable from exactly ONE row, from PENDING_MD, with the MD "
-              "capability", M.md_approval_is_mandatory())
-        approving = [a for a, spec in M.REQ_TRANSITIONS.items()
+        check("the budget gate cannot be skipped, asserted from the table",
+              M.budget_approval_is_mandatory())
+        approving = [a for a, spec in M.INTERNAL_REQ_TRANSITIONS.items()
                      if spec[1] is M.ReqApproval.APPROVED]
         check("no escalation action can result in APPROVED",
               not any(a.startswith("escalate-") for a in approving))
@@ -346,11 +354,11 @@ async def main() -> None:
         await SS.set_sanction(HR, COMPANY, {
             "department_id": DEPT, "designation_id": DESIG, "sanctioned_count": 2})
         probe = await RS.create_requisition(HOD, COMPANY, payload())
-        await RS.act_on_requisition(HR, COMPANY, probe["request_no"], "hr-approve")
-        await expect_http("MD approving while the requisition is still in escalation",
+        await to_budget_gate(probe["request_no"])
+        await expect_http("approving the scorecard while the requisition is still in escalation",
                           RS.act_on_requisition(MD, COMPANY, probe["request_no"],
-                                                "md-approve"),
-                          409, "Pending MD Approval")
+                                                "scorecard-approve"),
+                          409, "Pending Scorecard Approval")
         stuck = await RS.get_requisition(HR, COMPANY, probe["request_no"])
         check("it is still NOT approved",
               stuck["approval_status"] != M.ReqApproval.APPROVED.value)
@@ -378,10 +386,9 @@ async def main() -> None:
         # =================================================================
         sent.clear()
         orphaned = await RS.create_requisition(ORPHAN, COMPANY, payload())
-        routed = await RS.act_on_requisition(HR, COMPANY, orphaned["request_no"],
-                                             "hr-approve")
-        check("with no reporting line it routes STRAIGHT TO MD",
-              routed["approval_status"] == M.ReqApproval.PENDING_MD.value)
+        routed = await to_budget_gate(orphaned["request_no"])
+        check("with no reporting line it routes STRAIGHT TO the scorecard gate",
+              routed["approval_status"] == M.ReqApproval.PENDING_SCORECARD.value)
         check("it is NOT auto-approved",
               routed["approval_status"] != M.ReqApproval.APPROVED.value)
         check("no phantom chain is invented", routed["escalation_chain"] == [])
@@ -389,19 +396,22 @@ async def main() -> None:
               any(a["action"] == M.AUDIT_REQ_ESCALATED
                   and "no reporting chain" in (a.get("detail") or "").lower()
                   for a in audit_log.docs))
-        md_final = await RS.act_on_requisition(MD, COMPANY, orphaned["request_no"],
-                                               "md-approve")
-        check("MD still has to approve it",
-              md_final["approval_status"] == M.ReqApproval.APPROVED.value)
 
         # =================================================================
         section("Committed vacancies -- the double-spend guard")
         # =================================================================
+        # Nothing above reaches Approved (the scorecard gate is still ahead), so seed one
+        # approved, still-open requisition for this position.
+        await reqs.insert_one({
+            "request_no": "HR-REQ-2026-OPEN", "company_id": COMPANY, "created_by": U_HOD,
+            "department_id": DEPT, "designation_id": DESIG, "requisition_track": "internal",
+            "approval_status": M.ReqApproval.APPROVED.value,
+            "closing_status": M.ReqClosing.OPEN.value, "vacancy": 1})
         live = await SS.position_status(COMPANY, DEPT, DESIG)
         check("approved, still-open requisitions are counted as committed",
               live["open_requisitions"] >= 1)
         excluded = await SS.position_status(COMPANY, DEPT, DESIG,
-                                            exclude_request_no=over["request_no"])
+                                            exclude_request_no="HR-REQ-2026-OPEN")
         check("a requisition is never measured against ITSELF",
               excluded["open_requisitions"] < live["open_requisitions"])
 
@@ -410,20 +420,19 @@ async def main() -> None:
         # =================================================================
         check("the ladder is capped", M.MAX_ESCALATION_LEVELS == 5)
         check("escalation routing is declared beside the transition table",
-              M.REQ_ESCALATION_ROUTING["hr-approve"]
+              M.INTERNAL_ESCALATION_ROUTING["budget-approve"]
               is M.ReqApproval.PENDING_ESCALATION)
-        # Subset, not equality: REQ_AUDIT_ACTIONS also labels the internal track's actions.
         check("every action still has an audit label",
-              set(M.REQ_TRANSITIONS) <= set(M.REQ_AUDIT_ACTIONS))
+              set(M.INTERNAL_REQ_TRANSITIONS) <= set(M.REQ_AUDIT_ACTIONS))
         check("both escalation actions demand the escalate capability",
               all(spec[2] is M.Cap.REQUISITION_ESCALATE
-                  for a, spec in M.REQ_TRANSITIONS.items() if a.startswith("escalate-")))
+                  for a, spec in M.INTERNAL_REQ_TRANSITIONS.items() if a.startswith("escalate-")))
         check("every reject still demands a remark",
-              all(spec[3] for a, spec in M.REQ_TRANSITIONS.items()
+              all(spec[3] for a, spec in M.INTERNAL_REQ_TRANSITIONS.items()
                   if a.endswith("-reject")))
         check("no transition leaves the declared status set",
               all(spec[0] in set(M.ReqApproval) and spec[1] in set(M.ReqApproval)
-                  for spec in M.REQ_TRANSITIONS.values()))
+                  for spec in M.INTERNAL_REQ_TRANSITIONS.values()))
 
         from app.utils.hrms_access import can
         check("a hiring manager holds the escalate capability -- they ARE the ladder",

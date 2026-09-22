@@ -15,7 +15,7 @@ its route as deprecated-but-still-present (BACKEND_ANALYSIS 5.3, 6.7), so we sim
 build it.
 
 -- Three correctness properties worth stating --------------------------------------
-1. **Transitions are table-driven** (models.hrms.REQ_TRANSITIONS). The guard, the tests and
+1. **Transitions are table-driven** (models.hrms.INTERNAL_REQ_TRANSITIONS). The guard, the tests and
    the docs read from one source; an action absent from the table cannot happen.
 2. **Transitions are compare-and-swap.** The status is part of the update FILTER, so two
    concurrent approvals cannot both succeed -- the loser matches nothing and gets a 409.
@@ -37,20 +37,24 @@ from app.models.hrms import (
     AUDIT_JD_UPDATED, AUDIT_REQ_CLOSED, AUDIT_REQ_CREATED, AUDIT_REQ_DELETED,
     AUDIT_REQ_UPDATED, COLL_DEPARTMENTS, COLL_DESIGNATIONS, COLL_JOB_DESCRIPTIONS,
     COLL_REQUISITIONS, ENTITY_JD, ENTITY_REQUISITION, JdStatus, REQ_AUDIT_ACTIONS,
-    REQ_TRANSITIONS, ReqApproval, ReqClosing, is_iso_date,
+    ReqApproval, ReqClosing, is_iso_date,
 )
 # ── Phase 11-R additions (Items 4, 6, 7) ──
 from app.models.hrms import (
     AUDIT_REQ_ESCALATED, MAX_ESCALATION_LEVELS, REQ_CONDITIONAL_REMARK_REASONS,
-    REQ_CONDITIONAL_REMARKS, REQ_ESCALATION_ROUTING, BudgetStatus, Cap, EscalationStatus,
+    REQ_CONDITIONAL_REMARKS, BudgetStatus, Cap, EscalationStatus,
     RequisitionType, budget_delta, budget_status,
 )
 # ── Internal (in-house) recruitment track ──
-from app.models.hrms import PRE_BUDGET_STATES, TRACK_TRANSITIONS, RequisitionTrack
+from app.models.hrms import (
+    INTERNAL_ESCALATION_ROUTING, INTERNAL_REQ_TRANSITIONS, PRE_BUDGET_STATES,
+    REQUISITION_TRACK_INTERNAL,
+)
 from app.services.hrms_audit_service import audit
 from app.services.hrms_id_service import next_business_id
 from app.services.hrms_notify_service import notify_hrms_role, notify_user
 from app.utils.hrms_access import can
+from app.utils.hrms_access import tenant_member
 
 # Statuses in which a requisition's details may still be edited. Once MD has approved it,
 # the terms are what the approver signed off on -- changing them afterwards would make the
@@ -58,10 +62,9 @@ from app.utils.hrms_access import can
 #
 # Phase 11-R adds PENDING_ESCALATION: a requisition still working its way up the reporting
 # chain has not been finally approved by anyone, so the same editing logic applies to it.
-EDITABLE_STATUSES = {ReqApproval.PENDING_HR.value, ReqApproval.PENDING_MD.value,
-                     ReqApproval.PENDING_ESCALATION.value,
-                     # The internal chain's pre-approval states, for the same reason: none
-                     # of them represents a final sign-off by anybody.
+EDITABLE_STATUSES = {ReqApproval.PENDING_ESCALATION.value,
+                     # The pre-approval states: none of them represents a final sign-off by
+                     # anybody.
                      ReqApproval.PENDING_HR_VERIFICATION.value,
                      ReqApproval.PENDING_BUDGET.value,
                      ReqApproval.PENDING_SCORECARD.value}
@@ -80,11 +83,7 @@ def assert_sourcing_allowed(req: dict) -> None:
     waiting to drift out of step with it, and this particular gate is the SOP's only
     mandatory control.
 
-    The client track is untouched: it never enters PRE_BUDGET_STATES, so this returns
-    immediately for every requisition that existed before this phase.
     """
-    if track_of(req) is not RequisitionTrack.INTERNAL:
-        return
     status = req.get("approval_status")
     if status in PRE_BUDGET_STATES:
         raise HTTPException(
@@ -92,19 +91,6 @@ def assert_sourcing_allowed(req: dict) -> None:
             detail=(f"{req.get('request_no')} has not cleared budget approval yet "
                     f'(it is "{status}"). No internal role may be sourced before '
                     f"Management or Finance has approved the headcount and salary band."))
-
-
-def track_of(req: dict) -> RequisitionTrack:
-    """The track a requisition runs on, defaulting to CLIENT.
-
-    Every requisition raised before this phase has no `requisition_track` field at all, and
-    must keep behaving exactly as it did -- so the default is not a convenience, it is the
-    compatibility guarantee.
-    """
-    try:
-        return RequisitionTrack(req.get("requisition_track") or RequisitionTrack.CLIENT.value)
-    except ValueError:
-        return RequisitionTrack.CLIENT
 
 
 def _oid(value: str, label: str) -> ObjectId:
@@ -127,8 +113,6 @@ def _out(doc: dict) -> dict:
     doc.setdefault("requisition_type", RequisitionType.NEW_POSITION.value)
     doc.setdefault("escalation_chain", [])
     doc.setdefault("sanction_snapshot", None)
-    doc.setdefault("client_id", None)
-    doc.setdefault("client_name", None)
     return doc
 
 
@@ -208,9 +192,8 @@ async def _validate_requisition(payload: dict, company_id: str, *, partial: bool
             out[f"{field[:-3]}_name"] = master.get("name")
 
     if "assignee_id" in payload and payload["assignee_id"]:
-        assignee = await get_collection("learners").find_one(
-            {"_id": _oid(payload["assignee_id"], "assignee"), "company_id": str(company_id)},
-            {"full_name": 1, "first_name": 1, "last_name": 1, "email": 1})
+        assignee = await tenant_member(
+            company_id, payload["assignee_id"], {"full_name": 1, "first_name": 1, "last_name": 1, "email": 1})
         if not assignee:
             raise HTTPException(
                 status_code=422, detail="The assignee must be a user of this company.")
@@ -219,48 +202,32 @@ async def _validate_requisition(payload: dict, company_id: str, *, partial: bool
                                 or f"{assignee.get('first_name') or ''} {assignee.get('last_name') or ''}".strip()
                                 or assignee.get("email"))
 
-    # ── The track: whose vacancy this is, and therefore whose rules apply ──
-    # Validated BEFORE the client block below, because the two interact: an internal
-    # requisition may not name a client, and saying so plainly beats a confusing failure
-    # three lines later.
-    if "requisition_track" in payload and payload["requisition_track"] is not None:
-        raw = getattr(payload["requisition_track"], "value", payload["requisition_track"])
-        try:
-            track = RequisitionTrack(raw)
-        except ValueError:
+    # ── Internal Recruitment SOP §3 ── "role, reporting line, and business justification",
+    # the three things the HOD's own raise is defined by. Reporting line is validated
+    # exactly like `assignee_id` above -- a real user of this company -- and is who the NEW
+    # HIRE reports to, not who runs the recruitment.
+    if "reporting_manager_id" in payload and payload["reporting_manager_id"]:
+        manager = await tenant_member(
+            company_id, payload["reporting_manager_id"], {"full_name": 1, "first_name": 1, "last_name": 1, "email": 1})
+        if not manager:
             raise HTTPException(
                 status_code=422,
-                detail=(f"Track must be one of: "
-                        f"{', '.join(t.value for t in RequisitionTrack)}."))
-        if not partial:
-            out["requisition_track"] = track.value
-        elif track.value != (payload.get("_current_track") or track.value):
-            # Immutable after creation: an approval already granted under one track's rules
-            # would be meaningless under the other's. update_requisition enforces this too;
-            # the check is here as well so no write path can bypass it.
-            raise HTTPException(
-                status_code=409,
-                detail="A requisition's track cannot be changed after it is raised.")
-        if track is RequisitionTrack.INTERNAL and payload.get("client_id"):
-            raise HTTPException(
-                status_code=422,
-                detail=("An internal requisition is Sparsh Magic's own vacancy, so it has "
-                        "no client. Leave the client empty, or raise it on the client "
-                        "track instead."))
+                detail="The reporting manager must be a user of this company.")
+        out["reporting_manager_id"] = str(payload["reporting_manager_id"])
+        out["reporting_manager_name"] = (
+            manager.get("full_name")
+            or f"{manager.get('first_name') or ''} {manager.get('last_name') or ''}".strip()
+            or manager.get("email"))
+    elif "reporting_manager_id" in payload:
+        out["reporting_manager_id"] = None
+        out["reporting_manager_name"] = None
 
-    # ── Phase 11-R, Item 4: the client this vacancy is being filled for ──
-    # The client is a company from the ERP's Companies section, so `client_id` is that
-    # company's id and the name is denormalised from it (see hrms_client_service).
-    if "client_id" in payload:
-        if payload["client_id"]:
-            from app.services.hrms_client_service import require_client
-            client = await require_client(str(payload["client_id"]))
-            out["client_id"] = str(payload["client_id"])
-            out["client_name"] = client.get("name")
-        else:
-            # Explicitly cleared -- an in-house requisition has no client.
-            out["client_id"] = None
-            out["client_name"] = None
+    if "business_justification" in payload:
+        # Required by the raise FORM (Internal Recruitment SOP §3), not by this service --
+        # an untouched value is simply not recorded, exactly like `notes`. Enforcing it here
+        # too would refuse every caller that predates this field, including the ~10 test
+        # fixtures that build a requisition as setup for something else entirely.
+        out["business_justification"] = (payload["business_justification"] or "").strip() or None
 
     out.update(_validate_budget(payload))
     out.update(await _validate_replacement(payload, company_id))
@@ -342,9 +309,7 @@ async def _validate_replacement(payload: dict, company_id: str) -> dict:
         if user_id:
             # Same tenant check the assignee and forward_to_id references get: part of the
             # query, so a user from another company simply is not found.
-            person = await get_collection("learners").find_one(
-                {"_id": _oid(user_id, "employee"), "company_id": str(company_id)},
-                {"full_name": 1, "first_name": 1, "last_name": 1, "email": 1})
+            person = await tenant_member(company_id, user_id, {"full_name": 1, "first_name": 1, "last_name": 1, "email": 1})
             if not person:
                 raise HTTPException(
                     status_code=422,
@@ -390,7 +355,9 @@ def _validate_jd(jd: dict, *, partial: bool = False) -> dict:
     """
     out = {}
     for field in ("title", "responsibilities", "skills", "qualifications",
-                  "experience", "ctc", "location", "benefits"):
+                  "experience", "ctc", "location", "benefits",
+                  "job_summary", "key_competencies", "culture_fit",
+                  "additional_requirements"):
         if field in jd:
             out[field] = (jd[field] or "").strip() or None
 
@@ -490,9 +457,6 @@ def _visibility_filter(actor: dict) -> dict:
     secret WITHIN a tenant, and an employee who raised one must be able to track it. Row
     scoping tightens only for a plain EMPLOYEE, who sees the ones they raised.
 
-    A CLIENT user is NOT covered here: their narrowing needs a database read (their
-    engagements) and this function is synchronous. Use `visibility_filter_for` instead --
-    every read path does, and a client reaching this one directly would see the tenant.
     """
     from app.models.hrms import HrmsRole
     from app.utils.hrms_access import hrms_role
@@ -502,51 +466,15 @@ def _visibility_filter(actor: dict) -> dict:
     return {}
 
 
-async def visibility_filter_for(actor: dict, company_id: str) -> dict:
-    """The row filter for `actor`, including the client narrowing.
-
-    A CLIENT user sees the requisitions raised FOR THEIR OWN organisation and nothing else.
-    Without this a client contact holding `requisition.read` saw every requisition in the
-    tenant -- including which roles we are filling for their competitors, and for whom.
-    That is the disclosure the client dimension exists to prevent, and it went live the
-    moment real client users could sign in.
-
-    `$in` even when the scope is empty, so a client with no live engagement matches nothing
-    rather than everything -- the same fail-closed rule the share and job-request services
-    follow.
-    """
-    from app.utils.hrms_access import is_client_scoped_user, scope_client_ids
-
-    base = _visibility_filter(actor)
-    if not is_client_scoped_user(actor):
-        return base
-    allowed = await scope_client_ids(actor, company_id)
-    base["client_id"] = {"$in": list(allowed or [])}
-    return base
-
-
 async def list_requisitions(actor: dict, company_id: str, *, search: str = None,
                             approval_status: str = None, closing_status: str = None,
-                            department_id: str = None, track: str = None,
+                            department_id: str = None,
                             limit: int = 100, skip: int = 0) -> dict:
-    query = {"company_id": str(company_id)}
-    query.update(await visibility_filter_for(actor, company_id))
-    # `track=client` must also match every requisition raised BEFORE this phase, which
-    # carries no `requisition_track` field at all -- hence the explicit missing-field arm.
-    # Without it the client list would silently shed its own history.
-    if track:
-        try:
-            wanted = RequisitionTrack(track)
-        except ValueError:
-            raise HTTPException(
-                status_code=422,
-                detail=f"Track must be one of: {', '.join(t.value for t in RequisitionTrack)}.")
-        if wanted is RequisitionTrack.CLIENT:
-            query["$and"] = [{"$or": [{"requisition_track": wanted.value},
-                                      {"requisition_track": {"$exists": False}},
-                                      {"requisition_track": None}]}]
-        else:
-            query["requisition_track"] = wanted.value
+    # Only Sparsh Magic's own requisitions. Rows from the decommissioned client-hiring
+    # track (a stored track of "client", or none at all on the oldest) are not part of
+    # hiring any more; they stay in the database and out of every list.
+    query = {"company_id": str(company_id), "requisition_track": REQUISITION_TRACK_INTERNAL}
+    query.update(_visibility_filter(actor))
     if approval_status:
         query["approval_status"] = approval_status
     if closing_status:
@@ -569,11 +497,16 @@ async def list_requisitions(actor: dict, company_id: str, *, search: str = None,
         max(0, int(skip or 0))).limit(limit).to_list(limit)
 
     # Stat tiles come from the same scoped query, so the counts always agree with the list.
-    base = {"company_id": str(company_id), **_visibility_filter(actor)}
+    base = {"company_id": str(company_id), "requisition_track": REQUISITION_TRACK_INTERNAL,
+            **_visibility_filter(actor)}
     stats = {
         "total": total,
-        "pending_hr": await coll.count_documents({**base, "approval_status": ReqApproval.PENDING_HR.value}),
-        "pending_md": await coll.count_documents({**base, "approval_status": ReqApproval.PENDING_MD.value}),
+        "pending_hr": await coll.count_documents(
+            {**base, "approval_status": ReqApproval.PENDING_HR_VERIFICATION.value}),
+        "pending_budget": await coll.count_documents(
+            {**base, "approval_status": ReqApproval.PENDING_BUDGET.value}),
+        "pending_scorecard": await coll.count_documents(
+            {**base, "approval_status": ReqApproval.PENDING_SCORECARD.value}),
         "open": await coll.count_documents({**base, "closing_status": ReqClosing.OPEN.value,
                                             "approval_status": ReqApproval.APPROVED.value}),
     }
@@ -583,8 +516,9 @@ async def list_requisitions(actor: dict, company_id: str, *, search: str = None,
 
 async def get_requisition(actor: dict, company_id: str, request_no: str,
                           *, with_jd: bool = True) -> dict:
-    query = {"request_no": request_no, "company_id": str(company_id)}
-    query.update(await visibility_filter_for(actor, company_id))
+    query = {"request_no": request_no, "company_id": str(company_id),
+             "requisition_track": REQUISITION_TRACK_INTERNAL}
+    query.update(_visibility_filter(actor))
     doc = await get_collection(COLL_REQUISITIONS).find_one(query)
     if not doc:
         # 404 rather than 403 for an out-of-scope row: a 403 would confirm the id exists.
@@ -610,6 +544,13 @@ async def create_requisition(actor: dict, company_id: str, payload: dict) -> dic
     jd_payload = payload.get("jd") or {}
     if hasattr(jd_payload, "model_dump"):
         jd_payload = jd_payload.model_dump(exclude_unset=True)
+    # ── Internal Recruitment SOP §3 ── the JD is no longer authored by the HOD at raise time
+    # -- it is HR's job, once Management/Finance has cleared headcount and budget (see the
+    # gate in update_jd). A requisition raised with no `jd` in the payload opens with an
+    # empty placeholder JD rather than being forced through the "responsibilities or an
+    # attachment" content check below; a caller that DOES supply content (a pre-SOP-redesign
+    # form) keeps that check exactly as before.
+    jd_was_supplied = bool(jd_payload)
 
     clean = await _validate_requisition(payload, company_id, partial=False)
     # Assignee (recruiter) is no longer collected at raise time -- removed from every
@@ -625,7 +566,7 @@ async def create_requisition(actor: dict, company_id: str, payload: dict) -> dic
     clean.setdefault("requisition_type", RequisitionType.NEW_POSITION.value)
     _assert_replacement_complete(clean)
 
-    jd_clean = _validate_jd(jd_payload, partial=False)
+    jd_clean = _validate_jd(jd_payload, partial=not jd_was_supplied)
     jd_clean.setdefault("title", clean.get("designation_name"))
     # Everything the requisition already knows, carried onto the JD that will be published
     # from it. Runs after both are validated, so it inherits CLEANED values (the resolved
@@ -648,19 +589,10 @@ async def create_requisition(actor: dict, company_id: str, payload: dict) -> dic
         "created_by": actor_id, "created_at": now,
         **jd_clean,
     }
-    # The two chains start in different places. `clean` already carries the validated track
-    # (defaulting to CLIENT when the caller said nothing), so the starting state is read from
-    # it rather than passed around separately.
-    raised_track = RequisitionTrack(
-        clean.get("requisition_track") or RequisitionTrack.CLIENT.value)
-    opening_status = (ReqApproval.PENDING_HR_VERIFICATION
-                      if raised_track is RequisitionTrack.INTERNAL
-                      else ReqApproval.PENDING_HR)
-
     req_doc = {
         "request_no": request_no, "company_id": str(company_id), "jd_no": jd_no,
-        "requisition_track": raised_track.value,
-        "approval_status": opening_status.value,
+        "requisition_track": REQUISITION_TRACK_INTERNAL,
+        "approval_status": ReqApproval.PENDING_HR_VERIFICATION.value,
         "closing_status": ReqClosing.OPEN.value,
         # ── Internal track ── the budget gate's record. Null until `budget-approve` clears,
         # and read by the posting service, the candidate service and the offer band check.
@@ -702,8 +634,10 @@ async def create_requisition(actor: dict, company_id: str, payload: dict) -> dic
     except Exception:
         # Compensating delete: without a transaction this is how we keep the invariant
         # "every requisition has a JD" true. A JD with no requisition is inert; a
-        # requisition with no JD would break the approval chain.
-        await jds.delete_one({"jd_no": jd_no})
+        # requisition with no JD would break the approval chain. Scoped by company_id too --
+        # `jd_no` is unique only within a company, so another tenant's requisition raised at
+        # the same instant could otherwise be deleted by mistake.
+        await jds.delete_one({"jd_no": jd_no, "company_id": str(company_id)})
         raise
 
     await audit(actor, AUDIT_REQ_CREATED, ENTITY_REQUISITION, request_no,
@@ -869,25 +803,6 @@ async def update_requisition(actor: dict, company_id: str, request_no: str,
             detail=(f'Requisition {request_no} is "{current["approval_status"]}" and can no '
                     f"longer be edited."))
 
-    # The track is IMMUTABLE. An approval already granted under one track's rules would be
-    # meaningless under the other's -- a budget cleared by Finance says nothing about a
-    # client-track requisition, and an MD sign-off says nothing about an internal one.
-    if "requisition_track" in payload and payload["requisition_track"] is not None:
-        requested = getattr(payload["requisition_track"], "value",
-                            payload["requisition_track"])
-        if requested != track_of(current).value:
-            raise HTTPException(
-                status_code=409,
-                detail=("A requisition's track cannot be changed after it is raised. "
-                        "Close this one and raise it on the other track."))
-        payload = {k: v for k, v in payload.items() if k != "requisition_track"}
-
-    # An internal requisition can never acquire a client, whatever the edit says.
-    if payload.get("client_id") and track_of(current) is RequisitionTrack.INTERNAL:
-        raise HTTPException(
-            status_code=422,
-            detail="An internal requisition is Sparsh Magic's own vacancy and has no client.")
-
     clean = await _validate_requisition(payload, company_id, partial=True)
     if not clean:
         raise HTTPException(status_code=400, detail="No fields to update.")
@@ -941,7 +856,10 @@ async def delete_requisition(actor: dict, company_id: str, request_no: str) -> d
     await get_collection(COLL_REQUISITIONS).delete_one(
         {"request_no": request_no, "company_id": str(company_id)})
     if current.get("jd_no"):
-        await get_collection(COLL_JOB_DESCRIPTIONS).delete_one({"jd_no": current["jd_no"]})
+        # Scoped by company_id for the same reason update_jd's write is: `jd_no` is unique
+        # only within a company, so this could otherwise delete another tenant's JD.
+        await get_collection(COLL_JOB_DESCRIPTIONS).delete_one(
+            {"jd_no": current["jd_no"], "company_id": str(company_id)})
 
     await audit(actor, AUDIT_REQ_DELETED, ENTITY_REQUISITION, request_no,
                 current.get("designation_name"), company_id)
@@ -960,25 +878,23 @@ async def act_on_requisition(actor: dict, company_id: str, request_no: str,
     Every rule is read from the transition table for the requisition's TRACK, and the write
     is a compare-and-swap on the current status, so concurrent approvals cannot both land.
 
-    Two tables exist -- the client chain and the internal chain -- and which one applies is a
-    property of the requisition, never of the caller. `budget` carries the approved headcount
-    and salary band, and is required by (and only by) `budget-approve`.
+    `budget` carries the approved headcount and salary band, and is required by (and only
+    by) `budget-approve`.
     """
     coll = get_collection(COLL_REQUISITIONS)
     current = await coll.find_one({"request_no": request_no, "company_id": str(company_id)})
     if not current:
         raise HTTPException(status_code=404, detail="Requisition not found.")
 
-    # The table is chosen by the requisition, so an action from the other track's chain is
-    # simply unknown here -- which is the right error, and stops a client requisition being
-    # walked through internal gates or vice versa.
-    track = track_of(current)
-    transitions, escalation_routing = TRACK_TRANSITIONS[track]
+    # A legacy client-track row is not part of hiring any more: it cannot be advanced.
+    if current.get("requisition_track") != REQUISITION_TRACK_INTERNAL:
+        raise HTTPException(status_code=404, detail="Requisition not found.")
+    transitions, escalation_routing = INTERNAL_REQ_TRANSITIONS, INTERNAL_ESCALATION_ROUTING
 
     if action not in transitions:
         raise HTTPException(
             status_code=422,
-            detail=(f"Invalid action for a {track.value} requisition. Expected one of: "
+            detail=(f"Invalid action. Expected one of: "
                     f"{', '.join(transitions)}."))
 
     required_status, next_status, capability, remark_required = transitions[action]
@@ -986,10 +902,7 @@ async def act_on_requisition(actor: dict, company_id: str, request_no: str,
     if not can(actor, capability):
         raise HTTPException(
             status_code=403,
-            detail=("You are not authorised to perform this approval step. "
-                    "HR forwards a requisition; the MD approves it."
-                    if track is RequisitionTrack.CLIENT else
-                    "You are not authorised to perform this approval step. HR verifies, "
+            detail=("You are not authorised to perform this approval step. HR verifies, "
                     "Management or Finance approves the budget, and the hiring manager "
                     "approves the scorecard."))
 
@@ -1022,12 +935,9 @@ async def act_on_requisition(actor: dict, company_id: str, request_no: str,
     # ── Phase 11-R, Item 7 ── the over-sanction detour.
     #
     # The transition table still decides what is LEGAL. This decides, for one action, which
-    # of two legal destinations it lands on -- and it only ever applies to `hr-approve`,
-    # read from REQ_ESCALATION_ROUTING rather than branched on inline, so the rule lives
-    # beside the table it modifies.
-    #
-    # An IN-SANCTION requisition never enters this block: its chain is byte-for-byte the
-    # PENDING_HR -> PENDING_MD -> APPROVED it has always been.
+    # of two legal destinations it lands on -- and it only ever applies to `budget-approve`,
+    # read from INTERNAL_ESCALATION_ROUTING rather than branched on inline, so the rule
+    # lives beside the table it modifies. An IN-SANCTION requisition never enters this block.
     # ── Internal track ── the budget gate's payload.
     #
     # Validated BEFORE the state is written, so a malformed band cannot leave a requisition
@@ -1128,7 +1038,7 @@ async def act_on_requisition(actor: dict, company_id: str, request_no: str,
 
     # ── Item 7 ── an escalation step advances the LADDER, not the status, until the last
     # rung has acted. The transition table declares where the ladder ultimately leads
-    # (PENDING_MD); this decides whether we are there yet.
+    # (PENDING_SCORECARD); this decides whether we are there yet.
     if action == "escalate-approve":
         chain = list(current.get("escalation_chain") or [])
         level = int(current.get("escalation_level") or 1)
@@ -1147,9 +1057,7 @@ async def act_on_requisition(actor: dict, company_id: str, request_no: str,
                                "remarks": remarks or None})
         escalation_updates["escalation_chain"] = chain
         if level < len(chain):
-            # Rungs remain: stay in escalation and move up one. Track-agnostic -- the ladder
-            # does not care whose budget it is; only where it RETURNS to differs, and that
-            # comes from the track's own table.
+            # Rungs remain: stay in escalation and move up one.
             next_status = ReqApproval.PENDING_ESCALATION
             escalation_updates["escalation_level"] = level + 1
         else:
@@ -1232,8 +1140,11 @@ async def act_on_requisition(actor: dict, company_id: str, request_no: str,
                 jd_updates.update({"approved_by": actor_id, "approved_at": now})
             else:
                 jd_updates["md_remarks"] = remarks or None
+            # Scoped by company_id too -- `jd_no` is unique only within a company (see
+            # update_jd's own note), so this could otherwise flip another tenant's JD.
             await get_collection(COLL_JOB_DESCRIPTIONS).update_one(
-                {"jd_no": current["jd_no"]}, {"$set": jd_updates})
+                {"jd_no": current["jd_no"], "company_id": str(company_id)},
+                {"$set": jd_updates})
 
     await audit(actor, REQ_AUDIT_ACTIONS[action], ENTITY_REQUISITION, request_no,
                 remarks or None, company_id)
@@ -1251,14 +1162,16 @@ async def act_on_requisition(actor: dict, company_id: str, request_no: str,
             updates.get("escalation_level") or 1, company_id,
             updates.get("sanction_snapshot") or current.get("sanction_snapshot") or {})
     elif (action == "escalate-approve"
-          and updates.get("approval_status") == ReqApproval.PENDING_MD.value):
-        # The ladder is exhausted. MD is next, and MD is NOT optional — the transition table
-        # makes APPROVED reachable only from here (models.md_approval_is_mandatory).
+          and updates.get("approval_status") == ReqApproval.PENDING_SCORECARD.value):
+        # The ladder is exhausted. The scorecard gate is next, and it is NOT optional -- the
+        # transition table makes APPROVED reachable only from there
+        # (models.budget_approval_is_mandatory).
         await notify_hrms_role(
-            company_id, ["MD"],
-            f"Over-sanction requisition {request_no} awaits your approval",
+            company_id, ["HR"],
+            f"Over-sanction requisition {request_no} cleared escalation",
             f"The escalation chain for {current.get('designation_name') or 'this role'} is "
-            f"complete. {_sanction_sentence(current.get('sanction_snapshot') or {})}",
+            f"complete; the position scorecard is the next gate. "
+            f"{_sanction_sentence(current.get('sanction_snapshot') or {})}",
             kind="warning", link=f"/hrms/requisitions/{request_no}", email=True)
 
     return await get_requisition(actor, company_id, request_no)
@@ -1348,16 +1261,7 @@ async def _notify_transition(action, current, request_no, actor_name, remarks, c
     creator = current.get("created_by")
     link = f"/hrms/requisitions/{request_no}"
 
-    if action == "hr-approve":
-        await notify_hrms_role(
-            company_id, ["MD"],
-            f"Requisition {request_no} awaits your approval",
-            f"{actor_name} (HR) forwarded the requisition for {designation}.",
-            link=link, email=True)
-        if creator:
-            await notify_user(creator, f"Requisition {request_no} forwarded to MD",
-                              f"HR reviewed your requisition for {designation}.", link=link)
-    elif action == "escalate-approve":
+    if action == "escalate-approve":
         # Every hop tells the raiser their requisition moved. The NEXT rung is notified by
         # act_on_requisition, which knows the level the ladder actually advanced to.
         if creator:
@@ -1374,17 +1278,9 @@ async def _notify_transition(action, current, request_no, actor_name, remarks, c
             company_id, ["HR"], f"Requisition {request_no} rejected at escalation",
             f"{actor_name} rejected {designation} during the over-sanction review.",
             kind="warning", link=link)
-    elif action == "md-approve":
-        if creator:
-            await notify_user(creator, f"Requisition {request_no} approved",
-                              f"Your requisition for {designation} is approved - posting is "
-                              f"now enabled.", kind="success", link=link, email=True)
-        await notify_hrms_role(
-            company_id, ["HR"], f"Requisition {request_no} approved",
-            f"{designation} is approved and ready to publish.", kind="success", link=link)
-    # ── Internal track ── each gate tells the party that now holds the requisition. Without
-    # this an internal requisition would sit silently at the budget gate, which is exactly
-    # the "sat unseen in a queue" failure this function exists to prevent.
+    # Each gate tells the party that now holds the requisition. Without this a requisition
+    # would sit silently at the budget gate, which is exactly the "sat unseen in a queue"
+    # failure this function exists to prevent.
     elif action == "hr-verify":
         await notify_hrms_role(
             company_id, ["MD", "FINANCE"],
@@ -1413,7 +1309,7 @@ async def _notify_transition(action, current, request_no, actor_name, remarks, c
         stage = ("HR review" if action == "hr-reject"
                  else "budget approval" if action == "budget-reject"
                  else "scorecard approval" if action == "scorecard-reject"
-                 else "MD approval")
+                 else "approval")
         if creator:
             await notify_user(creator, f"Requisition {request_no} rejected",
                               f"Your requisition for {designation} was rejected at {stage}. "
@@ -1503,6 +1399,18 @@ async def update_jd(actor: dict, company_id: str, jd_no: str, payload: dict) -> 
             detail=("An approved job description cannot be edited - it is what the MD "
                     "approved. Raise a new requisition to hire on different terms."))
 
+    # ── Internal Recruitment SOP §3 ── Step 3 (Job Description / Position Scorecard) starts
+    # only once Management/Finance has cleared headcount and budget -- writing JD content
+    # any earlier would have HR describing a role nobody has funded yet.
+    requisition = await get_collection(COLL_REQUISITIONS).find_one(
+        {"request_no": current.get("request_no"), "company_id": str(company_id)},
+        {"approval_status": 1})
+    if requisition and requisition.get("approval_status") in PRE_BUDGET_STATES:
+        raise HTTPException(
+            status_code=409,
+            detail=("The Job Description cannot be written until Management or Finance has "
+                    "approved headcount and budget for this requisition."))
+
     clean = _validate_jd(payload, partial=True)
     if not clean:
         raise HTTPException(status_code=400, detail="No fields to update.")
@@ -1518,7 +1426,12 @@ async def update_jd(actor: dict, company_id: str, jd_no: str, payload: dict) -> 
 
     clean["updated_at"] = datetime.now(timezone.utc)
     clean["version"] = int(current.get("version") or 1) + 1
-    await coll.update_one({"jd_no": jd_no}, {"$set": clean})
+    # `jd_no` is unique only WITHIN a company (the counter is scoped by company_id, not
+    # globally) -- two tenants can legitimately mint the same business id. Filtering by
+    # `jd_no` alone here would let one company's edit silently land on another's document
+    # whenever their numbers happen to coincide, exactly as `find_one` above already scopes
+    # its own lookup by `company_id` too.
+    await coll.update_one({"jd_no": jd_no, "company_id": str(company_id)}, {"$set": clean})
     await audit(actor, AUDIT_JD_UPDATED, ENTITY_JD, jd_no,
                 ", ".join(sorted(k for k in clean if k not in ("updated_at", "version"))),
                 company_id)

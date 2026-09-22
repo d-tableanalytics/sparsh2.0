@@ -41,7 +41,8 @@ from fastapi import HTTPException
 from app.db.mongodb import get_collection
 from app.models.hrms import (
     AUDIT_CONFIG_RESET, AUDIT_CONFIG_UPDATED, COLL_SETTINGS,
-    CONFIG_HONOUR_HOLIDAYS, CONFIG_KIND_FLAG, CONFIG_KIND_FLOAT_MAP,
+    CONFIG_EMPLOYMENT_DOCS, CONFIG_HONOUR_HOLIDAYS, CONFIG_ONBOARD_DOC_TYPES,
+    CONFIG_KIND_FLAG, CONFIG_KIND_FLAG_MAP, CONFIG_KIND_FLOAT_MAP,
     CONFIG_KIND_INT_LIST, CONFIG_KIND_INT_MAP,
     CONFIG_PROBATION_MONTHS, CONFIG_PROBATION_REMINDERS, CONFIG_RETENTION_YEARS,
     CONFIG_SCORE_BANDS, CONFIG_SLA_TARGET_DAYS, CONFIG_SPEC, ENTITY_CONFIG,
@@ -84,6 +85,12 @@ async def config_for(company_id: str) -> dict:
                 resolved[key].update(value)
         elif spec["kind"] == CONFIG_KIND_FLAG:
             resolved[key] = bool(value)
+        elif spec["kind"] == CONFIG_KIND_FLAG_MAP:
+            # REPLACES rather than merges. Every other map has a closed set of names, so a
+            # merge can only change values; this one is open, and a company that deletes a
+            # document type has to see it disappear rather than come back from the default.
+            if isinstance(value, dict):
+                resolved[key] = {str(k): bool(v) for k, v in value.items()}
         else:
             resolved[key] = list(value)
     return resolved
@@ -101,7 +108,8 @@ async def describe(company_id: str) -> dict:
     for spec in CONFIG_SPEC:
         key = spec["key"]
         mine = stored.get(key)
-        if spec["kind"] in (CONFIG_KIND_INT_LIST, CONFIG_KIND_FLAG):
+        if spec["kind"] in (CONFIG_KIND_INT_LIST, CONFIG_KIND_FLAG,
+                            CONFIG_KIND_FLAG_MAP):
             overridden = [] if mine is None else ["*"]
         else:
             overridden = sorted(mine) if isinstance(mine, dict) else []
@@ -167,6 +175,16 @@ async def score_bands_for(company_or_config) -> dict:
     return (await _resolved(company_or_config))[CONFIG_SCORE_BANDS]
 
 
+async def onboarding_doc_types(company_or_config) -> dict:
+    """This company's joining-document catalogue as {label: required?}."""
+    return dict((await _resolved(company_or_config))[CONFIG_ONBOARD_DOC_TYPES])
+
+
+async def employment_documents(company_or_config) -> dict:
+    """The documents a new joiner signs with their appointment letter, {label: required?}."""
+    return dict((await _resolved(company_or_config))[CONFIG_EMPLOYMENT_DOCS])
+
+
 async def honours_holidays(company_or_config) -> bool:
     """Whether SLA maths skips this company's holidays as well as weekends."""
     return bool((await _resolved(company_or_config))[CONFIG_HONOUR_HOLIDAYS])
@@ -222,6 +240,36 @@ def _validate_map(key: str, spec: dict, value) -> dict:
                 detail=f'"{key}.{name}" cannot be switched off. Only '
                        f'{", ".join(sorted(optional)) or "nothing"} may be set to null.')
         out[name] = _number(raw, spec, label=f'"{key}.{name}"')
+    return out
+
+
+def _validate_flag_map(key: str, value) -> dict:
+    """An OPEN {label: required?} map — the caller names the entries.
+
+    Stored as given rather than merged with the default, so removing an entry removes it.
+    """
+    if not isinstance(value, dict) or not value:
+        raise HTTPException(
+            status_code=422,
+            detail=f'"{key}" expects at least one entry, as {{"PAN card": true}}.')
+    if len(value) > 30:
+        raise HTTPException(
+            status_code=422,
+            detail=f'"{key}" allows at most 30 entries. Each one is an upload task a new '
+                   f"hire has to complete.")
+    out = {}
+    for name, required in value.items():
+        label = str(name).strip()
+        if not label or len(label) > 120:
+            raise HTTPException(
+                status_code=422,
+                detail=f'"{key}" has a document name that is empty or longer than 120 '
+                       f"characters.")
+        if not isinstance(required, bool):
+            raise HTTPException(
+                status_code=422,
+                detail=f'"{key}.{label}" is required or not. Send true or false.')
+        out[label] = required
     return out
 
 
@@ -303,6 +351,10 @@ def validate(company_config: dict, payload: dict) -> dict:
 
         if spec["kind"] == CONFIG_KIND_INT_LIST:
             out[key] = _validate_list(key, spec, value)
+            continue
+
+        if spec["kind"] == CONFIG_KIND_FLAG_MAP:
+            out[key] = _validate_flag_map(key, value)
             continue
 
         clean = _validate_map(key, spec, value)

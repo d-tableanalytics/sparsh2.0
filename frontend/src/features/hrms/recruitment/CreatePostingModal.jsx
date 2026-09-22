@@ -1,19 +1,21 @@
 import React, { useEffect, useState } from 'react';
-import { X, Megaphone, Link2, FileText, Copy, Check } from 'lucide-react';
+import { X, Megaphone, Link2, FileText, Copy, Check, ShieldAlert } from 'lucide-react';
 import { useNotification } from '../../../context/NotificationContext';
 import { useHrms } from '../HrmsContext';
 import { getJds, createPosting, applyUrlFor } from '../../../services/hrmsApi';
 
 /**
- * HRMS ▸ publish a job description.
+ * HRMS ▸ Step 4 — draft a job posting from an approved JD.
  *
- * ONE posting, ONE link. There is deliberately no platform picker: a posting used to be
- * created once per job board, which meant a link per board to mint, share and keep alive,
- * and a candidate `source` inferred from whichever URL they clicked — an inference that was
- * wrong the moment somebody forwarded a link.
+ * Creating and publishing are separate moments (Internal Recruitment SOP Step 4: Create Job
+ * Posting -> Select Sourcing Channels -> Publish), so this modal produces a DRAFT. The
+ * Postings board is where it is reviewed and published.
  *
- * The single link goes wherever the company likes, and the application form asks the
- * applicant where they found the role. That answer is the source column HR reads.
+ * ONE posting, ONE link, several CHANNELS. The channels are where HR chose to advertise the
+ * role; the link is the single destination all of them point at. A candidate's `source` is
+ * still what the applicant says on the form — the channel is HR's intent, the source is the
+ * applicant's own answer, and conflating them is what made the old per-board postings wrong
+ * the moment a link was forwarded.
  *
  * Two things this screen is careful about:
  *
@@ -25,6 +27,16 @@ import { getJds, createPosting, applyUrlFor } from '../../../services/hrmsApi';
  *    reach this pipeline — nothing writes them back, and no source is captured either.
  *    Saying so here is better than an application count that silently stays at zero.
  */
+
+// Mirrors backend RecruitmentChannel exactly (models/hrms.py). Executive Search is the one
+// channel with a gate: a posting naming it opens Pending Management Approval.
+const CHANNELS = [
+  { value: 'Internal Database', hint: 'Search people already in the talent pool.' },
+  { value: 'Job Portals', hint: 'Naukri, LinkedIn, and the rest.' },
+  { value: 'Employee Referrals', hint: 'Ask the team who they know.' },
+  { value: 'Executive Search', hint: 'Leadership roles — needs Management approval.' },
+];
+const EXEC_SEARCH = 'Executive Search';
 
 const ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
 
@@ -55,10 +67,16 @@ const CreatePostingModal = ({ onClose, onCreated }) => {
   const [expiry, setExpiry] = useState('');
   const [notes, setNotes] = useState('');
   const [requiresAssessment, setRequiresAssessment] = useState(false);
+  const [channels, setChannels] = useState([]);
   const [copied, setCopied] = useState(false);
   const [saving, setSaving] = useState(false);
 
   const applyUrl = applyUrlFor(code);
+  const selectedJd = jds.find((j) => j.jd_no === jdNo);
+  const needsExecApproval = channels.includes(EXEC_SEARCH);
+
+  const toggleChannel = (value) => setChannels((prev) =>
+    (prev.includes(value) ? prev.filter((c) => c !== value) : [...prev, value]));
 
   useEffect(() => {
     getJds({ ...scope, status: 'Approved' })
@@ -84,6 +102,7 @@ const CreatePostingModal = ({ onClose, onCreated }) => {
   const submit = async (e) => {
     e.preventDefault();
     if (!jdNo) return showError('Select an approved job description.');
+    if (!channels.length) return showError('Select at least one recruitment channel.');
     if (mode === 'external' && !/^https?:\/\//i.test(externalUrl.trim())) {
       return showError('Enter a link starting with http:// or https://, or switch back to the generated form.');
     }
@@ -98,13 +117,14 @@ const CreatePostingModal = ({ onClose, onCreated }) => {
         expiry_date: expiry || null,
         notes: notes || null,
         requires_assessment: requiresAssessment,
+        channels,
       }, scope);
-      showSuccess(mode === 'external'
-        ? `Published as ${data.posting.posting_code}`
-        : `Published — share ${applyUrlFor(data.posting.posting_code)}`);
+      showSuccess(needsExecApproval
+        ? `${data.posting.posting_code} drafted — it needs Management's approval before it can be published`
+        : `${data.posting.posting_code} drafted — review it on the board, then publish`);
       onCreated();
     } catch (err) {
-      showError(err?.response?.data?.detail || 'Could not publish the posting.');
+      showError(err?.response?.data?.detail || 'Could not create the posting.');
     } finally {
       setSaving(false);
     }
@@ -116,7 +136,7 @@ const CreatePostingModal = ({ onClose, onCreated }) => {
         <div className="flex items-center justify-between px-5 py-4 border-b border-[var(--border)]">
           <div className="flex items-center gap-2.5">
             <Megaphone size={17} className="text-[var(--accent-indigo)]" />
-            <h2 className="text-[15px] font-bold text-[var(--text-main)]">Publish a job</h2>
+            <h2 className="text-[15px] font-bold text-[var(--text-main)]">Create a job posting</h2>
           </div>
           <button type="button" onClick={onClose}
             className="p-1.5 rounded-lg text-[var(--text-muted)] hover:bg-[var(--input-bg)]">
@@ -141,6 +161,71 @@ const CreatePostingModal = ({ onClose, onCreated }) => {
                   <option key={j.jd_no} value={j.jd_no}>{j.jd_no} — {j.title || 'Untitled'}</option>
                 ))}
               </select>
+            )}
+          </div>
+
+          {/* The approved JD's own content, pulled straight from the selected JD so the
+              poster can see what is about to be advertised without leaving the modal. It is
+              read-only here: the JD is approved, and editing it is Step 3's job. */}
+          {selectedJd && (
+            <div className="p-3.5 rounded-xl border border-[var(--border)] bg-[var(--input-bg)] space-y-2">
+              <p className="text-[10.5px] font-bold uppercase tracking-widest text-[var(--text-muted)]">
+                From the approved JD (read-only)
+              </p>
+              <div className="grid grid-cols-2 gap-x-3 gap-y-1.5 text-[12px]">
+                {[
+                  ['Job Title', selectedJd.title],
+                  ['Experience', selectedJd.experience],
+                  ['Qualifications', selectedJd.qualifications],
+                  ['Location', selectedJd.location],
+                ].map(([label, value]) => (
+                  <div key={label}>
+                    <span className="block text-[10px] font-bold uppercase tracking-widest text-[var(--text-muted)]">
+                      {label}
+                    </span>
+                    <span className="text-[var(--text-main)]">{value || '—'}</span>
+                  </div>
+                ))}
+              </div>
+              {selectedJd.job_summary && (
+                <p className="text-[11.5px] text-[var(--text-muted)] whitespace-pre-wrap">
+                  {selectedJd.job_summary}
+                </p>
+              )}
+              {selectedJd.skills && (
+                <p className="text-[11.5px] text-[var(--text-muted)]">
+                  <span className="font-bold">Skills:</span> {selectedJd.skills}
+                </p>
+              )}
+            </div>
+          )}
+
+          <div>
+            <span className={LABEL}>Recruitment channels *</span>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              {CHANNELS.map((c) => (
+                <label key={c.value}
+                  className={`flex items-start gap-2 p-2.5 rounded-lg border cursor-pointer transition-colors ${
+                    channels.includes(c.value)
+                      ? 'border-[var(--accent-indigo)] bg-[var(--accent-indigo-bg)]'
+                      : 'border-[var(--border)] hover:border-[var(--accent-indigo)]'}`}>
+                  <input type="checkbox" className="mt-0.5" checked={channels.includes(c.value)}
+                    onChange={() => toggleChannel(c.value)} />
+                  <span>
+                    <span className="block text-[12.5px] font-semibold text-[var(--text-main)]">
+                      {c.value}
+                    </span>
+                    <span className="block text-[11px] text-[var(--text-muted)]">{c.hint}</span>
+                  </span>
+                </label>
+              ))}
+            </div>
+            {needsExecApproval && (
+              <p className="mt-2 flex items-start gap-1.5 text-[11.5px] text-[var(--accent-orange)]">
+                <ShieldAlert size={13} className="shrink-0 mt-0.5" />
+                Executive Search is selected — this posting will open Pending Management
+                Approval and cannot be published until Management clears it.
+              </p>
             )}
           </div>
 
@@ -219,9 +304,9 @@ const CreatePostingModal = ({ onClose, onCreated }) => {
               className="h-9 px-4 rounded-lg border border-[var(--border)] text-[12px] font-bold text-[var(--text-muted)]">
               Cancel
             </button>
-            <button type="submit" disabled={saving || !jdNo}
+            <button type="submit" disabled={saving || !jdNo || !channels.length}
               className="h-9 px-4 rounded-lg bg-[var(--accent-indigo)] text-white text-[12px] font-bold disabled:opacity-50">
-              {saving ? 'Publishing…' : 'Publish'}
+              {saving ? 'Saving…' : 'Create draft'}
             </button>
           </div>
         </form>

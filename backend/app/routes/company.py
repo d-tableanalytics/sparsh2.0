@@ -121,7 +121,11 @@ async def list_companies(current_user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=403, detail="Not authorized to list companies")
     
     db = get_db()
-    companies = await db.companies.find().to_list(100)
+    # Every row here is a CLIENT organisation. Sparsh Magic's own company record carries
+    # `is_internal` and is deliberately excluded: it is the tenant the ERP is operated by,
+    # not an organisation it sells to, and listing it here invites somebody to manage it
+    # like a client (assign a SMOP, set a training path, delete it).
+    companies = await db.companies.find({"is_internal": {"$ne": True}}).to_list(100)
     for c in companies:
         c["_id"] = str(c["_id"])
     return companies
@@ -311,12 +315,32 @@ async def update_company_hrms_access(company_id: str, body: CompanyHrmsAccessUpd
     Restricted to Admin / Super Admin by ROLE, matching the TPMS toggle rather than the
     ORM one: HRMS holds payroll and personal data, so access is granted deliberately by
     Sparsh staff and never via a delegated `companies.update` grant. Opt-in — a company
-    stays dark until this is switched on (see utils/hrms_access.is_hrms_enabled).
+    stays dark until this is switched on, on either of the two doors below.
     """
     if (current_user.get("role") or "").lower() not in HRMS_TOGGLE_ROLES:
         raise HTTPException(status_code=403, detail="Only Admin / Super Admin can manage HRMS access")
 
     companies_collection = get_collection("companies")
+
+    # WHAT THIS FLAG GRANTS DEPENDS ON WHICH COMPANY IT IS SET ON.
+    #
+    # It used to be refused outright for a client company, back when HRMS was internal
+    # only and the flag would have been inert. It is not inert any more: HRMS now runs two
+    # separate tracks, and the two doors read the same flag to different ends.
+    #
+    #   * the IN-HOUSE tenant  -> the whole module (utils/hrms_access.is_hrms_enabled)
+    #   * a CLIENT company     -> Client Hiring and nothing else
+    #                             (utils/hrms_access.client_track_company, and the
+    #                              capability ceiling CLIENT_TRACK_CAPS behind it)
+    #
+    # So enabling it for a client admits their people to the PRO-fit track: their own
+    # requisitions, their own candidates, their own approvals. It does not give them
+    # payroll, employees, exits or Sparsh Magic's internal hiring, and it cannot, because
+    # the ceiling is applied at the single function every permission check resolves
+    # through rather than at any route.
+    #
+    # Disabling stays allowed for any company. Turning something off is never the
+    # dangerous direction.
     result = await companies_collection.update_one(
         {"_id": ObjectId(company_id)},
         {"$set": {"hrms_enabled": body.enabled, "updated_at": datetime.now(timezone.utc)}}

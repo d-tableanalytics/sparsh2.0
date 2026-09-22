@@ -44,11 +44,58 @@ async def _probation_summary(company_id: str, employee_code: str) -> Optional[di
     }
 
 
+async def _recruitment_history(actor: dict, company_id: str, source_uk: str) -> dict:
+    """Where this employee came from (§7.5 Stage 9).
+
+    "The candidate record converts to Active Employee while retaining recruitment history."
+    Conversion here has always been non-destructive -- the candidate document is never
+    deleted, and the employee carries `source_uk` back to it -- but nothing READ that link,
+    so from the employee's side the history may as well not have existed.
+
+    Composed by calling the modules that own each part, never by reading their collections,
+    exactly as every other section of this workspace is. Each part is fetched defensively:
+    a module that errors should cost this panel that one line, not the whole workspace.
+    """
+    out = {"uk": source_uk}
+
+    async def _safe(key, coro):
+        try:
+            out[key] = await coro
+        except Exception:                           # pragma: no cover - defensive
+            out[key] = None
+
+    from app.services import hrms_candidate_service as candidates
+    await _safe("candidate", candidates.get_candidate(actor, company_id, source_uk))
+    await _safe("journey", candidates.get_journey(actor, company_id, source_uk))
+
+    if can(actor, Cap.INTERVIEW_READ):
+        from app.services import hrms_interview_service as interviews
+        await _safe("interviews",
+                    interviews.list_interviews(actor, company_id, uk=source_uk))
+
+    if can(actor, Cap.ASSESSMENT_READ):
+        from app.services import hrms_assessment_service as assessments
+        await _safe("assessments",
+                    assessments.list_assessments(actor, company_id, uk=source_uk))
+
+    if can(actor, Cap.OFFER_READ):
+        from app.services import hrms_offer_service as offers
+        await _safe("offers", offers.list_offers(actor, company_id, uk=source_uk))
+
+    return out
+
+
 async def get_employee_360(actor: dict, company_id: str, user_id: str) -> dict:
     # The base profile IS the entry gate: self-view is an inherent right there, otherwise
     # EMPLOYEE_READ is required — this call raises 403/404 on its own if the caller may not
     # see this employee at all, before any section below is even considered.
-    profile = await employees.get_employee(actor, user_id, company_id=company_id)
+    # Addressed by login id normally, but an onboarding-created joiner has no login yet
+    # (see hrms_onboarding_service's note on why `user_id` is absent rather than null), so
+    # an employee CODE is accepted too. Without this the workspace is unreachable for
+    # precisely the newest employees -- the ones §7.5 Stage 9 is about.
+    profile = await employees.get_employee_by_code(actor, company_id, user_id)
+    if profile is None:
+        profile = await employees.get_employee(actor, user_id, company_id=company_id)
     employee_code = profile.get("employee_code")
 
     view = {"profile": profile}
@@ -56,6 +103,12 @@ async def get_employee_360(actor: dict, company_id: str, user_id: str) -> dict:
         # An onboarding-stage record with no employee_code yet has nothing else to compose —
         # every other module below addresses people by employee_code.
         return view
+
+    # §7.5 Stage 9 -- the recruitment history the conversion retains. Placed first
+    # because it is what came BEFORE everything else in this workspace.
+    if profile.get("source_uk") and can(actor, Cap.CANDIDATE_READ):
+        view["recruitment"] = await _recruitment_history(
+            actor, company_id, profile["source_uk"])
 
     if can(actor, Cap.PROBATION_READ):
         view["probation"] = await _probation_summary(company_id, employee_code)

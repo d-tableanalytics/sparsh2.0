@@ -71,8 +71,7 @@ async def list_holidays(company_id: str, *, year: int = None) -> dict:
 async def holiday_set(company_or_config, company_id: str = None) -> Optional[set]:
     """The dates SLA maths must skip for this company, or None when it skips none.
 
-    **None and an empty set are different answers**, and the distinction is the same one
-    `scope_client_ids` draws. `None` means "this company does not honour holidays" -- the
+    **None and an empty set are different answers**. `None` means "this company does not honour holidays" -- the
     maths takes its weekends-only path and reports `counts_holidays: false`. An empty set
     means "it does, and has no holidays recorded" -- the maths honours a calendar that
     happens to be empty, and says so. Collapsing them would make a company that opted in but

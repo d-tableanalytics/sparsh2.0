@@ -207,6 +207,18 @@ const ScorecardEvaluation = ({ candidate, onSaved }) => {
                       {ceiling !== 5 ? ` · out of ${ceiling}` : ''}
                     </span>
                   </div>
+                  {/* The bar and how to measure it, as agreed on the approved scorecard --
+                      scoring against criteria the panel cannot see is guesswork. */}
+                  {c.expected_level && (
+                    <p className="text-[11.5px] text-[var(--text-main)]">
+                      Expected: {c.expected_level}
+                    </p>
+                  )}
+                  {c.evaluation_criteria && (
+                    <p className="text-[11px] text-[var(--text-muted)]">
+                      {c.evaluation_criteria}
+                    </p>
+                  )}
                   <div className="flex items-center gap-3">
                     <input
                       id={`crit-${c.label}`} type="range"

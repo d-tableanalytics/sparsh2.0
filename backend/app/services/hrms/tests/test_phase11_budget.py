@@ -254,32 +254,41 @@ async def main() -> None:
         section("The conditional-remarks gate")
         # =================================================================
         check("the rule lives in ONE declared place",
-              "md-approve" in M.REQ_CONDITIONAL_REMARKS)
+              "budget-approve" in M.REQ_CONDITIONAL_REMARKS)
         check("it fires only on a mismatch",
-              M.REQ_CONDITIONAL_REMARKS["md-approve"](
+              M.REQ_CONDITIONAL_REMARKS["budget-approve"](
                   {"budget_sanctioned_amount": 1, "budget_hod_amount": 2}) is True
-              and M.REQ_CONDITIONAL_REMARKS["md-approve"](
+              and M.REQ_CONDITIONAL_REMARKS["budget-approve"](
                   {"budget_sanctioned_amount": 1, "budget_hod_amount": 1}) is False)
         check("it has a human-readable reason to show the approver",
-              "md-approve" in M.REQ_CONDITIONAL_REMARK_REASONS)
-        check("hr-approve is NOT gated -- HR forwards, it does not decide the money",
-              "hr-approve" not in M.REQ_CONDITIONAL_REMARKS)
+              "budget-approve" in M.REQ_CONDITIONAL_REMARK_REASONS)
+        check("hr-verify is NOT gated -- HR verifies, it does not decide the money",
+              "hr-verify" not in M.REQ_CONDITIONAL_REMARKS)
+
+        # The band Management records at the budget gate. No sanctioned strength is
+        # seeded in this file, so clearing the gate lands in escalation (fail closed):
+        # "cleared the budget gate" is the fact asserted below, never "Approved".
+        BAND = {"approved_headcount": 1, "approved_salary_band_min": 500000,
+                "approved_salary_band_max": 900000}
+        CLEARED = {M.ReqApproval.PENDING_SCORECARD.value,
+                   M.ReqApproval.PENDING_ESCALATION.value}
 
         no_mismatch = mismatched["request_no"]
-        await RS.act_on_requisition(HR, COMPANY, no_mismatch, "hr-approve")
-        check("HR can forward a mismatched requisition with no remark", True)
+        await RS.act_on_requisition(HR, COMPANY, no_mismatch, "hr-verify")
+        check("HR can verify a mismatched requisition with no remark", True)
 
-        await expect_http("MD approving a MISMATCHED requisition with no remark",
-                          RS.act_on_requisition(MD, COMPANY, no_mismatch, "md-approve"),
+        await expect_http("Management approving a MISMATCHED budget with no remark",
+                          RS.act_on_requisition(MD, COMPANY, no_mismatch, "budget-approve",
+                                                budget=BAND),
                           422, "do not match")
 
         approved = await RS.act_on_requisition(
-            MD, COMPANY, no_mismatch, "md-approve",
+            MD, COMPANY, no_mismatch, "budget-approve", budget=BAND,
             remarks="Approved at the higher figure; board has agreed the uplift.")
         check("with a remark, the approval GOES THROUGH -- a mismatch warns, never blocks",
-              approved["approval_status"] == M.ReqApproval.APPROVED.value)
+              approved["approval_status"] in CLEARED)
         check("the remark is recorded against the approval",
-              "board has agreed" in (approved["md_remarks"] or "").lower())
+              "board has agreed" in (approved.get("budget_remarks_approver") or "").lower())
         check("the requisition still reads Mismatch afterwards (the disagreement is a "
               "fact, not something approval erases)",
               approved["budget_status"] == M.BudgetStatus.MISMATCH.value)
@@ -289,17 +298,18 @@ async def main() -> None:
         # =================================================================
         clean = await RS.create_requisition(HOD, COMPANY, payload(
             budget_sanctioned_amount=700000, budget_hod_amount=700000))
-        await RS.act_on_requisition(HR, COMPANY, clean["request_no"], "hr-approve")
-        done = await RS.act_on_requisition(MD, COMPANY, clean["request_no"], "md-approve")
-        check("a matched budget approves with no remark",
-              done["approval_status"] == M.ReqApproval.APPROVED.value)
+        await RS.act_on_requisition(HR, COMPANY, clean["request_no"], "hr-verify")
+        done = await RS.act_on_requisition(MD, COMPANY, clean["request_no"],
+                                           "budget-approve", budget=BAND)
+        check("a matched budget clears the gate with no remark",
+              done["approval_status"] in CLEARED)
 
         not_set = await RS.create_requisition(HOD, COMPANY, payload())
-        await RS.act_on_requisition(HR, COMPANY, not_set["request_no"], "hr-approve")
+        await RS.act_on_requisition(HR, COMPANY, not_set["request_no"], "hr-verify")
         done2 = await RS.act_on_requisition(MD, COMPANY, not_set["request_no"],
-                                            "md-approve")
-        check("a requisition with NO budget captured approves as it always did",
-              done2["approval_status"] == M.ReqApproval.APPROVED.value)
+                                            "budget-approve", budget=BAND)
+        check("a requisition with NO budget captured clears the gate as it always did",
+              done2["approval_status"] in CLEARED)
 
         # =================================================================
         section("Reporting")

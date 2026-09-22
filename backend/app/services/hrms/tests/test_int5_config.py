@@ -331,7 +331,7 @@ async def main() -> None:
 
     raised = datetime.now(timezone.utc) - timedelta(days=6)     # ~4 working days ago
     req = {"request_no": "HR-REQ-2026-001", "company_id": C1,
-           "requisition_track": M.RequisitionTrack.INTERNAL.value,
+           "requisition_track": "internal",
            "closing_status": "Open", "created_at": raised, "sla_actuals": {}}
 
     report = await SLA.sla_for(C1, req)
@@ -369,11 +369,21 @@ async def main() -> None:
           not any(word in key for key in spec_keys
                   for word in ("gate", "reference", "scorecard", "telephonic", "budget_gate",
                                "require", "enforce", "skip", "disable")))
-    check("the configurable set is exactly the five numeric policy tables plus the "
-          "INT-6 working-calendar flag -- and nothing else has been added since",
+    check("the configurable set is exactly the five numeric policy tables, the INT-6 "
+          "working-calendar flag and the two §7.5 document catalogues -- and nothing "
+          "else has been added since",
           spec_keys == {M.CONFIG_SLA_TARGET_DAYS, M.CONFIG_RETENTION_YEARS,
                         M.CONFIG_PROBATION_MONTHS, M.CONFIG_PROBATION_REMINDERS,
-                        M.CONFIG_SCORE_BANDS, M.CONFIG_HONOUR_HOLIDAYS})
+                        M.CONFIG_SCORE_BANDS, M.CONFIG_HONOUR_HOLIDAYS,
+                        M.CONFIG_ONBOARD_DOC_TYPES, M.CONFIG_EMPLOYMENT_DOCS})
+    check("the employment-document catalogue also names at least one document by default",
+          bool(M.config_spec(M.CONFIG_EMPLOYMENT_DOCS)["default"]()))
+    # The document catalogue ADDS obligations rather than removing one: every entry is a
+    # file a new hire must send. Marking one optional relaxes a company's own paperwork
+    # policy, never an approval gate, which is why it is allowed to live here.
+    check("the joining-document catalogue cannot empty itself -- an entry may be made "
+          "optional, but the setting must still name at least one document",
+          bool(M.config_spec(M.CONFIG_ONBOARD_DOC_TYPES)["default"]()))
     check("the one flag switches a MEASUREMENT, not a control -- it decides which days "
           "count towards a target, never whether the target may be skipped",
           M.config_spec(M.CONFIG_HONOUR_HOLIDAYS)["default"]() is False)
@@ -398,13 +408,16 @@ async def main() -> None:
         key, kind = spec["key"], spec["kind"]
         check(f"'{key}' declares a label, a kind and a default",
               bool(spec.get("label")) and kind and spec.get("default") is not None)
-        if kind != M.CONFIG_KIND_FLAG:
+        if kind not in (M.CONFIG_KIND_FLAG, M.CONFIG_KIND_FLAG_MAP):
             check(f"'{key}' declares its bounds -- a numeric setting with no ceiling is one "
                   f"somebody can set to anything",
                   spec.get("min") is not None and spec.get("max") is not None)
     check("every default factory produces a value of its declared shape",
           all(isinstance(s["default"](), dict) if s["kind"] in MAPS
               else isinstance(s["default"](), list) if s["kind"] == M.CONFIG_KIND_INT_LIST
+              else (isinstance(s["default"](), dict)
+                    and all(isinstance(v, bool) for v in s["default"]().values()))
+              if s["kind"] == M.CONFIG_KIND_FLAG_MAP
               else isinstance(s["default"](), bool)
               for s in M.CONFIG_SPEC))
     check("every map default names exactly the permitted names",

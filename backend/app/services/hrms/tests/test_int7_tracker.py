@@ -78,7 +78,7 @@ async def main() -> None:
     for mod in (TR, CFG, HOL, SLA):
         mod.get_collection = mongo.get_collection
 
-    INT = M.RequisitionTrack.INTERNAL.value
+    INT = "internal"
 
     reqs = store.setdefault(M.COLL_REQUISITIONS, FakeCollection())
     reqs.docs.extend([

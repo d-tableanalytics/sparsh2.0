@@ -76,7 +76,7 @@ const OrientationBoard = () => {
     <div className="space-y-6">
       <HrmsPageHeader
         icon={GraduationCap}
-        title="Orientation & Training"
+        title="Induction & Training"
         subtitle="Onboarding plan assignment, scheduling and completion tracking (SM-HR-057)."
         actions={canManage && (
           <Btn tone="ghost" onClick={() => setManagingPlans(true)}>

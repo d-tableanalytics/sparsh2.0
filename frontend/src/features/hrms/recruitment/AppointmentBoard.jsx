@@ -255,7 +255,7 @@ const AppointmentBoard = () => {
     <div className="space-y-5">
       <HrmsPageHeader
         icon={BadgeCheck}
-        title="Appointment Letters"
+        title="Appointment & Agreements"
         subtitle="Issued after an offer is accepted, confirming joining terms"
         actions={canWrite && (
           <button
@@ -320,6 +320,15 @@ const AppointmentBoard = () => {
                     <span className={`inline-block px-2 py-0.5 rounded-md text-[11px] font-bold ${STATUS_TONE[row.status] || ''}`}>
                       {row.status}
                     </span>
+                    {/* §7.5 Stage 7 — how many of the NDA / Code of Conduct / policy
+                        documents this joiner has actually signed. A letter marked
+                        Acknowledged says nothing about the documents behind it. */}
+                    {(row.document_acks || []).length > 0 && (
+                      <span className="block mt-1 text-[10.5px] font-semibold text-[var(--text-muted)]">
+                        {row.document_acks.filter((d) => d.acknowledged_at).length}
+                        /{row.document_acks.length} documents signed
+                      </span>
+                    )}
                   </td>
                   <td className="px-4 py-2.5">
                     <div className="flex items-center justify-end gap-1.5">

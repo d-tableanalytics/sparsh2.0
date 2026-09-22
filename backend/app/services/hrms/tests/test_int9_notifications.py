@@ -123,7 +123,7 @@ async def main() -> None:
         return [n["to"][1] for n in sent if n["to"][0] == "user"]
 
     # ── Fixtures ─────────────────────────────────────────────────────────────
-    INT = M.RequisitionTrack.INTERNAL.value
+    INT = "internal"
     DESIG_MGR, DESIG_PLAIN = str(ObjectId()), str(ObjectId())
     store.setdefault(M.COLL_DESIGNATIONS, FakeCollection()).docs.extend([
         {"_id": DESIG_MGR, "company_id": C1, "name": "Ops Head",
@@ -296,6 +296,21 @@ async def main() -> None:
         return None
     PR.assert_statutory_checks_complete = no_statutory
 
+    # 7.5 Stage 12: confirm_probation now needs a manager recommendation and an HR
+    # endorsement first. This suite is about which notifications fire, so the chain's own
+    # notifications are trimmed back off `sent` -- otherwise every assertion below would
+    # be measuring this helper rather than the thing it is testing.
+    async def _chain(prb_no, recommendation="Confirm"):
+        from app.models.hrms import PROBATION_CRITERIA_KEYS
+        mark = len(sent)
+        await PR.submit_review(HOD_USER, C1, prb_no, {
+            **{k: 4 for k in PROBATION_CRITERIA_KEYS},
+            "recommendation": recommendation,
+            "remarks": "Reviewed.", "signature": "Meera HOD"})
+        await PR.hr_review(HR_USER, C1, prb_no,
+                           {"decision": "Endorsed", "signature": "Priya HR"})
+        del sent[mark:]
+
     async def no_survey(actor, company_id, kind, **kw):
         return None
     import app.services.hrms_survey_service as SV
@@ -314,6 +329,7 @@ async def main() -> None:
     await prb_coll.update_one({"prb_no": prb["prb_no"]},
                               {"$set": {M.PROBATION_REMINDED_FIELD: [30, 15]}})
     sent.clear()
+    await _chain(prb["prb_no"], "Extend")
     await PR.confirm_probation(HOD_USER, C1, prb["prb_no"], {
         "signature": "Meera HOD", "outcome": "Extended",
         "extended_to": "2027-05-01", "remarks": "Targets need one more quarter."})
@@ -328,6 +344,7 @@ async def main() -> None:
 
     # -- Confirmation: HR by email; MD informed only when managerial --
     sent.clear()
+    await _chain(prb["prb_no"], "Confirm")
     await PR.confirm_probation(HOD_USER, C1, prb["prb_no"], {
         "signature": "Meera HOD", "outcome": "Confirmed"})
     check("confirmation (non-managerial role) tells HR by email, and NOT Management",
@@ -340,6 +357,7 @@ async def main() -> None:
         "employee_code": "EMP-2026-002", "started_on": "2026-08-01",
         "duration_months": 6})
     sent.clear()
+    await _chain(prb2["prb_no"], "Confirm")
     await PR.confirm_probation(HOD_USER, C1, prb2["prb_no"], {
         "signature": "Meera HOD", "outcome": "Confirmed"})
     md_notes = [n for n in sent if "MD" in n["to"][1]]
@@ -357,6 +375,7 @@ async def main() -> None:
         "employee_code": "EMP-2026-003", "started_on": "2026-08-01",
         "duration_months": 3})
     sent.clear()
+    await _chain(prb3["prb_no"], "Separate")
     await PR.confirm_probation(HOD_USER, C1, prb3["prb_no"], {
         "signature": "Meera HOD", "outcome": "Terminated",
         "remarks": "Did not meet the agreed targets."})
@@ -375,6 +394,7 @@ async def main() -> None:
         "employee_code": "EMP-2026-004", "started_on": "2026-08-01",
         "duration_months": 6})
     sent.clear()
+    await _chain(prb4["prb_no"], "Separate")
     await PR.confirm_probation(HOD_USER, C1, prb4["prb_no"], {
         "signature": "Meera HOD", "outcome": "Terminated",
         "remarks": "Leadership expectations not met."})
@@ -390,6 +410,7 @@ async def main() -> None:
         "employee_code": "EMP-2026-005", "started_on": "2026-08-01",
         "duration_months": 3})
     sent.clear()
+    await _chain(prb5["prb_no"], "Confirm")
     await PR.confirm_probation(HOD_USER, C1, prb5["prb_no"], {
         "signature": "Meera HOD", "outcome": "Confirmed"})
     hr_note = next(n for n in sent if n["to"][1] == "HR")

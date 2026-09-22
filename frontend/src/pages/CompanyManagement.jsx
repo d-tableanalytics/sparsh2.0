@@ -13,6 +13,7 @@ import {
   ExternalLink, Activity
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import { setHrmsAccess } from '../services/hrmsApi';
 
 const IconicInput = ({ icon: Icon, label, ...props }) => (
   <div className="space-y-1 group">
@@ -37,6 +38,34 @@ const CompanyManagement = () => {
   const { user } = useAuth();
   const { showSuccess, showError } = useNotification();
   const [companies, setCompanies] = useState([]);
+  // Which row is mid-save. Tracked by id rather than a bare boolean so toggling one
+  // company does not grey out every other button in the table.
+  const [hrmsBusy, setHrmsBusy] = useState(null);
+
+  /**
+   * Switch Client Hiring on or off for a client company.
+   *
+   * The flag means different things on different companies: on Sparsh Magic's own tenant
+   * it opens the whole HRMS module, on a client company it opens Client Hiring and
+   * nothing else. This list only ever shows client companies, so here it is the latter.
+   *
+   * Updated in place on success rather than by refetching the list: the server is the
+   * one that decides, and it has just told us what it decided.
+   */
+  const toggleClientHiring = async (company) => {
+    const next = !(company.hrms_enabled ?? false);
+    setHrmsBusy(company._id);
+    try {
+      await setHrmsAccess(company._id, next);
+      setCompanies((rows) => rows.map((r) =>
+        (r._id === company._id ? { ...r, hrms_enabled: next } : r)));
+    } catch (err) {
+      alert(err?.response?.data?.detail
+        || 'Client Hiring access could not be changed.');
+    } finally {
+      setHrmsBusy(null);
+    }
+  };
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [viewMode, setViewMode] = useState('table');
@@ -250,6 +279,11 @@ const CompanyManagement = () => {
                   <th className="px-5 py-3 text-left text-[11px] font-bold text-[var(--text-muted)] uppercase tracking-wider">Scale</th>
                   <th className="px-5 py-3 text-left text-[11px] font-bold text-[var(--text-muted)] uppercase tracking-wider">Location</th>
                   <th className="px-5 py-3 text-left text-[11px] font-bold text-[var(--text-muted)] uppercase tracking-wider">Status</th>
+                  {/* Client Hiring is the one HRMS surface a client company may reach.
+                      Switching it on admits their people to the PRO-fit track and to
+                      nothing else -- not payroll, employees, exits, or Sparsh Magic's
+                      own internal hiring. */}
+                  <th className="px-5 py-3 text-left text-[11px] font-bold text-[var(--text-muted)] uppercase tracking-wider">Client Hiring</th>
                   <th className="px-5 py-3 text-right text-[11px] font-bold text-[var(--text-muted)] uppercase tracking-wider">Actions</th>
                 </tr>
               </thead>
@@ -278,6 +312,25 @@ const CompanyManagement = () => {
                       <span className="px-2 py-0.5 bg-[var(--status-active-bg)] text-[var(--status-active-text)] border border-[var(--status-active-border)] rounded-md text-[10px] font-bold inline-flex items-center gap-1.5">
                         <div className="w-1 h-1 bg-[var(--status-active-text)] rounded-full"></div> Active
                       </span>
+                    </td>
+                    <td className="px-5 py-2.5">
+                      <button
+                        type="button"
+                        disabled={hrmsBusy === c._id}
+                        onClick={() => toggleClientHiring(c)}
+                        title={c.hrms_enabled
+                          ? 'Switch Client Hiring off for this company'
+                          : 'Let this company raise requirements and give their approvals'}
+                        className={`px-2.5 py-1 rounded-md text-[11px] font-bold
+                          transition-colors disabled:opacity-50 ${
+                          c.hrms_enabled
+                            ? 'bg-[var(--accent-green-bg,var(--input-bg))] text-[var(--accent-green,var(--text-main))]'
+                            : 'bg-[var(--input-bg)] text-[var(--text-muted)]'}`}
+                      >
+                        {hrmsBusy === c._id
+                          ? 'Saving…'
+                          : (c.hrms_enabled ? 'On' : 'Off')}
+                      </button>
                     </td>
                     <td className="px-5 py-2.5 text-right">
                       <button onClick={() => navigate(`/companies/${c._id}`)} className="p-1.5 text-[var(--text-muted)] hover:text-[var(--accent-indigo)] hover:bg-[var(--accent-indigo-bg)] rounded-md transition-all" title="View Details">

@@ -1,29 +1,64 @@
 import React, { useEffect, useState } from 'react';
-import { X, FilePlus2, AlertTriangle } from 'lucide-react';
+import { X, FilePlus2, AlertTriangle, Save } from 'lucide-react';
 import { useNotification } from '../../../context/NotificationContext';
 import { useHrms } from '../HrmsContext';
+import { useAuth } from '../../../context/AuthContext';
 import {
   createRequisition, updateRequisition, getDepartments, getDesignations, getEmployees,
-  getClients, getSanctionedPosition,
+  getSanctionedPosition,
 } from '../../../services/hrmsApi';
 
 /**
  * HRMS ▸ raise / edit a hiring requisition.
  *
- * The requisition and its job description are authored in ONE form because they are
- * approved together — there is no separate JD submission step. The JD section is not
- * optional: a requisition without one cannot be posted, and the server rejects it.
+ * Reorganised around the Internal Recruitment SOP's own §3: "the HOD raises a requisition
+ * specifying role, reporting line, and business justification" — three sections in the
+ * order the SOP itself reads in: Request Information, Position Details, Business
+ * Requirement.
+ *
+ * The Job Description is deliberately NOT authored here. SOP §3 (Step 3) makes writing it
+ * HR's job, once Management/Finance has cleared headcount and budget — see JdLibrary.jsx,
+ * which is where it gets written once this requisition clears that gate.
  *
  * Department and designation are pickers over the Phase 2 masters, not free-text boxes.
  * That is the whole point of those masters: the source shipped a department dropdown that
  * disagreed with another dropdown on the same screen.
+ *
+ * -- Save Draft ------------------------------------------------------------------------
+ * The server has no draft status for a requisition — raising one starts the approval
+ * chain immediately (SOP §3), so there is nowhere on the server for an unfinished one to
+ * sit. "Save Draft" is therefore a LOCAL save (one slot, this browser only): it lets a HOD
+ * close the form without losing what they typed, and is offered back the next time they
+ * open a NEW requisition. It is explicitly not a second record type, a second approval
+ * chain, or anything the server or another user ever sees.
  */
 const FIELD = 'w-full h-9 px-3 rounded-lg border border-[var(--border)] bg-[var(--input-bg)] text-[13px] text-[var(--text-main)]';
 const AREA = 'w-full px-3 py-2 rounded-lg border border-[var(--border)] bg-[var(--input-bg)] text-[13px] text-[var(--text-main)] resize-none';
 const LABEL = 'block text-[11px] font-bold uppercase tracking-widest text-[var(--text-muted)] mb-1.5';
+const READONLY = 'w-full h-9 px-3 rounded-lg border border-[var(--border)] bg-[var(--bg-card)] text-[13px] text-[var(--text-muted)] flex items-center';
+const SECTION_HEADING = 'text-[10.5px] font-bold uppercase tracking-widest text-[var(--accent-indigo)] mb-3';
 
-const RequisitionFormModal = ({ existing, onClose, onSaved, fixedTrack }) => {
-  const { scope, companyName } = useHrms();
+const DRAFT_KEY = 'hrms_requisition_draft_v1';
+
+const day = (value) => {
+  if (!value) return '—';
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? '—'
+    : d.toLocaleDateString(undefined, { day: '2-digit', month: 'short', year: 'numeric' });
+};
+
+const emptyForm = {
+  department_id: '', designation_id: '', vacancy: 1, experience_required: '',
+  qualification: '', essential_skills: '', required_date: '',
+  reporting_manager_id: '', offering_ctc: '', urgency_level: 'Medium',
+  work_location: 'Office', gender_preferred: 'Any', employment_type: 'Full-time',
+  business_justification: '', notes: '',
+  requisition_type: 'New Position', replacement_for_user_id: '',
+  replacement_reason: '', last_working_day: '',
+};
+const RequisitionFormModal = ({ existing, onClose, onSaved }) => {
+  const { scope } = useHrms();
+  const { user } = useAuth();
   const { showSuccess, showError } = useNotification();
   const isEdit = !!existing;
 
@@ -31,78 +66,63 @@ const RequisitionFormModal = ({ existing, onClose, onSaved, fixedTrack }) => {
   const [designations, setDesignations] = useState([]);
   const [people, setPeople] = useState([]);
   const [saving, setSaving] = useState(false);
-  const [form, setForm] = useState({
-    // ── Which hiring track this vacancy runs on ──
-    // `fixedTrack` is set by the page that opened this modal (Internal Hiring vs Client
-    // Hiring are separate screens — see RequisitionList / InternalRequisitionList), so the
-    // track picker below never renders and there is nothing to default here. When editing,
-    // the existing record's own track always wins — it is immutable once raised. Falling
-    // back to 'client' keeps this safe if the modal is ever opened without either.
-    requisition_track: existing?.requisition_track || fixedTrack || 'client',
-    department_id: existing?.department_id || '',
-    designation_id: existing?.designation_id || '',
-    vacancy: existing?.vacancy ?? 1,
-    experience_required: existing?.experience_required || '',
-    qualification: existing?.qualification || '',
-    essential_skills: existing?.essential_skills || '',
-    required_date: existing?.required_date || '',
-    offering_ctc: existing?.offering_ctc ?? '',
-    urgency_level: existing?.urgency_level || 'Medium',
-    work_location: existing?.work_location || 'Office',
-    gender_preferred: existing?.gender_preferred || 'Any',
-    employment_type: existing?.employment_type || 'Full-time',
-    notes: existing?.notes || '',
-    // ── Phase 11-R, Item 4 ── which client this vacancy is for. Optional: an in-house
-    // requisition has no client, and so does every requisition raised before this phase.
-    client_id: existing?.client_id || '',
-    // ── Phase 11-R, Item 6 ── the two budget figures. Both optional; leaving them empty
-    // reproduces the pre-phase behaviour exactly (budget_status reads "Not Set").
-    budget_sanctioned_amount: existing?.budget_sanctioned_amount ?? '',
-    budget_sanctioned_by: existing?.budget_sanctioned_by || '',
-    budget_sanctioned_ref: existing?.budget_sanctioned_ref || '',
-    budget_sanctioned_on: existing?.budget_sanctioned_on || '',
-    budget_hod_amount: existing?.budget_hod_amount ?? '',
-    budget_hod_by: existing?.budget_hod_by || '',
-    budget_hod_on: existing?.budget_hod_on || '',
-    budget_remarks: existing?.budget_remarks || '',
-    // ── Phase 11-R, Item 7 ── replacement vs a genuinely new position.
-    requisition_type: existing?.requisition_type || 'New Position',
-    replacement_for_user_id: existing?.replacement_for_user_id || '',
-    replacement_reason: existing?.replacement_reason || '',
-    last_working_day: existing?.last_working_day || '',
-  });
-  const [clients, setClients] = useState([]);
-  // The live sanctioned/actual/available readout for the chosen position.
-  const [sanction, setSanction] = useState(null);
-  // Only the fields this form actually asks for. Experience, CTC, skills, qualifications
-  // and employment type are entered once above, on the requisition, and the server carries
-  // them onto the JD (hrms_requisition_service.JD_FROM_REQUISITION). They were previously
-  // declared here with no input bound to them, so the JD was saved with them empty.
-  // The JD library is where a published JD gets its own wording, after it is raised.
-  const [jd, setJd] = useState({
-    title: existing?.jd?.title || '',
-    responsibilities: existing?.jd?.responsibilities || '',
-    location: existing?.jd?.location || '',
-    benefits: existing?.jd?.benefits || '',
+  const [moreDetails, setMoreDetails] = useState(false);
+  const [restoredDraft, setRestoredDraft] = useState(false);
+
+  const [form, setForm] = useState(() => {
+    if (existing) {
+      return {
+        department_id: existing.department_id || '',
+        designation_id: existing.designation_id || '',
+        vacancy: existing.vacancy ?? 1,
+        experience_required: existing.experience_required || '',
+        qualification: existing.qualification || '',
+        essential_skills: existing.essential_skills || '',
+        required_date: existing.required_date || '',
+        reporting_manager_id: existing.reporting_manager_id || '',
+        offering_ctc: existing.offering_ctc ?? '',
+        urgency_level: existing.urgency_level || 'Medium',
+        work_location: existing.work_location || 'Office',
+        gender_preferred: existing.gender_preferred || 'Any',
+        employment_type: existing.employment_type || 'Full-time',
+        business_justification: existing.business_justification || '',
+        notes: existing.notes || '',
+        requisition_type: existing.requisition_type || 'New Position',
+        replacement_for_user_id: existing.replacement_for_user_id || '',
+        replacement_reason: existing.replacement_reason || '',
+        last_working_day: existing.last_working_day || '',
+      };
+    }
+    // A NEW requisition offers back whatever was last saved as a draft in this browser.
+    try {
+      const saved = JSON.parse(localStorage.getItem(DRAFT_KEY) || 'null');
+      if (saved?.form) return { ...emptyForm, ...saved.form };
+    } catch { /* a corrupt or missing draft is simply no draft */ }
+    return emptyForm;
   });
 
+  useEffect(() => {
+    if (!existing) {
+      try {
+        if (localStorage.getItem(DRAFT_KEY)) setRestoredDraft(true);
+      } catch { /* localStorage unavailable — simply no draft banner */ }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
-  const setJdField = (k) => (e) => setJd((j) => ({ ...j, [k]: e.target.value }));
 
   useEffect(() => {
     getDepartments(scope).then(({ data }) => setDepartments((data?.departments || []).filter((d) => d.active))).catch(() => {});
     getDesignations(scope).then(({ data }) => setDesignations((data?.designations || []).filter((d) => d.active))).catch(() => {});
-    // Assignee and "replacing" both need a real login account — the server validates
-    // whoever is picked against the `learners` collection. A profile created at onboarding
-    // before the person has a login (`pending_user_link`) has no `user_id` at all, and
-    // offering it here meant its option fell back to the person's NAME as the submitted
-    // value, which the server then rejected as "Invalid assignee id."
+    // Assignee, "reporting to" and "replacing" all need a real login account — the server
+    // validates whoever is picked against the `learners` collection. A profile created at
+    // onboarding before the person has a login (`pending_user_link`) has no `user_id` at
+    // all, and offering it here meant its option fell back to the person's NAME as the
+    // submitted value, which the server then rejected as "Invalid" for that field.
     getEmployees({ ...scope, limit: 500 })
       .then(({ data }) => setPeople((data?.employees || []).filter((e) => e.user_id)))
       .catch(() => {});
-    // Phase 11-R, Item 4. The options are the ERP's Companies — there is no separate client
-    // master. Failing quietly is correct: the form works perfectly without a client.
-    getClients(scope).then(({ data }) => setClients(data?.clients || [])).catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -110,6 +130,7 @@ const RequisitionFormModal = ({ existing, onClose, onSaved, fixedTrack }) => {
   // designation or vacancy count changes, so the raiser is told BEFORE they submit that
   // the request will be escalated. This is a HINT: the server re-evaluates the same figures
   // at raise time and again at each approval step, and its answer is the one that decides.
+  const [sanction, setSanction] = useState(null);
   useEffect(() => {
     if (!form.department_id || !form.designation_id) {
       setSanction(null);
@@ -130,23 +151,38 @@ const RequisitionFormModal = ({ existing, onClose, onSaved, fixedTrack }) => {
 
   const isReplacement = form.requisition_type === 'Replacement';
 
-  // Derived on the client for display only, from the SAME rule the server applies
-  // (models.budget_status). The server's answer is what the chip and the approval gate
-  // actually read — this only avoids a round trip while typing.
-  const budgetState = (() => {
-    const a = form.budget_sanctioned_amount;
-    const b = form.budget_hod_amount;
-    if (a === '' && b === '') return 'Not Set';
-    if (a === '' || b === '') return 'Pending';
-    return Number(a) === Number(b) ? 'Matched' : 'Mismatch';
-  })();
+  const buildPayload = () => ({
+    ...form,
+    vacancy: Number(form.vacancy) || 1,
+    offering_ctc: form.offering_ctc === '' ? null : Number(form.offering_ctc),
+    reporting_manager_id: form.reporting_manager_id || null,
+    replacement_for_user_id: form.replacement_for_user_id || null,
+  });
+
+  const saveDraft = () => {
+    try {
+      localStorage.setItem(DRAFT_KEY, JSON.stringify({ form }));
+      showSuccess('Draft saved on this device — reopen "Raise" to pick up where you left off.');
+      onClose();
+    } catch {
+      showError('Could not save a draft on this device.');
+    }
+  };
+
+  const discardDraft = () => {
+    try { localStorage.removeItem(DRAFT_KEY); } catch { /* nothing to discard */ }
+    setForm(emptyForm);
+    setRestoredDraft(false);
+  };
 
   const submit = async (e) => {
     e.preventDefault();
-    // Mirrors the server rule exactly, so the user is told before a round trip rather than
-    // after one. The server still enforces it — this is not the control.
-    if (!isEdit && !jd.responsibilities.trim()) {
-      showError('Provide a Job Description — enter the key responsibilities.');
+    if (!form.reporting_manager_id) {
+      showError('Name who this position reports to.');
+      return;
+    }
+    if (!form.business_justification.trim()) {
+      showError('Give the business justification for this position.');
       return;
     }
     // Phase 11-R, Item 7. Mirrors the server rule; the server still enforces it.
@@ -160,27 +196,16 @@ const RequisitionFormModal = ({ existing, onClose, onSaved, fixedTrack }) => {
     }
     setSaving(true);
     try {
-      const payload = {
-        ...form,
-        vacancy: Number(form.vacancy) || 1,
-        offering_ctc: form.offering_ctc === '' ? null : Number(form.offering_ctc),
-        client_id: form.client_id || null,
-        budget_sanctioned_amount:
-          form.budget_sanctioned_amount === '' ? null : Number(form.budget_sanctioned_amount),
-        budget_hod_amount:
-          form.budget_hod_amount === '' ? null : Number(form.budget_hod_amount),
-        replacement_for_user_id: form.replacement_for_user_id || null,
-      };
+      const payload = buildPayload();
       if (isEdit) {
         await updateRequisition(existing.request_no, payload, scope);
         showSuccess(`Requisition ${existing.request_no} updated`);
       } else {
-        const { data } = await createRequisition({ ...payload, jd }, scope);
+        const { data } = await createRequisition(payload, scope);
+        try { localStorage.removeItem(DRAFT_KEY); } catch { /* nothing to clear */ }
         showSuccess(
-          form.requisition_track === 'internal'
-            ? `Requisition ${data.request_no} raised — HR verifies it, then Management or `
-              + 'Finance approves the budget before sourcing can begin'
-            : `Requisition ${data.request_no} raised — routed to HR for review`);
+          `Requisition ${data.request_no} raised — HR verifies it, then Management or `
+          + 'Finance approves the budget before sourcing can begin');
       }
       onSaved();
     } catch (err) {
@@ -197,7 +222,7 @@ const RequisitionFormModal = ({ existing, onClose, onSaved, fixedTrack }) => {
           <div className="flex items-center gap-2.5">
             <FilePlus2 size={17} className="text-[var(--accent-indigo)]" />
             <h2 className="text-[15px] font-bold text-[var(--text-main)]">
-              {isEdit ? `Edit ${existing.request_no}` : 'Raise a hiring requisition'}
+              {isEdit ? `Edit ${existing.request_no}` : 'Raise Internal Recruitment Request'}
             </h2>
           </div>
           <button type="button" onClick={onClose}
@@ -206,149 +231,145 @@ const RequisitionFormModal = ({ existing, onClose, onSaved, fixedTrack }) => {
           </button>
         </div>
 
-        <form onSubmit={submit} className="p-5 space-y-5 overflow-y-auto">
-          {/* ── The track ──
-              Two radios rather than a dropdown: there are exactly two, and the choice
-              changes which approvals the requisition will need, so it deserves to be
-              visible rather than folded into a select. Disabled when editing, because the
-              server refuses a change and offering one would be a lie.
-
-              Hidden entirely when the caller pins the track (`fixedTrack`): Internal Hiring
-              and Client Hiring are separate pages now, so which track this is was already
-              decided by which "Raise" button was clicked, and offering a picker here just
-              invites raising the wrong kind of requisition from the wrong screen. */}
-          {!fixedTrack && (
-          <fieldset className="rounded-xl border border-[var(--border)] p-3.5">
-            <legend className="px-1.5 text-[11px] font-bold uppercase tracking-widest text-[var(--text-muted)]">
-              Hiring track
-            </legend>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-              {[
-                { value: 'client', label: 'For a client',
-                  hint: 'The client owns the budget and gives the verdict on CVs.' },
-                { value: 'internal',
-                  label: companyName ? `${companyName} (internal)` : 'In-house (internal)',
-                  hint: 'Budget approved internally. No client, and no CVs shared out.' },
-              ].map((option) => (
-                <label
-                  key={option.value}
-                  className={`flex gap-2.5 rounded-lg border p-3 cursor-pointer transition-colors
-                    ${form.requisition_track === option.value
-                      ? 'border-[var(--accent-indigo)] bg-[var(--accent-indigo-bg)]'
-                      : 'border-[var(--border)] hover:bg-[var(--input-bg)]'}
-                    ${isEdit ? 'opacity-60 cursor-not-allowed' : ''}`}
-                >
-                  <input
-                    type="radio" name="requisition_track" value={option.value}
-                    checked={form.requisition_track === option.value}
-                    disabled={isEdit}
-                    onChange={() => setForm((f) => ({
-                      ...f, requisition_track: option.value,
-                      // An internal requisition can never carry a client, so clearing it
-                      // here keeps the form from submitting a value the server would refuse.
-                      client_id: option.value === 'internal' ? '' : f.client_id,
-                    }))}
-                    className="mt-0.5 accent-[var(--accent-indigo)]"
-                  />
-                  <span className="min-w-0">
-                    <span className="block text-[13px] font-semibold text-[var(--text-main)]">
-                      {option.label}
-                    </span>
-                    <span className="block text-[11px] text-[var(--text-muted)] mt-0.5">
-                      {option.hint}
-                    </span>
-                  </span>
-                </label>
-              ))}
-            </div>
-            {isEdit && (
-              <p className="mt-2 text-[11px] text-[var(--text-muted)]">
-                The track cannot be changed once a requisition is raised — an approval given
-                under one track&rsquo;s rules would not mean the same under the other&rsquo;s.
-              </p>
-            )}
-          </fieldset>
-          )}
-
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <div>
-              <label className={LABEL} htmlFor="r-dept">Department *</label>
-              <select id="r-dept" required value={form.department_id} onChange={set('department_id')} className={FIELD}>
-                <option value="">Select…</option>
-                {departments.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
-              </select>
-            </div>
-            <div>
-              <label className={LABEL} htmlFor="r-desig">Designation *</label>
-              <select id="r-desig" required value={form.designation_id} onChange={set('designation_id')} className={FIELD}>
-                <option value="">Select…</option>
-                {designations.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
-              </select>
-              {designations.length === 0 && (
-                <p className="mt-1 text-[11px] text-[var(--text-muted)]">
-                  No designations yet — add one under HRMS ▸ Designations first.
-                </p>
-              )}
-            </div>
-            <div>
-              <label className={LABEL} htmlFor="r-vac">Vacancies *</label>
-              <input id="r-vac" type="number" min="1" required value={form.vacancy} onChange={set('vacancy')} className={FIELD} />
-            </div>
-            <div>
-              <label className={LABEL} htmlFor="r-date">Required by *</label>
-              <input id="r-date" type="date" required value={form.required_date} onChange={set('required_date')} className={FIELD} />
-            </div>
-            <div>
-              <label className={LABEL} htmlFor="r-exp">Experience required *</label>
-              <input id="r-exp" required value={form.experience_required} onChange={set('experience_required')}
-                placeholder="e.g. 3–5 years" className={FIELD} />
-            </div>
-            <div>
-              <label className={LABEL} htmlFor="r-qual">Qualification *</label>
-              <input id="r-qual" required value={form.qualification} onChange={set('qualification')}
-                placeholder="e.g. B.Com" className={FIELD} />
-            </div>
-            <div>
-              <label className={LABEL} htmlFor="r-ctc">Offered CTC (annual)</label>
-              <input id="r-ctc" type="number" min="0" value={form.offering_ctc} onChange={set('offering_ctc')} className={FIELD} />
-            </div>
-            <div>
-              <label className={LABEL} htmlFor="r-urg">Urgency</label>
-              <select id="r-urg" value={form.urgency_level} onChange={set('urgency_level')} className={FIELD}>
-                {['High', 'Medium', 'Low'].map((v) => <option key={v} value={v}>{v}</option>)}
-              </select>
-            </div>
-            <div>
-              <label className={LABEL} htmlFor="r-loc">Work location</label>
-              <select id="r-loc" value={form.work_location} onChange={set('work_location')} className={FIELD}>
-                {['Office', 'Factory', 'Remote', 'Hybrid'].map((v) => <option key={v} value={v}>{v}</option>)}
-              </select>
-            </div>
-            <div>
-              <label className={LABEL} htmlFor="r-type">Employment type</label>
-              <select id="r-type" value={form.employment_type} onChange={set('employment_type')} className={FIELD}>
-                {['Full-time', 'Part-time', 'Contract', 'Intern', 'Consultant'].map((v) => <option key={v} value={v}>{v}</option>)}
-              </select>
-            </div>
-            <div>
-              <label className={LABEL} htmlFor="r-gender">Gender preference</label>
-              <select id="r-gender" value={form.gender_preferred} onChange={set('gender_preferred')} className={FIELD}>
-                {['Any', 'Male', 'Female'].map((v) => <option key={v} value={v}>{v}</option>)}
-              </select>
-            </div>
+        {restoredDraft && !isEdit && (
+          <div className="mx-5 mt-4 flex items-center justify-between gap-3 rounded-lg
+                          border border-[var(--accent-indigo-border)] bg-[var(--accent-indigo-bg)]
+                          px-3.5 py-2.5">
+            <p className="text-[12px] text-[var(--accent-indigo)]">
+              Restored from a draft saved on this device.
+            </p>
+            <button type="button" onClick={discardDraft}
+              className="text-[11.5px] font-bold text-[var(--accent-indigo)] underline shrink-0">
+              Discard draft
+            </button>
           </div>
+        )}
 
+        <form onSubmit={submit} className="p-5 space-y-6 overflow-y-auto">
+          {/* ══ 1. Request Information ══ */}
           <div>
-            <label className={LABEL} htmlFor="r-skills">Required skills *</label>
-            <textarea id="r-skills" rows={2} required value={form.essential_skills}
-              onChange={set('essential_skills')} placeholder="Comma-separated" className={AREA} />
+            <h3 className={SECTION_HEADING}>1. Request Information</h3>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              {isEdit && (
+                <>
+                  <div>
+                    <label className={LABEL}>Requisition ID</label>
+                    <p className={READONLY}>{existing.request_no}</p>
+                  </div>
+                  <div>
+                    <label className={LABEL}>Request date</label>
+                    <p className={READONLY}>{day(existing.created_at)}</p>
+                  </div>
+                </>
+              )}
+              <div>
+                <label className={LABEL} htmlFor="r-dept">Department *</label>
+                <select id="r-dept" required value={form.department_id} onChange={set('department_id')} className={FIELD}>
+                  <option value="">Select…</option>
+                  {departments.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
+                </select>
+              </div>
+              <div>
+                <label className={LABEL}>Requesting HOD</label>
+                <p className={READONLY}>
+                  {isEdit ? (existing.created_by_name || '—') : (user?.full_name || 'You')}
+                </p>
+              </div>
+            </div>
           </div>
 
-          {/* ══ Phase 11-R, Item 7 — position & sanction ══ */}
-          <div className="pt-4 border-t border-[var(--border)] space-y-3">
-            <p className="text-[13px] font-bold text-[var(--text-main)]">Position &amp; sanction</p>
+          {/* ══ 2. Position Details ══ */}
+          <div className="pt-5 border-t border-[var(--border)]">
+            <h3 className={SECTION_HEADING}>2. Position Details</h3>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label className={LABEL} htmlFor="r-desig">Position / Role *</label>
+                <select id="r-desig" required value={form.designation_id} onChange={set('designation_id')} className={FIELD}>
+                  <option value="">Select…</option>
+                  {designations.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
+                </select>
+                {designations.length === 0 && (
+                  <p className="mt-1 text-[11px] text-[var(--text-muted)]">
+                    No designations yet — add one under HRMS ▸ Designations first.
+                  </p>
+                )}
+              </div>
+              <div>
+                <label className={LABEL} htmlFor="r-report">Reporting To *</label>
+                <select id="r-report" required value={form.reporting_manager_id}
+                  onChange={set('reporting_manager_id')} className={FIELD}>
+                  <option value="">Select…</option>
+                  {people.map((p) => <option key={p.user_id} value={p.user_id}>{p.name}</option>)}
+                </select>
+              </div>
+              <div>
+                <label className={LABEL} htmlFor="r-vac">No. of Positions *</label>
+                <input id="r-vac" type="number" min="1" required value={form.vacancy} onChange={set('vacancy')} className={FIELD} />
+              </div>
+              <div>
+                <label className={LABEL} htmlFor="r-date">Required by *</label>
+                <input id="r-date" type="date" required value={form.required_date} onChange={set('required_date')} className={FIELD} />
+              </div>
+              <div>
+                <label className={LABEL} htmlFor="r-exp">Required Experience *</label>
+                <input id="r-exp" required value={form.experience_required} onChange={set('experience_required')}
+                  placeholder="e.g. 3–5 years" className={FIELD} />
+              </div>
+            </div>
+            <div className="mt-3">
+              <label className={LABEL} htmlFor="r-skills">Required Skills / Competencies *</label>
+              <textarea id="r-skills" rows={2} required value={form.essential_skills}
+                onChange={set('essential_skills')} placeholder="Comma-separated" className={AREA} />
+            </div>
 
-            <div className="flex flex-wrap gap-4">
+            <button type="button" onClick={() => setMoreDetails((v) => !v)}
+              className="mt-3 text-[11.5px] font-bold text-[var(--accent-indigo)]">
+              {moreDetails ? 'Hide' : 'Show'} additional position details (optional)
+            </button>
+            {moreDetails && (
+              <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className={LABEL} htmlFor="r-qual">Qualification</label>
+                  <input id="r-qual" value={form.qualification} onChange={set('qualification')}
+                    placeholder="e.g. B.Com" className={FIELD} />
+                </div>
+                <div>
+                  <label className={LABEL} htmlFor="r-ctc">Offered CTC (annual)</label>
+                  <input id="r-ctc" type="number" min="0" value={form.offering_ctc} onChange={set('offering_ctc')} className={FIELD} />
+                </div>
+                <div>
+                  <label className={LABEL} htmlFor="r-urg">Urgency</label>
+                  <select id="r-urg" value={form.urgency_level} onChange={set('urgency_level')} className={FIELD}>
+                    {['High', 'Medium', 'Low'].map((v) => <option key={v} value={v}>{v}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className={LABEL} htmlFor="r-loc">Work location</label>
+                  <select id="r-loc" value={form.work_location} onChange={set('work_location')} className={FIELD}>
+                    {['Office', 'Factory', 'Remote', 'Hybrid'].map((v) => <option key={v} value={v}>{v}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className={LABEL} htmlFor="r-type">Employment type</label>
+                  <select id="r-type" value={form.employment_type} onChange={set('employment_type')} className={FIELD}>
+                    {['Full-time', 'Part-time', 'Contract', 'Intern', 'Consultant'].map((v) => <option key={v} value={v}>{v}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className={LABEL} htmlFor="r-gender">Gender preference</label>
+                  <select id="r-gender" value={form.gender_preferred} onChange={set('gender_preferred')} className={FIELD}>
+                    {['Any', 'Male', 'Female'].map((v) => <option key={v} value={v}>{v}</option>)}
+                  </select>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* ══ 3. Business Requirement ══ */}
+          <div className="pt-5 border-t border-[var(--border)]">
+            <h3 className={SECTION_HEADING}>3. Business Requirement</h3>
+
+            <div className="flex flex-wrap gap-4 mb-3">
               {['New Position', 'Replacement'].map((value) => (
                 <label key={value} className="flex items-center gap-2 text-[13px] text-[var(--text-main)]">
                   <input
@@ -364,7 +385,7 @@ const RequisitionFormModal = ({ existing, onClose, onSaved, fixedTrack }) => {
             </div>
 
             {isReplacement && (
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
                 <div>
                   <label className={LABEL} htmlFor="r-repl">Replacing *</label>
                   <select id="r-repl" value={form.replacement_for_user_id}
@@ -387,8 +408,20 @@ const RequisitionFormModal = ({ existing, onClose, onSaved, fixedTrack }) => {
               </div>
             )}
 
+            <div className="mb-3">
+              <label className={LABEL} htmlFor="r-just">Business Justification *</label>
+              <textarea id="r-just" rows={3} required value={form.business_justification}
+                onChange={set('business_justification')}
+                placeholder="Why the organisation needs this position" className={AREA} />
+            </div>
+            <div>
+              <label className={LABEL} htmlFor="r-remarks">Additional Remarks</label>
+              <textarea id="r-remarks" rows={2} value={form.notes}
+                onChange={set('notes')} placeholder="Any other role-specific requirement" className={AREA} />
+            </div>
+
             {sanction && (
-              <div className={`rounded-lg border px-3.5 py-3 ${
+              <div className={`mt-3 rounded-lg border px-3.5 py-3 ${
                 sanction.is_over_sanction
                   ? 'border-[var(--accent-amber,var(--accent-red))] bg-[var(--accent-amber-bg,var(--accent-red-bg))]'
                   : 'border-[var(--border)] bg-[var(--input-bg)]'
@@ -425,111 +458,32 @@ const RequisitionFormModal = ({ existing, onClose, onSaved, fixedTrack }) => {
             )}
           </div>
 
-          {/* ══ Phase 11-R, Items 4 & 6 — client and budget ══ */}
-          <div className="pt-4 border-t border-[var(--border)] space-y-3">
-            <p className="text-[13px] font-bold text-[var(--text-main)]">Client &amp; budget</p>
-
-            {/* An internal requisition is Sparsh Magic's own vacancy, so it has no client.
-                The selector is not disabled, it is ABSENT -- a greyed-out control invites
-                the question "why can't I pick one", which the track radio already answered. */}
-            {clients.length > 0 && form.requisition_track !== 'internal' && (
-              <div>
-                <label className={LABEL} htmlFor="r-client">Client</label>
-                <select id="r-client" value={form.client_id} onChange={set('client_id')} className={FIELD}>
-                  <option value="">In-house / no client</option>
-                  {clients.map((c) => (
-                    <option key={c.client_id} value={c.client_id}>{c.name}</option>
-                  ))}
-                </select>
-                <p className="mt-1 text-[11px] text-[var(--text-muted)]">
-                  From the Companies section. This is what the recruitment dashboard filters
-                  by, so a requisition left in-house will not appear under any client.
-                </p>
-              </div>
-            )}
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <div>
-                <label className={LABEL} htmlFor="r-bsanc">Budget sanctioned by management</label>
-                <input id="r-bsanc" type="number" min="0" value={form.budget_sanctioned_amount}
-                  onChange={set('budget_sanctioned_amount')} className={FIELD} />
-              </div>
-              <div>
-                <label className={LABEL} htmlFor="r-bhod">Budget approved by HOD</label>
-                <input id="r-bhod" type="number" min="0" value={form.budget_hod_amount}
-                  onChange={set('budget_hod_amount')} className={FIELD} />
-              </div>
-              <div>
-                <label className={LABEL} htmlFor="r-bref">Sanction reference</label>
-                <input id="r-bref" value={form.budget_sanctioned_ref}
-                  onChange={set('budget_sanctioned_ref')}
-                  placeholder="Approval note or minute number" className={FIELD} />
-              </div>
-              <div>
-                <label className={LABEL} htmlFor="r-bdate">Sanctioned on</label>
-                <input id="r-bdate" type="date" value={form.budget_sanctioned_on}
-                  onChange={set('budget_sanctioned_on')} className={FIELD} />
-              </div>
-            </div>
-
-            {budgetState !== 'Not Set' && (
-              <div className={`rounded-lg border px-3.5 py-2.5 text-[12.5px] ${
-                budgetState === 'Mismatch'
-                  ? 'border-[var(--accent-red)] bg-[var(--accent-red-bg)] text-[var(--accent-red)]'
-                  : 'border-[var(--border)] bg-[var(--input-bg)] text-[var(--text-muted)]'
-              }`}>
-                <b>Budget: {budgetState}.</b>{' '}
-                {budgetState === 'Mismatch' && (
-                  <>The two figures differ by{' '}
-                    {Math.abs(Number(form.budget_hod_amount) - Number(form.budget_sanctioned_amount))
-                      .toLocaleString('en-IN')}.{' '}
-                    This does not block approval, but HR, the MD and you will be notified,
-                    and the MD must record a remark when approving.
-                  </>
-                )}
-                {budgetState === 'Pending' && (
-                  <>Only one side has been recorded. The other approver will be notified.</>
-                )}
-              </div>
-            )}
-
-            <div>
-              <label className={LABEL} htmlFor="r-brem">Budget remarks</label>
-              <textarea id="r-brem" rows={2} value={form.budget_remarks}
-                onChange={set('budget_remarks')} className={AREA} />
-            </div>
-          </div>
-
           {!isEdit && (
-            <div className="pt-4 border-t border-[var(--border)] space-y-3">
-              <div>
-                <p className="text-[13px] font-bold text-[var(--text-main)]">Job description</p>
-                <p className="text-[11.5px] text-[var(--text-muted)]">
-                  Authored with the requisition and approved together — it is what candidates
-                  will see once the role is published. Experience, CTC, skills,
-                  qualifications, work location and employment type carry over from the
-                  details above; edit them per-JD in the JD library once this is raised.
-                </p>
-              </div>
-              <div>
-                <label className={LABEL} htmlFor="j-resp">Key responsibilities *</label>
-                <textarea id="j-resp" rows={4} required value={jd.responsibilities}
-                  onChange={setJdField('responsibilities')} placeholder="One per line" className={AREA} />
-              </div>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div className="pt-5 border-t border-[var(--border)] flex items-start gap-2.5">
+              <FilePlus2 size={15} className="text-[var(--accent-indigo)] mt-0.5 shrink-0" />
+              <p className="text-[11.5px] text-[var(--text-muted)]">
+                The Job Description and Position Scorecard are written by HR once Management
+                or Finance approves headcount and budget for this request — see the
+                Requisitions screen once it clears that gate.
+              </p>
+            </div>
+          )}
+
+          {/* ══ Budget — Management/Finance's own figures, recorded at approval, shown here
+              read-only once they exist. Not part of the HOD's raise (SOP §3 names only role,
+              reporting line and justification as theirs to give). ══ */}
+          {isEdit && (existing.budget_sanctioned_amount != null || existing.budget_hod_amount != null) && (
+            <div className="pt-5 border-t border-[var(--border)]">
+              <h3 className={SECTION_HEADING}>Budget (recorded at approval)</h3>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-[13px]">
                 <div>
-                  <label className={LABEL} htmlFor="j-title">JD title</label>
-                  <input id="j-title" value={jd.title} onChange={setJdField('title')}
-                    placeholder="Defaults to the designation" className={FIELD} />
+                  <label className={LABEL}>Sanctioned by management</label>
+                  <p className={READONLY}>{existing.budget_sanctioned_amount ?? '—'}</p>
                 </div>
                 <div>
-                  <label className={LABEL} htmlFor="j-loc">Location</label>
-                  <input id="j-loc" value={jd.location} onChange={setJdField('location')} className={FIELD} />
+                  <label className={LABEL}>Approved by HOD</label>
+                  <p className={READONLY}>{existing.budget_hod_amount ?? '—'}</p>
                 </div>
-              </div>
-              <div>
-                <label className={LABEL} htmlFor="j-benefits">Benefits</label>
-                <textarea id="j-benefits" rows={2} value={jd.benefits} onChange={setJdField('benefits')} className={AREA} />
               </div>
             </div>
           )}
@@ -539,9 +493,16 @@ const RequisitionFormModal = ({ existing, onClose, onSaved, fixedTrack }) => {
               className="h-9 px-4 rounded-lg border border-[var(--border)] text-[12px] font-bold text-[var(--text-muted)]">
               Cancel
             </button>
+            {!isEdit && (
+              <button type="button" onClick={saveDraft} disabled={saving}
+                className="h-9 px-4 rounded-lg border border-[var(--border)] text-[12px] font-bold
+                          text-[var(--text-main)] flex items-center gap-1.5 disabled:opacity-50">
+                <Save size={13} /> Save Draft
+              </button>
+            )}
             <button type="submit" disabled={saving}
               className="h-9 px-4 rounded-lg bg-[var(--accent-indigo)] text-white text-[12px] font-bold disabled:opacity-50">
-              {saving ? 'Saving…' : isEdit ? 'Save changes' : 'Raise for HR review'}
+              {saving ? 'Saving…' : isEdit ? 'Save changes' : 'Submit Request'}
             </button>
           </div>
         </form>

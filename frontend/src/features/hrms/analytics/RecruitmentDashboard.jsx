@@ -5,7 +5,7 @@ import HrmsPageHeader from '../common/HrmsPageHeader';
 import HrmsScopeBar from '../common/HrmsScopeBar';
 import { HrmsLoading, HrmsError } from '../common/HrmsStates';
 import {
-  getHrmsDashboard, getHrmsFunnel, getHrmsBreakdown, getHrmsPositions, getClients,
+  getHrmsDashboard, getHrmsFunnel, getHrmsBreakdown, getHrmsPositions,
   getInternalKpis, getDepartments, getDesignations,
 } from '../../../services/hrmsApi';
 import { CARD, GRID_TWO, SECTION_TITLE, nf } from './analyticsKit';
@@ -31,7 +31,6 @@ const BREAKDOWNS = [
   { by: 'designation', title: 'Requisitions by role' },
   // ── Phase 11-R, Item 4 ──
   { by: 'referral_source', title: 'Referral sources' },
-  { by: 'client_status', title: 'Client verdicts' },
 ];
 
 /**
@@ -39,7 +38,7 @@ const BREAKDOWNS = [
  *
  * The server returns fifteen KPIs as one flat list. Rendered as one flat grid they are a
  * wall of identical boxes with no entry point, so they are banded by the question they
- * answer: who applied, what we are hiring for, how far they got, what the client said.
+ * answer: who applied, what we are hiring for, and how far they got.
  *
  * The grouping is presentation only — no figure is computed, combined or filtered here.
  * Anything the server sends whose key is absent from this map falls into the trailing
@@ -51,8 +50,6 @@ const KPI_BANDS = [
   { title: 'Positions', keys: ['open_requisitions', 'awaiting_approval'] },
   { title: 'Progress to hire', keys: ['interviews', 'offers_sent', 'onboarding',
                                       'hired', 'joinings'] },
-  { title: 'Client', keys: ['shared_with_client', 'client_shortlisted',
-                            'client_rejected'] },
 ];
 
 const bandKpis = (kpis) => {
@@ -75,10 +72,6 @@ const RecruitmentDashboard = () => {
   const [breakdowns, setBreakdowns] = useState({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  // ── Phase 11-R, Item 4 ── the client-wise dropdown. Empty means "all clients", which is
-  // what surfaces the per-client comparison table instead of one client's figures.
-  const [clients, setClients] = useState([]);
-  const [clientId, setClientId] = useState('');
   const [positions, setPositions] = useState(null);
   // ── Internal track ── the SOP §10 KPI block is opt-in: asking for it changes what the
   // dashboard IS about, so it is a deliberate switch rather than something always on.
@@ -91,23 +84,7 @@ const RecruitmentDashboard = () => {
   const [kpiBlock, setKpiBlock] = useState(null);
   const [masters, setMasters] = useState({ departments: [], designations: [] });
 
-  useEffect(() => {
-    // The "which client is this for" filter only means anything for Sparsh staff, who
-    // recruit FOR other companies. A client-side company never does — their own reqs never
-    // carry another company's client_id — so this list would be every OTHER company on the
-    // platform shown to a reader who has no reason to see who else uses the module. Never
-    // fetched for a client-side caller, not just hidden once it arrives.
-    if (!companyId || !isInternal) return;
-    // These rows are the ERP's Companies, projected to `{ client_id, name }` by the API —
-    // HRMS keeps no client list of its own. Failing quietly is correct: losing the filter is
-    // better than an error banner over figures that are perfectly readable without it.
-    getClients(scope)
-      .then(({ data: d }) => setClients(d?.clients || []))
-      .catch(() => setClients([]));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [companyId, isInternal]);
 
-  const selectedClient = clients.find((c) => c.client_id === clientId);
 
   const load = useCallback(async () => {
     if (!companyId) { setLoading(false); return; }
@@ -117,7 +94,6 @@ const RecruitmentDashboard = () => {
       ...scope,
       date_from: range.from || undefined,
       date_to: range.to || undefined,
-      client_id: clientId || undefined,
       track: track || undefined,
     };
     try {
@@ -148,12 +124,12 @@ const RecruitmentDashboard = () => {
       setLoading(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [companyId, range.from, range.to, clientId, track]);
+  }, [companyId, range.from, range.to, track]);
 
   useEffect(() => { load(); }, [load]);
 
   // The masters feed the KPI filter dropdowns. Fetched once, only when the internal view
-  // is opened -- a client-track reader never pays for them.
+  // is opened -- nobody else pays for them.
   useEffect(() => {
     if (track !== 'internal' || !companyId) return;
     Promise.all([getDepartments(scope), getDesignations(scope)])
@@ -191,62 +167,21 @@ const RecruitmentDashboard = () => {
       <HrmsPageHeader
         icon={BarChart3}
         title="Recruitment analytics"
-        subtitle={selectedClient
-          ? `${selectedClient.name} · ${data?.range ? `${data.range.from} to ${data.range.to}` : ''}`
-          // "All clients" only means something from Sparsh's multi-client vantage point —
-          // a client-side company's own dashboard is just their own hiring, not a
-          // comparison, so it gets the plain date range instead.
-          : (data?.range
-            ? (isInternal ? `All clients · ${data.range.from} to ${data.range.to}`
-              : `${data.range.from} to ${data.range.to}`)
-            : 'Hiring at a glance')}
+        // In-house hiring, so the only scope worth stating is the period.
+        subtitle={data?.range
+          ? `${data.range.from} to ${data.range.to}`
+          : 'Hiring at a glance'}
         actions={<RangePicker value={range} onChange={setRange} />}
       />
       <HrmsScopeBar />
 
-      {/* ── The client-wise filter ──
-          The options are the ERP's Companies, so there is no client list to maintain here
-          and no company entered twice. Changing it re-reads every figure on the page from
-          the server — nothing below is filtered in the browser.
-
-          "All clients" is not a wider scope than the default — it IS the default, and it
-          turns on the per-client comparison table below.
-
-          Sparsh staff only: see the effect above for why a client-side company never gets
-          this list fetched in the first place. */}
-      {isInternal && clients.length > 0 && (
-        <div className="flex items-center gap-2.5 flex-wrap rounded-xl border border-[var(--border)] bg-[var(--bg-card)] px-4 py-3">
-          <label htmlFor="d-client" className="text-[11px] font-bold uppercase tracking-widest text-[var(--text-muted)]">
-            Client
-          </label>
-          <select
-            id="d-client"
-            value={clientId}
-            onChange={(e) => setClientId(e.target.value)}
-            className="h-9 min-w-[240px] px-3 rounded-lg border border-[var(--border)] bg-[var(--input-bg)] text-[13px] font-semibold text-[var(--text-main)]"
-          >
-            <option value="">All clients</option>
-            {clients.map((c) => (
-              <option key={c.client_id} value={c.client_id}>{c.name}</option>
-            ))}
-          </select>
-          <p className="text-[11.5px] text-[var(--text-muted)]">
-            {selectedClient
-              ? 'Every figure below covers this client only.'
-              : 'From the Companies section. Pick one to see that client’s funnel.'}
-          </p>
-        </div>
-      )}
-
       {/* ── Internal track ── the SOP §10 KPI block.
-          A separate toggle from the client filter because it answers a different question:
-          the client filter asks "how is this client's hiring going", this asks "is our own
+          A toggle rather than a permanent block because it answers a narrower question
+          than the tiles above: not "how is hiring going" but "is our own
           recruitment policy being followed".
 
           Sparsh staff only: the Internal Recruitment SOP is Sparsh Magic's own governance
-          document (position scorecards, phone screen, shortlisting committee — the same
-          track HrmsWorkspaceBar's "Internal hiring" group and INTERNAL_TRACK_ONLY_CAPS
-          already keep out of a client-side user's reach elsewhere in the module). With one
+          document (position scorecards, phone screen, shortlisting committee). With one
           option left there is nothing to toggle, so the selector itself is dropped rather
           than shown disabled. */}
       {isInternal && (
@@ -305,19 +240,14 @@ const RecruitmentDashboard = () => {
           </div>
 
           {/* ── The CV funnel ──
-              CV review → selection → client sharing → client verdict → joining, which is
-              the chain a recruitment client asks about. It sits ABOVE the hiring funnel
+              CV review → shortlist → selection → joining. It sits ABOVE the hiring funnel
               because it is this screen's subject; the hiring funnel below answers the
               different question of how far candidates got in the pipeline. */}
           {data.cv_funnel?.length > 0 && (
             <section className={CARD}>
               <p className={`${SECTION_TITLE} mb-1`}>Recruitment funnel</p>
               <p className="mb-4 text-[11.5px] text-[var(--text-muted)]">
-                {selectedClient
-                  ? `Every CV raised against ${selectedClient.name}'s requisitions.`
-                  : (isInternal
-                    ? 'Every CV in scope, across all clients and in-house requisitions.'
-                    : 'Every CV raised against your own requisitions.')}
+                Every CV raised against our own requisitions.
               </p>
               <CvFunnel stages={data.cv_funnel} />
             </section>
@@ -389,57 +319,6 @@ const RecruitmentDashboard = () => {
             </div>
           </div>
 
-          {/* ── Phase 11-R, Item 4 — the per-client comparison ──
-              Shown only in the "all clients" view: with one client selected the KPIs above
-              already ARE that client's figures, and a one-row comparison is noise. Sparsh
-              staff only, for the same reason: a client-side company's own reqs never carry
-              another company's client_id, so this would always be a single un-telling row. */}
-          {isInternal && !clientId && data.client_comparison?.length > 0 && (
-            <section className={CARD}>
-              <p className={`${SECTION_TITLE} mb-3`}>Client comparison</p>
-              <div className="overflow-x-auto">
-                <table className="w-full text-[12.5px] min-w-[760px]">
-                  <thead>
-                    <tr className="text-[10.5px] font-bold uppercase tracking-widest text-[var(--text-muted)] border-b border-[var(--border)]">
-                      <th className="text-left py-2 pr-3">Client</th>
-                      <th className="text-right py-2 px-2">Reqs</th>
-                      <th className="text-right py-2 px-2">CVs</th>
-                      <th className="text-right py-2 px-2">Reviewed</th>
-                      <th className="text-right py-2 px-2">Shared</th>
-                      <th className="text-right py-2 px-2">Client OK</th>
-                      <th className="text-right py-2 px-2">Client no</th>
-                      <th className="text-right py-2 px-2">Selected</th>
-                      <th className="text-right py-2 pl-2">Joined</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {data.client_comparison.map((row) => (
-                      <tr key={row.client_id || 'none'} className="border-b border-[var(--border)] last:border-0">
-                        <td className="py-2 pr-3 font-semibold text-[var(--text-main)]">
-                          {row.client_name}
-                        </td>
-                        <td className="py-2 px-2 text-right">{nf(row.requisitions)}</td>
-                        <td className="py-2 px-2 text-right">{nf(row.total)}</td>
-                        <td className="py-2 px-2 text-right">{nf(row.reviewed)}</td>
-                        <td className="py-2 px-2 text-right">{nf(row.shared_with_client)}</td>
-                        <td className="py-2 px-2 text-right text-[var(--accent-green,var(--accent-indigo))]">
-                          {nf(row.client_shortlisted)}
-                        </td>
-                        <td className="py-2 px-2 text-right text-[var(--accent-red)]">
-                          {nf(row.client_rejected)}
-                        </td>
-                        <td className="py-2 px-2 text-right">{nf(row.selected)}</td>
-                        <td className="py-2 pl-2 text-right font-bold text-[var(--text-main)]">
-                          {nf(row.joinings)}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </section>
-          )}
-
           {/* ── Phase 11-R, Item 4 — position-wise CV status matrix ──
               Horizontally scrolling with a sticky first column: there is one column per
               application status and that will always be wider than a screen. Only statuses
@@ -449,9 +328,7 @@ const RecruitmentDashboard = () => {
             <section className={CARD}>
               <p className={`${SECTION_TITLE} mb-2`}>Position-wise CV status</p>
               <p className="text-[12.5px] text-[var(--text-muted)]">
-                {selectedClient
-                  ? `No requisitions were raised for ${selectedClient.name} in this period.`
-                  : 'No requisitions in this period.'}
+                No requisitions in this period.
               </p>
             </section>
           )}
@@ -483,7 +360,7 @@ const RecruitmentDashboard = () => {
                             {row.designation || row.request_no}
                           </span>
                           <span className="block text-[11px] text-[var(--text-muted)]">
-                            {[row.request_no, row.department, row.client_name]
+                            {[row.request_no, row.department]
                               .filter(Boolean).join(' · ')}
                           </span>
                         </td>

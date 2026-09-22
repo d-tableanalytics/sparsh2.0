@@ -201,7 +201,8 @@ async def main() -> None:
 
     SERVICES = (RS, SC, PS, CS, TS, ASM, IV, SL, RC, NG, OF, PB, OB, PR, EX, PO, AN,
                 AUD, IDS, SN, LS, RF, BANDS, CFG, COMM, SV, DS, ES)
-    for mod in SERVICES:
+    import app.utils.hrms_access as HACC
+    for mod in list(SERVICES) + [HACC]:
         mod.get_collection = mongo.get_collection
 
     sent = []
@@ -383,8 +384,45 @@ async def main() -> None:
         # Asserted as "all but one" rather than as a number, so a later phase adding a
         # capability does not fail this line for the wrong reason -- what matters is that
         # the MD's grant stays universal-minus-the-HR-verification-step, not its size.
-        check("(actual) the MD holds every capability but one",
-              len(M.ROLE_CAPABILITIES[M.HrmsRole.MD]) == len(list(M.Cap)) - 1)
+        # Everything the MD lacks, other than HR's verification step, is a capability that
+        # only makes sense held by the SUBJECT of a record -- acknowledging a policy, or
+        # submitting your own pulse response. Those are not authority the MD is missing.
+        # (This used to be a strict count, which later phases broke every time they added a
+        # self-service grant -- exactly the "fails for the wrong reason" the note above
+        # says it was written to avoid.)
+        SELF_SERVICE_ONLY = {
+            M.Cap.POLICY_ACKNOWLEDGE, M.Cap.PULSE_SUBMIT,
+            M.Cap.EXIT_INTERVIEW_SUBMIT, M.Cap.GMP_READ, M.Cap.GMP_WRITE,
+        }
+        # Client Hiring is a SEPARATE TRACK, and the Operations Head's universal grant does
+        # not reach into it. Two kinds of capability are deliberately withheld there:
+        # things the client owns (their own requisition, their own approvals) and delivery
+        # work the recruiter does (drafting a benchmark, screening a CV). Neither is
+        # authority the MD is missing.
+        #
+        # Derived from the prefix rather than listed, so a later Client Hiring step does
+        # not fail this line for the wrong reason -- the same discipline the note above
+        # says this assertion was rewritten to follow.
+        CLIENT_TRACK = {c for c in M.Cap if c.value.startswith("client_")}
+        md_missing = set(M.Cap) - set(M.ROLE_CAPABILITIES[M.HrmsRole.MD])
+        check("(actual) on the INTERNAL track the MD holds every capability but one",
+              md_missing - SELF_SERVICE_ONLY - CLIENT_TRACK
+              == {M.Cap.REQUISITION_REVIEW_HR})
+
+        # What the MD does hold on the client track is oversight, and that is asserted
+        # positively so "withheld" cannot quietly become "absent altogether".
+        for cap in (M.Cap.CLIENT_REQUISITION_READ, M.Cap.CLIENT_REQUISITION_REVIEW,
+                    M.Cap.CLIENT_SCORECARD_READ, M.Cap.CLIENT_SCORECARD_REVIEW,
+                    M.Cap.CLIENT_CANDIDATE_READ, M.Cap.CLIENT_CANDIDATE_SHARE):
+            check(f"the Operations Head oversees {cap.value}",
+                  cap in M.ROLE_CAPABILITIES[M.HrmsRole.MD])
+
+        # The three the CLIENT owns. No Sparsh role may hold any of them, or the client's
+        # mandatory involvement becomes a formality the supplier performs for itself.
+        for cap in (M.Cap.CLIENT_REQUISITION_WRITE, M.Cap.CLIENT_SCORECARD_APPROVE,
+                    M.Cap.CLIENT_CANDIDATE_DECIDE):
+            check(f"no Sparsh role holds {cap.value}",
+                  not any(cap in caps for caps in M.ROLE_CAPABILITIES.values()))
         check("the one capability the MD does NOT hold is HR's verification step",
               M.Cap.REQUISITION_REVIEW_HR not in M.ROLE_CAPABILITIES[M.HrmsRole.MD])
         finding(
@@ -497,8 +535,8 @@ async def main() -> None:
         # =================================================================
         section("STAGE 4 -- Recruitment planning / sourcing (HR=R)")
         # =================================================================
-        posting = await PS.create_posting(HR, COMPANY, {"jd_no": JD})
-        check("HR (R) published the posting", bool(posting["posting"]["posting_code"]))
+        posting = await PS.create_posting(HR, COMPANY, {"jd_no": JD, "channels": ["Job Portals"]})
+        check("HR (R) drafted the posting", bool(posting["posting"]["posting_code"]))
         check("HOD (I) holds no posting.write", not A.can(HOD, M.Cap.POSTING_WRITE))
         check("Finance (I) holds no posting.write", not A.can(FIN, M.Cap.POSTING_WRITE))
         check("an employee holds no posting.write", not A.can(EMP, M.Cap.POSTING_WRITE))
@@ -580,7 +618,8 @@ async def main() -> None:
             "committee_members": [
                 {"user_id": U_HR, "decision": M.CommitteeDecision.AGREE.value},
                 {"user_id": U_HOD, "decision": M.CommitteeDecision.AGREE.value}],
-            "outcome": M.ShortlistOutcome.FINALISED.value})
+            # Final Commit: asking to commit; the outcome is derived from the two Agrees.
+            "outcome": M.ShortlistOutcome.SELECTED.value})
         check("HR (R) recorded the committee with the HOD (A) on it",
               bool(review["slr_no"]))
         check("the committee requires BOTH HR and the HOD",

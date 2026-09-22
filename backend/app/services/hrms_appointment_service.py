@@ -43,14 +43,18 @@ from app.models.hrms import (
 )
 from app.services.hrms_audit_service import audit
 from app.services.hrms_id_service import next_business_id
+from app.services.hrms_config_service import employment_documents
 from app.services.hrms_notify_service import notify_hrms_role, notify_user
 from app.utils.hrms_access import can, hrms_role
 from app.utils.hrms_public_guard import INVALID_LINK, clean_text, new_access_code
 
-# The candidate stages an appointment letter may be raised from. ONLY Offer Accepted: the
-# letter confirms terms the candidate has already agreed to, so issuing one before they have
-# accepted would be confirming an agreement that does not exist.
-APPOINTABLE_STATUSES = {AppStatus.OFFER_ACCEPTED}
+# The candidate stages an appointment letter may be raised from. The rule is "has already
+# accepted an offer" -- Offer Accepted itself, and Pre-Onboarding, which is strictly LATER
+# in the same forward chain and therefore implies it too. (Onboarding now opens
+# automatically the instant an offer is accepted -- BA Functional Design §7.5 -- so a
+# candidate no longer rests at Offer Accepted for any length of time; without
+# Pre-Onboarding here, an appointment letter could never legally be issued at all.)
+APPOINTABLE_STATUSES = {AppStatus.OFFER_ACCEPTED, AppStatus.PRE_ONBOARDING}
 
 
 def _today() -> str:
@@ -314,6 +318,14 @@ async def create_appointment(actor: dict, company_id: str, payload: dict) -> dic
         "generated_at": now,
         "sent_by": None, "sent_at": None,
         "acknowledged_at": None, "acknowledgement_signature": None,
+        # §7.5 Stage 7 -- the employment documents signed alongside the letter. Snapshotted
+        # at generation rather than read live, so changing the company catalogue later
+        # cannot retroactively add an obligation to a letter already in somebody's hands.
+        "document_acks": [
+            {"doc": label, "required": bool(required),
+             "acknowledged_at": None, "signature": None}
+            for label, required in (await employment_documents(company_id)).items()
+        ],
         "created_at": now,
     }
     await get_collection(COLL_APPOINTMENTS).insert_one(dict(doc))
@@ -578,7 +590,38 @@ async def get_public_appointment(code: str) -> dict:
         "signature": doc.get("signature"),
         "sent_at": doc.get("sent_at"),
         "acknowledged_at": doc.get("acknowledged_at"),
+        # §7.5 Stage 7 -- NDA, Code of Conduct and the required policies, each signed in
+        # its own right. Sent so the page can walk the joiner through them in order rather
+        # than asking for one signature that silently stands for five documents.
+        "documents": [
+            {"doc": d.get("doc"), "required": bool(d.get("required")),
+             "acknowledged_at": d.get("acknowledged_at")}
+            for d in (doc.get("document_acks") or [])
+        ],
     }
+
+
+async def _tick_policy_ack(company_id: str, uk: str) -> None:
+    """Mark "Policies acknowledged" on the joiner's open onboarding case.
+
+    Driven by the acknowledgement itself for the same reason `bg_cleared` and
+    `documents_verified` are: a checklist must not assert something the data does not
+    support, and the reverse -- a signed policy nobody ticked -- is just as wrong.
+    """
+    from app.models.hrms import COLL_ONBOARDING, OnboardStatus
+    coll = get_collection(COLL_ONBOARDING)
+    case = await coll.find_one({"company_id": str(company_id), "uk": uk,
+                                "status": {"$ne": OnboardStatus.COMPLETED.value}})
+    if not case:
+        return
+    now = datetime.now(timezone.utc)
+    checklist = [
+        {**i, "done": True, "done_at": now, "done_by": "Signed by the employee"}
+        if i.get("key") == "policy_ack" else i
+        for i in (case.get("checklist") or [])
+    ]
+    await coll.update_one({"onb_no": case["onb_no"], "company_id": str(company_id)},
+                          {"$set": {"checklist": checklist, "updated_at": now}})
 
 
 async def acknowledge_appointment(code: str, payload: dict) -> dict:
@@ -604,13 +647,35 @@ async def acknowledge_appointment(code: str, payload: dict) -> dict:
         raise HTTPException(
             status_code=422, detail="Type your full name to acknowledge this letter.")
 
+    # §7.5 Stage 7 -- "Appointment Letter -> NDA -> Code of Conduct -> Policy
+    # Acknowledgement -> Completion". The letter is only acknowledged once each required
+    # document has been, so one signature cannot silently stand for all of them.
+    agreed = {clean_text(d, limit=140) for d in (payload.get("documents") or [])
+              if clean_text(d, limit=140)}
+    catalogue = doc.get("document_acks") or []
+    outstanding = [d["doc"] for d in catalogue
+                   if d.get("required") and not d.get("acknowledged_at")
+                   and d["doc"] not in agreed]
+    if outstanding:
+        raise HTTPException(
+            status_code=422,
+            detail=("Please read and accept each document before signing: "
+                    + ", ".join(outstanding) + "."))
+
     now = datetime.now(timezone.utc)
+    acks = [
+        {**d,
+         "acknowledged_at": d.get("acknowledged_at") or (now if d["doc"] in agreed else None),
+         "signature": d.get("signature") or (signature if d["doc"] in agreed else None)}
+        for d in catalogue
+    ]
     result = await get_collection(COLL_APPOINTMENTS).update_one(
         {"access_code": code,
          "status": {"$in": [AppointmentStatus.SENT.value,
                             AppointmentStatus.PENDING_ACK.value]}},
         {"$set": {"status": AppointmentStatus.ACKNOWLEDGED.value,
                   "acknowledged_at": now,
+                  "document_acks": acks,
                   "acknowledgement_signature": signature,
                   "acknowledgement_note": clean_text(payload.get("note"), limit=2000),
                   "updated_at": now}})
@@ -627,6 +692,15 @@ async def acknowledge_appointment(code: str, payload: dict) -> dict:
     # Item 2: the filed document is now proven — mark it Verified.
     fresh = await get_collection(COLL_APPOINTMENTS).find_one({"access_code": code})
     await _file_letter_document(None, company_id, fresh or doc, status_verified=True)
+
+    # §7.5 Stage 7 -- the joiner has now signed the policies, so the onboarding
+    # checklist item that claims exactly that follows the act rather than waiting for HR
+    # to remember to tick it. Best-effort: the signature is already recorded, and a
+    # checklist that could not be updated must not undo it.
+    try:
+        await _tick_policy_ack(company_id, doc["uk"])
+    except Exception as e:                          # pragma: no cover - defensive
+        print(f"[WARN] policy_ack not ticked for {doc.get('uk')}: {e}")
 
     await notify_hrms_role(
         company_id, ["HR"],
