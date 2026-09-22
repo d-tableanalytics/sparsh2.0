@@ -315,6 +315,16 @@ const RequisitionFormModal = ({ existing, onClose, onSaved }) => {
                 <input id="r-exp" required value={form.experience_required} onChange={set('experience_required')}
                   placeholder="e.g. 3–5 years" className={FIELD} />
               </div>
+              {/* MANDATORY, so it belongs here and not behind the "optional" toggle
+                  below. `qualification` is a bare `str` on RequisitionCreate -- the API
+                  answers 422 "Qualification is required" without it. It used to sit inside
+                  the collapsed extras, so the submit failed with an error naming a field
+                  that was not on screen and stayed hidden while you looked for it. */}
+              <div>
+                <label className={LABEL} htmlFor="r-qual">Qualification *</label>
+                <input id="r-qual" required value={form.qualification} onChange={set('qualification')}
+                  placeholder="e.g. B.Tech / MCA" className={FIELD} />
+              </div>
             </div>
             <div className="mt-3">
               <label className={LABEL} htmlFor="r-skills">Required Skills / Competencies *</label>
@@ -328,11 +338,6 @@ const RequisitionFormModal = ({ existing, onClose, onSaved }) => {
             </button>
             {moreDetails && (
               <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <label className={LABEL} htmlFor="r-qual">Qualification</label>
-                  <input id="r-qual" value={form.qualification} onChange={set('qualification')}
-                    placeholder="e.g. B.Com" className={FIELD} />
-                </div>
                 <div>
                   <label className={LABEL} htmlFor="r-ctc">Offered CTC (annual)</label>
                   <input id="r-ctc" type="number" min="0" value={form.offering_ctc} onChange={set('offering_ctc')} className={FIELD} />

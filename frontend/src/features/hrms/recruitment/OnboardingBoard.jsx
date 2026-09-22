@@ -939,6 +939,11 @@ const OnboardingBoard = () => {
   const mayWrite = can(CAP.ONBOARDING_WRITE);
 
   const load = useCallback(async () => {
+    // Wait for the company scope. `scope` starts empty while HrmsContext resolves it, and
+    // GET /hrms/onboarding without a company_id is a 400 -- so every visit to this board
+    // fired two failing requests before the real one. The same guard every other board
+    // already has (AttendanceBoard, RecruitmentDashboard, AuditViewer, ...).
+    if (!companyId) { setLoading(false); return; }
     setLoading(true);
     setError(null);
     try {
