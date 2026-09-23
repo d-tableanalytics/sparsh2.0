@@ -34,7 +34,7 @@ from app.models.hrms import (
     AUDIT_REFERENCE_RECORDED, AUDIT_REFERENCE_UPDATED, COLL_CANDIDATES,
     COLL_REFERENCE_CHECKS, COLL_REQUISITIONS, ENTITY_REFERENCE, PHONE_RE,
     REFERENCE_CLEARS_OFFER, RETENTION_YEARS, ReferenceMode, ReferenceOutcome,
-    RequisitionTrack, is_iso_date,
+    REQUISITION_TRACK_INTERNAL, is_iso_date,
 )
 from app.services.hrms_audit_service import audit
 from app.services.hrms_config_service import retention_years_for
@@ -187,8 +187,8 @@ async def assert_reference_cleared(company_id: str, candidate: dict, req: dict) 
     Raises 409 unless the candidate has a clearing reference OR an approved exception waives
     it. There is deliberately no override parameter -- see hrms_exception_service for why.
     """
-    track = (req or {}).get("requisition_track") or RequisitionTrack.CLIENT.value
-    if track != RequisitionTrack.INTERNAL.value:
+    track = (req or {}).get("requisition_track")
+    if track != REQUISITION_TRACK_INTERNAL:
         return
 
     uk = candidate.get("uk")
@@ -234,8 +234,8 @@ async def _notify_if_not_cleared(company_id: str, doc: dict) -> None:
     req = await get_collection(COLL_REQUISITIONS).find_one(
         {"request_no": (doc or {}).get("request_no"), "company_id": str(company_id)},
         {"requisition_track": 1})
-    track = (req or {}).get("requisition_track") or RequisitionTrack.CLIENT.value
-    if track != RequisitionTrack.INTERNAL.value:
+    track = (req or {}).get("requisition_track")
+    if track != REQUISITION_TRACK_INTERNAL:
         return
     from app.services.hrms_notify_service import notify_hrms_role
     name = doc.get("candidate_name") or doc.get("uk")

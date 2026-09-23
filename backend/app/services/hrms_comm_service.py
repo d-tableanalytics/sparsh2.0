@@ -133,14 +133,42 @@ async def _seed_templates(company_id: str) -> None:
 
 
 async def get_template(company_id: str, key: str) -> Optional[dict]:
-    """One template by key, seeding the defaults if this company has none yet."""
+    """One template by key, seeding the defaults if this company is missing them.
+
+    Two cases, and the second used to be missed. A company with NO templates gets the whole
+    set. A company that was seeded before a new default shipped has templates but not this
+    one -- seeding only on an empty collection left that company permanently without it, so
+    every later addition to DEFAULT_COMM_TEMPLATES would silently never reach any existing
+    company. The single-key backfill below is what makes adding a default safe.
+    """
     coll = get_collection(COLL_COMM_TEMPLATES)
     doc = await coll.find_one({"company_id": str(company_id), "key": key})
     if not doc:
         if not await coll.count_documents({"company_id": str(company_id)}):
             await _seed_templates(company_id)
-            doc = await coll.find_one({"company_id": str(company_id), "key": key})
+        else:
+            await _seed_one(company_id, key)
+        doc = await coll.find_one({"company_id": str(company_id), "key": key})
     return _out(doc) if doc else None
+
+
+async def _seed_one(company_id: str, key: str) -> None:
+    """Backfill a single default this company never received. No-op for an unknown key."""
+    match = next((t for t in list(DEFAULT_COMM_TEMPLATES) + list(CONSENT_TEMPLATES)
+                  if t[0] == key), None)
+    if not match:
+        return
+    key, channel, subject, body, variables = match
+    try:
+        await get_collection(COLL_COMM_TEMPLATES).insert_one({
+            "company_id": str(company_id), "key": key, "channel": channel.value,
+            "subject": subject, "body": body, "variables": list(variables),
+            "active": True, "seeded": True,
+            "created_at": datetime.now(timezone.utc),
+        })
+    except Exception as e:
+        # A concurrent read may have inserted it already; the unique index makes that safe.
+        print(f"[WARN] HRMS comm-template backfill skipped for {company_id}/{key}: {e}")
 
 
 async def update_template(actor: dict, company_id: str, key: str, payload: dict) -> dict:

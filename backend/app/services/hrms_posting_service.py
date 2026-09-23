@@ -34,11 +34,13 @@ from fastapi import HTTPException
 
 from app.db.mongodb import get_collection
 from app.models.hrms import (
-    AUDIT_APPLICATION, AUDIT_POSTING_CREATED, AUDIT_POSTING_DELETED, AUDIT_POSTING_UPDATED,
-    COLL_CANDIDATES, COLL_JOB_DESCRIPTIONS, COLL_JOB_POSTINGS, COLL_REQUISITIONS,
+    AUDIT_APPLICATION, AUDIT_POSTING_CREATED, AUDIT_POSTING_DELETED,
+    AUDIT_POSTING_EXEC_APPROVED, AUDIT_POSTING_PUBLISHED, AUDIT_POSTING_UPDATED,
+    COLL_CANDIDATES, COLL_JOB_DESCRIPTIONS, COLL_JOB_POSTINGS, COLL_POSITION_SCORECARDS,
+    COLL_REQUISITIONS,
     EMAIL_RE, ENTITY_CANDIDATE_APPLICATION, ENTITY_POSTING, MAX_CERTIFICATES, PHONE_RE,
-    POSTING_CODE_RE, AppStatus, ApplyLinkMode, JdStatus, LiveStatus, RequisitionTrack,
-    is_iso_date,
+    POSTING_CODE_RE, AppStatus, ApplyLinkMode, JdStatus, LiveStatus, RecruitmentChannel,
+    REQUISITION_TRACK_INTERNAL, ScorecardStatus, is_iso_date,
 )
 from app.services.hrms_audit_service import audit
 from app.services.hrms_id_service import next_business_id
@@ -170,7 +172,13 @@ async def list_postings(actor: dict, company_id: str, *, jd_no: str = None,
 
 
 async def create_posting(actor: dict, company_id: str, payload: dict) -> dict:
-    """Publish an approved JD as ONE posting with ONE application link."""
+    """Draft a job posting against an approved JD.
+
+    Internal Recruitment SOP -- Step 4: creation is now its own step, separate from
+    publishing (`publish_posting`) -- a posting opens as a Draft (or, if it names Executive
+    Search among its channels, Pending Management Approval) rather than going live
+    immediately. Selecting channels happens here, at creation, not as an afterthought.
+    """
     jd_no = (payload.get("jd_no") or "").strip()
     if not jd_no:
         raise HTTPException(status_code=422, detail="Select a job description to publish.")
@@ -185,16 +193,49 @@ async def create_posting(actor: dict, company_id: str, payload: dict) -> dict:
             detail=(f'Only an approved job description can be published. {jd_no} is '
                     f'"{jd.get("status")}" - it must clear HR review and MD approval first.'))
 
-    # ── Internal track ── the mandatory budget gate (SOP §11). A JD reaches APPROVED only
-    # at the END of either chain, so in practice this is belt and braces -- but publishing is
-    # the primary act of sourcing, and the gate that guards it should be asserted where the
-    # act happens rather than inferred from the state of a different document.
+    req = None
     if jd.get("request_no"):
-        from app.services.hrms_requisition_service import assert_sourcing_allowed
         req = await get_collection(COLL_REQUISITIONS).find_one(
             {"request_no": jd["request_no"], "company_id": str(company_id)})
+        # ── Internal track ── the mandatory budget gate (SOP §11). A JD reaches APPROVED
+        # only at the END of either chain, so in practice this is belt and braces -- but
+        # publishing is the primary act of sourcing, and the gate that guards it should be
+        # asserted where the act happens rather than inferred from the state of a different
+        # document.
         if req:
+            from app.services.hrms_requisition_service import assert_sourcing_allowed
             assert_sourcing_allowed(req)
+
+        # Made EXPLICIT rather than left to the fact that JD.status can only reach Approved
+        # via the requisition's own scorecard-approve transition (Step 3 makes that gate
+        # true architecturally already) -- Step 4's own spec names it as a precondition in
+        # its own right, and a reader of this function should be able to see the rule here
+        # rather than trace it through a different service.
+        if req and req.get("requisition_track") == REQUISITION_TRACK_INTERNAL:
+            scorecard = await get_collection(COLL_POSITION_SCORECARDS).find_one(
+                {"request_no": jd["request_no"], "company_id": str(company_id)})
+            if not scorecard or scorecard.get("status") != ScorecardStatus.APPROVED.value:
+                raise HTTPException(
+                    status_code=409,
+                    detail=("The Position Scorecard for this requisition must be approved "
+                            "before a job posting can be created."))
+
+    raw_channels = payload.get("channels") or []
+    channels = []
+    for c in raw_channels:
+        value = getattr(c, "value", c)
+        try:
+            channels.append(RecruitmentChannel(value).value)
+        except ValueError:
+            raise HTTPException(
+                status_code=422,
+                detail=(f'"{value}" is not a recognised recruitment channel. Choose from: '
+                        f"{', '.join(ch.value for ch in RecruitmentChannel)}."))
+    if not channels:
+        raise HTTPException(
+            status_code=422, detail="Select at least one recruitment channel.")
+    channels = sorted(set(channels))
+    needs_exec_approval = RecruitmentChannel.EXECUTIVE_SEARCH.value in channels
 
     expiry = payload.get("expiry_date")
     if expiry:
@@ -219,28 +260,10 @@ async def create_posting(actor: dict, company_id: str, payload: dict) -> dict:
     else:
         external = None
 
-    # One JD, one live link. Publishing the same JD twice used to be how an operator got a
-    # second channel; there are no channels now, so a second link is simply a second thing
-    # to keep alive and reconcile. The message names the existing code so the operator can
-    # go and copy it rather than guess why they were refused.
-    # Every Live-stored row is examined, not just the first: a JD can carry a row whose date
-    # has passed (stored Live, effectively Expired) ALONGSIDE a genuinely live one, and
-    # picking one arbitrarily would let a second link through whenever the expired row came
-    # back first.
-    today = _today()
-    existing = await get_collection(COLL_JOB_POSTINGS).find(
-        {"jd_no": jd_no, "company_id": str(company_id),
-         "live_status": LiveStatus.LIVE.value}).to_list(50)
-    live = next((p for p in existing
-                 if _effective_status(p, today) == LiveStatus.LIVE.value), None)
-    if live:
-        raise HTTPException(
-            status_code=409,
-            detail=(f"{jd_no} is already published as {live['posting_code']}. Share that "
-                    f"link, or close the posting before publishing a new one."))
-
     now = datetime.now(timezone.utc)
     code = await _unique_code(payload.get("code"))
+    opening_status = (LiveStatus.PENDING_APPROVAL.value if needs_exec_approval
+                       else LiveStatus.DRAFT.value)
     doc = {
         "posting_code": code,
         "company_id": str(company_id),
@@ -249,35 +272,185 @@ async def create_posting(actor: dict, company_id: str, payload: dict) -> dict:
         "title": jd.get("title"),
         "apply_link_mode": mode,
         "external_url": external,
-        "live_status": LiveStatus.LIVE.value,
+        "channels": channels,
+        "live_status": opening_status,
         "expiry_date": expiry or None,
         "notes": clean_text(payload.get("notes")),
         "requires_assessment": bool(payload.get("requires_assessment")),
         "posted_by": str(actor.get("_id") or ""),
-        "posting_date": now.strftime("%Y-%m-%d"),
+        # Set only once the posting actually goes live (see publish_posting) -- a Draft
+        # has not been "posted" anywhere yet, so a date here would be a fiction.
+        "posting_date": None,
+        "published_by": None, "published_at": None,
+        "exec_search_approved_by": None, "exec_search_approved_at": None,
         "created_at": now,
     }
 
     await get_collection(COLL_JOB_POSTINGS).insert_one(dict(doc))
+    # Keyed to the POSTING code, not the JD: `get_posting_history` reads the audit trail by
+    # entity_id, and a creation row filed under the JD would be missing from the posting's
+    # own history -- the one place it most obviously belongs.
+    await audit(actor, AUDIT_POSTING_CREATED, ENTITY_POSTING, code,
+                f"{jd_no} · {', '.join(channels)}", company_id)
+    return {"posting": _out(doc), "created": 1}
 
-    # Phase 11-R, Item 1: register the AUTO posting's apply link.
-    #
-    # An EXTERNAL posting is deliberately NOT registered. It sends the applicant to a job
-    # board or a Google Form; nothing ever writes those applications back into this pipeline
-    # (see ApplyLinkMode.EXTERNAL), so there is no open to count and no submission to
+
+async def publish_posting(actor: dict, company_id: str, code: str) -> dict:
+    """Go live -- Step 4's own third moment, distinct from drafting and channel selection.
+
+    An Executive Search posting cannot reach here until Management has cleared
+    `approve_exec_search`; every other posting moves straight from Draft.
+    """
+    coll = get_collection(COLL_JOB_POSTINGS)
+    current = await coll.find_one({"posting_code": code, "company_id": str(company_id)})
+    if not current:
+        raise HTTPException(status_code=404, detail="Posting not found.")
+
+    status = current.get("live_status")
+    if status == LiveStatus.PENDING_APPROVAL.value:
+        raise HTTPException(
+            status_code=409,
+            detail=("This posting names Executive Search and needs Management's approval "
+                    "before it can be published."))
+    if status != LiveStatus.DRAFT.value:
+        raise HTTPException(
+            status_code=409,
+            detail=f'Only a Draft posting can be published. This one is "{status}".')
+
+    # One JD, one live link. Publishing the same JD twice used to be how an operator got a
+    # second channel; channels are now selected on ONE posting, so a second live posting is
+    # simply a second thing to keep alive and reconcile. The message names the existing code
+    # so the operator can go and copy it rather than guess why they were refused.
+    # Every Live-stored row is examined, not just the first: a JD can carry a row whose date
+    # has passed (stored Live, effectively Expired) ALONGSIDE a genuinely live one, and
+    # picking one arbitrarily would let a second link through whenever the expired row came
+    # back first.
+    today = _today()
+    existing = await get_collection(COLL_JOB_POSTINGS).find(
+        {"jd_no": current["jd_no"], "company_id": str(company_id),
+         "live_status": LiveStatus.LIVE.value}).to_list(50)
+    live = next((p for p in existing
+                 if _effective_status(p, today) == LiveStatus.LIVE.value), None)
+    if live and live["posting_code"] != code:
+        raise HTTPException(
+            status_code=409,
+            detail=(f"{current['jd_no']} is already published as {live['posting_code']}. "
+                    f"Share that link, or close it before publishing a new one."))
+
+    now = datetime.now(timezone.utc)
+    updates = {
+        "live_status": LiveStatus.LIVE.value,
+        "posting_date": now.strftime("%Y-%m-%d"),
+        "published_by": str(actor.get("_id") or ""),
+        "published_at": now,
+    }
+    await coll.update_one({"posting_code": code, "company_id": str(company_id)},
+                          {"$set": updates})
+
+    # Phase 11-R, Item 1: register the AUTO posting's apply link, now that it is actually
+    # public. An EXTERNAL posting is deliberately NOT registered -- it sends the applicant to
+    # a job board or a Google Form, and nothing ever writes those applications back into this
+    # pipeline (see ApplyLinkMode.EXTERNAL), so there is no open to count and no submission to
     # consume. Registering one would put a row in the Link Manager promising tracking that
     # cannot exist -- the same honesty the posting UI already applies.
-    if mode == ApplyLinkMode.AUTO.value:
+    if current.get("apply_link_mode") == ApplyLinkMode.AUTO.value:
         from app.models.hrms import LinkKind
         from app.services.hrms_link_service import register_link
         await register_link(
             company_id=company_id, kind=LinkKind.APPLY, code=code,
             target_type="posting", target_id=code, actor=actor,
-            candidate_name=None, request_no=doc.get("request_no"),
-            expires_at=doc.get("expiry_date"))
+            candidate_name=None, request_no=current.get("request_no"),
+            expires_at=current.get("expiry_date"))
 
-    await audit(actor, AUDIT_POSTING_CREATED, ENTITY_POSTING, jd_no, code, company_id)
-    return {"posting": _out(doc), "created": 1}
+    await audit(actor, AUDIT_POSTING_PUBLISHED, ENTITY_POSTING, code,
+                current.get("jd_no"), company_id)
+    doc = await coll.find_one({"posting_code": code, "company_id": str(company_id)})
+    item = _out(doc)
+    item["application_count"] = (await _application_counts([code])).get(code, 0)
+    return item
+
+
+async def approve_exec_search(actor: dict, company_id: str, code: str,
+                              remarks: str = None) -> dict:
+    """Management clears an Executive Search posting so it can be published.
+
+    Moves it to Draft rather than straight to Live: publishing itself is still `publish_posting`
+    -- one action per moment, the same discipline the rest of Step 4 follows.
+    """
+    coll = get_collection(COLL_JOB_POSTINGS)
+    current = await coll.find_one({"posting_code": code, "company_id": str(company_id)})
+    if not current:
+        raise HTTPException(status_code=404, detail="Posting not found.")
+    if current.get("live_status") != LiveStatus.PENDING_APPROVAL.value:
+        raise HTTPException(
+            status_code=409,
+            detail=(f'Only a posting "Pending Management Approval" can be cleared this way. '
+                    f'This one is "{current.get("live_status")}".'))
+
+    now = datetime.now(timezone.utc)
+    await coll.update_one(
+        {"posting_code": code, "company_id": str(company_id)},
+        {"$set": {"live_status": LiveStatus.DRAFT.value,
+                  "exec_search_approved_by": str(actor.get("_id") or ""),
+                  "exec_search_approved_at": now}})
+    await audit(actor, AUDIT_POSTING_EXEC_APPROVED, ENTITY_POSTING, code,
+                clean_text(remarks) or None, company_id)
+    doc = await coll.find_one({"posting_code": code, "company_id": str(company_id)})
+    return _out(doc)
+
+
+async def get_posting(actor: dict, company_id: str, code: str) -> dict:
+    """One posting, with the approved JD's content joined on for HR's own preview --
+    everything Step 4 says must be "auto-fetched" onto the posting screen, read live from
+    the JD/requisition rather than copied, so an edit to either is reflected immediately."""
+    doc = await get_collection(COLL_JOB_POSTINGS).find_one(
+        {"posting_code": code, "company_id": str(company_id)})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Posting not found.")
+
+    item = _out(doc)
+    item["live_status"] = _effective_status(doc, _today())
+    item["application_count"] = (await _application_counts([code])).get(code, 0)
+
+    jd = await get_collection(COLL_JOB_DESCRIPTIONS).find_one(
+        {"jd_no": doc.get("jd_no"), "company_id": str(company_id)})
+    req = None
+    if jd and jd.get("request_no"):
+        req = await get_collection(COLL_REQUISITIONS).find_one(
+            {"request_no": jd["request_no"], "company_id": str(company_id)})
+    if jd:
+        item["jd_details"] = {
+            "job_title": jd.get("title") or (req or {}).get("designation_name"),
+            "department": (req or {}).get("department_name"),
+            "reporting_to": (req or {}).get("reporting_manager_name"),
+            "job_summary": jd.get("job_summary"),
+            "responsibilities": jd.get("responsibilities"),
+            "required_skills": jd.get("skills"),
+            "experience": jd.get("experience"),
+            "qualifications": jd.get("qualifications"),
+            "location": jd.get("location"),
+            "key_competencies": jd.get("key_competencies"),
+            "culture_fit": jd.get("culture_fit"),
+            "additional_requirements": jd.get("additional_requirements"),
+        }
+    return item
+
+
+async def get_posting_history(actor: dict, company_id: str, code: str) -> dict:
+    """The posting's own history, reconstructed from the audit trail rather than a second,
+    parallel array that could drift from what the audit log already proves happened."""
+    if not await get_collection(COLL_JOB_POSTINGS).find_one(
+            {"posting_code": code, "company_id": str(company_id)}):
+        raise HTTPException(status_code=404, detail="Posting not found.")
+    from app.services.hrms_audit_service import read_audit
+    rows = await read_audit(company_id=str(company_id), entity=ENTITY_POSTING,
+                            entity_id=code, limit=200)
+    rows = list(reversed(rows))  # read_audit is newest-first; a history reads oldest-first
+    return {"posting_code": code, "history": [
+        {"action": r.get("action"), "actor_name": r.get("actor_name"),
+         "at": r.get("created_at"), "detail": r.get("detail")}
+        for r in rows
+    ]}
 
 
 async def update_posting(actor: dict, company_id: str, code: str, payload: dict) -> dict:
@@ -288,11 +461,54 @@ async def update_posting(actor: dict, company_id: str, code: str, payload: dict)
 
     updates = {}
     if payload.get("live_status") is not None:
-        updates["live_status"] = getattr(payload["live_status"], "value", payload["live_status"])
+        new_status = getattr(payload["live_status"], "value", payload["live_status"])
+        # Going live for the FIRST time is `publish_posting`'s own job -- it re-checks the
+        # "one live posting per JD" rule and stamps posting_date/published_by, neither of
+        # which this generic update does. Resuming an already-published posting (Paused ->
+        # Live) has no such precondition to re-check, so that toggle stays here.
+        if (new_status == LiveStatus.LIVE.value
+                and current.get("live_status") in (LiveStatus.DRAFT.value,
+                                                    LiveStatus.PENDING_APPROVAL.value)):
+            raise HTTPException(
+                status_code=409,
+                detail='Use "Publish" to take a posting live, not this field.')
+        updates["live_status"] = new_status
     if payload.get("notes") is not None:
         updates["notes"] = clean_text(payload["notes"])
     if payload.get("requires_assessment") is not None:
         updates["requires_assessment"] = bool(payload["requires_assessment"])
+    if payload.get("channels") is not None:
+        # Channels are chosen before publishing (SOP Step 4); once a posting is live, its
+        # advertised channels are what candidates have already been sourced against, so
+        # changing them here would rewrite history rather than correct a draft.
+        if current.get("live_status") not in (LiveStatus.DRAFT.value, LiveStatus.PENDING_APPROVAL.value):
+            raise HTTPException(
+                status_code=409,
+                detail="Channels can only be changed while the posting is still a Draft.")
+        raw_channels = payload["channels"] or []
+        channels = []
+        for c in raw_channels:
+            value = getattr(c, "value", c)
+            try:
+                channels.append(RecruitmentChannel(value).value)
+            except ValueError:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(f'"{value}" is not a recognised recruitment channel. Choose from: '
+                            f"{', '.join(ch.value for ch in RecruitmentChannel)}."))
+        if not channels:
+            raise HTTPException(
+                status_code=422, detail="Select at least one recruitment channel.")
+        channels = sorted(set(channels))
+        updates["channels"] = channels
+        # Selecting Executive Search after the fact routes it into the same Management gate
+        # a posting created with it already goes through; DEselecting it, while still
+        # pending, clears the block since nothing needs Management's approval any more.
+        needs_exec = RecruitmentChannel.EXECUTIVE_SEARCH.value in channels
+        if needs_exec and current.get("live_status") == LiveStatus.DRAFT.value:
+            updates["live_status"] = LiveStatus.PENDING_APPROVAL.value
+        elif not needs_exec and current.get("live_status") == LiveStatus.PENDING_APPROVAL.value:
+            updates["live_status"] = LiveStatus.DRAFT.value
     if payload.get("expiry_date") is not None:
         expiry = payload["expiry_date"]
         if expiry and not is_iso_date(expiry):
@@ -439,8 +655,8 @@ async def _acknowledgements(posting: dict, req: dict) -> list:
     back to no acknowledgements, which means the SERVER-side check is then the one that
     refuses the application -- loudly, rather than silently accepting an un-acknowledged one.
     """
-    track = (req or {}).get("requisition_track") or RequisitionTrack.CLIENT.value
-    if track != RequisitionTrack.INTERNAL.value:
+    track = (req or {}).get("requisition_track")
+    if track != REQUISITION_TRACK_INTERNAL:
         return []
     try:
         from app.models.hrms import CONSENT_TEMPLATES
@@ -539,6 +755,8 @@ async def submit_application(code: str, payload: dict) -> dict:
         raise HTTPException(
             status_code=422,
             detail="Please confirm that the information provided is accurate.")
+    if not payload.get("resume"):
+        raise HTTPException(status_code=422, detail="Please attach your resume.")
 
     certificates = payload.get("certificates") or []
     if len(certificates) > MAX_CERTIFICATES:
@@ -572,8 +790,7 @@ async def submit_application(code: str, payload: dict) -> dict:
     # form never costs storage.
     req_for_track = await get_collection(COLL_REQUISITIONS).find_one(
         {"request_no": posting.get("request_no")}) or {}
-    is_internal = ((req_for_track.get("requisition_track")
-                    or RequisitionTrack.CLIENT.value) == RequisitionTrack.INTERNAL.value)
+    is_internal = req_for_track.get("requisition_track") == REQUISITION_TRACK_INTERNAL
     if is_internal:
         if not payload.get("eeo_ack"):
             raise HTTPException(
@@ -618,6 +835,12 @@ async def submit_application(code: str, payload: dict) -> dict:
         "posting_code": code,
         "jd_no": posting.get("jd_no"),
         "request_no": posting.get("request_no"),
+        # The role applied FOR, denormalised so the Applicant Pool can list and filter by
+        # position without joining every candidate back to its requisition on every read.
+        # Distinct from `current_designation`, which is the job the applicant holds today.
+        "applied_position": (req_for_track.get("designation_name")
+                             or posting.get("title")),
+        "department_name": req_for_track.get("department_name"),
         "candidate_name": name,
         "can_email": email,
         "can_contact": phone,
@@ -633,6 +856,7 @@ async def submit_application(code: str, payload: dict) -> dict:
         "total_experience": clean_text(payload.get("total_experience"), limit=60),
         "qualification": clean_text(payload.get("qualification"), limit=180),
         "current_company": clean_text(payload.get("current_company"), limit=140),
+        "current_designation": clean_text(payload.get("current_designation"), limit=140),
         "current_ctc": clean_text(payload.get("current_ctc"), limit=40),
         "expected_ctc": clean_text(payload.get("expected_ctc"), limit=40),
         "notice_period": clean_text(payload.get("notice_period"), limit=60),
@@ -654,6 +878,11 @@ async def submit_application(code: str, payload: dict) -> dict:
         # the form. This is the ONLY way into the talent pool; there is no path that opts
         # somebody in because a recruiter liked their CV.
         "consent_to_retain": bool(payload.get("consent_to_retain")),
+        "consent_to_retain_at": now if payload.get("consent_to_retain") else None,
+        # The accuracy declaration is what makes a later misrepresentation actionable, so
+        # it is kept with its timestamp rather than discarded once validated.
+        "declaration": True,
+        "declaration_at": now,
         "talent_pool": False,
         "applied_at": now,
         "created_at": now,

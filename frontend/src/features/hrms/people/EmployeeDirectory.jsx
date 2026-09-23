@@ -263,19 +263,29 @@ const EmployeeDirectory = () => {
                   {data.salary_visible && (
                     <th className="text-right px-4 py-2.5 text-[10.5px] font-bold uppercase tracking-widest">Base salary</th>
                   )}
+                  <th className="px-4 py-2.5" />
                 </tr>
               </thead>
               <tbody>
-                {data.employees.map((e) => (
+                {data.employees.map((e, idx) => (
                   // Onboarding creates an employee BEFORE they have a login, so `user_id`
                   // may be null. Those rows key on the employee code and open the linking
-                  // dialog instead of a profile route that does not exist yet.
+                  // dialog instead of a profile route that does not exist yet. A row whose
+                  // link is broken has neither a usable `user_id` nor necessarily an
+                  // employee_code, so it opens nothing -- there is no profile route or
+                  // linking dialog that applies to it; fixing the underlying data is a
+                  // separate, deliberate action, not a click on the row.
                   <tr
-                    key={e.user_id || e.employee_code}
-                    onClick={() => (e.pending_user_link
-                      ? setLinking(e)
-                      : navigate(`/hrms/employees/${e.user_id}`))}
-                    className="border-t border-[var(--border)] cursor-pointer hover:bg-[var(--input-bg)] transition-colors"
+                    key={e.user_id || e.employee_code || e.email || idx}
+                    onClick={() => {
+                      if (e.pending_user_link) setLinking(e);
+                      else if (e.user_id) navigate(`/hrms/employees/${e.user_id}`);
+                    }}
+                    className={`border-t border-[var(--border)] transition-colors ${
+                      e.link_broken
+                        ? 'cursor-default'
+                        : 'cursor-pointer hover:bg-[var(--input-bg)]'
+                    }`}
                   >
                     <td className="px-4 py-2.5">
                       <div className="font-semibold text-[var(--text-main)] flex items-center gap-2">
@@ -283,6 +293,12 @@ const EmployeeDirectory = () => {
                         {e.pending_user_link && (
                           <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-[var(--input-bg)] text-[var(--text-muted)]">
                             No login yet
+                          </span>
+                        )}
+                        {e.link_broken && (
+                          <span title="This employee's linked login account could not be found — it may have moved to another company."
+                            className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-[var(--accent-red-bg)] text-[var(--accent-red)]">
+                            Account link broken
                           </span>
                         )}
                       </div>
@@ -303,6 +319,23 @@ const EmployeeDirectory = () => {
                         {inr(e.base_salary)}
                       </td>
                     )}
+                    {/* §7.5 Stage 9 — the 360° workspace, which carries the recruitment
+                        history a converted candidate keeps. Addressed by employee code so
+                        a joiner with no login yet can still be opened; clicking the row
+                        itself still offers to link their account, which is the more
+                        common thing to want for those people. */}
+                    <td className="px-4 py-2.5 text-right">
+                      {e.employee_code && (
+                        <button type="button"
+                          onClick={(ev) => {
+                            ev.stopPropagation();
+                            navigate(`/hrms/employees/${e.user_id || e.employee_code}/360`);
+                          }}
+                          className="h-7 px-2.5 rounded-lg border border-[var(--border)] text-[11.5px] font-bold text-[var(--text-muted)] hover:text-[var(--accent-indigo)] hover:border-[var(--accent-indigo)] whitespace-nowrap">
+                          360°
+                        </button>
+                      )}
+                    </td>
                   </tr>
                 ))}
               </tbody>

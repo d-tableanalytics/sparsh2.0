@@ -8,9 +8,9 @@
 // exist only for the pre-fetch decisions the shell has to make synchronously — sidebar
 // visibility and route guarding.
 //
-// HRMS is a CLIENT-COMPANY module (like TPMS): a client's HR team hires and pays their own
-// staff. Sparsh internal staff get cross-company admin/support visibility. Opt-in per
-// company — an absent `hrms_enabled` flag means OFF.
+// HRMS is Sparsh Magic's own HR and hiring module: it hires and pays Sparsh's own staff.
+// The ERP's client companies are never party to it. Internal staff get admin/support
+// visibility. Opt-in per company — an absent `hrms_enabled` flag means OFF.
 
 const INTERNAL_OWNER_ROLES = new Set(['superadmin']);
 const INTERNAL_STAFF_ROLES = new Set(['admin', 'coach', 'staff']);
@@ -55,6 +55,7 @@ export const CAP = {
   // Phase 4
   POSTING_READ: 'posting.read',
   POSTING_WRITE: 'posting.write',
+  POSTING_APPROVE_EXEC_SEARCH: 'posting.approve_exec_search',
 
   // Phase 5
   CANDIDATE_READ: 'candidate.read',
@@ -108,14 +109,6 @@ export const CAP = {
   APPOINTMENT_WRITE: 'appointment.write',
   // Separate from write: issuing the letter commits the company to employing somebody.
   APPOINTMENT_SEND: 'appointment.send',
-
-  // Item 4: the client dimension (recruitment-agency model — a client is NOT a tenant).
-  // READ still means reading a COMPANY, which is why nothing here edits one.
-  CLIENT_READ: 'client.read',
-  // WRITE means managing ENGAGEMENTS — the record that this tenant recruits for that
-  // company, and which of our users work on it. That relationship is HRMS's own, unlike
-  // the company record itself, which the Companies module owns.
-  CLIENT_WRITE: 'client.write',
 
   // Item 7: sanctioned strength + the over-sanction escalation ladder.
   SANCTION_READ: 'sanction.read',
@@ -177,7 +170,6 @@ export const CAP = {
   // New-hire experience surveys (SOP §10). READ is the AGGREGATE only — the server refuses
   // a breakdown below its suppression threshold, so this can never read one person.
   SURVEY_READ: 'survey.read',
-  SURVEY_WRITE: 'survey.write',
   // The policy register (SOP §14). APPROVE is the MD's alone: approving a revision is what
   // makes a version the one in force.
   POLICY_READ: 'policy.read',
@@ -187,17 +179,7 @@ export const CAP = {
   // confirmation because both destroy or end something.
   RETENTION_PURGE: 'retention.purge',
 
-  // ── Phase 12: the client hiring track ──
-  // A client raises a job request; Sparsh reviews it, shares CVs, and runs the hire.
-  // Every one of these is additionally row-scoped on the server by the client engagements
-  // the user belongs to — holding SHARE_READ says "may read shares", not "may read all
-  // shares", so the UI must never treat the capability alone as permission to show data.
-  JOB_REQUEST_READ: 'job_request.read',
-  JOB_REQUEST_WRITE: 'job_request.write',
-  JOB_REQUEST_REVIEW: 'job_request.review',
-  SHARE_READ: 'share.read',
-  SHARE_WRITE: 'share.write',
-  SHARE_RESPOND: 'share.respond',
+  // ── Phase 12: background verification ──
   BACKGROUND_READ: 'background.read',
   BACKGROUND_WRITE: 'background.write',
   BACKGROUND_APPROVE: 'background.approve',
@@ -221,6 +203,7 @@ export const CAP = {
   CLEARANCE_ACT: 'clearance.act',
   EXIT_INTERVIEW_READ: 'exit_interview.read',
   EXIT_INTERVIEW_WRITE: 'exit_interview.write',
+  EXIT_INTERVIEW_SUBMIT: 'exit_interview.submit',
   FNF_READ: 'fnf.read',
   FNF_PREPARE: 'fnf.prepare',
   FNF_APPROVE: 'fnf.approve',
@@ -282,6 +265,66 @@ export const CAP = {
   // ── Phase GMP-1 — Group Mediclaim Policy ──
   GMP_READ: 'gmp.read',
   GMP_WRITE: 'gmp.write',
+
+  // Client Hiring, step 1 (PRO-fit SOP section 7). A separate track: these are the
+  // only HRMS capabilities a client company's user can hold, and WRITE is split from
+  // REVIEW so a client can raise a requisition but never declare it feasible.
+  CLIENT_REQUISITION_READ: 'client_requisition.read',
+  CLIENT_REQUISITION_WRITE: 'client_requisition.write',
+  CLIENT_REQUISITION_REVIEW: 'client_requisition.review',
+  // Step 2 — the Position Scorecard. Sparsh drafts and reviews; only the client
+  // approves, which is why no Sparsh role holds the approve capability.
+  CLIENT_SCORECARD_READ: 'client_scorecard.read',
+  CLIENT_SCORECARD_WRITE: 'client_scorecard.write',
+  CLIENT_SCORECARD_REVIEW: 'client_scorecard.review',
+  CLIENT_SCORECARD_APPROVE: 'client_scorecard.approve',
+
+  // ── Step 2b — the job posting ──
+  // Sparsh-side only. The client agrees the benchmark and reads the candidates; the
+  // advert and its public link are Sparsh's professional work.
+  CLIENT_POSTING_READ: 'client_posting.read',
+  CLIENT_POSTING_WRITE: 'client_posting.write',
+  CLIENT_POSTING_PUBLISH: 'client_posting.publish',
+  // Steps 3-4 — sourcing, screening and the CV share. The recruiter writes, the
+  // Team Lead delivers, the client decides; no Sparsh role holds decide.
+  CLIENT_CANDIDATE_READ: 'client_candidate.read',
+  CLIENT_CANDIDATE_WRITE: 'client_candidate.write',
+  CLIENT_CANDIDATE_SHARE: 'client_candidate.share',
+  CLIENT_CANDIDATE_DECIDE: 'client_candidate.decide',
+  // Step 5 — the assessment. Managing it and marking it are separate jobs, per
+  // the SOP's own responsibility table; the client only reviews the result.
+  CLIENT_ASSESSMENT_READ: 'client_assessment.read',
+  CLIENT_ASSESSMENT_MANAGE: 'client_assessment.manage',
+  CLIENT_ASSESSMENT_SCORE: 'client_assessment.score',
+  CLIENT_ASSESSMENT_SHARE: 'client_assessment.share',
+  CLIENT_ASSESSMENT_REVIEW: 'client_assessment.review',
+  // Step 6 — the recorded interview. Sparsh conducts and delivers the recording;
+  // the client watches it and selects. No Sparsh role holds decide.
+  CLIENT_INTERVIEW_READ: 'client_interview.read',
+  CLIENT_INTERVIEW_MANAGE: 'client_interview.manage',
+  CLIENT_INTERVIEW_SHARE: 'client_interview.share',
+  CLIENT_INTERVIEW_DECIDE: 'client_interview.decide',
+  // Step 7 — reference check and the offer. References are Sparsh's alone. The
+  // offer follows the SOP matrix: recruiter prepares, Team Lead verifies, client
+  // approves and issues.
+  CLIENT_REFERENCE_READ: 'client_reference.read',
+  CLIENT_REFERENCE_WRITE: 'client_reference.write',
+  CLIENT_OFFER_READ: 'client_offer.read',
+  CLIENT_OFFER_WRITE: 'client_offer.write',
+  CLIENT_OFFER_VERIFY: 'client_offer.verify',
+  CLIENT_OFFER_RELEASE: 'client_offer.release',
+  // Client HR approving pay above the range they themselves approved. One of the
+  // client-exclusive decisions: subtracted from every Sparsh role server-side.
+  CLIENT_OFFER_DEVIATE: 'client_offer.deviate',
+  // Steps 8-9 — pre-boarding, joining, handover. The client confirms in writing
+  // that the person started; the Team Lead's handover closes the requisition.
+  CLIENT_JOINING_READ: 'client_joining.read',
+  CLIENT_JOINING_MANAGE: 'client_joining.manage',
+  CLIENT_JOINING_CONFIRM: 'client_joining.confirm',
+  CLIENT_JOINING_HANDOVER: 'client_joining.handover',
+  // Delivery analytics for the client track, separate from the internal
+  // recruitment dashboard and gated separately from it.
+  CLIENT_ANALYTICS_READ: 'client_analytics.read',
   // ── Phase POLICY-LIB-1 (§22.6) — the employee's own act of acknowledging a policy. ──
   POLICY_ACKNOWLEDGE: 'policy.acknowledge',
 };
@@ -328,8 +371,25 @@ export const hrmsRole = (user) => {
 export const canAccessHrms = (user) => {
   if (!user) return false;
   if (isInternalUser(user)) return true;
-  return user.hrms_enabled === true;
+  // Neither flag is the raw company toggle. The server (routes/user.py) splits it in two,
+  // mirroring the two doors in utils/hrms_access.py:
+  //
+  //   hrms_enabled          -> the whole module; requires `is_internal`, so no client
+  //                            company can ever reach payroll, employees or exits.
+  //   client_hiring_enabled -> the Client Hiring track and nothing else.
+  //
+  // Do not "fix" either by reading a company toggle directly -- that would offer a module
+  // every API call then 403s.
+  return user.hrms_enabled === true || isClientTrackUser(user);
 };
+
+/** A client company's own user, admitted to Client Hiring and to nothing else.
+ *
+ *  Their capability set server-side is replaced wholesale with CLIENT_TRACK_CAPS, so every
+ *  other HRMS screen would 403. The sidebar uses this to show them the one entry that
+ *  works rather than a menu of doors that do not. */
+export const isClientTrackUser = (user) =>
+  !!user && !isInternalUser(user) && user.client_hiring_enabled === true;
 
 /** Tri-state access, for ROUTE guarding: 'allowed' | 'denied' | 'unknown'.
  *
@@ -348,7 +408,12 @@ export const hrmsAccessState = (user) => {
   if (!user) return 'denied';
   if (isInternalUser(user)) return 'allowed';
   if (user.hrms_enabled === true) return 'allowed';
-  if (user.hrms_enabled === false) return 'denied';
+  // A client company's user reaches Client Hiring, and the routes under it are guarded
+  // per-capability from there. Checked BEFORE the denial below: their `hrms_enabled` is
+  // correctly false -- they are not entitled to the whole module -- and reading that as
+  // "denied" would bounce them out of the one track they ARE entitled to.
+  if (user.client_hiring_enabled === true) return 'allowed';
+  if (user.hrms_enabled === false && user.client_hiring_enabled === false) return 'denied';
   return 'unknown';
 };
 
@@ -360,9 +425,19 @@ export const isHrmsAdmin = (user) => {
 };
 
 /** Only Admin / Super Admin may switch the module on or off for a company.
- *  Matches routes/company.py update_company_hrms_access. */
+ *  Matches routes/company.py update_company_hrms_access.
+ *
+ *  Necessary but NOT sufficient: that route also refuses to enable HRMS for any company
+ *  that is not the in-house one. Pair this with `isInternalCompany(company)` wherever the
+ *  toggle is rendered, or an admin is shown a switch the server will 403. */
 export const canToggleHrms = (user) =>
   ['superadmin', 'admin'].includes((user?.role || '').toLowerCase());
+
+/** Is this COMPANY the one the ERP is operated in-house by? HRMS exists only for it.
+ *  Distinct from `isInternalUser`, which is about the person (platform staff) -- a
+ *  company and a user are different axes and conflating them is how the module ended up
+ *  reachable by client companies in the first place. */
+export const isInternalCompany = (company) => company?.is_internal === true;
 
 /** THE capability check. `caps` comes from GET /hrms/health — the server's own answer —
  *  so the UI shows exactly what the API will allow. Falls back to false when the health
@@ -372,7 +447,13 @@ export const hasCap = (caps, capability) =>
 
 /** Landing route for a user entering /hrms. Phase 1 has a single shell; later phases
  *  route by role here (recruitment vs. self-service), mirroring tpmsHome(). */
-export const hrmsHome = () => '/hrms';
+/** Where /hrms sends somebody.
+ *
+ *  A client company's user lands on Client Hiring, because it is the only track they hold
+ *  any capability in -- the shared HRMS home would show them a dashboard of numbers they
+ *  are refused. */
+export const hrmsHome = (user) =>
+  (isClientTrackUser(user) ? '/hrms/client-hiring' : '/hrms');
 
 export const HRMS_DISABLED_MESSAGE =
   'The HRMS module is not enabled for your company. Please contact your administrator.';

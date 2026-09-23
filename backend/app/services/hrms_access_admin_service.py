@@ -14,8 +14,8 @@ from fastapi import HTTPException
 
 from app.db.mongodb import get_collection
 from app.models.hrms import (
-    ASSIGNABLE_GOVERNANCE_ROLES, AUDIT_GOVERNANCE_ROLE_CHANGED, CLIENT_ROLES,
-    ENTITY_ACCESS, ROLE_CAPABILITIES, Cap, HrmsRole,
+    ASSIGNABLE_GOVERNANCE_ROLES, AUDIT_GOVERNANCE_ROLE_CHANGED,
+    ENTITY_ACCESS, INTERNAL_OWNER_ROLES, ROLE_CAPABILITIES, Cap, HrmsRole,
 )
 from app.services.hrms_audit_service import audit
 from app.services.hrms_employee_service import USER_COLLECTIONS, get_employee
@@ -63,24 +63,32 @@ async def set_governance_role(actor: dict, user_id: str, company_id: str,
             status_code=400,
             detail=f"governance_role must be one of {sorted(ASSIGNABLE_GOVERNANCE_ROLES)} or empty.")
 
-    user, coll = await _find_user(user_id)
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found.")
-    if str(user.get("company_id") or "") != str(company_id):
+    # Membership is resolved per tenant: Sparsh Magic's own people are `staff` and carry no
+    # company_id at all, so a flat `user.company_id == company_id` test 404s every one of
+    # them. See hrms_access.tenant_member.
+    from app.utils.hrms_access import tenant_member
+    member = await tenant_member(company_id, user_id, {"_id": 1})
+    if not member:
         # Same "404, not 403" reasoning as hrms_employee_service.get_employee — a refusal
         # must not confirm that a given id exists in another tenant.
         raise HTTPException(status_code=404, detail="User not found.")
+    user, coll = await _find_user(user_id)
 
     role = (user.get("role") or "").strip().lower()
-    if role not in CLIENT_ROLES:
-        raise HTTPException(
-            status_code=400,
-            detail="governance_role only applies to client-side users.")
+    # `hrms_role()` reads governance_role for internal staff as well as tenant users, so
+    # both are assignable here. What is refused is an account that already resolves to a
+    # fixed role regardless: a clientadmin is always MD, a superadmin always ADMIN, and
+    # setting a governance role on either would be a control that silently does nothing.
     if role == "clientadmin":
         raise HTTPException(
             status_code=400,
             detail="This user already resolves to MD via their account role — "
                    "governance_role has no effect for a clientadmin.")
+    if role in INTERNAL_OWNER_ROLES:
+        raise HTTPException(
+            status_code=400,
+            detail="A superadmin already holds every HRMS capability — "
+                   "governance_role has no effect for one.")
 
     previous = user.get("governance_role")
     await get_collection(coll).update_one(

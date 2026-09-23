@@ -89,7 +89,7 @@ async def main() -> None:
     reqs = store.setdefault(M.COLL_REQUISITIONS, FakeCollection())
     reqs.docs.extend([
         {"request_no": REQ_INT, "company_id": COMPANY, "designation_name": "Ops Executive",
-         "requisition_track": M.RequisitionTrack.INTERNAL.value},
+         "requisition_track": "internal"},
         # No `requisition_track` key at all -- the pre-internal shape, which `track_of`
         # must keep reading as the client track.
         {"request_no": REQ_CLI, "company_id": COMPANY, "designation_name": "Analyst"},
@@ -366,7 +366,7 @@ async def main() -> None:
     # -- Fails closed when there are no internal requisitions at all --
     saved = list(reqs.docs)
     reqs.docs[:] = [r for r in saved
-                    if r.get("requisition_track") != M.RequisitionTrack.INTERNAL.value]
+                    if r.get("requisition_track") != "internal"]
     check("no internal requisitions -> an empty queue, never every candidate",
           await TEL.screenable_candidates(HR, COMPANY) == [])
     reqs.docs[:] = saved

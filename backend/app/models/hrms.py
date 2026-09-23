@@ -59,25 +59,6 @@ COLL_LINKS               = "hrms_links"
 COLL_DOCUMENTS           = "hrms_documents"
 COLL_DOCUMENT_TYPES      = "hrms_document_types"
 COLL_APPOINTMENTS        = "hrms_appointments"
-# No COLL_CLIENTS: a client is a company from the ERP's Companies section, read through
-# hrms_client_service. Storing them again here is what that module exists to prevent.
-#
-# What IS stored is the ENGAGEMENT -- the fact that this tenant provides recruitment services
-# to that company, and which of this tenant's users work on it. That relationship exists
-# nowhere in the ERP and cannot be derived, so without it there is no way to answer "is this
-# company a client OF ours", which is the question every client-scope check rests on.
-COLL_CLIENT_ENGAGEMENTS  = "hrms_client_engagements"
-# ── Phase 12: the client hiring track ──
-# A job request is what a CLIENT asks for. It is deliberately NOT a requisition: a
-# requisition is Sparsh's own record of work it has agreed to do, and it carries Sparsh's
-# approval chain. Letting a client write straight into that chain would put an outside
-# party inside our governance. Sparsh reviews a request and CONVERTS it, which is the
-# moment the work becomes ours.
-COLL_JOB_REQUESTS        = "hrms_job_requests"
-# One row per (candidate, client). This is what makes "the same CV, five clients, five
-# different outcomes" representable: the candidate's own `application_status` is Sparsh's
-# pipeline stage, and each share carries the status FOR THAT CLIENT, independently.
-COLL_CANDIDATE_SHARES    = "hrms_candidate_shares"
 # Background verification, per candidate, one row per check performed. Separate from
 # onboarding's `bg_verification` flag, which happens after the offer and cannot gate it.
 COLL_BACKGROUND_CHECKS   = "hrms_background_checks"
@@ -103,6 +84,17 @@ COLL_EXCEPTIONS          = "hrms_exceptions"
 # work -- interview windows, salary bands, communication templates, the policy register --
 # do not, for exactly the reason hrms_document_types does not: a template belongs to a
 # company, not to one vacancy.
+# -- Client Hiring step 1 -- its own collection. Nothing about a client requisition
+# shares storage with an internal one; that separation is the point.
+COLL_CLIENT_REQUISITIONS = "hrms_client_requisitions"
+COLL_CLIENT_SCORECARDS = "hrms_client_scorecards"
+COLL_CLIENT_POSTINGS   = "hrms_client_job_postings"
+COLL_CLIENT_CANDIDATES = "hrms_client_candidates"
+COLL_CLIENT_ASSESSMENTS = "hrms_client_assessments"
+COLL_CLIENT_INTERVIEWS = "hrms_client_interviews"
+COLL_CLIENT_REFERENCE_CHECKS = "hrms_client_reference_checks"
+COLL_CLIENT_OFFERS = "hrms_client_offers"
+COLL_CLIENT_JOININGS = "hrms_client_joinings"
 COLL_SHORTLIST_REVIEWS   = "hrms_shortlist_reviews"      # SOP §5 shortlisting committee
 COLL_INTERVIEW_WINDOWS   = "hrms_interview_windows"      # Annexure C batch interview slots
 COLL_PREBOARDING         = "hrms_preboarding_touchpoints"  # SOP §6 pre-boarding engagement
@@ -177,6 +169,10 @@ COLL_ASSET_RETURNS     = "hrms_asset_returns"
 COLL_ACCESS_CLEARANCES = "hrms_access_clearances"
 COLL_EXIT_INTERVIEWS   = "hrms_exit_interviews"
 COLL_FNF_SETTLEMENTS   = "hrms_fnf_settlements"
+# Former employees, written at closure. A SUMMARY for rehire decisions, deliberately not
+# a copy of the personnel file -- an alumni list is read by people who should not be
+# reading somebody's old salary or their exit interview verbatim.
+COLL_ALUMNI            = "hrms_alumni"
 
 # ── Phase ATT-1 — Attendance & Leave (BA/Functional Design §7.8-7.12, §22.8-22.9) ──
 # COLL_ATTENDANCE, COLL_PUNCH_SEGMENTS, COLL_ATTENDANCE_CORRECTIONS, COLL_LEAVES and
@@ -450,25 +446,10 @@ HRMS_INDEXES = [
     (COLL_APPOINTMENTS, [("company_id", 1), ("status", 1)],   {"name": "by_company_status"}),
     (COLL_APPOINTMENTS, [("request_no", 1)],                  {"name": "by_request"}),
 
-    # Clients have no collection of their own: they ARE the ERP's companies. The index that
-    # matters for client-wise reporting is on the requisition that names one.
-    (COLL_REQUISITIONS, [("company_id", 1), ("client_id", 1)], {"name": "by_company_client"}),
-    # Internal track: every list and every KPI filters by track first.
+    # Every hiring list and KPI filters on the track discriminator first (see
+    # REQUISITION_TRACK_INTERNAL): it is what keeps legacy client-track rows out.
     (COLL_REQUISITIONS, [("company_id", 1), ("requisition_track", 1)],
      {"name": "by_company_track"}),
-
-    # ── Client engagements ──
-    # Composite with company_id -- engagement_id is minted per (vendor) company.
-    (COLL_CLIENT_ENGAGEMENTS, [("company_id", 1), ("engagement_id", 1)],
-                                                         {"unique": True,
-                                                         "name": "uniq_engagement_id"}),
-    # One engagement per (tenant, client). A second would mean two answers to "are they our
-    # client", and two member lists to keep in step.
-    (COLL_CLIENT_ENGAGEMENTS, [("company_id", 1), ("client_id", 1)],
-     {"unique": True, "name": "uniq_company_client"}),
-    # THE index the scope resolver reads on every client-scoped request.
-    (COLL_CLIENT_ENGAGEMENTS, [("company_id", 1), ("member_user_ids", 1), ("status", 1)],
-     {"name": "by_member_scope"}),
 
     # ── Internal recruitment track ──
     # One scorecard per requisition -- the uniqueness IS the rule, exactly as it is for
@@ -515,6 +496,71 @@ HRMS_INDEXES = [
 
     # ── Phase INT-2 ──
     # Composite with company_id -- slr_no is minted per company.
+    # -- Client Hiring step 1 -- every lookup is company-scoped FIRST, so a query that
+    # forgot the tenant cannot ride an index that would have made it fast.
+    (COLL_CLIENT_REQUISITIONS, [("company_id", 1), ("cr_no", 1)],
+     {"unique": True, "name": "uniq_client_req_no"}),
+    # One scorecard per requisition, enforced by the index rather than by a read-then-write
+    # that two requests could both pass.
+    (COLL_CLIENT_SCORECARDS, [("company_id", 1), ("cr_no", 1)],
+     {"unique": True, "name": "uniq_client_scorecard_per_req"}),
+    (COLL_CLIENT_SCORECARDS, [("company_id", 1), ("psc_no", 1)],
+     {"unique": True, "name": "uniq_client_psc_no"}),
+    (COLL_CLIENT_CANDIDATES, [("company_id", 1), ("ccn_no", 1)],
+     {"unique": True, "name": "uniq_client_candidate_no"}),
+    # Step 2b -- the job posting. The public code is globally unique because it is the
+    # ONLY thing a public request carries: two tenants minting the same code would serve
+    # one client's advert from the other's link.
+    (COLL_CLIENT_POSTINGS, [("posting_code", 1)],
+     {"unique": True, "name": "uniq_client_posting_code"}),
+    (COLL_CLIENT_POSTINGS, [("company_id", 1), ("posting_no", 1)],
+     {"unique": True, "name": "uniq_client_posting_no"}),
+    (COLL_CLIENT_POSTINGS, [("company_id", 1), ("cr_no", 1)],
+     {"name": "client_postings_by_req"}),
+    (COLL_CLIENT_POSTINGS, [("company_id", 1), ("status", 1)],
+     {"name": "client_postings_by_status"}),
+    # Applications are candidates, found by the posting they came through.
+    (COLL_CLIENT_CANDIDATES, [("posting_code", 1)],
+     {"name": "client_candidates_by_posting"}),
+    (COLL_CLIENT_ASSESSMENTS, [("company_id", 1), ("cas_no", 1)],
+     {"unique": True, "name": "uniq_client_assessment_no"}),
+    (COLL_CLIENT_INTERVIEWS, [("company_id", 1), ("cin_no", 1)],
+     {"unique": True, "name": "uniq_client_interview_no"}),
+    (COLL_CLIENT_REFERENCE_CHECKS, [("company_id", 1), ("crf_no", 1)],
+     {"unique": True, "name": "uniq_client_reference_no"}),
+    (COLL_CLIENT_REFERENCE_CHECKS, [("company_id", 1), ("ccn_no", 1)],
+     {"name": "client_references_by_candidate"}),
+    (COLL_CLIENT_OFFERS, [("company_id", 1), ("cof_no", 1)],
+     {"unique": True, "name": "uniq_client_offer_no"}),
+    (COLL_CLIENT_JOININGS, [("company_id", 1), ("cjn_no", 1)],
+     {"unique": True, "name": "uniq_client_joining_no"}),
+    (COLL_CLIENT_JOININGS, [("company_id", 1), ("ccn_no", 1)],
+     {"unique": True, "name": "uniq_client_joining_per_candidate"}),
+    (COLL_CLIENT_JOININGS, [("company_id", 1), ("status", 1)],
+     {"name": "client_joinings_by_status"}),
+    (COLL_CLIENT_OFFERS, [("company_id", 1), ("ccn_no", 1)],
+     {"name": "client_offers_by_candidate"}),
+    (COLL_CLIENT_OFFERS, [("company_id", 1), ("status", 1)],
+     {"name": "client_offers_by_status"}),
+    (COLL_CLIENT_INTERVIEWS, [("company_id", 1), ("ccn_no", 1)],
+     {"name": "client_interviews_by_candidate"}),
+    (COLL_CLIENT_INTERVIEWS, [("company_id", 1), ("status", 1)],
+     {"name": "client_interviews_by_status"}),
+    # One live assessment per candidate, enforced by the index rather than a read-then-write.
+    (COLL_CLIENT_ASSESSMENTS, [("company_id", 1), ("ccn_no", 1)],
+     {"unique": True, "name": "uniq_client_assessment_per_candidate"}),
+    (COLL_CLIENT_ASSESSMENTS, [("company_id", 1), ("status", 1)],
+     {"name": "client_assessments_by_status"}),
+    (COLL_CLIENT_CANDIDATES, [("company_id", 1), ("cr_no", 1), ("status", 1)],
+     {"name": "client_candidates_by_req"}),
+    (COLL_CLIENT_CANDIDATES, [("company_id", 1), ("status", 1)],
+     {"name": "client_candidates_by_status"}),
+    (COLL_CLIENT_SCORECARDS, [("company_id", 1), ("status", 1)],
+     {"name": "client_scorecard_by_status"}),
+    (COLL_CLIENT_REQUISITIONS, [("company_id", 1), ("status", 1)],
+     {"name": "client_req_by_status"}),
+    (COLL_CLIENT_REQUISITIONS, [("status", 1), ("created_at", -1)],
+     {"name": "client_req_review_queue"}),
     (COLL_SHORTLIST_REVIEWS, [("company_id", 1), ("slr_no", 1)],
                                                               {"unique": True,
                                                               "name": "uniq_slr_no"}),
@@ -626,31 +672,6 @@ HRMS_INDEXES = [
     # Two rows for the same day would be counted once by the maths and twice by the screen.
     (COLL_HOLIDAYS, [("company_id", 1), ("holiday_date", 1)], {"unique": True,
                                                                "name": "uniq_company_date"}),
-    # ── Phase 12: the client hiring track ──
-    # Composite with company_id throughout, for the reason INT-10 records: business ids are
-    # minted per company, so two tenants' first request of a year are both JBR-2026-001 and
-    # a bare unique index would refuse the second tenant's.
-    (COLL_JOB_REQUESTS, [("company_id", 1), ("jbr_no", 1)],  {"unique": True,
-                                                              "name": "uniq_company_jbr_no"}),
-    # The client's own list, and Sparsh's inbox, are both this query.
-    (COLL_JOB_REQUESTS, [("company_id", 1), ("client_id", 1), ("status", 1)],
-     {"name": "by_company_client_status"}),
-    (COLL_JOB_REQUESTS, [("company_id", 1), ("status", 1)],  {"name": "by_company_status"}),
-
-    (COLL_CANDIDATE_SHARES, [("company_id", 1), ("share_no", 1)],
-     {"unique": True, "name": "uniq_company_share_no"}),
-    # UNIQUE, and the whole point of the collection: one candidate is shared with one client
-    # ONCE. A second share would give that client two rows with two different statuses for
-    # the same person, and nothing could say which was current. Re-sharing after a
-    # withdrawal reuses this row rather than adding to it.
-    (COLL_CANDIDATE_SHARES, [("company_id", 1), ("uk", 1), ("client_id", 1)],
-     {"unique": True, "name": "uniq_candidate_client"}),
-    # The client portal's only list: their shares, newest first, filtered by status.
-    (COLL_CANDIDATE_SHARES, [("company_id", 1), ("client_id", 1), ("status", 1)],
-     {"name": "by_client_status"}),
-    (COLL_CANDIDATE_SHARES, [("company_id", 1), ("uk", 1)], {"name": "by_candidate"}),
-    (COLL_CANDIDATE_SHARES, [("request_no", 1)],             {"name": "by_request"}),
-
     # NOT unique on (company, candidate, type): a check is re-run when the first came back
     # inconclusive, and the gate asks whether the LATEST of each required type cleared.
     (COLL_BACKGROUND_CHECKS, [("company_id", 1), ("bgv_no", 1)],
@@ -689,6 +710,10 @@ HRMS_INDEXES = [
     # document (draft → approved → paid), never a history of attempts.
     (COLL_FNF_SETTLEMENTS, [("company_id", 1), ("sep_no", 1)],
      {"unique": True, "name": "uniq_sep_fnf"}),
+    # One alumni row per former employee. Upserted at closure, so a case reopened and
+    # re-closed corrects the existing row rather than adding a second.
+    (COLL_ALUMNI, [("company_id", 1), ("employee_code", 1)],
+     {"unique": True, "name": "uniq_alumni_employee"}),
     # ── Phase ATT-1 — Attendance & Leave ──
     # One attendance row per employee per work date — the daily engine's whole output. The
     # regularisation flow updates this row in place (preserving the original in
@@ -844,9 +869,9 @@ HRMS_INDEXES = [
 #                  + governance_role: MD | HR | FINANCE | HOD | IMPLEMENTOR
 #                    (the client ladder, already used by auth_controller.client_rank)
 #
-# HRMS is a CLIENT-COMPANY module: a client's HR team hires and pays their own staff,
-# scoped by company_id. Sparsh internal staff get cross-company admin/support visibility.
-# This mirrors TPMS/ORM/Delegation exactly.
+# HRMS is Sparsh Magic's OWN HR and hiring module: it hires and pays Sparsh's own staff,
+# scoped by company_id (the one in-house tenant). The ERP's client companies are never
+# party to it. Sparsh internal staff get admin/support visibility.
 class HrmsRole(str, Enum):
     ADMIN    = "admin"      # Sparsh superadmin — full HRMS owner, cross-company
     INTERNAL = "internal"   # Sparsh admin/coach/staff — cross-company operator + support
@@ -859,11 +884,791 @@ class HrmsRole(str, Enum):
     FINANCE  = "finance"
     MANAGER  = "manager"    # client HOD — hiring manager; raises reqs, co-reviews assessments
     EMPLOYEE = "employee"   # client implementor / plain user — self-service only
-    # A user of a CLIENT ORGANISATION this tenant recruits for -- not a Sparsh user at all.
-    # The distinction that matters: every role above is scoped by company_id alone, and this
-    # one is additionally scoped to the client engagements it belongs to. See
-    # utils/hrms_access.scope_client_ids.
-    CLIENT   = "client"
+
+
+# =============================================================
+# Client Hiring, step 1 -- Need Mapping -> Manpower Requisition -> feasibility
+# =============================================================
+# PRO-fit SOP section 7. TWO forms, ONE record.
+#
+# The SOP describes a Need Mapping Form and a Manpower Requisition Form as separate
+# documents, and they are modelled here as two STAGES of one requisition rather than two
+# collections. They describe the same vacancy: the NMF captures why the client needs
+# somebody, the MRF formalises what the role actually is. Splitting them would mean
+# maintaining a join whose only job is to say "these two papers are the same job", and
+# would make "no sourcing until BOTH are complete" a cross-collection invariant rather than
+# a status on one row.
+#
+# Nothing here is shared with the internal requisition. Different collection, different
+# statuses, different capabilities, different service. Internal Hiring's own chain
+# (INTERNAL_REQ_TRANSITIONS) is untouched and must stay that way.
+class ClientReqStatus(str, Enum):
+    """Where a client requisition sits. The SOP's section 7, as states."""
+    NEED_MAPPING        = "Need Mapping"          # client is filling the NMF
+    MANPOWER_REQUISITION = "Manpower Requisition"  # NMF done; client is filling the MRF
+    PENDING_FEASIBILITY = "Pending Feasibility"   # submitted; Sparsh must review
+    APPROVED            = "Approved"              # activated; the scorecard stage may begin
+    REJECTED            = "Rejected"              # Sparsh refused it
+    CLOSED              = "Closed"                # withdrawn or no longer needed
+
+
+class ClientRoleLevel(str, Enum):
+    """The Role Level the SOP's section 12 interview-panel table is written in terms of.
+
+    Carried on the Manpower Requisition because section 15 hangs a control off it: a
+    reference check before offer release "for managerial and above roles". A level nobody
+    records is a control that never fires, so it is asked for on the requisition rather
+    than inferred from a job title.
+    """
+    JUNIOR      = "Junior / Executive"
+    MID         = "Mid-level / Specialist"
+    MANAGERIAL  = "Managerial"
+    LEADERSHIP  = "Senior Leadership"
+
+
+# Section 15: the pre-offer reference check applies to "managerial and above".
+CLIENT_REFERENCE_REQUIRED_LEVELS = {ClientRoleLevel.MANAGERIAL.value,
+                                    ClientRoleLevel.LEADERSHIP.value}
+
+# Only a positive reference clears the gate. "Unable to Verify" is completed WORK but not
+# a clearance -- the same distinction the internal track draws, and for the same reason.
+CLIENT_REFERENCE_CLEARS = {"Positive"}
+
+
+class ClientReferenceOutcome(str, Enum):
+    POSITIVE         = "Positive"
+    NEGATIVE         = "Negative"
+    UNABLE_TO_VERIFY = "Unable to Verify"
+
+
+class EmploymentTypeClient(str, Enum):
+    """SOP section 2: the position categories a PRO-fit engagement handles."""
+    PERMANENT   = "Permanent"
+    CONTRACTUAL = "Contractual"
+    REPLACEMENT = "Replacement"
+    VOLUME      = "Volume Hiring"
+
+
+class ClientReqUrgency(str, Enum):
+    IMMEDIATE = "Immediate"
+    HIGH      = "High"
+    NORMAL    = "Normal"
+
+
+# The state machine, as data. Same shape as INTERNAL_REQ_TRANSITIONS so both tracks are
+# read the same way, and deliberately a SEPARATE table so a change to one cannot move the
+# other.
+#
+#   action -> (from, to, capability, is_terminal_refusal)
+#
+# There is no edge out of REJECTED or CLOSED. "A rejected requisition cannot progress" is
+# therefore a property of the table rather than a check somebody has to remember to write.
+CLIENT_REQ_TRANSITIONS = {
+    # The client completes the Need Mapping Form and moves on to the requisition form.
+    "submit-need-mapping": (ClientReqStatus.NEED_MAPPING,
+                            ClientReqStatus.MANPOWER_REQUISITION,
+                            "CLIENT_REQUISITION_WRITE", False),
+    # The client completes the Manpower Requisition Form and sends it to Sparsh.
+    "submit-requisition":  (ClientReqStatus.MANPOWER_REQUISITION,
+                            ClientReqStatus.PENDING_FEASIBILITY,
+                            "CLIENT_REQUISITION_WRITE", False),
+    # Sparsh's feasibility and budget review -- section 7 step 3.
+    "feasibility-approve": (ClientReqStatus.PENDING_FEASIBILITY, ClientReqStatus.APPROVED,
+                            "CLIENT_REQUISITION_REVIEW", False),
+    "feasibility-reject":  (ClientReqStatus.PENDING_FEASIBILITY, ClientReqStatus.REJECTED,
+                            "CLIENT_REQUISITION_REVIEW", True),
+    # Sent back for the client to correct, rather than refused outright. Not a rejection:
+    # the requisition is alive, it is simply back with the person who can fix it.
+    "feasibility-return":  (ClientReqStatus.PENDING_FEASIBILITY,
+                            ClientReqStatus.MANPOWER_REQUISITION,
+                            "CLIENT_REQUISITION_REVIEW", True),
+}
+
+# Statuses from which the CLIENT may still edit their own forms.
+CLIENT_REQ_EDITABLE = {ClientReqStatus.NEED_MAPPING.value,
+                       ClientReqStatus.MANPOWER_REQUISITION.value}
+
+# Terminal. Nothing leaves these, by design.
+CLIENT_REQ_CLOSED = {ClientReqStatus.REJECTED.value, ClientReqStatus.CLOSED.value}
+
+# What the feasibility reviewer must actually assess (SOP section 7 step 3). Declared so the
+# screen and the service ask for the same three things, and so "reviewed" cannot mean
+# "somebody clicked approve".
+FEASIBILITY_CHECKS = [
+    ("role_clarity",              "Role clarity"),
+    ("compensation_competitive",  "Compensation competitiveness"),
+    ("timeline_realistic",        "Realistic timeline"),
+]
+
+# =============================================================
+# Client Hiring, step 2 -- the Position Scorecard
+# =============================================================
+# PRO-fit SOP section 4 (definition), section 6 (principle) and the section 8 approval
+# matrix. The scorecard is the EVALUATION BENCHMARK: every later score on this track --
+# the Talent Fit Score at screening, the comparative scorecard shared with the client --
+# is a measurement against it. Section 6: "No candidate shall be presented to a client
+# without an approved Position Scorecard as the evaluation benchmark."
+#
+# So it is approved before sourcing, not after, and the client's approval is mandatory.
+# Approving a benchmark once candidates already exist would let the yardstick be chosen to
+# fit the people already found, which is the whole reason the SOP puts it at step 4.
+class ClientScorecardStatus(str, Enum):
+    DRAFT                   = "Draft"                    # the recruiter is writing it
+    PENDING_INTERNAL_REVIEW = "Pending Internal Review"   # Team Lead, before client sharing
+    PENDING_CLIENT_APPROVAL = "Pending Client Approval"   # shared with the client
+    APPROVED                = "Approved"                  # sourcing may begin
+
+
+# The five sections SOP section 4 names. Declared as data so the form, the service and the
+# completeness check ask for the same things, and so "what is a scorecard" is answerable
+# without reading three files.
+CLIENT_SCORECARD_SECTIONS = [
+    ("responsibilities",      "Responsibilities"),
+    ("skills",                "Skills"),
+    ("experience",            "Experience"),
+    ("cultural_expectations", "Cultural expectations"),
+    ("success_indicators",    "Success indicators"),
+]
+
+# action -> (from, to, capability, remarks_required)
+#
+# Recruiter drafts, Team Lead reviews, client approves -- the section 8 matrix, as a table.
+# Either reviewer may send it back, and a return is not a rejection: the scorecard returns
+# to Draft with the reason on it, because a benchmark nobody agreed is a document to fix
+# rather than a decision to record.
+CLIENT_SCORECARD_TRANSITIONS = {
+    "submit-for-review": (ClientScorecardStatus.DRAFT,
+                          ClientScorecardStatus.PENDING_INTERNAL_REVIEW,
+                          "CLIENT_SCORECARD_WRITE", False),
+    "internal-approve":  (ClientScorecardStatus.PENDING_INTERNAL_REVIEW,
+                          ClientScorecardStatus.PENDING_CLIENT_APPROVAL,
+                          "CLIENT_SCORECARD_REVIEW", False),
+    "internal-return":   (ClientScorecardStatus.PENDING_INTERNAL_REVIEW,
+                          ClientScorecardStatus.DRAFT,
+                          "CLIENT_SCORECARD_REVIEW", True),
+    "client-approve":    (ClientScorecardStatus.PENDING_CLIENT_APPROVAL,
+                          ClientScorecardStatus.APPROVED,
+                          "CLIENT_SCORECARD_APPROVE", False),
+    "client-return":     (ClientScorecardStatus.PENDING_CLIENT_APPROVAL,
+                          ClientScorecardStatus.DRAFT,
+                          "CLIENT_SCORECARD_APPROVE", True),
+}
+
+# Only the recruiter's own draft is editable. Once it is with a reviewer it is a document
+# under consideration, and editing it underneath them would make their approval meaningless.
+CLIENT_SCORECARD_EDITABLE = {ClientScorecardStatus.DRAFT.value}
+
+# What the client is allowed to SEE. A scorecard still with Sparsh is work in progress, and
+# showing a client a draft their recruiter has not finished invites approval of the wrong
+# thing. Read as a set so the rule is one lookup rather than a comparison to get backwards.
+CLIENT_SCORECARD_VISIBLE_TO_CLIENT = {
+    ClientScorecardStatus.PENDING_CLIENT_APPROVAL.value,
+    ClientScorecardStatus.APPROVED.value,
+}
+
+# =============================================================
+# Client Hiring, step 2b -- the job posting
+# =============================================================
+# An approved Position Scorecard is a benchmark, not an advert. The posting is what turns
+# it into something a person can apply to, and it is deliberately a SEPARATE record from
+# the internal track's `hrms_job_postings`: same idea, different tenant, different
+# audience, and one collection serving both would put a client's advert one query mistake
+# away from Sparsh Magic's own.
+#
+# Three states and no more. A posting is being written, it is open to applications, or it
+# is not. Anything finer (paused, expiring, exec-search approval) belongs to the internal
+# track's own lifecycle and is not what this flow asked for.
+class ClientPostingStatus(str, Enum):
+    DRAFT     = "Draft"        # being written; no public link works yet
+    PUBLISHED = "Published"    # live, and applications are being accepted
+    CLOSED    = "Closed"       # no longer accepting; applications already in stay put
+
+
+# action -> (from, to, capability, remarks_required)
+CLIENT_POSTING_TRANSITIONS = {
+    "publish": (ClientPostingStatus.DRAFT, ClientPostingStatus.PUBLISHED,
+                "CLIENT_POSTING_PUBLISH", False),
+    # Closing needs a reason: a posting that stops accepting applications mid-search is a
+    # decision somebody will ask about, and "why did this close" is the question.
+    "close":   (ClientPostingStatus.PUBLISHED, ClientPostingStatus.CLOSED,
+                "CLIENT_POSTING_WRITE", True),
+}
+
+# Only a draft is editable. Once it is published the wording is what applicants were
+# shown, and editing it underneath them rewrites the advert they answered.
+CLIENT_POSTING_EDITABLE = {ClientPostingStatus.DRAFT.value}
+
+
+# =============================================================
+# Client Hiring, steps 3-4 -- candidates, screening and the CV share
+# =============================================================
+# PRO-fit SOP sections 10 (sourcing), 11 (screening), 13 (evaluation) and 14 (selection).
+#
+# A CLIENT candidate is a different record from an internal one. Same real person,
+# perhaps, but a different process, different scores, a different owner and a different
+# audience -- and above all a different tenant. Keeping them in one collection would put
+# Sparsh's own applicants one query mistake away from a client's screen.
+class ClientCandidateStatus(str, Enum):
+    SOURCED            = "Sourced"              # found, not yet measured
+    SCREENED           = "Screened"             # Talent Fit Score recorded (section 11)
+    TELEPHONIC_PASSED  = "Telephonic Passed"    # PI Score recorded, passed
+    TELEPHONIC_FAILED  = "Telephonic Failed"    # revivable; not a rejection of the person
+    SHORTLISTED        = "Shortlisted"          # Sparsh's internal pick
+    SHARED_WITH_CLIENT = "Shared with Client"   # awaiting the client's CV verdict
+    CLIENT_APPROVED    = "Client Approved"      # the gate into assessment
+    # Step 5 drives these two. They are set by the assessment service rather than by the
+    # candidate's own action endpoint, the same way the internal interview service moves an
+    # internal candidate: the stage is a consequence of work recorded elsewhere, and
+    # letting somebody set it by hand would let the pipeline claim an assessment that
+    # never happened.
+    ASSESSMENT         = "Assessment"           # sitting the assessment
+    ASSESSMENT_REVIEWED = "Assessment Reviewed"  # client has read the result
+    INTERVIEW          = "Interview"            # step 6 drives this
+    SELECTED           = "Selected"             # the client chose them
+    OFFER_RELEASED     = "Offer Released"       # step 7 drives these two
+    OFFER_ACCEPTED     = "Offer Accepted"
+    OFFER_DECLINED     = "Offer Declined"
+    PRE_BOARDING       = "Pre-boarding"         # steps 8-9 drive these three
+    JOINED             = "Joined"
+    DROPPED            = "Dropped Out"
+    CLIENT_REJECTED    = "Client Rejected"      # the client passed on them
+    WITHDRAWN          = "Withdrawn"            # the candidate stepped away
+
+
+# SOP section 13's decision guide, as data. "No candidate shall be shortlisted solely on
+# personal recommendation without meeting the minimum score threshold", so the threshold
+# has to be a number the system knows rather than a paragraph somebody read once.
+#
+# (floor, label, may_shortlist)
+CLIENT_SCORE_GUIDE = [
+    (4.0, "Strong -- recommend for client presentation", True),
+    (3.5, "Consider -- present with notes",              True),
+    (3.0, "Hold -- compare against other candidates",    False),
+    (0.0, "Reject",                                      False),
+]
+
+# Below this, section 13 says reject. Named so the gate and the guide cannot drift.
+CLIENT_SHORTLIST_MIN_SCORE = 3.5
+
+
+def client_score_band(score) -> dict:
+    """Which band a score falls in, and whether it may be shortlisted. Pure."""
+    try:
+        value = float(score)
+    except (TypeError, ValueError):
+        return {"score": None, "label": "Not scored", "may_shortlist": False}
+    for floor, label, may in CLIENT_SCORE_GUIDE:
+        if value >= floor:
+            return {"score": round(value, 2), "label": label, "may_shortlist": may}
+    return {"score": round(value, 2), "label": "Reject", "may_shortlist": False}
+
+
+# The scores SOP section 13 names. Averaged into the figure the guide bands.
+CLIENT_SCORE_FIELDS = [
+    ("tfs_score",        "Talent Fit Score"),
+    ("competency_score", "Competency Score"),
+    ("pi_score",         "Preliminary Interview Score"),
+]
+
+# action -> (from, to, capability, remarks_required)
+CLIENT_CANDIDATE_TRANSITIONS = {
+    # The recruiter measures the CV against the approved Position Scorecard (section 11).
+    "screen":            (ClientCandidateStatus.SOURCED, ClientCandidateStatus.SCREENED,
+                          "CLIENT_CANDIDATE_WRITE", False),
+    # The brief telephonic interview, section 11.
+    "telephonic-pass":   (ClientCandidateStatus.SCREENED,
+                          ClientCandidateStatus.TELEPHONIC_PASSED,
+                          "CLIENT_CANDIDATE_WRITE", False),
+    "telephonic-fail":   (ClientCandidateStatus.SCREENED,
+                          ClientCandidateStatus.TELEPHONIC_FAILED,
+                          "CLIENT_CANDIDATE_WRITE", True),
+    # A telephonic failure is NOT a rejection of the person -- the status has said so since
+    # it was written, and TELEPHONIC_FAILED is deliberately absent from
+    # CLIENT_CANDIDATE_CLOSED. But there was no way back out of it, so "revivable" was a
+    # comment rather than a behaviour: the candidate sat in a state that was neither closed
+    # nor movable. Back to SCREENED, because the screening scores still stand and it is the
+    # telephonic that is being given a second run. Remarks required -- reviving somebody a
+    # colleague failed is a judgement that should carry its reason.
+    "revive":            (ClientCandidateStatus.TELEPHONIC_FAILED,
+                          ClientCandidateStatus.SCREENED,
+                          "CLIENT_CANDIDATE_WRITE", True),
+    # Sparsh's own pick, gated on the section 13 threshold.
+    "shortlist":         (ClientCandidateStatus.TELEPHONIC_PASSED,
+                          ClientCandidateStatus.SHORTLISTED,
+                          "CLIENT_CANDIDATE_WRITE", False),
+    # Delivery to the client is the Team Lead's accountability, not the recruiter's.
+    "share":             (ClientCandidateStatus.SHORTLISTED,
+                          ClientCandidateStatus.SHARED_WITH_CLIENT,
+                          "CLIENT_CANDIDATE_SHARE", False),
+    # THE GATE. The client's verdict is what lets a candidate into assessment.
+    "client-approve":    (ClientCandidateStatus.SHARED_WITH_CLIENT,
+                          ClientCandidateStatus.CLIENT_APPROVED,
+                          "CLIENT_CANDIDATE_DECIDE", False),
+    "client-reject":     (ClientCandidateStatus.SHARED_WITH_CLIENT,
+                          ClientCandidateStatus.CLIENT_REJECTED,
+                          "CLIENT_CANDIDATE_DECIDE", True),
+}
+
+# A client sees a candidate once they have been shared, and not one moment before. Sourcing
+# and screening are Sparsh's working process; a client watching it would be reading an
+# opinion that has not been formed yet.
+CLIENT_CANDIDATE_VISIBLE_TO_CLIENT = {
+    ClientCandidateStatus.SHARED_WITH_CLIENT.value,
+    ClientCandidateStatus.CLIENT_APPROVED.value,
+    ClientCandidateStatus.CLIENT_REJECTED.value,
+    # Once a client has approved a CV the candidate stays theirs to follow, so every later
+    # stage is visible too. Losing sight of somebody the moment they progress would be a
+    # strange reading of a rule meant to hide work in progress.
+    ClientCandidateStatus.ASSESSMENT.value,
+    ClientCandidateStatus.ASSESSMENT_REVIEWED.value,
+    ClientCandidateStatus.INTERVIEW.value,
+    ClientCandidateStatus.SELECTED.value,
+    ClientCandidateStatus.OFFER_RELEASED.value,
+    ClientCandidateStatus.OFFER_ACCEPTED.value,
+    ClientCandidateStatus.OFFER_DECLINED.value,
+    ClientCandidateStatus.PRE_BOARDING.value,
+    ClientCandidateStatus.JOINED.value,
+    ClientCandidateStatus.DROPPED.value,
+}
+
+# Nothing leaves these -- on THIS engagement. See CLIENT_CANDIDATE_POOL below: a closed
+# state ends a candidate's run at one client, not their usefulness as a person.
+CLIENT_CANDIDATE_CLOSED = {ClientCandidateStatus.CLIENT_REJECTED.value,
+                           ClientCandidateStatus.OFFER_DECLINED.value,
+                           ClientCandidateStatus.DROPPED.value,
+                           ClientCandidateStatus.WITHDRAWN.value}
+
+# The AVAILABLE CANDIDATE POOL.
+#
+# A client rejecting a CV ends that candidate's run at THAT client. It says nothing about
+# whether they suit somebody else, and deleting or permanently closing them would throw
+# away sourcing Sparsh has already paid for -- along with the candidate's own time.
+#
+# So these states are terminal for the engagement and OPEN for the pool: the record stays
+# exactly where it is, in the client's own tenant, visible to them as the rejection they
+# made. Sparsh separately sees the person in a pool spanning every engagement, and can
+# source them into a different requisition.
+#
+# THAT RE-SOURCE CREATES A NEW RECORD IN THE NEW TENANT. It does not move, re-point or
+# share the original. Client B never sees Client A's row, never learns that Client A
+# rejected them, and the two engagements keep separate histories of the same person --
+# which is the only reading of "reusable" that does not breach tenant isolation.
+CLIENT_CANDIDATE_POOL = {
+    ClientCandidateStatus.CLIENT_REJECTED.value,     # the client passed on them
+    ClientCandidateStatus.TELEPHONIC_FAILED.value,   # parked, and revivable in place
+    ClientCandidateStatus.OFFER_DECLINED.value,      # they said no to this one
+    ClientCandidateStatus.DROPPED.value,             # never started here
+    ClientCandidateStatus.WITHDRAWN.value,           # stepped away
+}
+
+
+# =============================================================
+# Client Hiring, step 5 -- the assessment
+# =============================================================
+# PRO-fit SOP section 12 ("Talent Fit Assessment test administered and evaluated against
+# the Position Scorecard") and the responsibility table for the assessment stage.
+#
+# The order is fixed and the reason is the same one that puts scorecard approval before
+# sourcing: the assessment is marked against the benchmark, so it happens after the client
+# has agreed both the benchmark and this particular candidate.
+class ClientAssessmentStatus(str, Enum):
+    SENT      = "Sent"                  # issued to the candidate
+    SUBMITTED = "Submitted"             # the candidate has completed it
+    SCORED    = "Scored"                # the evaluator has marked it
+    SHARED    = "Shared with Client"    # the result is with the client
+    REVIEWED  = "Reviewed by Client"    # the client has read it; interviews may begin
+
+
+# action -> (from, to, capability, remarks_required)
+CLIENT_ASSESSMENT_TRANSITIONS = {
+    # The candidate sits it. Recorded by whoever manages the assessment, because the
+    # candidate is not a user of this system.
+    "record-submission": (ClientAssessmentStatus.SENT, ClientAssessmentStatus.SUBMITTED,
+                          "CLIENT_ASSESSMENT_MANAGE", False),
+    # The designated evaluator marks it.
+    "score":             (ClientAssessmentStatus.SUBMITTED, ClientAssessmentStatus.SCORED,
+                          "CLIENT_ASSESSMENT_SCORE", False),
+    # Delivery to the client, the Team Lead's accountability as everywhere else.
+    "share":             (ClientAssessmentStatus.SCORED, ClientAssessmentStatus.SHARED,
+                          "CLIENT_ASSESSMENT_SHARE", False),
+    # The client reads the result. This is an acknowledgement, not a verdict: the flow goes
+    # straight on to the interview, and the client's SELECTION comes later, after they have
+    # seen the recording.
+    "client-review":     (ClientAssessmentStatus.SHARED, ClientAssessmentStatus.REVIEWED,
+                          "CLIENT_ASSESSMENT_REVIEW", False),
+}
+
+CLIENT_ASSESSMENT_VISIBLE_TO_CLIENT = {
+    ClientAssessmentStatus.SHARED.value,
+    ClientAssessmentStatus.REVIEWED.value,
+}
+
+# =============================================================
+# Client Hiring, step 6 -- interview, recording, client selection
+# =============================================================
+# PRO-fit SOP section 12: "Personal interview conducted on a recorded platform
+# (Zoom/virtual) by the internal recruitment panel", and section 14, which lists the
+# "recorded interview link" among what the client receives.
+#
+# SPARSH CONDUCTS, THE CLIENT WATCHES. The SOP also describes a separate client-run
+# interview; the agreed flow replaced it with the client viewing Sparsh's recording, so
+# there is no client-side panel here. The recording is a LINK rather than an upload,
+# which is what section 14 asks for and what a recorded meeting platform produces.
+class ClientInterviewStatus(str, Enum):
+    SCHEDULED       = "Scheduled"
+    CONDUCTED       = "Conducted"            # held, scored, recording link captured
+    SHARED          = "Shared with Client"   # the client may watch it
+    CLIENT_SELECTED = "Selected by Client"   # the selection; opens the offer stage
+    CLIENT_REJECTED = "Rejected by Client"
+
+
+# The competencies the panel scores. Kept short and named here so the form, the service
+# and any later report ask for the same things.
+CLIENT_INTERVIEW_CRITERIA = [
+    ("role_fit",        "Fit against the Position Scorecard"),
+    ("communication",   "Communication"),
+    ("technical_depth", "Technical depth"),
+    ("culture_fit",     "Culture fit"),
+]
+
+# action -> (from, to, capability, remarks_required)
+CLIENT_INTERVIEW_TRANSITIONS = {
+    "record-outcome": (ClientInterviewStatus.SCHEDULED, ClientInterviewStatus.CONDUCTED,
+                       "CLIENT_INTERVIEW_MANAGE", False),
+    "share":          (ClientInterviewStatus.CONDUCTED, ClientInterviewStatus.SHARED,
+                       "CLIENT_INTERVIEW_SHARE", False),
+    # THE SELECTION. The client watches the recording and chooses.
+    "client-select":  (ClientInterviewStatus.SHARED,
+                       ClientInterviewStatus.CLIENT_SELECTED,
+                       "CLIENT_INTERVIEW_DECIDE", False),
+    "client-reject":  (ClientInterviewStatus.SHARED,
+                       ClientInterviewStatus.CLIENT_REJECTED,
+                       "CLIENT_INTERVIEW_DECIDE", True),
+}
+
+CLIENT_INTERVIEW_VISIBLE_TO_CLIENT = {
+    ClientInterviewStatus.SHARED.value,
+    ClientInterviewStatus.CLIENT_SELECTED.value,
+    ClientInterviewStatus.CLIENT_REJECTED.value,
+}
+
+# =============================================================
+# Client Hiring, step 7 -- the offer
+# =============================================================
+# PRO-fit SOP sections 16 and 17, and the section 8 approval matrix.
+#
+# Section 16 is a CHECKPOINT with three conditions, all of which are enforced before the
+# offer leaves Sparsh: the client's final selection in writing, compensation inside the
+# range the client approved on the Manpower Requisition, and (section 15, for managerial
+# and above) a reference check. Section 17 then has the CLIENT releasing the letter
+# directly to the candidate, and states that no verbal offer is valid.
+class ClientOfferStatus(str, Enum):
+    DRAFT                   = "Draft"                   # the recruiter prepares terms
+    # SALARY DEVIATION. When the candidate's CTC lands outside the range the client
+    # approved on the Manpower Requisition, the offer cannot simply be submitted -- but it
+    # is not dead either. It goes STRAIGHT to Client HR, who own the money, and the
+    # approved requisition range is left exactly as it is. Nothing about the range, the
+    # requisition or any other stage changes; this is an extra door out of Draft, not a
+    # different route through the existing ones.
+    PENDING_DEVIATION       = "Pending Salary Deviation"  # with Client HR to decide
+    DEVIATION_REJECTED      = "Deviation Rejected"        # Client HR said no; terminal
+    PENDING_VERIFICATION    = "Pending Verification"    # Team Lead checks the paperwork
+    PENDING_CLIENT_APPROVAL = "Pending Client Approval"  # with the client to approve
+    RELEASED                = "Released"                # the client issued it
+    ACCEPTED                = "Accepted"                # written acceptance recorded
+    DECLINED                = "Declined"
+
+
+# action -> (from, to, capability, remarks_required)
+CLIENT_OFFER_TRANSITIONS = {
+    "submit-for-verification": (ClientOfferStatus.DRAFT,
+                                ClientOfferStatus.PENDING_VERIFICATION,
+                                "CLIENT_OFFER_WRITE", False),
+    # ── The salary deviation request ──
+    # The OTHER way out of Draft, and the only one open to an offer above (or below) the
+    # approved range. Remarks are mandatory: Client HR is being asked to spend more than
+    # they budgeted, and "why" is the whole of what they are deciding on.
+    "submit-deviation":  (ClientOfferStatus.DRAFT, ClientOfferStatus.PENDING_DEVIATION,
+                          "CLIENT_OFFER_WRITE", True),
+    # Client HR approves the figure -> the offer rejoins the ordinary chain at
+    # verification, and runs from there exactly as any other offer does.
+    "deviation-approve": (ClientOfferStatus.PENDING_DEVIATION,
+                          ClientOfferStatus.PENDING_VERIFICATION,
+                          "CLIENT_OFFER_DEVIATE", False),
+    # Client HR refuses it -> the offer is terminal and the CANDIDATE goes down the
+    # existing rejection path (Client Rejected, which is already an Available Candidates
+    # pool state). Nothing new is invented for the reject case.
+    "deviation-reject":  (ClientOfferStatus.PENDING_DEVIATION,
+                          ClientOfferStatus.DEVIATION_REJECTED,
+                          "CLIENT_OFFER_DEVIATE", True),
+    "verify":        (ClientOfferStatus.PENDING_VERIFICATION,
+                      ClientOfferStatus.PENDING_CLIENT_APPROVAL,
+                      "CLIENT_OFFER_VERIFY", False),
+    "return":        (ClientOfferStatus.PENDING_VERIFICATION, ClientOfferStatus.DRAFT,
+                      "CLIENT_OFFER_VERIFY", True),
+    # Section 17 -- the client releases it to the candidate.
+    "client-release": (ClientOfferStatus.PENDING_CLIENT_APPROVAL,
+                       ClientOfferStatus.RELEASED,
+                       "CLIENT_OFFER_RELEASE", False),
+    "client-return":  (ClientOfferStatus.PENDING_CLIENT_APPROVAL, ClientOfferStatus.DRAFT,
+                       "CLIENT_OFFER_RELEASE", True),
+    # Section 17 -- "recruiter confirms written acceptance and joining date".
+    "record-acceptance": (ClientOfferStatus.RELEASED, ClientOfferStatus.ACCEPTED,
+                          "CLIENT_OFFER_WRITE", False),
+    "record-decline":    (ClientOfferStatus.RELEASED, ClientOfferStatus.DECLINED,
+                          "CLIENT_OFFER_WRITE", True),
+}
+
+CLIENT_OFFER_EDITABLE = {ClientOfferStatus.DRAFT.value}
+
+CLIENT_OFFER_VISIBLE_TO_CLIENT = {
+    # A deviation request is addressed TO the client, so it has to be visible from the
+    # moment it is raised -- and afterwards, so their own refusal stays on their record.
+    ClientOfferStatus.PENDING_DEVIATION.value,
+    ClientOfferStatus.DEVIATION_REJECTED.value,
+    ClientOfferStatus.PENDING_CLIENT_APPROVAL.value,
+    ClientOfferStatus.RELEASED.value,
+    ClientOfferStatus.ACCEPTED.value,
+    ClientOfferStatus.DECLINED.value,
+}
+
+# =============================================================
+# Client Hiring, steps 8-9 -- pre-boarding, joining, handover, closure
+# =============================================================
+# PRO-fit SOP sections 18, 19 and 20.
+#
+# Section 19 puts the recruiter in periodic contact with the candidate between acceptance
+# and Day 1, to manage counter-offer and drop-out risk. Section 18 has the CLIENT
+# confirming, in writing, that the person turned up. Section 20 then has Sparsh handing
+# over the candidate file and the post-joining checks, and says the requisition is closed
+# "only after this handover" -- so closure is a consequence of the handover here, not a
+# separate button somebody can press early.
+class ClientJoiningStatus(str, Enum):
+    PRE_BOARDING = "Pre-boarding"   # accepted; between offer and Day 1
+    JOINED       = "Joined"         # the client confirmed it in writing
+    COMPLETED    = "Completed"      # handover done, requisition closed
+    DROPPED      = "Dropped Out"    # never joined
+
+
+# What section 20 hands to the client's own HR team. Declared as data so the service and
+# the screen ask for the same things, and so "handover" cannot mean an empty note.
+CLIENT_HANDOVER_ITEMS = [
+    ("candidate_file",      "Candidate file"),
+    ("scorecards",          "Scorecards"),
+    ("interview_records",   "Interview records"),
+    ("verification_status", "Verification status"),
+]
+
+# action -> (from, to, capability, remarks_required)
+CLIENT_JOINING_TRANSITIONS = {
+    # Section 18 -- the client confirms joining in writing.
+    "confirm-joining": (ClientJoiningStatus.PRE_BOARDING, ClientJoiningStatus.JOINED,
+                        "CLIENT_JOINING_CONFIRM", False),
+    # The counter-offer risk section 19 exists to manage, when it lands.
+    "record-drop":     (ClientJoiningStatus.PRE_BOARDING, ClientJoiningStatus.DROPPED,
+                        "CLIENT_JOINING_MANAGE", True),
+    # Section 20 -- the handover note, which is also what closes the requisition.
+    "share-handover":  (ClientJoiningStatus.JOINED, ClientJoiningStatus.COMPLETED,
+                        "CLIENT_JOINING_HANDOVER", False),
+}
+
+# The joiner is the client's own new employee from the moment they accept, so every stage
+# of this record is theirs to follow.
+CLIENT_JOINING_VISIBLE_TO_CLIENT = {s.value for s in ClientJoiningStatus}
+
+AUDIT_CLIENT_JOINING_OPENED   = "client pre-boarding opened"
+AUDIT_CLIENT_JOINING_UPDATED  = "client joining record updated"
+AUDIT_CLIENT_JOINING_ACTIONED = "client joining stage changed"
+AUDIT_CLIENT_TOUCHPOINT       = "client pre-boarding touchpoint recorded"
+ENTITY_CLIENT_JOINING = "client_joining"
+
+
+AUDIT_CLIENT_REFERENCE_RECORDED = "client reference check recorded"
+AUDIT_CLIENT_OFFER_CREATED      = "client offer prepared"
+AUDIT_CLIENT_OFFER_UPDATED      = "client offer updated"
+AUDIT_CLIENT_OFFER_ACTIONED     = "client offer stage changed"
+ENTITY_CLIENT_REFERENCE = "client_reference_check"
+ENTITY_CLIENT_OFFER     = "client_offer"
+
+
+AUDIT_CLIENT_INTERVIEW_SCHEDULED = "client interview scheduled"
+AUDIT_CLIENT_INTERVIEW_UPDATED   = "client interview updated"
+AUDIT_CLIENT_INTERVIEW_ACTIONED  = "client interview stage changed"
+ENTITY_CLIENT_INTERVIEW = "client_interview"
+
+
+AUDIT_CLIENT_ASSESSMENT_SENT     = "client assessment issued"
+AUDIT_CLIENT_ASSESSMENT_UPDATED  = "client assessment updated"
+AUDIT_CLIENT_ASSESSMENT_ACTIONED = "client assessment stage changed"
+ENTITY_CLIENT_ASSESSMENT = "client_assessment"
+
+
+AUDIT_CLIENT_CANDIDATE_ADDED    = "client candidate sourced"
+AUDIT_CLIENT_CANDIDATE_UPDATED  = "client candidate updated"
+AUDIT_CLIENT_CANDIDATE_ACTIONED = "client candidate stage changed"
+ENTITY_CLIENT_CANDIDATE = "client_candidate"
+
+
+AUDIT_CLIENT_SCORECARD_CREATED  = "client position scorecard drafted"
+AUDIT_CLIENT_SCORECARD_UPDATED  = "client position scorecard updated"
+AUDIT_CLIENT_SCORECARD_ACTIONED = "client position scorecard status changed"
+ENTITY_CLIENT_SCORECARD = "client_scorecard"
+
+
+AUDIT_CLIENT_REQ_CREATED  = "client requisition raised"
+AUDIT_CLIENT_REQ_UPDATED  = "client requisition updated"
+AUDIT_CLIENT_REQ_ACTIONED = "client requisition status changed"
+ENTITY_CLIENT_REQUISITION = "client_requisition"
+
+
+# =============================================================
+# Client Hiring -- the capability ceiling for a client company
+# =============================================================
+# Sparsh Magic runs TWO hiring tracks and they do not meet. Internal Hiring is Sparsh
+# hiring its own staff; Client Hiring is Sparsh recruiting on behalf of a client company.
+#
+# A user of a client company reaching HRMS must be able to do the client half of the
+# PRO-fit flow and NOTHING else -- not payroll, not employees, not exits, not Internal
+# Hiring, not another client's data. Tenant scoping already stops them reading another
+# company (see hrms_access.scope_company_id, which ignores a requested company id for a
+# client-side caller). What tenant scoping does NOT stop is a client company's own admin
+# resolving to an HRMS ladder role and running the whole module INSIDE their own tenant.
+#
+# This set IS what a client-side caller holds -- it replaces whatever their role inside
+# their own company would otherwise grant, at the one place every gate resolves through
+# (hrms_access.capabilities_for). So a capability not listed here cannot be reached by a
+# client-side caller from ANY route, service or future code path, and one that is listed
+# does not depend on an internal ladder role that means nothing to a client.
+#
+# It started EMPTY and grows one step at a time. Each increment adds ONLY the capabilities
+# that increment's feature needs, so anything not listed here cannot be reached by a
+# client-side caller from any route, service or future code path. Fail closed, then open
+# one door at a time.
+#
+# Step 1 (Need Mapping / Manpower Requisition): the client may raise, read and amend their
+# OWN requisition. They may NOT review it -- the feasibility and budget decision is Sparsh's
+# (SOP section 7 step 3, and the RACI's "Internal feasibility review: Team Lead = A").
+# Referenced lazily by name because Cap is defined above but the members are added below.
+CLIENT_TRACK_CAPS: set = set()
+
+
+def _seed_client_track_caps() -> None:
+    """Populate the ceiling once Cap exists. Called at import, at the bottom of this module."""
+    CLIENT_TRACK_CAPS.update({
+        Cap.MODULE_ACCESS,
+        # Step 1 -- raise, read and amend their own requisition. Never review it.
+        Cap.CLIENT_REQUISITION_READ,
+        Cap.CLIENT_REQUISITION_WRITE,
+        # Step 2 -- read the scorecard Sparsh drafted for them, and approve it. Never
+        # write it: the benchmark is Sparsh's professional work, and a client who could
+        # edit it could approve their own words.
+        Cap.CLIENT_SCORECARD_READ,
+        Cap.CLIENT_SCORECARD_APPROVE,
+        # Steps 3-4 -- see the candidates shared with them, and give the verdict that lets
+        # one into assessment. Never source, never screen, never share.
+        Cap.CLIENT_CANDIDATE_READ,
+        Cap.CLIENT_CANDIDATE_DECIDE,
+        # Step 5 -- see the assessment result once it is shared, and record that they have
+        # reviewed it. Never administer the test and never mark it.
+        Cap.CLIENT_ASSESSMENT_READ,
+        Cap.CLIENT_ASSESSMENT_REVIEW,
+        # Step 6 -- watch the recording once shared, and select or reject. Never schedule,
+        # never conduct, never score.
+        Cap.CLIENT_INTERVIEW_READ,
+        Cap.CLIENT_INTERVIEW_DECIDE,
+        # Step 7 -- see the offer and release it. NOT the reference check: those are
+        # Sparsh's working enquiries about somebody not yet hired.
+        Cap.CLIENT_OFFER_READ,
+        Cap.CLIENT_OFFER_RELEASE,
+        # A salary deviation request comes straight to Client HR, because it is their
+        # budget being exceeded. They approve or refuse the figure; the approved
+        # requisition range is never touched either way.
+        Cap.CLIENT_OFFER_DEVIATE,
+        # Steps 8-9 -- follow the joiner, and confirm in writing that they turned up.
+        # Not the pre-boarding contact log: those are Sparsh's calls to the candidate.
+        Cap.CLIENT_JOINING_READ,
+        Cap.CLIENT_JOINING_CONFIRM,
+        # A client sees the delivery board for their own engagement. Scoping decides
+        # whose numbers those are; this decides whether they get a board at all.
+        Cap.CLIENT_ANALYTICS_READ,
+    })
+
+# ─────────────────────────────────────────────────────────────
+# The five decisions that belong to the CLIENT and to nobody at Sparsh
+# ─────────────────────────────────────────────────────────────
+# PRO-fit gives the client company five decision points, and the value of the whole track
+# rests on them being genuinely theirs: the scorecard approval, the CV verdict, the
+# selection after interview, the offer release and the joining confirmation. Sparsh
+# sources, screens, administers, scores, verifies and chases -- but does not decide.
+#
+# Keeping them out of ROLE_CAPABILITIES was not enough. `capabilities_for` resolves the
+# ADMIN role to "every member of Cap", deliberately, so that a capability added in a later
+# phase can never lock the module owner out of their own system. That blanket grant swept
+# these five up with everything else, and a Sparsh superadmin was offered "Approve" on a
+# scorecard sitting with the client -- and could release the client's own offer.
+#
+# So the two ideas are separated, and this set is what separates them:
+#
+#   ADMIN           = administrative access. Read everything, support everything, fix
+#                     everything, run the workflow. Unchanged.
+#   CLIENT_DECISION = the authority to make a decision the client owns. Held by client-side
+#                     callers only, by virtue of being that company, not by seniority.
+#
+# Subtracted in `capabilities_for` from every caller who is NOT client-side, which is the
+# one function every route, service and UI hint resolves through. A future role, a widened
+# ROLE_CAPABILITIES entry or a new admin branch therefore cannot reacquire them by
+# accident: the subtraction is the last thing that happens before the answer is returned.
+CLIENT_DECISION_CAPS: set = set()
+
+
+# Capabilities that are the client's OWN WORK rather than their own decision.
+#
+# Different from CLIENT_DECISION_CAPS in kind, identical in effect: subtracted from every
+# Sparsh role. Kept as a separate set because "decision" is a promise about authority and
+# these are not decisions -- writing the Need Mapping and Manpower Requisition forms is the
+# client stating what they need. Folding them into the decision list would make that list
+# lie about what it contains, and the count of client decisions is asserted in a test on
+# purpose.
+#
+# Why Sparsh cannot do it: on PRO-fit the requirement ORIGINATES with the client (SOP
+# section 7 step 1). Sparsh reviews feasibility, which is a different capability
+# (CLIENT_REQUISITION_REVIEW) and is Sparsh's. A supplier that could raise the client's
+# requirement could also set its salary range -- the very figure the supplier is later
+# measured against, and the one the client is asked to approve a deviation from.
+CLIENT_OWNED_CAPS: set = set()
+
+
+def _seed_client_owned_caps() -> None:
+    """The client's own forms. Called at the bottom of this module, beside the decisions."""
+    CLIENT_OWNED_CAPS.update({
+        # Create the Need Mapping Form, amend either form, and submit them (the
+        # "submit-need-mapping" and "submit-requisition" transitions both name this cap).
+        Cap.CLIENT_REQUISITION_WRITE,
+    })
+
+
+def _seed_client_decision_caps() -> None:
+    """Populate the exclusive set once Cap exists. Called at the bottom of this module."""
+    CLIENT_DECISION_CAPS.update({
+        Cap.CLIENT_SCORECARD_APPROVE,    # 1. the benchmark they will be measured against
+        Cap.CLIENT_CANDIDATE_DECIDE,     # 2. the CV verdict, which opens the assessment
+        Cap.CLIENT_INTERVIEW_DECIDE,     # 3. the selection after the interview
+        Cap.CLIENT_OFFER_RELEASE,        # 4. releasing their own employment contract
+        Cap.CLIENT_JOINING_CONFIRM,      # 5. confirming somebody actually started
+        # 6. approving pay above the range they approved. Same logic as the five above:
+        # it commits the CLIENT's money, so no Sparsh role may do it on their behalf.
+        Cap.CLIENT_OFFER_DEVIATE,
+    })
+
+
+# Marker stamped on the request's user by the module gate when the caller belongs to a
+# client company rather than to Sparsh Magic's own tenant. Read by `capabilities_for`.
+#
+# A flag on the in-memory user rather than a role, because the distinction is a property of
+# WHICH COMPANY the caller is in, and `hrms_role()` is synchronous and cannot look a company
+# up. It is set in exactly one place -- the router-wide dependency -- so it cannot be forged
+# by a request body: an incoming payload never becomes the user dict.
+CLIENT_TRACK_FLAG = "_hrms_client_track_only"
 
 
 # Which ERP roles map into the two internal HRMS roles.
@@ -881,10 +1686,6 @@ GOVERNANCE_TO_HRMS = {
     "FINANCE":     HrmsRole.FINANCE,
     "HOD":         HrmsRole.MANAGER,
     "IMPLEMENTOR": HrmsRole.EMPLOYEE,
-    # A user of a client organisation. Ranked lowest by auth_controller.CLIENT_RANK: they
-    # are not part of this company's governance ladder at all, and must never be able to
-    # assign work up it.
-    "CLIENT":      HrmsRole.CLIENT,
 }
 
 # Roles permitted to switch the HRMS module on/off for a company. Matches the TPMS
@@ -928,7 +1729,11 @@ class Cap(str, Enum):
 
     # ── Phase 4: job postings ──
     POSTING_READ  = "posting.read"
-    POSTING_WRITE = "posting.write"    # publish / pause / close / delete
+    POSTING_WRITE = "posting.write"    # create / publish / pause / close / delete
+    # Internal Recruitment SOP — Step 4: "Executive Search for Leadership Roles" requires
+    # Management's own approval before such a posting may be published, separate from the
+    # HR/recruiter capability that does everything else on a posting.
+    POSTING_APPROVE_EXEC_SEARCH = "posting.approve_exec_search"
 
     # ── Phase 5: candidates + screening ──
     CANDIDATE_READ   = "candidate.read"
@@ -974,14 +1779,6 @@ class Cap(str, Enum):
     APPOINTMENT_READ  = "appointment.read"
     APPOINTMENT_WRITE = "appointment.write"
     APPOINTMENT_SEND  = "appointment.send"
-    # Item 4 — the client dimension (recruitment-agency model; see PHASE_11R_REPORT
-    # §Decisions). Reading a client still means reading a COMPANY, which is why there is no
-    # capability here for editing one -- that remains the Companies module's `companies.write`.
-    CLIENT_READ  = "client.read"
-    # Manage ENGAGEMENTS, which is a different act from editing a company: it records that
-    # this tenant recruits for that company, and which of this tenant's users work on it.
-    # That relationship is HRMS's own, so the capability is too.
-    CLIENT_WRITE = "client.write"
     # Item 7 — sanctioned strength + the escalation ladder.
     SANCTION_READ  = "sanction.read"
     SANCTION_WRITE = "sanction.write"
@@ -1072,7 +1869,6 @@ class Cap(str, Enum):
     # refuses a breakdown below SURVEY_MIN_RESPONSES, so this capability can never become
     # a way to read one person's answers.
     SURVEY_READ  = "survey.read"
-    SURVEY_WRITE = "survey.write"
     # The policy register (SOP §14). APPROVE is the MD's alone: approving a revision is
     # what makes a version the one in force.
     POLICY_READ    = "policy.read"
@@ -1088,25 +1884,6 @@ class Cap(str, Enum):
     # confirmation because both destroy or end something.
     RETENTION_PURGE = "retention.purge"
 
-    # ══ Phase 12: the client hiring track ══
-    # A client asks for people; Sparsh sources them, shares CVs, and runs the hire.
-    #
-    # The client-facing capabilities are the first in this module granted to somebody
-    # OUTSIDE the tenant, so each is written to be the narrowest thing that still lets the
-    # client do their job. Every one of them is additionally row-scoped at the service
-    # layer by the engagements the user belongs to -- the capability says "may read shares",
-    # the scope says "these shares".
-    #
-    # The client raises the request; only Sparsh may review, accept, decline or convert it.
-    JOB_REQUEST_READ   = "job_request.read"
-    JOB_REQUEST_WRITE  = "job_request.write"     # raise / edit one's own, before review
-    JOB_REQUEST_REVIEW = "job_request.review"    # Sparsh: accept, decline, convert
-    # CV sharing. WRITE is Sparsh's alone -- deciding which client sees a candidate is the
-    # whole control behind requirement 6, and a client must never be able to share a CV
-    # onward. RESPOND is the client's verdict on a CV they were shown.
-    SHARE_READ    = "share.read"
-    SHARE_WRITE   = "share.write"
-    SHARE_RESPOND = "share.respond"
     # Background verification. WRITE records a check; APPROVE is the sign-off that unlocks
     # the offer, and is deliberately a DIFFERENT capability -- the person who runs a check
     # should not be the only signature that it passed.
@@ -1117,7 +1894,7 @@ class Cap(str, Enum):
     #
     # A separate capability from `interview.schedule` and `interview.evaluate` because it is
     # a different act: booking a conversation and judging one are operational, while
-    # attaching the evidence a CLIENT will read and watch is a disclosure decision. A
+    # attaching the evidence others will read and watch is a disclosure decision. A
     # company that wants a senior recruiter to control what leaves the building can grant
     # the first two widely and this one narrowly.
     INTERVIEW_MEDIA = "interview.media"
@@ -1139,6 +1916,12 @@ class Cap(str, Enum):
     CLEARANCE_ACT       = "clearance.act"          # clear, reject or confirm ONE task
     EXIT_INTERVIEW_READ  = "exit_interview.read"
     EXIT_INTERVIEW_WRITE = "exit_interview.write"
+    # A LEAVING EMPLOYEE completing their own exit interview. Deliberately its own verb
+    # rather than the `.write` above, matching every other self-service grant in this
+    # enum (leave.apply, pulse.submit, policy.acknowledge, attendance.regularize_request):
+    # ".write" reads as "may write this record", and an employee may not -- they may
+    # submit THEIRS, which the service enforces by ownership.
+    EXIT_INTERVIEW_SUBMIT = "exit_interview.submit"
     FNF_READ    = "fnf.read"
     FNF_PREPARE = "fnf.prepare"                    # maker
     FNF_APPROVE = "fnf.approve"                    # checker (BR-021)
@@ -1259,6 +2042,111 @@ class Cap(str, Enum):
     # LETTER_READ: an employee sees their own enrolment, HR/INTERNAL see the company's.
     GMP_READ  = "gmp.read"
     GMP_WRITE = "gmp.write"
+
+    # ── Client Hiring, step 1 (PRO-fit SOP section 7) ──
+    #
+    # Three, and no more. The client owns their own Need Mapping and Manpower Requisition;
+    # Sparsh owns the feasibility decision. Splitting WRITE from REVIEW is the whole
+    # control: a client who could review their own requisition could activate it without
+    # Sparsh ever assessing role clarity, pay competitiveness or timeline, which is exactly
+    # what section 7 step 3 exists to prevent.
+    CLIENT_REQUISITION_READ   = "client_requisition.read"
+    CLIENT_REQUISITION_WRITE  = "client_requisition.write"
+    CLIENT_REQUISITION_REVIEW = "client_requisition.review"
+
+    # ── Client Hiring, step 2 -- the Position Scorecard (PRO-fit SOP section 6, 13) ──
+    #
+    # Four, because four different people act on one document and the SOP's approval matrix
+    # names them separately: "PSC -- Recruiter: Draft, Team Lead: Review, Client: Approve
+    # (mandatory)". WRITE is Sparsh's, APPROVE is the client's, and REVIEW is the internal
+    # check that sits between them. Collapsing any two would let one side both write the
+    # benchmark and declare it agreed, which is the thing section 6 forbids: "no candidate
+    # shall be presented to a client without an APPROVED Position Scorecard".
+    CLIENT_SCORECARD_READ    = "client_scorecard.read"
+    CLIENT_SCORECARD_WRITE   = "client_scorecard.write"
+    CLIENT_SCORECARD_REVIEW  = "client_scorecard.review"
+    CLIENT_SCORECARD_APPROVE = "client_scorecard.approve"
+
+    # Step 2b -- the job posting. Sparsh-side only: a client agrees the benchmark
+    # and reads the candidates, but the advert is Sparsh's professional work and
+    # the public link is Sparsh's to open and close.
+    CLIENT_POSTING_READ    = "client_posting.read"
+    CLIENT_POSTING_WRITE   = "client_posting.write"
+    CLIENT_POSTING_PUBLISH = "client_posting.publish"
+
+    # ── Client Hiring, steps 3-4 -- sourcing, screening, and the CV share ──
+    #
+    # SHARE is separate from WRITE because the SOP's RACI makes shortlist DELIVERY the Team
+    # Lead's accountability ("Shortlist delivery to client: Recruiter R, Team Lead A") while
+    # sourcing and screening are the recruiter's alone. DECIDE belongs to the client and to
+    # nobody at Sparsh: their verdict on a CV is the gate into assessment, and a gate the
+    # supplier can open for itself is not a gate.
+    CLIENT_CANDIDATE_READ   = "client_candidate.read"
+    CLIENT_CANDIDATE_WRITE  = "client_candidate.write"
+    CLIENT_CANDIDATE_SHARE  = "client_candidate.share"
+    CLIENT_CANDIDATE_DECIDE = "client_candidate.decide"
+
+    # ── Client Hiring, step 5 -- the assessment (PRO-fit SOP sections 12, 13) ──
+    #
+    # MANAGE and SCORE are separate because the SOP's own responsibility table separates
+    # them: "Assessment managed -- Sparsh HR/Recruitment" and "Assessment scoring --
+    # Sparsh / designated evaluator" are different rows. The person who administers a test
+    # is not necessarily the person qualified to mark it, and collapsing the two would
+    # make that distinction unrecordable.
+    CLIENT_ASSESSMENT_READ   = "client_assessment.read"
+    CLIENT_ASSESSMENT_MANAGE = "client_assessment.manage"
+    CLIENT_ASSESSMENT_SCORE  = "client_assessment.score"
+    CLIENT_ASSESSMENT_SHARE  = "client_assessment.share"
+    CLIENT_ASSESSMENT_REVIEW = "client_assessment.review"
+
+    # ── Client Hiring, step 6 -- interview, recording, client selection ──
+    #
+    # Sparsh conducts the interview on a recorded platform and shares the recording; the
+    # client watches it and decides. DECIDE is the client's and nobody at Sparsh holds it,
+    # because this is the selection -- the point at which a person is chosen.
+    CLIENT_INTERVIEW_READ   = "client_interview.read"
+    CLIENT_INTERVIEW_MANAGE = "client_interview.manage"
+    CLIENT_INTERVIEW_SHARE  = "client_interview.share"
+    CLIENT_INTERVIEW_DECIDE = "client_interview.decide"
+
+    # ── Client Hiring, step 7 -- reference check and the offer (SOP sections 15-17) ──
+    #
+    # The reference check is SPARSH-ONLY and never reaches the ceiling. Section 15 shares
+    # the background check and culture score with the client AFTER joining; a referee's
+    # candid remarks about somebody who has not been hired are not the client's to read.
+    CLIENT_REFERENCE_READ  = "client_reference.read"
+    CLIENT_REFERENCE_WRITE = "client_reference.write"
+
+    # The offer follows the section 8 matrix exactly: "Offer letter release -- Recruiter:
+    # Facilitate, Team Lead: Verify docs, Client: Approve & Issue". Three capabilities,
+    # three hands, and RELEASE is the client's -- section 17 has the client releasing the
+    # letter directly to the candidate.
+    CLIENT_OFFER_READ    = "client_offer.read"
+    CLIENT_OFFER_WRITE   = "client_offer.write"
+    CLIENT_OFFER_VERIFY  = "client_offer.verify"
+    CLIENT_OFFER_RELEASE = "client_offer.release"
+    # Approving pay ABOVE the range the client themselves approved. Client HR's call and
+    # nobody else's -- it commits the client's money, so it sits in CLIENT_DECISION_CAPS
+    # beside the other five and is subtracted from every Sparsh role, Superadmin included.
+    CLIENT_OFFER_DEVIATE = "client_offer.deviate"
+
+    # ── Client Hiring, steps 8-9 -- pre-boarding, joining, handover (sections 18-20) ──
+    #
+    # CONFIRM is the client's: section 18 has "the client/HR confirms candidate joining in
+    # writing". HANDOVER is the Team Lead's, whom the RACI makes accountable for the
+    # handover note and the requisition closure that follows it.
+    CLIENT_JOINING_READ     = "client_joining.read"
+    CLIENT_JOINING_MANAGE   = "client_joining.manage"
+    CLIENT_JOINING_CONFIRM  = "client_joining.confirm"
+    CLIENT_JOINING_HANDOVER = "client_joining.handover"
+
+    # ── Client Hiring -- delivery analytics for the PRO-fit track ──
+    #
+    # Its own capability rather than riding on the record reads, so a client company can
+    # be given the pipeline without the board, or the board without every record. It is
+    # also what keeps this separate from the INTERNAL recruitment dashboard, which is
+    # gated by ANALYTICS_READ and counts entirely different things.
+    CLIENT_ANALYTICS_READ = "client_analytics.read"
     # ── Later phases append their capabilities here. ──
 
 
@@ -1280,6 +2168,12 @@ class Cap(str, Enum):
 # is the documented break-glass path — see PHASE_3_REPORT Finding #1.)
 ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
     HrmsRole.INTERNAL: {
+        # -- Client Hiring step 1 -- support staff see the pipeline, decide nothing.
+        Cap.CLIENT_REQUISITION_READ, Cap.CLIENT_SCORECARD_READ,
+        Cap.CLIENT_POSTING_READ,
+        Cap.CLIENT_CANDIDATE_READ, Cap.CLIENT_ASSESSMENT_READ,
+        Cap.CLIENT_INTERVIEW_READ, Cap.CLIENT_OFFER_READ,
+        Cap.CLIENT_JOINING_READ, Cap.CLIENT_ANALYTICS_READ,
         Cap.MODULE_ACCESS, Cap.MODULE_ADMIN, Cap.AUDIT_READ,
         Cap.EMPLOYEE_READ, Cap.EMPLOYEE_WRITE,
         Cap.DEPARTMENT_READ, Cap.DEPARTMENT_WRITE,
@@ -1310,10 +2204,6 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
         # Read only, the same boundary as employee.salary.* above: Sparsh staff may see a
         # client's GMP enrolment to support the module, not administer their insurance.
         Cap.GMP_READ,
-        # Setting up an engagement is administrative support work, not a governance
-        # decision about the client's hiring -- the same line that gives INTERNAL
-        # LINK_MANAGE and DOCUMENT_WRITE but withholds every approval.
-        Cap.CLIENT_READ, Cap.CLIENT_WRITE,
         Cap.SANCTION_READ,
         # ── Internal track ── READS ONLY, for the reason the rest of this set is shaped the
         # way it is: Sparsh staff support the client's hiring, they do not govern it. Budget
@@ -1339,11 +2229,9 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
         Cap.COMM_READ,
         Cap.SURVEY_READ,
         Cap.POLICY_READ,
-        # ── Phase 12 ── Sparsh staff RUN the client track: they triage incoming job
-        # requests and place CVs. Consistent with this role everywhere else, they hold no
-        # approval -- BACKGROUND_APPROVE is what unlocks an offer, and that is a decision.
-        Cap.JOB_REQUEST_READ, Cap.JOB_REQUEST_WRITE, Cap.JOB_REQUEST_REVIEW,
-        Cap.SHARE_READ, Cap.SHARE_WRITE,
+        # ── Phase 12 ── Sparsh staff record background checks. Consistent with this role
+        # everywhere else, they hold no approval -- BACKGROUND_APPROVE is what unlocks an
+        # offer, and that is a decision.
         Cap.BACKGROUND_READ, Cap.BACKGROUND_WRITE,
         Cap.INTERVIEW_MEDIA,
         # ── Phase LETTER-1 ── read only, the same "support observes, does not issue
@@ -1351,6 +2239,26 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
         Cap.LETTER_READ,
     },
     HrmsRole.MD: {
+        # -- Client Hiring step 1 -- Operations Head oversight of the same decision.
+        Cap.CLIENT_REQUISITION_READ, Cap.CLIENT_REQUISITION_REVIEW,
+        # -- step 2 -- same oversight. Note the Operations Head does NOT hold
+        # CLIENT_SCORECARD_APPROVE: the client's approval is theirs alone to give.
+        Cap.CLIENT_SCORECARD_READ, Cap.CLIENT_SCORECARD_REVIEW,
+        # -- step 2b -- the advert. Read and publish, but the recruiter writes it.
+        Cap.CLIENT_POSTING_READ, Cap.CLIENT_POSTING_PUBLISH,
+        # -- steps 3-4 -- same again: oversight of delivery, never the client's
+        # verdict on a CV.
+        Cap.CLIENT_CANDIDATE_READ, Cap.CLIENT_CANDIDATE_SHARE,
+        # -- step 5 -- oversight of delivery, never the client's review.
+        Cap.CLIENT_ASSESSMENT_READ, Cap.CLIENT_ASSESSMENT_SHARE,
+        # -- step 6 -- oversight of delivery, never the client's selection.
+        Cap.CLIENT_INTERVIEW_READ, Cap.CLIENT_INTERVIEW_SHARE,
+        # -- step 7 -- oversight, and may verify. Never issues the letter.
+        Cap.CLIENT_REFERENCE_READ, Cap.CLIENT_OFFER_READ,
+        Cap.CLIENT_OFFER_VERIFY,
+        # -- step 9 -- same oversight of the handover.
+        Cap.CLIENT_JOINING_READ, Cap.CLIENT_JOINING_HANDOVER,
+        Cap.CLIENT_ANALYTICS_READ,
         Cap.MODULE_ACCESS, Cap.MODULE_ADMIN, Cap.AUDIT_READ,
         Cap.EMPLOYEE_READ, Cap.EMPLOYEE_WRITE,
         Cap.EMPLOYEE_SALARY_READ, Cap.EMPLOYEE_SALARY_WRITE,
@@ -1371,7 +2279,6 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
         Cap.LINK_READ, Cap.LINK_MANAGE,
         Cap.DOCUMENT_READ, Cap.DOCUMENT_WRITE, Cap.DOCUMENT_VERIFY,
         Cap.APPOINTMENT_READ, Cap.APPOINTMENT_WRITE, Cap.APPOINTMENT_SEND,
-        Cap.CLIENT_READ, Cap.CLIENT_WRITE,
         Cap.SANCTION_READ, Cap.SANCTION_WRITE,
         # MD holds the escalation capability as well as the final approval: an escalation
         # ladder that stalls because its top rung cannot act is not a control, it is a trap.
@@ -1382,6 +2289,7 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
         # FINANCE user the MD alone can therefore run the whole internal track.
         Cap.REQUISITION_APPROVE_BUDGET,
         Cap.SCORECARD_READ, Cap.SCORECARD_WRITE, Cap.SCORECARD_APPROVE,
+        Cap.POSTING_APPROVE_EXEC_SEARCH,
         Cap.REFERENCE_READ, Cap.REFERENCE_WRITE,
         Cap.TELEPHONIC_READ, Cap.TELEPHONIC_WRITE,
         Cap.NEGOTIATION_READ, Cap.NEGOTIATION_WRITE,
@@ -1399,12 +2307,10 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
         Cap.PREBOARDING_READ, Cap.PREBOARDING_WRITE,
         Cap.SALARY_BAND_READ, Cap.SALARY_BAND_WRITE,
         Cap.COMM_READ, Cap.COMM_WRITE, Cap.COMM_TEMPLATE_WRITE,
-        Cap.SURVEY_READ, Cap.SURVEY_WRITE,
+        Cap.SURVEY_READ,
         Cap.POLICY_READ, Cap.POLICY_WRITE, Cap.POLICY_APPROVE,
         Cap.RETENTION_PURGE,
-        # ── Phase 12 ── the client track, including the sign-off that unlocks an offer.
-        Cap.JOB_REQUEST_READ, Cap.JOB_REQUEST_WRITE, Cap.JOB_REQUEST_REVIEW,
-        Cap.SHARE_READ, Cap.SHARE_WRITE, Cap.SHARE_RESPOND,
+        # ── Phase 12 ── background verification, including the sign-off that unlocks an offer.
         Cap.BACKGROUND_READ, Cap.BACKGROUND_WRITE, Cap.BACKGROUND_APPROVE,
         Cap.INTERVIEW_MEDIA,
         # ── Phase EXIT-1 ── the MD holds every one of these, on the same reasoning as the
@@ -1416,6 +2322,7 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
         Cap.HANDOVER_READ, Cap.HANDOVER_WRITE, Cap.HANDOVER_APPROVE,
         Cap.CLEARANCE_READ, Cap.CLEARANCE_MANAGE, Cap.CLEARANCE_ACT,
         Cap.EXIT_INTERVIEW_READ, Cap.EXIT_INTERVIEW_WRITE,
+        Cap.EXIT_INTERVIEW_SUBMIT,
         Cap.FNF_READ, Cap.FNF_PREPARE, Cap.FNF_APPROVE,
         # ── Phase ATT-1 ── same reasoning as every block above: the MD holds every one of
         # these so the governance chain's top rung can always act, including in a company
@@ -1447,6 +2354,30 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
         Cap.PULSE_READ, Cap.PULSE_MANAGE,
     },
     HrmsRole.HR: {
+        # -- Client Hiring step 1 -- the recruiter reads client requisitions but does
+        # not pass them: the feasibility call is the Team Lead's (SOP RACI).
+        Cap.CLIENT_REQUISITION_READ,
+        # -- step 2 -- the recruiter DRAFTS the Position Scorecard (matrix: 'Draft').
+        Cap.CLIENT_SCORECARD_READ, Cap.CLIENT_SCORECARD_WRITE,
+        # -- step 2b -- the recruiter writes the advert and opens it for applications
+        # once the client has agreed the benchmark it is written against.
+        Cap.CLIENT_POSTING_READ, Cap.CLIENT_POSTING_WRITE, Cap.CLIENT_POSTING_PUBLISH,
+        # -- steps 3-4 -- sources and screens. Delivery to the client is the Team
+        # Lead's call (RACI: 'Shortlist delivery to client -- Team Lead A').
+        Cap.CLIENT_CANDIDATE_READ, Cap.CLIENT_CANDIDATE_WRITE,
+        # -- step 5 -- administers the assessment, and may be the designated
+        # evaluator who marks it.
+        Cap.CLIENT_ASSESSMENT_READ, Cap.CLIENT_ASSESSMENT_MANAGE,
+        Cap.CLIENT_ASSESSMENT_SCORE,
+        # -- step 6 -- schedules and conducts the recorded panel interview.
+        Cap.CLIENT_INTERVIEW_READ, Cap.CLIENT_INTERVIEW_MANAGE,
+        # -- step 7 -- takes references and prepares the offer. Facilitates its
+        # release; does not verify it and cannot issue it.
+        Cap.CLIENT_REFERENCE_READ, Cap.CLIENT_REFERENCE_WRITE,
+        Cap.CLIENT_OFFER_READ, Cap.CLIENT_OFFER_WRITE,
+        # -- steps 8-9 -- keeps the joiner warm (section 19) and records a drop.
+        Cap.CLIENT_JOINING_READ, Cap.CLIENT_JOINING_MANAGE,
+        Cap.CLIENT_ANALYTICS_READ,
         Cap.MODULE_ACCESS, Cap.AUDIT_READ,
         Cap.EMPLOYEE_READ, Cap.EMPLOYEE_WRITE,
         Cap.EMPLOYEE_SALARY_READ, Cap.EMPLOYEE_SALARY_WRITE,
@@ -1466,7 +2397,6 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
         Cap.LINK_READ, Cap.LINK_MANAGE,
         Cap.DOCUMENT_READ, Cap.DOCUMENT_WRITE, Cap.DOCUMENT_VERIFY,
         Cap.APPOINTMENT_READ, Cap.APPOINTMENT_WRITE, Cap.APPOINTMENT_SEND,
-        Cap.CLIENT_READ,
         Cap.SANCTION_READ, Cap.SANCTION_WRITE,
         # Deliberately NO REQUISITION_ESCALATE: the escalation ladder is the reporting
         # hierarchy above the raiser, and HR reviewing then also escalating would collapse
@@ -1497,7 +2427,7 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
         Cap.SHORTLIST_READ, Cap.SHORTLIST_WRITE,
         Cap.PREBOARDING_READ, Cap.PREBOARDING_WRITE,
         Cap.COMM_READ, Cap.COMM_WRITE,
-        Cap.SURVEY_READ, Cap.SURVEY_WRITE,
+        Cap.SURVEY_READ,
         Cap.POLICY_READ, Cap.POLICY_WRITE,
         # READ, not write: the band master is agreed annually WITH Finance (Annexure C), so
         # HR reads what was agreed and the budget gate pre-fills from it. HR rewriting the
@@ -1513,8 +2443,6 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
         # -> HR Approval -> Offer Letter"). WRITE and APPROVE are still separate
         # capabilities, so a company that wants two pairs of eyes can withdraw one of them
         # from a junior recruiter without touching the other.
-        Cap.JOB_REQUEST_READ, Cap.JOB_REQUEST_WRITE, Cap.JOB_REQUEST_REVIEW,
-        Cap.SHARE_READ, Cap.SHARE_WRITE,
         Cap.BACKGROUND_READ, Cap.BACKGROUND_WRITE, Cap.BACKGROUND_APPROVE,
         Cap.INTERVIEW_MEDIA,
         # ── Phase EXIT-1 ── HR runs the process end to end: raises/records a case, drives
@@ -1528,6 +2456,7 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
         Cap.HANDOVER_READ, Cap.HANDOVER_WRITE,
         Cap.CLEARANCE_READ, Cap.CLEARANCE_MANAGE, Cap.CLEARANCE_ACT,
         Cap.EXIT_INTERVIEW_READ, Cap.EXIT_INTERVIEW_WRITE,
+        Cap.EXIT_INTERVIEW_SUBMIT,
         Cap.FNF_READ, Cap.FNF_PREPARE,
         # ── Phase ATT-1 ── HR runs this end to end too: marks/corrects attendance, is the
         # second-level regularisation approver (§7.9 step 68), locks the monthly period
@@ -1582,6 +2511,27 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
     # hrms_employee_service, not by this set) and never sees pay. They RAISE requisitions --
     # that is the documented design intent: whoever raises one becomes its hiring manager.
     HrmsRole.MANAGER: {
+        # -- Client Hiring step 1 -- Team Lead is Accountable for the feasibility and
+        # budget review (SOP section 7 step 3).
+        Cap.CLIENT_REQUISITION_READ, Cap.CLIENT_REQUISITION_REVIEW,
+        # -- step 2 -- and reviews the scorecard before it is shared (section 5.2).
+        Cap.CLIENT_SCORECARD_READ, Cap.CLIENT_SCORECARD_REVIEW,
+        # -- step 2b -- accountable for what reaches the public, as for the shortlist.
+        Cap.CLIENT_POSTING_READ, Cap.CLIENT_POSTING_PUBLISH,
+        # -- steps 3-4 -- accountable for what goes to the client.
+        Cap.CLIENT_CANDIDATE_READ, Cap.CLIENT_CANDIDATE_SHARE,
+        # -- step 5 -- may mark, and delivers the result.
+        Cap.CLIENT_ASSESSMENT_READ, Cap.CLIENT_ASSESSMENT_SCORE,
+        Cap.CLIENT_ASSESSMENT_SHARE,
+        # -- step 6 -- sits on the panel, and delivers the recording.
+        Cap.CLIENT_INTERVIEW_READ, Cap.CLIENT_INTERVIEW_MANAGE,
+        Cap.CLIENT_INTERVIEW_SHARE,
+        # -- step 7 -- 'Team Lead: Verify docs' (section 8 matrix).
+        Cap.CLIENT_REFERENCE_READ, Cap.CLIENT_OFFER_READ,
+        Cap.CLIENT_OFFER_VERIFY,
+        # -- step 9 -- accountable for the handover and the closure it triggers.
+        Cap.CLIENT_JOINING_READ, Cap.CLIENT_JOINING_HANDOVER,
+        Cap.CLIENT_ANALYTICS_READ,
         Cap.MODULE_ACCESS,
         Cap.EMPLOYEE_READ,
         Cap.DEPARTMENT_READ, Cap.DESIGNATION_READ,
@@ -1603,7 +2553,6 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
         Cap.LINK_READ,
         Cap.DOCUMENT_READ,
         Cap.APPOINTMENT_READ,
-        Cap.CLIENT_READ,
         Cap.SANCTION_READ,
         # A hiring manager IS the reporting line an over-sanction requisition escalates
         # through -- this is the capability that lets them clear their rung.
@@ -1713,12 +2662,12 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
         # ── Phase EXIT-1 ── an employee raises their own resignation (§7.18 step 137) and
         # completes their own exit interview (§22.2 step 195) — the same self-service
         # exception REQUISITION_CREATE above already makes for "anyone may raise a hiring
-        # requisition". SCOPE NOTE: EXIT-1 does not yet check that the case/interview an
-        # employee writes to is their OWN — that ownership check is a documented follow-up,
-        # not a decision that this is safe to skip permanently. Read access and asset-return
-        # self-initiation are deliberately NOT granted here yet for the same reason: they stay
-        # HR-mediated (SEPARATION_READ, CLEARANCE_MANAGE) until that check lands.
-        Cap.SEPARATION_INITIATE, Cap.EXIT_INTERVIEW_WRITE,
+        # requisition". Ownership IS now enforced at the service layer -- see
+        # `assert_own_case` in hrms_exit_service: a caller whose only route in is one of
+        # these two grants may act on their OWN record and nothing else. Read access and
+        # asset-return self-initiation stay HR-mediated (SEPARATION_READ, CLEARANCE_MANAGE),
+        # which is a scope choice rather than a missing control.
+        Cap.SEPARATION_INITIATE, Cap.EXIT_INTERVIEW_SUBMIT,
         # ── Phase ATT-1 ── an employee sees and requests their OWN attendance, leave and
         # C-Off, and raises their own regularisation/OD requests (§7.9 step 63, §7.10 step
         # 70, §7.11 step 80, §22.9's calendar). Unlike EXIT-1's self-service caps, ownership
@@ -1769,52 +2718,6 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
         # self-service). §7.17 names "Employee" as a complaint-raising actor, but self-service
         # raise-a-complaint needs confidentiality/anonymity handling this phase does not yet
         # build — a documented follow-up, not an oversight (see the MANAGER block's note).
-    },
-    # ── A user of a CLIENT ORGANISATION ──
-    #
-    # DELIBERATELY MINIMAL, and it will stay that way until the phase that secures each
-    # surface lands. This set is the floor a client user needs to open the module and see
-    # that their requisitions exist; it is NOT the eventual client permission model.
-    #
-    # Everything else is absent ON PURPOSE, because the row-level client scope that would
-    # make it safe does not exist yet:
-    #   CANDIDATE_READ   -- candidates carry no client scope (Phase: candidate isolation)
-    #   DOCUMENT_READ    -- CVs carry no client scope (Phase: document security)
-    #   INTERVIEW_*      -- (Phase: interview / client review)
-    #   ANALYTICS_READ   -- the client_id filter is caller-supplied and unvalidated
-    # Granting any of them now would hand a client user every OTHER client's data, because
-    # the services narrow by company and manager-ownership only. The capability is not the
-    # missing piece; the scope is.
-    #
-    # Future capabilities this role will need, named here so the gap is documented rather
-    # than shipped as dead permissions (see §14 of the phase brief):
-    #   client.requisition.read / write, client.candidate.read / review,
-    #   client.interview.read / feedback, client.hiring_decision.write,
-    #   client.dashboard.read
-    HrmsRole.CLIENT: {
-        Cap.MODULE_ACCESS,
-        # Their OWN requisitions only. Phase 12 wires the narrowing that makes this true:
-        # every read a CLIENT user performs is intersected with the client ids their
-        # engagements grant, and fails CLOSED to nothing when they have none.
-        Cap.REQUISITION_READ,
-        # Needed to render their own client's name. Reading the client LIST is a separate
-        # concern already gated by CLIENT_READ; narrowing that list is a later phase.
-        Cap.CLIENT_READ,
-        # ── Phase 12 ── what a client actually comes here to do.
-        #
-        # They raise a job request and read their own; they see the CVs Sparsh chose to
-        # show them and give a verdict on each. That is the whole surface.
-        #
-        # What is deliberately ABSENT is everything that would let a client reach past the
-        # candidates shared WITH THEM: no CANDIDATE_READ (the share record carries the
-        # authorised snapshot instead -- see hrms_share_service), no SHARE_WRITE (a client
-        # can never share a CV onward, to anyone), no JOB_REQUEST_REVIEW (accepting their
-        # own request would make Sparsh's review a formality), and nothing at all about
-        # offers, onboarding, background checks or other clients' work.
-        Cap.JOB_REQUEST_READ,
-        Cap.JOB_REQUEST_WRITE,
-        Cap.SHARE_READ,
-        Cap.SHARE_RESPOND,
     },
     # ── Internal track ── the budget authority, and nothing else.
     #
@@ -1882,52 +2785,6 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
 
 
 # ─────────────────────────────────────────────────────────────
-# The Internal Recruitment SOP's own controls — Sparsh Magic hiring for itself
-# ─────────────────────────────────────────────────────────────
-# HrmsWorkspaceBar's "Internal hiring" tab group (Overview, Internal reqs, Scorecards,
-# Phone screen, Shortlisting, References, Negotiation) runs on these ten capabilities.
-# They stay in ROLE_CAPABILITIES above unchanged -- MD/HR/MANAGER/FINANCE still need them
-# to run Sparsh's OWN governance ladder when a Sparsh staff member holds one of those
-# governance roles -- but `capabilities_for()` strips this exact set from any CLIENT-SIDE
-# user, whatever governance role their own company's Role & Access screen has them at.
-#
-# Why a strip rather than a smaller ROLE_CAPABILITIES to begin with: MD/HR/MANAGER/
-# FINANCE/EMPLOYEE are the SAME role identities a client company's own users resolve to
-# (hrms_role() maps governance_role -> these same enum members, with no separate "client
-# MD" role) -- so the capability SET a rung carries has to differ by who the caller is,
-# not just by rung. A client's HOD approving THEIR OWN requisitions still needs everything
-# else that rung holds; they never need Sparsh's internal scorecard/phone-screen/
-# shortlisting-committee/reference-check/negotiation controls, which exist to run the
-# Internal Recruitment SOP (Annexure B/C) for Sparsh's own headcount, not a client's.
-INTERNAL_TRACK_ONLY_CAPS: Set[Cap] = {
-    Cap.SCORECARD_READ, Cap.SCORECARD_WRITE, Cap.SCORECARD_APPROVE,
-    Cap.TELEPHONIC_READ, Cap.TELEPHONIC_WRITE,
-    Cap.SHORTLIST_READ, Cap.SHORTLIST_WRITE,
-    Cap.REFERENCE_READ, Cap.REFERENCE_WRITE,
-    Cap.NEGOTIATION_READ, Cap.NEGOTIATION_WRITE,
-}
-
-
-# ─────────────────────────────────────────────────────────────
-# Sparsh's own side of the Client Hiring conversation
-# ─────────────────────────────────────────────────────────────
-# The CLIENT role's own comment (above, where it deliberately omits these) already states
-# the design: "no SHARE_WRITE (a client can never share a CV onward, to anyone), no
-# JOB_REQUEST_REVIEW (accepting their own request would make Sparsh's review a formality)".
-# A client raises a job request and responds to the CVs shared with them (JOB_REQUEST_READ/
-# WRITE, SHARE_READ/RESPOND — left untouched); reviewing/accepting/declining/converting that
-# SAME request, sharing a CV onward, and running background verification are Sparsh's own
-# triage of it, for the identical reason INTERNAL_TRACK_ONLY_CAPS exists just above: MD/HR/
-# MANAGER are the same role identities a client's own governance ladder resolves to, so
-# these five have to be stripped by WHO the caller is, not left keyed to rung alone.
-CLIENT_TRACK_SPARSH_ONLY_CAPS: Set[Cap] = {
-    Cap.JOB_REQUEST_REVIEW,
-    Cap.SHARE_WRITE,
-    Cap.BACKGROUND_READ, Cap.BACKGROUND_WRITE, Cap.BACKGROUND_APPROVE,
-}
-
-
-# ─────────────────────────────────────────────────────────────
 # Audit actions
 # ─────────────────────────────────────────────────────────────
 AUDIT_MODULE_ENABLED  = "hrms module enabled"
@@ -1951,6 +2808,17 @@ ENTITY_SETTING     = "setting"
 # under concurrency (BACKEND_ANALYSIS Risk #12). We use an atomic counter instead —
 # see services/hrms_id_service.py. These are the format templates only (pure, no I/O).
 ID_FORMATS = {
+    # -- Client Hiring -- a prefix of its own, so a number can never be mistaken for an
+    # internal requisition's in a conversation, a report or a support ticket.
+    "client_requisition": ("CR", True, 3),  # CR-2026-001
+    "client_scorecard":   ("PSC", True, 3),  # PSC-2026-001
+    "client_posting":     ("CJP", True, 3),  # CJP-2026-001
+    "client_candidate":   ("CCN", True, 3),  # CCN-2026-001
+    "client_assessment":  ("CAS", True, 3),  # CAS-2026-001
+    "client_interview":   ("CIN", True, 3),  # CIN-2026-001
+    "client_reference":   ("CRF", True, 3),  # CRF-2026-001
+    "client_offer":       ("COF", True, 3),  # COF-2026-001
+    "client_joining":     ("CJN", True, 3),  # CJN-2026-001
     "requisition": ("HR-REQ", True,  3),   # HR-REQ-2026-001   (prefix, year-scoped, pad)
     "jd":          ("JD",     True,  3),   # JD-2026-001
     "interview":   ("INT",    True,  3),   # INT-2026-001
@@ -1971,11 +2839,7 @@ ID_FORMATS = {
     "negotiation": ("NEG",    True,  3),   # NEG-2026-001
     "probation":   ("PRB",    True,  3),   # PRB-2026-001
     "exception":   ("EXC",    True,  3),   # EXC-2026-001
-    # ── Client engagements ──
-    "engagement":  ("CLI-ENG", True, 3),   # CLI-ENG-2026-001
-    # ── Phase 12: the client hiring track ──
-    "job_request": ("JBR",    True,  3),   # JBR-2026-001
-    "share":       ("SHR",    True,  3),   # SHR-2026-001
+    # ── Phase 12: background verification ──
     "background":  ("BGV",    True,  3),   # BGV-2026-001
     # ── Phase INT-2 ──
     "shortlist":   ("SLR",    True,  3),   # SLR-2026-001  shortlisting committee record
@@ -2075,17 +2939,6 @@ class HrmsHealthResponse(BaseModel):
     company_id: Optional[str] = None
     is_internal: bool = False
 
-    # ── Client scope ──
-    # Pydantic DROPS undeclared fields on a response_model, so anything the frontend gates
-    # on has to be declared here. The same omission has bitten UserResponse twice.
-    #
-    # `is_client_user` and `allowed_client_ids` are the SERVER's answer, resolved from the
-    # engagement records. The frontend renders from them; it never derives them, and a
-    # client id it sends back is never an authorisation input.
-    is_client_user: bool = False
-    # None  -> not client-scoped (a Sparsh user); no client filter applies.
-    # []    -> client-scoped with no valid membership; everything must fail closed.
-    allowed_client_ids: Optional[List[str]] = None
 
 
 class AuditEntry(BaseModel):
@@ -2332,48 +3185,37 @@ class EmployeeProfileUpdate(BaseModel):
 # Phase 3 - Requisitions (FMS) + Job Descriptions
 # =============================================================
 
-class RequisitionTrack(str, Enum):
-    """Whose vacancy this is, and therefore whose money and whose rules.
+# The discriminator stored on every requisition, and copied onto the records that hang
+# off one. HRMS hires for Sparsh Magic only, so every requisition raised is "internal". The
+# value is still STORED because rows from the decommissioned client-hiring track remain in
+# the database (some carry "client", the oldest carry no field at all): every hiring read
+# filters on this, which is what keeps those legacy rows out of the flow without touching
+# them.
+REQUISITION_TRACK_INTERNAL = "internal"
 
-    CLIENT   -> the recruitment-agency model the module was built for. A client company owns
-                the budget, CVs are shared with them for a verdict, and they issue the offer.
-    INTERNAL -> Sparsh Magic hiring for itself, governed by the Internal Recruitment SOP.
-                There is NO client: headcount, salary band and budget are approved internally
-                by Management/Finance and HR issues the offer directly.
-
-    Defaults to CLIENT, so every requisition raised before this phase keeps its exact
-    behaviour, and IMMUTABLE after creation -- changing the track mid-flight would invalidate
-    an approval already granted under different rules.
-    """
-    CLIENT   = "client"
-    INTERNAL = "internal"
+# Application statuses that only the decommissioned client-hiring track could produce.
+# They are no longer members of AppStatus -- nothing can move a candidate into one -- but
+# legacy candidates still carry them, so the pipeline reads exclude them by value.
+LEGACY_CLIENT_TRACK_STATUSES = ("Shared with Client", "Client Shortlisted", "Client Rejected")
 
 
 class ReqApproval(str, Enum):
     """The approval machine. A requisition and its JD move through ONE unified chain -- the
-    source's separate JD approval was removed and the JD is co-approved at the MD stage
-    (BACKEND_ANALYSIS 6.7).
+    source's separate JD approval was removed and the JD is co-approved at the last stage
+    (BACKEND_ANALYSIS 6.7):
 
-    TWO chains share these states, selected by `requisition_track`:
+      Pending HR Verification -> Pending Budget Approval -> [Pending Escalation]
+      -> Pending Scorecard Approval -> Approved
 
-      client   : Pending HR Review -> [Pending Escalation] -> Pending MD Approval -> Approved
-      internal : Pending HR Verification -> Pending Budget Approval
-                 -> [Pending Escalation] -> Pending Scorecard Approval -> Approved
-
-    The internal chain inserts a MANDATORY budget gate before anything may be sourced (SOP
-    §11), and ends on the position scorecard rather than a single MD sign-off. The client
-    chain's states are untouched, so no existing requisition changes meaning.
+    A MANDATORY budget gate sits before anything may be sourced (SOP §11), and the chain
+    ends on the position scorecard rather than a single sign-off.
     """
-    PENDING_HR = "Pending HR Review"
     # Phase 11-R, Item 7: an OVER-SANCTION requisition is routed through the raiser's
-    # reporting line before it reaches the MD. An in-sanction requisition never enters this
-    # state, so the existing three-step chain is completely unchanged for it.
-    # Shared by both tracks -- the ladder does not care whose budget it is.
+    # reporting line before it reaches the scorecard gate. An in-sanction requisition never
+    # enters this state.
     PENDING_ESCALATION = "Pending Escalation"
-    PENDING_MD = "Pending MD Approval"
     APPROVED   = "Approved"
     REJECTED   = "Rejected"
-    # ── Internal track only ──
     # Named "Verification" rather than "Review" because the SOP's step is a check that the
     # requisition is complete and justified, not the headcount judgement -- that is the next
     # state, and it is Management's.
@@ -2382,21 +3224,7 @@ class ReqApproval(str, Enum):
     PENDING_SCORECARD       = "Pending Scorecard Approval"
 
 
-# The states each track may legally occupy. A requisition that somehow holds a state from the
-# other track's chain is a bug, and these sets are what make that assertable.
-TRACK_APPROVAL_STATES = {
-    RequisitionTrack.CLIENT: {
-        ReqApproval.PENDING_HR, ReqApproval.PENDING_ESCALATION, ReqApproval.PENDING_MD,
-        ReqApproval.APPROVED, ReqApproval.REJECTED,
-    },
-    RequisitionTrack.INTERNAL: {
-        ReqApproval.PENDING_HR_VERIFICATION, ReqApproval.PENDING_BUDGET,
-        ReqApproval.PENDING_ESCALATION, ReqApproval.PENDING_SCORECARD,
-        ReqApproval.APPROVED, ReqApproval.REJECTED,
-    },
-}
-
-# Approval states in which an internal requisition has NOT yet cleared its budget gate.
+# Approval states in which a requisition has NOT yet cleared its budget gate.
 # Sourcing of any kind -- publishing a posting, creating a candidate -- is refused while a
 # requisition sits in one of these. Declared once here so the posting service and the
 # candidate service cannot drift apart on what "before budget approval" means.
@@ -2445,49 +3273,15 @@ class GenderPreference(str, Enum):
 # the documentation all read from one source. An action absent from this table simply
 # cannot happen, and adding a stage later is a data change rather than new control flow.
 #   action -> (required_status, resulting_status, capability, remark_required)
-REQ_TRANSITIONS = {
-    "hr-approve": (ReqApproval.PENDING_HR, ReqApproval.PENDING_MD,
-                   Cap.REQUISITION_REVIEW_HR, False),
-    "hr-reject":  (ReqApproval.PENDING_HR, ReqApproval.REJECTED,
-                   Cap.REQUISITION_REVIEW_HR, True),
-    "md-approve": (ReqApproval.PENDING_MD, ReqApproval.APPROVED,
-                   Cap.REQUISITION_APPROVE_MD, False),
-    "md-reject":  (ReqApproval.PENDING_MD, ReqApproval.REJECTED,
-                   Cap.REQUISITION_APPROVE_MD, True),
-    # ── Phase 11-R, Item 7 ── the over-sanction escalation ladder.
-    # `escalate-approve` results in PENDING_MD, which is the status reached once the WHOLE
-    # ladder is exhausted; while rungs remain the service holds the requisition at
-    # PENDING_ESCALATION and advances the level (see hrms_requisition_service).
-    "escalate-approve": (ReqApproval.PENDING_ESCALATION, ReqApproval.PENDING_MD,
-                         Cap.REQUISITION_ESCALATE, False),
-    "escalate-reject":  (ReqApproval.PENDING_ESCALATION, ReqApproval.REJECTED,
-                         Cap.REQUISITION_ESCALATE, True),
-}
-
-REQ_ACTIONS = tuple(REQ_TRANSITIONS.keys())
-
-# Where `hr-approve` lands when the requisition is OVER-SANCTION. Declared beside the
-# transition table rather than branched inside the handler, so the two cannot drift.
-# In-sanction requisitions ignore this map entirely and keep today's PENDING_HR ->
-# PENDING_MD edge byte for byte.
-REQ_ESCALATION_ROUTING = {"hr-approve": ReqApproval.PENDING_ESCALATION}
-
-
-# ── Internal track: a SECOND table, not a branch inside the first ──
 #
-# The client table above is left byte-for-byte alone, which is what makes "the agency track
-# is unchanged" a fact rather than a hope: `md_approval_is_mandatory()` still inspects it and
-# still finds exactly one road to APPROVED.
-#
-# The internal chain differs in two ways the SOP requires:
+# The chain differs from a plain HR -> MD sign-off in two ways the SOP requires:
 #   * a MANDATORY budget gate before anything may be sourced (SOP §11), and
-#   * the chain ends on the position SCORECARD rather than a single MD sign-off, because
-#     Annexure B makes the HOD accountable for the scorecard and Management accountable for
-#     the budget -- two different people, two different gates.
+#   * it ends on the position SCORECARD rather than a single MD sign-off, because
+#     Annexure B makes the HOD accountable for the scorecard and Management accountable
+#     for the budget -- two different people, two different gates.
 #
-# The over-sanction detour hangs off `budget-approve` here rather than `hr-verify`: there is
-# no point asking a reporting line to justify extra headcount before anyone has agreed to
-# pay for it.
+# The over-sanction detour hangs off `budget-approve`: there is no point asking a
+# reporting line to justify extra headcount before anyone has agreed to pay for it.
 INTERNAL_REQ_TRANSITIONS = {
     "hr-verify":         (ReqApproval.PENDING_HR_VERIFICATION, ReqApproval.PENDING_BUDGET,
                           Cap.REQUISITION_REVIEW_HR, False),
@@ -2497,8 +3291,7 @@ INTERNAL_REQ_TRANSITIONS = {
                           Cap.REQUISITION_APPROVE_BUDGET, False),
     "budget-reject":     (ReqApproval.PENDING_BUDGET, ReqApproval.REJECTED,
                           Cap.REQUISITION_APPROVE_BUDGET, True),
-    # Same ladder, same capability, same cap on depth -- it simply returns to the scorecard
-    # gate instead of to the MD.
+    # The escalation ladder returns to the scorecard gate once exhausted.
     "escalate-approve":  (ReqApproval.PENDING_ESCALATION, ReqApproval.PENDING_SCORECARD,
                           Cap.REQUISITION_ESCALATE, False),
     "escalate-reject":   (ReqApproval.PENDING_ESCALATION, ReqApproval.REJECTED,
@@ -2511,16 +3304,8 @@ INTERNAL_REQ_TRANSITIONS = {
 
 INTERNAL_ESCALATION_ROUTING = {"budget-approve": ReqApproval.PENDING_ESCALATION}
 
-# Which table drives which track. The service looks the pair up rather than branching on the
-# track in four places, so adding a third track later is a table, not a rewrite.
-TRACK_TRANSITIONS = {
-    RequisitionTrack.CLIENT:   (REQ_TRANSITIONS, REQ_ESCALATION_ROUTING),
-    RequisitionTrack.INTERNAL: (INTERNAL_REQ_TRANSITIONS, INTERNAL_ESCALATION_ROUTING),
-}
-
-
 def budget_approval_is_mandatory() -> bool:
-    """The internal-track twin of `md_approval_is_mandatory`, asserted from the table.
+    """Budget approval cannot be skipped, asserted from the table rather than trusted.
 
     "No internal role may be sourced without prior written headcount and budget approval"
     (SOP §11) holds exactly while: PENDING_BUDGET is on the ONLY road out of HR verification,
@@ -2556,28 +3341,10 @@ class EscalationStatus(str, Enum):
     REJECTED = "Rejected"
 
 
-def md_approval_is_mandatory() -> bool:
-    """MD approval cannot be skipped, asserted from the table rather than trusted.
-
-    The requirement "MD is compulsory" is only as strong as the transition table: it holds
-    exactly while `APPROVED` is reachable from ONE row, that row starts at `PENDING_MD`, and
-    it demands `REQUISITION_APPROVE_MD`. Adding a well-meaning shortcut later -- an
-    `escalate-approve` that lands on APPROVED when the chain is empty, say -- would silently
-    remove the MD from the loop. This function is what the test asserts, so that change
-    fails loudly instead.
-    """
-    rows = [spec for spec in REQ_TRANSITIONS.values() if spec[1] is ReqApproval.APPROVED]
-    return (len(rows) == 1
-            and rows[0][0] is ReqApproval.PENDING_MD
-            and rows[0][2] is Cap.REQUISITION_APPROVE_MD)
-
 AUDIT_REQ_CREATED     = "requisition raised"
 AUDIT_REQ_UPDATED     = "requisition updated"
 AUDIT_REQ_DELETED     = "requisition deleted"
-AUDIT_REQ_HR_APPROVED = "requisition HR-approved"
 AUDIT_REQ_HR_REJECTED = "requisition rejected (HR)"
-AUDIT_REQ_MD_APPROVED = "requisition approved (MD)"
-AUDIT_REQ_MD_REJECTED = "requisition rejected (MD)"
 AUDIT_REQ_CLOSED      = "requisition closing status changed"
 AUDIT_JD_UPDATED      = "job description updated"
 
@@ -2593,13 +3360,9 @@ AUDIT_REQ_SCORECARD_OK = "requisition scorecard approved (internal)"
 AUDIT_REQ_SCORECARD_NO = "requisition rejected at scorecard (internal)"
 
 REQ_AUDIT_ACTIONS = {
-    "hr-approve": AUDIT_REQ_HR_APPROVED,
     "hr-reject":  AUDIT_REQ_HR_REJECTED,
-    "md-approve": AUDIT_REQ_MD_APPROVED,
-    "md-reject":  AUDIT_REQ_MD_REJECTED,
     "escalate-approve": AUDIT_REQ_ESC_APPROVED,
     "escalate-reject":  AUDIT_REQ_ESC_REJECTED,
-    # ── Internal track ──
     "hr-verify":         AUDIT_REQ_HR_VERIFIED,
     "budget-approve":    AUDIT_REQ_BUDGET_OK,
     "budget-reject":     AUDIT_REQ_BUDGET_NO,
@@ -2660,7 +3423,7 @@ def budget_delta(req: dict):
 
 
 # Actions that require remarks CONDITIONALLY, on top of the flat `remark_required` slot in
-# REQ_TRANSITIONS. Declared here so the whole "when must an approver explain themselves"
+# INTERNAL_REQ_TRANSITIONS. Declared here so the whole "when must an approver explain themselves"
 # rule is readable in one place rather than scattered through the handler.
 #
 # The rule (confirmed with the business, see PHASE_11R_REPORT §Decisions): a budget mismatch
@@ -2668,12 +3431,12 @@ def budget_delta(req: dict):
 # budget figures disagree must say why -- an unexplained approval over a known disagreement
 # is exactly the record an audit later needs.
 REQ_CONDITIONAL_REMARKS = {
-    "md-approve": lambda req: budget_status(req) == BudgetStatus.MISMATCH.value,
+    "budget-approve": lambda req: budget_status(req) == BudgetStatus.MISMATCH.value,
 }
 
 REQ_CONDITIONAL_REMARK_REASONS = {
-    "md-approve": ("The sanctioned and HOD-approved budgets do not match. "
-                   "Record a remark explaining the approval."),
+    "budget-approve": ("The sanctioned and HOD-approved budgets do not match. "
+                       "Record a remark explaining the approval."),
 }
 
 
@@ -2700,6 +3463,13 @@ class JobDescriptionIn(BaseModel):
     ctc: Optional[str] = None
     location: Optional[str] = None
     benefits: Optional[str] = None
+    # ── Internal Recruitment SOP §3 — Step 3 (Job Description / Position Scorecard) ──
+    # Authored by HR once headcount and budget clear, not by the HOD at raise time.
+    job_summary: Optional[str] = None          # a short overview, distinct from the
+                                                # line-by-line Key Responsibilities
+    key_competencies: Optional[str] = None
+    culture_fit: Optional[str] = None          # "Culture-Fit Expectations"
+    additional_requirements: Optional[str] = None
     # None rather than FULL_TIME so "the caller said nothing" stays distinguishable from
     # "the caller chose full-time". Defaulting here silently published every Contract and
     # Intern requisition as Full-time, because the JD default outranked the requisition's
@@ -2717,6 +3487,10 @@ class JobDescriptionUpdate(BaseModel):
     ctc: Optional[str] = None
     location: Optional[str] = None
     benefits: Optional[str] = None
+    job_summary: Optional[str] = None
+    key_competencies: Optional[str] = None
+    culture_fit: Optional[str] = None
+    additional_requirements: Optional[str] = None
     employment_type: Optional[EmploymentType] = None
     attachments: Optional[List[dict]] = None
 
@@ -2736,6 +3510,15 @@ class RequisitionIn(BaseModel):
     qualification: str
     essential_skills: str
     required_date: str                    # YYYY-MM-DD
+    # ── Internal Recruitment SOP §3 ── "the HOD raises a requisition specifying role,
+    # reporting line, and business justification." Reporting line names WHO THE NEW HIRE
+    # WILL REPORT TO -- a user of this company, same validation as replacement_for_user_id
+    # below -- and is distinct from `assignee_id` (who RUNS the recruitment). Justification
+    # is the HOD's own stated reason; both are required going forward, but Optional here so
+    # a pre-SOP-redesign requisition (with neither) still deserialises.
+    reporting_manager_id: Optional[str] = None
+    reporting_manager_name: Optional[str] = None       # denormalised label
+    business_justification: Optional[str] = None
     # No longer collected at raise time (removed from every requisition-raising form) -- a
     # requisition left unassigned is not incomplete; see create_requisition's own note.
     assignee_id: Optional[str] = None     # who will run the recruitment, once named
@@ -2745,18 +3528,12 @@ class RequisitionIn(BaseModel):
     gender_preferred: GenderPreference = GenderPreference.ANY
     employment_type: EmploymentType = EmploymentType.FULL_TIME
     notes: Optional[str] = None
-    jd: JobDescriptionIn
-
-    # ── Which hiring track this vacancy runs on ──
-    # Defaults to CLIENT so every existing caller is unchanged. INTERNAL is Sparsh Magic's
-    # own vacancy: it may not name a client, and it enters the budget-gated chain instead of
-    # the HR -> MD one. Immutable once raised.
-    requisition_track: RequisitionTrack = RequisitionTrack.CLIENT
-
-    # ── Phase 11-R, Item 4 ── which client this vacancy is being filled FOR.
-    # Optional: an in-house requisition has no client, and every requisition raised before
-    # this phase has none either.
-    client_id: Optional[str] = None
+    # ── Internal Recruitment SOP §3 ── on the internal track, the JD is no longer authored
+    # here -- it is HR's job, once Management/Finance has cleared headcount and budget (Step
+    # 3, see hrms_requisition_service.create_jd). Optional so the raise form can stop asking
+    # for it; still accepted for backward compatibility with the client track and any caller
+    # that wants to seed content at raise time.
+    jd: Optional[JobDescriptionIn] = None
 
     # ── Phase 11-R, Item 6 ── dual budget capture. All optional; omitting both preserves
     # the pre-phase behaviour exactly (budget_status reads "Not Set").
@@ -2787,6 +3564,9 @@ class RequisitionUpdate(BaseModel):
     qualification: Optional[str] = None
     essential_skills: Optional[str] = None
     required_date: Optional[str] = None
+    reporting_manager_id: Optional[str] = None
+    reporting_manager_name: Optional[str] = None
+    business_justification: Optional[str] = None
     assignee_id: Optional[str] = None
     offering_ctc: Optional[float] = None
     urgency_level: Optional[Urgency] = None
@@ -2796,7 +3576,6 @@ class RequisitionUpdate(BaseModel):
     notes: Optional[str] = None
 
     # ── Phase 11-R ── same additions as RequisitionIn, all optional.
-    client_id: Optional[str] = None
     budget_sanctioned_amount: Optional[float] = None
     budget_sanctioned_by: Optional[str] = None
     budget_sanctioned_ref: Optional[str] = None
@@ -2813,7 +3592,7 @@ class RequisitionUpdate(BaseModel):
 
 
 class RequisitionAction(BaseModel):
-    action: str                            # one of REQ_ACTIONS
+    action: str                            # one of INTERNAL_REQ_TRANSITIONS
     remarks: Optional[str] = None
     salary_change: Optional[float] = None  # MD may revise the offered CTC on approval
     # ── Internal track ── required by `budget-approve` and ignored by every other action.
@@ -2846,10 +3625,29 @@ class ApplyLinkMode(str, Enum):
 
 
 class LiveStatus(str, Enum):
+    # ── Internal Recruitment SOP — Step 4 ── Create Job Posting -> Select Sourcing Channels
+    # -> Publish are three distinct moments, not one atomic action, so a posting now opens
+    # as a DRAFT rather than going live at creation. PENDING_APPROVAL exists only for a
+    # posting that names Executive Search among its channels (Management must clear it
+    # before it can be published); every other posting skips straight from Draft to Live.
+    DRAFT            = "Draft"
+    PENDING_APPROVAL = "Pending Management Approval"
     LIVE    = "Live"
     PAUSED  = "Paused"
     EXPIRED = "Expired"
     CLOSED  = "Closed"
+
+
+class RecruitmentChannel(str, Enum):
+    """Where HR is sourcing this vacancy from — the Internal Recruitment SOP's own list.
+    Independent of `ApplyLinkMode`/`source`: a channel is where HR chose to advertise it,
+    `source` (on the candidate) is where the applicant says they actually found it."""
+    INTERNAL_DATABASE   = "Internal Database"
+    JOB_PORTALS         = "Job Portals"
+    EMPLOYEE_REFERRALS  = "Employee Referrals"
+    # The only channel with its own gate: SOP names it explicitly as needing Management's
+    # sign-off, unlike the other three which any recruiter may select freely.
+    EXECUTIVE_SEARCH    = "Executive Search"
 
 
 # The master candidate lifecycle. Phase 4 only ever writes APPLIED; the rest are driven by
@@ -2860,11 +3658,6 @@ class AppStatus(str, Enum):
     APPLIED              = "Applied"
     UNDER_REVIEW         = "Under Review"
     SHORTLISTED          = "Shortlisted"
-    # ── Phase 11-R, Item 4 ── the CV goes out to the hiring client for their verdict.
-    # This is NOT ScreenAction.FORWARD, which assigns an INTERNAL owner and moves nobody.
-    SHARED_WITH_CLIENT   = "Shared with Client"
-    CLIENT_SHORTLISTED   = "Client Shortlisted"
-    CLIENT_REJECTED      = "Client Rejected"
     ON_HOLD              = "On Hold"
     DUPLICATE            = "Duplicate"
     REJECTED             = "Rejected"
@@ -2885,6 +3678,12 @@ class AppStatus(str, Enum):
     ASSESSMENT_FAILED    = "Assessment Failed"
     TECHNICAL_ROUND      = "Technical Round"
     MD_ROUND             = "MD Round"
+    # -- Final Commit -- the committee agreed, and the role is managerial or above, so the
+    # mandatory Management final round still stands between them and an offer. A status of
+    # its own rather than an inference from "no passed MD Round yet": the people waiting on
+    # a final interview are a group somebody has to chase, and a group nobody can list is a
+    # group nobody chases.
+    FINAL_INTERVIEW_REQUIRED = "Final Interview Required"
     SELECTED             = "Selected"
     OFFER_GENERATED      = "Offer Generated"
     OFFER_ACCEPTED       = "Offer Accepted"
@@ -2921,7 +3720,9 @@ EMAIL_RE = _re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 # Digits, spaces and the usual separators; 7-20 characters of actual digits.
 PHONE_RE = _re.compile(r"^[0-9+\-() ]{7,25}$")
 
-AUDIT_POSTING_CREATED = "job posting published"
+AUDIT_POSTING_CREATED       = "job posting created"
+AUDIT_POSTING_PUBLISHED     = "job posting published"
+AUDIT_POSTING_EXEC_APPROVED = "executive search approved"
 AUDIT_POSTING_UPDATED = "job posting updated"
 AUDIT_POSTING_DELETED = "job posting deleted"
 AUDIT_APPLICATION     = "application received"
@@ -2944,9 +3745,11 @@ class PostingIn(BaseModel):
     apply_link_mode: ApplyLinkMode = ApplyLinkMode.AUTO
     external_url: Optional[str] = None
     code: Optional[str] = None       # client-previewed code; honoured only if valid + unique
-    expiry_date: Optional[str] = None          # YYYY-MM-DD
+    expiry_date: Optional[str] = None          # YYYY-MM-DD ("Closing Date")
     notes: Optional[str] = None
     requires_assessment: bool = False
+    # Internal Recruitment SOP -- Step 4: at least one sourcing channel must be named.
+    channels: List[RecruitmentChannel] = Field(default_factory=list)
 
 
 class PostingUpdate(BaseModel):
@@ -2956,6 +3759,12 @@ class PostingUpdate(BaseModel):
     apply_link_mode: Optional[ApplyLinkMode] = None
     external_url: Optional[str] = None
     requires_assessment: Optional[bool] = None
+    channels: Optional[List[RecruitmentChannel]] = None
+
+
+class PostingExecApprovalIn(BaseModel):
+    """Management's own sign-off before an Executive Search posting may be published."""
+    remarks: Optional[str] = None
 
 
 class UploadIn(BaseModel):
@@ -2964,20 +3773,38 @@ class UploadIn(BaseModel):
     name: str
     mime_type: str
     data: str                                   # base64, optionally a data: URL
+    # Which joining document this file answers (§7.5 Stage 3). Absent for every other
+    # upload in the system -- a CV or a certificate has no catalogue to belong to.
+    doc_type: Optional[str] = None
 
 
 # =============================================================
 # Phase 11-R, Item 5 - referral capture
 # =============================================================
 class ReferralSource(str, Enum):
-    EMPLOYEE          = "Employee"
-    EX_EMPLOYEE       = "Ex-Employee"
-    CONSULTANT_AGENCY = "Consultant / Agency"
-    JOB_PORTAL        = "Job Portal"
-    SOCIAL_MEDIA      = "Social Media"
-    WALK_IN           = "Walk-in"
-    CLIENT            = "Client"
-    OTHER             = "Other"
+    """Where an application came FROM, as the applicant (or the recruiter) reports it.
+
+    Distinct from `RecruitmentChannel`, which is where HR chose to ADVERTISE the role: a
+    posting advertised on Job Portals can still receive a walk-in. The four values added for
+    the Applicant Pool -- Internal Database, Company Website, Direct Application, Executive
+    Search -- close the gap between the two lists without renaming any existing value, so
+    every candidate already filed under the old ones keeps its meaning and its place in the
+    `source` breakdown.
+    """
+    EMPLOYEE           = "Employee"
+    EX_EMPLOYEE        = "Ex-Employee"
+    CONSULTANT_AGENCY  = "Consultant / Agency"
+    JOB_PORTAL         = "Job Portal"
+    SOCIAL_MEDIA       = "Social Media"
+    WALK_IN            = "Walk-in"
+    # "Client" was removed with the client-hiring track: it meant "the hiring client sent us
+    # this CV", which has no meaning now every requisition is this company's own vacancy.
+    # Candidates filed under it were re-filed as "Other".
+    INTERNAL_DATABASE  = "Internal Database"
+    COMPANY_WEBSITE    = "Company Website"
+    DIRECT_APPLICATION = "Direct Application"
+    EXECUTIVE_SEARCH   = "Executive Search"
+    OTHER              = "Other"
 
 
 # The `source` value a referred candidate is filed under, so referrals land in the existing
@@ -3018,6 +3845,7 @@ class PublicApplicationIn(BaseModel):
     total_experience: Optional[str] = None
     qualification: Optional[str] = None
     current_company: Optional[str] = None
+    current_designation: Optional[str] = None
     current_ctc: Optional[str] = None
     expected_ctc: Optional[str] = None
     notice_period: Optional[str] = None
@@ -3084,31 +3912,19 @@ FORWARD_TRANSITIONS = {
     AppStatus.UNDER_REVIEW:         {AppStatus.SHORTLISTED},
     # Shortlisting routes by the role's assessment requirement -- the screening service
     # picks which of these two edges to take (see hrms_screening_service).
-    # SHARED_WITH_CLIENT is a THIRD option, taken only when the CV is sent to the hiring
-    # client for their verdict (Phase 11-R, Item 4).
     # ── Phase INT-4 ── the telephonic edges are ADDED, not substituted. The direct
-    # Shortlisted -> Assessment / Interview edges stay, so the client track (and an internal
-    # role with an approved waiver) is never forced through a phone screen by the shape of
-    # the graph. The SOP's ordering is enforced by `assert_telephonic_cleared` at interview
+    # Shortlisted -> Assessment / Interview edges stay, so a role with an approved waiver is
+    # never forced through a phone screen by the shape of the graph. The SOP's ordering is enforced by `assert_telephonic_cleared` at interview
     # scheduling, where it can be waived by an approved exception -- a missing edge cannot.
     AppStatus.SHORTLISTED:          {AppStatus.ASSESSMENT_PENDING, AppStatus.INTERVIEW_SCHEDULED,
-                                     AppStatus.SHARED_WITH_CLIENT,
                                      AppStatus.TELEPHONIC_PASSED,
                                      AppStatus.TELEPHONIC_REJECTED},
     # A passed phone screen leads where a shortlist does: the SOP puts the skill assessment
     # (Annexure B) between the call and the panel, so both onward edges exist.
-    AppStatus.TELEPHONIC_PASSED:    {AppStatus.ASSESSMENT_PENDING, AppStatus.INTERVIEW_SCHEDULED,
-                                     AppStatus.SHARED_WITH_CLIENT},
-    # Revivable, exactly like CLIENT_REJECTED: somebody unreachable on Tuesday is not
+    AppStatus.TELEPHONIC_PASSED:    {AppStatus.ASSESSMENT_PENDING, AppStatus.INTERVIEW_SCHEDULED},
+    # Revivable, exactly like REJECTED: somebody unreachable on Tuesday is not
     # permanently unsuitable, and a dead end here would force HR to re-key the candidate.
     AppStatus.TELEPHONIC_REJECTED:  {AppStatus.UNDER_REVIEW},
-    # The client's verdict, or -- if they never respond -- the pipeline carries on without
-    # one. Sharing a CV must not be able to strand a candidate on an unanswered email.
-    AppStatus.SHARED_WITH_CLIENT:   {AppStatus.CLIENT_SHORTLISTED, AppStatus.CLIENT_REJECTED,
-                                     AppStatus.ASSESSMENT_PENDING, AppStatus.INTERVIEW_SCHEDULED},
-    AppStatus.CLIENT_SHORTLISTED:   {AppStatus.ASSESSMENT_PENDING, AppStatus.INTERVIEW_SCHEDULED},
-    # Revivable, exactly like REJECTED: a client changing their mind is a real event.
-    AppStatus.CLIENT_REJECTED:      {AppStatus.UNDER_REVIEW},
     AppStatus.ASSESSMENT_PENDING:   {AppStatus.ASSESSMENT_COMPLETED},
     AppStatus.ASSESSMENT_COMPLETED: {AppStatus.ASSESSMENT_PASSED, AppStatus.ASSESSMENT_FAILED},
     AppStatus.ASSESSMENT_PASSED:    {AppStatus.INTERVIEW_SCHEDULED},
@@ -3116,8 +3932,15 @@ FORWARD_TRANSITIONS = {
     # both of which come from ALWAYS_AVAILABLE.
     AppStatus.ASSESSMENT_FAILED:    set(),
     AppStatus.INTERVIEW_SCHEDULED:  {AppStatus.TECHNICAL_ROUND, AppStatus.MD_ROUND,
+                                     AppStatus.FINAL_INTERVIEW_REQUIRED,
                                      AppStatus.SELECTED},
-    AppStatus.TECHNICAL_ROUND:      {AppStatus.MD_ROUND, AppStatus.SELECTED},
+    AppStatus.TECHNICAL_ROUND:      {AppStatus.MD_ROUND,
+                                     AppStatus.FINAL_INTERVIEW_REQUIRED,
+                                     AppStatus.SELECTED},
+    # Final Commit mandated the round; the candidate now sits in it, then is selected. The
+    # direct edge to SELECTED is kept for the case where the round is already on record and
+    # passed, which `final_commit_outcome` resolves to SELECTED rather than routing here.
+    AppStatus.FINAL_INTERVIEW_REQUIRED: {AppStatus.MD_ROUND, AppStatus.SELECTED},
     AppStatus.MD_ROUND:             {AppStatus.SELECTED},
     AppStatus.SELECTED:             {AppStatus.OFFER_GENERATED},
     # SELECTED is the REVOKE walk-back: withdrawing an offer un-does the fact that one was
@@ -3168,13 +3991,12 @@ PIPELINE_COLUMNS = [
     ("applied",     "Applied",     [AppStatus.APPLIED, AppStatus.UNDER_REVIEW]),
     # TELEPHONIC_PASSED sits here, with the rest of rank 2: the board column and the funnel
     # rank must agree, or a candidate appears in one place and is counted in another.
-    ("shortlisted", "Shortlisted", [AppStatus.SHORTLISTED, AppStatus.SHARED_WITH_CLIENT,
-                                    AppStatus.CLIENT_SHORTLISTED,
-                                    AppStatus.TELEPHONIC_PASSED]),
+    ("shortlisted", "Shortlisted", [AppStatus.SHORTLISTED, AppStatus.TELEPHONIC_PASSED]),
     ("assessment",  "Assessment",  [AppStatus.ASSESSMENT_PENDING, AppStatus.ASSESSMENT_COMPLETED,
                                     AppStatus.ASSESSMENT_PASSED, AppStatus.ASSESSMENT_FAILED]),
     ("interview",   "Interview",   [AppStatus.INTERVIEW_SCHEDULED, AppStatus.TECHNICAL_ROUND,
-                                    AppStatus.MD_ROUND]),
+                                    AppStatus.MD_ROUND,
+                                    AppStatus.FINAL_INTERVIEW_REQUIRED]),
     ("selected",    "Selected",    [AppStatus.SELECTED, AppStatus.OFFER_GENERATED,
                                     AppStatus.OFFER_ACCEPTED,
                                     AppStatus.APPOINTMENT_LETTER_SENT]),
@@ -3182,10 +4004,10 @@ PIPELINE_COLUMNS = [
                                     AppStatus.EMPLOYEE_CREATED,
                                     AppStatus.PROBATION_CONFIRMED]),
     ("hold",        "On Hold",     [AppStatus.ON_HOLD]),
-    # TELEPHONIC_REJECTED groups with the other "declined at a stage" outcomes, exactly as
-    # CLIENT_REJECTED does -- both rank 2 in the funnel and both read as a rejection here.
+    # TELEPHONIC_REJECTED groups with the other "declined at a stage" outcomes -- rank 2 in
+    # the funnel, and it reads as a rejection here.
     ("rejected",    "Rejected",    [AppStatus.REJECTED, AppStatus.DUPLICATE,
-                                    AppStatus.OFFER_DECLINED, AppStatus.CLIENT_REJECTED,
+                                    AppStatus.OFFER_DECLINED,
                                     AppStatus.TELEPHONIC_REJECTED]),
 ]
 
@@ -3197,9 +4019,6 @@ class ScreenAction(str, Enum):
     DUPLICATE = "duplicate"
     REJECT    = "reject"
     FORWARD   = "forward"
-    # Phase 11-R, Item 4. Distinct from FORWARD on purpose: FORWARD assigns an internal
-    # owner and moves nobody, this sends the CV OUT to the hiring client for their verdict.
-    SHARE_WITH_CLIENT = "share_with_client"
 
 
 # action -> (target status or None, remark_required, recipient_required)
@@ -3212,12 +4031,46 @@ SCREEN_ACTIONS = {
     ScreenAction.DUPLICATE: (AppStatus.DUPLICATE, False, False),
     ScreenAction.REJECT:    (AppStatus.REJECTED, True, False),
     ScreenAction.FORWARD:   (None, False, True),
-    # Remark optional (a covering note to the client), recipient optional (the client
-    # contact is free text on the share record, not an ERP user).
-    ScreenAction.SHARE_WITH_CLIENT: (AppStatus.SHARED_WITH_CLIENT, False, False),
 }
 
 MAX_BULK_SCREEN = 200
+
+
+class CvScreeningResult(str, Enum):
+    """HR's verdict on the CV, judged against the approved Position Scorecard (SOP §1).
+
+    Kept separate from `application_status`: the status says where the candidate IS, this
+    says what HR CONCLUDED when they read the CV. A candidate can be "Shortlisted" with a
+    `Meets` CV screen, or held at "Under Review" with a `Partially Meets` one — collapsing
+    the two would lose the reason behind the move.
+    """
+    MEETS           = "Meets Requirements"
+    PARTIALLY_MEETS = "Partially Meets"
+    DOES_NOT_MEET   = "Does Not Meet"
+
+
+class ScreeningStatus(str, Enum):
+    """The overall HR screening verdict across CV, telephonic and assessment (SOP §1-§3)."""
+    IN_PROGRESS = "In Progress"
+    CLEARED     = "Cleared"
+    ON_HOLD     = "On Hold"
+    REJECTED    = "Rejected"
+
+
+class CvScreeningIn(BaseModel):
+    """Record the CV screening for ONE candidate, against the approved scorecard.
+
+    Distinct from `ScreenIn`, which is the bulk triage that MOVES people. This records the
+    finding; whether the candidate then moves is the triage action's job, so a screen can
+    be written down before anybody decides what to do about it.
+    """
+    result: CvScreeningResult
+    remarks: Optional[str] = None
+    # HR's running note across the whole screening, and the overall verdict. Both optional:
+    # the CV screen is usually the first of three, and a verdict on the whole is premature
+    # until the later two are in.
+    hr_remarks: Optional[str] = None
+    screening_status: Optional[ScreeningStatus] = None
 
 AUDIT_CANDIDATE_ADDED   = "candidate added"
 AUDIT_CANDIDATE_UPDATED = "candidate updated"
@@ -3240,9 +4093,6 @@ JOURNEY_KINDS = {
 # Statuses that colour a journey event regardless of which action produced it.
 JOURNEY_STATUS_KINDS = {
     # ── Phase 11-R ──
-    AppStatus.SHARED_WITH_CLIENT: "info",
-    AppStatus.CLIENT_SHORTLISTED: "success",
-    AppStatus.CLIENT_REJECTED: "reject",
     AppStatus.APPOINTMENT_LETTER_SENT: "offer",
     AppStatus.SHORTLISTED: "success", AppStatus.ASSESSMENT_PASSED: "success",
     AppStatus.SELECTED: "success", AppStatus.OFFER_ACCEPTED: "success",
@@ -3252,6 +4102,7 @@ JOURNEY_STATUS_KINDS = {
     AppStatus.ASSESSMENT_FAILED: "reject", AppStatus.OFFER_DECLINED: "reject",
     AppStatus.ON_HOLD: "warning",
     AppStatus.INTERVIEW_SCHEDULED: "interview", AppStatus.TECHNICAL_ROUND: "interview",
+    AppStatus.FINAL_INTERVIEW_REQUIRED: "interview",
     AppStatus.MD_ROUND: "interview",
     AppStatus.OFFER_GENERATED: "offer",
     AppStatus.PRE_ONBOARDING: "onboarding",
@@ -3261,10 +4112,7 @@ JOURNEY_STATUS_KINDS = {
 # The 7-step rail shown above the timeline: (label, statuses that mean it is reached).
 JOURNEY_RAIL = [
     ("Applied",     {AppStatus.APPLIED, AppStatus.UNDER_REVIEW}),
-    # Client sharing and the client's shortlist verdict belong to the shortlisting step --
-    # they are a decision ABOUT a shortlisted CV, not a new stage of the candidate's journey.
-    ("Shortlisted", {AppStatus.SHORTLISTED, AppStatus.SHARED_WITH_CLIENT,
-                     AppStatus.CLIENT_SHORTLISTED}),
+    ("Shortlisted", {AppStatus.SHORTLISTED}),
     ("Assessment",  {AppStatus.ASSESSMENT_PENDING, AppStatus.ASSESSMENT_COMPLETED,
                      AppStatus.ASSESSMENT_PASSED, AppStatus.ASSESSMENT_FAILED}),
     ("Interview",   {AppStatus.INTERVIEW_SCHEDULED, AppStatus.TECHNICAL_ROUND,
@@ -3287,15 +4135,21 @@ class CandidateIn(BaseModel):
     can_email: Optional[str] = None
     can_contact: Optional[str] = None
     request_no: Optional[str] = None
+    # Which published posting they came through, when there is one. A manually added
+    # walk-in has no posting; an application typed in from a job board against a live
+    # posting does, and the Applicant Pool wants that link kept.
+    posting_code: Optional[str] = None
     source: str = "Manual"
     current_location: Optional[str] = None
     total_experience: Optional[str] = None
     qualification: Optional[str] = None
     current_company: Optional[str] = None
+    current_designation: Optional[str] = None
     current_ctc: Optional[str] = None
     expected_ctc: Optional[str] = None
     notice_period: Optional[str] = None
     linkedin: Optional[str] = None
+    portfolio: Optional[str] = None
     cover_note: Optional[str] = None
     resume: Optional[UploadIn] = None
     # ── Phase 11-R, Item 5 ── the manual-add path captures the same referral detail as the
@@ -3322,12 +4176,18 @@ class CandidateUpdate(BaseModel):
     total_experience: Optional[str] = None
     qualification: Optional[str] = None
     current_company: Optional[str] = None
+    current_designation: Optional[str] = None
     current_ctc: Optional[str] = None
     expected_ctc: Optional[str] = None
     notice_period: Optional[str] = None
     linkedin: Optional[str] = None
+    portfolio: Optional[str] = None
     cover_note: Optional[str] = None
     remarks: Optional[str] = None
+    # Correctable: a CV that arrived by email and was filed as "Manual" is often later
+    # found to have come from a portal or a referral, and the source breakdown is only
+    # worth reading if it can be corrected.
+    source: Optional[str] = None
 
 
 class ScreenIn(BaseModel):
@@ -3730,6 +4590,27 @@ class PreOnboardStatus(str, Enum):
     VERIFIED  = "Verified"
 
 
+class DocStatus(str, Enum):
+    """Where ONE uploaded joining document has got to (§7.5 Stage 3).
+
+    `EXCEPTION` is the controlled-continuation case: the document is not in order, and
+    somebody has accepted that in writing anyway -- a graduate whose degree certificate is
+    still with the university, a joiner whose previous employer will not release a relieving
+    letter. It satisfies the mandatory-document gate exactly as VERIFIED does, which is the
+    whole point of it, and it is deliberately NOT a silent override: it carries the note
+    saying who allowed it and why, and it reads differently everywhere it is shown.
+    """
+    PENDING   = "Pending"
+    VERIFIED  = "Verified"
+    REJECTED  = "Rejected"
+    EXCEPTION = "Exception"
+
+
+# A rejected document is not a satisfied one: it has to be replaced. These two are what let
+# a joining go ahead.
+DOC_SATISFYING_STATUSES = {DocStatus.VERIFIED.value, DocStatus.EXCEPTION.value}
+
+
 class BgVerification(str, Enum):
     PENDING     = "Pending"
     IN_PROGRESS = "In Progress"
@@ -3753,6 +4634,43 @@ ONBOARD_CHECKLIST = [
     ("bank_payroll",      "Bank and payroll details recorded"),
     ("buddy_assigned",    "Reporting manager and buddy introduced"),
 ]
+
+
+# ── BA Functional Design §7.5 Stage 8 ── who each joining task actually belongs to.
+#
+# The list above has always been one flat set, which made every item look like HR's job.
+# It is not: IT creates the accounts, Admin allocates the desk, and the reporting manager
+# runs the induction. Naming the owner is what lets each of them be told what is theirs.
+#
+# Anything absent from this map is HR's, which is the right default -- HR owns the case.
+TASK_OWNER_IT      = "IT"
+TASK_OWNER_ADMIN   = "Admin"
+TASK_OWNER_MANAGER = "Reporting Manager"
+TASK_OWNER_HR      = "HR"
+
+TASK_OWNERS = {
+    "email_created":           TASK_OWNER_IT,
+    "system_access":           TASK_OWNER_IT,
+    "asset_issued":            TASK_OWNER_IT,
+    "workspace":               TASK_OWNER_ADMIN,
+    "induction":               TASK_OWNER_MANAGER,
+    "buddy_assigned":          TASK_OWNER_MANAGER,
+    "induction_policies":      TASK_OWNER_MANAGER,
+    "induction_systems":       TASK_OWNER_IT,
+    "induction_introductions": TASK_OWNER_MANAGER,
+    "induction_workplace":     TASK_OWNER_MANAGER,
+    "induction_feedback":      TASK_OWNER_HR,
+}
+
+# The owners whose work begins when the joiner actually turns up (§7.5 Stage 8: "Once
+# joining is confirmed, the system automatically creates onboarding tasks"). HR's own items
+# run from the moment the case opens, so they are not in here.
+TASKS_ASSIGNED_AT_JOINING = (TASK_OWNER_IT, TASK_OWNER_ADMIN, TASK_OWNER_MANAGER)
+
+
+def task_owner(key: str) -> str:
+    """Who owns one checklist item. Unknown keys are HR's -- HR owns the case."""
+    return TASK_OWNERS.get(key, TASK_OWNER_HR)
 CHECKLIST_KEYS = [k for k, _ in ONBOARD_CHECKLIST]
 
 # Checklist items the system owns. A human toggling these by hand would let the checklist
@@ -3765,6 +4683,62 @@ SYSTEM_CHECKLIST_KEYS = {"employee_id", "documents_verified", "bg_cleared"}
 
 MAX_ONBOARD_DOCUMENTS = 15
 MAX_REFERENCES = 5
+
+# What the NEW HIRE has to do, as opposed to ONBOARD_CHECKLIST, which is what HR has to do.
+# Mailed to them with their portal link (§7.5, "Send Secure Onboarding Portal / Task List").
+# Kept beside the form's own validation (`_validate_submission`) so the two stay in step --
+# telling somebody to send a document the form does not accept wastes their time.
+ONBOARD_CANDIDATE_TASKS = [
+    "Your PAN or Aadhaar number",
+    "Date of birth and personal details",
+    "Current and permanent address",
+    "Bank account number and IFSC code, for payroll",
+    "Statutory details (UAN / PF / ESIC), where you have them",
+    "An emergency contact",
+    "Professional references",
+    "Scanned copies of your identity, address, bank and previous-employment documents",
+]
+
+# ── BA Functional Design §7.5 ── the document upload TASKS, as opposed to a single pile of
+# files. A typed slot is what makes "your address proof is missing" answerable; an untyped
+# list can only say how many files arrived.
+#
+# This is the DEFAULT catalogue. A company edits it through the
+# `onboarding_document_types` setting, which is why the shape is {label: required?} rather
+# than a fixed enum -- §7.5 asks for these six "and other configurable document types".
+ONBOARD_DOC_TYPES = {
+    "PAN card": True,
+    "Aadhaar card": True,
+    "Bank proof (cancelled cheque or passbook)": True,
+    "Address proof": True,
+    "Previous employment documents": False,
+    "Photograph": True,
+}
+
+# The candidate portal's sections, in the order §7.5 gives them. Declared as data so the
+# portal, the HR view and this file cannot drift into three different orders.
+# ── BA Functional Design §7.5 Stage 7 ── the employment documents a new joiner signs
+# alongside their appointment letter. The letter itself is NOT in this list: it is the
+# appointment record, not an attachment to it, and it already has its own signature.
+#
+# Configurable per company through `employment_documents`, for the same reason the joining
+# documents are: "required policies" differs by industry, and a company adding its own
+# policy should not need a deploy.
+EMPLOYMENT_DOCUMENTS = {
+    "Non-Disclosure Agreement": True,
+    "Code of Conduct": True,
+    "IT & Data Security Policy": True,
+    "POSH Policy": True,
+    "Leave & Attendance Policy": False,
+}
+
+ONBOARD_SECTIONS = [
+    {"key": "personal",  "label": "Personal information"},
+    {"key": "contact",   "label": "Contact information"},
+    {"key": "bank",      "label": "Bank information"},
+    {"key": "statutory", "label": "Statutory information"},
+    {"key": "documents", "label": "Document upload"},
+]
 
 # Candidate stages an onboarding may be started from.
 #
@@ -3794,20 +4768,17 @@ AUDIT_EMPLOYEE_LINKED    = "employee linked to a user account"
 ENTITY_ONBOARDING = "onboarding"
 
 
-def seed_checklist(track: str = None) -> list:
-    """The checklist a new onboarding record starts with.
-
-    An INTERNAL-track joiner additionally gets the Day-1 induction items (SOP §7). The base
-    twelve are unchanged for everybody, so a client-track onboarding shows exactly the list
-    it always has -- the induction items are appended, never interleaved, so the existing
-    order is preserved too.
-    """
-    items = [{"key": k, "label": label, "done": False, "done_at": None, "done_by": None}
+def seed_checklist() -> list:
+    """The checklist a new onboarding record starts with: the base twelve items, then the
+    Day-1 induction items (SOP §7). The induction items are appended, never interleaved, so
+    the base order is preserved."""
+    items = [{"key": k, "label": label, "done": False, "done_at": None, "done_by": None,
+              "owner": task_owner(k), "assigned_at": None}
              for k, label in ONBOARD_CHECKLIST]
-    if track == RequisitionTrack.INTERNAL.value:
-        items += [{"key": k, "label": label, "done": False, "done_at": None,
-                   "done_by": None, "induction": True}
-                  for k, label in INDUCTION_CHECKLIST]
+    items += [{"key": k, "label": label, "done": False, "done_at": None,
+               "done_by": None, "induction": True,
+               "owner": task_owner(k), "assigned_at": None}
+              for k, label in INDUCTION_CHECKLIST]
     return items
 
 
@@ -3824,6 +4795,38 @@ class OnboardingDetailsIn(BaseModel):
     asset_requirements: Optional[str] = None
 
 
+class OnboardingJoiningIn(BaseModel):
+    """HR confirming that somebody actually turned up (§7.5 Stage 6).
+
+    `actual_doj` is separate from the planned `joining_date` on purpose: people start late,
+    and overwriting the agreed date would destroy the evidence that they did. Payroll,
+    probation and tenure all run from the ACTUAL date.
+
+    The assignment fields are the nine the BA document lists. Department, designation and
+    reporting manager reference records that exist; grade, location, unit and payroll group
+    are free text because this codebase has no master for any of them yet.
+    """
+    actual_doj: str
+    note: Optional[str] = None
+    unit: Optional[str] = None
+    department_id: Optional[str] = None
+    designation_id: Optional[str] = None
+    grade: Optional[str] = None
+    work_location: Optional[str] = None
+    reporting_manager_id: Optional[str] = None
+    employment_type: Optional[EmploymentType] = None
+    employment_status: Optional[EmploymentStatus] = None
+    payroll_group: Optional[str] = None
+
+
+# The nine attributes assigned when an employee is activated (§7.5 Stage 6). Declared as
+# data so the onboarding record, the employee record and the screen cannot drift apart.
+ASSIGNMENT_FIELDS = (
+    "unit", "department_id", "designation_id", "grade", "work_location",
+    "reporting_manager_id", "employment_type", "employment_status", "payroll_group",
+)
+
+
 class OnboardingBgIn(BaseModel):
     bg_verification: BgVerification
     note: Optional[str] = None
@@ -3838,6 +4841,17 @@ class OnboardingDocumentsIn(BaseModel):
     """HR-side KYC upload. Kept separate from the candidate's public submission so HR can
     collect documents even before the candidate fills the form."""
     documents: List[UploadIn] = Field(default_factory=list)
+
+
+class OnboardingDocReviewIn(BaseModel):
+    """HR's verdict on one uploaded joining document (§7.5 Stage 3).
+
+    Names the document TYPE rather than an index: the verdict belongs to "the Aadhaar card",
+    and an index would silently point at a different file the moment a new version arrives.
+    """
+    doc_type: str
+    status: DocStatus
+    note: Optional[str] = None
 
 
 class EmployeeLinkIn(BaseModel):
@@ -3898,18 +4912,11 @@ STAGE_RANK = {
     AppStatus.ON_HOLD:              1,
     AppStatus.REJECTED:             1,   # ranked where they entered, not where they left
     AppStatus.SHORTLISTED:          2,
-    # ── Phase 11-R ── the client-share band sits WITH Shortlisted, not after it. Sharing a
-    # CV and getting a verdict is a decision about a shortlisted candidate; it does not move
-    # them further down the funnel, so it must not out-rank shortlisting. CLIENT_REJECTED is
-    # ranked where they ENTERED, the same treatment REJECTED gets at rank 1.
-    AppStatus.SHARED_WITH_CLIENT:   2,
-    AppStatus.CLIENT_SHORTLISTED:   2,
-    AppStatus.CLIENT_REJECTED:      2,
-    # ── Phase INT-4 ── the telephonic band sits WITH Shortlisted, for exactly the reason the
-    # client-share band does: a phone screen is a decision ABOUT a shortlisted candidate, not
+    # ── Phase INT-4 ── the telephonic band sits WITH Shortlisted: a phone screen is a
+    # decision ABOUT a shortlisted candidate, not
     # a further stage of the funnel. Ranking it 3 would push assessment and interview up and
     # renumber every Phase 10 figure. TELEPHONIC_REJECTED is ranked where the candidate
-    # ENTERED, the same treatment REJECTED and CLIENT_REJECTED get.
+    # ENTERED, the same treatment REJECTED gets.
     AppStatus.TELEPHONIC_PASSED:    2,
     AppStatus.TELEPHONIC_REJECTED:  2,
     AppStatus.ASSESSMENT_PENDING:   3,
@@ -3919,6 +4926,10 @@ STAGE_RANK = {
     AppStatus.INTERVIEW_SCHEDULED:  4,
     AppStatus.TECHNICAL_ROUND:      4,
     AppStatus.MD_ROUND:             4,
+    # Ranked WITH the interview band, not above it. Final Commit has decided, but the
+    # candidate has not cleared the round yet, and ranking them at 5 would count them as
+    # selected in every funnel figure.
+    AppStatus.FINAL_INTERVIEW_REQUIRED: 4,
     AppStatus.SELECTED:             5,
     AppStatus.OFFER_GENERATED:      6,
     AppStatus.OFFER_DECLINED:       6,   # they DID receive an offer -- that stage was reached
@@ -4251,7 +5262,7 @@ class DocumentStatus(str, Enum):
     EXPIRED      = "Expired"        # past `expiry_date` -- COMPUTED on read, never stored
 
 
-# Rejecting a document requires a reason, the same rule REQ_TRANSITIONS applies to a
+# Rejecting a document requires a reason, the same rule INTERNAL_REQ_TRANSITIONS applies to a
 # rejected requisition: a refusal the owner cannot act on is not a decision, it is a wall.
 DOCUMENT_STATUSES_REQUIRING_REMARKS = {DocumentStatus.REJECTED}
 
@@ -4457,6 +5468,9 @@ class PublicAppointmentAckIn(BaseModel):
     accepting an offer is."""
     signature: str
     note: Optional[str] = None
+    # §7.5 Stage 7: the employment documents the joiner ticked. Named rather than counted,
+    # so the record says WHICH documents that one signature covers.
+    documents: List[str] = Field(default_factory=list)
 
 
 # =============================================================
@@ -4467,147 +5481,9 @@ class PublicAppointmentAckIn(BaseModel):
 # held in its own master, and is NOT the same thing as `company_id` (which remains the ERP
 # tenant that OWNS the data). Every requisition may name one; scoping still runs on
 # company_id throughout, so the client dimension is a reporting axis, never a security one.
-class ClientStatus(str, Enum):
-    ACTIVE   = "Active"
-    INACTIVE = "Inactive"
-
-
-class ClientShareStatus(str, Enum):
-    PENDING     = "Pending"
-    SHORTLISTED = "Shortlisted"
-    REJECTED    = "Rejected"
-    ON_HOLD     = "On Hold"
-
-
-# The client's verdict -> where the candidate lands. Declared as data, so the verdict
-# handler is a lookup rather than a branch, and FORWARD_TRANSITIONS still decides legality.
-CLIENT_RESPONSE_STATUS = {
-    ClientShareStatus.SHORTLISTED: AppStatus.CLIENT_SHORTLISTED,
-    ClientShareStatus.REJECTED:    AppStatus.CLIENT_REJECTED,
-    ClientShareStatus.ON_HOLD:     AppStatus.ON_HOLD,
-    ClientShareStatus.PENDING:     None,      # no verdict yet -- the candidate does not move
-}
-
-# A client is not created, updated or deleted here -- it is a company, and the Companies
-# module audits its own writes. What HRMS does to a client is share a CV and record a verdict,
-# so those are the only two actions this module has to account for.
-AUDIT_CLIENT_SHARED    = "cv shared with client"
-AUDIT_CLIENT_RESPONSE  = "client verdict recorded"
-
-
 # =============================================================
-# Phase 12 — the client hiring track
+# Phase 12 — background verification
 # =============================================================
-# The flow this serves, end to end:
-#
-#   client raises a Job Request -> Sparsh reviews it -> Sparsh converts it to a requisition
-#   -> Sparsh sources candidates -> a CV is SHARED with one or more clients
-#   -> each client reviews INDEPENDENTLY -> interview -> selection
-#   -> background verification -> HR approval -> offer -> onboarding
-#
-# -- Why a share is a record and not a field ---------------------------------------------
-# The requirement is that one CV can go to five clients and carry five different outcomes.
-# A candidate has ONE `application_status`, so that stage can only ever describe Sparsh's
-# own pipeline. Everything per-client therefore lives on the share row, and the two never
-# compete: `application_status` says where WE are with somebody, `ShareStatus` says where
-# each CLIENT is.
-class JobRequestStatus(str, Enum):
-    SUBMITTED    = "Submitted"       # the client has sent it; Sparsh has not looked yet
-    UNDER_REVIEW = "Under Review"    # Sparsh has picked it up
-    ACCEPTED     = "Accepted"        # Sparsh will work it, and has converted it
-    DECLINED     = "Declined"        # Sparsh will not work it; a reason is mandatory
-    WITHDRAWN    = "Withdrawn"       # the client changed their mind before review finished
-
-
-# What the client may do to their own request, and when. A request Sparsh has already
-# accepted is a commitment on both sides and stops being the client's to edit.
-JOB_REQUEST_CLIENT_EDITABLE = {JobRequestStatus.SUBMITTED.value,
-                               JobRequestStatus.UNDER_REVIEW.value}
-
-# Sparsh's moves. Table-driven for the same reason the requisition chain is: the legal
-# transitions are data somebody can read, not branches spread through a handler.
-# action -> (from, to, capability, remark_required)
-JOB_REQUEST_TRANSITIONS = {
-    "review":  (JobRequestStatus.SUBMITTED,    JobRequestStatus.UNDER_REVIEW,
-                Cap.JOB_REQUEST_REVIEW, False),
-    "accept":  (JobRequestStatus.UNDER_REVIEW, JobRequestStatus.ACCEPTED,
-                Cap.JOB_REQUEST_REVIEW, False),
-    "decline": (JobRequestStatus.UNDER_REVIEW, JobRequestStatus.DECLINED,
-                Cap.JOB_REQUEST_REVIEW, True),
-}
-
-
-class ShareStatus(str, Enum):
-    """One client's view of one candidate. The spec's list, verbatim."""
-    CV_SHARED          = "CV Shared"
-    UNDER_REVIEW       = "Under Review"
-    SHORTLISTED        = "Shortlisted"
-    INTERVIEW_SCHEDULED = "Interview Scheduled"
-    SELECTED           = "Selected"
-    REJECTED           = "Rejected"
-    OFFER_IN_PROGRESS  = "Offer in Progress"
-    HIRED              = "Hired"
-    # ── spec §12 ── the client hands the candidate back without rejecting them.
-    #
-    # Distinct from Rejected on purpose, and the distinction is the point: Rejected means
-    # "not for us", Sent Back means "not for THIS role -- see what else you have". Collapsing
-    # them would lose the difference between a candidate a client turned down and one they
-    # liked but could not place, and only one of those is worth re-pitching to them.
-    SENT_BACK          = "Sent Back to Sparsh"
-    WITHDRAWN          = "Withdrawn"   # Sparsh pulled the CV back from this client
-
-
-# Legal moves for a share, mirroring FORWARD_TRANSITIONS' job for candidates: the graph
-# decides what is possible and the services decide who may ask.
-#
-# Rejected is revivable to Under Review for the same reason CLIENT_REJECTED is: a client
-# who passed in March may reconsider in June, and forcing a fresh share would lose the
-# history of the first one.
-SHARE_TRANSITIONS = {
-    ShareStatus.CV_SHARED:           {ShareStatus.UNDER_REVIEW, ShareStatus.SHORTLISTED,
-                                      ShareStatus.REJECTED, ShareStatus.SENT_BACK,
-                                      ShareStatus.WITHDRAWN},
-    ShareStatus.UNDER_REVIEW:        {ShareStatus.SHORTLISTED, ShareStatus.REJECTED,
-                                      ShareStatus.SENT_BACK, ShareStatus.WITHDRAWN},
-    ShareStatus.SHORTLISTED:         {ShareStatus.INTERVIEW_SCHEDULED, ShareStatus.SELECTED,
-                                      ShareStatus.REJECTED, ShareStatus.SENT_BACK,
-                                      ShareStatus.WITHDRAWN},
-    ShareStatus.INTERVIEW_SCHEDULED: {ShareStatus.SELECTED, ShareStatus.REJECTED,
-                                      ShareStatus.SENT_BACK, ShareStatus.WITHDRAWN},
-    ShareStatus.SELECTED:            {ShareStatus.OFFER_IN_PROGRESS, ShareStatus.REJECTED,
-                                      ShareStatus.SENT_BACK, ShareStatus.WITHDRAWN},
-    ShareStatus.OFFER_IN_PROGRESS:   {ShareStatus.HIRED, ShareStatus.REJECTED,
-                                      ShareStatus.WITHDRAWN},
-    ShareStatus.HIRED:               set(),          # terminal
-    ShareStatus.REJECTED:            {ShareStatus.UNDER_REVIEW},
-    # Back with Sparsh. They can re-open the conversation with this client (Under Review),
-    # or close it off as a rejection -- and either way the CV is free to go elsewhere,
-    # because a share with one client never constrained the others.
-    ShareStatus.SENT_BACK:           {ShareStatus.UNDER_REVIEW, ShareStatus.REJECTED,
-                                      ShareStatus.WITHDRAWN},
-    ShareStatus.WITHDRAWN:           set(),          # terminal; re-share to start again
-}
-
-# Which of those the CLIENT may set themselves, and which are Sparsh's. A client says what
-# they think of a CV; only Sparsh records that somebody was actually hired, because that is
-# a commercial fact with a fee attached and it is not theirs to assert.
-SHARE_CLIENT_SETTABLE = {ShareStatus.UNDER_REVIEW, ShareStatus.SHORTLISTED,
-                         ShareStatus.INTERVIEW_SCHEDULED, ShareStatus.SELECTED,
-                         ShareStatus.REJECTED,
-                         # §12: handing a candidate back is a client action by definition.
-                         ShareStatus.SENT_BACK}
-
-
-def share_can_transition(current, target) -> bool:
-    """Whether a share may move from `current` to `target`. Pure, and the ONLY authority on
-    share ordering -- services ask this rather than testing statuses themselves."""
-    try:
-        return ShareStatus(getattr(target, "value", target)) in SHARE_TRANSITIONS[
-            ShareStatus(getattr(current, "value", current))]
-    except (ValueError, KeyError):
-        return False
-
-
 class BackgroundCheckType(str, Enum):
     EMPLOYMENT = "Employment"
     EDUCATION  = "Education"
@@ -4649,15 +5525,6 @@ class BackgroundApprovalStatus(str, Enum):
     REJECTED      = "Rejected"
 
 
-AUDIT_JOB_REQUEST_RAISED    = "client job request raised"
-AUDIT_JOB_REQUEST_REVIEWED  = "client job request reviewed"
-AUDIT_JOB_REQUEST_CONVERTED = "client job request converted to a requisition"
-AUDIT_SHARE_CREATED         = "cv shared with client (share record)"
-AUDIT_SHARE_STATUS          = "client share status changed"
-AUDIT_SHARE_WITHDRAWN       = "cv withdrawn from client"
-# The moment a client actually READS somebody's personal data. Audited as its own
-# action because §8 asks for a trail of client ACCESS, not only of client decisions.
-AUDIT_SHARE_CV_OPENED       = "cv opened by client"
 AUDIT_BACKGROUND_RECORDED   = "background check recorded"
 AUDIT_BACKGROUND_APPROVED   = "background verification approved"
 AUDIT_BACKGROUND_REJECTED   = "background verification rejected"
@@ -4685,17 +5552,6 @@ ENTITY_PROBATION = "probation_review"
 ENTITY_EXCEPTION = "exception"
 
 
-class ClientResponseIn(BaseModel):
-    """Record the hiring client's verdict on a shared CV.
-
-    Recorded BY an HRMS user on the client's behalf -- there is deliberately no public
-    client portal in this phase, and inventing one would be a far larger surface than the
-    review asked for.
-    """
-    uk: str
-    status: ClientShareStatus
-    remarks: Optional[str] = None
-    responded_at: Optional[str] = None        # YYYY-MM-DD; defaults to now
 
 
 # =============================================================
@@ -4996,6 +5852,46 @@ class ProbationOutcome(str, Enum):
     TERMINATED = "Terminated"
 
 
+class ProbationRecommendation(str, Enum):
+    """What the REPORTING MANAGER proposes (§7.5 Stage 12).
+
+    Deliberately distinct from ProbationOutcome. A recommendation is what one person
+    thinks; an outcome is what the company decided. Collapsing the two -- which is what
+    this module did before Stage 12 -- made the manager's opinion indistinguishable from
+    an authorised decision, and left no room for HR to disagree.
+    """
+    CONFIRM  = "Confirm"
+    EXTEND   = "Extend"
+    SEPARATE = "Separate"
+
+
+class HrReviewDecision(str, Enum):
+    ENDORSED = "Endorsed"        # goes forward to the authorised approver
+    RETURNED = "Returned"        # back to the manager, with a reason
+
+
+# The five things a manager assesses before recommending anything (§7.5 Stage 12).
+# Declared as data so the form, the stored record and the letter all read the same list.
+PROBATION_REVIEW_CRITERIA = [
+    ("performance", "Performance against the role"),
+    ("conduct",     "Conduct and professionalism"),
+    ("attendance",  "Attendance and punctuality"),
+    ("competence",  "Competence and skill"),
+    ("suitability", "Overall suitability for the role"),
+]
+
+PROBATION_CRITERIA_KEYS = [k for k, _ in PROBATION_REVIEW_CRITERIA]
+
+# Which manager recommendation each outcome may follow from. HR and the approver can
+# disagree with the manager, but the disagreement has to be deliberate -- the approver
+# signs their own outcome, and the recommendation stays on the record beside it.
+RECOMMENDATION_OUTCOME = {
+    ProbationRecommendation.CONFIRM.value:  ProbationOutcome.CONFIRMED.value,
+    ProbationRecommendation.EXTEND.value:   ProbationOutcome.EXTENDED.value,
+    ProbationRecommendation.SEPARATE.value: ProbationOutcome.TERMINATED.value,
+}
+
+
 # SOP §7: "typically 3-6 months, per employment terms". The default is the top of that range,
 # and every probation record carries its own duration -- so a shorter term is data, not code.
 DEFAULT_PROBATION_MONTHS = 6
@@ -5096,10 +5992,24 @@ class BudgetApprovalIn(BaseModel):
 
 
 class ScorecardCriterionIn(BaseModel):
-    label: str
+    """One row of the Position Scorecard template.
+
+    `Score (1-5)` is deliberately NOT a field here: the template defines the bar, and a
+    score belongs to a CANDIDATE measured against it (see evaluate_candidate, which stores
+    scores per candidate). Putting it on the template would mean one shared score for
+    everyone ever interviewed for the role.
+    """
+    label: str                                  # "Competency / Skill"
     category: ScorecardCategory = ScorecardCategory.SKILL
-    weight: float = 1.0
+    # The bar itself -- "5+ years on a production Django codebase". Distinct from
+    # `evaluation_criteria`, which is HOW it is measured rather than WHAT is expected.
+    expected_level: Optional[str] = None        # "Requirement / Expected Level"
+    # What "good" looks like for this row, e.g. "Demonstrates via live coding exercise" --
+    # free text because a evaluation method varies far more than a category does.
+    evaluation_criteria: Optional[str] = None
+    weight: float = 1.0                         # "Weightage"
     max_score: int = SCORE_MAX
+    remarks: Optional[str] = None                # the scorecard author's own note on this row
 
 
 class ScorecardIn(BaseModel):
@@ -5330,10 +6240,40 @@ class ProbationUpdate(BaseModel):
     notes: Optional[str] = None
 
 
+class ProbationReviewIn(BaseModel):
+    """The reporting manager's review and recommendation (§7.5 Stage 12).
+
+    Scores are 1-5 on the five criteria PROBATION_REVIEW_CRITERIA names. They are required
+    because a recommendation with no assessment behind it is an opinion, and this review
+    can end somebody's employment.
+    """
+    performance: float
+    conduct: float
+    attendance: float
+    competence: float
+    suitability: float
+    recommendation: ProbationRecommendation
+    remarks: Optional[str] = None
+    signature: str
+
+
+class ProbationHrReviewIn(BaseModel):
+    """HR's step between the manager's recommendation and the authorised approval."""
+    decision: HrReviewDecision
+    remarks: Optional[str] = None
+    signature: str
+
+
 class ProbationConfirmIn(BaseModel):
     outcome: ProbationOutcome
     rating: Optional[float] = None
     extended_to: Optional[str] = None           # required when the outcome is Extended
+    # §7.5 Stage 12, Confirm branch: the date the confirmation takes effect. Distinct
+    # from the day it was signed -- a decision taken late still takes effect from the day
+    # probation ended, and pay and benefits run from this date, not the signature date.
+    effective_from: Optional[str] = None
+    # Extend branch: when the next review falls due, so an extension is not open-ended.
+    next_review_on: Optional[str] = None
     remarks: Optional[str] = None
     signature: str
 
@@ -5344,12 +6284,337 @@ class ExceptionIn(BaseModel):
     reason: str
     uk: Optional[str] = None                    # when candidate-specific
     linked_entity: Optional[str] = None         # e.g. the offer_no this would unblock
+    # SOP section 6: an Offer Outside Budget request is a request for A FIGURE. Asking
+    # Finance to approve "more money" and then reading the approval as "any money" is the
+    # hole this closes -- see SALARY_EXCEPTION_NEEDS_AMOUNT.
+    requested_ctc: Optional[float] = None
 
 
 class ExceptionDecisionIn(BaseModel):
     decision: ExceptionStatus
     remarks: Optional[str] = None
     signature: str
+    # Finance may grant LESS than was asked for ("I will go to 13, not 15"). Left empty, an
+    # approval grants exactly what was requested.
+    approved_ctc: Optional[float] = None
+
+
+# Exception types whose whole meaning is a number, so an approval that does not carry one
+# would be an unbounded permission. Declared as a set rather than tested inline, so adding a
+# second money-shaped exception later cannot forget the rule.
+SALARY_EXCEPTION_NEEDS_AMOUNT = {ExceptionType.OFFER_OUTSIDE_BUDGET.value}
+
+
+def salary_exception_ceiling(exception: Optional[dict]) -> Optional[float]:
+    """The highest CTC an approved Offer Outside Budget exception authorises.
+
+    None means "this exception does not bound the figure" -- which is true only of rows
+    written before the amount was recorded. Everything raised since carries one, and
+    `assert_within_band` treats a missing ceiling as the legacy case rather than as
+    permission for anything.
+    """
+    if not exception:
+        return None
+    for field in ("approved_ctc", "requested_ctc"):
+        value = (exception or {}).get(field)
+        if value is not None:
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+class ClientNeedMappingIn(BaseModel):
+    """SOP section 7 step 1 -- the Need Mapping Form, filled by the client.
+
+    Only the fields the SOP names: business context, the role need, urgency, and what the
+    client expects from the engagement. Nothing is inferred and nothing extra is asked for.
+    """
+    business_context: str
+    role_need: str
+    urgency: ClientReqUrgency = ClientReqUrgency.NORMAL
+    engagement_expectations: Optional[str] = None
+
+
+class ClientManpowerRequisitionIn(BaseModel):
+    """SOP section 7 step 2 -- the Manpower Requisition Form, confirmed by the client."""
+    role_title: str
+    department_name: str
+    reporting_line: str
+    salary_range_min: float
+    salary_range_max: float
+    employment_type: EmploymentTypeClient = EmploymentTypeClient.PERMANENT
+    urgency: Optional[ClientReqUrgency] = None
+    vacancies: int = 1
+    role_level: Optional[ClientRoleLevel] = None
+
+
+class ClientRequisitionUpdate(BaseModel):
+    """Amend either form while the requisition is still with the client."""
+    business_context: Optional[str] = None
+    role_need: Optional[str] = None
+    engagement_expectations: Optional[str] = None
+    role_title: Optional[str] = None
+    department_name: Optional[str] = None
+    reporting_line: Optional[str] = None
+    salary_range_min: Optional[float] = None
+    salary_range_max: Optional[float] = None
+    employment_type: Optional[EmploymentTypeClient] = None
+    urgency: Optional[ClientReqUrgency] = None
+    vacancies: Optional[int] = None
+    role_level: Optional[ClientRoleLevel] = None
+
+
+class ClientRequisitionAction(BaseModel):
+    """One move along CLIENT_REQ_TRANSITIONS.
+
+    The three feasibility assessments are REQUIRED on an approval: SOP section 7 step 3
+    names them, and an approval that records no assessment is a click, not a review.
+    """
+    action: str
+    remarks: Optional[str] = None
+    role_clarity: Optional[bool] = None
+    compensation_competitive: Optional[bool] = None
+    timeline_realistic: Optional[bool] = None
+
+
+class ClientJoiningIn(BaseModel):
+    """Open pre-boarding for a candidate whose written acceptance is on record."""
+    ccn_no: str
+    joining_date: Optional[str] = None
+
+
+class ClientTouchpointIn(BaseModel):
+    """SOP section 19 -- one periodic contact during pre-boarding."""
+    contacted_on: Optional[str] = None
+    channel: Optional[str] = None
+    at_risk: bool = False
+    notes: Optional[str] = None
+
+
+class ClientJoiningUpdate(BaseModel):
+    joining_date: Optional[str] = None
+    client_requirements_ready: Optional[bool] = None
+    # Section 20 -- the post-joining results shared with the client.
+    background_check_result: Optional[str] = None
+    culture_score: Optional[float] = None
+    handover_note: Optional[str] = None
+    candidate_file: Optional[bool] = None
+    scorecards: Optional[bool] = None
+    interview_records: Optional[bool] = None
+    verification_status: Optional[bool] = None
+
+
+class ClientJoiningAction(BaseModel):
+    action: str
+    remarks: Optional[str] = None
+    actual_joining_date: Optional[str] = None
+    acknowledged: Optional[bool] = None
+
+
+class ClientReferenceCheckIn(BaseModel):
+    """SOP section 15 -- last employer, conduct, reason for leaving."""
+    ccn_no: str
+    referee_name: str
+    referee_organisation: Optional[str] = None
+    relationship: Optional[str] = None
+    referee_contact: Optional[str] = None
+    outcome: ClientReferenceOutcome = ClientReferenceOutcome.POSITIVE
+    checked_on: Optional[str] = None
+    remarks: Optional[str] = None
+
+
+class ClientOfferIn(BaseModel):
+    """SOP section 16 -- the terms, prepared against the client's approved range."""
+    ccn_no: str
+    offered_ctc: float
+    joining_date: Optional[str] = None
+    designation: Optional[str] = None
+    terms: Optional[str] = None
+
+
+class ClientOfferUpdate(BaseModel):
+    offered_ctc: Optional[float] = None
+    joining_date: Optional[str] = None
+    designation: Optional[str] = None
+    terms: Optional[str] = None
+    negotiation_notes: Optional[str] = None
+
+
+class ClientOfferAction(BaseModel):
+    action: str
+    remarks: Optional[str] = None
+    # Section 17: the recruiter confirms written acceptance AND the joining date.
+    accepted_on: Optional[str] = None
+    joining_date: Optional[str] = None
+
+
+class ClientInterviewIn(BaseModel):
+    """Schedule the recorded panel interview (SOP section 12)."""
+    ccn_no: str
+    scheduled_at: str                              # ISO datetime
+    mode: Optional[str] = "Virtual"
+    meeting_link: Optional[str] = None
+    panel: List[str] = Field(default_factory=list)  # Sparsh's panel, by name
+
+
+class ClientInterviewUpdate(BaseModel):
+    scheduled_at: Optional[str] = None
+    mode: Optional[str] = None
+    meeting_link: Optional[str] = None
+    panel: Optional[List[str]] = None
+    # The recorded-platform link section 14 shares with the client.
+    recording_link: Optional[str] = None
+    role_fit: Optional[float] = None
+    communication: Optional[float] = None
+    technical_depth: Optional[float] = None
+    culture_fit: Optional[float] = None
+    outcome: Optional[str] = None                  # Recommend / Do Not Recommend
+    panel_notes: Optional[str] = None
+
+
+class ClientInterviewAction(BaseModel):
+    action: str
+    remarks: Optional[str] = None
+
+
+class ClientAssessmentIn(BaseModel):
+    """Issue the Talent Fit Assessment to a candidate the client has approved."""
+    ccn_no: str
+    title: str
+    instructions: Optional[str] = None
+    due_on: Optional[str] = None                  # YYYY-MM-DD
+    max_score: float = 5.0
+
+
+class ClientAssessmentUpdate(BaseModel):
+    title: Optional[str] = None
+    instructions: Optional[str] = None
+    due_on: Optional[str] = None
+    submission_reference: Optional[str] = None
+    score: Optional[float] = None
+    result: Optional[str] = None                  # Pass / Fail, the evaluator's call
+    evaluator_notes: Optional[str] = None
+
+
+class ClientAssessmentAction(BaseModel):
+    action: str
+    remarks: Optional[str] = None
+
+
+class ClientCandidateIn(BaseModel):
+    """SOP section 10 -- a candidate sourced against an approved requisition."""
+    cr_no: str
+    candidate_name: str
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    source: Optional[str] = None
+    cv_reference: Optional[str] = None
+    current_employer: Optional[str] = None
+    notice_period: Optional[str] = None
+    current_ctc: Optional[float] = None
+    expected_ctc: Optional[float] = None
+
+
+class ClientCandidateUpdate(BaseModel):
+    candidate_name: Optional[str] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    source: Optional[str] = None
+    cv_reference: Optional[str] = None
+    current_employer: Optional[str] = None
+    notice_period: Optional[str] = None
+    current_ctc: Optional[float] = None
+    expected_ctc: Optional[float] = None
+    # SOP section 13 -- the three scores, recorded as they are established.
+    tfs_score: Optional[float] = None
+    competency_score: Optional[float] = None
+    pi_score: Optional[float] = None
+    screening_notes: Optional[str] = None
+
+
+class ClientCandidateAction(BaseModel):
+    """One move along CLIENT_CANDIDATE_TRANSITIONS."""
+    action: str
+    remarks: Optional[str] = None
+
+
+class ClientPostingIn(BaseModel):
+    """Draft a job posting against a requisition whose scorecard the client approved."""
+    cr_no: str
+    title: Optional[str] = None            # defaults to the requisition's role title
+    summary: Optional[str] = None
+    responsibilities: Optional[str] = None
+    requirements: Optional[str] = None
+    location: Optional[str] = None
+    # The band is the CLIENT's to disclose. Off unless they say otherwise.
+    show_salary: bool = False
+
+
+class ClientPostingUpdate(BaseModel):
+    title: Optional[str] = None
+    summary: Optional[str] = None
+    responsibilities: Optional[str] = None
+    requirements: Optional[str] = None
+    location: Optional[str] = None
+    show_salary: Optional[bool] = None
+
+
+class ClientPostingAction(BaseModel):
+    action: str
+    remarks: Optional[str] = None
+
+
+class ClientApplicationIn(BaseModel):
+    """A public application. Every field is untrusted -- see the posting service."""
+    candidate_name: str
+    email: str
+    phone: str
+    cv_reference: Optional[str] = None
+    current_employer: Optional[str] = None
+    notice_period: Optional[str] = None
+    declaration: bool = False
+
+
+class ClientPoolSourceIn(BaseModel):
+    """Source somebody from the available pool into a different requisition.
+
+    `from_company_id` is not optional: business ids are minted per company, so `ccn_no`
+    alone names a different person in every engagement.
+    """
+    ccn_no: str
+    from_company_id: str
+    cr_no: str
+
+
+class ClientScorecardIn(BaseModel):
+    """SOP section 4 -- the five things a Position Scorecard describes.
+
+    Drafted by the recruiter against an ACTIVATED requisition. Nothing here is optional at
+    approval time; the completeness check runs when it is submitted, so a half-written
+    draft can still be saved and returned to.
+    """
+    cr_no: str
+    responsibilities: Optional[str] = None
+    skills: Optional[str] = None
+    experience: Optional[str] = None
+    cultural_expectations: Optional[str] = None
+    success_indicators: Optional[str] = None
+
+
+class ClientScorecardUpdate(BaseModel):
+    responsibilities: Optional[str] = None
+    skills: Optional[str] = None
+    experience: Optional[str] = None
+    cultural_expectations: Optional[str] = None
+    success_indicators: Optional[str] = None
+
+
+class ClientScorecardAction(BaseModel):
+    """One move along CLIENT_SCORECARD_TRANSITIONS."""
+    action: str
+    remarks: Optional[str] = None
 
 
 class PersonnelFileCloseIn(BaseModel):
@@ -5417,15 +6682,87 @@ FINAL_ROUND_PASSING = {Outcome.PASS.value}
 
 
 class ShortlistOutcome(str, Enum):
-    """What the committee decided about the intake as a whole."""
-    PENDING   = "Pending"        # convened, not yet decided
-    FINALISED = "Finalised"      # the named candidates go to the final interview
-    DEFERRED  = "Deferred"       # more sourcing needed; nobody progresses on this sitting
+    """What the committee decided -- the Final Commit.
+
+    The three live values are NOT a menu somebody picks from. They are derived by
+    `final_commit_outcome` from the members' own verdicts and the seniority of the role, so
+    the record can never say "Selected" about a sitting where the Department Head objected.
+    Offering them as a free choice is what made the old two-value dropdown misleading: it
+    asked for a conclusion instead of the facts the conclusion follows from.
+    """
+    PENDING  = "Pending"          # convened, not yet decided
+    SELECTED = "Selected"         # both approved, and no final round stands in the way
+    REJECTED = "Rejected"         # at least one approver did not agree
+    FINAL_INTERVIEW_REQUIRED = "Final Interview Required"
+
+    # -- Legacy, read-only -------------------------------------------------------------
+    # Sittings decided before Final Commit existed. They are still valid records and must
+    # keep clearing the selection gate (see SHORTLIST_CLEARS_SELECTION); what they may not
+    # do is be chosen for a NEW decision. Rewriting them to the new vocabulary would be
+    # forging minutes -- "Finalised" is what that committee actually resolved.
+    FINALISED = "Finalised"
+    DEFERRED  = "Deferred"
+
+
+# Outcomes that may be recorded by a new sitting. PENDING is the starting state, and the two
+# legacy values are history, so neither belongs in a decision control.
+SHORTLIST_LIVE_OUTCOMES = (
+    ShortlistOutcome.SELECTED,
+    ShortlistOutcome.REJECTED,
+    ShortlistOutcome.FINAL_INTERVIEW_REQUIRED,
+)
+
+# What satisfies the gate on `Selected`.
+#
+# FINAL_INTERVIEW_REQUIRED belongs here, and leaving it out is a trap worth naming. This gate
+# asks ONE question: did HR and the Department Head agree this person goes forward? A commit
+# that routed to the final interview is a YES to exactly that -- what it withheld was the
+# Management round, which `assert_final_round_complete` asks about separately and in its own
+# right. Admitting only SELECTED would strand every managerial candidate the moment they
+# passed the round the commit sent them to: the committee had approved them, and the gate
+# would still say it had not.
+#
+# FINALISED is here because that is what it meant when it was recorded. Dropping it would
+# retrospectively invalidate every sitting held before Final Commit existed.
+SHORTLIST_CLEARS_SELECTION = {
+    ShortlistOutcome.SELECTED.value,
+    ShortlistOutcome.FINAL_INTERVIEW_REQUIRED.value,
+    ShortlistOutcome.FINALISED.value,
+}
+
+# A sitting that ended the candidate's run. Kept as a set so "did the committee turn them
+# down" is one lookup rather than a comparison somebody can get backwards.
+SHORTLIST_REJECTS = {ShortlistOutcome.REJECTED.value}
 
 
 class CommitteeDecision(str, Enum):
     AGREE  = "Agree"
     OBJECT = "Object"
+
+
+def final_commit_outcome(members, *, level=None, final_round_passed: bool = False):
+    """The Final Commit decision, derived. Pure -- no I/O, so the rule is testable alone.
+
+    The SOP's logic, in order:
+
+      1. Every active approver must agree. One objection from either side is a rejection,
+         not a tie to be broken later: the committee is HR AND the Department Head, and a
+         shortlist one of them refused is not a shortlist.
+      2. For a managerial-or-above role, agreement is not selection. SOP section 5 puts a
+         mandatory Management final round in the way, so the commit routes there instead.
+      3. If that round has already been sat and passed, there is nothing left to route to
+         and the commit is a selection.
+
+    A RECUSED member is not an approver. They stood down, so their silence is neither an
+    objection nor an agreement -- the same treatment `committee_state` gives them when it
+    works out whether the committee is quorate at all.
+    """
+    active = [m for m in (members or []) if not (m or {}).get("recused")]
+    if any((m or {}).get("decision") == CommitteeDecision.OBJECT.value for m in active):
+        return ShortlistOutcome.REJECTED
+    if final_round_is_mandatory(level) and not final_round_passed:
+        return ShortlistOutcome.FINAL_INTERVIEW_REQUIRED
+    return ShortlistOutcome.SELECTED
 
 
 # SOP §5 requires HR AND the Department Head to finalise candidates. Two ROLES, and -- the
@@ -5614,6 +6951,22 @@ DEFAULT_COMM_TEMPLATES = [
      "Regards,\n{company}",
      ["candidate_name", "designation", "ctc", "joining_date", "location", "company"]),
 
+    # ── BA Functional Design §7.5 ── "Send Secure Onboarding Portal / Task List", the step
+    # that follows "Create Pre-Joiner Case". The link is single-purpose and tied to the
+    # onboarding record, which is why it is sent rather than a login being issued.
+    ("onboarding_portal", CommChannel.EMAIL,
+     "Your joining formalities for {designation}",
+     "Dear {candidate_name},\n\n"
+     "Welcome aboard. Now that you have accepted our offer, the next step is to complete "
+     "your joining formalities.\n\n"
+     "Use this secure link to upload your documents and confirm your details:\n"
+     "{portal_link}\n\n"
+     "What we need from you:\n{task_list}\n\n"
+     "The link is personal to you -- please do not forward it. If anything is unclear, "
+     "reply to this message.\n\n"
+     "Regards,\n{company}",
+     ["candidate_name", "designation", "portal_link", "task_list", "company"]),
+
     ("preboarding_checkin", CommChannel.EMAIL,
      "Looking forward to {joining_date}",
      "Dear {candidate_name},\n\n"
@@ -5652,6 +7005,10 @@ AUTO_COMM_EVENTS = {
     # least 24 hours in advance." Fired on every schedule AND reschedule, because a moved
     # interview is a new set of logistics the candidate has not been told.
     "interview_scheduled":  "interview_scheduled",
+    # ── BA Functional Design §7.5 ── fired when the pre-joiner case opens, which is itself
+    # fired by the offer being accepted. Automatic because the candidate cannot start their
+    # joining formalities until they have the link.
+    "onboarding_started":   "onboarding_portal",
 }
 
 # Templates that are only ever sent by hand. `offer_summary` is here deliberately: writing to
@@ -5802,6 +7159,7 @@ PURGE_TARGETS = [
     (COLL_CANDIDATES, "uk", "retention_until", PURGE_REDACT,
      ["candidate_name", "can_email", "can_contact", "current_location", "linkedin",
       "portfolio", "cover_note", "resume", "photo", "certificates", "current_company",
+      "current_designation",
       "current_ctc", "expected_ctc", "referred_by", "referrer_employee_code",
       "talent_pool_tags"]),
     (COLL_REFERENCE_CHECKS, "ref_no", "retention_until", PURGE_REDACT,
@@ -5864,6 +7222,9 @@ JOB_PULSE_SURVEY  = "pulse_survey_issue"
 # for the same reason: an unacknowledged policy stays unacknowledged, so a daily nudge would
 # be noise, not a governance signal.
 JOB_POLICY_ACK    = "policy_acknowledgement_reminders"
+# The Last Working Day sweep: revokes access and opens the F&F on the day somebody
+# actually leaves, rather than leaving both to whenever a human next opens the case.
+JOB_LWD           = "last_working_day"
 
 # (key, label, cadence, utc_hour)
 SCHEDULED_JOBS = [
@@ -5875,6 +7236,9 @@ SCHEDULED_JOBS = [
     (JOB_ORIENTATION,   "orientation escalation sweep",    JOB_CADENCE_DAILY,  7),
     (JOB_PULSE_SURVEY,  "30/90-day pulse survey issuance", JOB_CADENCE_DAILY,  7),
     (JOB_POLICY_ACK,    "policy acknowledgement reminders", JOB_CADENCE_WEEKLY, 8),
+    # Runs early: everything else on somebody's last day (final attendance, payroll cut-off)
+    # reads better once the access revocation and the F&F have been opened.
+    (JOB_LWD,           "last working day sweep",          JOB_CADENCE_DAILY,  6),
 ]
 
 
@@ -6110,69 +7474,6 @@ class PurgeApproveIn(BaseModel):
     remarks: Optional[str] = None
 
 
-# =============================================================
-# Client engagements — the tenant/client relationship
-# =============================================================
-# "Sparsh Magic provides recruitment services to this company, and these of our users work
-# on it." That fact exists nowhere in the ERP: a `companies` row says an organisation
-# exists, not that it is OUR client. Without it, `client_id` is an unverifiable label, and
-# "is this company a client of ours" -- the question every client-scope check rests on --
-# has no answer.
-#
-# The engagement is NOT a second company record. `client_id` remains a `companies._id`;
-# nothing here duplicates a name, an address or a contact.
-#
-# -- Membership lives HERE, not on the user ------------------------------------------------
-# `learners` and `staff` are shared ERP collections owned by routes/user.py. HRMS writing
-# its own array into them would widen another module's schema and put a field the frontend
-# reads behind UserResponse's declaration guard. Holding the member list on the engagement
-# keeps the whole relationship inside HRMS, makes "manage this client's users" a single
-# document, and makes revocation atomic: closing an engagement removes its access.
-#
-# A user in two engagements has two clients. Multi-client is the natural shape, not a
-# special case.
-
-class EngagementStatus(str, Enum):
-    ACTIVE    = "active"
-    # Suspended rather than deleted: an engagement that ends still has to explain the
-    # requisitions raised under it. Only ACTIVE grants scope.
-    SUSPENDED = "suspended"
-    ENDED     = "ended"
-
-
-# The only status that resolves client scope. Declared as a set so the rule is read from
-# one place rather than re-tested as `== "active"` in each caller.
-ENGAGEMENT_GRANTS_SCOPE = {EngagementStatus.ACTIVE.value}
-
-AUDIT_ENGAGEMENT_CREATED = "client engagement opened"
-AUDIT_ENGAGEMENT_UPDATED = "client engagement updated"
-AUDIT_ENGAGEMENT_MEMBER_ADDED   = "client engagement member added"
-AUDIT_ENGAGEMENT_MEMBER_REMOVED = "client engagement member removed"
-
-ENTITY_ENGAGEMENT = "client_engagement"
-
-
-class ClientEngagementIn(BaseModel):
-    """Open an engagement with an existing ERP company."""
-    client_id: str                       # a companies._id
-    notes: Optional[str] = None
-
-
-class ClientEngagementUpdate(BaseModel):
-    status: Optional[EngagementStatus] = None
-    notes: Optional[str] = None
-
-
-class EngagementMemberIn(BaseModel):
-    """Give one user access to one client's recruitment.
-
-    `user_id` must be a user of the SAME company as the engagement. A user from another
-    tenant is refused -- company_id remains the security boundary, and client scope narrows
-    inside it rather than reaching across it.
-    """
-    user_id: str
-
-
 # =============================================================================
 # Phase INT-5 — per-company configuration (spec §42, "configuration over hard-coding")
 # =============================================================================
@@ -6213,12 +7514,19 @@ CONFIG_PROBATION_MONTHS    = "probation_months"
 CONFIG_PROBATION_REMINDERS = "probation_reminder_days"
 CONFIG_SCORE_BANDS         = "score_bands"
 CONFIG_HONOUR_HOLIDAYS     = "honour_holidays"
+CONFIG_ONBOARD_DOC_TYPES   = "onboarding_document_types"
+CONFIG_EMPLOYMENT_DOCS     = "employment_documents"
 
 # How a value is shaped, which decides how it is validated and merged.
 CONFIG_KIND_INT_MAP   = "int_map"      # {name: whole number}
 CONFIG_KIND_INT_LIST  = "int_list"     # [whole numbers], strictly descending
 CONFIG_KIND_FLOAT_MAP = "float_map"    # {name: number}, strictly descending by value
 CONFIG_KIND_FLAG      = "flag"         # a plain on/off
+# {label: required?} with OPEN names -- unlike the maps above, a company may add names of
+# its own. That is the whole point of the setting: §7.5 calls for the six documents below
+# plus "other configurable document types", so the catalogue has to be extensible, not
+# merely toggleable.
+CONFIG_KIND_FLAG_MAP  = "flag_map"
 
 # Probation duration is one setting with three parts rather than three settings: they
 # constrain each other (min <= default <= max), and a company that could save one without
@@ -6287,6 +7595,24 @@ CONFIG_SPEC = [
      "note": "Calendar days, strictly descending. Each tier fires once per review, at that "
              "distance OR CLOSER -- see hrms_scheduler_service."},
 
+    {"key": CONFIG_ONBOARD_DOC_TYPES,
+     "label": "Joining documents a new hire must upload",
+     "kind": CONFIG_KIND_FLAG_MAP,
+     "default": lambda: dict(ONBOARD_DOC_TYPES),
+     # No `names`: this catalogue is open. A company adds a document its own statutory or
+     # client obligations need, and marks each one required or optional.
+     "note": "Each entry is one upload task on the new hire's portal. Ticked means they "
+             "cannot submit the form without it, so mark a document optional rather than "
+             "removing it when it only applies to some joiners."},
+
+    {"key": CONFIG_EMPLOYMENT_DOCS,
+     "label": "Employment documents a new joiner signs",
+     "kind": CONFIG_KIND_FLAG_MAP,
+     "default": lambda: dict(EMPLOYMENT_DOCUMENTS),
+     "note": "Signed alongside the appointment letter (§7.5 Stage 7). Ticked means the "
+             "joiner cannot complete their acknowledgement without it. The appointment "
+             "letter itself is not listed here — it carries its own signature."},
+
     {"key": CONFIG_HONOUR_HOLIDAYS,
      "label": "Skip this company's holidays in SLA maths",
      "kind": CONFIG_KIND_FLAG,
@@ -6347,84 +7673,8 @@ ENTITY_CONFIG = "configuration"
 
 
 # =============================================================
-# Phase 12 — API models for the client hiring track
+# Phase 12 — API models for background verification
 # =============================================================
-class JobRequestIn(BaseModel):
-    """What a client asks Sparsh to hire for.
-
-    Free text where the client's vocabulary is theirs (skills, location) and structured
-    where Sparsh has to act on it (positions, budget). Deliberately NOT a requisition: it
-    carries no department, no designation id and no approval fields, because those are
-    Sparsh's masters and Sparsh's governance, filled in at conversion.
-    """
-    job_title: str
-    positions: int = 1
-    required_skills: str
-    experience: Optional[str] = None
-    location: Optional[str] = None
-    budget_min: Optional[float] = None
-    budget_max: Optional[float] = None
-    job_description: Optional[str] = None
-    other_requirements: Optional[str] = None
-    target_date: Optional[str] = None            # YYYY-MM-DD
-    # Sparsh staff raising one ON BEHALF of a client name them here. A CLIENT user's own
-    # request ignores this and takes the client from their engagement -- a client cannot
-    # raise a request against somebody else's account.
-    client_id: Optional[str] = None
-
-
-class JobRequestUpdate(BaseModel):
-    job_title: Optional[str] = None
-    positions: Optional[int] = None
-    required_skills: Optional[str] = None
-    experience: Optional[str] = None
-    location: Optional[str] = None
-    budget_min: Optional[float] = None
-    budget_max: Optional[float] = None
-    job_description: Optional[str] = None
-    other_requirements: Optional[str] = None
-    target_date: Optional[str] = None
-
-
-class JobRequestAction(BaseModel):
-    action: str                                   # review | accept | decline
-    remarks: Optional[str] = None
-
-
-class JobRequestConvertIn(BaseModel):
-    """Turn an accepted request into a requisition. The masters Sparsh must supply are
-    exactly the ones a client cannot know: which department and designation this maps to
-    in OUR structure, and who will run it."""
-    department_id: str
-    designation_id: str
-    assignee_id: str
-    required_date: str
-    vacancy: Optional[int] = None                 # defaults to the request's positions
-    offering_ctc: Optional[float] = None
-
-
-class ShareIn(BaseModel):
-    """Share one candidate with one or more clients, in a single act.
-
-    `client_ids` is a list because the requirement is explicitly plural -- one CV, several
-    clients -- and doing it in one call is what makes the audit read as one decision
-    rather than five coincidences.
-    """
-    uk: str
-    client_ids: List[str] = Field(default_factory=list)
-    request_no: Optional[str] = None
-    note: Optional[str] = None                    # covering note shown to every client
-    # What the client is allowed to see. Contact details are withheld by default: a client
-    # who can email the candidate directly can hire them around us, and that is a
-    # commercial decision rather than a default.
-    include_contact: bool = False
-
-
-class ShareStatusIn(BaseModel):
-    status: str
-    remarks: Optional[str] = None
-
-
 class BackgroundCheckIn(BaseModel):
     uk: str
     check_type: BackgroundCheckType
@@ -7725,9 +8975,8 @@ ENTITY_ACCESS = "user_access"
 
 AUDIT_GOVERNANCE_ROLE_CHANGED = "Governance role changed"
 
-# Assignable via this screen. "CLIENT" is deliberately excluded — it is the stamp a
-# CLIENT-COMPANY participant gets (see hrms_access.CLIENT_TENANT_FIELD), never a role a
-# tenant assigns to its own people.
+# Assignable via this screen. Every governance rung of the in-house tenant, and nothing
+# else: HRMS has no client-company participants.
 ASSIGNABLE_GOVERNANCE_ROLES = {"MD", "HR", "FINANCE", "HOD", "IMPLEMENTOR"}
 
 
@@ -7967,3 +9216,11 @@ class PulseSubmitIn(BaseModel):
     survives a question-list edit between issuance and submission without index drift)."""
     scores: dict[str, float]
     comment: Optional[str] = None
+
+
+# Populate the Client Hiring ceiling now that every Cap member exists. Kept at the very
+# bottom so the set is complete before anything imports it, and so adding a capability to
+# the client track is a one-line edit in `_seed_client_track_caps` above.
+_seed_client_track_caps()
+_seed_client_decision_caps()
+_seed_client_owned_caps()

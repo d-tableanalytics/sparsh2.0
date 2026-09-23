@@ -90,14 +90,11 @@ export const createRequisition = (payload, params) =>
   api.post('/hrms/requisitions', payload, { params });
 export const updateRequisition = (requestNo, payload, params) =>
   api.patch(`/hrms/requisitions/${requestNo}`, payload, { params });
-export const deleteRequisition = (requestNo, params) =>
-  api.delete(`/hrms/requisitions/${requestNo}`, { params });
 /** One transition of the approval chain.
- *  action = 'hr-approve' | 'hr-reject' | 'md-approve' | 'md-reject' */
+ *  action = 'hr-verify' | 'hr-reject' | 'budget-approve' | 'budget-reject'
+ *         | 'scorecard-approve' | 'scorecard-reject' | 'escalate-approve' | 'escalate-reject' */
 export const actOnRequisition = (requestNo, payload, params) =>
   api.post(`/hrms/requisitions/${requestNo}/approve`, payload, { params });
-export const closeRequisition = (requestNo, status, params) =>
-  api.post(`/hrms/requisitions/${requestNo}/close`, { status }, { params });
 
 // ── Job descriptions ──
 // JDs are authored with their requisition and approved together, so there is deliberately
@@ -109,8 +106,16 @@ export const updateJd = (jdNo, payload, params) =>
 
 // ── Job postings (authenticated) ──
 export const getPostings = (params) => api.get('/hrms/postings', { params });
+export const getPosting = (code, params) =>
+  api.get(`/hrms/postings/${code}`, { params });
+export const getPostingHistory = (code, params) =>
+  api.get(`/hrms/postings/${code}/history`, { params });
 export const createPosting = (payload, params) =>
   api.post('/hrms/postings', payload, { params });
+export const publishPosting = (code, params) =>
+  api.post(`/hrms/postings/${code}/publish`, {}, { params });
+export const approvePostingExecSearch = (code, payload, params) =>
+  api.post(`/hrms/postings/${code}/approve-exec-search`, payload || {}, { params });
 export const updatePosting = (code, payload, params) =>
   api.patch(`/hrms/postings/${code}`, payload, { params });
 export const deletePosting = (code, params) =>
@@ -135,6 +140,12 @@ export const screenCandidates = (payload, params) =>
 /** Full history, reconstructed server-side from the audit trail. */
 export const getCandidateJourney = (uk, params) =>
   api.get(`/hrms/candidates/${uk}/journey`, { params });
+
+/** The HR Screening page's four blocks in one call (SOP §1-§3). */
+export const getCandidateScreening = (uk, params) =>
+  api.get(`/hrms/candidates/${uk}/screening`, { params });
+export const recordCvScreening = (uk, payload, params) =>
+  api.post(`/hrms/candidates/${uk}/cv-screening`, payload, { params });
 
 // ── Assessments (dual review) ──
 export const getAssessments = (params) => api.get('/hrms/assessments', { params });
@@ -197,8 +208,16 @@ export const verifyOnboardingDocuments = (no, params) =>
   api.post(`/hrms/onboarding/${no}/verify`, {}, { params });
 export const addOnboardingDocuments = (no, payload, params) =>
   api.post(`/hrms/onboarding/${no}/documents`, payload, { params });
+/** HR's verdict on ONE joining document: Verified, Rejected or Exception (§7.5 Stage 3). */
+export const reviewOnboardingDocument = (no, payload, params) =>
+  api.post(`/hrms/onboarding/${no}/documents/review`, payload, { params });
 export const setOnboardingChecklist = (no, payload, params) =>
   api.post(`/hrms/onboarding/${no}/checklist`, payload, { params });
+/** HR confirming the joiner actually reported, on what date, and the assignment made
+ *  (§7.5 Stage 6): unit, department, designation, grade, location, reporting manager,
+ *  employment category, employment status, payroll group. */
+export const confirmOnboardingJoining = (no, payload, params) =>
+  api.post(`/hrms/onboarding/${no}/joining`, payload, { params });
 /** The irreversible step: mints the Employee ID and creates the employee record. */
 export const generateEmployeeId = (no, params) =>
   api.post(`/hrms/onboarding/${no}/generate-id`, {}, { params });
@@ -275,19 +294,6 @@ export const cancelAppointment = (no, payload, params) =>
 
 /** The candidate-facing appointment link. 128-bit access code, case-sensitive. */
 export const appointmentUrlFor = (code) => `${window.location.origin}/appointment/${code}`;
-
-// ── Item 4: the client dimension + client sharing ──
-/** The companies that may be named as the client of a requisition.
- *
- *  READ ONLY, and that is the point: these rows are the ERP's own Companies, projected into
- *  the `{ client_id, name }` shape HRMS reports on. There is no create/update/delete because
- *  a client is a company — it is created and edited in the Companies section, once. */
-export const getClients = (params) => api.get('/hrms/clients', { params });
-export const getClient = (clientId, params) =>
-  api.get(`/hrms/clients/${clientId}`, { params });
-/** Record the hiring client's verdict on a shared CV. Rejecting REQUIRES remarks. */
-export const recordClientResponse = (payload, params) =>
-  api.post('/hrms/candidates/client-response', payload, { params });
 
 // ── Item 7: sanctioned strength ──
 export const getSanctionedStrength = (params) =>
@@ -431,6 +437,14 @@ export const openProbation = (payload, params) =>
   api.post('/hrms/probation', payload, { params });
 export const updateProbation = (prbNo, payload, params) =>
   api.patch(`/hrms/probation/${prbNo}`, payload, { params });
+/** The reporting manager's scored recommendation (§7.5 Stage 12) — the step BEFORE HR
+ *  endorsement and the authorised confirm/extend/separate decision below. */
+export const reviewProbation = (prbNo, payload, params) =>
+  api.post(`/hrms/probation/${prbNo}/review`, payload, { params });
+/** HR endorses the manager's recommendation, or returns it with a reason. Only an
+ *  endorsed recommendation can be confirmed. */
+export const hrReviewProbation = (prbNo, payload, params) =>
+  api.post(`/hrms/probation/${prbNo}/hr-review`, payload, { params });
 export const confirmProbation = (prbNo, payload, params) =>
   api.post(`/hrms/probation/${prbNo}/confirm`, payload, { params });
 export const closePersonnelFile = (payload, params) =>
@@ -585,52 +599,12 @@ export const getRecordDocument = (entity, businessNo, params) =>
   api.get(`/hrms/records/${entity}/${businessNo}/document`, { params });
 
 /* ═══════════════════════════════════════════════════════════════
- * Phase 12 — the client hiring track
- *
- * Client → Job Request → Sparsh → CV Sharing → Client Review → Interview
- * → Selection → Background Verification → HR Approval → Offer → Onboarding
- *
- * One set of endpoints serves both Sparsh and the client: the SERVER narrows what a
- * client-scoped user sees, from their engagements. The browser never sends a client id to
- * choose its own scope — it could not be trusted to, and the list endpoints ignore one
- * from a client user.
+ * Background verification — a mandatory gate on offers for both hiring tracks (Phase 12),
+ * not a client-only stage. The rest of Phase 12's client hiring track (job requests, CV
+ * sharing, the client's own candidate hub) was removed with client-track hiring itself —
+ * see `_client_hiring_disabled` in backend/app/routes/hrms.py — and its bindings here went
+ * with it.
  * ═══════════════════════════════════════════════════════════════ */
-
-/** Client job requests. Sparsh sees every client's; a client sees only their own. */
-export const getJobRequests = (params) => api.get('/hrms/job-requests', { params });
-export const getJobRequest = (jbrNo, params) =>
-  api.get(`/hrms/job-requests/${jbrNo}`, { params });
-export const createJobRequest = (payload, params) =>
-  api.post('/hrms/job-requests', payload, { params });
-export const updateJobRequest = (jbrNo, payload, params) =>
-  api.patch(`/hrms/job-requests/${jbrNo}`, payload, { params });
-/** Sparsh's review: review | accept | decline. Declining requires a reason. */
-export const actOnJobRequest = (jbrNo, payload, params) =>
-  api.post(`/hrms/job-requests/${jbrNo}/act`, payload, { params });
-export const withdrawJobRequest = (jbrNo, payload, params) =>
-  api.post(`/hrms/job-requests/${jbrNo}/withdraw`, payload, { params });
-/** Accepted request → client-track requisition. The masters a client cannot know
- *  (department, designation, owner) are supplied here. */
-export const convertJobRequest = (jbrNo, payload, params) =>
-  api.post(`/hrms/job-requests/${jbrNo}/convert`, payload, { params });
-
-/** CV sharing. One candidate, many clients, one status each. */
-export const getShares = (params) => api.get('/hrms/shares', { params });
-export const getShare = (shareNo, params) => api.get(`/hrms/shares/${shareNo}`, { params });
-/** Share one CV with one or more clients in a single act. Sparsh only. Partial success:
- *  the response reports what was shared and what was skipped, per client. */
-export const shareCandidate = (payload, params) =>
-  api.post('/hrms/shares', payload, { params });
-export const setShareStatus = (shareNo, payload, params) =>
-  api.post(`/hrms/shares/${shareNo}/status`, payload, { params });
-export const withdrawShare = (shareNo, payload, params) =>
-  api.post(`/hrms/shares/${shareNo}/withdraw`, payload, { params });
-/** A short-lived link to the CV on one share. Audited server-side on every open. */
-export const getShareCv = (shareNo, params) =>
-  api.get(`/hrms/shares/${shareNo}/cv`, { params });
-/** Every client one candidate went to. Sparsh only — the answer names other clients. */
-export const getCandidateShares = (uk, params) =>
-  api.get(`/hrms/candidates/${uk}/shares`, { params });
 
 /** Background verification, and the approval that unlocks an offer. */
 export const getBackgroundChecks = (params) =>
@@ -653,30 +627,14 @@ export const uploadCandidateCv = (uk, payload, params) =>
 export const getCandidateCv = (uk, params) =>
   api.get(`/hrms/candidates/${uk}/cv`, { params });
 
-/* ── Interview evidence (spec §10) and the client candidate hub (§11) ──
- *
- * The access rule differs per artefact and is enforced by which endpoint exists:
- *   CV                  view + download  (getShareCv — served as an attachment)
- *   Interview report    view             (inline)
- *   Interview recording watch only       (inline; no download control anywhere)
- */
-export const getInterviewMedia = (interviewNo, params) =>
-  api.get(`/hrms/interviews/${interviewNo}/media`, { params });
-/** `kind` is 'report' or 'recording'. Body: {name, mime_type, data} or {external_url}. */
-export const attachInterviewMedia = (interviewNo, kind, payload, params) =>
-  api.post(`/hrms/interviews/${interviewNo}/media/${kind}`, payload, { params });
-export const removeInterviewMedia = (interviewNo, kind, params) =>
-  api.delete(`/hrms/interviews/${interviewNo}/media/${kind}`, { params });
+/* The photo and certificates the applicant attached to the form. Same access rule and
+ * same audit trail as the CV — they are personal data in exactly the same way. */
+export const getCandidateAttachment = (uk, slot, index, params) =>
+  api.get(`/hrms/candidates/${uk}/attachment`, { params: { ...params, slot, index } });
+
 /** Sparsh-side: every interview for a candidate, with scores and panel. */
 export const getCandidateInterviews = (uk, params) =>
   api.get(`/hrms/candidates/${uk}/interviews`, { params });
-
-/** The client's single-call candidate hub: profile, interviews, evidence, timeline. */
-export const getSharedCandidateHub = (shareNo, params) =>
-  api.get(`/hrms/shares/${shareNo}/candidate`, { params });
-/** A link to one interview's report or recording, authorised by the share. */
-export const getShareInterviewMedia = (shareNo, interviewNo, kind, params) =>
-  api.get(`/hrms/shares/${shareNo}/interviews/${interviewNo}/${kind}`, { params });
 
 // ── Phase EXIT-1 — Exit Management (§7.18, §22.2, §7.21) ──
 // Resignation submitted -> notice calculated -> HR/manager records acceptance (an approval
@@ -1012,3 +970,107 @@ export const getLetter = (letterNo, params) => api.get(`/hrms/letters/${letterNo
 export const issueLetter = (letterNo, params) => api.post(`/hrms/letters/${letterNo}/issue`, null, { params });
 export const reissueLetter = (letterNo, payload, params) =>
   api.post(`/hrms/letters/${letterNo}/reissue`, payload, { params });
+
+// ── Client Hiring (PRO-fit track) ──────────────────────────────────────────
+// A separate track from Internal Hiring: its own endpoints, its own capabilities, and a
+// client company's user reaches these and nothing else in HRMS.
+export const getClientRequisitions = (params) =>
+  api.get('/hrms/client-requisitions', { params });
+export const getClientRequisition = (crNo, params) =>
+  api.get(`/hrms/client-requisitions/${crNo}`, { params });
+export const createClientRequisition = (payload, params) =>
+  api.post('/hrms/client-requisitions', payload, { params });
+export const updateClientRequisition = (crNo, payload, params) =>
+  api.patch(`/hrms/client-requisitions/${crNo}`, payload, { params });
+export const actOnClientRequisition = (crNo, payload, params) =>
+  api.post(`/hrms/client-requisitions/${crNo}/action`, payload, { params });
+
+export const getClientScorecards = (params) => api.get('/hrms/client-scorecards', { params });
+export const getClientScorecard = (pscNo, params) =>
+  api.get(`/hrms/client-scorecards/${pscNo}`, { params });
+export const createClientScorecard = (payload, params) =>
+  api.post('/hrms/client-scorecards', payload, { params });
+export const updateClientScorecard = (pscNo, payload, params) =>
+  api.patch(`/hrms/client-scorecards/${pscNo}`, payload, { params });
+export const actOnClientScorecard = (pscNo, payload, params) =>
+  api.post(`/hrms/client-scorecards/${pscNo}/action`, payload, { params });
+
+export const getClientCandidates = (params) => api.get('/hrms/client-candidates', { params });
+export const getClientCandidate = (ccnNo, params) =>
+  api.get(`/hrms/client-candidates/${ccnNo}`, { params });
+export const createClientCandidate = (payload, params) =>
+  api.post('/hrms/client-candidates', payload, { params });
+export const updateClientCandidate = (ccnNo, payload, params) =>
+  api.patch(`/hrms/client-candidates/${ccnNo}`, payload, { params });
+export const actOnClientCandidate = (ccnNo, payload, params) =>
+  api.post(`/hrms/client-candidates/${ccnNo}/action`, payload, { params });
+
+export const getClientAssessments = (params) => api.get('/hrms/client-assessments', { params });
+export const createClientAssessment = (payload, params) =>
+  api.post('/hrms/client-assessments', payload, { params });
+export const updateClientAssessment = (casNo, payload, params) =>
+  api.patch(`/hrms/client-assessments/${casNo}`, payload, { params });
+export const actOnClientAssessment = (casNo, payload, params) =>
+  api.post(`/hrms/client-assessments/${casNo}/action`, payload, { params });
+
+export const getClientInterviews = (params) => api.get('/hrms/client-interviews', { params });
+export const createClientInterview = (payload, params) =>
+  api.post('/hrms/client-interviews', payload, { params });
+export const updateClientInterview = (cinNo, payload, params) =>
+  api.patch(`/hrms/client-interviews/${cinNo}`, payload, { params });
+export const actOnClientInterview = (cinNo, payload, params) =>
+  api.post(`/hrms/client-interviews/${cinNo}/action`, payload, { params });
+
+export const getClientOffers = (params) => api.get('/hrms/client-offers', { params });
+export const getClientOfferCheckpoint = (cofNo, params) =>
+  api.get(`/hrms/client-offers/${cofNo}/checkpoint`, { params });
+export const createClientOffer = (payload, params) =>
+  api.post('/hrms/client-offers', payload, { params });
+export const updateClientOffer = (cofNo, payload, params) =>
+  api.patch(`/hrms/client-offers/${cofNo}`, payload, { params });
+export const actOnClientOffer = (cofNo, payload, params) =>
+  api.post(`/hrms/client-offers/${cofNo}/action`, payload, { params });
+export const getClientReferenceChecks = (params) =>
+  api.get('/hrms/client-reference-checks', { params });
+export const recordClientReferenceCheck = (payload, params) =>
+  api.post('/hrms/client-reference-checks', payload, { params });
+
+export const getClientJoinings = (params) => api.get('/hrms/client-joinings', { params });
+export const openClientJoining = (payload, params) =>
+  api.post('/hrms/client-joinings', payload, { params });
+export const recordClientTouchpoint = (cjnNo, payload, params) =>
+  api.post(`/hrms/client-joinings/${cjnNo}/touchpoints`, payload, { params });
+export const updateClientJoining = (cjnNo, payload, params) =>
+  api.patch(`/hrms/client-joinings/${cjnNo}`, payload, { params });
+export const actOnClientJoining = (cjnNo, payload, params) =>
+  api.post(`/hrms/client-joinings/${cjnNo}/action`, payload, { params });
+export const getClientAnalytics = (params) =>
+  api.get('/hrms/client-analytics', { params });
+export const getClientCompanies = (params) =>
+  api.get('/hrms/client-companies', { params });
+
+// ── Client Hiring, step 2b — the job posting and its applications ──
+export const getClientPostings = (params) =>
+  api.get('/hrms/client-postings', { params });
+export const getClientPosting = (postingNo, params) =>
+  api.get(`/hrms/client-postings/${postingNo}`, { params });
+export const createClientPosting = (payload, params) =>
+  api.post('/hrms/client-postings', payload, { params });
+export const updateClientPosting = (postingNo, payload, params) =>
+  api.patch(`/hrms/client-postings/${postingNo}`, payload, { params });
+export const actOnClientPosting = (postingNo, payload, params) =>
+  api.post(`/hrms/client-postings/${postingNo}/action`, payload, { params });
+export const getClientApplications = (params) =>
+  api.get('/hrms/client-applications', { params });
+
+// ── The available candidate pool ──
+// Sparsh-only and deliberately unscoped: it spans every engagement, which is why the
+// server refuses a client-side caller outright rather than filtering them down.
+export const getClientCandidatePool = (params) =>
+  api.get('/hrms/client-candidate-pool', { params });
+export const sourceFromClientPool = (payload, params) =>
+  api.post('/hrms/client-candidate-pool/source', payload, { params });
+
+// ── Status history, read from the audit trail ──
+export const getClientHistory = (entity, recordNo, params) =>
+  api.get(`/hrms/client-history/${entity}/${recordNo}`, { params });

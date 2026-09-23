@@ -43,6 +43,8 @@ const AppointmentPage = () => {
   const [loadError, setLoadError] = useState(null);
   const [signature, setSignature] = useState('');
   const [note, setNote] = useState('');
+  // §7.5 Stage 7 — the NDA, Code of Conduct and policies, each accepted in its own right.
+  const [agreed, setAgreed] = useState(() => new Set());
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [done, setDone] = useState(null);
@@ -59,15 +61,30 @@ const AppointmentPage = () => {
       .finally(() => setLoading(false));
   }, [code]);
 
+  const documents = appointment?.documents || [];
+  const outstanding = documents.filter(
+    (d) => d.required && !d.acknowledged_at && !agreed.has(d.doc));
+
+  const toggleDoc = (name) => setAgreed((prev) => {
+    const next = new Set(prev);
+    if (next.has(name)) next.delete(name); else next.add(name);
+    return next;
+  });
+
   const acknowledge = async () => {
     setError('');
+    if (outstanding.length) {
+      setError(`Please read and accept each document first: ${outstanding.map((d) => d.doc).join(', ')}.`);
+      return;
+    }
     if (!signature.trim()) {
       setError('Please type your full name to acknowledge this letter.');
       return;
     }
     setBusy(true);
     try {
-      const { data } = await acknowledgeAppointment(code, { signature, note });
+      const { data } = await acknowledgeAppointment(code, {
+        signature, note, documents: [...agreed] });
       setDone(data);
     } catch (err) {
       setError(err?.response?.data?.detail || 'Your acknowledgement could not be recorded.');
@@ -141,8 +158,46 @@ const AppointmentPage = () => {
           </h2>
           <p className="text-[13px] text-slate-500 mt-1">
             Typing your name below confirms that you have read and accepted the terms of
-            this appointment letter.
+            this appointment letter
+            {documents.length > 0 ? ', and each of the documents ticked below.' : '.'}
           </p>
+
+          {/* §7.5 Stage 7 — NDA, Code of Conduct and the required policies. Each is
+              ticked separately so the record says which documents the signature below
+              actually covers, rather than one tick standing for all of them. */}
+          {documents.length > 0 && (
+            <div className="mt-5 space-y-2">
+              <p className="text-[11px] font-bold uppercase tracking-widest text-slate-500">
+                Employment documents
+              </p>
+              {documents.map((d) => {
+                const already = !!d.acknowledged_at;
+                return (
+                  <label key={d.doc}
+                    className={`flex items-start gap-2.5 p-3 rounded-lg border cursor-pointer ${
+                      already || agreed.has(d.doc)
+                        ? 'border-emerald-200 bg-emerald-50/60'
+                        : 'border-slate-200 hover:border-slate-300'}`}>
+                    <input type="checkbox" className="mt-0.5"
+                      checked={already || agreed.has(d.doc)}
+                      disabled={already}
+                      onChange={() => toggleDoc(d.doc)} />
+                    <span className="text-[13px] text-slate-800">
+                      I have read and accept the <strong>{d.doc}</strong>
+                      {d.required
+                        ? <span className="ml-1.5 text-[10.5px] font-bold text-rose-600">REQUIRED</span>
+                        : <span className="ml-1.5 text-[10.5px] font-semibold text-slate-400">OPTIONAL</span>}
+                      {already && (
+                        <span className="block text-[11.5px] text-emerald-700">
+                          Already accepted
+                        </span>
+                      )}
+                    </span>
+                  </label>
+                );
+              })}
+            </div>
+          )}
 
           <label className="block text-[11px] font-bold uppercase tracking-widest text-slate-500 mt-5 mb-1.5">
             Your full name
@@ -170,7 +225,7 @@ const AppointmentPage = () => {
           <button
             type="button"
             onClick={acknowledge}
-            disabled={busy}
+            disabled={busy || outstanding.length > 0 || !signature.trim()}
             className="mt-5 h-10 px-5 rounded-lg bg-slate-900 text-white text-[14px] font-bold flex items-center gap-2 disabled:opacity-50"
           >
             <Check size={15} />

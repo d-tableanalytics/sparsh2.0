@@ -201,10 +201,12 @@ async def main() -> None:
                 COMPANY, await candidates.find_one({"uk": "CAN-001"}), req),
             409, "not been finalised by the shortlisting committee")
 
-        await SL.update_shortlist_review(HR, COMPANY, SLR, {"outcome": "Finalised"})
+        # Final Commit: the outcome is DERIVED from the members' verdicts, so asking for
+        # "Selected" on an all-Agree committee records exactly that. See test_final_commit.
+        await SL.update_shortlist_review(HR, COMPANY, SLR, {"outcome": "Selected"})
         await SL.assert_shortlist_cleared(
             COMPANY, await candidates.find_one({"uk": "CAN-001"}), req)
-        check("once FINALISED, the named candidate passes", True)
+        check("once committed, the named candidate passes", True)
 
         await expect_http(
             "a candidate the sitting did NOT name",
@@ -221,31 +223,38 @@ async def main() -> None:
             "committee_members": members(U_HR),
             "outcome": "Pending"})
         await expect_http(
-            "finalising with HR alone on the committee",
+            "committing with HR alone on the committee",
             SL.update_shortlist_review(HR, COMPANY, lone["slr_no"],
-                                       {"outcome": "Finalised"}),
+                                       {"outcome": "Selected"}),
             422, "two different people")
 
         await expect_http(
-            "convening AND finalising in one call with an incomplete committee",
+            "convening AND committing in one call with an incomplete committee",
             SL.create_shortlist_review(HR, COMPANY, {
                 "request_no": "HR-REQ-2026-001", "candidate_uks": ["CAN-003"],
-                "committee_members": members(U_HR), "outcome": "Finalised"}),
+                "committee_members": members(U_HR), "outcome": "Selected"}),
             422, "two different people")
 
         await expect_http(
-            "finalising a sitting that names nobody",
+            "committing a sitting that names nobody",
             SL.create_shortlist_review(HR, COMPANY, {
                 "request_no": "HR-REQ-2026-001", "candidate_uks": [],
+                "committee_members": members(U_HR, U_HOD), "outcome": "Selected"}),
+            422, "name the candidates")
+
+        await expect_http(
+            "recording a NEW sitting with the pre-Final-Commit vocabulary",
+            SL.create_shortlist_review(HR, COMPANY, {
+                "request_no": "HR-REQ-2026-001", "candidate_uks": ["CAN-003"],
                 "committee_members": members(U_HR, U_HOD), "outcome": "Finalised"}),
-            422, "deferral")
+            422, "before Final Commit")
 
         # =================================================================
         section("A decided sitting is frozen")
         # =================================================================
         await expect_http(
-            "editing a sitting that has already been finalised",
-            SL.update_shortlist_review(HR, COMPANY, SLR, {"outcome": "Deferred"}),
+            "editing a sitting that has already been committed",
+            SL.update_shortlist_review(HR, COMPANY, SLR, {"outcome": "Rejected"}),
             409, "already decided")
         check("a second decision is a second sitting, not an edit of the first", True)
 
@@ -290,7 +299,7 @@ async def main() -> None:
             SL.create_shortlist_review(HR, COMPANY, {
                 "request_no": "HR-REQ-2026-002", "candidate_uks": ["CAN-100"],
                 "committee_members": members(U_HR, U_HOD)}),
-            409, "client requisition")
+            409, "legacy client-track")
 
         client_req = await reqs.find_one({"request_no": "HR-REQ-2026-002"})
         await SL.assert_shortlist_cleared(

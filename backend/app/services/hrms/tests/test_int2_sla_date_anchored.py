@@ -92,10 +92,12 @@ async def main() -> None:
          "request_no": "HR-REQ-2026-001", "candidate_name": "Joiner Four",
          "joining_date": ago(30),
          "checklist": induction_items(True, NOW - timedelta(days=5))},
-        # A CLIENT-track onboarding: twelve items, no induction items at all.
+        # A LEGACY client-track onboarding: twelve base items, no induction items at all.
         {"onb_no": "ONB-2026-005", "company_id": COMPANY,
          "request_no": "HR-REQ-2026-001", "candidate_name": "Client Joiner",
-         "joining_date": ago(10), "checklist": M.seed_checklist("client")},
+         "joining_date": ago(10),
+         "checklist": [{"key": k, "label": label, "done": False, "done_at": None}
+                       for k, label in M.ONBOARD_CHECKLIST]},
     ])
     probations = FakeCollection([
         {"prb_no": "PRB-2026-001", "company_id": COMPANY,

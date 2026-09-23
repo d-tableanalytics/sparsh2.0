@@ -94,11 +94,12 @@ async def main() -> None:
     original = mongo.get_collection
     mongo.get_collection = lambda name: store.setdefault(name, FakeCollection())
 
+    import app.utils.hrms_access as HACC
     import app.services.hrms_requisition_service as RS
     import app.services.hrms_audit_service as AS
     import app.services.hrms_id_service as IS
     import app.services.hrms_notify_service as NS
-    for mod in (RS, AS, IS, NS):
+    for mod in (RS, AS, IS, NS, HACC):
         mod.get_collection = mongo.get_collection
 
     sent = []
@@ -167,8 +168,8 @@ async def main() -> None:
         # =================================================================
         r1 = await RS.create_requisition(HOD, COMPANY, base_payload())
         check("requisition created", r1["request_no"].startswith("HR-REQ-"))
-        check("starts at Pending HR Review",
-              r1["approval_status"] == M.ReqApproval.PENDING_HR.value)
+        check("starts at Pending HR Verification",
+              r1["approval_status"] == M.ReqApproval.PENDING_HR_VERIFICATION.value)
         check("closing status Open", r1["closing_status"] == M.ReqClosing.OPEN.value)
         check("JD created alongside", r1["jd"]["jd_no"].startswith("JD-"))
         check("JD starts Pending Approval",
@@ -253,7 +254,7 @@ async def main() -> None:
               any(s[0] == "user" and s[1] == U_HOD and "no hr reviewer" in s[2].lower()
                   for s in sent))
         check("the requisition is still created (warned, not blocked)",
-              stuck["approval_status"] == M.ReqApproval.PENDING_HR.value)
+              stuck["approval_status"] == M.ReqApproval.PENDING_HR_VERIFICATION.value)
         hr_doc["governance_role"] = "HR"                   # restore for the rest of the run
         sent.clear()
 
@@ -278,9 +279,18 @@ async def main() -> None:
             HOD, COMPANY, base_payload(qualification="   ")), 422, "required")
         await expect_http("assignee from another company", RS.create_requisition(
             HOD, COMPANY, base_payload(assignee_id=str(ObjectId()))), 422, "user of this company")
-        # The JD is mandatory content, not a formality.
-        await expect_http("JD with neither responsibilities nor attachment",
-                          RS.create_requisition(HOD, COMPANY, base_payload(jd={})),
+        # ── Internal Recruitment SOP §3 ── the JD is no longer authored at raise time; HR
+        # writes it in Step 3, once budget clears (see update_jd's own gate). Omitting `jd`
+        # (or sending `{}`) now opens an empty placeholder rather than 422ing -- but a caller
+        # who DOES try to supply JD fields here is still held to the old "responsibilities or
+        # an attachment" rule, so a half-written JD cannot sneak in under the new leniency.
+        placeholder = await RS.create_requisition(HOD, COMPANY, base_payload(jd={}))
+        check("an empty JD opens a placeholder, not a 422",
+              placeholder["jd"]["status"] == "Pending Approval"
+              and not placeholder["jd"].get("responsibilities"))
+        await expect_http("a JD with SOME fields but no responsibilities or attachment",
+                          RS.create_requisition(HOD, COMPANY,
+                                                base_payload(jd={"title": "Ops Lead"})),
                           422, "Job Description")
         ok = await RS.create_requisition(HOD, COMPANY, base_payload(
             jd={"attachments": [{"name": "jd.pdf", "url": "/files/jd.pdf"}]}))
@@ -311,29 +321,38 @@ async def main() -> None:
         # =================================================================
         section("Approval chain: the happy path")
         # =================================================================
+        # The band Management records at the budget gate. No sanctioned strength is
+        # seeded in this file, so clearing the gate lands in escalation (fail closed):
+        # "cleared the budget gate" is what is asserted, never "Approved".
+        BAND = {"approved_headcount": 1, "approved_salary_band_min": 500000,
+                "approved_salary_band_max": 900000}
+        CLEARED = {M.ReqApproval.PENDING_SCORECARD.value,
+                   M.ReqApproval.PENDING_ESCALATION.value}
+
         no = r1["request_no"]
-        after_hr = await RS.act_on_requisition(HR, COMPANY, no, "hr-approve", "Looks right")
-        check("hr-approve -> Pending MD Approval",
-              after_hr["approval_status"] == M.ReqApproval.PENDING_MD.value)
+        after_hr = await RS.act_on_requisition(HR, COMPANY, no, "hr-verify", "Looks right")
+        check("hr-verify -> Pending Budget Approval",
+              after_hr["approval_status"] == M.ReqApproval.PENDING_BUDGET.value)
         check("HR reviewer stamped", after_hr["hr_reviewed_by"] == U_HR)
         check("HR remark stored", after_hr["hr_remarks"] == "Looks right")
         check("JD still pending after HR stage",
               after_hr["jd"]["status"] == M.JdStatus.PENDING_APPROVAL.value)
         check("MD notified", any(s[0] == "role" and "MD" in s[1] for s in sent))
 
-        after_md = await RS.act_on_requisition(MD, COMPANY, no, "md-approve", "Go ahead", 650000)
-        check("md-approve -> Approved",
-              after_md["approval_status"] == M.ReqApproval.APPROVED.value)
-        check("approver stamped", after_md["approved_by"] == U_MD)
-        check("revised CTC applied to the requisition", after_md["offering_ctc"] == 650000)
-        check("salary_change recorded separately", after_md["salary_change"] == 650000)
-        check("JD CO-APPROVED (this is what unlocks posting)",
-              after_md["jd"]["status"] == M.JdStatus.APPROVED.value)
-        check("creator notified of approval",
-              any(s[0] == "user" and s[1] == U_HOD and "approved" in s[2].lower() for s in sent))
+        after_md = await RS.act_on_requisition(MD, COMPANY, no, "budget-approve", "Go ahead",
+                                               budget=BAND)
+        check("budget-approve clears the budget gate", after_md["approval_status"] in CLEARED)
+        check("approver stamped", after_md["budget_approved_by"] == U_MD)
+        check("the approved band is recorded on the requisition",
+              after_md["approved_salary_band_min"] == 500000
+              and after_md["approved_salary_band_max"] == 900000)
+        check("the JD is NOT yet approved -- the scorecard gate is still ahead",
+              after_md["jd"]["status"] != M.JdStatus.APPROVED.value)
+        check("creator notified that the role is funded",
+              any(s[0] == "user" and s[1] == U_HOD and "funded" in s[2].lower() for s in sent))
         check("both stages audited",
-              any(a["action"] == M.AUDIT_REQ_HR_APPROVED for a in audit_log.docs)
-              and any(a["action"] == M.AUDIT_REQ_MD_APPROVED for a in audit_log.docs))
+              any(a["action"] == M.AUDIT_REQ_HR_VERIFIED for a in audit_log.docs)
+              and any(a["action"] == M.AUDIT_REQ_BUDGET_OK for a in audit_log.docs))
 
         # =================================================================
         section("Approval chain: every status x action pair")
@@ -346,17 +365,18 @@ async def main() -> None:
         # stage or an action (Phase 11-R adds PENDING_ESCALATION plus escalate-approve /
         # escalate-reject) extends the coverage automatically instead of failing an
         # arithmetic assertion that was only ever a restatement of the table's size.
-        legal = {(a, spec[0].value) for a, spec in M.REQ_TRANSITIONS.items()}
-        expected_illegal = len(M.REQ_ACTIONS) * len(list(M.ReqApproval)) - len(legal)
+        legal = {(a, spec[0].value) for a, spec in M.INTERNAL_REQ_TRANSITIONS.items()}
+        actions = tuple(M.INTERNAL_REQ_TRANSITIONS)
+        expected_illegal = len(actions) * len(list(M.ReqApproval)) - len(legal)
         illegal_ok = 0
-        for action in M.REQ_ACTIONS:
+        for action in actions:
             for status in (s.value for s in M.ReqApproval):
                 if (action, status) in legal:
                     continue
                 probe = await RS.create_requisition(HOD, COMPANY, base_payload())
                 await reqs.update_one({"request_no": probe["request_no"]},
                                       {"$set": {"approval_status": status}})
-                actor = HR if action.startswith("hr-") else MD
+                actor = SUPER          # holds every capability, so only the status can refuse
                 from fastapi import HTTPException
                 try:
                     await RS.act_on_requisition(actor, COMPANY, probe["request_no"],
@@ -371,27 +391,29 @@ async def main() -> None:
         r2 = await RS.create_requisition(HOD, COMPANY, base_payload())
         n2 = r2["request_no"]
         await expect_http("MD cannot perform the HR stage", RS.act_on_requisition(
-            MD, COMPANY, n2, "hr-approve"), 403, "not authorised")
-        await expect_http("HOD cannot review", RS.act_on_requisition(
-            HOD, COMPANY, n2, "hr-approve"), 403)
-        await expect_http("employee cannot review", RS.act_on_requisition(
-            EMP, COMPANY, n2, "hr-approve"), 403)
+            MD, COMPANY, n2, "hr-verify"), 403, "not authorised")
+        await expect_http("HOD cannot verify", RS.act_on_requisition(
+            HOD, COMPANY, n2, "hr-verify"), 403)
+        await expect_http("employee cannot verify", RS.act_on_requisition(
+            EMP, COMPANY, n2, "hr-verify"), 403)
         await expect_http("unknown action", RS.act_on_requisition(
             HR, COMPANY, n2, "hr-maybe"), 422, "Invalid action")
         await expect_http("hr-reject without a remark", RS.act_on_requisition(
             HR, COMPANY, n2, "hr-reject"), 422, "remark is required")
         await expect_http("unknown requisition", RS.act_on_requisition(
-            HR, COMPANY, "HR-REQ-2026-999", "hr-approve"), 404)
+            HR, COMPANY, "HR-REQ-2026-999", "hr-verify"), 404)
 
-        await RS.act_on_requisition(HR, COMPANY, n2, "hr-approve")
-        await expect_http("HR cannot perform the MD stage", RS.act_on_requisition(
-            HR, COMPANY, n2, "md-approve"), 403)
-        await expect_http("md-reject without a remark", RS.act_on_requisition(
-            MD, COMPANY, n2, "md-reject"), 422, "remark is required")
-        await expect_http("non-numeric revised CTC", RS.act_on_requisition(
-            MD, COMPANY, n2, "md-approve", None, "lots"), 422, "number")
-        await expect_http("negative revised CTC", RS.act_on_requisition(
-            MD, COMPANY, n2, "md-approve", None, -5), 422, "negative")
+        await RS.act_on_requisition(HR, COMPANY, n2, "hr-verify")
+        await expect_http("HR cannot perform the budget stage", RS.act_on_requisition(
+            HR, COMPANY, n2, "budget-approve", budget=BAND), 403)
+        await expect_http("budget-reject without a remark", RS.act_on_requisition(
+            MD, COMPANY, n2, "budget-reject"), 422, "remark is required")
+        await expect_http("a budget approval with no band", RS.act_on_requisition(
+            MD, COMPANY, n2, "budget-approve", None, budget={}), 422, "salary band")
+        await expect_http("a negative band", RS.act_on_requisition(
+            MD, COMPANY, n2, "budget-approve", None,
+            budget={"approved_headcount": 1, "approved_salary_band_min": -5,
+                    "approved_salary_band_max": 10}), 422, "negative")
 
         section("Rejection closes the requisition and the JD")
         r3 = await RS.create_requisition(HOD, COMPANY, base_payload())
@@ -409,7 +431,7 @@ async def main() -> None:
         r4 = await RS.create_requisition(HOD, COMPANY, base_payload())
         n4 = r4["request_no"]
         outcomes = await asyncio.gather(
-            *[RS.act_on_requisition(HR, COMPANY, n4, "hr-approve", "race") for _ in range(5)],
+            *[RS.act_on_requisition(HR, COMPANY, n4, "hr-verify", "race") for _ in range(5)],
             return_exceptions=True)
         wins = sum(1 for o in outcomes if not isinstance(o, Exception))
         conflicts = sum(1 for o in outcomes if isinstance(o, Exception)
@@ -429,8 +451,10 @@ async def main() -> None:
         await expect_http("edit cannot clear a required field", RS.update_requisition(
             HR, COMPANY, n5, {"qualification": "  "}), 422)
 
-        await RS.act_on_requisition(HR, COMPANY, n5, "hr-approve")
-        await RS.act_on_requisition(MD, COMPANY, n5, "md-approve")
+        # Approval is the far end of a chain that needs an approved scorecard; the
+        # freeze is what is under test, so set the state directly.
+        await reqs.update_one({"request_no": n5},
+                              {"$set": {"approval_status": M.ReqApproval.APPROVED.value}})
         await expect_http("an APPROVED requisition cannot be edited",
                           RS.update_requisition(HR, COMPANY, n5, {"vacancy": 9}),
                           409, "no longer be edited")
@@ -457,6 +481,11 @@ async def main() -> None:
         # =================================================================
         r7 = await RS.create_requisition(HOD, COMPANY, base_payload())
         jd7 = r7["jd"]["jd_no"]
+        # SOP 3: the JD is written once Management has cleared headcount and budget.
+        await expect_http("a JD edit before budget approval", RS.update_jd(
+            HR, COMPANY, jd7, {"benefits": "too early"}), 409, "approved headcount and budget")
+        await RS.act_on_requisition(HR, COMPANY, r7["request_no"], "hr-verify")
+        await RS.act_on_requisition(MD, COMPANY, r7["request_no"], "budget-approve", budget=BAND)
         updated = await RS.update_jd(HR, COMPANY, jd7, {"benefits": "PF + insurance"})
         check("JD editable while pending", updated["benefits"] == "PF + insurance")
         check("version bumps on edit", updated["version"] == 2)
@@ -465,8 +494,10 @@ async def main() -> None:
         await expect_http("edit cannot strip a JD of all content", RS.update_jd(
             HR, COMPANY, jd7, {"responsibilities": ""}), 422, "responsibilities or at least one")
 
-        await RS.act_on_requisition(HR, COMPANY, r7["request_no"], "hr-approve")
-        await RS.act_on_requisition(MD, COMPANY, r7["request_no"], "md-approve")
+        await reqs.update_one({"request_no": r7["request_no"]},
+                              {"$set": {"approval_status": M.ReqApproval.APPROVED.value}})
+        await store[M.COLL_JOB_DESCRIPTIONS].update_one(
+            {"jd_no": jd7}, {"$set": {"status": M.JdStatus.APPROVED.value}})
         await expect_http("an APPROVED JD is frozen", RS.update_jd(
             HR, COMPANY, jd7, {"benefits": "changed"}), 409, "cannot be edited")
         await expect_http("unknown JD", RS.update_jd(HR, COMPANY, "JD-2026-999", {"ctc": "x"}), 404)
@@ -512,25 +543,26 @@ async def main() -> None:
         # guards is the SHAPE of the table (below) plus the one rule that must never bend:
         # APPROVED is reachable from exactly one row, and only from PENDING_MD with the MD
         # capability -- asserted from the model itself so a later "shortcut" fails loudly.
-        check("the four Phase 3 actions are still declared",
-              {"hr-approve", "hr-reject", "md-approve", "md-reject"} <= set(M.REQ_TRANSITIONS))
-        check("MD approval cannot be skipped", M.md_approval_is_mandatory())
+        check("the chain's actions are declared",
+              {"hr-verify", "hr-reject", "budget-approve", "budget-reject",
+               "scorecard-approve", "scorecard-reject"} <= set(M.INTERNAL_REQ_TRANSITIONS))
+        check("budget approval cannot be skipped", M.budget_approval_is_mandatory())
         # Subset, not equality: REQ_AUDIT_ACTIONS also labels the internal track's actions,
         # which have their own table. What this asserts is what it always meant -- no client
         # action may transition without leaving a labelled trail.
         check("every action has an audit label",
-              set(M.REQ_TRANSITIONS) <= set(M.REQ_AUDIT_ACTIONS))
+              set(M.INTERNAL_REQ_TRANSITIONS) <= set(M.REQ_AUDIT_ACTIONS))
         check("hr actions require the HR capability",
               all(spec[2] == M.Cap.REQUISITION_REVIEW_HR
-                  for a, spec in M.REQ_TRANSITIONS.items() if a.startswith("hr-")))
-        check("md actions require the MD capability",
-              all(spec[2] == M.Cap.REQUISITION_APPROVE_MD
-                  for a, spec in M.REQ_TRANSITIONS.items() if a.startswith("md-")))
+                  for a, spec in M.INTERNAL_REQ_TRANSITIONS.items() if a.startswith("hr-")))
+        check("budget actions require the budget capability",
+              all(spec[2] == M.Cap.REQUISITION_APPROVE_BUDGET
+                  for a, spec in M.INTERNAL_REQ_TRANSITIONS.items() if a.startswith("budget-")))
         check("both rejects demand a remark",
-              all(spec[3] for a, spec in M.REQ_TRANSITIONS.items() if a.endswith("-reject")))
+              all(spec[3] for a, spec in M.INTERNAL_REQ_TRANSITIONS.items() if a.endswith("-reject")))
         check("no transition leaves the declared status set",
               all(spec[0] in set(M.ReqApproval) and spec[1] in set(M.ReqApproval)
-                  for spec in M.REQ_TRANSITIONS.values()))
+                  for spec in M.INTERNAL_REQ_TRANSITIONS.values()))
 
         section("Index registry (Phase 3 additions)")
         names = [(c, o.get("name")) for c, _k, o in M.HRMS_INDEXES]

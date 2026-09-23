@@ -17,8 +17,7 @@ one is a 409, not silent corruption.
 -- Row scoping ----------------------------------------------------------------------
   HR / MD / ADMIN     every candidate in the company
   INTERNAL            every candidate (support), but cannot screen -- screening is a
-                      hiring decision, and those belong to the client (same boundary the
-                      approval chain draws in Phase 3)
+                      hiring decision (same boundary the approval chain draws in Phase 3)
   MANAGER (HOD)       only candidates on requisitions THEY raised
   EMPLOYEE            403 -- no candidate access at all
 """
@@ -31,19 +30,19 @@ from app.db.mongodb import get_collection
 from app.models.hrms import (
     AUDIT_ASSIGNED, AUDIT_CANDIDATE_ADDED, AUDIT_CANDIDATE_DELETED, AUDIT_CANDIDATE_UPDATED,
     AUDIT_SCREENED, AUDIT_STAGE_CHANGED, COLL_AUDIT_LOG, COLL_CANDIDATES, COLL_REQUISITIONS,
-    RequisitionTrack,
     EMAIL_RE, ENTITY_CANDIDATE, JOURNEY_KINDS, JOURNEY_RAIL, JOURNEY_STATUS_KINDS,
+    LEGACY_CLIENT_TRACK_STATUSES,
     MAX_BULK_SCREEN, PHONE_RE, PIPELINE_COLUMNS, SCREEN_ACTIONS, AppStatus, Cap, HrmsRole,
     ScreenAction, allowed_next_statuses, can_transition, is_iso_date,
+    CvScreeningResult, ScreeningStatus,
 )
 # ── The record-backed stages (see assert_stage_has_backing_record below) ──
 from app.models.hrms import (
     AppointmentStatus, COLL_APPOINTMENTS, COLL_ONBOARDING, COLL_OFFERS, OfferStatus,
-    COLL_PROBATION_REVIEWS, OnboardStatus, ProbationOutcome,
+    COLL_PROBATION_REVIEWS, OnboardStatus, ProbationOutcome, PRE_ASSESSMENT_STATUSES,
 )
-from app.models.hrms import (
-    AUDIT_CLIENT_RESPONSE, AUDIT_CLIENT_SHARED, CLIENT_RESPONSE_STATUS, ClientShareStatus,
-)
+# ── HR screening page (SOP §1-§3): the approved role's own requirements ──
+from app.models.hrms import COLL_JOB_DESCRIPTIONS, COLL_POSITION_SCORECARDS
 from app.services.hrms_audit_service import audit
 from app.services.hrms_id_service import next_business_id
 from app.services.hrms_notify_service import notify_user
@@ -104,12 +103,25 @@ async def _require_visible(actor: dict, company_id: str, uk: str) -> dict:
 async def list_candidates(actor: dict, company_id: str, *, search: str = None,
                           status: str = None, request_no: str = None,
                           posting_code: str = None, talent_pool: bool = None,
-                          tags: str = None, limit: int = 200,
+                          tags: str = None, source: str = None,
+                          location: str = None, experience: str = None,
+                          date_from: str = None, date_to: str = None,
+                          limit: int = 200,
                           skip: int = 0) -> dict:
     query = {"company_id": str(company_id)}
     query.update(await _scope_filter(actor, company_id))
+    # Candidates parked at a status from the decommissioned client-hiring track are
+    # legacy data: kept in the database, never listed as part of hiring.
+    query["application_status"] = {"$nin": list(LEGACY_CLIENT_TRACK_STATUSES)}
     if status:
-        query["application_status"] = status
+        # Comma-separated is an OR of statuses (e.g. the several statuses that all count as
+        # "shortlisted" for the cross-requisition Shortlisted Candidates tab); a single value
+        # behaves exactly as before.
+        if "," in status:
+            values = [s.strip() for s in status.split(",") if s.strip()]
+            query["application_status"] = {"$in": values}
+        else:
+            query["application_status"] = status
     if request_no:
         query["request_no"] = request_no
     if posting_code:
@@ -129,6 +141,48 @@ async def list_candidates(actor: dict, company_id: str, *, search: str = None,
             # everybody who matches either, and narrowing to the intersection would hide
             # most of the pool behind a search that looks broader than it is.
             query["talent_pool_tags"] = {"$in": wanted}
+    # ── Applicant Pool filters ──
+    # `source` is comma-separated for the same reason `status` is: the pool's source filter
+    # is a multi-select, and one query per selected source would be the same answer read
+    # several times.
+    if source:
+        values = [s.strip() for s in str(source).split(",") if s.strip()]
+        if values:
+            query["source"] = {"$in": values} if len(values) > 1 else values[0]
+    if location:
+        # Substring, case-insensitive: locations are typed free-text by applicants
+        # ("Pune", "pune, MH", "Pune (remote)"), so an exact match would find almost none
+        # of the people it should.
+        import re as _re_loc
+        query["current_location"] = {"$regex": _re_loc.escape(location.strip()),
+                                      "$options": "i"}
+    if experience:
+        # Also a substring: `total_experience` is stored as free text ("4 years", "3-5
+        # yrs"), not a number, so this filters on what was actually written rather than
+        # pretending a range comparison is possible.
+        import re as _re_exp
+        query["total_experience"] = {"$regex": _re_exp.escape(experience.strip()),
+                                      "$options": "i"}
+    if date_from or date_to:
+        # Filed against `applied_at`, which is the application date the pool displays --
+        # not `created_at`, which for a pooled CV re-sourced onto a new requisition is the
+        # date of the copy rather than of the application.
+        from datetime import datetime as _dt, timezone as _tz
+        window = {}
+        if date_from:
+            try:
+                window["$gte"] = _dt.strptime(date_from, "%Y-%m-%d").replace(tzinfo=_tz.utc)
+            except ValueError:
+                raise HTTPException(status_code=422, detail="date_from must be YYYY-MM-DD.")
+        if date_to:
+            try:
+                end = _dt.strptime(date_to, "%Y-%m-%d").replace(tzinfo=_tz.utc)
+            except ValueError:
+                raise HTTPException(status_code=422, detail="date_to must be YYYY-MM-DD.")
+            # Inclusive of the whole end day: a recruiter picking "to 5 March" means
+            # everything applied on the 5th, not everything before midnight starting it.
+            window["$lte"] = end.replace(hour=23, minute=59, second=59)
+        query["applied_at"] = window
     if search:
         import re
         safe = re.escape(search.strip())
@@ -159,8 +213,22 @@ async def list_candidates(actor: dict, company_id: str, *, search: str = None,
             "count": await coll.count_documents({**base, "application_status": {"$in": values}}),
         })
 
+    # "How many came from each platform", over the SAME filters the list is showing minus
+    # the source filter itself -- so the strip still shows every source to switch to rather
+    # than collapsing to the one already selected. Aggregated rather than counted per value:
+    # the set of sources is open (free text on the manual path), so there is no fixed list
+    # to loop over.
+    source_base = {k: v for k, v in query.items() if k != "source"}
+    source_rows = await coll.aggregate([
+        {"$match": source_base},
+        {"$group": {"_id": "$source", "count": {"$sum": 1}}},
+        {"$sort": {"count": -1}},
+    ]).to_list(50)
+    sources = [{"source": r["_id"] or "Unspecified", "count": r["count"]}
+               for r in source_rows]
+
     return {"candidates": candidates, "total": total, "limit": limit, "skip": skip,
-            "columns": columns}
+            "columns": columns, "sources": sources}
 
 
 def normalise_phone(value: str) -> str:
@@ -256,6 +324,11 @@ async def create_candidate(actor: dict, company_id: str, payload: dict) -> dict:
         "source": clean_text(payload.get("source"), limit=60) or "Manual",
         "request_no": request_no,
         "jd_no": (req or {}).get("jd_no"),
+        # The role they applied FOR, denormalised so the Applicant Pool can list and filter
+        # by position without joining every candidate back to its requisition on every read.
+        # Distinct from `current_designation`, which is the job they hold today.
+        "applied_position": (req or {}).get("designation_name"),
+        "department_name": (req or {}).get("department_name"),
         "application_status": AppStatus.APPLIED.value,
         # A manually-added candidate inherits the requisition's assessment requirement, so
         # they are gated identically to someone who applied through a posting.
@@ -272,15 +345,25 @@ async def create_candidate(actor: dict, company_id: str, payload: dict) -> dict:
         doc, await _retention_map(company_id))
     for field, limit in (("current_location", 120), ("total_experience", 60),
                          ("qualification", 180), ("current_company", 140),
+                         ("current_designation", 140),
                          ("current_ctc", 40), ("expected_ctc", 40),
-                         ("notice_period", 60), ("linkedin", 300), ("cover_note", 4000)):
+                         ("notice_period", 60), ("linkedin", 300),
+                         ("portfolio", 300), ("cover_note", 4000)):
         doc[field] = clean_text(payload.get(field), limit=limit)
 
     if request_no:
-        posting = await get_collection("hrms_job_postings").find_one(
-            {"request_no": request_no, "company_id": str(company_id)})
+        # Prefer the posting the caller named; otherwise fall back to this requisition's own
+        # posting, so a CV entered by hand against an advertised role still carries the
+        # posting link the Applicant Pool reports on. Left null when there is no posting at
+        # all -- a walk-in did not come through one, and inventing a link would be a lie.
+        wanted = clean_text(payload.get("posting_code"), limit=20)
+        query = {"request_no": request_no, "company_id": str(company_id)}
+        if wanted:
+            query = {"posting_code": wanted.upper(), "company_id": str(company_id)}
+        posting = await get_collection("hrms_job_postings").find_one(query)
         if posting:
             doc["requires_assessment"] = bool(posting.get("requires_assessment"))
+            doc["posting_code"] = posting.get("posting_code")
 
     # Phase 11-R, Item 5: the SAME referral resolver the public form uses. A referral HR
     # types onto a walk-in CV is validated and stored identically to a self-declared one,
@@ -294,9 +377,7 @@ async def create_candidate(actor: dict, company_id: str, payload: dict) -> dict:
     # ── Phase 12 ── the CV itself.
     #
     # `CandidateIn.resume` has been declared since Phase 5 and nothing ever stored it, so an
-    # HR-uploaded CV was accepted by the model and silently dropped. That matters more now
-    # than it did: a share carries the CV to a client, and `share_candidate` refuses a
-    # candidate who has none.
+    # HR-uploaded CV was accepted by the model and silently dropped.
     #
     # Stored through the SAME helper the public form uses, so a walk-in CV and an applied-for
     # one land in the same place, in the same shape, with the same validation.
@@ -328,9 +409,6 @@ async def assert_selectable(actor: Optional[dict], company_id: str,
     here, the interview pass-chain, and offer creation. Three copies of a gate is one gate
     and two bugs waiting to drift out of step -- the same reasoning that keeps
     `assert_sourcing_allowed` in a single place.
-
-    Both checks return immediately on a client requisition, so the agency track is
-    untouched: a client-track candidate reaches Selected exactly as they always did.
     """
     request_no = (candidate or {}).get("request_no")
     if not request_no:
@@ -357,9 +435,31 @@ async def assert_selectable(actor: Optional[dict], company_id: str,
 # through Offer Generated -> Offer Accepted -> Pre-Onboarding -> Joined by name alone, with
 # no offer, letter, onboarding case or employee record ever created to back any of it --
 # and, past Selected, there is no legal transition back to undo the mistake.
-async def assert_stage_has_backing_record(company_id: str, uk: str, target: str) -> None:
+async def assert_stage_has_backing_record(
+        company_id: str, uk: str, target: str, candidate: Optional[dict] = None) -> None:
     company_id = str(company_id)
-    if target == AppStatus.OFFER_GENERATED.value:
+    if target == AppStatus.INTERVIEW_SCHEDULED.value:
+        # THE ASSESSMENT GATE (see the identical check in hrms_interview_service.
+        # schedule_interview). Repeated here because this is the OTHER path onto
+        # "Interview Scheduled" -- the generic PATCH -- and without it a hand-set stage
+        # move walks straight past a mandatory assessment that scheduling an interview the
+        # normal way correctly blocks.
+        if candidate is None:
+            candidate = await get_collection(COLL_CANDIDATES).find_one(
+                {"uk": uk, "company_id": company_id})
+        if candidate and candidate.get("requires_assessment"):
+            try:
+                current_enum = AppStatus(candidate.get("application_status"))
+            except ValueError:
+                current_enum = None
+            if current_enum in PRE_ASSESSMENT_STATUSES:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(f'{candidate.get("candidate_name")} is at '
+                            f'"{candidate.get("application_status")}". This role requires an '
+                            f'assessment, so interviews can only be scheduled once they reach '
+                            f'"{AppStatus.ASSESSMENT_PASSED.value}".'))
+    elif target == AppStatus.OFFER_GENERATED.value:
         if not await get_collection(COLL_OFFERS).find_one(
                 {"uk": uk, "company_id": company_id,
                  "status": {"$ne": OfferStatus.DRAFT.value}}):
@@ -423,9 +523,11 @@ async def update_candidate(actor: dict, company_id: str, uk: str, payload: dict)
 
     for field, limit in (("candidate_name", 140), ("current_location", 120),
                          ("total_experience", 60), ("qualification", 180),
-                         ("current_company", 140), ("current_ctc", 40),
-                         ("expected_ctc", 40), ("notice_period", 60),
-                         ("linkedin", 300), ("cover_note", 4000), ("remarks", 2000)):
+                         ("current_company", 140), ("current_designation", 140),
+                         ("current_ctc", 40), ("expected_ctc", 40),
+                         ("notice_period", 60), ("source", 60),
+                         ("linkedin", 300), ("portfolio", 300),
+                         ("cover_note", 4000), ("remarks", 2000)):
         if field in payload:
             updates[field] = clean_text(payload[field], limit=limit)
 
@@ -483,12 +585,12 @@ async def update_candidate(actor: dict, company_id: str, uk: str, payload: dict)
             # "Selected" onto a candidate would route around both controls and the offer
             # gate would find a status it had no reason to doubt.
             #
-            # Both are silent on the client track, and both are checked BEFORE anything is
-            # written so a refusal cannot leave a half-moved candidate behind.
+            # Both are checked BEFORE anything is written so a refusal cannot leave a
+            # half-moved candidate behind.
             if target == AppStatus.SELECTED.value:
                 await assert_selectable(actor, company_id, current)
             else:
-                await assert_stage_has_backing_record(company_id, uk, target)
+                await assert_stage_has_backing_record(company_id, uk, target, current)
             updates["application_status"] = target
             stage_from, stage_to = current_status, target
 
@@ -908,24 +1010,6 @@ async def screen_candidates(actor: dict, company_id: str, payload: dict) -> dict
         if remarks:
             updates["screening_remarks"] = remarks
 
-        # Phase 11-R, Item 4: sharing a CV also OPENS a client-share record. The stage says
-        # where the candidate is; the sub-document holds who it went to and what came back.
-        # Written in the same update as the stage move, so the two can never disagree.
-        if action is ScreenAction.SHARE_WITH_CLIENT:
-            updates["client_share"] = {
-                "shared_at": now,
-                "shared_by": str(actor.get("_id") or ""),
-                "shared_by_name": _actor_name(actor),
-                "client_contact": clean_text(payload.get("client_contact"), limit=140),
-                "status": ClientShareStatus.PENDING.value,
-                "responded_at": None,
-                "remarks": remarks,
-            }
-            # Denormalised alongside it so REPORT_ENTITIES and the breakdowns can read a
-            # flat field -- reports project a fixed column list and cannot dig into a
-            # sub-document.
-            updates["client_share_status"] = ClientShareStatus.PENDING.value
-
         await coll.update_one(query, {"$set": updates})
         moved.append({"uk": uk, "status": target_status})
 
@@ -953,12 +1037,6 @@ async def screen_candidates(actor: dict, company_id: str, payload: dict) -> dict
         if action is ScreenAction.REJECT:
             from app.services.hrms_comm_service import fire_event
             await fire_event(actor, company_id, uk, "screening_rejected")
-        if action is ScreenAction.SHARE_WITH_CLIENT:
-            # Its own audit action, so "we sent this CV out" is findable in the journey
-            # without reading the prose of a generic screening line.
-            await audit(actor, AUDIT_CLIENT_SHARED, ENTITY_CANDIDATE, uk,
-                        clean_text(payload.get("client_contact"), limit=140)
-                        or "shared with the client", company_id)
 
     if action is ScreenAction.FORWARD and moved and recipient:
         await notify_user(
@@ -973,122 +1051,8 @@ async def screen_candidates(actor: dict, company_id: str, payload: dict) -> dict
 
 
 # -------------------------------------------------------------
-# Client sharing (Phase 11-R, Item 4)
-# -------------------------------------------------------------
-# The write path for client verdicts lives HERE, in the service that already owns screening,
-# rather than in hrms_analytics_service. Analytics is read-only by contract and putting a
-# write in it -- even a small one -- would end that guarantee for every future reader.
-async def record_client_response(actor: dict, company_id: str, payload: dict) -> dict:
-    """Record the hiring client's verdict on a CV that was shared with them.
-
-    Recorded BY an HRMS user on the client's behalf: there is deliberately no public client
-    portal in this phase. Building one would mean a second unauthenticated surface with its
-    own credentials, rate limits and threat model, which is far more than the review asked
-    for.
-
-    The verdict drives the candidate's stage through CLIENT_RESPONSE_STATUS -- a lookup
-    table, not a branch -- and FORWARD_TRANSITIONS still decides legality, so a verdict can
-    never move somebody somewhere the lifecycle forbids.
-    """
-    uk = (payload.get("uk") or "").strip()
-    if not uk:
-        raise HTTPException(status_code=422, detail="Select a candidate.")
-
-    current = await _require_visible(actor, company_id, uk)
-    share = current.get("client_share") or {}
-    if not share.get("shared_at"):
-        raise HTTPException(
-            status_code=409,
-            detail=(f"{current.get('candidate_name')}'s CV has not been shared with a "
-                    f"client, so there is no verdict to record."))
-
-    raw = getattr(payload.get("status"), "value", payload.get("status"))
-    try:
-        verdict = ClientShareStatus(raw)
-    except ValueError:
-        raise HTTPException(
-            status_code=422,
-            detail=f"Verdict must be one of: "
-                   f"{', '.join(s.value for s in ClientShareStatus)}.")
-
-    remarks = clean_text(payload.get("remarks"), limit=2000)
-    if verdict is ClientShareStatus.REJECTED and not remarks:
-        # Same rule a rejection carries everywhere else in this module: a refusal the
-        # recruiter cannot explain to the candidate is not usable feedback.
-        raise HTTPException(
-            status_code=422, detail="Record the client's reason for rejecting.")
-
-    now = datetime.now(timezone.utc)
-    responded_at = payload.get("responded_at") or now
-    updates = {
-        "client_share.status": verdict.value,
-        "client_share.responded_at": responded_at,
-        "client_share.remarks": remarks,
-        "client_share.recorded_by": str(actor.get("_id") or ""),
-        "client_share_status": verdict.value,
-        "updated_at": now,
-    }
-
-    # The stage move, if this verdict implies one and the graph permits it.
-    target = CLIENT_RESPONSE_STATUS.get(verdict)
-    stage_from = current.get("application_status")
-    stage_to = None
-    if target is not None and can_transition(stage_from, target.value):
-        updates["application_status"] = target.value
-        stage_to = target.value
-
-    await get_collection(COLL_CANDIDATES).update_one(
-        {"uk": uk, "company_id": str(company_id)}, {"$set": updates})
-
-    await audit(actor, AUDIT_CLIENT_RESPONSE, ENTITY_CANDIDATE, uk,
-                f"client verdict: {verdict.value}" + (f" — {remarks}" if remarks else ""),
-                company_id)
-    if stage_to:
-        await audit(actor, AUDIT_STAGE_CHANGED, ENTITY_CANDIDATE, uk,
-                    f"{stage_from} -> {stage_to}", company_id)
-
-    # Tell whoever shared it. They are waiting on this answer and nobody watches a record
-    # they were not told changed -- the gap Phase 3 closed for requisitions.
-    if share.get("shared_by"):
-        await notify_user(
-            share["shared_by"],
-            f"Client verdict: {current.get('candidate_name')} — {verdict.value}",
-            f"The client responded on {uk}." + (f" Note: {remarks}" if remarks else ""),
-            kind="success" if verdict is ClientShareStatus.SHORTLISTED else "info",
-            link="/hrms/candidates")
-
-    return await get_candidate(actor, company_id, uk)
-
-
-# -------------------------------------------------------------
 # Journey
 # -------------------------------------------------------------
-async def _is_internal_track(company_id: str, request_no) -> bool:
-    """Whether a candidate's requisition runs on the internal track.
-
-    A candidate with no requisition (a talent-pool or directly sourced record) is treated as
-    client-track, which is also what every requisition raised before the track field existed
-    defaults to.
-    """
-    if not request_no:
-        return False
-    req = await get_collection(COLL_REQUISITIONS).find_one(
-        {"request_no": request_no, "company_id": str(company_id)},
-        {"requisition_track": 1})
-    if not req:
-        return False
-    track = req.get("requisition_track") or RequisitionTrack.CLIENT.value
-    return track == RequisitionTrack.INTERNAL.value
-
-
-def _journey_is_over(status: str, is_internal: bool) -> bool:
-    """Whether the rail has run out of steps for THIS candidate."""
-    if not is_internal and status == AppStatus.EMPLOYEE_CREATED.value:
-        # There is no probation on the client track, so the hire is the last stop.
-        return True
-    return not allowed_next_statuses(status)
-
-
 async def get_journey(actor: dict, company_id: str, uk: str) -> dict:
     """Reconstruct a candidate's full history from the audit trail.
 
@@ -1097,14 +1061,6 @@ async def get_journey(actor: dict, company_id: str, uk: str) -> dict:
     """
     candidate = await _require_visible(actor, company_id, uk)
     status = candidate.get("application_status") or AppStatus.APPLIED.value
-
-    # -- Phase INT-15 -- whether a hire is the END depends on the track.
-    #
-    # `Probation Confirmed` follows `Employee Created` on the INTERNAL track only. The
-    # lifecycle graph is shared and cannot express that, so it offers the edge to everybody
-    # and the reader decides. Without this, a client-track hire -- who has no probation and
-    # never will -- would render as an unfinished journey for ever.
-    is_internal = await _is_internal_track(company_id, candidate.get("request_no"))
 
     rows = await get_collection(COLL_AUDIT_LOG).find(
         {"entity": ENTITY_CANDIDATE, "entity_id": uk}).sort("created_at", 1).to_list(500)
@@ -1159,33 +1115,27 @@ async def get_journey(actor: dict, company_id: str, uk: str) -> dict:
             "source": candidate.get("source"),
             "request_no": candidate.get("request_no"),
             "applied_at": candidate.get("applied_at") or candidate.get("created_at"),
-            # ── Phase 11-R ── the referral and client-share context the journey screen
-            # renders alongside the timeline. Read with `.get`, so a candidate created
-            # before this phase simply reports nulls rather than breaking the view.
+            # ── Phase 11-R ── the referral context the journey screen renders alongside
+            # the timeline. Read with `.get`, so a candidate created before this phase
+            # simply reports nulls rather than breaking the view.
             "is_referral": bool(candidate.get("is_referral")),
             "referred_by": candidate.get("referred_by"),
             "referral_source": candidate.get("referral_source"),
             "referrer_name": candidate.get("referrer_name"),
             "referrer_employee_code": candidate.get("referrer_employee_code"),
             "referral_relation": candidate.get("referral_relation"),
-            "client_share": candidate.get("client_share"),
-            # ── Phase INT-15 ── the internal track's own facts, so the candidate page can
-            # be one place rather than four. Null on the client track, where none of these
-            # exist -- the screen renders the section only when there is something in it.
+            # ── Phase INT-15 ── the hiring facts, so the candidate page can be one place
+            # rather than four. The screen renders the section only when there is
+            # something in it.
             "scorecard_evaluation": candidate.get("scorecard_evaluation"),
             "scorecard_score": candidate.get("scorecard_score"),
             "scorecard_band": candidate.get("scorecard_band"),
         },
-        # Which track this candidate is on, so the reader does not have to infer it from
-        # the presence of fields that are merely empty on a new internal hire.
-        "track": (RequisitionTrack.INTERNAL.value if is_internal
-                  else RequisitionTrack.CLIENT.value),
         "rail": rail,
         "reached": reached,
         # A terminal stage means the rail stops here -- the UI shows why rather than
-        # implying more steps are coming. A client-track hire is finished at
-        # `Employee Created`; an internal one still has its probation confirmation to come.
-        "terminal": _journey_is_over(status, is_internal),
+        # implying more steps are coming.
+        "terminal": not allowed_next_statuses(status),
         "events": events,
     }
 
@@ -1197,9 +1147,9 @@ async def upload_cv(actor: dict, company_id: str, uk: str, payload: dict) -> dic
     opened from a phone call and the CV arrives by email an hour later. Without this, the
     only way to give an existing candidate a CV was to delete and re-add them.
 
-    Replacing keeps the OLD key in `resume_history` rather than overwriting it blind. The
-    previous CV may already have gone to a client on a share, and a share that points at a
-    document nobody can produce any more is worse than one carrying an old version.
+    Replacing keeps the OLD key in `resume_history` rather than overwriting it blind: a
+    record that points at a document nobody can produce any more is worse than one
+    carrying an old version.
     """
     current = await _require_visible(actor, company_id, uk)
     if not payload.get("resume"):
@@ -1228,12 +1178,10 @@ async def upload_cv(actor: dict, company_id: str, uk: str, payload: dict) -> dic
 
 
 async def cv_url(actor: dict, company_id: str, uk: str) -> dict:
-    """A short-lived link to a candidate's CV, for Sparsh-side readers.
+    """A short-lived link to a candidate's CV.
 
     Audited, because opening somebody's CV is a read of personal data and §8 of the audit
-    asked for exactly this trail. Clients do NOT come through here -- they hold no
-    `candidate.read` and use the share's own CV route, which additionally checks that the
-    candidate was shared with them.
+    asked for exactly this trail.
     """
     candidate = await _require_visible(actor, company_id, uk)
     key = (candidate.get("resume") or {}).get("key")
@@ -1250,3 +1198,180 @@ async def cv_url(actor: dict, company_id: str, uk: str) -> dict:
                 "CV opened", company_id)
     return {"url": url, "expires_in": 300,
             "name": (candidate.get("resume") or {}).get("name") or "cv.pdf"}
+
+
+async def attachment_url(actor: dict, company_id: str, uk: str,
+                         slot: str, index: int = 0) -> dict:
+    """A short-lived link to the photo or one certificate the applicant uploaded.
+
+    Separate from `cv_url` only because those live in different shapes on the document
+    (a single object vs. a list); the access check and the audit trail are the same, since
+    a certificate is personal data exactly as a CV is.
+    """
+    candidate = await _require_visible(actor, company_id, uk)
+
+    if slot == "photo":
+        stored = candidate.get("photo") or {}
+        label = "Photo"
+    elif slot == "certificate":
+        certs = candidate.get("certificates") or []
+        if index < 0 or index >= len(certs):
+            raise HTTPException(status_code=404, detail="No such certificate on file.")
+        stored = certs[index] or {}
+        label = f"Certificate {index + 1}"
+    else:
+        raise HTTPException(status_code=422, detail="Unknown attachment.")
+
+    key = stored.get("key")
+    if not key:
+        raise HTTPException(status_code=404,
+                            detail=f"No {label.lower()} is on file for this candidate.")
+
+    from app.services.s3_service import get_signed_url
+    url = get_signed_url(key, expires_in=300)
+    if not url:
+        raise HTTPException(
+            status_code=503,
+            detail="The file could not be opened right now. Please try again.")
+    await audit(actor, AUDIT_CANDIDATE_UPDATED, ENTITY_CANDIDATE, uk,
+                f"{label} opened", company_id)
+    return {"url": url, "expires_in": 300, "name": stored.get("name") or label}
+
+
+# -------------------------------------------------------------
+# HR screening (SOP §1-§3)
+# -------------------------------------------------------------
+async def record_cv_screening(actor: dict, company_id: str, uk: str, payload: dict) -> dict:
+    """Record HR's reading of the CV against the approved Position Scorecard.
+
+    Deliberately does NOT move the candidate. Moving them is the triage action's job
+    (`screen_candidates`), and keeping the two apart means a screen can be written down
+    before anybody decides what to do about it -- and that a later triage decision does
+    not silently overwrite the finding that justified it, which is what happened while
+    `screening_remarks` was the only place a remark could live.
+    """
+    candidate = await _require_visible(actor, company_id, uk)
+
+    raw = payload.get("result")
+    try:
+        result = CvScreeningResult(getattr(raw, "value", raw))
+    except ValueError:
+        raise HTTPException(
+            status_code=422,
+            detail=("CV screening result must be one of: "
+                    f"{', '.join(r.value for r in CvScreeningResult)}."))
+
+    now = datetime.now(timezone.utc)
+    updates = {
+        "cv_screening_result": result.value,
+        "cv_screening_remarks": clean_text(payload.get("remarks"), limit=4000),
+        "screened_by": str(actor.get("_id") or ""),
+        "screened_by_name": _actor_name(actor),
+        "screening_date": now,
+    }
+    if payload.get("hr_remarks") is not None:
+        updates["hr_remarks"] = clean_text(payload["hr_remarks"], limit=4000)
+    if payload.get("screening_status") is not None:
+        raw_status = payload["screening_status"]
+        try:
+            updates["screening_status"] = ScreeningStatus(
+                getattr(raw_status, "value", raw_status)).value
+        except ValueError:
+            raise HTTPException(
+                status_code=422,
+                detail=("Screening status must be one of: "
+                        f"{', '.join(s.value for s in ScreeningStatus)}."))
+
+    await get_collection(COLL_CANDIDATES).update_one(
+        {"uk": uk, "company_id": str(company_id)}, {"$set": updates})
+    await audit(actor, AUDIT_SCREENED, ENTITY_CANDIDATE, uk,
+                f"CV screening: {result.value}"
+                + (f" — {updates['cv_screening_remarks']}"
+                   if updates.get("cv_screening_remarks") else ""),
+                company_id)
+    return await get_candidate(actor, company_id, uk)
+
+
+async def get_screening(actor: dict, company_id: str, uk: str) -> dict:
+    """Everything the HR Screening page needs for one candidate, in one call.
+
+    Four blocks, assembled from the services that own each one rather than copied onto the
+    candidate: who they are, what the approved role actually asks for, what screening has
+    found so far, and where the interview/shortlisting stands. Fanning out here rather than
+    in the browser keeps the page one request and keeps every gate's own service the single
+    author of its own data.
+
+    Every fan-out is defensive: a screening page that 500s because one board is empty is
+    worse than one that renders the blocks it can.
+    """
+    candidate = await _require_visible(actor, company_id, uk)
+
+    async def _safe(coro, default):
+        try:
+            return await coro
+        except Exception:
+            return default
+
+    req = None
+    if candidate.get("request_no"):
+        req = await get_collection(COLL_REQUISITIONS).find_one(
+            {"request_no": candidate["request_no"], "company_id": str(company_id)})
+
+    # ── (b) What the approved role asks for: the JD's own wording, and the approved
+    # scorecard's criteria, which are the actual bar the SOP says to screen against.
+    jd = None
+    if candidate.get("jd_no"):
+        jd = await get_collection(COLL_JOB_DESCRIPTIONS).find_one(
+            {"jd_no": candidate["jd_no"], "company_id": str(company_id)})
+    scorecard = None
+    if candidate.get("request_no"):
+        scorecard = await get_collection(COLL_POSITION_SCORECARDS).find_one(
+            {"request_no": candidate["request_no"], "company_id": str(company_id)})
+
+    requirements = {
+        "skills": (jd or {}).get("skills") or (req or {}).get("essential_skills"),
+        "experience": (jd or {}).get("experience") or (req or {}).get("experience_required"),
+        "qualifications": (jd or {}).get("qualifications") or (req or {}).get("qualification"),
+        "key_competencies": (jd or {}).get("key_competencies"),
+        "culture_fit": (jd or {}).get("culture_fit"),
+        "additional_requirements": (jd or {}).get("additional_requirements"),
+        "job_summary": (jd or {}).get("job_summary"),
+        "scorecard": {
+            "scr_no": (scorecard or {}).get("scr_no"),
+            "status": (scorecard or {}).get("status"),
+            "managerial": (scorecard or {}).get("managerial"),
+            "criteria": (scorecard or {}).get("criteria") or [],
+        } if scorecard else None,
+    }
+
+    # ── (c)/(d) What has actually happened, read from the boards that own each step.
+    from app.services import hrms_telephonic_service as telephonic
+    from app.services import hrms_assessment_service as assessments
+    from app.services import hrms_shortlist_service as shortlist
+    from app.services import hrms_interview_media_service as interview_media
+
+    tel = await _safe(telephonic.list_screenings(actor, company_id, uk=uk), {})
+    ass = await _safe(assessments.list_assessments(actor, company_id, uk=uk), {})
+    # Returns a plain list, unlike the others' {key: [...]} envelopes.
+    ivs = await _safe(interview_media.interviews_for_candidate(company_id, uk), [])
+    # Filtered by `uk` server-side: a requisition's other sittings are not this person's
+    # shortlisting decision.
+    slr = await _safe(shortlist.list_shortlist_reviews(actor, company_id, uk=uk), {})
+    reviews = slr.get("shortlist_reviews") or []
+
+    return {
+        "candidate": _out(candidate),
+        "requisition": {
+            "request_no": (req or {}).get("request_no"),
+            "designation_name": (req or {}).get("designation_name"),
+            "department_name": (req or {}).get("department_name"),
+            "reporting_manager_name": (req or {}).get("reporting_manager_name"),
+            "approved_salary_band_min": (req or {}).get("approved_salary_band_min"),
+            "approved_salary_band_max": (req or {}).get("approved_salary_band_max"),
+        } if req else None,
+        "requirements": requirements,
+        "telephonic": tel.get("screenings") or [],
+        "assessments": ass.get("assessments") or [],
+        "interviews": ivs or [],
+        "shortlist_reviews": reviews,
+    }

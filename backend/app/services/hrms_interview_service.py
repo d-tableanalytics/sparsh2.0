@@ -60,7 +60,7 @@ from app.models.hrms import (
 # ── Phase INT-2 ── interview governance (SOP §5).
 from app.models.hrms import (
     COLL_DESIGNATIONS, COLL_INTERVIEW_WINDOWS, FINAL_ROUND, FINAL_ROUND_PASSING, WEEKDAYS,
-    RequisitionTrack, designation_level, final_round_is_mandatory, required_panel_roles,
+    REQUISITION_TRACK_INTERNAL, designation_level, final_round_is_mandatory, required_panel_roles,
 )
 from app.services.hrms_audit_service import audit
 from app.services.hrms_ics import build_invite
@@ -68,6 +68,7 @@ from app.services.hrms_id_service import next_business_id
 from app.services.hrms_notify_service import notify_user
 from app.utils.hrms_access import can, hrms_role
 from app.utils.hrms_public_guard import clean_text
+from app.utils.hrms_access import tenant_member
 
 
 def _out(doc: dict) -> dict:
@@ -134,13 +135,7 @@ def _validate_place(mode, meeting_link, location) -> tuple:
 async def _resolve_interviewer(company_id: str, interviewer_id: str) -> dict:
     if not interviewer_id:
         raise HTTPException(status_code=422, detail="Choose who will take the interview.")
-    try:
-        oid = ObjectId(str(interviewer_id))
-    except (InvalidId, TypeError):
-        raise HTTPException(status_code=422, detail="Invalid interviewer.")
-    person = await get_collection("learners").find_one(
-        {"_id": oid, "company_id": str(company_id)},
-        {"full_name": 1, "first_name": 1, "last_name": 1, "email": 1})
+    person = await tenant_member(company_id, interviewer_id, {"full_name": 1, "first_name": 1, "last_name": 1, "email": 1})
     if not person:
         raise HTTPException(
             status_code=422, detail="The interviewer must be a user of this company.")
@@ -157,8 +152,7 @@ def _person_name(doc: dict) -> str:
 # Phase INT-2 — interview governance (SOP §5). Internal track only.
 # ─────────────────────────────────────────────────────────────
 def _is_internal(req: dict) -> bool:
-    return ((req or {}).get("requisition_track")
-            or RequisitionTrack.CLIENT.value) == RequisitionTrack.INTERNAL.value
+    return (req or {}).get("requisition_track") == REQUISITION_TRACK_INTERNAL
 
 
 async def _requisition_for(company_id: str, request_no: str) -> dict:
@@ -202,12 +196,7 @@ async def _resolve_panel(company_id: str, panel) -> list:
         user_id = str(entry.get("user_id") or "").strip()
         if not user_id:
             raise HTTPException(status_code=422, detail="Every panel member needs a user.")
-        try:
-            oid = ObjectId(user_id)
-        except (InvalidId, TypeError):
-            raise HTTPException(status_code=422, detail="Invalid panel member.")
-        person = await get_collection("learners").find_one(
-            {"_id": oid, "company_id": str(company_id)})
+        person = await tenant_member(company_id, user_id)
         if not person:
             raise HTTPException(
                 status_code=422,

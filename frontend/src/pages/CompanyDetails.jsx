@@ -16,7 +16,7 @@ import { useAuth } from '../context/AuthContext';
 import ORMReportTab from '../components/company/ORMReportTab';
 import ORMTargetRequestsTab from '../components/company/ORMTargetRequestsTab';
 import { setHrmsAccess } from '../services/hrmsApi';
-import { canToggleHrms } from '../features/hrms/access';
+import { canToggleHrms, isInternalCompany } from '../features/hrms/access';
 import {
   BarChart, Bar, LineChart, Line, PieChart, Pie, Cell,
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
@@ -539,14 +539,17 @@ const CompanyDetails = () => {
               title="Toggle whether this company can access the Task Management module"
             />
           )}
-          {/* HRMS module access. Off by default — a company has no HRMS until switched on
-              here. Admin / Super Admin only, matching the TPMS toggle. */}
-          {isHrmsToggler && (
+          {/* HRMS module access. Shown ONLY for the in-house company: HRMS is an
+              internal recruitment and HR system, not a module the ERP's client companies
+              can be given. routes/company.py refuses to enable it for anyone else, so
+              rendering the switch on a client company would be offering an action the
+              server answers with 403. */}
+          {isHrmsToggler && isInternalCompany(company) && (
             <ModuleToggle
               label="HRMS"
               enabled={company.hrms_enabled ?? false}
               onToggle={handleToggleHrms}
-              title="Toggle whether this company can access the HRMS module"
+              title="Toggle HRMS for the in-house company"
             />
           )}
           {canUpdate && (

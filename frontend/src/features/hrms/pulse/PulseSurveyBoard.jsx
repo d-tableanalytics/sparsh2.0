@@ -81,7 +81,7 @@ const PulseSurveyBoard = () => {
     <div className="space-y-6">
       <HrmsPageHeader
         icon={HeartPulse}
-        title="Pulse Surveys"
+        title="30/90-Day Surveys"
         subtitle="30/90-day onboarding check-ins, issued automatically from date of joining (SM-HR-058)."
         actions={canManage && (
           <Btn tone="ghost" onClick={() => setConfiguring(true)}>

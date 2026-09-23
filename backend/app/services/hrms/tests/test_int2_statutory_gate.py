@@ -142,6 +142,18 @@ async def main() -> None:
     MD = actor(U_MD, "MD", role="clientadmin")
     HR = actor(U_HR, "HR")
 
+    # 7.5 Stage 12: confirm_probation now needs a manager recommendation and an HR
+    # endorsement first. This suite is about the statutory gate, not the approval chain,
+    # so it walks the chain here rather than restating it at every call site.
+    async def _chain(prb_no, recommendation="Confirm"):
+        from app.models.hrms import PROBATION_CRITERIA_KEYS
+        await PB.submit_review(HOD, COMPANY, prb_no, {
+            **{k: 4 for k in PROBATION_CRITERIA_KEYS},
+            "recommendation": recommendation,
+            "remarks": "Reviewed.", "signature": "Hari HOD"})
+        await PB.hr_review(HR, COMPANY, prb_no,
+                           {"decision": "Endorsed", "signature": "Hana HR"})
+
     def confirm(**over):
         base = {"outcome": "Confirmed", "signature": "Hari HOD",
                 "remarks": "Met the bar."}
@@ -182,6 +194,7 @@ async def main() -> None:
         # =================================================================
         section("Confirmation is refused while checks are open")
         # =================================================================
+        await _chain("PRB-2026-001")
         await expect_http(
             "confirming with the background check in progress",
             PB.confirm_probation(HOD, COMPANY, "PRB-2026-001", confirm()),
@@ -191,6 +204,7 @@ async def main() -> None:
               still["outcome"] == M.ProbationOutcome.PENDING.value)
         check("the checks are checked BEFORE anything is written", True)
 
+        await _chain("PRB-2026-002", "Confirm")
         done = await PB.confirm_probation(HOD, COMPANY, "PRB-2026-002", confirm())
         check("an employee whose checks are complete confirms normally",
               done["outcome"] == M.ProbationOutcome.CONFIRMED.value)
@@ -199,6 +213,7 @@ async def main() -> None:
         section("It gates CONFIRMATION only")
         # =================================================================
         # Extending is exactly what you do when something is still outstanding.
+        await _chain("PRB-2026-001", "Extend")
         extended = await PB.confirm_probation(HOD, COMPANY, "PRB-2026-001", {
             "outcome": "Extended", "signature": "Hari HOD",
             "remarks": "Waiting on the background check.",
@@ -207,6 +222,7 @@ async def main() -> None:
               extended["outcome"] == M.ProbationOutcome.PENDING.value)
         check("and the extension is counted", extended["extension_count"] == 1)
 
+        await _chain("PRB-2026-003", "Separate")
         terminated = await PB.confirm_probation(HOD, COMPANY, "PRB-2026-003", {
             "outcome": "Terminated", "signature": "Hari HOD",
             "remarks": "Did not meet the bar."})
@@ -228,6 +244,7 @@ async def main() -> None:
             "exception_type": "Statutory Check Waived",
             "reason": ("The verification agency has not responded in three months; the "
                        "MD accepts the residual risk.")})
+        await _chain("PRB-2026-001")
         await expect_http(
             "a PENDING waiver lifts nothing",
             PB.confirm_probation(HOD, COMPANY, "PRB-2026-001", confirm()),
@@ -235,6 +252,7 @@ async def main() -> None:
 
         await EX.decide_exception(MD, COMPANY, raised["exc_no"], {
             "decision": "Approved", "signature": "Meera MD", "remarks": "Accepted."})
+        await _chain("PRB-2026-001", "Confirm")
         confirmed = await PB.confirm_probation(HOD, COMPANY, "PRB-2026-001", confirm())
         check("an APPROVED waiver lets the confirmation through",
               confirmed["outcome"] == M.ProbationOutcome.CONFIRMED.value)

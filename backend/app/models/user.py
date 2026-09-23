@@ -69,6 +69,11 @@ class UserResponse(UserBase):
     # on the TPMS flag it already receives.
 
     hrms_enabled: Optional[bool] = False  # Company-level HRMS module access (opt-in)
+    # Client Hiring access, the OTHER half of the HRMS toggle. `hrms_enabled` is only true
+    # for the in-house tenant (it requires `is_internal`), so a client company's user must
+    # be told about their own track separately or the module is invisible to them however
+    # the company toggle is set. Third time this class has dropped a flag; see below.
+    client_hiring_enabled: Optional[bool] = False
 
     # The client-side governance ladder (MD > HR > HOD > IMPLEMENTOR) that
     # auth_controller.client_rank already uses server-side. Declared here so it survives
@@ -76,9 +81,11 @@ class UserResponse(UserBase):
     # in features/hrms/access.js, and it must agree with the server's utils/hrms_access.py.
     #
     # Every module flag the frontend gates on has to be listed on this class. The same
-    # omission has now bitten twice: once as the original `delegation_enabled` bug above,
-    # and once when these two HRMS lines were dropped — which left `hrmsAccessState()`
-    # permanently 'unknown' and degraded every client user to the EMPLOYEE role. The
+    # omission has now bitten three times: the original `delegation_enabled` bug above;
+    # then when these HRMS lines were dropped, leaving `hrmsAccessState()` permanently
+    # 'unknown' and degrading every client user to the EMPLOYEE role; and again with
+    # `client_hiring_enabled`, which routes/user.py set correctly while this class silently
+    # stripped it, so Client Hiring was invisible to the very people it is for. The
     # regression guard in test_phase1_foundation.py asserts all of them stay declared.
     governance_role: Optional[str] = None
 

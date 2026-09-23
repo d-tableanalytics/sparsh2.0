@@ -1,8 +1,9 @@
-import React from 'react';
+import React, { useState } from 'react';
+import { ChevronDown } from 'lucide-react';
 // Constants and pure helpers live in the .js sibling, imported from there by both this
 // module and every screen. Re-exporting them here would break Fast Refresh again, which
 // is the whole reason for the split -- same pairing as analytics/analyticsKit.
-import { FIELD, LABEL } from './internalKit';
+import { CARD, FIELD, LABEL, tint } from './internalKit';
 
 /**
  * HRMS ▸ internal recruitment track — shared presentation pieces.
@@ -168,3 +169,86 @@ export const Btn = ({ tone = 'ghost', children, ...rest }) => {
   );
 };
 
+/**
+ * A headline number with its own tinted icon.
+ *
+ * Lives in the kit rather than on one dashboard because both hiring tracks show a row of
+ * these above the stage rail, and two hand-built copies would drift apart — which is the
+ * whole reason the two boards stopped looking like one module in the first place.
+ */
+export const Tile = ({ label, value, icon: Icon, tone = 'indigo', hint }) => (
+  <div className={`${CARD} !p-4 flex items-center gap-3`}>
+    <span className={`h-10 w-10 rounded-xl grid place-items-center shrink-0 ${tint(tone).bg}`}>
+      <Icon size={18} className={tint(tone).text} />
+    </span>
+    <div className="min-w-0">
+      <p className="text-[10.5px] font-bold uppercase tracking-widest text-[var(--text-muted)] truncate">
+        {label}
+      </p>
+      <p className={`text-[22px] font-bold tabular-nums leading-tight ${
+        tone === 'red' ? 'text-[var(--accent-red)]'
+          : tone === 'orange' ? 'text-[var(--accent-orange)]' : 'text-[var(--text-main)]'}`}>
+        {value}
+      </p>
+      {hint && (
+        <p className="text-[11px] text-[var(--text-muted)] truncate" title={hint}>{hint}</p>
+      )}
+    </div>
+  </div>
+);
+
+/**
+ * A collapsed-by-default "who hands off to whom" reference.
+ *
+ * Both hiring tracks answer the same question — internal hiring lists its twelve SOP
+ * handoffs, PRO-fit lists who owns each of its eight stages — and they answer it in the
+ * same place on the page, so they answer it with the same component. Collapsed because it
+ * is a reference to open when something is unclear, not something to scroll past on every
+ * visit.
+ */
+export const FlowAccordion = ({ icon: Icon, title, subtitle, steps }) => {
+  const [open, setOpen] = useState(false);
+  return (
+    <section className={`${CARD} !p-0 overflow-hidden`}>
+      <button type="button" onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+        className="w-full flex items-center justify-between gap-3 p-4 text-left">
+        <span className="flex items-center gap-2.5">
+          <span className="h-8 w-8 rounded-lg bg-[var(--accent-indigo-bg)] grid place-items-center shrink-0">
+            <Icon size={15} className="text-[var(--accent-indigo)]" />
+          </span>
+          <span>
+            <span className="block text-[13px] font-bold text-[var(--text-main)]">{title}</span>
+            <span className="block text-[11.5px] text-[var(--text-muted)]">{subtitle}</span>
+          </span>
+        </span>
+        <ChevronDown size={16}
+          className={`text-[var(--text-muted)] shrink-0 transition-transform ${open ? 'rotate-180' : ''}`} />
+      </button>
+      {open && (
+        <ol className="px-4 pb-4 space-y-0">
+          {steps.map((step, i) => (
+            <li key={i} className="flex gap-3">
+              <div className="flex flex-col items-center">
+                <span className="h-6 w-6 rounded-full bg-[var(--accent-indigo-bg)]
+                                 text-[var(--accent-indigo)] text-[10.5px] font-bold
+                                 grid place-items-center shrink-0">
+                  {i + 1}
+                </span>
+                {i < steps.length - 1 && (
+                  <span aria-hidden="true" className="w-px flex-1 bg-[var(--border)] my-0.5" />
+                )}
+              </div>
+              <div className="pb-4 min-w-0">
+                <p className="text-[12px] font-bold uppercase tracking-wide text-[var(--accent-indigo)]">
+                  {step.actor}
+                </p>
+                <p className="text-[13px] text-[var(--text-main)] mt-0.5">{step.action}</p>
+              </div>
+            </li>
+          ))}
+        </ol>
+      )}
+    </section>
+  );
+};

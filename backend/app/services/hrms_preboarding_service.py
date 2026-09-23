@@ -35,7 +35,7 @@ from app.db.mongodb import get_collection
 from app.models.hrms import (
     AUDIT_PREBOARDING_LOGGED, COLL_CANDIDATES, COLL_PREBOARDING, COLL_REQUISITIONS,
     ENTITY_PREBOARDING, PREBOARDING_CONTACT_DAYS, PREBOARDING_STATUSES, RETENTION_YEARS,
-    AppStatus, PreboardingMode, PreboardingSentiment, RequisitionTrack, is_iso_date,
+    AppStatus, PreboardingMode, PreboardingSentiment, REQUISITION_TRACK_INTERNAL, is_iso_date,
 )
 from app.services.hrms_audit_service import audit
 from app.services.hrms_config_service import retention_years_for
@@ -116,7 +116,7 @@ async def due_touchpoints(actor: dict, company_id: str, *,
     # rather than filtered afterwards.
     reqs = await get_collection(COLL_REQUISITIONS).find(
         {"company_id": str(company_id),
-         "requisition_track": RequisitionTrack.INTERNAL.value},
+         "requisition_track": REQUISITION_TRACK_INTERNAL},
         {"request_no": 1, "designation_name": 1}).to_list(2000)
     request_nos = [r["request_no"] for r in reqs if r.get("request_no")]
     designation = {r["request_no"]: r.get("designation_name") for r in reqs}
@@ -179,13 +179,12 @@ async def record_touchpoint(actor: dict, company_id: str, payload: dict) -> dict
     if candidate.get("request_no"):
         req = await get_collection(COLL_REQUISITIONS).find_one(
             {"request_no": candidate["request_no"], "company_id": str(company_id)}) or {}
-    track = req.get("requisition_track") or RequisitionTrack.CLIENT.value
-    if track != RequisitionTrack.INTERNAL.value:
+    track = req.get("requisition_track")
+    if track != REQUISITION_TRACK_INTERNAL:
         raise HTTPException(
             status_code=409,
-            detail=(f'{candidate.get("candidate_name")} is on a client requisition. '
-                    f"Pre-boarding engagement is Sparsh Magic's practice for its own "
-                    f"joiners -- a client's new hire is the client's to keep warm."))
+            detail=(f'{candidate.get("candidate_name")} is on a requisition that '
+                    f"is a legacy client-track requisition and is not part of hiring any more."))
 
     status = candidate.get("application_status")
     if status not in {s.value for s in PREBOARDING_STATUSES}:

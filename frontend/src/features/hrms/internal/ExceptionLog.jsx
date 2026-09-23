@@ -220,11 +220,14 @@ const RaiseModal = ({ scope, onClose, onDone, showSuccess, showError }) => {
   const [reqs, setReqs] = useState([]);
   const [form, setForm] = useState({
     request_no: '', exception_type: 'Reference Check Waived', reason: '', uk: '',
+    requested_ctc: '',
   });
+  // An Offer Outside Budget request IS a request for a figure, so the form asks for one.
+  const needsAmount = form.exception_type === 'Offer Outside Budget';
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    getRequisitions({ ...scope, track: 'internal', limit: 200 })
+    getRequisitions({ ...scope, limit: 200 })
       .then(({ data }) => setReqs(data?.requisitions || []))
       .catch(() => setReqs([]));
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -235,9 +238,17 @@ const RaiseModal = ({ scope, onClose, onDone, showSuccess, showError }) => {
       showError('Choose a requisition and say why the deviation is needed.');
       return;
     }
+    if (needsAmount && !(Number(form.requested_ctc) > 0)) {
+      showError('Say what CTC you are asking Finance to approve.');
+      return;
+    }
     setBusy(true);
     try {
-      const { data } = await raiseException({ ...form, uk: form.uk || null }, scope);
+      const { data } = await raiseException({
+        ...form,
+        uk: form.uk || null,
+        requested_ctc: needsAmount ? Number(form.requested_ctc) : null,
+      }, scope);
       showSuccess(`${data.exc_no} logged — it lifts nothing until it is approved`);
       onDone();
     } catch (err) {
@@ -290,6 +301,19 @@ const RaiseModal = ({ scope, onClose, onDone, showSuccess, showError }) => {
         </p>
       </div>
 
+      {needsAmount && (
+        <div>
+          <label className={LABEL} htmlFor="exc-ctc">CTC you are asking Finance for *</label>
+          <input id="exc-ctc" type="number" min="1" value={form.requested_ctc}
+            className={FIELD} placeholder="1300000"
+            onChange={(e) => setForm((f) => ({ ...f, requested_ctc: e.target.value }))} />
+          <p className="mt-1 text-[11px] text-[var(--text-muted)]">
+            Finance approves a figure, not a direction. The offer is then held to whatever
+            they approve, so an offer above it is refused exactly as one above the band is.
+          </p>
+        </div>
+      )}
+
       <div>
         <label className={LABEL} htmlFor="exc-uk">Candidate (optional)</label>
         <input id="exc-uk" value={form.uk} className={FIELD} placeholder="CAN-001"
@@ -316,6 +340,11 @@ const DecideModal = ({ row, scope, busy, setBusy, onClose, onDone,
   showSuccess, showError }) => {
   const [signature, setSignature] = useState('');
   const [remarks, setRemarks] = useState('');
+  // A budget request names a figure, and Finance may grant less than was asked for.
+  // Pre-filled with the request so approving unchanged means "yes, that amount".
+  const isBudget = row.exception_type === 'Offer Outside Budget';
+  const [approvedCtc, setApprovedCtc] = useState(
+    row.requested_ctc != null ? String(row.requested_ctc) : '');
 
   const decide = async (decision) => {
     if (!signature.trim()) {
@@ -326,10 +355,18 @@ const DecideModal = ({ row, scope, busy, setBusy, onClose, onDone,
       showError('Say why it is refused, so the raiser knows what to do next.');
       return;
     }
+    if (isBudget && decision === 'Approved' && !(Number(approvedCtc) > 0)) {
+      showError('Say what CTC you are approving.');
+      return;
+    }
     setBusy(true);
     try {
-      await decideException(row.exc_no,
-        { decision, signature: signature.trim(), remarks: remarks.trim() }, scope);
+      await decideException(row.exc_no, {
+        decision,
+        signature: signature.trim(),
+        remarks: remarks.trim(),
+        approved_ctc: isBudget && decision === 'Approved' ? Number(approvedCtc) : null,
+      }, scope);
       showSuccess(`${row.exc_no} ${decision.toLowerCase()}`);
       onDone();
     } catch (err) {
@@ -359,6 +396,14 @@ const DecideModal = ({ row, scope, busy, setBusy, onClose, onDone,
           { label: 'Scope', value: row.uk ? (row.candidate_name || row.uk) : 'All candidates' },
           { label: 'Raised by', value: row.raised_by_name },
           { label: 'Raised on', value: day(row.raised_at) },
+          ...(isBudget ? [
+            { label: 'Approved band',
+              value: row.band_max_at_request != null
+                ? `up to ${Number(row.band_max_at_request).toLocaleString()}` : '—' },
+            { label: 'Asking for',
+              value: row.requested_ctc != null
+                ? Number(row.requested_ctc).toLocaleString() : '—' },
+          ] : []),
         ]} />
         <p className="mt-2.5 text-[12.5px] text-[var(--text-main)]">{row.reason}</p>
         {row.gate && (
@@ -368,6 +413,19 @@ const DecideModal = ({ row, scope, busy, setBusy, onClose, onDone,
           </p>
         )}
       </div>
+
+      {isBudget && (
+        <div>
+          <label className={LABEL} htmlFor="exc-approved-ctc">CTC you approve *</label>
+          <input id="exc-approved-ctc" type="number" min="1" value={approvedCtc}
+            className={FIELD}
+            onChange={(e) => setApprovedCtc(e.target.value)} />
+          <p className="mt-1 text-[11px] text-[var(--text-muted)]">
+            You can approve less than was asked for, never more. The offer is held to this
+            figure — anything above it is refused.
+          </p>
+        </div>
+      )}
 
       <p className="text-[11.5px] text-[var(--text-muted)]">
         A deviation is granted by somebody other than the person who asked for it — if you

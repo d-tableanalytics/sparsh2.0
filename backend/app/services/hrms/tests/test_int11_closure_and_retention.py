@@ -32,6 +32,7 @@ Run:  python -m app.services.hrms.tests.test_int11_closure_and_retention   (from
 from __future__ import annotations
 
 import asyncio
+import base64
 from datetime import datetime, timedelta, timezone
 
 results: list[bool] = []
@@ -124,6 +125,16 @@ async def main() -> None:
     for mod in SERVICES:
         mod.get_collection = mongo.get_collection
 
+    # Resume upload is mandatory on the public form as of this phase, so F3's
+    # submit_application() call now actually reaches the upload step -- fake it out rather
+    # than hitting real S3, the same as test_e2e_recruitment_journey does.
+    def fake_s3(stream, filename, mime):
+        return {"key": f"s3/{filename}", "url": "https://signed.example/x"}
+
+    import app.services.s3_service as S3
+    original_s3 = S3.upload_file_to_s3_with_key
+    S3.upload_file_to_s3_with_key = fake_s3
+
     async def silent(*a, **kw):
         return None
     for mod in SERVICES:
@@ -198,17 +209,6 @@ async def main() -> None:
         check("the internal requisition is still Open",
               await closing_of(IREQ) == M.ReqClosing.OPEN.value)
 
-        section("F2 -- the CLIENT track is unchanged: acceptance still closes it")
-        client = await RS.create_requisition(HOD, COMPANY, payload(track="client"))
-        CREQ = client["request_no"]
-        await RS.act_on_requisition(HR, COMPANY, CREQ, "hr-approve")
-        await RS.act_on_requisition(MD, COMPANY, CREQ, "md-approve")
-        await add_accepted_candidate(CREQ, "Bala")
-        closed = await OF.reconcile_requisition_closure(HR, COMPANY, CREQ)
-        check("a client requisition still closes as Hired on acceptance",
-              closed == M.ReqClosing.HIRED.value)
-        check("...and is stamped Hired", await closing_of(CREQ) == M.ReqClosing.HIRED.value)
-
         section("F2 -- probation confirmation is what closes the internal one")
         await store[M.COLL_EMPLOYEE_PROFILES].insert_one({
             "_id": ObjectId(), "company_id": COMPANY, "employee_code": "EMP-1",
@@ -224,6 +224,14 @@ async def main() -> None:
 
         async def _noop():
             return None
+
+        async def _chain(prb_no):
+            # §7.5 Stage 12: the manager recommends and HR endorses before anybody decides.
+            await PR.submit_review(HOD, COMPANY, prb_no, {
+                "performance": 4, "conduct": 4, "attendance": 4, "competence": 4,
+                "suitability": 4, "recommendation": "Confirm", "signature": "Hari HOD"})
+            await PR.hr_review(HR, COMPANY, prb_no, {"decision": "Endorsed", "signature": "HR"})
+        await _chain(prb["prb_no"])
         confirmed = await PR.confirm_probation(HOD, COMPANY, prb["prb_no"], {
             "outcome": M.ProbationOutcome.CONFIRMED.value, "signature": "Hari HOD",
             "remarks": "Confirmed."})
@@ -254,14 +262,17 @@ async def main() -> None:
                 "started_on": (TODAY - timedelta(days=200)).strftime("%Y-%m-%d"),
                 "duration_months": 6})
             prbs.append(p["prb_no"])
+        await _chain(prbs[0])
         await PR.confirm_probation(HOD, COMPANY, prbs[0], {
             "outcome": M.ProbationOutcome.CONFIRMED.value, "signature": "H", "remarks": "ok"})
         check("1 of 3 confirmed -- still Open",
               await closing_of(MREQ) == M.ReqClosing.OPEN.value)
+        await _chain(prbs[1])
         await PR.confirm_probation(HOD, COMPANY, prbs[1], {
             "outcome": M.ProbationOutcome.CONFIRMED.value, "signature": "H", "remarks": "ok"})
         check("2 of 3 confirmed -- still Open",
               await closing_of(MREQ) == M.ReqClosing.OPEN.value)
+        await _chain(prbs[2])
         await PR.confirm_probation(HOD, COMPANY, prbs[2], {
             "outcome": M.ProbationOutcome.CONFIRMED.value, "signature": "H", "remarks": "ok"})
         check("3 of 3 confirmed -- NOW it closes",
@@ -285,14 +296,17 @@ async def main() -> None:
               == str(int(str(mrow["applied_at"])[:4]) + expected_unselected))
 
         section("F3 -- and when one arrives through the public form")
-        posting = await PS.create_posting(HR, COMPANY, {"jd_no": fresh["jd_no"]})
+        posting = await PS.create_posting(HR, COMPANY, {"jd_no": fresh["jd_no"], "channels": ["Job Portals"]})
         code = posting["posting"]["posting_code"]
+        await PS.publish_posting(HR, COMPANY, code)
         applied = await PS.submit_application(code, {
             "candidate_name": "Gita", "can_email": "gita@example.com",
             "can_contact": "+91 90000 00003", "declaration": True,
             "referral_source": M.ReferralSource.JOB_PORTAL.value,
             # Internal track: the SOP §11 acknowledgements are mandatory on this form.
-            "eeo_ack": True, "data_use_ack": True})
+            "eeo_ack": True, "data_use_ack": True,
+            "resume": {"name": "gita.pdf", "mime_type": "application/pdf",
+                       "data": base64.b64encode(b"%PDF-1.4 curriculum vitae").decode()}})
         grow = await store[M.COLL_CANDIDATES].find_one({"uk": applied["reference"]})
         check("a public application carries a retention floor",
               bool(grow.get("retention_until")))
@@ -362,6 +376,7 @@ async def main() -> None:
 
     finally:
         mongo.get_collection = original
+        S3.upload_file_to_s3_with_key = original_s3
         NS.notify_user, NS.notify_hrms_role = keep_notify
 
     print()

@@ -124,10 +124,10 @@ async def main() -> None:
         {"onb_no": "ONB-001", "company_id": COMPANY, "request_no": "HR-REQ-2026-001",
          "employee_id": "EMP-2026-001", "joining_date": d(120),
          "checklist": [{**i, "done": i["key"] == "induction_feedback"}
-                       for i in M.seed_checklist("internal")]},
+                       for i in M.seed_checklist()]},
         {"onb_no": "ONB-002", "company_id": COMPANY, "request_no": "HR-REQ-2026-002",
          "employee_id": "EMP-2026-002", "joining_date": d(10),
-         "checklist": M.seed_checklist("internal")},
+         "checklist": M.seed_checklist()},
     ])
     profiles = FakeCollection([
         # Joined 120 days ago, still here -> retained.

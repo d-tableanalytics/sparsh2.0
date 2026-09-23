@@ -24,6 +24,7 @@ nothing in this codebase does that yet. Asset/clearance recoveries ARE rolled up
 (§22.2 step 196), because those numbers already live in this module's own collections.
 """
 from datetime import datetime, timezone
+import re
 from typing import Optional
 
 from bson import ObjectId
@@ -31,6 +32,7 @@ from bson.errors import InvalidId
 from fastapi import HTTPException
 
 from app.db.mongodb import get_collection
+from app.utils.hrms_public_guard import clean_text
 from app.models.hrms import (
     AUDIT_ACCESS_CLEARANCE_CREATED, AUDIT_ACCESS_CLEARANCE_UPDATED,
     AUDIT_ASSET_RETURN_CREATED, AUDIT_ASSET_RETURN_UPDATED,
@@ -43,7 +45,7 @@ from app.models.hrms import (
     CLOSED_SEPARATION_STAGES,
     COLL_ACCESS_CLEARANCES, COLL_ASSET_RETURNS, COLL_CLEARANCE_TASKS,
     COLL_DESIGNATIONS, COLL_EMPLOYEE_PROFILES, COLL_EXIT_INTERVIEWS,
-    COLL_FNF_SETTLEMENTS, COLL_HANDOVER_TASKS, COLL_PROBATION_REVIEWS,
+    COLL_ALUMNI, COLL_FNF_SETTLEMENTS, COLL_HANDOVER_TASKS, COLL_PROBATION_REVIEWS,
     COLL_SEPARATIONS,
     ENTITY_ACCESS_CLEARANCE, ENTITY_ASSET_RETURN, ENTITY_CLEARANCE,
     ENTITY_EXIT_INTERVIEW, ENTITY_FNF, ENTITY_HANDOVER, ENTITY_SEPARATION,
@@ -156,11 +158,53 @@ async def _is_on_probation(company_id: str, employee_code: str) -> bool:
 
 
 async def _reporting_manager_id(profile: dict) -> Optional[str]:
+    """Who signs off this person's handover.
+
+    The linked login is asked first, because that is the record a manager change is made
+    on once somebody has an account. The PROFILE's own `reporting_manager_id` is the
+    fallback, and it is the only answer for an employee created straight through
+    onboarding: confirm_joining records their manager there, and `link_user` is a separate,
+    optional step that may never happen. Reading only the login left `reporting_manager_id`
+    empty on the separation, so nobody at all could accept the handover -- and BR-025 then
+    refused to close the exit, leaving a forced closure as the only way out of a case where
+    nothing had actually gone wrong.
+    """
     user_id = profile.get("user_id")
-    if not user_id:
-        return None
-    user, _coll = await _find_user(user_id)
-    return (user or {}).get("reporting_manager")
+    if user_id:
+        user, _coll = await _find_user(user_id)
+        if (user or {}).get("reporting_manager"):
+            return user["reporting_manager"]
+    return profile.get("reporting_manager_id")
+
+
+async def _own_employee_code(actor: dict, company_id: str) -> Optional[str]:
+    """The employee code belonging to the caller, or None if they have no profile."""
+    profile = await get_collection(COLL_EMPLOYEE_PROFILES).find_one(
+        {"company_id": str(company_id), "user_id": str((actor or {}).get("_id") or "")})
+    return (profile or {}).get("employee_code")
+
+
+async def assert_own_case(actor: dict, company_id: str, employee_code: str) -> None:
+    """An employee may only act on their OWN exit.
+
+    SEPARATION_INITIATE and EXIT_INTERVIEW_WRITE are granted to every employee so they can
+    resign and complete their own exit interview (7.18 step 137, 22.2 step 195). Without
+    this check that grant also let any employee open a separation case against ANY
+    colleague -- the capability comment in models/hrms.py flagged the missing ownership
+    check as a follow-up, and this is it.
+
+    Anyone holding SEPARATION_MANAGE is acting for HR and is not restricted; the check
+    only binds callers whose sole route in is the self-service grant.
+    """
+    from app.models.hrms import Cap
+    from app.utils.hrms_access import can
+    if can(actor, Cap.SEPARATION_MANAGE):
+        return
+    own = await _own_employee_code(actor, company_id)
+    if not own or own != employee_code:
+        raise HTTPException(
+            status_code=403,
+            detail="You can only do this for your own employment record.")
 
 
 async def _get_separation(company_id: str, sep_no: str) -> dict:
@@ -197,6 +241,9 @@ async def initiate_separation(actor: dict, company_id: str, payload: dict) -> di
     if not employee_code:
         raise HTTPException(status_code=422, detail="Select an employee.")
 
+    # An employee resigns for themselves; HR raises a case for anybody.
+    await assert_own_case(actor, company_id, employee_code)
+
     existing_open = await get_collection(COLL_SEPARATIONS).find_one({
         "company_id": str(company_id), "employee_code": employee_code,
         "stage": {"$nin": list(CLOSED_SEPARATION_STAGES)},
@@ -226,7 +273,11 @@ async def initiate_separation(actor: dict, company_id: str, payload: dict) -> di
         "sep_no": sep_no,
         "company_id": str(company_id),
         "employee_code": employee_code,
-        "employee_name": profile.get("display_name") or profile.get("full_name"),
+        # A profile created by onboarding carries the person's name in identity_snapshot
+        # rather than in a top-level field, so without this the case -- and every
+        # notification and alumni row built from it -- was addressed to nobody.
+        "employee_name": (profile.get("display_name") or profile.get("full_name")
+                          or (profile.get("identity_snapshot") or {}).get("name")),
         "user_id": profile.get("user_id"),
         "reporting_manager_id": manager_id,
         "exit_type": exit_type,
@@ -271,6 +322,9 @@ async def initiate_separation(actor: dict, company_id: str, payload: dict) -> di
     await audit(actor, AUDIT_SEPARATION_INITIATED, ENTITY_SEPARATION, sep_no,
                f"{employee_code}, {exit_type}, calculated notice {calculated_days}d "
                f"(LWD {calculated_lwd})", company_id)
+    # 7.18 step 2: the reporting manager is told, and HR picks up the retention
+    # conversation. Nothing here notified anybody before.
+    await _notify_exit(company_id, doc, "initiated")
     return _out(doc)
 
 
@@ -364,6 +418,11 @@ async def decide_separation(actor: dict, company_id: str, sep_no: str, payload: 
     await audit(actor, AUDIT_SEPARATION_DECIDED, ENTITY_SEPARATION, sep_no,
                f"recommended LWD {updates['recommended_lwd']}"
                + (" — awaiting approval" if needs_approval else " — final"), company_id)
+    fresh = await _get_separation(company_id, sep_no)
+    await _notify_exit(company_id, fresh, "decided")
+    if fresh.get("recommended_lwd") and not fresh.get("final_lwd"):
+        # Early release: BR-016 needs somebody to approve it, and nothing told them.
+        await _notify_exit(company_id, fresh, "approval_needed")
     return await get_separation(actor, company_id, sep_no)
 
 
@@ -723,7 +782,10 @@ async def save_exit_interview(actor: dict, company_id: str, sep_no: str, payload
     """Upsert — one interview per case (COLL_EXIT_INTERVIEWS carries a unique index on
     (company_id, sep_no)), so a re-submission corrects the same record rather than
     accumulating duplicates."""
-    await _get_separation(company_id, sep_no)   # 404s if the case does not exist
+    sep = await _get_separation(company_id, sep_no)   # 404s if the case does not exist
+    # EXIT_INTERVIEW_WRITE is granted to every employee so they can complete their OWN
+    # exit interview. Without this it also let them write to anybody else's.
+    await assert_own_case(actor, company_id, sep.get("employee_code"))
     now = datetime.now(timezone.utc)
     clean = {k: v for k, v in payload.items() if v is not None}
     clean["updated_at"] = now
@@ -897,7 +959,141 @@ async def mark_fnf_paid(actor: dict, company_id: str, sep_no: str, payload: dict
 # ─────────────────────────────────────────────────────────────
 # §22.2 step 199 — Closure
 # ─────────────────────────────────────────────────────────────
-async def close_separation(actor: dict, company_id: str, sep_no: str, *, force: bool = False) -> dict:
+# ─────────────────────────────────────────────────────────────
+# The Last Working Day (7.18 step 10)
+# ─────────────────────────────────────────────────────────────
+async def _revoke_login(company_id: str, employee_code: str) -> bool:
+    """Deactivate the leaver's login. Returns whether a row was actually changed.
+
+    Same write `close_separation` has always done -- what changes is WHEN. Closure sits
+    behind the F&F being paid, which is typically weeks after the person stopped coming
+    in; leaving their account live for that window is the gap this closes.
+    """
+    profile = await get_collection(COLL_EMPLOYEE_PROFILES).find_one(
+        {"company_id": str(company_id), "employee_code": employee_code}, {"user_id": 1})
+    user_id = (profile or {}).get("user_id")
+    if not user_id:
+        return False
+    for coll_name in USER_COLLECTIONS:
+        result = await get_collection(coll_name).update_one(
+            {"_id": _oid(user_id)}, {"$set": {"is_active": False}})
+        if getattr(result, "modified_count", 0):
+            return True
+    return False
+
+
+async def run_lwd_sweep(company_id: str) -> dict:
+    """On the last working day: revoke access, and open the F&F if nobody has.
+
+    Anchored on `final_lwd` -- the approved date -- and never on the calculated one, which
+    is only a proposal until somebody accepts it. Idempotent: `lwd_processed_at` is stamped
+    on the case, so a re-run does nothing and a case processed by hand first is skipped.
+
+    Deliberately does NOT close the case. Closure means the F&F is settled and the
+    clearances are done, which is a human judgement (BR-025); this only does the two
+    things that should not wait for it.
+    """
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    cases = await get_collection(COLL_SEPARATIONS).find({
+        "company_id": str(company_id),
+        "stage": {"$nin": list(CLOSED_SEPARATION_STAGES)},
+        "final_lwd": {"$ne": None, "$lte": today},
+        "lwd_processed_at": None,
+    }).to_list(500)
+
+    revoked = fnf_opened = 0
+    for case in cases:
+        sep_no = case["sep_no"]
+        now = datetime.now(timezone.utc)
+        changes = {"lwd_processed_at": now, "updated_at": now}
+
+        if await _revoke_login(company_id, case.get("employee_code")):
+            revoked += 1
+            changes["access_revoked_at"] = now
+            await audit(None, AUDIT_SEPARATION_DECIDED, ENTITY_SEPARATION, sep_no,
+                        "login deactivated on the last working day", company_id)
+
+        # Open the F&F so it is waiting for Finance rather than waiting to be remembered.
+        existing = await get_collection(COLL_FNF_SETTLEMENTS).find_one(
+            {"company_id": str(company_id), "sep_no": sep_no})
+        if not existing:
+            await get_collection(COLL_FNF_SETTLEMENTS).insert_one({
+                "company_id": str(company_id), "sep_no": sep_no,
+                "employee_code": case.get("employee_code"),
+                "status": FnfStatus.DRAFT.value,
+                "opened_by_system": True,
+                "created_at": now, "updated_at": now,
+            })
+            fnf_opened += 1
+            if case.get("stage") not in (SeparationStage.FNF_PENDING.value,
+                                         SeparationStage.FNF_APPROVED.value,
+                                         SeparationStage.SETTLED.value):
+                changes["stage"] = SeparationStage.FNF_PENDING.value
+
+        await get_collection(COLL_SEPARATIONS).update_one(
+            {"sep_no": sep_no, "company_id": str(company_id)}, {"$set": changes})
+        await _notify_exit(company_id, case, "lwd_reached")
+
+    return {"checked": len(cases), "access_revoked": revoked, "fnf_opened": fnf_opened}
+
+
+# ─────────────────────────────────────────────────────────────
+# Notifications (7.18 step 2 and the rest of the chain)
+# ─────────────────────────────────────────────────────────────
+async def _notify_exit(company_id: str, case: dict, event: str, **extra) -> None:
+    """Tell whoever the event concerns. Best-effort, never load-bearing.
+
+    This module sent nothing at all before: a resignation reached the reporting manager
+    only if somebody told them out of band, which is exactly what step 2 of the workflow
+    exists to prevent.
+    """
+    try:
+        from app.services.hrms_notify_service import notify_hrms_role, notify_user
+        name = case.get("employee_name") or case.get("employee_code")
+        sep_no = case.get("sep_no")
+        link = f"/hrms/separations/{sep_no}"
+        manager_id = case.get("reporting_manager_id")
+
+        if event == "initiated":
+            if manager_id:
+                await notify_user(
+                    manager_id, f"{name} has resigned",
+                    f"{name} raised {sep_no}. Their notice runs to "
+                    f"{case.get('calculated_lwd')}. You own their handover acceptance.",
+                    link=link)
+            await notify_hrms_role(
+                company_id, ["HR"], f"Exit initiated: {name}",
+                f"{sep_no} ({case.get('exit_type')}). Notice calculated to "
+                f"{case.get('calculated_lwd')}. Start the retention conversation and "
+                f"record the decision.", link=link, email=True)
+        elif event == "decided":
+            if manager_id:
+                await notify_user(
+                    manager_id, f"Last working day set for {name}",
+                    f"{sep_no}: {case.get('final_lwd') or case.get('recommended_lwd')}. "
+                    f"Handover and clearance are open.", link=link)
+        elif event == "approval_needed":
+            await notify_hrms_role(
+                company_id, ["HR", "admin"], f"Early release needs approval: {name}",
+                f"{sep_no} proposes leaving before the notice period ends. "
+                f"It cannot complete until somebody approves the waiver.",
+                link=link, email=True)
+        elif event == "lwd_reached":
+            await notify_hrms_role(
+                company_id, ["HR"], f"Last working day reached: {name}",
+                f"{sep_no}: access has been revoked and the full & final settlement is "
+                f"open for input.", link=link, email=True)
+        elif event == "closed":
+            await notify_hrms_role(
+                company_id, ["HR"], f"Exit closed: {name}",
+                f"{sep_no} is closed and {name} has been archived to alumni.", link=link)
+    except Exception as e:                          # pragma: no cover - defensive
+        print(f"[WARN] exit notification ({event}) not sent for "
+              f"{case.get('sep_no')}: {e}")
+
+
+async def close_separation(actor: dict, company_id: str, sep_no: str, *,
+                           force: bool = False, force_reason: str = None) -> dict:
     """BR-025: exit cannot be treated as complete until mandatory handover and clearance
     tasks are completed or formally waived. `force` is HR's explicit override for a task that
     will never close (e.g. an absconding case with no handover possible) — recorded as such
@@ -905,6 +1101,15 @@ async def close_separation(actor: dict, company_id: str, sep_no: str, *, force: 
     """
     sep = await _get_separation(company_id, sep_no)
     _require_open(sep)
+
+    # An override with no reason is indistinguishable from a mistake six months later,
+    # and this one closes an exit with work outstanding.
+    force_reason = clean_text(force_reason, limit=2000) if force else None
+    if force and not force_reason:
+        raise HTTPException(
+            status_code=422,
+            detail=("Say why this exit is being closed with tasks outstanding. A forced "
+                    "closure with no reason cannot be reviewed later."))
 
     if not force:
         open_handover = await get_collection(COLL_HANDOVER_TASKS).count_documents(
@@ -915,11 +1120,24 @@ async def close_separation(actor: dict, company_id: str, sep_no: str, *, force: 
              "status": ClearanceStatus.PENDING.value})
         fnf = await get_collection(COLL_FNF_SETTLEMENTS).find_one(
             {"company_id": str(company_id), "sep_no": sep_no})
+        # Asset returns and access items were NOT checked before, which meant a case
+        # could be closed with a laptop outstanding and a live VPN account -- the two
+        # things the business rule most obviously means by "clearance".
+        open_assets = await get_collection(COLL_ASSET_RETURNS).count_documents(
+            {"company_id": str(company_id), "sep_no": sep_no,
+             "status": AssetReturnStatus.PENDING.value})
+        open_access = await get_collection(COLL_ACCESS_CLEARANCES).count_documents(
+            {"company_id": str(company_id), "sep_no": sep_no,
+             "status": AccessClearanceStatus.PENDING.value})
         problems = []
         if open_handover:
             problems.append(f"{open_handover} handover task(s) not yet accepted/rejected")
         if open_clearance:
             problems.append(f"{open_clearance} clearance task(s) still pending")
+        if open_assets:
+            problems.append(f"{open_assets} asset(s) not yet returned or written off")
+        if open_access:
+            problems.append(f"{open_access} access item(s) not yet disabled")
         if not fnf or fnf.get("status") != FnfStatus.PAID.value:
             problems.append("F&F is not marked Paid")
         if problems:
@@ -933,16 +1151,27 @@ async def close_separation(actor: dict, company_id: str, sep_no: str, *, force: 
         {"company_id": str(company_id), "sep_no": sep_no},
         {"$set": {"stage": SeparationStage.CLOSED.value, "closed_at": now, "updated_at": now}})
 
+    status = (EmploymentStatus.TERMINATED.value
+             if sep.get("exit_type") in (ExitType.TERMINATION.value, ExitType.ABSCONDING.value)
+             else EmploymentStatus.RESIGNED.value)
     if sep.get("user_id"):
         from app.services.hrms_employee_service import update_profile
-        status = (EmploymentStatus.TERMINATED.value
-                 if sep.get("exit_type") in (ExitType.TERMINATION.value, ExitType.ABSCONDING.value)
-                 else EmploymentStatus.RESIGNED.value)
         await update_profile(actor, sep["user_id"],
                              {"employment_status": status, "resigned_on": final_lwd}, company_id)
         for coll in USER_COLLECTIONS:
             await get_collection(coll).update_one(
                 {"_id": ObjectId(sep["user_id"])}, {"$set": {"is_active": False}})
+    elif sep.get("employee_code"):
+        # An employee created straight through onboarding (Stage 9) has no login yet, so
+        # `update_profile` -- keyed on `user_id` -- has nothing to find and this whole
+        # deactivation silently never ran. BR-025 and this function's own docstring say the
+        # employee "is deactivated and moved to Resigned/Terminated on close" with no carve-out
+        # for one who never got a login; there is no `is_active` flag to clear here, only the
+        # employment_status write, but that write is the one this function must not skip.
+        await get_collection(COLL_EMPLOYEE_PROFILES).update_one(
+            {"company_id": str(company_id), "employee_code": sep["employee_code"]},
+            {"$set": {"employment_status": status, "resigned_on": final_lwd,
+                      "updated_at": now}})
 
     # §7.15 BR: "If employee leaves before 12 months, held 25% is not payable." Any
     # variable-pay hold still sitting as Held at closure has, by definition, not already
@@ -951,6 +1180,72 @@ async def close_separation(actor: dict, company_id: str, sep_no: str, *, force: 
     from app.services.hrms_variable_pay_service import forfeit_holds_for_separation
     await forfeit_holds_for_separation(company_id, sep["employee_code"], sep_no)
 
+    await _archive_to_alumni(company_id, sep, final_lwd)
+
     await audit(actor, AUDIT_SEPARATION_CLOSED, ENTITY_SEPARATION, sep_no,
-               f"LWD {final_lwd}" + (" (forced)" if force else ""), company_id)
+               f"LWD {final_lwd}"
+               + (f" (forced: {force_reason})" if force else ""), company_id)
+    await _notify_exit(company_id, sep, "closed")
     return await get_separation(actor, company_id, sep_no)
+
+
+async def _archive_to_alumni(company_id: str, sep: dict, final_lwd: str) -> None:
+    """Write the alumni record the closure step is supposed to leave behind.
+
+    A leaver previously just had their employment_status flipped and their login switched
+    off -- there was no record you could ask "who has left, when, and would we take them
+    back". This is that record: a small, deliberate summary rather than a copy of the
+    personnel file, because an alumni list is read by people who should not be reading
+    somebody's old salary or their exit interview verbatim.
+
+    Best-effort: the exit is already closed, and failing to write the archive must not
+    undo that.
+    """
+    try:
+        interview = await get_collection(COLL_EXIT_INTERVIEWS).find_one(
+            {"company_id": str(company_id), "sep_no": sep["sep_no"]}) or {}
+        profile = await get_collection(COLL_EMPLOYEE_PROFILES).find_one(
+            {"company_id": str(company_id),
+             "employee_code": sep.get("employee_code")}) or {}
+        now = datetime.now(timezone.utc)
+        await get_collection(COLL_ALUMNI).update_one(
+            {"company_id": str(company_id), "employee_code": sep.get("employee_code")},
+            {"$set": {
+                "company_id": str(company_id),
+                "employee_code": sep.get("employee_code"),
+                "employee_name": sep.get("employee_name"),
+                "sep_no": sep["sep_no"],
+                "exit_type": sep.get("exit_type"),
+                "joined_on": profile.get("joined_on"),
+                "last_working_day": final_lwd,
+                "department_id": profile.get("department_id"),
+                "designation_id": profile.get("designation_id"),
+                # The one judgement worth carrying forward, and the reason an alumni list
+                # is useful at all: would we hire them again.
+                "rehire_recommended": interview.get("rehire_recommended"),
+                "archived_at": now,
+            }},
+            upsert=True)
+        await audit(None, AUDIT_SEPARATION_CLOSED, ENTITY_SEPARATION, sep["sep_no"],
+                    "archived to alumni", company_id)
+    except Exception as e:                          # pragma: no cover - defensive
+        print(f"[WARN] alumni archive failed for {sep.get('sep_no')}: {e}")
+
+
+async def list_alumni(actor: dict, company_id: str, *, search: str = None,
+                      rehire_only: bool = False, limit: int = 200) -> dict:
+    """Former employees, as a list somebody can actually search when rehiring."""
+    query = {"company_id": str(company_id)}
+    if rehire_only:
+        query["rehire_recommended"] = True
+    if search:
+        term = clean_text(search, limit=80)
+        if term:
+            safe = re.escape(term)
+            query["$or"] = [
+                {"employee_name": {"$regex": safe, "$options": "i"}},
+                {"employee_code": {"$regex": safe, "$options": "i"}},
+            ]
+    rows = await get_collection(COLL_ALUMNI).find(query).sort(
+        "last_working_day", -1).to_list(min(limit, 500))
+    return {"alumni": [_out(r) for r in rows], "total": len(rows)}

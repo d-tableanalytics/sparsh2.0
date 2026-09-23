@@ -177,94 +177,62 @@ async def main() -> None:
         # =================================================================
         section("The gates are asserted from the tables, not from prose")
         # =================================================================
-        check("MD approval is still mandatory on the CLIENT track",
-              M.md_approval_is_mandatory())
-        check("budget approval is mandatory on the INTERNAL track",
+        check("budget approval is mandatory",
               M.budget_approval_is_mandatory())
-        check("the two tracks declare disjoint approval states, bar the shared ones",
-              M.TRACK_APPROVAL_STATES[M.RequisitionTrack.CLIENT]
-              & M.TRACK_APPROVAL_STATES[M.RequisitionTrack.INTERNAL]
-              == {M.ReqApproval.PENDING_ESCALATION, M.ReqApproval.APPROVED,
-                  M.ReqApproval.REJECTED})
-        # The equality the Phase 3 test used to assert, now stated across BOTH tables --
-        # every action on either track leaves a labelled trail, and no label is orphaned.
-        check("every action on either track has an audit label, and none is orphaned",
-              set(M.REQ_TRANSITIONS) | set(M.INTERNAL_REQ_TRANSITIONS)
-              == set(M.REQ_AUDIT_ACTIONS))
+        # Every action leaves a labelled trail, and no label is orphaned.
+        check("every action has an audit label, and none is orphaned",
+              set(M.INTERNAL_REQ_TRANSITIONS) == set(M.REQ_AUDIT_ACTIONS))
         check("every internal reject demands a remark",
               all(spec[3] for a, spec in M.INTERNAL_REQ_TRANSITIONS.items()
                   if a.endswith("-reject")))
-        check("both tracks are routed from one table",
-              set(M.TRACK_TRANSITIONS) == set(M.RequisitionTrack))
 
         # =================================================================
-        section("Raising: track, and the client a requisition may not have")
+        section("Raising: every requisition is Sparsh Magic's own")
         # =================================================================
-        client_req = await RS.create_requisition(HOD, COMPANY, payload())
-        CREQ = client_req["request_no"]
-        check("a requisition with no track named defaults to the client track",
-              client_req["requisition_track"] == "client")
-        check("and opens at Pending HR Review, exactly as it always has",
-              client_req["approval_status"] == M.ReqApproval.PENDING_HR.value)
-
-        internal_req = await RS.create_requisition(
-            HOD, COMPANY, payload(requisition_track="internal"))
+        internal_req = await RS.create_requisition(HOD, COMPANY, payload())
         IREQ = internal_req["request_no"]
         check("an internal requisition is stamped as such",
               internal_req["requisition_track"] == "internal")
-        check("and opens at Pending HR Verification, NOT Pending HR Review",
+        check("and opens at Pending HR Verification",
               internal_req["approval_status"]
               == M.ReqApproval.PENDING_HR_VERIFICATION.value)
         check("its budget fields start empty",
               internal_req.get("approved_headcount") is None
               and internal_req.get("approved_salary_band_min") is None)
 
-        await expect_http(
-            "raising an internal requisition FOR a client",
-            RS.create_requisition(HOD, COMPANY,
-                                  payload(requisition_track="internal",
-                                          client_id=str(ObjectId()))),
-            422, "no client")
-        await expect_http(
-            "raising with an unknown track",
-            RS.create_requisition(HOD, COMPANY, payload(requisition_track="freelance")),
-            422, "Track must be one of")
-
-        await expect_http(
-            "switching a raised requisition to the other track",
-            RS.update_requisition(HOD, COMPANY, IREQ, {"requisition_track": "client"}),
-            409, "cannot be changed")
-
-        listing = await RS.list_requisitions(HR, COMPANY, track="internal")
-        check("the track filter returns only internal requisitions",
+        listing = await RS.list_requisitions(HR, COMPANY)
+        check("the list returns the requisition",
               [r["request_no"] for r in listing["requisitions"]] == [IREQ])
-        listing = await RS.list_requisitions(HR, COMPANY, track="client")
-        check("and only client ones the other way", CREQ in
-              [r["request_no"] for r in listing["requisitions"]])
-        both = await RS.list_requisitions(HR, COMPANY)
-        check("omitting the filter returns BOTH, as every existing caller expects",
-              both["total"] == 2)
 
-        # A requisition raised before this phase has no `requisition_track` field at all.
+        # Rows from the decommissioned client-hiring track stay in the database and out
+        # of the flow: one carrying "client", and one raised before the track field
+        # existed, which carries nothing at all.
+        CREQ = "HR-REQ-2025-998"
+        await reqs.insert_one({
+            "request_no": CREQ, "company_id": COMPANY, "created_by": U_HOD,
+            "requisition_track": "client", "approval_status": "Pending HR Review",
+            "closing_status": M.ReqClosing.OPEN.value, "vacancy": 1, "created_at": NOW})
         await reqs.insert_one({
             "request_no": "HR-REQ-2025-999", "company_id": COMPANY, "created_by": U_HOD,
-            "approval_status": M.ReqApproval.PENDING_HR.value,
+            "approval_status": "Pending HR Review",
             "closing_status": M.ReqClosing.OPEN.value, "vacancy": 1, "created_at": NOW})
-        legacy = await RS.list_requisitions(HR, COMPANY, track="client")
-        check("a legacy requisition with NO track field still counts as client",
-              "HR-REQ-2025-999" in [r["request_no"] for r in legacy["requisitions"]])
+        listing = await RS.list_requisitions(HR, COMPANY)
+        check("legacy client-track rows are not listed",
+              [r["request_no"] for r in listing["requisitions"]] == [IREQ])
+        await expect_http("nor readable by number",
+                          RS.get_requisition(HR, COMPANY, CREQ), 404)
 
         # =================================================================
         section("The internal ladder, rung by rung")
         # =================================================================
         await expect_http(
-            "a client action on an internal requisition",
+            "an action that is not in the table",
             RS.act_on_requisition(HR, COMPANY, IREQ, "hr-approve"),
-            422, "Invalid action for a internal requisition")
+            422, "Invalid action")
         await expect_http(
-            "an internal action on a client requisition",
+            "acting on a legacy client-track requisition",
             RS.act_on_requisition(HR, COMPANY, CREQ, "hr-verify"),
-            422, "Invalid action for a client requisition")
+            404)
 
         await expect_http(
             "skipping HR verification straight to the budget gate",
@@ -338,26 +306,13 @@ async def main() -> None:
               == M.JdStatus.APPROVED.value)
 
         # =================================================================
-        section("The client chain is byte-for-byte what it was")
-        # =================================================================
-        state = await RS.act_on_requisition(HR, COMPANY, CREQ, "hr-approve")
-        check("hr-approve still lands on Pending MD Approval",
-              state["approval_status"] == M.ReqApproval.PENDING_MD.value)
-        state = await RS.act_on_requisition(MD, COMPANY, CREQ, "md-approve")
-        check("md-approve still lands on Approved",
-              state["approval_status"] == M.ReqApproval.APPROVED.value)
-        check("no budget fields were invented on a client requisition",
-              state.get("approved_salary_band_min") is None)
-
-        # =================================================================
         section("Escalation hangs off the BUDGET gate, not HR verification")
         # =================================================================
         # Remove the sanctioned figure: no figure at all counts as over-sanction (fail
         # closed), which is the documented Phase 11-R rule and must still hold here.
         sanctions.docs.clear()
 
-        esc = await RS.create_requisition(HOD, COMPANY,
-                                          payload(requisition_track="internal"))
+        esc = await RS.create_requisition(HOD, COMPANY, payload())
         EREQ = esc["request_no"]
         state = await RS.act_on_requisition(HR, COMPANY, EREQ, "hr-verify")
         check("HR verification does NOT escalate -- nobody has agreed to pay yet",

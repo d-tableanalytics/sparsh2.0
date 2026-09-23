@@ -44,15 +44,19 @@ from fastapi import HTTPException
 
 from app.db.mongodb import get_collection
 from app.models.hrms import (
-    AUDIT_SHORTLIST_CONVENED, AUDIT_SHORTLIST_DECIDED, COLL_CANDIDATES,
-    COLL_POSITION_SCORECARDS, COLL_REQUISITIONS, COLL_SHORTLIST_REVIEWS,
-    ENTITY_SHORTLIST, RETENTION_YEARS, SHORTLIST_COMMITTEE_ROLES, SHORTLIST_MIN_MEMBERS,
-    CommitteeDecision, RequisitionTrack, ShortlistOutcome, score_band,
+    AUDIT_SHORTLIST_CONVENED, AUDIT_SHORTLIST_DECIDED, AUDIT_STAGE_CHANGED, AppStatus,
+    COLL_CANDIDATES, COLL_INTERVIEWS, COLL_POSITION_SCORECARDS, COLL_REQUISITIONS,
+    COLL_SHORTLIST_REVIEWS, ENTITY_CANDIDATE, ENTITY_SHORTLIST, FINAL_ROUND,
+    FINAL_ROUND_PASSING, RETENTION_YEARS, SHORTLIST_CLEARS_SELECTION,
+    SHORTLIST_COMMITTEE_ROLES, SHORTLIST_LIVE_OUTCOMES, SHORTLIST_MIN_MEMBERS,
+    CommitteeDecision, REQUISITION_TRACK_INTERNAL, ShortlistOutcome, can_transition,
+    final_commit_outcome, score_band,
 )
 from app.services.hrms_audit_service import audit
 from app.services.hrms_id_service import next_business_id
 from app.utils.hrms_access import hrms_role
 from app.utils.hrms_public_guard import clean_text
+from app.utils.hrms_access import tenant_member
 
 MAX_COMMITTEE_MEMBERS = 10
 MAX_SHORTLIST_CANDIDATES = 100
@@ -88,13 +92,11 @@ async def _require_internal_requisition(company_id: str, request_no: str) -> dic
     if not req:
         raise HTTPException(
             status_code=422, detail="That requisition does not exist for this company.")
-    track = req.get("requisition_track") or RequisitionTrack.CLIENT.value
-    if track != RequisitionTrack.INTERNAL.value:
+    track = req.get("requisition_track")
+    if track != REQUISITION_TRACK_INTERNAL:
         raise HTTPException(
             status_code=409,
-            detail=(f"{request_no} is a client requisition. The shortlisting committee is a "
-                    f"Sparsh Magic control -- on the client track the client decides who "
-                    f"they want to see, and their verdict is recorded against the CV."))
+            detail=f"{request_no} is a legacy client-track requisition and is not part of hiring any more.")
     return req
 
 
@@ -126,12 +128,7 @@ async def _resolve_members(company_id: str, members) -> list:
                 status_code=422,
                 detail="The same person is listed twice on this committee.")
         seen.add(user_id)
-        try:
-            oid = ObjectId(user_id)
-        except (InvalidId, TypeError):
-            raise HTTPException(status_code=422, detail="Invalid committee member.")
-        person = await get_collection("learners").find_one(
-            {"_id": oid, "company_id": str(company_id)})
+        person = await tenant_member(company_id, user_id)
         if not person:
             raise HTTPException(
                 status_code=422,
@@ -237,6 +234,19 @@ async def get_shortlist_review(company_id: str, slr_no: str) -> Optional[dict]:
         return None
     out = _out(doc)
     out["committee_state"] = committee_state(doc.get("committee_members"))
+
+    # A sitting that has not been decided carries a LIVE preview of what committing now
+    # would produce; a decided one carries the rationale frozen at the moment it was
+    # decided. The screen renders whichever is present, so it never has to ask the user for
+    # a conclusion it can work out itself.
+    if doc.get("outcome") == ShortlistOutcome.PENDING.value:
+        state = out["committee_state"]
+        if state.get("complete") and doc.get("candidate_uks"):
+            req = await get_collection(COLL_REQUISITIONS).find_one(
+                {"request_no": doc.get("request_no"),
+                 "company_id": str(company_id)}) or {}
+            out["commit_preview"] = await commit_preview(
+                company_id, req, doc.get("committee_members"), doc.get("candidate_uks"))
     return out
 
 
@@ -254,21 +264,21 @@ async def assert_shortlist_cleared(company_id: str, candidate: dict, req: dict) 
     committee has not agreed on IS a relaxation of the selection criteria, which is the
     deviation that type names, so it does not get an exception type of its own.
     """
-    track = (req or {}).get("requisition_track") or RequisitionTrack.CLIENT.value
-    if track != RequisitionTrack.INTERNAL.value:
+    track = (req or {}).get("requisition_track")
+    if track != REQUISITION_TRACK_INTERNAL:
         return
     request_no = (req or {}).get("request_no")
     uk = (candidate or {}).get("uk")
     if not request_no or not uk:
         return
 
-    finalised = await get_collection(COLL_SHORTLIST_REVIEWS).find_one({
+    cleared = await get_collection(COLL_SHORTLIST_REVIEWS).find_one({
         "company_id": str(company_id),
         "request_no": request_no,
-        "outcome": ShortlistOutcome.FINALISED.value,
+        "outcome": {"$in": sorted(SHORTLIST_CLEARS_SELECTION)},
         "candidate_uks": uk,
     })
-    if finalised:
+    if cleared:
         return
 
     from app.services.hrms_exception_service import approved_exception_for
@@ -282,6 +292,120 @@ async def assert_shortlist_cleared(company_id: str, candidate: dict, req: dict) 
                 f"Department Head to agree the shortlist before the final interview. "
                 f"Record the committee's decision, or log an approved Relaxed Scorecard "
                 f"exception."))
+
+
+# -------------------------------------------------------------
+# Final Commit
+# -------------------------------------------------------------
+async def _final_round_passed(company_id: str, uks) -> bool:
+    """Whether EVERY named candidate has already passed the Management final round.
+
+    All of them, not any: one sitting carries one outcome, so if a single candidate still
+    owes the round then the sitting as a whole routes to the final interview. Selecting the
+    group on the strength of one person's completed round is exactly the hole SOP section 5
+    exists to close.
+    """
+    uks = [u for u in (uks or []) if u]
+    if not uks:
+        return False
+    rounds = await get_collection(COLL_INTERVIEWS).find(
+        {"company_id": str(company_id), "uk": {"$in": uks},
+         "round": FINAL_ROUND.value},
+        {"uk": 1, "outcome": 1}).to_list(200)
+    passed = {r.get("uk") for r in rounds if r.get("outcome") in FINAL_ROUND_PASSING}
+    return all(u in passed for u in uks)
+
+
+async def commit_preview(company_id: str, req: dict, members, uks) -> dict:
+    """What recording the decision right now WOULD produce, and why.
+
+    Served to the screen so the committee sees the consequence before it commits, instead of
+    choosing a conclusion from a dropdown. Read-only.
+    """
+    from app.services.hrms_interview_service import _level_for
+    level = await _level_for(company_id, req or {})
+    final_passed = await _final_round_passed(company_id, uks)
+    outcome = final_commit_outcome(members, level=level, final_round_passed=final_passed)
+    objectors = [m.get("name") for m in (members or [])
+                 if not m.get("recused")
+                 and m.get("decision") == CommitteeDecision.OBJECT.value]
+    if outcome is ShortlistOutcome.REJECTED:
+        because = f"not approved by {', '.join(objectors)}"
+    elif outcome is ShortlistOutcome.FINAL_INTERVIEW_REQUIRED:
+        because = (f'a "{getattr(level, "value", level)}" role needs the Management final '
+                   f"interview before selection")
+    else:
+        because = "approved by the committee, with no final round outstanding"
+    return {
+        "outcome": outcome.value,
+        "because": because,
+        "designation_level": getattr(level, "value", level),
+        "final_round_passed": final_passed,
+        "objections": objectors,
+    }
+
+
+# Where each Final Commit outcome leaves the candidates it names.
+COMMIT_CANDIDATE_STATUS = {
+    ShortlistOutcome.SELECTED: AppStatus.SELECTED,
+    ShortlistOutcome.REJECTED: AppStatus.REJECTED,
+    ShortlistOutcome.FINAL_INTERVIEW_REQUIRED: AppStatus.FINAL_INTERVIEW_REQUIRED,
+}
+
+
+async def _apply_commit(actor: dict, company_id: str, outcome, uks, slr_no: str) -> list:
+    """Move the named candidates to where the commit puts them.
+
+    Best-effort PER CANDIDATE and deliberately not transactional: the decision is already
+    recorded, and a candidate whose status could not be advanced must not un-record a
+    committee's minutes. Anything skipped is returned so the caller can say so out loud
+    rather than leaving the screen to imply it worked.
+
+    `Selected` still goes through `assert_selectable`. The sitting written a moment ago is
+    what satisfies that gate, so it passes -- and if it does not, the derivation and the gate
+    disagree, which is a defect that should surface here rather than be papered over.
+    """
+    target = COMMIT_CANDIDATE_STATUS.get(outcome)
+    if not target:
+        return []
+    from app.services.hrms_candidate_service import assert_selectable
+
+    skipped = []
+    for uk in (uks or []):
+        candidate = await get_collection(COLL_CANDIDATES).find_one(
+            {"uk": uk, "company_id": str(company_id)})
+        if not candidate:
+            continue
+        current = candidate.get("application_status") or AppStatus.APPLIED.value
+        if current == target.value:
+            continue
+        # "Needs the Management final round" is already true of somebody sitting IN it.
+        #
+        # Passing an earlier round advances a candidate to MD Round automatically, so on
+        # the normal managerial path the commit arrives to find them already where it was
+        # going to send them. There is no edge back from MD Round, and rightly so -- moving
+        # them from "in the final round" to "needs a final round" would be a regression.
+        # Without this the routing was reported as a candidate who could not be moved,
+        # which reads as a failure on a path where nothing went wrong.
+        if (target is AppStatus.FINAL_INTERVIEW_REQUIRED
+                and current in (AppStatus.MD_ROUND.value, AppStatus.SELECTED.value)):
+            continue
+        if not can_transition(current, target.value):
+            skipped.append(f'{candidate.get("candidate_name") or uk} (at "{current}")')
+            continue
+        if target is AppStatus.SELECTED:
+            try:
+                await assert_selectable(actor, company_id, candidate)
+            except HTTPException as e:
+                skipped.append(f'{candidate.get("candidate_name") or uk}: {e.detail}')
+                continue
+        await get_collection(COLL_CANDIDATES).update_one(
+            {"uk": uk, "company_id": str(company_id)},
+            {"$set": {"application_status": target.value,
+                      "updated_at": datetime.now(timezone.utc)}})
+        await audit(actor, AUDIT_STAGE_CHANGED, ENTITY_CANDIDATE, uk,
+                    f"{current} -> {target.value} ({slr_no})", company_id)
+    return skipped
 
 
 # -------------------------------------------------------------
@@ -348,35 +472,64 @@ def _decision_guide(candidates: list, bands: dict = None) -> list:
     } for c in candidates]
 
 
+async def _resolve_outcome(company_id: str, req: dict, members, uks, raw):
+    """Turn what the caller ASKED for into what the committee's own verdicts SUPPORT.
+
+    Returns `(outcome, preview)`. `preview` is None when nothing was decided.
+
+    The caller may ask to commit; it may not choose the answer. Passing "Selected" is read
+    as "record the decision now", and what gets written is whatever `final_commit_outcome`
+    derives from the members' verdicts and the seniority of the role. That is the whole
+    point of the change: a sitting can no longer be recorded as Selected over an objection.
+    """
+    raw = getattr(raw, "value", raw)
+    try:
+        requested = ShortlistOutcome(raw or ShortlistOutcome.PENDING.value)
+    except ValueError:
+        raise HTTPException(
+            status_code=422,
+            detail=("Outcome must be one of: "
+                    + ", ".join(o.value for o in SHORTLIST_LIVE_OUTCOMES)
+                    + ", or Pending while the sitting is still open."))
+
+    if requested is ShortlistOutcome.PENDING:
+        return requested, None
+
+    if requested not in SHORTLIST_LIVE_OUTCOMES:
+        # FINALISED / DEFERRED. Readable history, not a decision anybody may record now.
+        raise HTTPException(
+            status_code=422,
+            detail=(f'"{requested.value}" is how sittings were recorded before Final '
+                    f"Commit. Record each member's approval instead and the outcome "
+                    f"follows from it."))
+
+    # Committing is the act that decides someone's candidacy, so THAT is what needs a real
+    # committee. Convening one and coming back to it later is a normal way to work.
+    assert_committee_complete(members)
+    if not uks:
+        raise HTTPException(
+            status_code=422,
+            detail="Name the candidates this committee is deciding on. A commit about "
+                   "nobody decides nothing -- leave the sitting Pending instead.")
+
+    preview = await commit_preview(company_id, req, members, uks)
+    return ShortlistOutcome(preview["outcome"]), preview
+
+
 async def create_shortlist_review(actor: dict, company_id: str, payload: dict) -> dict:
     """Convene a committee sitting. Convening decides nothing until the outcome is set."""
     request_no = clean_text(payload.get("request_no"), limit=40)
     if not request_no:
         raise HTTPException(status_code=422, detail="Choose a requisition.")
-    await _require_internal_requisition(company_id, request_no)
+    req = await _require_internal_requisition(company_id, request_no)
 
     members = await _resolve_members(company_id, payload.get("committee_members"))
     candidates = await _resolve_candidates(company_id, request_no,
                                            payload.get("candidate_uks"))
+    uks = [c["uk"] for c in candidates]
 
-    raw_outcome = getattr(payload.get("outcome"), "value", payload.get("outcome"))
-    try:
-        outcome = ShortlistOutcome(raw_outcome or ShortlistOutcome.PENDING.value)
-    except ValueError:
-        raise HTTPException(
-            status_code=422,
-            detail=(f"Outcome must be one of: "
-                    f"{', '.join(o.value for o in ShortlistOutcome)}."))
-
-    # Finalising is the act that lifts the gate, so THAT is what needs a real committee.
-    # Convening one and coming back to it later is a normal way to work.
-    if outcome is ShortlistOutcome.FINALISED:
-        assert_committee_complete(members)
-        if not candidates:
-            raise HTTPException(
-                status_code=422,
-                detail="A finalised shortlist with nobody on it is a deferral. Name the "
-                       "candidates, or record the outcome as Deferred.")
+    outcome, preview = await _resolve_outcome(
+        company_id, req, members, uks, payload.get("outcome"))
 
     now = datetime.now(timezone.utc)
     slr_no = await next_business_id("shortlist", str(company_id), now.year)
@@ -386,10 +539,14 @@ async def create_shortlist_review(actor: dict, company_id: str, payload: dict) -
         "slr_no": slr_no,
         "company_id": str(company_id),
         "request_no": request_no,
-        "candidate_uks": [c["uk"] for c in candidates],
+        "candidate_uks": uks,
         "committee_members": members,
         "decision_guide": _decision_guide(candidates, await _bands(company_id)),
         "outcome": outcome.value,
+        # WHY the outcome is what it is, frozen beside it. Recomputing this later would read
+        # today's designation band and today's interview record, which is not what the
+        # committee decided on.
+        "commit_rationale": preview,
         "notes": clean_text(payload.get("notes"), limit=4000),
         "decided_at": decided_at,
         "convened_by": str(actor.get("_id") or ""),
@@ -406,8 +563,15 @@ async def create_shortlist_review(actor: dict, company_id: str, payload: dict) -
                 f"{len(candidates)} candidate(s) on {request_no}, "
                 f"{len(members)} member(s), outcome {outcome.value}", company_id)
 
+    skipped = []
+    if preview:
+        skipped = await _apply_commit(actor, company_id, outcome, uks, slr_no)
+
     out = _out(doc)
     out["committee_state"] = committee_state(members)
+    if skipped:
+        out["warning"] = ("The decision is recorded, but these candidates were not moved: "
+                          + "; ".join(skipped) + ".")
     return out
 
 
@@ -442,30 +606,19 @@ async def update_shortlist_review(actor: dict, company_id: str, slr_no: str,
     if payload.get("notes") is not None:
         updates["notes"] = clean_text(payload["notes"], limit=4000)
 
-    decided = None
+    decided, preview = None, None
     if payload.get("outcome") is not None:
-        raw = getattr(payload["outcome"], "value", payload["outcome"])
-        try:
-            decided = ShortlistOutcome(raw)
-        except ValueError:
-            raise HTTPException(
-                status_code=422,
-                detail=(f"Outcome must be one of: "
-                        f"{', '.join(o.value for o in ShortlistOutcome)}."))
-
-    if decided is ShortlistOutcome.FINALISED:
         members = updates.get("committee_members", current.get("committee_members"))
         uks = updates.get("candidate_uks", current.get("candidate_uks"))
-        assert_committee_complete(members)
-        if not uks:
-            raise HTTPException(
-                status_code=422,
-                detail="A finalised shortlist with nobody on it is a deferral. Name the "
-                       "candidates, or record the outcome as Deferred.")
+        req = await get_collection(COLL_REQUISITIONS).find_one(
+            {"request_no": current.get("request_no"), "company_id": str(company_id)}) or {}
+        decided, preview = await _resolve_outcome(
+            company_id, req, members, uks, payload["outcome"])
 
     if decided is not None:
         updates["outcome"] = decided.value
-        if decided is not ShortlistOutcome.PENDING:
+        if preview:
+            updates["commit_rationale"] = preview
             updates["decided_at"] = datetime.now(timezone.utc)
             updates["decided_by"] = str(actor.get("_id") or "")
             updates["decided_by_name"] = _actor_name(actor)
@@ -488,4 +641,15 @@ async def update_shortlist_review(actor: dict, company_id: str, slr_no: str,
     await audit(actor, AUDIT_SHORTLIST_DECIDED, ENTITY_SHORTLIST, slr_no,
                 (updates.get("outcome") or "updated")
                 + f' on {current.get("request_no")}', company_id)
-    return await get_shortlist_review(company_id, slr_no)
+
+    skipped = []
+    if preview:
+        skipped = await _apply_commit(
+            actor, company_id, decided,
+            updates.get("candidate_uks", current.get("candidate_uks")), slr_no)
+
+    out = await get_shortlist_review(company_id, slr_no)
+    if skipped:
+        out["warning"] = ("The decision is recorded, but these candidates were not moved: "
+                          + "; ".join(skipped) + ".")
+    return out

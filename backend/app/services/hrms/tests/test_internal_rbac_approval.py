@@ -138,7 +138,8 @@ async def main() -> None:
     import app.services.hrms_referral_service as RF
     import app.services.hrms_scorecard_service as SC
     import app.services.hrms_salary_band_service as BANDS
-    for mod in (RS, PS, CS, AUD, IDS, SANC, LS, RF, SC, BANDS):
+    import app.utils.hrms_access as HACC
+    for mod in (RS, PS, CS, AUD, IDS, SANC, LS, RF, SC, BANDS, HACC):
         mod.get_collection = mongo.get_collection
 
     async def silent(*a, **kw):
@@ -227,7 +228,7 @@ async def main() -> None:
         REQ = raised["request_no"]
         check("requisition created", REQ.startswith("HR-REQ-"))
         check("runs on the INTERNAL track",
-              raised["requisition_track"] == M.RequisitionTrack.INTERNAL.value)
+              raised["requisition_track"] == "internal")
         check("opens at Pending HR Verification -- NOT at the budget step",
               raised["approval_status"] == M.ReqApproval.PENDING_HR_VERIFICATION.value)
         check("closing status Open", raised["closing_status"] == M.ReqClosing.OPEN.value)

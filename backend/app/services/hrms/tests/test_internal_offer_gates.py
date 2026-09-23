@@ -332,7 +332,7 @@ async def main() -> None:
             "approving a CLIENT-track offer",
             OF.approve_offer(FIN, COMPANY, client_offer["offer_no"],
                              {"signature": "Farid"}),
-            409, "internal-track control")
+            409, "legacy client-track")
 
         sent = await OF.send_offer(HR, COMPANY, client_offer["offer_no"],
                                    {"signature": "Hana HR"})

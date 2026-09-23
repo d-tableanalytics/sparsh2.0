@@ -98,6 +98,16 @@ async def main() -> None:
     for mod in (RS, PS, CANS, AUD, IDS, LS):
         mod.get_collection = mongo.get_collection
 
+    # Resume upload is mandatory on the public form as of this phase, so every
+    # submit_application() call below now actually reaches the upload step -- fake it out
+    # exactly as test_e2e_recruitment_journey does, rather than hitting real S3.
+    def fake_s3(stream, filename, mime):
+        return {"key": f"s3/{filename}", "url": "https://signed.example/x"}
+
+    import app.services.s3_service as S3
+    original_s3 = S3.upload_file_to_s3_with_key
+    S3.upload_file_to_s3_with_key = fake_s3
+
     notified = []
 
     async def fake_notify_user(uid, title, msg, **kw):
@@ -117,10 +127,16 @@ async def main() -> None:
     HR = {"_id": U_HR, "role": "clientuser", "_source_collection": "learners",
           "company_id": COMPANY, "governance_role": "HR", "full_name": "Hana HR"}
 
+    def resume(name="resume.pdf"):
+        # "%PDF-1.4 …" base64 -- decode_upload sniffs the magic bytes, so a placeholder
+        # string would be rejected as a disguised file.
+        return {"name": name, "mime_type": "application/pdf",
+                "data": base64.b64encode(b"%PDF-1.4 curriculum vitae").decode()}
+
     def application(**over):
         base = {"candidate_name": "Asha Rao", "can_email": "asha@example.com",
                 "can_contact": "+91 98765 43210", "declaration": True,
-                "certificates": [], "referral_source": "Job Portal"}
+                "certificates": [], "referral_source": "Job Portal", "resume": resume()}
         base.update(over)
         return base
 
@@ -321,6 +337,7 @@ async def main() -> None:
 
     finally:
         mongo.get_collection = original
+        S3.upload_file_to_s3_with_key = original_s3
 
     passed = sum(1 for r in results if r)
     print(f"\n=== {passed}/{len(results)} checks passed ===")

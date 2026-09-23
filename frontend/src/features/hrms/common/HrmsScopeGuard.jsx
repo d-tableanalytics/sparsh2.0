@@ -20,60 +20,19 @@ import { canToggleHrms } from '../access';
  *
  * The server now hands internal staff the companies that actually hold HRMS records when
  * none is enabled, so Sparsh Magic's own hiring keeps working with the module switched off.
- * This component handles the two states that leaves:
+ * This component handles the one state that leaves: no company at all — nothing enabled AND
+ * no HRMS records anywhere. A genuinely empty module, which needs explaining rather than
+ * 400ing on every screen.
  *
- *   1. Every company switched off — a one-line banner. The screens function normally for
- *      internal staff, so this is a statement of fact, not an error; what it is really
- *      there for is the thing that IS off and is invisible from here, namely that no
- *      company's own users -- employees or client contacts -- can reach HRMS at all.
- *
- *   2. No company at all — nothing enabled AND no HRMS records anywhere. A genuinely empty
- *      module, which needs explaining rather than 400ing on every screen.
- *
- * -- The mental model this has to correct ---------------------------------------------------
- * The companies list is mostly CLIENT organisations, so "switch HRMS off for the companies"
- * reads like a client-side decision. It is not, for one of them: Sparsh Magic's own company
- * is in that same list and is the tenant that owns every HRMS record, on both tracks. An
- * internal requisition is a row in the operator's own database with `client_id = null` —
- * internal hiring is not a system that exists outside the companies list. That is exactly
- * why the fallback above is needed: without it, switching the clients off takes Sparsh's own
- * hiring down with them, which is never what anybody meant to do.
+ * There is deliberately NO "every company is switched off" banner. Internal staff are not
+ * gated by the toggle, so every screen works regardless and the notice was a statement of
+ * fact nobody needed on every page. The toggle's real effect — that a company's own users
+ * cannot reach HRMS — is visible where it is set, in Companies.
  */
-
-/**
- * The banner names no company, and says "all", because it can only ever appear when NO
- * company has the module on: the selector lists enabled companies when there are any, so a
- * single one being on is enough for this never to render. Naming the company it happened to
- * fall back to was both narrower than the truth and implied the others might be on.
- */
-const Banner = ({ mayToggle }) => (
-  <div
-    role="status"
-    className="mb-3 rounded-xl border border-[var(--accent-orange)]/40
-               bg-[var(--accent-orange-bg)] px-4 py-3 flex flex-wrap items-center gap-3"
-  >
-    <PowerOff size={16} className="text-[var(--accent-orange)] shrink-0" />
-    <p className="min-w-0 flex-1 text-[12.5px] font-bold text-[var(--text-main)]">
-      HRMS is switched off for all companies
-    </p>
-    {mayToggle && (
-      <Link
-        to="/companies"
-        className="shrink-0 inline-flex items-center gap-1.5 h-8 px-3 rounded-lg
-                   border border-[var(--accent-orange)]/50 text-[11.5px] font-bold
-                   text-[var(--accent-orange)]"
-      >
-        Switch on <ArrowRight size={13} />
-      </Link>
-    )}
-  </div>
-);
 
 const HrmsScopeGuard = ({ children }) => {
   const { user } = useAuth();
-  const {
-    loading, error, isInternal, companyId, companies, moduleEnabledHere,
-  } = useHrms();
+  const { loading, error, isInternal, companyId, companies } = useHrms();
 
   // While the answer is still arriving, let the screens render their own loading states —
   // flashing a banner and then removing it would be worse than a moment of nothing.
@@ -120,15 +79,6 @@ const HrmsScopeGuard = ({ children }) => {
           </p>
         )}
       </div>
-    );
-  }
-
-  if (!moduleEnabledHere) {
-    return (
-      <>
-        <Banner mayToggle={mayToggle} />
-        {children}
-      </>
     );
   }
 

@@ -7,7 +7,7 @@ import HrmsScopeBar from '../common/HrmsScopeBar';
 import { HrmsLoading, HrmsError, HrmsEmpty } from '../common/HrmsStates';
 import { useNotification } from '../../../context/NotificationContext';
 import {
-  getShortlistReviews, createShortlistReview, updateShortlistReview,
+  getShortlistReviews, getShortlistReview, createShortlistReview, updateShortlistReview,
   getRequisitions, getCandidates, getEmployees,
 } from '../../../services/hrmsApi';
 import { FIELD, LABEL, TEXTAREA, day, toneFor } from './internalKit';
@@ -35,7 +35,16 @@ import { Btn, Chip, Facts, Modal, RecordList } from './internalKit.jsx';
  * is a decision the committee is allowed to make and is recorded making.
  */
 
-const OUTCOMES = ['Pending', 'Finalised', 'Deferred'];
+// Filter values only. 'Finalised' and 'Deferred' are how sittings were recorded before
+// Final Commit; they can still be searched for, but never chosen (see DecideModal).
+const OUTCOMES = ['Pending', 'Selected', 'Rejected', 'Final Interview Required',
+  'Finalised', 'Deferred'];
+
+const GOOD_OUTCOMES = ['Selected', 'Finalised'];
+
+const outcomeTone = (outcome) => (GOOD_OUTCOMES.includes(outcome) ? 'good'
+  : outcome === 'Rejected' ? 'bad'
+    : outcome === 'Pending' ? 'warn' : 'neutral');
 
 const ShortlistCommittee = () => {
   const { scope, companyId, can } = useHrms();
@@ -112,10 +121,7 @@ const ShortlistCommittee = () => {
       key: 'outcome',
       label: 'Outcome',
       render: (r) => (
-        <Chip tone={r.outcome === 'Finalised' ? 'good'
-          : r.outcome === 'Pending' ? 'warn' : 'neutral'}>
-          {r.outcome}
-        </Chip>
+        <Chip tone={outcomeTone(r.outcome)}>{r.outcome}</Chip>
       ),
     },
     { key: 'decided', label: 'Decided', render: (r) => day(r.decided_at) },
@@ -187,10 +193,7 @@ const ShortlistCommittee = () => {
                   </p>
                   <p className="text-[11.5px] text-[var(--text-muted)]">{r.request_no}</p>
                 </div>
-                <Chip tone={r.outcome === 'Finalised' ? 'good'
-                  : r.outcome === 'Pending' ? 'warn' : 'neutral'}>
-                  {r.outcome}
-                </Chip>
+                <Chip tone={outcomeTone(r.outcome)}>{r.outcome}</Chip>
               </div>
               <Facts items={[
                 { label: 'Candidates', value: (r.candidate_uks || []).length },
@@ -219,7 +222,9 @@ const ShortlistCommittee = () => {
       {deciding && (
         <DecideModal
           review={deciding}
+          scope={scope}
           busy={busy}
+          onError={showError}
           onClose={() => setDeciding(null)}
           onSubmit={async (value) => {
             setBusy(true);
@@ -252,7 +257,7 @@ const ConveneModal = ({ scope, busy, setBusy, onClose, onDone, onError }) => {
   const [notes, setNotes] = useState('');
 
   useEffect(() => {
-    getRequisitions({ ...scope, track: 'internal' })
+    getRequisitions({ ...scope })
       .then(({ data }) => setReqs(data?.requisitions || []))
       .catch(() => setReqs([]));
     // A committee member needs a real login account — a profile onboarded before the
@@ -369,56 +374,201 @@ const ConveneModal = ({ scope, busy, setBusy, onClose, onDone, onError }) => {
   );
 };
 
-/** Record the outcome. Finalising is what lifts the gate on `Selected`. */
-const DecideModal = ({ review, busy, onClose, onSubmit }) => {
-  const [value, setValue] = useState('Finalised');
-  const state = review.committee_state || {};
+/**
+ * Final Commit — record each member's verdict; the outcome follows from them.
+ *
+ * There is deliberately no outcome dropdown. Selected, Rejected and Final Interview Required
+ * are CONSEQUENCES, not choices: they follow from what each approver said and how senior the
+ * role is. Offering a menu asked the committee for a conclusion instead of the facts behind
+ * it, which is how a sitting could once be recorded as agreed over a Head's objection.
+ *
+ * What the menu HID, and what this modal now exposes, is the input. Convening stamped every
+ * member as agreeing and there was nowhere at all to say otherwise, so "Rejected" was
+ * unreachable through the interface however the backend behaved. The verdict controls below
+ * are that missing input, and the member picker is how an inquorate sitting gets fixed
+ * without abandoning it.
+ *
+ * Changes are saved as they are made and the preview is then re-read FROM THE SERVER. The
+ * rule is never re-implemented here: a predicted outcome that disagreed with the recorded
+ * one would be worse than no prediction at all.
+ */
+const DecideModal = ({ review, scope, busy, onClose, onSubmit, onError }) => {
+  const [full, setFull] = useState(null);
+  const [people, setPeople] = useState([]);
+  const [adding, setAdding] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [loadErr, setLoadErr] = useState(null);
+
+  const load = useCallback(async () => {
+    try {
+      const { data } = await getShortlistReview(review.slr_no, scope);
+      setFull(data || null);
+      setLoadErr(null);
+    } catch (err) {
+      setLoadErr(err?.response?.data?.detail || 'Could not load this sitting.');
+    }
+  }, [review.slr_no, scope]);
+
+  useEffect(() => { load(); }, [load]);
+
+  useEffect(() => {
+    getEmployees(scope)
+      .then(({ data }) => setPeople((data?.employees || []).filter((e) => e.user_id)))
+      .catch(() => setPeople([]));
+  }, [scope]);
+
+  const members = full?.committee_members || [];
+  const state = full?.committee_state || review.committee_state || {};
+  const preview = full?.commit_preview || null;
+  const uks = full?.candidate_uks || review.candidate_uks || [];
+
+  /** Persist the committee as it now stands, then re-read the server's verdict. */
+  const saveMembers = async (next) => {
+    setSaving(true);
+    try {
+      await updateShortlistReview(review.slr_no, {
+        committee_members: next.map((m) => ({
+          user_id: m.user_id,
+          decision: m.decision || 'Agree',
+          recused: !!m.recused,
+        })),
+      }, scope);
+      await load();
+    } catch (err) {
+      onError(err?.response?.data?.detail || 'Could not update the committee.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const setVerdict = (userId, decision) =>
+    saveMembers(members.map((m) => (m.user_id === userId ? { ...m, decision } : m)));
+
+  const removeMember = (userId) =>
+    saveMembers(members.filter((m) => m.user_id !== userId));
+
+  const addMember = () => {
+    if (!adding) return;
+    saveMembers([...members, { user_id: adding, decision: 'Agree' }]);
+    setAdding('');
+  };
+
+  const unpicked = people.filter(
+    (p) => !members.some((m) => String(m.user_id) === String(p.user_id)));
+  const outcome = preview?.outcome;
+  const working = busy || saving;
+
   return (
     <Modal
-      title={`Decide ${review.slr_no}`}
+      title={`Final Commit — ${review.slr_no}`}
       subtitle="A decided sitting is frozen. A second decision is a second sitting."
       labelledBy="slr-decide"
       onClose={onClose}
       footer={(
         <>
-          <Btn onClick={onClose}>Cancel</Btn>
-          <Btn tone="primary" disabled={busy} onClick={() => onSubmit(value)}>
-            Record
+          <Btn onClick={onClose} disabled={working}>Cancel</Btn>
+          <Btn tone={outcome === 'Rejected' ? 'danger' : 'primary'}
+            disabled={working || !outcome}
+            onClick={() => onSubmit(outcome)}>
+            {working ? 'Working…' : `Record ${outcome || ''}`.trim()}
           </Btn>
         </>
       )}
     >
       <Facts items={[
         { label: 'Requisition', value: review.request_no },
-        { label: 'Candidates', value: (review.candidate_uks || []).length },
-        { label: 'Members', value: state.member_count },
-        { label: 'Roles covered', value: (state.covered_roles || []).join(', ') },
+        { label: 'Candidates', value: uks.length },
+        { label: 'Role level', value: preview?.designation_level || '—' },
       ]} />
+
+      <div>
+        <p className={LABEL}>Committee verdicts</p>
+        <div className="mt-1.5 space-y-1.5">
+          {members.map((m) => {
+            const objecting = m.decision === 'Object';
+            return (
+              <div key={m.user_id}
+                className="flex items-center justify-between gap-3 rounded-lg border border-[var(--border)] px-3 py-2">
+                <div className="min-w-0">
+                  <p className="text-[12.5px] font-semibold text-[var(--text-main)] truncate">
+                    {m.name || m.user_id}
+                  </p>
+                  <p className="text-[11px] text-[var(--text-muted)]">
+                    {m.role || 'no HRMS role'}{m.recused ? ' · recused' : ''}
+                  </p>
+                </div>
+                <div className="flex items-center gap-1.5 shrink-0">
+                  <Btn tone={objecting ? 'ghost' : 'primary'} disabled={working}
+                    onClick={() => setVerdict(m.user_id, 'Agree')}>
+                    Approve
+                  </Btn>
+                  <Btn tone={objecting ? 'danger' : 'ghost'} disabled={working}
+                    onClick={() => setVerdict(m.user_id, 'Object')}>
+                    Do not approve
+                  </Btn>
+                  <Btn disabled={working} onClick={() => removeMember(m.user_id)}>
+                    Remove
+                  </Btn>
+                </div>
+              </div>
+            );
+          })}
+          {!members.length && (
+            <p className="text-[12px] text-[var(--text-muted)]">
+              Nobody is on this committee yet.
+            </p>
+          )}
+        </div>
+
+        <div className="mt-2 flex items-center gap-2">
+          <select className={FIELD} value={adding} aria-label="Add a committee member"
+            onChange={(e) => setAdding(e.target.value)}>
+            <option value="">Add a member…</option>
+            {unpicked.map((p) => (
+              <option key={p.user_id} value={p.user_id}>
+                {p.display_name || p.full_name || p.employee_code}
+              </option>
+            ))}
+          </select>
+          <Btn disabled={working || !adding} onClick={addMember}>Add</Btn>
+        </div>
+      </div>
 
       {!state.complete && (
         <p className="text-[12px] text-[var(--accent-orange)] font-semibold">
           Still needed: {(state.outstanding_roles || []).join(', ')}. A sitting can only be
-          finalised once the committee is complete.
+          committed once Human Resources and the hiring manager are both on it, as two
+          different people.
         </p>
       )}
-      {!!(state.objections || []).length && (
-        <p className="text-[12px] text-[var(--accent-orange)]">
-          Objection recorded by {state.objections.join(', ')}.
-        </p>
+      {loadErr && (
+        <p className="text-[12px] text-[var(--accent-red,var(--accent-orange))]">{loadErr}</p>
       )}
 
-      <div>
-        <label className={LABEL} htmlFor="slr-outcome-pick">Outcome</label>
-        <select id="slr-outcome-pick" className={FIELD} value={value}
-          onChange={(e) => setValue(e.target.value)}>
-          <option value="Finalised">
-            Finalised — these candidates go to the final interview
-          </option>
-          <option value="Deferred">
-            Deferred — more sourcing needed, nobody progresses
-          </option>
-        </select>
-      </div>
+      {outcome ? (
+        <div>
+          <p className={LABEL}>This commit records</p>
+          <div className="flex items-center gap-2 mt-1">
+            <Chip tone={outcomeTone(outcome)}>{outcome}</Chip>
+            <span className="text-[12px] text-[var(--text-muted)]">{preview.because}</span>
+          </div>
+          <p className="text-[11.5px] text-[var(--text-muted)] mt-2">
+            {outcome === 'Selected'
+              ? 'The named candidates move to Selected and can be made an offer.'
+              : outcome === 'Rejected'
+                ? 'The named candidates are rejected on this requisition.'
+                : 'The named candidates go to the Management final round. Nobody is selected until it is passed.'}
+          </p>
+        </div>
+      ) : !loadErr && (
+        <p className="text-[12px] text-[var(--text-muted)]">
+          {!state.complete
+            ? 'Add the missing member above and the outcome will appear here.'
+            : !uks.length
+              ? 'This sitting names no candidates, so there is nothing to decide about.'
+              : 'Working out what this sitting decides…'}
+        </p>
+      )}
     </Modal>
   );
 };

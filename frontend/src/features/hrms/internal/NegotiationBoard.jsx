@@ -8,6 +8,7 @@ import { HrmsLoading, HrmsError, HrmsEmpty } from '../common/HrmsStates';
 import { useNotification } from '../../../context/NotificationContext';
 import {
   getNegotiationRounds, getCandidateNegotiation, recordNegotiationRound,
+  getExceptions, raiseException,
 } from '../../../services/hrmsApi';
 import { FIELD, LABEL, TEXTAREA, day } from './internalKit';
 import {
@@ -47,8 +48,20 @@ const NegotiationBoard = () => {
   const [error, setError] = useState(null);
   const [adding, setAdding] = useState(null);     // null | {} | { uk }
   const [inspecting, setInspecting] = useState(null);
+  // Budget requests already raised, so a round can show where its approval stands instead
+  // of inviting a second request the server would refuse as a duplicate.
+  const [budgetAsks, setBudgetAsks] = useState([]);
+  const [asking, setAsking] = useState(null);    // the round a request is being raised for
+  const [busy, setBusy] = useState(false);
 
   const canWrite = can(CAP.NEGOTIATION_WRITE);
+  const canAskBudget = can(CAP.EXCEPTION_WRITE);
+
+  /** The Offer Outside Budget request covering this round, if there is one. */
+  const askFor = (r) => budgetAsks.find(
+    (e) => e.request_no === r.request_no
+      && (e.uk === r.uk || !e.uk)
+      && e.exception_type === 'Offer Outside Budget');
 
   const load = useCallback(async () => {
     if (!companyId) { setLoading(false); return; }
@@ -57,6 +70,15 @@ const NegotiationBoard = () => {
     try {
       const { data } = await getNegotiationRounds({ ...scope, limit: 300 });
       setRows(data?.rounds || []);
+      try {
+        const { data: exc } = await getExceptions({ ...scope, limit: 300 });
+        setBudgetAsks((exc?.exceptions || []).filter(
+          (e) => e.exception_type === 'Offer Outside Budget'));
+      } catch {
+        // The rounds are the point of this screen; not being able to read the exception
+        // log should dim the approval status, never blank the board.
+        setBudgetAsks([]);
+      }
     } catch (err) {
       setError(err?.response?.data?.detail || 'Could not load negotiation rounds.');
     } finally {
@@ -107,11 +129,8 @@ const NegotiationBoard = () => {
       render: (r) => (
         <div className="flex flex-col items-end gap-1">
           <Chip tone={verdictTone(r.verdict)}>{verdictLabel(r.verdict)}</Chip>
-          {r.verdict && r.verdict !== 'within' && (
-            <span className="text-[10.5px] text-[var(--text-muted)]">
-              an offer here needs fresh approval
-            </span>
-          )}
+          <BudgetAskCell round={r} ask={askFor(r)} canAsk={canAskBudget}
+            onAsk={() => setAsking(r)} />
         </div>
       ) },
   ];
@@ -136,6 +155,8 @@ const NegotiationBoard = () => {
         { label: 'Recorded', value: day(r.recorded_at) },
       ]} />
       {r.notes && <p className="text-[12px] text-[var(--text-muted)]">{r.notes}</p>}
+      <BudgetAskCell round={r} ask={askFor(r)} canAsk={canAskBudget}
+        onAsk={() => setAsking(r)} />
     </div>
   );
 
@@ -157,8 +178,38 @@ const NegotiationBoard = () => {
         A proposal <b>above</b> or <b>below</b> the band is recorded, not refused — the
         conversation is allowed to happen. The <b>offer</b> is what the band gate refuses,
         until the budget is re-approved at the new figure or an <i>Offer Outside Budget</i>
-        exception is approved. Management is told the moment a round leaves the band.
+        request is approved. Use <b>Request budget approval</b> on an above-band round to
+        ask Finance for a specific figure; the offer is then held to whatever they grant.
       </p>
+
+      {asking && (
+        <BudgetAskModal
+          round={asking}
+          busy={busy}
+          onClose={() => setAsking(null)}
+          onSubmit={async (payload) => {
+            setBusy(true);
+            try {
+              const { data } = await raiseException({
+                request_no: asking.request_no,
+                uk: asking.uk,
+                exception_type: 'Offer Outside Budget',
+                requested_ctc: payload.requested_ctc,
+                reason: payload.reason,
+              }, scope);
+              showSuccess(`${data.exc_no} sent to Finance — the offer stays blocked `
+                + 'until they approve a figure');
+              setAsking(null);
+              load();
+            } catch (err) {
+              showError(err?.response?.data?.detail
+                || 'The budget request could not be raised.');
+            } finally {
+              setBusy(false);
+            }
+          }}
+        />
+      )}
 
       {loading && <HrmsLoading label="Loading negotiation rounds…" />}
       {error && !loading && <HrmsError message={error} onRetry={load} />}
@@ -361,6 +412,114 @@ const CandidateDrawer = ({ scope, uk, canWrite, onClose, onRecord }) => {
           <Search size={13} /> Loading…
         </p>
       )}
+    </Modal>
+  );
+};
+
+/**
+ * Where a round's budget approval stands, or the way to ask for one.
+ *
+ * The board used to say "an offer here needs fresh approval" and stop there, which named a
+ * requirement and offered no way to meet it. Anyone reading that had to work out for
+ * themselves that the answer lived in the exception log, under a type called Offer Outside
+ * Budget. That is a gap between what a screen asks for and what it lets you do.
+ */
+const BudgetAskCell = ({ round, ask, canAsk, onAsk }) => {
+  if (!round.verdict || round.verdict === 'within') return null;
+
+  if (ask?.status === 'Approved') {
+    return (
+      <span className="text-[10.5px] text-[var(--accent-green,var(--text-muted))]">
+        Finance approved up to {money(ask.approved_ctc ?? ask.requested_ctc)} ({ask.exc_no})
+      </span>
+    );
+  }
+  if (ask?.status === 'Pending') {
+    return (
+      <span className="text-[10.5px] text-[var(--text-muted)]">
+        {ask.exc_no} with Finance, asking {money(ask.requested_ctc)}
+      </span>
+    );
+  }
+  if (ask?.status === 'Rejected') {
+    return (
+      <span className="text-[10.5px] text-[var(--accent-red,var(--accent-orange))]">
+        Finance refused {ask.exc_no} — renegotiate inside the band
+      </span>
+    );
+  }
+  // Below-band needs no budget: the money is already approved. Saying "request approval"
+  // there would send somebody to ask Finance for permission to spend less.
+  if (round.verdict === 'below') {
+    return (
+      <span className="text-[10.5px] text-[var(--text-muted)]">
+        below the band — the offer gate still asks for fresh approval
+      </span>
+    );
+  }
+  if (!canAsk) {
+    return (
+      <span className="text-[10.5px] text-[var(--text-muted)]">
+        an offer here needs Finance to approve a higher figure
+      </span>
+    );
+  }
+  return <Btn onClick={onAsk}>Request budget approval</Btn>;
+};
+
+/** Ask Finance for a figure. A request for "more" is not a request anybody can decide. */
+const BudgetAskModal = ({ round, busy, onClose, onSubmit }) => {
+  const [amount, setAmount] = useState(String(round.proposed_ctc ?? ''));
+  const [reason, setReason] = useState('');
+  const asking = Number(amount);
+  const overBand = asking > Number(round.band_max || 0);
+
+  return (
+    <Modal
+      title="Request budget approval"
+      subtitle={`${round.candidate_name || round.uk} · ${round.request_no}`}
+      labelledBy="neg-budget-ask"
+      onClose={onClose}
+      footer={(
+        <>
+          <Btn onClick={onClose} disabled={busy}>Cancel</Btn>
+          <Btn tone="primary" disabled={busy || !(asking > 0) || !reason.trim() || !overBand}
+            onClick={() => onSubmit({ requested_ctc: asking, reason: reason.trim() })}>
+            {busy ? 'Sending…' : 'Send to Finance'}
+          </Btn>
+        </>
+      )}
+    >
+      <Facts items={[
+        { label: 'Approved band', value: `${money(round.band_min)} – ${money(round.band_max)}` },
+        { label: 'Proposed this round', value: money(round.proposed_ctc) },
+        { label: 'Candidate asked', value: money(round.candidate_expectation) },
+      ]} />
+
+      <div>
+        <label className={LABEL} htmlFor="neg-ask-ctc">CTC you are asking Finance for *</label>
+        <input id="neg-ask-ctc" type="number" min="1" value={amount} className={FIELD}
+          onChange={(e) => setAmount(e.target.value)} />
+        {!overBand && asking > 0 && (
+          <p className="mt-1 text-[11px] text-[var(--accent-orange)]">
+            {money(asking)} is already inside the approved band. No request is needed —
+            make the offer.
+          </p>
+        )}
+      </div>
+
+      <div>
+        <label className={LABEL} htmlFor="neg-ask-reason">Why the deviation is needed *</label>
+        <textarea id="neg-ask-reason" rows={4} value={reason} className={TEXTAREA}
+          placeholder="What the candidate is holding out for, and why this hire is worth it."
+          onChange={(e) => setReason(e.target.value)} />
+      </div>
+
+      <p className="text-[11.5px] text-[var(--text-muted)]">
+        Finance may approve less than you ask for, never more. The offer is then held to
+        whatever they grant, so an offer above that figure is refused exactly as one above
+        the band is. Whoever raises this cannot approve it.
+      </p>
     </Modal>
   );
 };

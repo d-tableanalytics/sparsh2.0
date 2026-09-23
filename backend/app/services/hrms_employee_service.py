@@ -41,7 +41,7 @@ from app.models.hrms import (
     AADHAAR_RE, AUDIT_EMPLOYEE_CREATED, AUDIT_EMPLOYEE_UPDATED, AUDIT_SALARY_CHANGED,
     AUDIT_EMPLOYEE_LINKED, COLL_DEPARTMENTS, COLL_DESIGNATIONS,
     COLL_EMPLOYEE_PROFILES, ENTITY_EMPLOYEE,
-    IFSC_RE, PAN_RE, UAN_RE, Cap, EmploymentStatus, HrmsRole, is_iso_date,
+    IFSC_RE, PAN_RE, UAN_RE, Cap, EmploymentStatus, EmploymentType, HrmsRole, is_iso_date,
 )
 from app.services.hrms_audit_service import audit
 from app.services.hrms_id_service import next_business_id
@@ -265,6 +265,18 @@ def _compose(user: Optional[dict], profile: Optional[dict], *, departments: dict
     return view
 
 
+async def _identity_source(company_id: str) -> tuple:
+    """Which identity collection holds this tenant's people. See hrms_access for the rule.
+
+    The directory does not simply stamp `company_id` onto the staff records instead: that
+    field being null is what the rest of the ERP relies on to tell an operator apart from a
+    company's own user (see `list_users` in routes/user.py, and org_tools' company filter).
+    Resolving it per tenant keeps that boundary where it is.
+    """
+    from app.utils.hrms_access import tenant_identity_source
+    return await tenant_identity_source(company_id)
+
+
 async def _resolve_lookups(company_id: str, users: list) -> tuple:
     """Batch-resolve department names, designation names and manager names.
 
@@ -343,7 +355,7 @@ async def list_employees(actor: dict, company_id: str, *, search: str = None,
             status_code=400,
             detail="A company must be selected to list employees.")
 
-    query = {"company_id": str(company_id)}
+    source, query = await _identity_source(company_id)
     if not include_inactive:
         query["is_active"] = {"$ne": False}
 
@@ -383,8 +395,13 @@ async def list_employees(actor: dict, company_id: str, *, search: str = None,
             return {"employees": [], "total": 0, "limit": limit, "skip": skip}
         query["_id"] = {"$in": oids}
 
-    users_coll = get_collection("learners")
+    users_coll = get_collection(source)
     total = await users_coll.count_documents(query)
+    # The full matching id set (unpaginated), so the orphan check below isn't fooled by a
+    # profile whose linked user simply falls on a different page.
+    matched_user_ids = {
+        str(d["_id"]) for d in await users_coll.find(query, {"_id": 1}).to_list(20000)
+    }
     limit = max(1, min(int(limit or 200), 500))
     users = await users_coll.find(query, _USER_PROJECTION).sort(
         "full_name", 1).skip(max(0, int(skip or 0))).limit(limit).to_list(limit)
@@ -417,15 +434,31 @@ async def list_employees(actor: dict, company_id: str, *, search: str = None,
                              designations=designations, managers=managers,
                              include_salary=include_salary))
 
+    # A profile can carry a `user_id` that no longer resolves to a learner of THIS company
+    # -- the account was moved to another company, or the profile was linked against the
+    # wrong one to begin with. `_unlinked_profiles` correctly skips it (its `user_id` field
+    # IS set), and the query above never finds it either, so without this it vanishes from
+    # the directory entirely instead of surfacing the inconsistency HR needs to fix.
+    orphaned = await _orphaned_linked_profiles(
+        company_id, matched_user_ids, search=search, department_id=department_id,
+        designation_id=designation_id, status=status)
+    for profile in orphaned:
+        row = _compose(None, profile, departments=departments, designations=designations,
+                       managers=managers, include_salary=include_salary)
+        row["pending_user_link"] = False
+        row["link_broken"] = True
+        rows.append(row)
+
     rows.sort(key=lambda r: (r.get("name") or "").lower())
 
     return {
         "employees": rows,
-        "total": total + len(unlinked),
+        "total": total + len(unlinked) + len(orphaned),
         "limit": limit,
         "skip": skip,
         "salary_visible": include_salary,
         "pending_links": sum(1 for r in rows if r.get("pending_user_link")),
+        "broken_links": sum(1 for r in rows if r.get("link_broken")),
     }
 
 
@@ -457,6 +490,40 @@ async def _unlinked_profiles(company_id: str, *, search: str = None,
     return rows
 
 
+async def _orphaned_linked_profiles(company_id: str, matched_user_ids: set, *,
+                                    search: str = None, department_id: str = None,
+                                    designation_id: str = None, status: str = None) -> list:
+    """Employee profiles whose `user_id` no longer resolves to a learner of THIS company.
+
+    `_unlinked_profiles` deliberately matches on the ABSENCE of `user_id`; a profile that
+    HAS one but whose target has since moved to another company (or was linked against the
+    wrong one) falls through both that query and the main user-driven one, and used to
+    disappear from the directory rather than surface as the data problem it is.
+
+    Filtered exactly like `_unlinked_profiles`, so a search or filter narrows this set too
+    rather than always injecting every orphan regardless of what the caller asked for.
+    """
+    query = {"company_id": str(company_id), "user_id": {"$exists": True, "$nin": [None, ""]}}
+    if department_id:
+        query["department_id"] = department_id
+    if designation_id:
+        query["designation_id"] = designation_id
+    if status:
+        query["employment_status"] = status
+
+    rows = await get_collection(COLL_EMPLOYEE_PROFILES).find(query).to_list(2000)
+    rows = [r for r in rows if r.get("user_id") not in matched_user_ids]
+    if search:
+        needle = search.strip().lower()
+        rows = [
+            r for r in rows
+            if needle in ((r.get("identity_snapshot") or {}).get("name") or "").lower()
+            or needle in ((r.get("identity_snapshot") or {}).get("email") or "").lower()
+            or needle in (r.get("employee_code") or "").lower()
+        ]
+    return rows
+
+
 async def get_employee(actor: dict, user_id: str, *, company_id: str = None,
                        force_salary: bool = None) -> dict:
     """One employee, composed. Raises 404 when the user does not exist or is out of scope.
@@ -472,8 +539,12 @@ async def get_employee(actor: dict, user_id: str, *, company_id: str = None,
     if not is_internal_user(actor):
         if user_company != str(actor.get("company_id") or ""):
             raise HTTPException(status_code=404, detail="Employee not found.")
-    elif company_id and user_company != str(company_id):
-        raise HTTPException(status_code=404, detail="Employee not found.")
+    elif company_id:
+        # Resolved per tenant rather than by comparing `company_id` directly: Sparsh Magic's
+        # own people are `staff` and carry none, so a flat comparison 404s every one of them.
+        from app.utils.hrms_access import tenant_member
+        if not await tenant_member(company_id, user_id, {"_id": 1}):
+            raise HTTPException(status_code=404, detail="Employee not found.")
 
     is_self = str(actor.get("_id") or "") == str(user_id)
     if not is_self and not can(actor, Cap.EMPLOYEE_READ):
@@ -494,6 +565,37 @@ async def get_employee(actor: dict, user_id: str, *, company_id: str = None,
                       else (is_self or can(actor, Cap.EMPLOYEE_SALARY_READ)))
     return _compose(user, profile, departments=departments, designations=designations,
                     managers=managers, include_salary=include_salary)
+
+
+async def get_employee_by_code(actor: dict, company_id: str,
+                               employee_code: str) -> Optional[dict]:
+    """One employee addressed by EMPLOYEE CODE rather than by login id.
+
+    Needed because an employee created by onboarding has no `user_id` at all until their
+    account is linked -- deliberately so, see the onboarding module's own note. Every
+    caller that addresses people by ObjectId therefore cannot reach a brand-new joiner,
+    which is exactly the person somebody is most likely to open.
+
+    Returns None rather than raising when there is no such code, so a caller can fall back
+    to the user-id path without catching.
+    """
+    if not employee_code:
+        return None
+    profile = await get_collection(COLL_EMPLOYEE_PROFILES).find_one(
+        {"company_id": str(company_id), "employee_code": employee_code})
+    if not profile:
+        return None
+    if not can(actor, Cap.EMPLOYEE_READ):
+        raise HTTPException(status_code=403, detail="You may only view your own profile.")
+
+    user = None
+    if profile.get("user_id"):
+        user, _coll = await _find_user(profile["user_id"])
+    departments, designations, managers = await _resolve_lookups(
+        company_id, [user] if user else [])
+    return _compose(user, profile, departments=departments, designations=designations,
+                    managers=managers,
+                    include_salary=can(actor, Cap.EMPLOYEE_SALARY_READ))
 
 
 async def create_profile(actor: dict, company_id: str, payload: dict) -> dict:
@@ -679,8 +781,9 @@ async def list_linkable_users(actor: dict, company_id: str) -> list:
         p.get("user_id") for p in await get_collection(COLL_EMPLOYEE_PROFILES).find(
             {"company_id": str(company_id)}, {"user_id": 1}).to_list(5000)
     } - {None}
-    users = await get_collection("learners").find(
-        {"company_id": str(company_id), "is_active": {"$ne": False}}, _USER_PROJECTION
+    source, query = await _identity_source(company_id)
+    users = await get_collection(source).find(
+        {**query, "is_active": {"$ne": False}}, _USER_PROJECTION
     ).sort("full_name", 1).to_list(2000)
     return [
         {"user_id": str(u["_id"]), "name": _display_name(u), "email": u.get("email"),
@@ -698,7 +801,8 @@ def _escape_regex(value: str) -> str:
 async def create_from_onboarding(actor: dict, company_id: str, *, employee_code: str,
                                  identity: dict, source_uk: str,
                                  joined_on: str = None, department_id: str = None,
-                                 designation_id: str = None, extra: dict = None) -> dict:
+                                 designation_id: str = None, assignment: dict = None,
+                                 extra: dict = None) -> dict:
     """Create an employee record for someone who has no login account yet (Phase 9).
 
     This is the moment recruitment becomes an employee, and it is the link both analysis
@@ -730,13 +834,19 @@ async def create_from_onboarding(actor: dict, company_id: str, *, employee_code:
         },
         "source_uk": source_uk,
         "employment_status": EmploymentStatus.ACTIVE.value,
-        "employment_type": "Full-time",
+        "employment_type": EmploymentType.FULL_TIME.value,
         "joined_on": joined_on,
         "department_id": department_id,
         "designation_id": designation_id,
         "created_at": now,
         "created_by": str(actor.get("_id")) if actor and actor.get("_id") else None,
     }
+    # §7.5 Stage 6 -- what HR assigned at joining. Applied over the defaults above, so
+    # a company that records an employment category or a payroll group gets theirs rather
+    # than the fallback, and one that records neither is unaffected.
+    for key, value in (assignment or {}).items():
+        if value not in (None, ""):
+            doc[key] = getattr(value, "value", value)
     for key, value in (extra or {}).items():
         if value is not None:
             doc[key] = value

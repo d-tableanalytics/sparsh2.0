@@ -35,12 +35,45 @@ from fastapi import HTTPException
 from app.db.mongodb import get_collection
 from app.models.hrms import (
     AUDIT_EXCEPTION_DECIDED, AUDIT_EXCEPTION_RAISED, COLL_CANDIDATES, COLL_EXCEPTIONS,
-    COLL_REQUISITIONS, ENTITY_EXCEPTION, EXCEPTION_UNBLOCKS, ExceptionStatus,
-    ExceptionType, RequisitionTrack,
+    COLL_REQUISITIONS, ENTITY_EXCEPTION, EXCEPTION_UNBLOCKS,
+    SALARY_EXCEPTION_NEEDS_AMOUNT, ExceptionStatus,
+    ExceptionType, REQUISITION_TRACK_INTERNAL,
 )
 from app.services.hrms_audit_service import audit
 from app.services.hrms_id_service import next_business_id
 from app.utils.hrms_public_guard import clean_text
+
+LEGACY = "is a legacy client-track requisition and is not part of hiring any more."
+
+# The same ceiling the offer service draws. A figure past it is a typo, not a salary.
+MAX_PLAUSIBLE_CTC = 1_000_000_000
+
+
+def _money(value) -> str:
+    """A figure a reader can check at a glance. Mirrors hrms_offer_service._money."""
+    try:
+        return f"{float(value):,.0f}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _validate_ctc(value, *, label: str = "CTC") -> float:
+    """A salary figure that is actually a salary."""
+    if value is None or value == "":
+        raise HTTPException(
+            status_code=422,
+            detail=("Say what figure you are asking Finance to approve. An Offer Outside "
+                    "Budget request with no number is a request nobody can decide."))
+    try:
+        amount = float(value)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail=f"{label} must be a number.")
+    if amount <= 0:
+        raise HTTPException(status_code=422, detail=f"{label} must be more than zero.")
+    if amount > MAX_PLAUSIBLE_CTC:
+        raise HTTPException(
+            status_code=422, detail=f"{label} is not a plausible salary figure.")
+    return round(amount, 2)
 
 
 async def approved_exception_for(company_id: str, gate: str, request_no: str,
@@ -145,25 +178,11 @@ async def raise_exception(actor: dict, company_id: str, payload: dict) -> dict:
             detail=(f"Type must be one of: "
                     f"{', '.join(t.value for t in ExceptionType)}."))
 
-    # ── Track ──
-    # The exception log began as a record of deviations from Sparsh Magic's OWN recruitment
-    # policy, so it refused the client track outright: that track had no gates for a waiver
-    # to lift.
-    #
-    # Phase 12 changed that fact rather than the principle. Background verification now
-    # stands in front of every offer on BOTH tracks, so the client track has exactly one
-    # gate -- and a gate with no attributable way past it is how override flags get invented.
-    # The refusal therefore narrows from "not this track" to "not this type on this track",
-    # which is the same rule stated against what is actually true now.
-    track = req.get("requisition_track") or RequisitionTrack.CLIENT.value
-    if track != RequisitionTrack.INTERNAL.value             and exception_type is not ExceptionType.BACKGROUND_WAIVED:
-        raise HTTPException(
-            status_code=409,
-            detail=(f"{request_no} is a client requisition. The only gate the client track "
-                    f'carries is background verification, so "'
-                    f'{ExceptionType.BACKGROUND_WAIVED.value}" is the only exception it can '
-                    f"take. Everything else here records deviations from Sparsh Magic's own "
-                    f"recruitment policy."))
+    # The exception log records deviations from Sparsh Magic's OWN recruitment policy. A
+    # legacy client-track row has no gates of ours for a waiver to lift.
+    track = req.get("requisition_track")
+    if track != REQUISITION_TRACK_INTERNAL:
+        raise HTTPException(status_code=409, detail=f"{request_no} {LEGACY}")
 
     reason = clean_text(payload.get("reason"), limit=4000)
     if not reason:
@@ -184,6 +203,24 @@ async def raise_exception(actor: dict, company_id: str, payload: dict) -> dict:
                 detail=(f"{uk} is not a candidate on {request_no}. An exception must name "
                         f"the requisition the candidate is actually against, or the waiver "
                         f"would lift a gate on work it was never reviewed for."))
+
+    # ── SOP section 6 ── "any deviation requires fresh Management/Finance approval".
+    #
+    # A deviation from a BUDGET is a number, and this is the request that goes to Finance,
+    # so the number has to be on it. Without one, HR asked for "more" and Finance approved
+    # "more", and `assert_within_band` then had no figure to hold the offer to -- an
+    # approval for 13 lakh would have cleared an offer of 30.
+    requested_ctc = None
+    if exception_type.value in SALARY_EXCEPTION_NEEDS_AMOUNT:
+        requested_ctc = _validate_ctc(payload.get("requested_ctc"))
+        band_min = req.get("approved_salary_band_min")
+        band_max = req.get("approved_salary_band_max")
+        if band_max is not None and requested_ctc <= float(band_max):
+            raise HTTPException(
+                status_code=422,
+                detail=(f"{_money(requested_ctc)} is already inside the approved band for "
+                        f"{request_no} ({_money(band_min)} to {_money(band_max)}). No "
+                        f"exception is needed -- make the offer."))
 
     # A second PENDING request for the same waiver is noise, and approving one of two
     # identical rows leaves the other stranded forever.
@@ -212,6 +249,14 @@ async def raise_exception(actor: dict, company_id: str, payload: dict) -> dict:
         # what this would actually let through. None for "Other", which lifts nothing.
         "gate": GATE_FOR_TYPE.get(exception_type.value),
         "reason": reason,
+        # What was ASKED for, and (once decided) what was actually granted. Both are kept:
+        # "they wanted 15 and Finance gave 13" is the interesting half of the record.
+        "requested_ctc": requested_ctc,
+        "approved_ctc": None,
+        # The band as it stood when the request was made, so a later budget re-approval
+        # does not rewrite what this request was a deviation FROM.
+        "band_min_at_request": req.get("approved_salary_band_min"),
+        "band_max_at_request": req.get("approved_salary_band_max"),
         "linked_entity": clean_text(payload.get("linked_entity"), limit=60),
         "status": ExceptionStatus.PENDING.value,
         "raised_by": str(actor.get("_id") or ""),
@@ -243,6 +288,8 @@ async def raise_exception(actor: dict, company_id: str, payload: dict) -> dict:
         f"Exception {exc_no} needs a decision",
         f'{doc["raised_by_name"]} requests "{exception_type.value}" on {request_no}'
         + (f' for {doc.get("candidate_name") or uk}. ' if uk else " (all candidates). ")
+        + (f"Requested CTC: {_money(requested_ctc)} (approved band tops out at "
+           f'{_money(req.get("approved_salary_band_max"))}). ' if requested_ctc else "")
         + f"Reason: {reason}",
         kind="warning", link="/hrms/exceptions", email=True)
     return _out(doc)
@@ -294,12 +341,36 @@ async def decide_exception(actor: dict, company_id: str, exc_no: str,
             status_code=422,
             detail="Say why the exception is refused, so the raiser knows what to do next.")
 
+    # ── The figure Finance is actually granting ──
+    #
+    # Defaults to what was asked for, so approving without touching it means "yes, that
+    # amount". Finance may grant LESS ("I will go to 13, not 15") because that is a real
+    # decision they make. They may not grant MORE: an approval above the request would
+    # authorise a figure nobody asked for and nobody argued for.
+    approved_ctc = None
+    if (current.get("exception_type") in SALARY_EXCEPTION_NEEDS_AMOUNT
+            and decision is ExceptionStatus.APPROVED):
+        requested = current.get("requested_ctc")
+        if payload.get("approved_ctc") in (None, ""):
+            approved_ctc = requested
+        else:
+            approved_ctc = _validate_ctc(payload.get("approved_ctc"),
+                                         label="The approved CTC")
+            if requested is not None and approved_ctc > float(requested):
+                raise HTTPException(
+                    status_code=422,
+                    detail=(f"{_money(approved_ctc)} is more than the "
+                            f"{_money(requested)} that was requested. Approve up to what "
+                            f"was asked for, or ask HR to raise the request again at the "
+                            f"higher figure."))
+
     now = datetime.now(timezone.utc)
     updates = {
         "status": decision.value,
         "approved_by": actor_id,
         "approved_by_name": actor.get("full_name") or actor.get("email"),
         "approved_at": now,
+        "approved_ctc": approved_ctc,
         "signature": signature,
         "decision_remarks": remarks,
         "updated_at": now,

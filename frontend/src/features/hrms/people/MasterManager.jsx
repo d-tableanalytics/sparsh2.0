@@ -25,6 +25,24 @@ import {
  * decides which spelling wins.
  */
 
+/**
+ * The SOP's seniority bands, mirroring DesignationLevel in models/hrms.py.
+ *
+ * This is not decoration. Two rules are stated in terms of it: who must sit on an
+ * interview panel, and whether a candidate needs the Management final round before they
+ * can be selected. Leaving it unset reads as "mid", which silently means no final round --
+ * so a managerial role that nobody banded is a managerial role hired without one.
+ */
+const SENIORITY = [
+  ['', 'Not set (treated as mid)'],
+  ['junior', 'Junior'],
+  ['mid', 'Mid'],
+  ['senior', 'Senior \u2014 needs the Management final round'],
+  ['managerial', 'Managerial \u2014 needs the Management final round'],
+];
+
+const SENIORITY_LABEL = Object.fromEntries(SENIORITY.map(([v, l]) => [v, l]));
+
 const API = {
   department: {
     list: getDepartments, create: createDepartment, update: updateDepartment, remove: deleteDepartment,
@@ -109,6 +127,16 @@ const MasterManager = ({ kind = 'department' }) => {
       await load();
     } catch (err) {
       showError(err?.response?.data?.detail || 'Could not save the change.');
+    }
+  };
+
+  const setSeniority = async (row, value) => {
+    try {
+      await cfg.update(row.id, { designation_level: value || null }, scope);
+      showSuccess(`${row.name} set to ${SENIORITY_LABEL[value] || 'not set'}`);
+      await load();
+    } catch (err) {
+      showError(err?.response?.data?.detail || 'Could not set the seniority band.');
     }
   };
 
@@ -200,6 +228,14 @@ const MasterManager = ({ kind = 'department' }) => {
         </div>
       )}
 
+      {kind === 'designation' && rows.length > 0 && (
+        <p className="text-[11.5px] text-[var(--text-muted)]">
+          <b>Seniority</b> drives two SOP rules: who must sit on the interview panel, and
+          whether a candidate needs the Management final round before they can be selected.
+          A designation left unset is treated as mid, which means no final round.
+        </p>
+      )}
+
       {rows.length === 0 ? (
         <HrmsEmpty
           icon={Building2}
@@ -212,6 +248,11 @@ const MasterManager = ({ kind = 'department' }) => {
             <thead className="bg-[var(--input-bg)] text-[var(--text-muted)]">
               <tr>
                 <th className="text-left px-4 py-2.5 text-[10.5px] font-bold uppercase tracking-widest">{cfg.label}</th>
+                {kind === 'designation' && (
+                  <th className="text-left px-4 py-2.5 text-[10.5px] font-bold uppercase tracking-widest w-64">
+                    Seniority
+                  </th>
+                )}
                 <th className="text-left px-4 py-2.5 text-[10.5px] font-bold uppercase tracking-widest w-28">Status</th>
                 {canWrite && <th className="px-4 py-2.5 w-28" />}
               </tr>
@@ -234,6 +275,22 @@ const MasterManager = ({ kind = 'department' }) => {
                       <span className="font-semibold text-[var(--text-main)]">{r.name}</span>
                     )}
                   </td>
+                  {kind === 'designation' && (
+                    <td className="px-4 py-2.5">
+                      <select
+                        value={r.designation_level || ''} disabled={!canWrite}
+                        onChange={(e) => setSeniority(r, e.target.value)}
+                        aria-label={`Seniority band for ${r.name}`}
+                        className="h-8 px-2 w-full rounded-lg border border-[var(--border)]
+                          bg-[var(--input-bg)] text-[12px] text-[var(--text-main)]
+                          disabled:opacity-50"
+                      >
+                        {SENIORITY.map(([value, label]) => (
+                          <option key={value || 'unset'} value={value}>{label}</option>
+                        ))}
+                      </select>
+                    </td>
+                  )}
                   <td className="px-4 py-2.5">
                     <button
                       type="button" disabled={!canWrite} onClick={() => toggleActive(r)}

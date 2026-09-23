@@ -89,6 +89,9 @@ export const toneFor = (status) => ({
   // 'Extended' and 'Draft' already map to 'warn'/'neutral' above.
   // ── Phase LETTER-1 — HR Letter / Document Generator ──
   Issued: 'good', Superseded: 'neutral',
+  // ── Phase 11-R, Item 6 — dual budget capture (BudgetStatus) ── 'Pending' already maps to
+  // 'warn' above, which is the right reading here too (one figure is in, one is not).
+  Matched: 'good', Mismatch: 'bad',
 }[status] || 'neutral');
 
 /**
@@ -115,3 +118,13 @@ export const money = (value) => {
   const n = Number(value);
   return Number.isNaN(n) ? '—' : n.toLocaleString();
 };
+
+/** Tints for `Tile` (internalKit.jsx) — the headline-number card both hiring boards use. */
+const TILE_TONE = {
+  indigo: { bg: 'bg-[var(--accent-indigo-bg)]', text: 'text-[var(--accent-indigo)]' },
+  green: { bg: 'bg-[var(--accent-green-bg)]', text: 'text-[var(--accent-green)]' },
+  orange: { bg: 'bg-[var(--accent-orange-bg)]', text: 'text-[var(--accent-orange)]' },
+  red: { bg: 'bg-[var(--accent-red-bg)]', text: 'text-[var(--accent-red)]' },
+};
+
+export const tint = (tone) => TILE_TONE[tone] || TILE_TONE.indigo;

@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { Building, Plus, Timer, Table2, ListTodo } from 'lucide-react';
+import { Building, Timer, Table2, ListTodo, Wallet } from 'lucide-react';
 import { useHrms } from '../HrmsContext';
 import { CAP } from '../access';
 import HrmsPageHeader from '../common/HrmsPageHeader';
@@ -8,25 +8,26 @@ import HrmsScopeBar from '../common/HrmsScopeBar';
 import { HrmsLoading, HrmsError, HrmsEmpty } from '../common/HrmsStates';
 import { useNotification } from '../../../context/NotificationContext';
 import ApprovalDialog from '../recruitment/ApprovalDialog';
-import RequisitionFormModal from '../recruitment/RequisitionFormModal';
 import InternalTracker from './InternalTracker';
 import {
   getRequisitions, actOnRequisition, getRequisitionSla,
 } from '../../../services/hrmsApi';
-import { day, toneFor } from './internalKit';
+import { day, toneFor, money } from './internalKit';
 import {
   Btn, Chip, Facts, Modal, RecordList,
 } from './internalKit.jsx';
+import { REQUISITION_SOP_LABEL, sopLabelFor } from './sopLabels';
 
 /**
- * HRMS ▸ internal track — requisitions.
+ * HRMS ▸ internal track — Headcount & Budget Approval.
  *
- * The same list as the client track, filtered to `track=internal` and showing the gate each
- * requisition is actually sitting at. `RequisitionFormModal` and `ApprovalDialog` are REUSED
- * rather than cloned — the chain differs in its states, not in what an approval dialog is.
+ * Raising a new requisition happens on the Overview screen now (its own "+ Raise" button);
+ * this screen's job is narrower and comes after that: answer "what is this waiting on, and
+ * can I clear it", with the budget figures a Management/Finance reviewer needs to answer it
+ * shown plainly rather than buried in the detail page. `ApprovalDialog` is REUSED rather than
+ * cloned — the chain differs in its states, not in what an approval dialog is.
  *
- * The screen's job is to answer "what is this waiting on, and can I clear it". So the action
- * offered on each row is derived from the requisition's own state and the caller's
+ * The action offered on each row is derived from the requisition's own state and the caller's
  * capabilities, never from a fixed set of buttons that 403 when pressed.
  */
 
@@ -56,6 +57,41 @@ const GATES = {
   },
 };
 
+/**
+ * The budget view this screen exists for: what the HOD asked for (`budget_hod_amount`) next
+ * to what Management/Finance actually sanctioned (`budget_sanctioned_amount`), the derived
+ * agreement status between them (Phase 11-R, Item 6 — `budget_status`/`budget_delta` are
+ * never stored, always read fresh), and — once the gate clears — the approved headcount and
+ * salary band that is the real answer to "what did Management approve". A requisition with
+ * neither figure captured yet shows plainly as `Not Set` rather than a blank cell.
+ */
+const BudgetCell = ({ r }) => {
+  const status = r.budget_status || 'Not Set';
+  return (
+    <div className="space-y-1 min-w-[150px]">
+      <Chip tone={toneFor(status)}>{status}</Chip>
+      {status !== 'Not Set' && (
+        <div className="text-[11px] text-[var(--text-muted)] tabular-nums">
+          HOD {money(r.budget_hod_amount)} · Sanctioned {money(r.budget_sanctioned_amount)}
+        </div>
+      )}
+      {status === 'Mismatch' && r.budget_delta != null && (
+        <div className="text-[11px] font-semibold text-[var(--accent-red)] tabular-nums">
+          Δ {r.budget_delta > 0 ? '+' : ''}{money(r.budget_delta)}
+        </div>
+      )}
+      {r.approved_salary_band_min != null ? (
+        <div className="text-[11px] text-[var(--text-main)] tabular-nums">
+          Band {money(r.approved_salary_band_min)}–{money(r.approved_salary_band_max)}
+          {r.approved_headcount != null && ` · ${r.approved_headcount} approved`}
+        </div>
+      ) : (
+        <div className="text-[11px] text-[var(--text-muted)]">Band not approved</div>
+      )}
+    </div>
+  );
+};
+
 const InternalRequisitionList = () => {
   const { scope, companyId, companyName, can } = useHrms();
   const navigate = useNavigate();
@@ -64,7 +100,6 @@ const InternalRequisitionList = () => {
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [raising, setRaising] = useState(false);
   // Two views of one screen. The QUEUE offers actions (verify, approve budget, clear
   // escalation); the TRACKER answers "where has everything got to, and what is late"
   // (Phase INT-7, Annexure C). Same route, so neither navigation list changes.
@@ -78,7 +113,7 @@ const InternalRequisitionList = () => {
     setLoading(true);
     setError(null);
     try {
-      const { data } = await getRequisitions({ ...scope, track: 'internal', limit: 200 });
+      const { data } = await getRequisitions({ ...scope, limit: 200 });
       setRows(data?.requisitions || []);
     } catch (err) {
       setError(err?.response?.data?.detail || 'Could not load internal requisitions.');
@@ -125,33 +160,33 @@ const InternalRequisitionList = () => {
           </span>
         </>
       ) },
-    { key: 'seats', label: 'Seats', align: 'right',
+    { key: 'requested', label: 'Requested', align: 'right',
+      // What the HOD actually asked for when they raised it — seats and the CTC they
+      // proposed — kept separate from the Budget column so a reviewer can see the ask
+      // and the sanctioned figure side by side rather than one overwriting the other.
       render: (r) => (
         <>
-          <span className="text-[var(--text-main)]">{r.vacancy}</span>
-          {r.approved_headcount != null && r.approved_headcount !== r.vacancy && (
-            <span className="block text-[11px] text-[var(--text-muted)]">
-              {r.approved_headcount} approved
+          <span className="text-[var(--text-main)]">{r.vacancy} seat{r.vacancy === 1 ? '' : 's'}</span>
+          {r.offering_ctc != null && (
+            <span className="block text-[11px] text-[var(--text-muted)] tabular-nums">
+              {money(r.offering_ctc)} CTC
             </span>
           )}
         </>
       ) },
-    { key: 'band', label: 'Approved band',
-      render: (r) => (
-        r.approved_salary_band_min != null ? (
-          <span className="text-[var(--text-muted)] tabular-nums">
-            {Number(r.approved_salary_band_min).toLocaleString()}
-            {' – '}
-            {Number(r.approved_salary_band_max).toLocaleString()}
-          </span>
-        ) : <span className="text-[var(--text-muted)]">not approved</span>
-      ) },
+    { key: 'budget', label: 'Budget', render: (r) => <BudgetCell r={r} /> },
     { key: 'stage', label: 'Waiting on',
       render: (r) => {
         const gate = GATES[r.approval_status];
+        const sop = sopLabelFor(r.approval_status, REQUISITION_SOP_LABEL);
         return (
           <>
             <Chip tone={toneFor(r.approval_status)}>{r.approval_status}</Chip>
+            {sop && (
+              <span className="block text-[10.5px] text-[var(--text-muted)] italic mt-0.5">
+                SOP: {sop}
+              </span>
+            )}
             {gate && (
               <span className="block text-[11px] text-[var(--text-muted)] mt-1">
                 {gate.who}
@@ -189,14 +224,22 @@ const InternalRequisitionList = () => {
             </p>
             <p className="text-[11.5px] text-[var(--text-muted)]">{r.request_no}</p>
           </div>
-          <Chip tone={toneFor(r.approval_status)}>{r.approval_status}</Chip>
+          <div className="text-right">
+            <Chip tone={toneFor(r.approval_status)}>{r.approval_status}</Chip>
+            {sopLabelFor(r.approval_status, REQUISITION_SOP_LABEL) && (
+              <span className="block text-[10.5px] text-[var(--text-muted)] italic mt-0.5">
+                SOP: {sopLabelFor(r.approval_status, REQUISITION_SOP_LABEL)}
+              </span>
+            )}
+          </div>
         </div>
         <Facts items={[
-          { label: 'Seats', value: r.vacancy },
+          { label: 'Requested', value: `${r.vacancy} seat${r.vacancy === 1 ? '' : 's'}`
+            + (r.offering_ctc != null ? ` · ${money(r.offering_ctc)} CTC` : '') },
+          { label: 'Budget', value: r.budget_status || 'Not Set' },
           { label: 'Band',
             value: r.approved_salary_band_min != null
-              ? `${Number(r.approved_salary_band_min).toLocaleString()}–`
-                + `${Number(r.approved_salary_band_max).toLocaleString()}`
+              ? `${money(r.approved_salary_band_min)}–${money(r.approved_salary_band_max)}`
               : 'not approved' },
           { label: 'Raised', value: day(r.created_at) },
         ]} />
@@ -219,15 +262,11 @@ const InternalRequisitionList = () => {
   return (
     <div className="space-y-5">
       <HrmsPageHeader
-        icon={Building}
-        title="Internal requisitions"
-        subtitle={`${companyName || 'This company'}'s own vacancies — budget approved `
-          + 'internally, no client'}
-        actions={can(CAP.REQUISITION_CREATE) && (
-          <Btn tone="primary" onClick={() => setRaising(true)}>
-            <Plus size={14} /> Raise
-          </Btn>
-        )}
+        icon={Wallet}
+        title="Headcount & Budget Approval"
+        subtitle={`${companyName || 'This company'}'s open requisitions — what was `
+          + 'requested against what Management or Finance has sanctioned. Raise a new '
+          + 'request from the Overview screen.'}
       />
       <HrmsScopeBar />
 
@@ -264,16 +303,8 @@ const InternalRequisitionList = () => {
           empty={<HrmsEmpty
             icon={Building}
             title="No internal requisitions"
-            hint="Raise one with the button above — it's created on the internal track."
+            hint="Raise one from the Overview screen — it's created on the internal track."
           />}
-        />
-      )}
-
-      {raising && (
-        <RequisitionFormModal
-          fixedTrack="internal"
-          onClose={() => setRaising(false)}
-          onSaved={() => { setRaising(false); load(); }}
         />
       )}
 

@@ -38,7 +38,7 @@ from app.models.hrms import (
     AUDIT_SCORECARD_APPROVED, AUDIT_SCORECARD_CREATED, AUDIT_SCORECARD_EVALUATED,
     AUDIT_SCORECARD_UPDATED, COLL_CANDIDATES, COLL_POSITION_SCORECARDS, COLL_REQUISITIONS,
     ENTITY_CANDIDATE, ENTITY_SCORECARD, SCORE_MAX, SCORE_MIN, Cap, Decision, HrmsRole,
-    RequisitionTrack, ScorecardCategory, ScorecardStatus, score_band,
+    REQUISITION_TRACK_INTERNAL, ScorecardCategory, ScorecardStatus, score_band,
 )
 from app.services.hrms_audit_service import audit
 from app.services.hrms_id_service import next_business_id
@@ -63,13 +63,11 @@ async def _require_internal_requisition(company_id: str, request_no: str) -> dic
     if not req:
         raise HTTPException(
             status_code=422, detail="That requisition does not exist for this company.")
-    track = req.get("requisition_track") or RequisitionTrack.CLIENT.value
-    if track != RequisitionTrack.INTERNAL.value:
+    track = req.get("requisition_track")
+    if track != REQUISITION_TRACK_INTERNAL:
         raise HTTPException(
             status_code=409,
-            detail=(f"{request_no} is a client requisition. Position scorecards belong to "
-                    f"Sparsh Magic's own vacancies -- on the client track the client owns "
-                    f"the hiring judgement."))
+            detail=f"{request_no} is a legacy client-track requisition and is not part of hiring any more.")
     return req
 
 
@@ -134,7 +132,10 @@ def _validate_criteria(raw) -> list:
                 status_code=422, detail=f'The maximum score for "{label}" must be at least 1.')
 
         out.append({"label": label, "category": category.value,
-                    "weight": weight, "max_score": max_score})
+                    "expected_level": clean_text(item.get("expected_level"), limit=500) or None,
+                    "evaluation_criteria": clean_text(item.get("evaluation_criteria"), limit=500) or None,
+                    "weight": weight, "max_score": max_score,
+                    "remarks": clean_text(item.get("remarks"), limit=500) or None})
     return out
 
 

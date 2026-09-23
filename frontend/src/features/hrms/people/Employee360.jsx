@@ -82,6 +82,57 @@ const Employee360 = () => {
         ]} />
       </Section>
 
+      {/* §7.5 Stage 9 — where this employee came from. Conversion has always kept the
+          candidate record and pointed at it from `source_uk`, but nothing read that link,
+          so from the employee's side the recruitment history may as well not have
+          existed. Placed first because it is what happened BEFORE everything below. */}
+      {'recruitment' in view && (
+        <Section title="Recruitment history">
+          {view.recruitment?.candidate ? (
+            <>
+              <Facts items={[
+                { label: 'Candidate', value: view.recruitment.candidate.candidate_name },
+                { label: 'Reference', value: view.recruitment.uk },
+                { label: 'Applied', value: day(view.recruitment.candidate.applied_at) },
+                { label: 'Source', value: view.recruitment.candidate.source },
+                { label: 'Applied for', value: view.recruitment.candidate.applied_position },
+                { label: 'Requisition', value: view.recruitment.candidate.request_no },
+              ]} />
+              <div className="mt-3 flex flex-wrap gap-1.5">
+                {[['Interviews', view.recruitment.interviews?.interviews],
+                  ['Assessments', view.recruitment.assessments?.assessments],
+                  ['Offers', view.recruitment.offers?.offers]]
+                  .filter(([, rows]) => Array.isArray(rows))
+                  .map(([label, rows]) => (
+                    <Chip key={label} tone={rows.length ? 'good' : 'neutral'}>
+                      {rows.length} {label.toLowerCase()}
+                    </Chip>
+                  ))}
+              </div>
+              {(view.recruitment.journey?.events || []).length > 0 && (
+                <ul className="mt-3 space-y-1.5">
+                  {view.recruitment.journey.events.map((e, i) => (
+                    <li key={i} className="flex items-baseline justify-between gap-3 text-[12px]">
+                      <span className="text-[var(--text-main)]">
+                        {e.title}
+                        {e.detail && (
+                          <span className="text-[var(--text-muted)]"> — {e.detail}</span>
+                        )}
+                      </span>
+                      <span className="text-[11px] text-[var(--text-muted)] shrink-0">
+                        {day(e.at)}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </>
+          ) : (
+            <Empty label="This employee was added directly, not hired through recruitment." />
+          )}
+        </Section>
+      )}
+
       {'probation' in view && (
         <Section title="Probation">
           {view.probation ? (

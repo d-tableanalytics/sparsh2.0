@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { NavLink, useLocation } from 'react-router-dom';
 import {  AnimatePresence , motion } from 'framer-motion';
 import {
+  Archive,
   LayoutDashboard, Users, Briefcase, CheckSquare,
   Settings, Building2,
   MessageSquare, LogOut, Layers, Copy, Calendar, Sparkles, PlayCircle, Target, BarChart3, Library, X,
@@ -9,7 +10,7 @@ import {
   Gauge, GitBranch, AlertTriangle, UserCog, ListChecks, ScrollText, UserCircle, ClipboardList, ClipboardCheck, Link2,
   Award, SlidersHorizontal, FolderOpen, FileCog, CalendarClock, ShieldAlert,
   // ── Phase INT-2 ── the remaining Internal Recruitment SOP surfaces.
-  HeartHandshake, Bookmark, Scale, Mail, BookMarked,
+  HeartHandshake, Bookmark, Scale, Mail,
   // ── Phase EXIT-1 ── Exit Management. Not LogOut — that icon is already the literal
   // sign-out control further down this file, and reusing it here for "someone else is
   // leaving the company" would read as the wrong action entirely.
@@ -26,6 +27,9 @@ import {
   Wallet,
   // ── Phase PIP-1 ── Performance Improvement Plan.
   TrendingDown,
+  // The Onboarding workspace. UserPlus is "a new person joining", which is the
+  // whole of what that workspace covers.
+  UserPlus,
   // Notification Templates.
   BellRing,
   // ── Phase ORIENT-1 ── Orientation & Training.
@@ -36,7 +40,37 @@ import {
 import { useAuth } from '../../context/AuthContext';
 import { canAccessTaskManagement } from '../../utils/taskAccess';
 import { canAccessTpms } from '../../features/tpms/access';
-import { canAccessHrms } from '../../features/hrms/access';
+import { canAccessHrms, isClientTrackUser } from '../../features/hrms/access';
+
+/**
+ * The submodules a given viewer actually sees, headings included.
+ *
+ * A `{ section: 'Time & Pay' }` marker is a heading, not a link. HRMS is 22 entries long
+ * and a flat run of 22 reads as one undifferentiated list you have to scan end to end;
+ * broken into named groups it reads as six short ones you can skip past.
+ *
+ * Headings are dropped when nothing under them survives the role and track filters —
+ * otherwise a non-admin would see a "Setup" heading with nothing beneath it, which
+ * advertises screens they cannot open. That means filtering the LINKS first and pruning
+ * the headings afterwards, never the other way round.
+ */
+const visibleSubmodules = (submodules, user, clientTrackOnly) => {
+  const kept = submodules.filter((sub) => (
+    sub.section
+      || ((!sub.roles || sub.roles.includes(user?.role))
+        // A client company's user holds CLIENT_TRACK_CAPS and nothing else, so every
+        // entry but Client Hiring leads to a screen the API answers 403. Offering them a
+        // full HRMS menu would be a list of doors that do not open.
+        && (!clientTrackOnly || sub.clientTrack))
+  ));
+  return kept.filter((sub, i) => {
+    if (!sub.section) return true;
+    const next = kept[i + 1];
+    return !!next && !next.section;   // a heading with no link under it is not a heading
+  });
+};
+import { HIRING_WORKSPACE, ONBOARDING_WORKSPACE, workspacePaths }
+  from '../../features/hrms/common/hrmsWorkspaces';
 import { canManage as canManageLeadershipCycle } from '../../features/tpms/leadership/leadershipUtils';
 import { canOpenNotificationTemplates } from '../../utils/notifyTemplateAccess';
 
@@ -162,30 +196,22 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
   // What is left is the way IN plus the screens the strip does not carry. `Recruitment`
   // stays highlighted anywhere in the workspace (see `match`), so the sidebar still shows
   // which part of HRMS you are in after the tabs have moved you off the requisition screen.
-  // Phase 11-R appends `appointments` — it lives in the workspace tab strip, so it belongs
-  // here and NOT in hrmsSubmodules (the two lists must stay disjoint).
-  const HRMS_WORKSPACE = ['/hrms/requisitions', '/hrms/jd', '/hrms/postings', '/hrms/candidates',
-    '/hrms/screening', '/hrms/assessments', '/hrms/interviews', '/hrms/offers',
-    '/hrms/appointments', '/hrms/onboarding', '/hrms/reports',
-    // Internal track — hiring stages, so they live in the tab strip.
-    '/hrms/internal-requisitions', '/hrms/scorecards', '/hrms/reference-checks',
-    // Phase INT-2: the shortlisting committee is a hiring stage too — it sits between
-    // screening and the final interview, and gates `Selected`.
-    '/hrms/shortlist-reviews',
-    // Phase INT-4: the telephonic screen sits between CV screening and the panel, and
-    // gates interview scheduling. A stage, so it belongs in the strip — which means it
-    // belongs in THIS list, so "Recruitment" stays lit while somebody is on it.
-    '/hrms/telephonic-screening',
-    // Phase INT-10: the salary negotiation record is a hiring stage (SOP step 9).
-    '/hrms/negotiations',
-    // Phase INT-15: the internal hiring dashboard is the way into the internal track, so
-    // it belongs in the strip -- and therefore in this list, or the sidebar would go dark
-    // on the very screen somebody starts from.
-    '/hrms/internal-hiring',
-    // Phase 12: the client track's own stages. These were in the tab strip from the start
-    // but were never listed here, so "Recruitment" unlit itself the moment somebody opened
-    // a job request. They are stages like any other.
-    '/hrms/job-requests', '/hrms/cv-sharing', '/hrms/background-checks'];
+  // Paths a workspace TAB STRIP already carries (features/hrms/common/hrmsWorkspaces.js).
+  // Anything in one of these lists must NOT also be a sidebar submodule -- a screen
+  // reachable from both is two doors into one room, and the two navigations then disagree
+  // about where it lives.
+  //
+  // These are DERIVED from the strips rather than retyped. The hand-kept copy that used to
+  // sit here had drifted four paths behind the real strip, which is exactly how Pre-Joiners,
+  // Induction, 30/90-Day Surveys and Probation ended up in both navigations at once. A list
+  // maintained in two places is a list that will disagree with itself.
+  const HIRING_PATHS = workspacePaths(HIRING_WORKSPACE);
+  const ONBOARDING_PATHS = workspacePaths(ONBOARDING_WORKSPACE);
+  // `/hrms/requisitions` is the retired "both tracks" list; App.jsx redirects it to the
+  // internal board, so the entry has to stay lit while that redirect is in flight.
+  const inHiring = (p) => p === '/hrms/requisitions'
+    || HIRING_PATHS.some((r) => p === r || p.startsWith(`${r}/`));
+  const inOnboarding = (p) => ONBOARDING_PATHS.some((r) => p === r || p.startsWith(`${r}/`));
 
   // Ordered to follow the BA doc's own Employee Lifecycle (§5: Workforce Need -> MRF ->
   // Recruitment -> Offer -> Pre-boarding -> Joining -> Probation -> Active Employment ->
@@ -193,7 +219,11 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
   // build phase. Previously this list was ordered roughly by the phase that added each
   // entry, which put Probation and Exit Management ahead of Attendance/Payroll and
   // Orientation near the very end — the opposite of the order a lifecycle reads in.
+  // True for a client company's own user: they reach Client Hiring and nothing else.
+  const clientTrackOnly = isClientTrackUser(user);
+
   const hrmsSubmodules = [
+    { section: 'Overview' },
     { name: 'Dashboard', path: '/hrms/dashboard', icon: BarChart3 },
     { name: 'Employees', path: '/hrms/employees', icon: Users },
 
@@ -201,44 +231,67 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
     // Recruitment is visible to everyone: any HRMS user may raise a requisition, and whoever
     // raises one becomes its hiring manager (the module's documented design intent). Opens
     // the workspace tab strip, which carries every pipeline stage from requisition through
-    // Appointments (see HrmsWorkspaceBar.jsx) — Talent Pool and Shared Candidates below are
-    // sourcing/client surfaces that feed the same pipeline without being a stage in it.
+    // Appointments (see HrmsWorkspaceBar.jsx) — Talent Pool below is a sourcing surface that
+    // feeds the same pipeline without being a stage in it.
+    { section: 'Hiring' },
+    // ── Internal Hiring ── ONE entry for the whole internal process. It opens the
+    // hiring board, whose tab strip carries every stage from requisition through
+    // probation, so the stages do not each need a sidebar line of their own. Named to
+    // match Client Hiring below: two tracks, two entries, the same shape.
     {
-      name: 'Recruitment', path: '/hrms/requisitions', icon: ClipboardList,
-      match: (p) => HRMS_WORKSPACE.some((r) => p === r || p.startsWith(`${r}/`)),
+      name: 'Internal Hiring', path: '/hrms/internal-hiring', icon: ClipboardList,
+      match: inHiring,
     },
-    // ── Phase INT-2 ── a search across candidates rather than a step in one hire.
+    // ── Client Hiring (PRO-fit) ── the OTHER hiring track, deliberately its own entry
+    // rather than a filter inside Recruitment. Sparsh hiring its own staff and Sparsh
+    // recruiting for a client are different processes with different approvers, and one
+    // menu item covering both would invite exactly the mixing this track exists to avoid.
+    {
+      name: 'Client Hiring', path: '/hrms/client-hiring', icon: Building2,
+      // Everything under /hrms/client- EXCEPT the pool, which is its own entry below.
+      // Two entries claiming one path would light up together.
+      match: (p) => p.startsWith('/hrms/client-') && p !== '/hrms/client-candidate-pool',
+      // The one HRMS surface a client company's own people may reach. See clientTrack
+      // below for why that matters to this list.
+      clientTrack: true,
+    },
+    // ── Rejected & available candidates ── people a client passed on, kept for the next
+    // role that suits them. Its own entry because it is not part of any one client's
+    // flow; Sparsh-side only, and the endpoint refuses a client-side caller anyway.
+    {
+      name: 'Available Candidates', path: '/hrms/client-candidate-pool', icon: Archive,
+      roles: ['superadmin', 'admin', 'coach', 'staff'],
+    },
+    // ── Phase INT-2 ── a search across candidates rather than a step in one hire, so it
+    // is not a tab on the hiring strip and keeps its own entry.
     { name: 'Talent Pool', path: '/hrms/talent-pool', icon: Bookmark },
-    // Phase 12 — a client's own read-only view of candidates shared with them. Deliberately
-    // NOT in the workspace tab strip's "Client hiring" group (that group is Sparsh staff's
-    // own pipeline view); this is the one entry point a client-side user has to their board.
-    { name: 'Shared Candidates', path: '/hrms/shared-candidates', icon: Users },
 
-    // ── Stages 06-07: Pre-boarding -> Joining (Onboarding) ──
-    // Onboarding's sidebar entry point was removed again: it duplicated the workspace tab
-    // strip's own 'Onboarding' tab (`/hrms/onboarding`, in the "Both tracks" group), which
-    // is reachable from 'Recruitment' above the same way 'Hiring Req' is — so this was a
-    // second door to the same room, not a second room.
-    // ── Phase INT-2 ── post-offer engagement tracking for the same pre-boarding window,
-    // not itself a pipeline stage.
-    { name: 'Pre-boarding', path: '/hrms/preboarding', icon: HeartHandshake },
+    { section: 'Joining' },
+    // ── Onboarding ── ONE entry for the whole joining journey, the same shape as the two
+    // hiring entries above. It opens the onboarding board, whose tab strip carries
+    // Pre-Joiners, Appointment & Agreements, Induction, the 30/90-Day Surveys and
+    // Probation, so none of those needs a sidebar line of its own.
+    //
+    // Its own workspace rather than the tail of Internal Hiring because onboarding runs
+    // identically for a client-track joiner and a Sparsh Magic one — a screen serving both
+    // tracks cannot sit inside one of them. (Exit is NOT a workspace: resignation, notice,
+    // handover, clearance and F&F are stages of one case, and Exit below already shows
+    // them as one record's lifecycle.)
+    {
+      name: 'Onboarding', path: '/hrms/onboarding', icon: UserPlus,
+      match: inOnboarding,
+    },
+
     // Phase 11-R, Item 2 — the document register has ONE home, and it is the sidebar (not a
     // hiring stage, so deliberately absent from the workspace strip). KYC/joining documents
     // are verified here during onboarding, and every document type stays reachable from the
     // same place afterward.
     { name: 'Documents', path: '/hrms/documents', icon: FolderOpen },
-    // ── Phase ORIENT-1 ── §22.3: assigned "on employee activation" — i.e. right after
-    // joining. An employee reaches their own record ("My Onboarding") through this entry.
-    { name: 'Orientation & Training', path: '/hrms/orientation', icon: GraduationCap },
-    // ── Phase PULSE-1 ── 30/90-day check-ins, issued automatically from date of joining —
-    // the first health-check after Orientation, so it follows immediately after.
-    { name: 'Pulse Surveys', path: '/hrms/pulse-surveys', icon: HeartPulse },
 
-    // ── Stage 08: Probation ──
-    { name: 'Probation', path: '/hrms/probation', icon: CalendarClock },
 
     // ── Stage 09: Active Employment ──
     // ── Phase ATT-1 ── daily capture, regularisation, Outdoor Duty and monthly closure.
+    { section: 'Time & Pay' },
     { name: 'Attendance', path: '/hrms/attendance', icon: Clock },
     { name: 'Leave & C-Off', path: '/hrms/leave', icon: CalendarCheck },
     // ── Phase PAY-1 ── component-driven payroll, salary advance and variable pay.
@@ -247,6 +300,7 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
     // ── Stages 10-11: Growth / Conduct ──
     // ── Phase PIP-1 ── objectives, support, reviews and outcome for a Performance
     // Improvement Plan.
+    { section: 'Performance & Conduct' },
     { name: 'PIP', path: '/hrms/pip', icon: TrendingDown },
     // ── Phase MOVE-1 ── promotions/transfers (Growth) and discipline/absconding/retirement
     // alerts (Conduct) — one screen covers both stages.
@@ -256,12 +310,9 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
     // ── Phase LETTER-1 ── controlled correspondence (confirmation, revision, warning, etc.)
     // — HR manages the template register and issues letters, an employee reads their own.
     { name: 'Letters', path: '/hrms/letters', icon: FileCog },
-    // ── Phase POLICY-LIB-1 (§22.6) ── every employee's own view of the policies that
-    // apply to them, separate from the HR-only 'Policy Register' further down (which
-    // administers the register rather than reading it).
-    { name: 'HR Policy Library', path: '/hrms/policy-library', icon: BookMarked },
 
     // ── Stages 12-15: Exit Initiation -> Notice/Handover -> F&F -> Closure ──
+    { section: 'Exit & Exceptions' },
     // ── Phase EXIT-1 ── `match` also lights this up on the detail route.
     {
       name: 'Exit Management', path: '/hrms/separations', icon: UserMinus,
@@ -271,6 +322,7 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
     // ── Governance, not a lifecycle stage: an internal-hiring control surface. ──
     { name: 'Exceptions', path: '/hrms/exceptions', icon: ShieldAlert },
     ...(isHrmsAdminUser ? [
+      { section: 'Setup' },
       { name: 'Departments', path: '/hrms/departments', icon: Building2 },
       { name: 'Designations', path: '/hrms/designations', icon: Briefcase },
       // No 'Clients' entry: a recruitment client IS a company, so it is maintained in the
@@ -282,20 +334,16 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
       // communications are managed in Notification Templates). The
       // capability checks are the real control -- this list only decides visibility.
       { name: 'Salary Bands', path: '/hrms/salary-bands', icon: Scale },
-      { name: 'Policy Register', path: '/hrms/policies', icon: BookMarked },
       // ── Phase INT-5 ── the per-company rule set: SLA targets, retention periods,
       // probation duration, reminder tiers and score bands. Governance, not a hiring
       // stage, so it stays out of the workspace tab strip. The `settings.write`
       // capability is the real control -- this list only decides visibility.
       { name: 'HRMS Settings', path: '/hrms/settings', icon: SlidersHorizontal },
-      // ── SM-HR-052 ── the audit trail every write path in this module has already been
-      // logging to since Phase 1 — this is its first screen. Admin-only visibility here;
-      // the real control is still Cap.AUDIT_READ on the route itself.
-      { name: 'Audit Viewer', path: '/hrms/audit', icon: ScrollText },
-      // ── SM-HR-051 ── governance-role assignment, account disable and the read-only
-      // role/capability matrix. Admin-only visibility here too; the real control is
-      // Cap.MODULE_ADMIN on the route itself.
-      { name: 'Role & Access', path: '/hrms/access', icon: UserCog },
+      // Policy Register, HR Policy Library, Audit Viewer and Role & Access were removed
+      // from this list on 2026-09-23 at the user's request. Their ROUTES are untouched
+      // (/hrms/policies, /hrms/policy-library, /hrms/audit, /hrms/access) and their
+      // capability gates are unchanged -- they are simply not advertised in the nav.
+      // Re-add an entry here if one of them needs a door again.
     ] : []),
   ];
 
@@ -499,7 +547,20 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
                       exit={{ height: 0, opacity: 0 }}
                       className="overflow-hidden pl-4 space-y-1 mt-1"
                     >
-                      {link.submodules.filter((sub) => !sub.roles || sub.roles.includes(user?.role)).map((sub) => {
+                      {visibleSubmodules(link.submodules, user, clientTrackOnly)
+                        .map((sub, subIndex) => {
+                        // A heading, not a link.
+                        if (sub.section) {
+                          return (
+                            <p key={`section-${sub.section}`}
+                              className={`px-3 text-[10px] font-bold uppercase tracking-widest
+                                text-[var(--text-muted)]/70 select-none
+                                ${subIndex === 0 ? 'pt-0.5 pb-1' : 'pt-3 pb-1'}`}>
+                              {sub.section}
+                            </p>
+                          );
+                        }
+
                         const subLinkClass = ({ isActive }) => `
                           group flex items-center gap-3 pl-3 pr-2.5 py-2 rounded-lg transition-colors text-[12.5px]
                           ${isActive

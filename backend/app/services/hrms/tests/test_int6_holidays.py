@@ -247,7 +247,7 @@ async def main() -> None:
     reqs = store.setdefault(M.COLL_REQUISITIONS, FakeCollection())
     raised = datetime(2026, 8, 17, 9, 0, tzinfo=timezone.utc)     # Monday
     req = {"request_no": "HR-REQ-2026-001", "company_id": C1,
-           "requisition_track": M.RequisitionTrack.INTERNAL.value,
+           "requisition_track": "internal",
            "closing_status": "Open", "created_at": raised,
            # Budget approved on the Friday: 4 calendar working days later.
            "sla_actuals": {"budget_approved": datetime(2026, 8, 21, 9, 0,

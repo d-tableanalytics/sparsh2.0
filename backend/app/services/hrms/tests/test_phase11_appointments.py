@@ -127,8 +127,13 @@ async def main() -> None:
         # =================================================================
         section("The Offer-Accepted gate")
         # =================================================================
-        check("only Offer Accepted may be appointed",
-              APS.APPOINTABLE_STATUSES == {S.OFFER_ACCEPTED})
+        # Widened to include Pre-Onboarding: onboarding now opens automatically the instant
+        # an offer is accepted (BA Functional Design §7.5), so a candidate no longer rests
+        # at Offer Accepted -- without this, an appointment letter could never legally be
+        # issued at all. Pre-Onboarding is strictly LATER in the same forward chain, so it
+        # still means exactly what this gate asks: "has accepted an offer".
+        check("Offer Accepted or later (Pre-Onboarding) may be appointed",
+              APS.APPOINTABLE_STATUSES == {S.OFFER_ACCEPTED, S.PRE_ONBOARDING})
         await expect_http("appointing a merely Selected candidate",
                           APS.create_appointment(HR, COMPANY, {"uk": "CAN-002"}),
                           409, "accepted their offer")
@@ -261,10 +266,43 @@ async def main() -> None:
                           APS.acknowledge_appointment(appt["access_code"], {}),
                           422, "full name")
 
+        # §7.5 Stage 7 -- the NDA, Code of Conduct and required policies are signed with
+        # the letter, and one signature must not silently stand for all of them.
+        public = await APS.get_public_appointment(appt["access_code"])
+        check("the joiner is shown the employment documents to sign",
+              [d["doc"] for d in public["documents"]]
+              == list(M.EMPLOYMENT_DOCUMENTS))
+        check("and which of them are required",
+              [d["required"] for d in public["documents"]]
+              == list(M.EMPLOYMENT_DOCUMENTS.values()))
+
+        await expect_http("signing without accepting the required documents",
+                          APS.acknowledge_appointment(
+                              appt["access_code"], {"signature": "Cand CAN-001"}),
+                          422, "read and accept each document")
+        await expect_http("accepting only some of them",
+                          APS.acknowledge_appointment(
+                              appt["access_code"],
+                              {"signature": "Cand CAN-001",
+                               "documents": ["Non-Disclosure Agreement"]}),
+                          422, "Code of Conduct")
+
+        required_docs = [d for d, req in M.EMPLOYMENT_DOCUMENTS.items() if req]
         ack = await APS.acknowledge_appointment(
-            appt["access_code"], {"signature": "Cand CAN-001", "note": "Looking forward"})
+            appt["access_code"], {"signature": "Cand CAN-001", "note": "Looking forward",
+                                  "documents": required_docs})
         check("the acknowledgement is recorded",
               ack["status"] == M.AppointmentStatus.ACKNOWLEDGED.value)
+        signed = await appts.find_one({"appointment_no": appt["appointment_no"]})
+        check("each accepted document is stamped in its own right",
+              all(d["acknowledged_at"] for d in signed["document_acks"]
+                  if d["doc"] in required_docs))
+        check("the same signature is recorded against each one",
+              all(d["signature"] == "Cand CAN-001" for d in signed["document_acks"]
+                  if d["doc"] in required_docs))
+        check("an optional document left unticked stays unsigned",
+              all(d["acknowledged_at"] is None for d in signed["document_acks"]
+                  if d["doc"] not in required_docs))
         stored = await appts.find_one({"appointment_no": appt["appointment_no"]})
         check("the signature is kept",
               stored["acknowledgement_signature"] == "Cand CAN-001")

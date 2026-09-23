@@ -282,12 +282,14 @@ async def main() -> None:
             "onb_no": "ONB-2026-001", "company_id": COMPANY,
             "request_no": "HR-REQ-2026-001", "candidate_name": "Joiner One",
             "joining_date": (NOW - timedelta(days=5)).strftime("%Y-%m-%d"),
-            "checklist": M.seed_checklist("internal")})
+            "checklist": M.seed_checklist()})
         await onboardings.insert_one({
             "onb_no": "ONB-2026-002", "company_id": COMPANY,
-            "request_no": "HR-REQ-2026-001", "candidate_name": "Client Joiner",
+            "request_no": "HR-REQ-2026-001", "candidate_name": "Legacy Client Joiner",
             "joining_date": (NOW - timedelta(days=5)).strftime("%Y-%m-%d"),
-            "checklist": M.seed_checklist("client")})
+            # A LEGACY client-track onboarding: base items only, no induction items.
+            "checklist": [{"key": k, "label": label, "done": False, "done_at": None}
+                          for k, label in M.ONBOARD_CHECKLIST]})
         await probations.insert_one({
             "prb_no": "PRB-2026-001", "company_id": COMPANY,
             "request_no": "HR-REQ-2026-001", "employee_name": "Joiner One",
@@ -311,7 +313,7 @@ async def main() -> None:
         await onboardings.update_one(
             {"onb_no": "ONB-2026-001"},
             {"$set": {"checklist": [{**i, "done": True}
-                                    for i in M.seed_checklist("internal")]}})
+                                    for i in M.seed_checklist()]}})
         await probations.update_one(
             {"prb_no": "PRB-2026-001"},
             {"$set": {"outcome": M.ProbationOutcome.CONFIRMED.value}})

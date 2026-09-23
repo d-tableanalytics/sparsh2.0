@@ -38,7 +38,7 @@ from app.db.mongodb import get_collection
 from app.models.hrms import (
     AUDIT_NEGOTIATION_RECORDED, COLL_CANDIDATES, COLL_NEGOTIATIONS, COLL_REQUISITIONS,
     ENTITY_NEGOTIATION, MAX_NEGOTIATION_ROUNDS, NEGOTIATION_ABOVE, NEGOTIATION_BELOW,
-    NEGOTIATION_WITHIN, RequisitionTrack, negotiation_verdict,
+    NEGOTIATION_WITHIN, REQUISITION_TRACK_INTERNAL, negotiation_verdict,
 )
 from app.services.hrms_audit_service import audit
 # The SAME row scoping the candidate pipeline applies: a hiring manager sees rounds on the
@@ -94,13 +94,11 @@ async def _requisition_with_band(company_id: str, candidate: dict) -> dict:
     if not req:
         raise HTTPException(
             status_code=422, detail="That candidate's requisition does not exist.")
-    track = req.get("requisition_track") or RequisitionTrack.CLIENT.value
-    if track != RequisitionTrack.INTERNAL.value:
+    track = req.get("requisition_track")
+    if track != REQUISITION_TRACK_INTERNAL:
         raise HTTPException(
             status_code=409,
-            detail=(f'{req.get("request_no")} is a client requisition. Salary negotiation '
-                    f"against an internally approved band is a Sparsh Magic control; the "
-                    f"client owns the money on that track."))
+            detail=f'{req.get("request_no")} is a legacy client-track requisition and is not part of hiring any more.')
     if req.get("approved_salary_band_min") is None or req.get("approved_salary_band_max") is None:
         raise HTTPException(
             status_code=409,
@@ -159,7 +157,7 @@ async def negotiation_for(actor: dict, company_id: str, uk: str) -> dict:
 
     req = await get_collection(COLL_REQUISITIONS).find_one(
         {"request_no": candidate.get("request_no"), "company_id": str(company_id)}) or {}
-    track = req.get("requisition_track") or RequisitionTrack.CLIENT.value
+    track = req.get("requisition_track")
     band_min = req.get("approved_salary_band_min")
     band_max = req.get("approved_salary_band_max")
 
@@ -178,13 +176,13 @@ async def negotiation_for(actor: dict, company_id: str, uk: str) -> dict:
                        if latest else None)
 
     waiver = None
-    if track == RequisitionTrack.INTERNAL.value and req.get("request_no"):
+    if track == REQUISITION_TRACK_INTERNAL and req.get("request_no"):
         from app.services.hrms_exception_service import approved_exception_for
         waiver = await approved_exception_for(
             company_id, "salary_band", req.get("request_no"), uk)
 
-    if track != RequisitionTrack.INTERNAL.value:
-        would_pass, reason = True, "Client track: the band gate does not apply."
+    if track != REQUISITION_TRACK_INTERNAL:
+        would_pass, reason = False, "Legacy client-track requisition: not part of hiring."
     elif band_min is None or band_max is None:
         # Mirrors the gate exactly: `assert_within_band` does NOT refuse an internal
         # requisition with no band recorded (it can only be one approved before the band

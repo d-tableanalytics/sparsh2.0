@@ -57,7 +57,7 @@ from app.models.hrms import (
     JOB_PREBOARDING,
     JOB_PROBATION, JOB_PULSE_SURVEY, JOB_RETENTION, JOB_SLA_SWEEP, MANAGERIAL_LEVELS,
     PROBATION_REMINDED_FIELD, ProbationOutcome,
-    PurgeBatchStatus, SCHEDULED_JOBS,
+    JOB_LWD, PurgeBatchStatus, SCHEDULED_JOBS,
 )
 
 
@@ -394,6 +394,16 @@ async def run_policy_acknowledgement_reminders(company_id: str) -> dict:
     return await notify_pending_acknowledgements(company_id)
 
 
+async def run_last_working_day(company_id: str) -> dict:
+    """Everything that should happen on somebody's last day (7.18 step 10).
+
+    All the decision logic lives in hrms_exit_service.run_lwd_sweep; this is the
+    registration shim, exactly as the pulse and orientation jobs are.
+    """
+    from app.services.hrms_exit_service import run_lwd_sweep
+    return await run_lwd_sweep(company_id)
+
+
 JOB_HANDLERS = {
     JOB_SLA_SWEEP:     run_sla_sweep,
     JOB_PROBATION:     run_probation_reminders,
@@ -403,6 +413,7 @@ JOB_HANDLERS = {
     JOB_ORIENTATION:   run_orientation_escalation,
     JOB_PULSE_SURVEY:  run_pulse_survey_issue,
     JOB_POLICY_ACK:    run_policy_acknowledgement_reminders,
+    JOB_LWD:           run_last_working_day,
 }
 
 

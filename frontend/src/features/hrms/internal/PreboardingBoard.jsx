@@ -136,7 +136,7 @@ const PreboardingBoard = () => {
     <div className="space-y-5">
       <HrmsPageHeader
         icon={HeartHandshake}
-        title="Pre-boarding"
+        title="Pre-Joiners"
         subtitle="Staying in touch between the accepted offer and the first day (SOP section 6). Tracking, not a gate — nothing is blocked by it."
       />
       <HrmsScopeBar />

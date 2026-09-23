@@ -25,13 +25,14 @@ candidates who have reached an accepted-or-later stage against the requisition's
 flips it to Hired. It never overrides Hold, Cancel or Closed -- a human decision outranks an
 arithmetic one.
 """
+import logging
 from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import HTTPException
 
 from app.db.mongodb import get_collection
-from app.models.hrms import AUDIT_OFFER_APPROVED, RequisitionTrack
+from app.models.hrms import AUDIT_OFFER_APPROVED, REQUISITION_TRACK_INTERNAL
 from app.models.hrms import (
     ACTIVE_OFFER_STATUSES, AUDIT_OFFER_ACCEPTED, AUDIT_OFFER_CREATED, AUDIT_OFFER_DECLINED,
     AUDIT_OFFER_DELETED, AUDIT_OFFER_EDITED, AUDIT_OFFER_REVOKED, AUDIT_OFFER_SENT,
@@ -45,6 +46,8 @@ from app.services.hrms_id_service import next_business_id
 from app.services.hrms_notify_service import notify_hrms_role, notify_user
 from app.utils.hrms_access import can
 from app.utils.hrms_public_guard import INVALID_LINK, clean_text, new_access_code
+
+logger = logging.getLogger(__name__)
 
 
 def _today() -> str:
@@ -191,8 +194,7 @@ async def offerable_candidates(actor: dict, company_id: str) -> list:
 # Internal track — the two offer gates
 # ─────────────────────────────────────────────────────────────
 def _is_internal(req: dict) -> bool:
-    return ((req or {}).get("requisition_track")
-            or RequisitionTrack.CLIENT.value) == RequisitionTrack.INTERNAL.value
+    return (req or {}).get("requisition_track") == REQUISITION_TRACK_INTERNAL
 
 
 def _money(value) -> str:
@@ -230,9 +232,29 @@ async def assert_within_band(company_id: str, ctc: float, candidate: dict,
         return
 
     from app.services.hrms_exception_service import approved_exception_for
-    if await approved_exception_for(company_id, "salary_band", req.get("request_no"),
-                                    candidate.get("uk")):
-        return
+    waiver = await approved_exception_for(company_id, "salary_band", req.get("request_no"),
+                                          candidate.get("uk"))
+    if waiver:
+        # An approved exception authorises A FIGURE, not "any figure".
+        #
+        # Finance approving 13 lakh used to clear an offer of 30, because the approval was
+        # a boolean and the gate returned the moment it found one. The ceiling is what
+        # Finance actually granted, so an offer past it is refused exactly as if no
+        # exception existed -- and the message says whose number it is breaching.
+        from app.models.hrms import salary_exception_ceiling
+        ceiling = salary_exception_ceiling(waiver)
+        if ceiling is None:
+            # Raised before the figure was recorded. Nothing to hold it to, so it behaves
+            # as it always did rather than retrospectively blocking a granted waiver.
+            return
+        if float(ctc) <= ceiling:
+            return
+        raise HTTPException(
+            status_code=409,
+            detail=(f'{_money(ctc)} is more than the {_money(ceiling)} Finance approved '
+                    f'for {candidate.get("candidate_name") or candidate.get("uk")} '
+                    f'({waiver.get("exc_no")}). Offer at or below that figure, or raise a '
+                    f"new Offer Outside Budget request at the higher one."))
 
     direction = "below" if float(ctc) < float(band_min) else "above"
     raise HTTPException(
@@ -282,8 +304,8 @@ async def approve_offer(actor: dict, company_id: str, offer_no: str,
     if not _is_internal(req):
         raise HTTPException(
             status_code=409,
-            detail=("Offer approval is an internal-track control. On a client requisition "
-                    "the client approves the offer, not Sparsh Magic."))
+            detail=(f"{current.get('request_no')} is a legacy client-track requisition and "
+                    "is not part of hiring any more; its offers cannot be approved."))
 
     signature = clean_text(payload.get("signature"), limit=140)
     if not signature:
@@ -724,8 +746,7 @@ async def reconcile_requisition_closure(actor: Optional[dict], company_id: str,
     # later, and the tracker reports the funnel per requisition. What stays open is the
     # REQUISITION, which is the honest state -- a joiner who leaves in month two puts this
     # role back in the market, and a requisition already closed as Hired cannot say so.
-    if (req.get("requisition_track") or RequisitionTrack.CLIENT.value) \
-            == RequisitionTrack.INTERNAL.value:
+    if req.get("requisition_track") == REQUISITION_TRACK_INTERNAL:
         return None
 
     filled = await get_collection(COLL_CANDIDATES).count_documents({
@@ -865,6 +886,40 @@ async def respond_to_offer(code: str, payload: dict) -> dict:
     if action == "accept":
         # The last vacancy may just have been filled.
         await reconcile_requisition_closure(None, company_id, doc.get("request_no"))
+
+        # ── BA Functional Design §7.5 ── "Pre-boarding & Joining Document Workflow",
+        # Trigger: "Offer accepted." -- the onboarding case (and the candidate's own
+        # secure document-upload portal) is meant to open THE MOMENT an offer is
+        # accepted, not once HR gets around to picking them from a list. Best-effort:
+        # the offer has already been recorded above, and a candidate must never see
+        # their acceptance fail because this fire-and-forget step hit a problem.
+        try:
+            from app.services.hrms_onboarding_service import start_onboarding
+            await start_onboarding(None, company_id, {
+                "uk": doc["uk"], "joining_date": doc.get("joining_date")})
+        except HTTPException as e:
+            # 409 is the expected, legal case: HR started the onboarding by hand first.
+            # Anything else means the pre-joiner case did NOT open, and swallowing that
+            # left a candidate who had accepted with no case and nobody aware of it.
+            if e.status_code != 409:
+                await notify_hrms_role(
+                    company_id, ["HR"],
+                    f"Pre-joiner case NOT created: {doc.get('candidate_name')}",
+                    (f"{doc.get('candidate_name')} accepted {doc['offer_no']}, but their "
+                     f"onboarding could not be opened automatically ({e.detail}). "
+                     f"Start it by hand from the onboarding board."),
+                    kind="error", link="/hrms/onboarding", email=True)
+        except Exception as e:                      # pragma: no cover - defensive
+            # The offer is already Accepted at this point; a failure here must never make
+            # the candidate's acceptance look like it did not work.
+            logger.warning("Auto onboarding failed for %s: %s", doc.get("uk"), e)
+            await notify_hrms_role(
+                company_id, ["HR"],
+                f"Pre-joiner case NOT created: {doc.get('candidate_name')}",
+                (f"{doc.get('candidate_name')} accepted {doc['offer_no']}, but their onboarding "
+                 f"could not be opened automatically. Start it by hand from the "
+                 f"onboarding board."),
+                kind="error", link="/hrms/onboarding", email=True)
 
     return {
         "ok": True,

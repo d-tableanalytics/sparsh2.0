@@ -121,6 +121,13 @@ const CreateModal = ({ onClose, onCreated }) => {
                 ))}
               </select>
             )}
+            {/* Says the rule up front rather than letting the server's 409 be the first
+                anybody hears of it — the list above is filtered on stage, not on whether
+                the checks have cleared. */}
+            <p className="mt-1.5 text-[11px] text-[var(--text-muted)]">
+              Background verification must be complete and approved before an offer can be
+              raised.
+            </p>
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">

@@ -15,6 +15,10 @@ Three layers use this:
                                  administering a switched-off module is still possible.
   • can() / require_cap()      — the capability check every feature gate resolves through.
 
+HRMS hires for Sparsh Magic only. The ERP's client companies are never party to it, so
+there is no client-side scope anywhere in this module: a caller is either internal staff
+or a user of the in-house tenant, and `company_id` is the only boundary.
+
 ── Why a capability check and not role strings ──────────────────────────────────
 The source HRMS accumulated four overlapping authorization mechanisms with three
 different "admin" role sets, a helper (`canAccessHrms`) whose name no longer matched
@@ -34,38 +38,15 @@ from fastapi import Depends, HTTPException
 from app.controllers.auth_controller import get_current_user
 from app.db.mongodb import get_collection
 from app.models.hrms import (
-    CLIENT_ROLES, CLIENT_TRACK_SPARSH_ONLY_CAPS, GOVERNANCE_TO_HRMS, INTERNAL_OWNER_ROLES,
-    INTERNAL_STAFF_ROLES, INTERNAL_TRACK_ONLY_CAPS, ROLE_CAPABILITIES, TOGGLE_ROLES, Cap,
-    HrmsRole,
+    CLIENT_ROLES, GOVERNANCE_TO_HRMS, INTERNAL_OWNER_ROLES, INTERNAL_STAFF_ROLES,
+    ROLE_CAPABILITIES, TOGGLE_ROLES, Cap, CLIENT_TRACK_CAPS, CLIENT_DECISION_CAPS,
+    CLIENT_OWNED_CAPS, CLIENT_TRACK_FLAG, HrmsRole,
 )
-from app.models.hrms import COLL_CLIENT_ENGAGEMENTS, ENGAGEMENT_GRANTS_SCOPE
 
 MODULE_DISABLED_MESSAGE = (
     "The HRMS module is not enabled for your company. Please contact your administrator."
 )
 NO_ACCESS_MESSAGE = "You do not have access to the HRMS module."
-
-# ─────────────────────────────────────────────────────────────
-# The client-participant stamp
-# ─────────────────────────────────────────────────────────────
-# A user of a CLIENT organisation is not a tenant of HRMS. Their own company has the module
-# switched off -- correctly, because they do not run a hiring pipeline; Sparsh runs one FOR
-# them. They reach HRMS as a participant in Sparsh's tenant, through a client engagement.
-#
-# Establishing that takes a database read, and `hrms_role` / `can` are synchronous and
-# called on every gate in the module. So the entry dependency (`ensure_hrms_enabled`, which
-# already runs per request) resolves it once and STAMPS the answer on the user dict, and
-# the synchronous resolvers read the stamp.
-#
-# Two properties this must hold, because getting either wrong is a privilege escalation:
-#
-#   1. The stamp is SERVER-SET ONLY. `ensure_hrms_enabled` clears any inbound value before
-#      deciding, so a crafted request body can never award itself a tenant.
-#   2. A stamped user is a CLIENT, whatever their governance_role says. A client company's
-#      "HR" is HR *of that company*; inside Sparsh's HRMS they are a client contact, and
-#      mapping their title to HrmsRole.HR would hand them Sparsh's entire HR capability set.
-CLIENT_TENANT_FIELD = "_hrms_client_tenant"
-
 
 # ─────────────────────────────────────────────────────────────
 # Identity
@@ -100,17 +81,28 @@ def is_client_side_user(user: dict) -> bool:
 def hrms_role(user: dict) -> Optional[HrmsRole]:
     """Resolve an ERP user to their HRMS role, or None if they have none.
 
-    Internal:  superadmin              → ADMIN     (full owner, cross-company)
-               admin / coach / staff   → INTERNAL  (cross-company operator + support)
-    Client:    clientadmin             → MD        (top of their company's ladder)
+    Internal:  superadmin              → ADMIN     (full owner)
                governance_role MD      → MD
                governance_role HR      → HR
-               governance_role FINANCE → FINANCE   (internal-track budget authority)
-               governance_role HOD     → MANAGER
-               anything else           → EMPLOYEE  (self-service only)
+               governance_role FINANCE → FINANCE   (the budget authority)
+               governance_role HOD     → MANAGER   (hiring manager)
+               no governance_role      → INTERNAL  (operator + support, reads only)
+    Tenant:    clientadmin             → MD        (top of the company's ladder)
+               governance_role as above, anything else → EMPLOYEE (self-service only)
 
-    A client user with no governance_role falls through to EMPLOYEE, matching
-    auth_controller.client_rank's treatment of the same case (lowest rank by default).
+    -- Why internal staff read `governance_role` too -----------------------------------
+    HRMS hires for Sparsh Magic, and Sparsh's own people ARE staff accounts. Mapping every
+    one of them to INTERNAL (reads only) left the approval chain unusable: INTERNAL holds
+    no REQUISITION_REVIEW_HR, no REQUISITION_APPROVE_BUDGET and no SCORECARD_APPROVE, so
+    only a superadmin could act -- and a superadmin could perform every step alone, which
+    is the opposite of the separation of duties the SOP is built on. Worse, SCORECARD_APPROVE
+    is gated on the MANAGER rung specifically, a rung no staff account could ever reach, so
+    no requisition could be approved and nothing could be posted at all.
+
+    Reading the same `governance_role` the tenant ladder already uses fixes that without a
+    second mechanism: HR verifies, Management/Finance approves the budget, the hiring
+    manager approves the scorecard. Staff with no governance role keep exactly the support
+    access they had.
     """
     if not user:
         return None
@@ -119,14 +111,8 @@ def hrms_role(user: dict) -> Optional[HrmsRole]:
     if is_internal_user(user):
         if role in INTERNAL_OWNER_ROLES:
             return HrmsRole.ADMIN
-        return HrmsRole.INTERNAL
-
-    # A participant from a CLIENT organisation, admitted through an engagement. Checked
-    # before the governance ladder on purpose: their title describes their standing in
-    # their OWN company, and reading it here would promote a client's HR to Sparsh's HR or
-    # a client's owner (clientadmin) to Sparsh's MD. In this module they are a client.
-    if user.get(CLIENT_TENANT_FIELD):
-        return HrmsRole.CLIENT
+        governance = (user.get("governance_role") or "").strip().upper()
+        return GOVERNANCE_TO_HRMS.get(governance, HrmsRole.INTERNAL)
 
     if role == "clientadmin":
         return HrmsRole.MD
@@ -140,8 +126,24 @@ def hrms_role(user: dict) -> Optional[HrmsRole]:
 # Company module toggle
 # ─────────────────────────────────────────────────────────────
 async def is_hrms_enabled(company_id: str) -> bool:
-    """Whether HRMS is switched on for a company. A missing flag means OFF — the module
-    is opt-in per company, so nothing is exposed until it is explicitly enabled."""
+    """Whether HRMS is available to a company.
+
+    TWO conditions, both required:
+
+      * `hrms_enabled` — the per-company opt-in switch. A missing flag means OFF.
+      * `is_internal`  — this is the ONE company the ERP is operated in-house by.
+
+    HRMS is an internal recruitment and HR system, not a module sold to the ERP's client
+    companies. `hrms_enabled` alone used to be the whole test, which meant a client
+    company was one toggle away from the entire module -- including payroll and personal
+    data. Requiring `is_internal` as well makes that impossible rather than merely
+    unlikely: flipping the toggle on a client company now grants nothing, so a mistaken
+    or malicious enable is inert.
+
+    This is THE gate. `ensure_hrms_enabled` below is the only caller that matters, and it
+    guards the entire `/api/hrms` router as a dependency, so there is no HRMS endpoint
+    that can be reached without passing through here.
+    """
     if not company_id:
         return False
     try:
@@ -150,7 +152,29 @@ async def is_hrms_enabled(company_id: str) -> bool:
         return False
     if not company:
         return False
-    return bool(company.get("hrms_enabled", False))
+    return bool(company.get("hrms_enabled", False)) and bool(company.get("is_internal", False))
+
+
+async def client_track_company(company_id: str) -> bool:
+    """Whether this company may reach HRMS as a CLIENT, not as the operator.
+
+    The second door, deliberately separate from `is_hrms_enabled`. A client company needs
+    the same per-company opt-in, and must NOT be the in-house tenant -- the two are mutually
+    exclusive by construction, so a company can never be both operator and client.
+
+    Passing this admits the caller to the module. What they may then do is decided entirely
+    by CLIENT_TRACK_CAPS, which starts empty.
+    """
+    if not company_id:
+        return False
+    try:
+        company = await get_collection("companies").find_one({"_id": ObjectId(company_id)})
+    except Exception:
+        return False
+    if not company:
+        return False
+    return (bool(company.get("hrms_enabled", False))
+            and not bool(company.get("is_internal", False)))
 
 
 async def ensure_hrms_enabled(current_user: dict, company_id: str = None) -> None:
@@ -164,64 +188,89 @@ async def ensure_hrms_enabled(current_user: dict, company_id: str = None) -> Non
     if is_internal_user(current_user):
         return
 
-    # Never trust an inbound stamp. This runs before any decision, so a value arriving on
-    # the request body or a stale dict cannot award itself a tenant.
-    current_user.pop(CLIENT_TENANT_FIELD, None)
-
-    target = company_id or str(current_user.get("company_id") or "")
+    # A client-side caller is judged on THEIR OWN company, never on one they name.
+    #
+    # This used to read `company_id or current_user["company_id"]`, honouring a
+    # `?company_id=` from the query string. That let any client-company user pass the
+    # in-house company's id and clear the gate -- the data layer still pinned them to
+    # their own company via `scope_company_id`, so they saw nothing, but they got 200s
+    # from a module that is supposed to answer them 403. The entitlement is a property of
+    # who they are, not of the company they ask about, so the parameter is ignored here.
+    target = str(current_user.get("company_id") or "")
     if await is_hrms_enabled(target):
         return
 
-    # Their own company has HRMS off. Before refusing, ask the question the old code never
-    # did: is this a CLIENT organisation's user, participating in a tenant that DOES run
-    # HRMS? That is the whole client-hiring model -- a client does not run a pipeline, they
-    # are a party to somebody else's -- and without this every client contact was refused
-    # at the door, which is exactly the reported "client HR cannot access HRMS".
-    tenant = await client_participant_tenant(current_user)
-    if tenant:
-        current_user[CLIENT_TENANT_FIELD] = tenant
+    # -- Client Hiring ------------------------------------------------------------------
+    # A client company with the module switched on is admitted to the CLIENT TRACK ONLY.
+    # The flag is stamped here, on the request's own user object, and `capabilities_for`
+    # narrows everything they hold to CLIENT_TRACK_CAPS from this point on.
+    #
+    # Stamped on the way through so it is set for every admitted client request, and never
+    # for internal staff, who returned above.
+    if await client_track_company(target):
+        current_user[CLIENT_TRACK_FLAG] = True
         return
 
+    # Their own company has HRMS off, and that is the end of it.
     raise HTTPException(status_code=403, detail=MODULE_DISABLED_MESSAGE)
 
 
-async def client_participant_tenant(user: dict) -> Optional[str]:
-    """The HRMS tenant this user takes part in as a client contact, or None.
+async def internal_company_id() -> Optional[str]:
+    """The ONE company this ERP is operated in-house by, or None if it is not set up yet.
 
-    An engagement that lists them as a member, whose status grants scope, belonging to a
-    company that actually has HRMS enabled. All three conditions matter: a lapsed
-    engagement grants nothing, and an engagement in a tenant with the module switched off
-    is not a way in through the back.
-
-    Fails closed on any error, for the same reason `scope_client_ids` does -- a resolver
-    that returns access because a read failed is a lock that opens when it breaks.
+    `is_internal` is not settable through any route (see models/company.py), so this is a
+    fact about the deployment rather than something a user can flip. Callers use it to ask
+    "am I looking at Sparsh Magic's own tenant, or a client's".
     """
-    user_id = str((user or {}).get("_id") or "")
-    if not user_id:
-        return None
     try:
-        rows = await get_collection(COLL_CLIENT_ENGAGEMENTS).find(
-            {"member_user_ids": user_id,
-             "status": {"$in": sorted(ENGAGEMENT_GRANTS_SCOPE)}},
-            {"company_id": 1}).to_list(50)
-        if not rows:
-            return None
-        enabled = await hrms_enabled_company_ids()
-        for row in rows:
-            candidate = str(row.get("company_id") or "")
-            if candidate in enabled:
-                return candidate
+        doc = await get_collection("companies").find_one({"is_internal": True}, {"_id": 1})
     except Exception as e:
-        print(f"[WARN] HRMS client-participant lookup failed for {user_id}: {e}")
-    return None
+        print(f"[WARN] HRMS internal-company lookup failed: {e}")
+        return None
+    return str(doc["_id"]) if doc else None
+
+
+async def tenant_identity_source(company_id: str) -> tuple:
+    """Which identity collection holds a tenant's people, and how to select them.
+
+    Sparsh Magic's OWN staff live in `staff` and carry NO `company_id`: they are the
+    platform's operators, not members of any company in the Companies list. Every other
+    company's people are its `learners`, keyed by `company_id`.
+
+    Anything asking "is this user a member of this company" -- an assignee, a reporting
+    manager, an interviewer, a panel or committee member -- must resolve through here.
+    A hard-coded `learners` lookup answers "no" for every one of Sparsh's own employees,
+    which is exactly the bug this replaced.
+    """
+    if company_id and str(company_id) == (await internal_company_id() or ""):
+        return "staff", {}
+    return "learners", {"company_id": str(company_id)}
+
+
+async def tenant_member(company_id: str, user_id, projection: dict = None) -> Optional[dict]:
+    """One user of this tenant by id, or None. See `tenant_identity_source`."""
+    from bson.errors import InvalidId
+    try:
+        oid = ObjectId(str(user_id))
+    except (InvalidId, TypeError):
+        return None
+    source, base = await tenant_identity_source(company_id)
+    return await get_collection(source).find_one({**base, "_id": oid}, projection)
 
 
 async def hrms_enabled_company_ids() -> set:
-    """Ids of every company with HRMS switched on — the data-layer filter. Aggregations
-    intersect against this so a disabled company never appears in a list, dashboard,
-    report, filter dropdown or rollup."""
+    """Ids of every company HRMS is available to — the data-layer filter.
+
+    Mirrors `is_hrms_enabled` exactly: both `hrms_enabled` AND `is_internal`. Aggregations
+    intersect against this, so a client company can never appear in an HRMS list,
+    dashboard, report, filter dropdown or rollup even if its toggle was somehow set.
+
+    In practice this resolves to at most one id. It stays a set because every caller
+    already treats it as one, and because a set of one is the honest shape for "whichever
+    companies qualify" rather than a special case that reads as a bug.
+    """
     docs = await get_collection("companies").find(
-        {"hrms_enabled": True}, {"_id": 1}
+        {"hrms_enabled": True, "is_internal": True}, {"_id": 1}
     ).to_list(5000)
     return {str(d["_id"]) for d in docs}
 
@@ -280,25 +329,60 @@ def capabilities_for(user: dict) -> Set[Cap]:
     a maintained list, so a capability added in a later phase can never accidentally lock
     the module owner out of their own system.
 
-    A CLIENT-SIDE user never holds an Internal Recruitment SOP capability, nor Sparsh's own
-    side of the Client Hiring conversation, whatever governance role they resolve to. MD/HR/
-    MANAGER/FINANCE are shared role IDENTITIES between a client company's own governance
-    ladder and Sparsh's — hrms_role() has no separate "client MD" enum member — so the track
-    boundary has to be enforced here, by who the caller is, not by which rung
-    ROLE_CAPABILITIES grants it to. See INTERNAL_TRACK_ONLY_CAPS and
-    CLIENT_TRACK_SPARSH_ONLY_CAPS in models/hrms.py for exactly which capabilities these are
-    and why. Internal Sparsh staff (INTERNAL/ADMIN) are untouched.
     """
     role = hrms_role(user)
     if role is None:
         return set()
     if role == HrmsRole.ADMIN:
-        return set(Cap)
-    caps = set(ROLE_CAPABILITIES.get(role, set()))
-    if is_client_side_user(user):
-        caps -= INTERNAL_TRACK_ONLY_CAPS
-        caps -= CLIENT_TRACK_SPARSH_ONLY_CAPS
-    return caps
+        caps = set(Cap)
+    else:
+        caps = set(ROLE_CAPABILITIES.get(role, set()))
+
+    # -- Client Hiring ------------------------------------------------------------------
+    # A caller from a client company holds EXACTLY the client-track set, and their ladder
+    # role inside their own company is discarded rather than intersected.
+    #
+    # Intersecting was the first attempt and it was wrong twice over. It could only ever
+    # take capabilities away, so a client could never be GRANTED the client-track ones at
+    # all; and it made what a client could do depend on an internal ladder that has no
+    # meaning for them -- a client's "MD" is not Sparsh's MD, and mapping one onto the
+    # other is the category error this whole separation exists to avoid.
+    #
+    # Replacing is also the stronger guarantee. There is exactly one set of capabilities a
+    # client-side caller can hold, it is declared in one place, and it cannot grow because
+    # somebody widened an internal role. ADMIN is replaced too: a client company's own
+    # owner is still a client company's user, and "owner of my tenant" must never mean
+    # "owner of Sparsh Magic's recruitment system".
+    if user.get(CLIENT_TRACK_FLAG):
+        return set(CLIENT_TRACK_CAPS)
+
+    # -- The five client-owned decisions ------------------------------------------------
+    # Everything above decides what this Sparsh caller may DO. This last step decides what
+    # they may not DECIDE, and it is deliberately the last thing that happens.
+    #
+    # PRO-fit's value rests on five decisions being genuinely the client's: the scorecard
+    # approval, the CV verdict, the selection after interview, the offer release and the
+    # joining confirmation. Leaving them out of ROLE_CAPABILITIES was not enough, because
+    # ADMIN resolves to "every member of Cap" a few lines above -- so a Sparsh superadmin
+    # was offered "Approve" on a scorecard sitting with the client, and could release the
+    # client's own employment contract.
+    #
+    # ADMINISTRATIVE ACCESS AND DECISION AUTHORITY ARE DIFFERENT THINGS. A superadmin keeps
+    # every read, every write, every review and every share -- they administer, support and
+    # troubleshoot the whole track exactly as before. They simply cannot cast the client's
+    # five votes. Subtracting here rather than at a route means a new endpoint, a widened
+    # role or a future admin branch cannot reacquire them by accident, and a direct API
+    # call fails the same way the button's absence implies.
+    #
+    # CLIENT_OWNED_CAPS goes the same way for the same reason, but for the client's own
+    # WORK rather than their decisions: on PRO-fit the requirement originates with the
+    # client (SOP section 7 step 1), so raising and amending their Need Mapping and
+    # Manpower Requisition forms is theirs. Sparsh's move on a requisition is the
+    # feasibility review, which is a different capability and stays with Sparsh. A
+    # supplier who could raise the client's requirement could also set its salary range --
+    # the figure that supplier is later measured against, and the one the client is asked
+    # to approve deviations from.
+    return caps - CLIENT_DECISION_CAPS - CLIENT_OWNED_CAPS
 
 
 def can(user: dict, capability: Cap) -> bool:
@@ -333,14 +417,6 @@ def scope_company_id(user: dict, requested: str = None) -> Optional[str]:
     """
     if is_internal_user(user):
         return requested or None
-    # A client participant works inside the TENANT's data, not their own company's -- their
-    # own company holds no HRMS records at all. What narrows them to their own candidates
-    # and requests is `scope_client_ids`, which is a different axis: this says WHOSE
-    # database, that says WHICH ROWS in it. A requested id is ignored here exactly as it is
-    # for any other client-side user.
-    tenant = user.get(CLIENT_TENANT_FIELD)
-    if tenant:
-        return str(tenant)
     return str(user.get("company_id") or "") or None
 
 
@@ -352,116 +428,3 @@ def company_filter(user: dict, requested: str = None) -> dict:
     """
     scoped = scope_company_id(user, requested)
     return {"company_id": scoped} if scoped else {}
-
-
-# ─────────────────────────────────────────────────────────────
-# Client scope — the SECOND narrowing, inside the tenant
-# ─────────────────────────────────────────────────────────────
-# `company_id` is and remains the security boundary. Client scope narrows FURTHER, inside
-# one tenant, for users who belong to a client organisation rather than to this company.
-# It never widens anything, and it never reaches across companies.
-#
-# -- Why the return type is Optional[list], not list ----------------------------------------
-# Two situations look alike and must not be confused:
-#
-#     None  ->  the caller is NOT client-scoped (Sparsh HR, MD, Finance, a manager...).
-#               No client filter applies, and their behaviour is exactly what it was
-#               before client scope existed.
-#
-#     []    ->  the caller IS client-scoped but has no valid membership. Everything must
-#               match NOTHING.
-#
-# Collapsing them into a single empty list would either lock out every HR user or open the
-# gate for an unmapped client user, depending which way the collapse went. Both are wrong,
-# and only one of them is loud.
-def is_client_scoped_user(user: dict) -> bool:
-    """Whether this user's access is narrowed to specific client organisations.
-
-    A property of the RESOLVED ROLE, not of any request field. Nothing a caller sends can
-    make them client-scoped, and nothing a caller sends can make them stop being.
-    """
-    return hrms_role(user) is HrmsRole.CLIENT
-
-
-async def scope_client_ids(user: dict, company_id: str) -> Optional[list]:
-    """The client ids this user may work on, or None if they are not client-scoped.
-
-    Resolved ENTIRELY from the engagement records: an engagement of THIS company, whose
-    status grants scope, listing THIS user as a member. A client id from a request is never
-    consulted -- see the module note above and `assert_client_allowed`.
-
-    Cross-company membership is impossible by construction rather than by a later check:
-    `company_id` is part of the query, so an engagement belonging to another tenant simply
-    is not found.
-
-    Fails closed on ANY error. An access resolver that returns "unrestricted" because a
-    database read failed is a resolver that opens the door when the lock breaks.
-    """
-    if not is_client_scoped_user(user):
-        return None
-
-    user_id = str(user.get("_id") or "")
-    if not user_id or not company_id:
-        return []
-
-    try:
-        rows = await get_collection(COLL_CLIENT_ENGAGEMENTS).find(
-            {"company_id": str(company_id),
-             "member_user_ids": user_id,
-             "status": {"$in": sorted(ENGAGEMENT_GRANTS_SCOPE)}},
-            {"client_id": 1}).to_list(200)
-    except Exception as e:
-        print(f"[WARN] HRMS client scope resolution failed for {user_id}: {e}")
-        return []
-
-    # Deduplicated and ordered so the value is stable between requests -- an unstable scope
-    # makes a cached or logged decision impossible to compare against a later one.
-    return sorted({str(r["client_id"]) for r in rows if r.get("client_id")})
-
-
-def client_filter(allowed: Optional[list]) -> dict:
-    """A Mongo filter fragment for a resolved client scope.
-
-    Takes the RESOLVED scope, never a user and never a request, so there is no path by
-    which a query parameter reaches this function.
-
-        None -> {}                                (not client-scoped)
-        []   -> {"client_id": {"$in": []}}        (scoped, no membership -> matches nothing)
-        [..] -> {"client_id": {"$in": [...]}}
-
-    The empty case is spelled out rather than short-circuited to `{}` on purpose: a caller
-    that drops the filter when the list is empty turns "no clients" into "all clients",
-    which is the single most likely way this control gets broken later.
-    """
-    if allowed is None:
-        return {}
-    return {"client_id": {"$in": list(allowed)}}
-
-
-def assert_client_allowed(allowed: Optional[list], requested: Optional[str]) -> Optional[str]:
-    """Reconcile a REQUESTED client id with the caller's resolved scope.
-
-    This is the function that makes `?client_id=` a FILTER rather than an authorisation
-    input. A requested id narrows what the caller already had; it can never add to it.
-
-        not client-scoped   -> the request is honoured as a plain filter (Sparsh staff
-                               choosing which client to look at)
-        client-scoped, in scope   -> honoured
-        client-scoped, out of scope -> 403
-        client-scoped, nothing requested -> None, and the caller applies the full
-                               `client_filter(allowed)` instead
-
-    Returning the id rather than a boolean lets the caller build one filter and keeps the
-    "which client" decision in one place.
-    """
-    if allowed is None:
-        return str(requested) if requested else None
-    if not requested:
-        return None
-    if str(requested) not in set(allowed):
-        # 403 rather than an empty result set: the caller asked for something specific and
-        # is entitled to know it was refused rather than to read silence as "no data".
-        raise HTTPException(
-            status_code=403,
-            detail="You do not have access to that client.")
-    return str(requested)

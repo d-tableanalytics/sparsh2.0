@@ -193,7 +193,7 @@ async def main() -> None:
         await expect_http(
             "an exception on a CLIENT requisition",
             EX.raise_exception(HR, COMPANY, exc(request_no="HR-REQ-2026-002")),
-            409, "client requisition")
+            409, "legacy client-track")
         await expect_http(
             "an exception naming a candidate from a DIFFERENT requisition",
             EX.raise_exception(HR, COMPANY, exc(uk="CAN-900")),

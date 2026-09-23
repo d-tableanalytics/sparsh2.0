@@ -159,8 +159,17 @@ async def main() -> None:
     # ---------------------------------------------------------
     section("Capabilities")
     # ---------------------------------------------------------
-    check("ADMIN holds every capability implicitly",
-          A.capabilities_for(SUPERADMIN) == set(M.Cap))
+    # ADMIN is resolved as "all of Cap" rather than a maintained list, so a capability
+    # added in a later phase can never lock the module owner out -- MINUS the five
+    # decisions PRO-fit gives the client company, which are theirs alone. Administrative
+    # access and decision authority are different things; see CLIENT_DECISION_CAPS and
+    # test_client_decision_exclusivity.
+    check("ADMIN holds every capability implicitly, bar the client's own",
+          A.capabilities_for(SUPERADMIN)
+          == set(M.Cap) - M.CLIENT_DECISION_CAPS - M.CLIENT_OWNED_CAPS)
+    check("...and what is withheld is exactly the client's decisions and their own forms",
+          set(M.Cap) - A.capabilities_for(SUPERADMIN)
+          == M.CLIENT_DECISION_CAPS | M.CLIENT_OWNED_CAPS)
     check("no user -> no capabilities", A.capabilities_for(None) == set())
     check("employee CAN access module", A.can(CLIENT_EMP, M.Cap.MODULE_ACCESS))
     check("employee CANNOT read audit", not A.can(CLIENT_EMP, M.Cap.AUDIT_READ))
@@ -170,8 +179,12 @@ async def main() -> None:
     check("HR CANNOT administer", not A.can(CLIENT_HR, M.Cap.MODULE_ADMIN))
     check("None user is refused everything", not A.can(None, M.Cap.MODULE_ACCESS))
     # A future capability must never lock the owner out -- this is why ADMIN is implicit.
+    # The client's five decisions are the one deliberate exception.
     check("ADMIN would hold a capability added later",
-          all(A.can(SUPERADMIN, c) for c in M.Cap))
+          all(A.can(SUPERADMIN, c) for c in M.Cap
+              if c not in (M.CLIENT_DECISION_CAPS | M.CLIENT_OWNED_CAPS)))
+    check("...but never the client's five, however ADMIN is resolved",
+          not any(A.can(SUPERADMIN, c) for c in M.CLIENT_DECISION_CAPS))
 
     section("Toggle authorization")
     check("superadmin may toggle", A.can_toggle_module(SUPERADMIN))
@@ -398,7 +411,12 @@ async def main() -> None:
     # HRMS lines had been removed by an unrelated edit, which silently locked every client
     # user out of the module -- exactly the failure this guard exists to catch. Listing the
     # other modules' flags too means the next such edit fails here rather than in the field.
-    for flag in ("orm_enabled", "tpms_enabled", "delegation_enabled", "hrms_enabled"):
+    for flag in ("orm_enabled", "tpms_enabled", "delegation_enabled", "hrms_enabled",
+                 # Client Hiring's own flag. `hrms_enabled` requires `is_internal`, so a
+                 # client company's user is told about their track through this one alone;
+                 # dropping it makes Client Hiring invisible to the people it is for, which
+                 # is how it shipped once already.
+                 "client_hiring_enabled"):
         check(f"module flag `{flag}` is declared on UserResponse", flag in declared)
     check("tpms_enabled still declared", "tpms_enabled" in declared)
     check("orm_enabled still declared", "orm_enabled" in declared)

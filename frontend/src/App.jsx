@@ -85,10 +85,10 @@ import EmployeeProfile from './features/hrms/people/EmployeeProfile';
 // ── Phase 360-1 — Employee 360° (§6) ──
 import Employee360 from './features/hrms/people/Employee360';
 import MasterManager from './features/hrms/people/MasterManager';
-import RequisitionList from './features/hrms/recruitment/RequisitionList';
 import JdLibrary from './features/hrms/recruitment/JdLibrary';
 import PostingList from './features/hrms/recruitment/PostingList';
 import CandidatePipeline from './features/hrms/recruitment/CandidatePipeline';
+import ShortlistedCandidates from './features/hrms/recruitment/ShortlistedCandidates';
 import ScreeningBoard from './features/hrms/recruitment/ScreeningBoard';
 import AssessmentBoard from './features/hrms/recruitment/AssessmentBoard';
 import InterviewBoard from './features/hrms/recruitment/InterviewBoard';
@@ -102,6 +102,7 @@ import OnboardingBoard from './features/hrms/recruitment/OnboardingBoard';
 import RecruitmentDashboard from './features/hrms/analytics/RecruitmentDashboard';
 import RecruitmentReports from './features/hrms/analytics/RecruitmentReports';
 import ApplyPage from './pages/hrms/public/ApplyPage';
+import ClientApplyPage from './pages/hrms/public/ClientApplyPage';
 import AssessPage from './pages/hrms/public/AssessPage';
 import OfferPage from './pages/hrms/public/OfferPage';
 import OnboardPage from './pages/hrms/public/OnboardPage';
@@ -114,15 +115,15 @@ import SanctionedStrength from './features/hrms/people/SanctionedStrength';
 import InternalRequisitionList from './features/hrms/internal/InternalRequisitionList';
 import InternalRequisitionDetail from './features/hrms/internal/InternalRequisitionDetail';
 import InternalHiringDashboard from './features/hrms/internal/InternalHiringDashboard';
+import ClientHiringDashboard from './features/hrms/client/ClientHiringDashboard';
+import ClientRecruitmentAnalytics from './features/hrms/client/ClientRecruitmentAnalytics';
+import ClientCandidatePool from './features/hrms/client/ClientCandidatePool';
 import ScorecardLibrary from './features/hrms/internal/ScorecardLibrary';
 import ReferenceCheckBoard from './features/hrms/internal/ReferenceCheckBoard';
 import TelephonicBoard from './features/hrms/internal/TelephonicBoard';
 import NegotiationBoard from './features/hrms/internal/NegotiationBoard';
 // Phase 12 - the client hiring track.
-import JobRequestBoard from './features/hrms/client/JobRequestBoard';
-import CvSharingBoard from './features/hrms/client/CvSharingBoard';
-import BackgroundCheckBoard from './features/hrms/client/BackgroundCheckBoard';
-import SharedCandidates from './features/hrms/client/SharedCandidates';
+import BackgroundCheckBoard from './features/hrms/recruitment/BackgroundCheckBoard';
 import HrmsSettings from './features/hrms/internal/HrmsSettings';
 import ProbationBoard from './features/hrms/internal/ProbationBoard';
 import ExceptionLog from './features/hrms/internal/ExceptionLog';
@@ -224,6 +225,9 @@ const AppRoutes = () => {
           redirect every applicant to /login. They render their own standalone chrome: an
           applicant is not a user of this ERP and must never see its navigation or modules. */}
       <Route path="/apply/:code" element={<ApplyPage />} />
+      {/* A CLIENT company's vacancy. Separate from /apply above, which is Sparsh
+          Magic's own recruitment — different tenant, different collection. */}
+      <Route path="/hrms/client-apply/:code" element={<ClientApplyPage />} />
       <Route path="/assess/:code" element={<AssessPage />} />
       <Route path="/offer/:code" element={<OfferPage />} />
       <Route path="/onboard/:code" element={<OnboardPage />} />
@@ -375,11 +379,16 @@ const AppRoutes = () => {
         <Route path="departments"        element={<MasterManager kind="department" />} />
         <Route path="designations"       element={<MasterManager kind="designation" />} />
         {/* Recruitment — requisitions + their co-approved job descriptions (Phase 3). */}
-        <Route path="requisitions"       element={<RequisitionList />} />
+        {/* The generic "both tracks" requisition list is superseded by the internal
+            requisition experience (gates, SLA, escalation) now that every requisition runs
+            on that one process — redirect rather than leave a stale screen reachable by an
+            old bookmark or notification link. */}
+        <Route path="requisitions"       element={<Navigate to="/hrms/internal-requisitions" replace />} />
         <Route path="jd"                 element={<JdLibrary />} />
         <Route path="postings"           element={<PostingList />} />
         {/* Pipeline — candidates, triage and the audit-trail journey (Phase 5). */}
         <Route path="candidates"         element={<CandidatePipeline />} />
+        <Route path="shortlisted"        element={<ShortlistedCandidates />} />
         <Route path="screening"          element={<ScreeningBoard />} />
         <Route path="assessments"        element={<AssessmentBoard />} />
         <Route path="interviews"         element={<InterviewBoard />} />
@@ -391,12 +400,35 @@ const AppRoutes = () => {
         <Route path="documents"          element={<DocumentCenter />} />
         <Route path="document-types"     element={<DocumentTypeManager />} />
         <Route path="appointments"       element={<AppointmentBoard />} />
-        {/* No /hrms/clients: clients are the ERP's companies, managed at /companies. */}
         <Route path="sanctioned-strength" element={<SanctionedStrength />} />
         {/* ── Internal track ── Sparsh Magic's own hiring, governed by the Internal
             Recruitment SOP. The pipeline screens sit in the workspace tab strip; the
             governance ones (probation, exceptions) sit in the sidebar. */}
         <Route path="internal-hiring"      element={<InternalHiringDashboard />} />
+        {/* Client Hiring (PRO-fit). A separate track: its own screens, its own
+            records and its own capabilities. Every endpoint behind these
+            refuses a caller who does not hold the client capability, so the
+            route is a convenience rather than the control. */}
+        <Route path="client-hiring"        element={<ClientHiringDashboard />} />
+        {/* The seven stages are ONE page. These paths predate that and are kept as
+            redirects: bookmarks and older links still resolve, and the sidebar's
+            `/hrms/client-` match keeps working, but nothing navigates away from the
+            workspace any more. */}
+        <Route path="client-requisitions"
+          element={<Navigate to="/hrms/client-hiring?stage=requisitions" replace />} />
+        <Route path="client-scorecards"
+          element={<Navigate to="/hrms/client-hiring?stage=scorecards" replace />} />
+        <Route path="client-candidates"
+          element={<Navigate to="/hrms/client-hiring?stage=candidates" replace />} />
+        <Route path="client-offers"
+          element={<Navigate to="/hrms/client-hiring?stage=offers" replace />} />
+        <Route path="client-joinings"
+          element={<Navigate to="/hrms/client-hiring?stage=joinings" replace />} />
+        <Route path="client-analytics"     element={<ClientRecruitmentAnalytics />} />
+        {/* Its own page, and its ONLY home: the pool spans every engagement rather than
+            sitting inside one client's flow, so it is not a stage on the workspace rail
+            and is not duplicated there. */}
+        <Route path="client-candidate-pool" element={<ClientCandidatePool />} />
         <Route path="internal-requisitions" element={<InternalRequisitionList />} />
         {/* Phase INT-15 (spec 29) -- one position, end to end. Nested under the list so
             the workspace tab stays lit on the detail page. */}
@@ -410,14 +442,12 @@ const AppRoutes = () => {
         {/* Phase INT-10 — the SOP's step 9 salary negotiation record. A hiring stage, so
             it lives in the workspace tab strip. */}
         <Route path="negotiations"         element={<NegotiationBoard />} />
-        {/* Phase 12 - the client hiring track. `job-requests` and `shared-candidates`
-            serve BOTH audiences: the server narrows a client-scoped user to their own
-            rows, so one route is correct for both and there is no second screen to keep
-            in step. */}
-        <Route path="job-requests"         element={<JobRequestBoard />} />
-        <Route path="cv-sharing"           element={<CvSharingBoard />} />
+        {/* Client-track hiring (job requests, CV sharing, the client's own shared-candidates
+            view) has been discontinued — the backend refuses those endpoints outright (see
+            `_client_hiring_disabled` in routes/hrms.py). Background verification stays: it
+            is a mandatory gate on offers for BOTH tracks (Phase 12), not a client-only
+            screen. */}
         <Route path="background-checks"    element={<BackgroundCheckBoard />} />
-        <Route path="shared-candidates"    element={<SharedCandidates />} />
         <Route path="probation"            element={<ProbationBoard />} />
         <Route path="exceptions"           element={<ExceptionLog />} />
         {/* Phase EXIT-1 — Exit Management (§7.18, §22.2, §7.21). Post-hire employment

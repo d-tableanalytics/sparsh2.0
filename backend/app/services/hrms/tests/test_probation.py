@@ -147,19 +147,13 @@ async def main() -> None:
               M.AppStatus.PROBATION_CONFIRMED in M.FILLED_STATUSES)
 
         # =================================================================
-        section("Induction items -- internal onboardings only")
+        section("Induction items -- appended to every onboarding")
         # =================================================================
-        client_list = M.seed_checklist("client")
-        internal_list = M.seed_checklist("internal")
-        legacy_list = M.seed_checklist()
-        check("a client onboarding keeps exactly its twelve items",
-              len(client_list) == len(M.ONBOARD_CHECKLIST) == 12)
-        check("a call with NO track behaves like the client track (back-compatible)",
-              [i["key"] for i in legacy_list] == [i["key"] for i in client_list])
-        check("an internal onboarding gains the five induction items",
+        internal_list = M.seed_checklist()
+        check("an onboarding gets the twelve base items plus the induction items",
               len(internal_list) == 12 + len(M.INDUCTION_CHECKLIST))
-        check("they are APPENDED, so the existing order is untouched",
-              [i["key"] for i in internal_list][:12] == [i["key"] for i in client_list])
+        check("they are APPENDED, so the base order is untouched",
+              [i["key"] for i in internal_list][:12] == [k for k, _ in M.ONBOARD_CHECKLIST])
         check("and are flagged so the UI can group them",
               all(i.get("induction") for i in internal_list[12:]))
         check("induction feedback is one of them -- it feeds the KPI block",
@@ -230,6 +224,117 @@ async def main() -> None:
         check("the two are reported separately, not merged into one sorted list",
               not (overdue_codes & soon_codes))
 
+        # ── §7.5 Stage 10, the rule the design calls out explicitly ──
+        # "Completion of the probation period alone does NOT automatically confirm the
+        # employee. Written/system confirmation through the approval process is required."
+        overdue_row = await store[M.COLL_PROBATION_REVIEWS].find_one(
+            {"prb_no": PRB, "company_id": COMPANY})
+        check("a probation whose end date has PASSED is still Pending, not Confirmed",
+              overdue_row["outcome"] == M.ProbationOutcome.PENDING.value
+              and overdue_row["ends_on"] < days(0))
+        check("nothing has stamped a confirmation on it",
+              not overdue_row.get("signature") and not overdue_row.get("confirmed_by"))
+        check("and the employee is not marked confirmed by the passage of time",
+              (await candidates.find_one(
+                  {"uk": "CAN-INTERNAL-1", "company_id": COMPANY}) or {}
+               ).get("application_status") != M.AppStatus.PROBATION_CONFIRMED.value)
+        check("the reminder sweep only reminds -- it holds no confirming code at all",
+              "confirm_probation" not in __import__(
+                  "inspect").getsource(
+                  __import__("app.services.hrms_scheduler_service",
+                             fromlist=["x"])))
+
+        # =================================================================
+        section("7.5 Stage 12: manager recommends, HR reviews, approver decides")
+        # =================================================================
+        GOOD_SCORES = {k: 4 for k in M.PROBATION_CRITERIA_KEYS}
+
+        await expect_http(
+            "deciding before anybody has reviewed it",
+            PB.confirm_probation(HOD, COMPANY, PRB,
+                                 {"outcome": "Confirmed", "signature": "Hari"}),
+            409, "has not completed their review")
+        await expect_http(
+            "HR reviewing before the manager has recommended anything",
+            PB.hr_review(HR, COMPANY, PRB,
+                         {"decision": "Endorsed", "signature": "Hana"}),
+            409, "no manager recommendation")
+
+        await expect_http(
+            "a review with no signature",
+            PB.submit_review(HOD, COMPANY, PRB,
+                             {**GOOD_SCORES, "recommendation": "Confirm"}),
+            422, "Type your name")
+        await expect_http(
+            "a recommendation with a criterion left unscored",
+            PB.submit_review(HOD, COMPANY, PRB,
+                             {**{k: 4 for k in M.PROBATION_CRITERIA_KEYS[:-1]},
+                              "recommendation": "Confirm", "signature": "Hari"}),
+            422, "from 1 to 5")
+        await expect_http(
+            "an invented recommendation",
+            PB.submit_review(HOD, COMPANY, PRB,
+                             {**GOOD_SCORES, "recommendation": "Promote",
+                              "signature": "Hari"}),
+            422, "must be one of")
+        await expect_http(
+            "recommending separation with no reason",
+            PB.submit_review(HOD, COMPANY, PRB,
+                             {**GOOD_SCORES, "recommendation": "Separate",
+                              "signature": "Hari"}),
+            422, "Say why")
+
+        reviewed = await PB.submit_review(HOD, COMPANY, PRB, {
+            **GOOD_SCORES, "suitability": 5, "recommendation": "Confirm",
+            "remarks": "Met the bar on every criterion.", "signature": "Hari HOD"})
+        check("all five criteria are stored",
+              all(k in reviewed["review"] for k in M.PROBATION_CRITERIA_KEYS))
+        check("the average is derived, not typed",
+              reviewed["review"]["average"] == round((4 * 4 + 5) / 5, 2))
+        check("the recommendation is recorded as a recommendation",
+              reviewed["review"]["recommendation"] == "Confirm")
+        check("and attributed to the manager who made it",
+              reviewed["review"]["by_name"] == "Hari HOD")
+        check("a recommendation is NOT an outcome",
+              reviewed["outcome"] == M.ProbationOutcome.PENDING.value)
+
+        await expect_http(
+            "approving a recommendation HR has not seen",
+            PB.confirm_probation(HOD, COMPANY, PRB,
+                                 {"outcome": "Confirmed", "signature": "Hari"}),
+            409, "HR has not endorsed")
+
+        returned = await PB.hr_review(HR, COMPANY, PRB, {
+            "decision": "Returned", "remarks": "Attach the last two 1:1 notes.",
+            "signature": "Hana HR"})
+        check("HR can send a recommendation back",
+              returned["hr_review"]["decision"] == "Returned")
+        await expect_http(
+            "approving a returned review",
+            PB.confirm_probation(HOD, COMPANY, PRB,
+                                 {"outcome": "Confirmed", "signature": "Hari"}),
+            409, "returned this review")
+        await expect_http(
+            "returning without saying what to fix",
+            PB.hr_review(HR, COMPANY, PRB,
+                         {"decision": "Returned", "signature": "Hana"}),
+            422, "Say what needs to change")
+
+        # The manager resubmits, which invalidates the stale HR review.
+        again = await PB.submit_review(HOD, COMPANY, PRB, {
+            **GOOD_SCORES, "suitability": 5, "recommendation": "Confirm",
+            "remarks": "1:1 notes attached.", "signature": "Hari HOD"})
+        check("resubmitting clears the previous HR review rather than keeping it",
+              again.get("hr_review") is None)
+
+        endorsed = await PB.hr_review(HR, COMPANY, PRB, {
+            "decision": "Endorsed", "signature": "Hana HR"})
+        check("HR endorsement is recorded and signed",
+              endorsed["hr_review"]["decision"] == "Endorsed"
+              and endorsed["hr_review"]["signature"] == "Hana HR")
+        check("endorsing still does not decide the probation",
+              endorsed["outcome"] == M.ProbationOutcome.PENDING.value)
+
         # =================================================================
         section("Confirming")
         # =================================================================
@@ -252,6 +357,12 @@ async def main() -> None:
         done = await PB.confirm_probation(HOD, COMPANY, PRB, {
             "outcome": "Confirmed", "rating": 4.2, "signature": "Hari HOD",
             "remarks": "Met the bar on every criterion."})
+        check("the confirmation takes effect from the probation end date by default",
+              done["effective_from"] == done["ends_on"])
+        check("the manager recommendation survives beside the decision",
+              done["review"]["recommendation"] == "Confirm")
+        check("and so does the HR endorsement that cleared it",
+              done["hr_review"]["decision"] == "Endorsed")
         check("the outcome is recorded",
               done["outcome"] == M.ProbationOutcome.CONFIRMED.value)
         check("it is signed and attributable", done["confirmed_by"] == U_HOD)
@@ -294,6 +405,13 @@ async def main() -> None:
         # =================================================================
         second = await probations.find_one({"employee_code": "EMP-2026-002"})
         PRB2 = second["prb_no"]
+        # §7.5 Stage 12: an extension goes through the same chain a confirmation does.
+        await PB.submit_review(HOD, COMPANY, PRB2, {
+            **{k: 3 for k in M.PROBATION_CRITERIA_KEYS},
+            "recommendation": "Extend",
+            "remarks": "Progressing, but not yet consistent.", "signature": "Hari HOD"})
+        await PB.hr_review(HR, COMPANY, PRB2,
+                           {"decision": "Endorsed", "signature": "Hana HR"})
         await expect_http(
             "extending with no new end date",
             PB.confirm_probation(HOD, COMPANY, PRB2,
@@ -332,6 +450,11 @@ async def main() -> None:
         # =================================================================
         third = await PB.open_probation(HR, COMPANY, {"employee_code": "EMP-2026-003",
                                                       "started_on": days(-400)})
+        await PB.submit_review(HOD, COMPANY, third["prb_no"], {
+            **{k: 4 for k in M.PROBATION_CRITERIA_KEYS},
+            "recommendation": "Confirm", "signature": "Hari HOD"})
+        await PB.hr_review(HR, COMPANY, third["prb_no"],
+                           {"decision": "Endorsed", "signature": "Hana HR"})
         await PB.confirm_probation(HOD, COMPANY, third["prb_no"], {
             "outcome": "Confirmed", "signature": "Hari HOD"})
         cancelled = await reqs.find_one({"request_no": "HR-REQ-2026-003"})

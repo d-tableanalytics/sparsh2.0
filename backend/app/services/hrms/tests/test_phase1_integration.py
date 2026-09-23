@@ -81,11 +81,16 @@ def main() -> None:
         check("is_internal true", body["is_internal"] is True)
         check("internal scope is unbounded (company_id null)", body["company_id"] is None)
         check("capabilities include module.access", "module.access" in body["capabilities"])
-        # The invariant is "ADMIN holds ALL capabilities", not "ADMIN holds exactly N" --
-        # a hardcoded count would break every time a phase registers a new capability.
-        from app.models.hrms import Cap as _Cap
-        check("admin gets every registered capability",
-              len(body["capabilities"]) == len(_Cap))
+        # The invariant is "ADMIN holds ALL capabilities EXCEPT the client company's own
+        # five decisions", not "ADMIN holds exactly N" -- a hardcoded count would break
+        # every time a phase registers a new capability. The exception is deliberate:
+        # administrative access is not the authority to decide on a client's behalf.
+        from app.models.hrms import (Cap as _Cap, CLIENT_DECISION_CAPS as _DECISIONS,
+                                     CLIENT_OWNED_CAPS as _OWNED)
+        check("admin gets every registered capability bar the client's own",
+              len(body["capabilities"]) == len(_Cap) - len(_DECISIONS | _OWNED))
+        check("and none of those five is in the served list",
+              not ({c.value for c in _DECISIONS} & set(body["capabilities"])))
         check("capabilities are sorted", body["capabilities"] == sorted(body["capabilities"]))
 
         as_user(CLIENT_HR)

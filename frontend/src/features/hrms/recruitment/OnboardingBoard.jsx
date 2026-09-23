@@ -1,7 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   UserPlus, Plus, X, Copy, Check, ShieldCheck, ShieldAlert, BadgeCheck, Search,
-  Paperclip, CalendarDays, Link2,
+  Paperclip, CalendarDays, Link2, FileCheck2, FileX2, FileClock, FileWarning,
+  LogIn, Briefcase,
 } from 'lucide-react';
 import { useNotification } from '../../../context/NotificationContext';
 import { useHrms } from '../HrmsContext';
@@ -13,6 +14,8 @@ import {
   getOnboardings, getOnboardableCandidates, getOnboarding, startOnboarding,
   updateOnboarding, updateOnboardingBg, verifyOnboardingDocuments,
   setOnboardingChecklist, generateEmployeeId, onboardUrlFor,
+  reviewOnboardingDocument, confirmOnboardingJoining,
+  getDepartments, getDesignations, getEmployees,
 } from '../../../services/hrmsApi';
 
 /**
@@ -46,6 +49,12 @@ const BG_TONE = {
 };
 
 const SYSTEM_ITEMS = new Set(['employee_id', 'documents_verified', 'bg_cleared']);
+
+/** Completeness reads as a traffic light: green only at 100, because 90% complete still
+ *  means somebody cannot be activated. */
+const pctTone = (pct) => (pct >= 100 ? 'bg-[var(--accent-green)]'
+  : pct >= 60 ? 'bg-[var(--accent-indigo)]'
+  : 'bg-[var(--accent-orange)]');
 
 const fmtDate = (v) => (v ? new Date(v).toLocaleDateString('en-IN', {
   day: '2-digit', month: 'short', year: 'numeric',
@@ -138,6 +147,15 @@ const StartModal = ({ onClose, onStarted }) => {
 };
 
 // ── Detail panel ──────────────────────────────────────────────
+/** How each document verdict reads (§7.5 Stage 3). Exception is amber rather than green:
+ *  it lets the joining proceed, but it is a decision somebody signed, not a clean pass. */
+const DOC_TONE = {
+  Verified:  { icon: FileCheck2,   cls: 'text-[var(--accent-green)]',  bg: 'bg-[var(--accent-green-bg)]' },
+  Rejected:  { icon: FileX2,       cls: 'text-[var(--accent-red)]',    bg: 'bg-[var(--accent-red-bg)]' },
+  Exception: { icon: FileWarning,  cls: 'text-[var(--accent-orange)]', bg: 'bg-[var(--accent-orange-bg)]' },
+  Pending:   { icon: FileClock,    cls: 'text-[var(--text-muted)]',    bg: 'bg-[var(--input-bg)]' },
+};
+
 const Detail = ({ onbNo, onClose, onChanged }) => {
   const { scope, can } = useHrms();
   const { showSuccess, showError } = useNotification();
@@ -179,6 +197,60 @@ const Detail = ({ onbNo, onClose, onChanged }) => {
     }
   };
 
+  // The doc_type currently being given a Rejected/Exception verdict, and the note that
+  // must come with it. Verified needs no note, so it does not open this.
+  const [reviewing, setReviewing] = useState(null);   // {doc_type, status}
+  const [reviewNote, setReviewNote] = useState('');
+
+  const reviewDoc = (docType, status, note) => run(
+    () => reviewOnboardingDocument(onbNo, { doc_type: docType, status, note }, scope),
+    `${docType} marked ${status.toLowerCase()}.`);
+
+  const submitReview = async () => {
+    if (!reviewNote.trim()) return;
+    await reviewDoc(reviewing.doc_type, reviewing.status, reviewNote.trim());
+    setReviewing(null);
+    setReviewNote('');
+  };
+
+  // ── §7.5 Stage 6 -- joining day ──
+  // Department, designation and reporting manager reference real records; grade, location,
+  // unit and payroll group are free text because this codebase has no master for any of
+  // them yet (confirmed against the org-structure module before choosing this shape).
+  const [depts, setDepts] = useState([]);
+  const [desigs, setDesigs] = useState([]);
+  const [managers, setManagers] = useState([]);
+  const [joinForm, setJoinForm] = useState(null);   // null until "Confirm joining" is opened
+
+  useEffect(() => {
+    if (!joinForm) return;
+    getDepartments(scope).then(({ data }) => setDepts(data?.departments || data || []))
+      .catch(() => {});
+    getDesignations(scope).then(({ data }) => setDesigs(data?.designations || data || []))
+      .catch(() => {});
+    getEmployees({ ...scope, limit: 500 }).then(({ data }) => setManagers(data?.employees || data || []))
+      .catch(() => {});
+  }, [joinForm, scope]);
+
+  const openJoinForm = () => setJoinForm({
+    actual_doj: new Date().toISOString().slice(0, 10),
+    note: '', unit: '', department_id: row.department_id || '',
+    designation_id: row.designation_id || '', grade: '', work_location: '',
+    reporting_manager_id: row.reporting_manager_id || '',
+    employment_type: 'Full-time', employment_status: 'Active', payroll_group: '',
+  });
+
+  const submitJoinForm = async () => {
+    if (!joinForm.actual_doj) return;
+    const payload = { ...joinForm };
+    // Blank optional fields are omitted rather than sent as "" -- the server treats an
+    // absent field as "leave whatever is already on the case", and an empty string would
+    // instead overwrite it with nothing.
+    Object.keys(payload).forEach((k) => { if (payload[k] === '') delete payload[k]; });
+    await run(() => confirmOnboardingJoining(onbNo, payload, scope), 'Joining confirmed');
+    setJoinForm(null);
+  };
+
   const copyLink = () => {
     navigator.clipboard?.writeText(onboardUrlFor(row.access_code));
     setCopied(true);
@@ -186,6 +258,26 @@ const Detail = ({ onbNo, onClose, onChanged }) => {
   };
 
   const blockers = row?.id_blockers || [];
+  // §7.5 Stage 4: when a verification file exists it owns `bg_verification`, so the manual
+  // dropdown stands down rather than offering an edit the server would refuse.
+  // §7.5 Stage 8 — checklist grouped by owner, in the order responsibility flows:
+  // HR opens the case, IT and Admin prepare, the manager inducts.
+  const OWNER_ORDER = ['HR', 'IT', 'Admin', 'Reporting Manager'];
+  const groupedTasks = useMemo(() => {
+    const groups = new Map();
+    for (const item of row?.checklist || []) {
+      const owner = item.owner || 'HR';
+      if (!groups.has(owner)) groups.set(owner, []);
+      groups.get(owner).push(item);
+    }
+    return [...groups.entries()].sort(
+      (a, b) => OWNER_ORDER.indexOf(a[0]) - OWNER_ORDER.indexOf(b[0]));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [row?.checklist]);
+
+  const comp = row?.completeness;
+  const vf = row?.verification || {};
+  const hasFile = (vf.checks || []).length > 0;
 
   return (
     <div className="fixed inset-0 z-50 flex justify-end bg-black/40 backdrop-blur-sm">
@@ -272,7 +364,7 @@ const Detail = ({ onbNo, onClose, onChanged }) => {
                 </div>
                 <div>
                   <label className={LABEL} htmlFor="d-bg">Background verification</label>
-                  {mayWrite ? (
+                  {mayWrite && !hasFile ? (
                     <select id="d-bg" className={FIELD} disabled={busy}
                       value={row.bg_verification || 'Pending'}
                       onChange={(e) => run(
@@ -288,6 +380,11 @@ const Detail = ({ onbNo, onClose, onChanged }) => {
                       {row.bg_verification || 'Pending'}
                     </p>
                   )}
+                  {hasFile && (
+                    <p className="text-[11px] text-[var(--text-muted)] mt-1">
+                      Follows the verification file below.
+                    </p>
+                  )}
                   {row.bg_verification === 'Flagged' && (
                     <p className="text-[11.5px] text-[var(--accent-red)] mt-1 flex items-center gap-1">
                       <ShieldAlert size={12} /> An Employee ID cannot be issued while flagged.
@@ -295,6 +392,153 @@ const Detail = ({ onbNo, onClose, onChanged }) => {
                   )}
                 </div>
               </section>
+
+              {/* Verification file (§7.5 Stage 4) — shown ON the case, because BGV and
+                  reference checks are part of onboarding rather than a separate process
+                  somebody has to go and remember about. Read-only here: the result is
+                  recorded where the check is, and this case follows it. */}
+              <section>
+                <p className={LABEL}>Verification file</p>
+                {!hasFile && !vf.reference ? (
+                  <p className="text-[12.5px] text-[var(--text-muted)]">
+                    No background or reference check has been recorded for this joiner.
+                    Where your policy requires one, raise it on the Verification screen —
+                    the result appears here automatically.
+                  </p>
+                ) : (
+                  <div className="space-y-2">
+                    {(vf.checks || []).map((c) => (
+                      <div key={c.bgv_no}
+                        className="flex items-center gap-2.5 p-2.5 rounded-lg border border-[var(--border)]">
+                        <ShieldCheck size={14} className="shrink-0 text-[var(--text-muted)]" />
+                        <div className="min-w-0 flex-1">
+                          <p className="text-[12.5px] font-semibold text-[var(--text-main)] truncate">
+                            {c.check_type}
+                          </p>
+                          {c.remarks && (
+                            <p className="text-[11px] text-[var(--text-muted)] truncate">
+                              {c.remarks}
+                            </p>
+                          )}
+                        </div>
+                        <span className={`text-[11px] font-bold shrink-0 ${
+                          c.status === 'Flagged' ? 'text-[var(--accent-red)]'
+                            : c.status === 'Cleared' ? 'text-[var(--accent-green)]'
+                            : 'text-[var(--text-muted)]'}`}>
+                          {c.status}
+                        </span>
+                      </div>
+                    ))}
+
+                    {(vf.outstanding || []).length > 0 && (
+                      <p className="text-[11.5px] text-[var(--accent-orange)]">
+                        Still outstanding: {vf.outstanding.join(', ')}.
+                      </p>
+                    )}
+
+                    {vf.approval?.status && vf.approval.status !== 'Not Requested' && (
+                      <p className="text-[11.5px] text-[var(--text-muted)]">
+                        HR sign-off: <strong className="text-[var(--text-main)]">
+                          {vf.approval.status}
+                        </strong>
+                        {vf.approval.signed_by ? ` · ${vf.approval.signed_by}` : ''}
+                      </p>
+                    )}
+
+                    {vf.reference && (
+                      <div className="flex items-center gap-2.5 p-2.5 rounded-lg border border-[var(--border)]">
+                        <BadgeCheck size={14} className="shrink-0 text-[var(--accent-green)]" />
+                        <div className="min-w-0 flex-1">
+                          <p className="text-[12.5px] font-semibold text-[var(--text-main)]">
+                            Reference check
+                          </p>
+                          <p className="text-[11px] text-[var(--text-muted)] truncate">
+                            {vf.reference.referee_name || vf.reference.ref_no}
+                          </p>
+                        </div>
+                        <span className="text-[11px] font-bold text-[var(--accent-green)] shrink-0">
+                          {vf.reference.outcome}
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </section>
+
+              {/* Joining documents (§7.5 Stage 3) — one row per document the company
+                  asks for, carrying the current version's verdict and the controls to
+                  change it. Chips alone could show state but not act on it. */}
+              {(row.document_tasks || []).length > 0 && (
+                <section>
+                  <p className={LABEL}>Joining documents</p>
+                  <ul className="space-y-1.5">
+                    {row.document_tasks.map((t) => {
+                      const tone = DOC_TONE[t.status] || DOC_TONE.Pending;
+                      const Icon = tone.icon;
+                      return (
+                        <li key={t.doc_type}
+                          className="p-2.5 rounded-lg border border-[var(--border)]">
+                          <div className="flex items-center gap-2.5">
+                            <span className={`h-7 w-7 shrink-0 rounded-lg grid place-items-center ${tone.bg} ${tone.cls}`}>
+                              <Icon size={14} />
+                            </span>
+                            <div className="min-w-0 flex-1">
+                              <p className="text-[12.5px] font-semibold text-[var(--text-main)] truncate">
+                                {t.doc_type}
+                                {t.version > 1 && (
+                                  <span className="ml-1.5 text-[10.5px] font-bold text-[var(--text-muted)]">
+                                    v{t.version}
+                                  </span>
+                                )}
+                                {!t.required && (
+                                  <span className="ml-1.5 text-[10px] font-semibold text-[var(--text-muted)]">
+                                    optional
+                                  </span>
+                                )}
+                              </p>
+                              <p className={`text-[11px] font-bold ${tone.cls}`}>
+                                {t.uploaded ? t.status : 'Not received'}
+                                {t.reviewed_by && (
+                                  <span className="font-normal text-[var(--text-muted)]">
+                                    {' '}· {t.reviewed_by}
+                                  </span>
+                                )}
+                              </p>
+                              {t.review_note && (
+                                <p className="text-[11px] text-[var(--text-muted)]">
+                                  {t.review_note}
+                                </p>
+                              )}
+                            </div>
+                            {mayWrite && t.uploaded && (
+                              <div className="flex items-center gap-1 shrink-0">
+                                <button type="button" disabled={busy}
+                                  onClick={() => reviewDoc(t.doc_type, 'Verified')}
+                                  title="The document is in order"
+                                  className="h-7 px-2 rounded-lg border border-[var(--border)] text-[11px] font-bold text-[var(--text-muted)] hover:border-[var(--accent-green)] hover:text-[var(--accent-green)] disabled:opacity-50">
+                                  Verify
+                                </button>
+                                <button type="button" disabled={busy}
+                                  onClick={() => { setReviewing({ doc_type: t.doc_type, status: 'Rejected' }); setReviewNote(''); }}
+                                  title="Send it back to be replaced"
+                                  className="h-7 px-2 rounded-lg border border-[var(--border)] text-[11px] font-bold text-[var(--text-muted)] hover:border-[var(--accent-red)] hover:text-[var(--accent-red)] disabled:opacity-50">
+                                  Reject
+                                </button>
+                                <button type="button" disabled={busy}
+                                  onClick={() => { setReviewing({ doc_type: t.doc_type, status: 'Exception' }); setReviewNote(''); }}
+                                  title="Allow joining to continue without it, on record"
+                                  className="h-7 px-2 rounded-lg border border-[var(--border)] text-[11px] font-bold text-[var(--text-muted)] hover:border-[var(--accent-orange)] hover:text-[var(--accent-orange)] disabled:opacity-50">
+                                  Exception
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </section>
+              )}
 
               {/* Documents */}
               <section>
@@ -310,6 +554,11 @@ const Detail = ({ onbNo, onClose, onChanged }) => {
                         className="flex items-center gap-2 text-[12.5px] text-[var(--text-main)]">
                         <Paperclip size={13} className="text-[var(--text-muted)] shrink-0" />
                         <span className="truncate">{d.name}</span>
+                        {d.doc_type && (
+                          <span className="px-1.5 rounded bg-[var(--input-bg)] text-[10.5px] font-bold text-[var(--text-main)] shrink-0">
+                            {d.doc_type}
+                          </span>
+                        )}
                         <span className="text-[11px] text-[var(--text-muted)] shrink-0">
                           {d.source === 'hr' ? 'added by HR' : 'from candidate'}
                         </span>
@@ -318,6 +567,50 @@ const Detail = ({ onbNo, onClose, onChanged }) => {
                   </ul>
                 )}
               </section>
+
+              {/* Onboarding completeness (§7.5 Stage 5) — the six groups, and exactly
+                  what is still missing in each. The list matters more than the number:
+                  it is what tells HR whom to chase before activation. */}
+              {comp && (
+                <section>
+                  <div className="flex items-center justify-between mb-2">
+                    <p className={`${LABEL} mb-0`}>Onboarding completeness</p>
+                    <p className="text-[13px] font-bold text-[var(--text-main)]">
+                      {comp.percent}%
+                    </p>
+                  </div>
+                  <div className="h-2 rounded-full bg-[var(--input-bg)] overflow-hidden mb-3">
+                    <div className={`h-full transition-all ${pctTone(comp.percent)}`}
+                      style={{ width: `${comp.percent}%` }} />
+                  </div>
+                  <ul className="space-y-1.5">
+                    {(comp.groups || []).map((g) => (
+                      <li key={g.key} className="text-[12px]">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="font-semibold text-[var(--text-main)]">
+                            {g.label}
+                          </span>
+                          <span className={g.done === g.total
+                            ? 'text-[var(--accent-green)] font-bold'
+                            : 'text-[var(--text-muted)] font-bold'}>
+                            {g.done}/{g.total}
+                          </span>
+                        </div>
+                        {g.missing.length > 0 && (
+                          <p className="text-[11px] text-[var(--accent-orange)]">
+                            Missing: {g.missing.join(', ')}
+                          </p>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                  {comp.missing.length === 0 && (
+                    <p className="mt-2 text-[11.5px] text-[var(--accent-green)]">
+                      Nothing outstanding — every mandatory item is in.
+                    </p>
+                  )}
+                </section>
+              )}
 
               {/* Checklist */}
               <section>
@@ -336,33 +629,102 @@ const Detail = ({ onbNo, onClose, onChanged }) => {
                     Read-only — you can see the checklist but not update it.
                   </p>
                 )}
-                <ul className="space-y-1">
-                  {(row.checklist || []).map((item) => {
-                    const owned = SYSTEM_ITEMS.has(item.key);
-                    return (
-                      <li key={item.key}
-                        className="flex items-start gap-2.5 py-1.5 px-2 rounded-lg hover:bg-[var(--input-bg)]">
-                        <input type="checkbox" checked={!!item.done}
-                          disabled={owned || !mayWrite || busy}
-                          onChange={(e) => run(() => setOnboardingChecklist(
-                            onbNo, { key: item.key, done: e.target.checked }, scope))}
-                          className="mt-0.5 accent-[var(--accent-indigo)] disabled:opacity-60"
-                          aria-label={item.label} />
-                        <div className="min-w-0">
-                          <p className={`text-[12.5px] ${item.done ? 'text-[var(--text-muted)] line-through' : 'text-[var(--text-main)]'}`}>
-                            {item.label}
-                          </p>
-                          {owned && (
-                            <p className="text-[11px] text-[var(--text-muted)]">
-                              Set automatically — it follows the action that achieves it.
-                            </p>
-                          )}
-                        </div>
-                      </li>
-                    );
-                  })}
-                </ul>
+                {/* §7.5 Stage 8 — grouped by who actually owns the work. One flat list
+                    made every item read as HR's job; IT creates the accounts, Admin
+                    allocates the desk, and the manager runs the induction. */}
+                {groupedTasks.map(([owner, items]) => (
+                  <div key={owner} className="mb-3 last:mb-0">
+                    <div className="flex items-center justify-between px-2 mb-1">
+                      <p className="text-[10.5px] font-bold uppercase tracking-widest text-[var(--text-muted)]">
+                        {owner}
+                      </p>
+                      <p className="text-[10.5px] font-bold text-[var(--text-muted)]">
+                        {items.filter((i) => i.done).length}/{items.length}
+                      </p>
+                    </div>
+                    <ul className="space-y-1">
+                      {items.map((item) => {
+                        const owned = SYSTEM_ITEMS.has(item.key);
+                        return (
+                          <li key={item.key}
+                            className="flex items-start gap-2.5 py-1.5 px-2 rounded-lg hover:bg-[var(--input-bg)]">
+                            <input type="checkbox" checked={!!item.done}
+                              disabled={owned || !mayWrite || busy}
+                              onChange={(e) => run(() => setOnboardingChecklist(
+                                onbNo, { key: item.key, done: e.target.checked }, scope))}
+                              className="mt-0.5 accent-[var(--accent-indigo)] disabled:opacity-60"
+                              aria-label={item.label} />
+                            <div className="min-w-0">
+                              <p className={`text-[12.5px] ${item.done ? 'text-[var(--text-muted)] line-through' : 'text-[var(--text-main)]'}`}>
+                                {item.label}
+                              </p>
+                              {owned && (
+                                <p className="text-[11px] text-[var(--text-muted)]">
+                                  Set automatically — it follows the action that achieves it.
+                                </p>
+                              )}
+                              {!owned && !item.done && item.assigned_at && (
+                                <p className="text-[11px] text-[var(--accent-indigo)]">
+                                  Assigned {fmtDate(item.assigned_at)}
+                                </p>
+                              )}
+                            </div>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  </div>
+                ))}
               </section>
+
+              {/* §7.5 Stage 6 -- "Candidate Reports -> HR Verifies Joining -> Confirm
+                  Actual DOJ". Sits before the Employee ID section because it is the
+                  precondition the server now enforces: an ID cannot be issued until
+                  somebody has confirmed the joiner actually turned up. */}
+              {!row.employee_id && (
+                <section className="rounded-xl border border-[var(--border)] p-4 space-y-2">
+                  <p className="text-[13px] font-bold text-[var(--text-main)] flex items-center gap-1.5">
+                    <LogIn size={14} /> Joining day
+                  </p>
+                  {row.actual_doj ? (
+                    <div className="text-[12.5px] text-[var(--text-main)] space-y-1">
+                      <p>
+                        Reported on <strong>{fmtDate(row.actual_doj)}</strong>
+                        {row.joining_confirmed_by && (
+                          <span className="text-[var(--text-muted)]"> · confirmed by {row.joining_confirmed_by}</span>
+                        )}
+                      </p>
+                      {row.joining_note && (
+                        <p className="text-[11.5px] text-[var(--text-muted)]">{row.joining_note}</p>
+                      )}
+                      <div className="flex flex-wrap gap-1.5 pt-1">
+                        {[['Unit', row.unit], ['Grade', row.grade], ['Location', row.work_location],
+                          ['Category', row.employment_type], ['Status', row.employment_status],
+                          ['Payroll group', row.payroll_group]]
+                          .filter(([, v]) => v)
+                          .map(([label, v]) => (
+                            <span key={label} className="px-2 py-0.5 rounded-md bg-[var(--input-bg)] text-[11px] font-semibold text-[var(--text-main)]">
+                              {label}: {v}
+                            </span>
+                          ))}
+                      </div>
+                    </div>
+                  ) : (
+                    <>
+                      <p className="text-[11.5px] text-[var(--text-muted)]">
+                        Confirm the date they actually reported, and the role they are
+                        joining into, before an Employee ID can be issued.
+                      </p>
+                      {mayWrite && (
+                        <button type="button" onClick={openJoinForm}
+                          className={`${BTN} border border-[var(--border)] text-[var(--text-main)] flex items-center gap-1.5`}>
+                          <Briefcase size={14} /> Confirm joining
+                        </button>
+                      )}
+                    </>
+                  )}
+                </section>
+              )}
 
               {/* The handover. Blockers are server prose explaining exactly what is still
                   missing — the single most common source of "the system is broken" tickets
@@ -401,6 +763,164 @@ const Detail = ({ onbNo, onClose, onChanged }) => {
           )}
         </div>
       </div>
+
+      {/* §7.5 Stage 6 -- confirm the actual DOJ and the nine assignment attributes. */}
+      {joinForm && (
+        <div className="fixed inset-0 z-[60] grid place-items-center bg-black/40 backdrop-blur-sm p-4 overflow-y-auto">
+          <div className="w-full max-w-lg my-8 rounded-2xl border border-[var(--border)] bg-[var(--bg-card)] shadow-xl">
+            <div className="flex items-center justify-between px-5 py-4 border-b border-[var(--border)]">
+              <h3 className="text-[14.5px] font-bold text-[var(--text-main)]">Confirm joining</h3>
+              <button type="button" onClick={() => setJoinForm(null)}
+                className="p-1.5 rounded-lg text-[var(--text-muted)] hover:bg-[var(--input-bg)]">
+                <X size={17} />
+              </button>
+            </div>
+            <div className="p-5 space-y-3">
+              <div>
+                <label className={LABEL} htmlFor="jf-doj">Actual date of joining *</label>
+                <input id="jf-doj" type="date" className={FIELD}
+                  max={new Date().toISOString().slice(0, 10)}
+                  value={joinForm.actual_doj}
+                  onChange={(e) => setJoinForm((f) => ({ ...f, actual_doj: e.target.value }))} />
+                <p className="mt-1 text-[11px] text-[var(--text-muted)]">
+                  The day they actually reported — kept separate from the planned date, so a
+                  late start does not overwrite what was agreed.
+                </p>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className={LABEL} htmlFor="jf-dept">Department</label>
+                  <select id="jf-dept" className={FIELD} value={joinForm.department_id}
+                    onChange={(e) => setJoinForm((f) => ({ ...f, department_id: e.target.value }))}>
+                    <option value="">—</option>
+                    {depts.map((d) => (
+                      <option key={d._id || d.id} value={d._id || d.id}>{d.name}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className={LABEL} htmlFor="jf-desig">Designation</label>
+                  <select id="jf-desig" className={FIELD} value={joinForm.designation_id}
+                    onChange={(e) => setJoinForm((f) => ({ ...f, designation_id: e.target.value }))}>
+                    <option value="">—</option>
+                    {desigs.map((d) => (
+                      <option key={d._id || d.id} value={d._id || d.id}>{d.name}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className={LABEL} htmlFor="jf-mgr">Reporting manager</label>
+                  <select id="jf-mgr" className={FIELD} value={joinForm.reporting_manager_id}
+                    onChange={(e) => setJoinForm((f) => ({ ...f, reporting_manager_id: e.target.value }))}>
+                    <option value="">—</option>
+                    {managers.map((m) => (
+                      <option key={m.user_id || m._id} value={m.user_id || m._id}>
+                        {m.full_name || m.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className={LABEL} htmlFor="jf-unit">Company / Unit</label>
+                  <input id="jf-unit" className={FIELD} value={joinForm.unit}
+                    onChange={(e) => setJoinForm((f) => ({ ...f, unit: e.target.value }))} />
+                </div>
+                <div>
+                  <label className={LABEL} htmlFor="jf-grade">Grade / Level</label>
+                  <input id="jf-grade" className={FIELD} value={joinForm.grade}
+                    onChange={(e) => setJoinForm((f) => ({ ...f, grade: e.target.value }))} />
+                </div>
+                <div>
+                  <label className={LABEL} htmlFor="jf-loc">Location</label>
+                  <input id="jf-loc" className={FIELD} value={joinForm.work_location}
+                    onChange={(e) => setJoinForm((f) => ({ ...f, work_location: e.target.value }))} />
+                </div>
+                <div>
+                  <label className={LABEL} htmlFor="jf-type">Employment category</label>
+                  <select id="jf-type" className={FIELD} value={joinForm.employment_type}
+                    onChange={(e) => setJoinForm((f) => ({ ...f, employment_type: e.target.value }))}>
+                    {['Full-time', 'Part-time', 'Contract', 'Intern', 'Consultant'].map((v) => (
+                      <option key={v} value={v}>{v}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className={LABEL} htmlFor="jf-status">Employment status</label>
+                  <select id="jf-status" className={FIELD} value={joinForm.employment_status}
+                    onChange={(e) => setJoinForm((f) => ({ ...f, employment_status: e.target.value }))}>
+                    {['Active', 'On Notice', 'Resigned', 'Terminated', 'On Long Leave'].map((v) => (
+                      <option key={v} value={v}>{v}</option>
+                    ))}
+                  </select>
+                </div>
+                <div className="sm:col-span-2">
+                  <label className={LABEL} htmlFor="jf-payroll">Payroll group</label>
+                  <input id="jf-payroll" className={FIELD} value={joinForm.payroll_group}
+                    onChange={(e) => setJoinForm((f) => ({ ...f, payroll_group: e.target.value }))} />
+                </div>
+              </div>
+
+              <div>
+                <label className={LABEL} htmlFor="jf-note">Note (optional)</label>
+                <textarea id="jf-note" rows={2} value={joinForm.note}
+                  onChange={(e) => setJoinForm((f) => ({ ...f, note: e.target.value }))}
+                  className={`${FIELD} h-auto py-2 resize-y`} />
+              </div>
+            </div>
+            <div className="flex justify-end gap-2 px-5 py-4 border-t border-[var(--border)]">
+              <button type="button" onClick={() => setJoinForm(null)}
+                className={`${BTN} border border-[var(--border)] text-[var(--text-muted)]`}>
+                Cancel
+              </button>
+              <button type="button" onClick={submitJoinForm}
+                disabled={busy || !joinForm.actual_doj}
+                className={`${BTN} bg-[var(--accent-indigo)] text-white`}>
+                Confirm joining
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* A rejection and an exception both have to say why: one tells the new hire what
+          to fix, the other is the written basis for letting joining proceed without it. */}
+      {reviewing && (
+        <div className="fixed inset-0 z-[60] grid place-items-center bg-black/40 backdrop-blur-sm p-4">
+          <div className="w-full max-w-md rounded-2xl border border-[var(--border)] bg-[var(--bg-card)] shadow-xl p-5 space-y-3">
+            <h3 className="text-[14.5px] font-bold text-[var(--text-main)]">
+              {reviewing.status === 'Rejected' ? 'Reject' : 'Allow an exception for'}
+              {' '}{reviewing.doc_type}
+            </h3>
+            <p className="text-[12px] text-[var(--text-muted)]">
+              {reviewing.status === 'Rejected'
+                ? 'Tell the new hire what is wrong, so they can send a replacement.'
+                : 'Record what was accepted and on whose authority. Joining can then go '
+                  + 'ahead without this document, and this note is the reason why.'}
+            </p>
+            <textarea rows={3} value={reviewNote} autoFocus
+              onChange={(e) => setReviewNote(e.target.value)}
+              placeholder={reviewing.status === 'Rejected'
+                ? 'e.g. The scan is cut off — the number is not readable.'
+                : 'e.g. Degree certificate still with the university; undertaking signed, '
+                  + 'to be produced within 60 days. Approved by the HR Head.'}
+              className={`${FIELD} h-auto py-2 resize-y`} />
+            <div className="flex justify-end gap-2">
+              <button type="button" onClick={() => setReviewing(null)}
+                className={`${BTN} border border-[var(--border)] text-[var(--text-muted)]`}>
+                Cancel
+              </button>
+              <button type="button" onClick={submitReview}
+                disabled={busy || !reviewNote.trim()}
+                className={`${BTN} text-white ${
+                  reviewing.status === 'Rejected'
+                    ? 'bg-[var(--accent-red)]' : 'bg-[var(--accent-orange)]'}`}>
+                {reviewing.status === 'Rejected' ? 'Reject document' : 'Allow exception'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
@@ -419,6 +939,11 @@ const OnboardingBoard = () => {
   const mayWrite = can(CAP.ONBOARDING_WRITE);
 
   const load = useCallback(async () => {
+    // Wait for the company scope. `scope` starts empty while HrmsContext resolves it, and
+    // GET /hrms/onboarding without a company_id is a 400 -- so every visit to this board
+    // fired two failing requests before the real one. The same guard every other board
+    // already has (AttendanceBoard, RecruitmentDashboard, AuditViewer, ...).
+    if (!companyId) { setLoading(false); return; }
     setLoading(true);
     setError(null);
     try {
@@ -444,7 +969,7 @@ const OnboardingBoard = () => {
     <div className="space-y-5">
       <HrmsPageHeader
         icon={UserPlus}
-        title="Onboarding"
+        title="Onboarding Cases"
         subtitle="Where a candidate becomes an employee"
         actions={mayWrite && (
           <button type="button" onClick={() => setStarting(true)}
@@ -501,9 +1026,16 @@ const OnboardingBoard = () => {
                 </span>
               </div>
 
-              <div className="mt-3 h-1.5 rounded-full bg-[var(--input-bg)] overflow-hidden">
-                <div className="h-full bg-[var(--accent-indigo)]"
-                  style={{ width: `${r.progress?.percent ?? 0}%` }} />
+              {/* §7.5 Stage 5 — completeness across all six groups, not just the
+                  joining checklist. This is the number that answers "who is behind?". */}
+              <div className="mt-3 flex items-center gap-2">
+                <div className="flex-1 h-1.5 rounded-full bg-[var(--input-bg)] overflow-hidden">
+                  <div className={`h-full ${pctTone(r.completeness?.percent ?? 0)}`}
+                    style={{ width: `${r.completeness?.percent ?? 0}%` }} />
+                </div>
+                <span className="text-[11px] font-bold text-[var(--text-muted)] shrink-0">
+                  {r.completeness?.percent ?? 0}%
+                </span>
               </div>
 
               <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11.5px]">

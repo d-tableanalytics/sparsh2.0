@@ -195,8 +195,12 @@ def main() -> None:
         section("Request validation")
         # -----------------------------------------------------
         as_user(HR)
+        # `assignee_id` and `jd` are deliberately absent from this list: neither is collected
+        # at raise time any more. A requisition left unassigned is not incomplete (see
+        # create_requisition's own note), and the JD is authored by HR in Step 3, once
+        # Management/Finance has cleared headcount and budget (Internal Recruitment SOP §3).
         for missing in ("department_id", "designation_id", "experience_required",
-                        "qualification", "essential_skills", "required_date", "assignee_id", "jd"):
+                        "qualification", "essential_skills", "required_date"):
             payload = {k: v for k, v in VALID.items() if k != missing}
             code = client.post("/api/hrms/requisitions", json=payload).status_code
             check(f"missing '{missing}' rejected (422)", code == 422)

@@ -225,7 +225,12 @@ def main() -> None:
         # answer without a token to be useful to a container orchestrator. Allow-listed by
         # EXACT path (never by prefix) so a future /api/assistant/* route is still swept.
         # See OUT_OF_SCOPE_FINDINGS OOS-005 for the mild flag disclosure in /ready.
-        intended_public_exact = {"/api/assistant/health", "/api/assistant/ready"}
+        # Meta's WhatsApp webhook verification handshake. Meta GETs this URL before it
+        # will POST to it, unauthenticated by protocol -- it cannot take a token and still
+        # work. The POST alongside it is signature-verified (HMAC), which is the real
+        # control; this GET only ever echoes back a challenge it was already sent.
+        intended_public_exact = {"/api/assistant/health", "/api/assistant/ready",
+                                 "/api/leadership/whatsapp-status"}
         leaked = []
         checked = 0
         for route in app.routes:

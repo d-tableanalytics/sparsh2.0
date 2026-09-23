@@ -1,38 +1,69 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { FileText, Search, Save, Rocket, ExternalLink } from 'lucide-react';
+import {
+  FileText, Search, Save, Rocket, ExternalLink, Lock, ArrowRight,
+} from 'lucide-react';
 import { useNotification } from '../../../context/NotificationContext';
 import { useHrms } from '../HrmsContext';
 import { CAP } from '../access';
 import HrmsPageHeader from '../common/HrmsPageHeader';
 import HrmsScopeBar from '../common/HrmsScopeBar';
 import { HrmsLoading, HrmsError, HrmsEmpty } from '../common/HrmsStates';
-import { getJds, updateJd } from '../../../services/hrmsApi';
+import { getJds, updateJd, getRequisition } from '../../../services/hrmsApi';
 
 /**
- * HRMS ▸ job description library.
+ * HRMS ▸ Step 3 — Job Description.
  *
- * A view/edit library, not an approval queue. JDs are authored with their requisition and
- * approved together, so there is deliberately no "New JD" and no approve/reject here — the
- * source's standalone JD workflow was removed and its route left behind as dead code
- * (BACKEND_ANALYSIS §5.3); we simply never built it.
+ * Internal Recruitment SOP §3: once Management/Finance has cleared headcount and budget
+ * (Step 2), HR writes the JD against the now-approved requisition — not before. The read-
+ * only panel is exactly what was approved (department, position, reporting line, business
+ * justification, required skills/experience, the approved budget); everything below it is
+ * HR's own authoring.
  *
- * An Approved JD is read-only: it is what the MD signed off on and what candidates will be
- * shown. The server enforces the same rule with a 409.
+ * A JD is still minted at raise time (see RequisitionFormModal) so it has somewhere to live
+ * from the start, but it opens empty until this screen writes it — "HR creates the JD" means
+ * HR is the one who first gives it real content, not that a new record is created here.
+ *
+ * Kept single-purpose on purpose: the Position Scorecard is its own screen
+ * (ScorecardLibrary.jsx), with its own HOD/Management dual-approval signing already built
+ * and tested there — this page only points to it once the JD is written, rather than
+ * duplicating that builder here too.
  */
 
+// Tone is meaning, and matches `toneFor` in internalKit: amber while somebody is being
+// waited on, green once the JD is signed off, red when it came back. Approved used to be
+// grey, which made the one state that unblocks sourcing the hardest to spot in the list.
 const STATUS_TONES = {
-  'Pending Approval': 'bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)]',
-  Approved: 'bg-[var(--input-bg)] text-[var(--text-main)]',
+  'Pending Approval': 'bg-[var(--accent-orange-bg)] text-[var(--accent-orange)]',
+  Approved: 'bg-[var(--accent-green-bg)] text-[var(--accent-green)]',
   Rejected: 'bg-[var(--accent-red-bg)] text-[var(--accent-red)]',
   Draft: 'bg-[var(--input-bg)] text-[var(--text-muted)]',
 };
 
+const STATUS_BAR = {
+  'Pending Approval': 'var(--accent-orange)',
+  Approved: 'var(--accent-green)',
+  Rejected: 'var(--accent-red)',
+  Draft: 'var(--border)',
+};
+
+// Approval states in which the linked requisition has not yet cleared its budget gate --
+// mirrors backend PRE_BUDGET_STATES exactly (models/hrms.py), so this screen's message
+// agrees with the 409 the server would otherwise give.
+const PRE_BUDGET_STATES = new Set(['Pending HR Verification', 'Pending Budget Approval']);
+
 const FIELD = 'w-full h-9 px-3 rounded-lg border border-[var(--border)] bg-[var(--input-bg)] text-[13px] text-[var(--text-main)] disabled:opacity-60';
 const AREA = 'w-full px-3 py-2 rounded-lg border border-[var(--border)] bg-[var(--input-bg)] text-[13px] text-[var(--text-main)] resize-none disabled:opacity-60';
 const LABEL = 'block text-[11px] font-bold uppercase tracking-widest text-[var(--text-muted)] mb-1.5';
+const READONLY_LABEL = 'block text-[10.5px] font-bold uppercase tracking-widest text-[var(--text-muted)] mb-1';
 
-// A field renders editable only when the viewer holds JD_WRITE AND the JD isn't locked —
+const money = (value) => {
+  if (value == null || value === '') return '—';
+  const n = Number(value);
+  return Number.isNaN(n) ? '—' : n.toLocaleString();
+};
+
+// A field renders editable only when the viewer holds JD_WRITE AND the JD isn't locked --
 // otherwise it shows the same value as plain text, rather than an input the viewer might
 // try to type into and wonder why nothing happens.
 const JdField = ({ id, label, value, onChange, editable }) => (
@@ -57,6 +88,58 @@ const JdArea = ({ id, label, value, onChange, editable, rows = 3 }) => (
   </div>
 );
 
+// What was actually approved at Step 1/2 -- shown read-only so HR writes the JD against the
+// real request, not a half-remembered version of it. Fetched separately from the JD list
+// because the JD document itself doesn't carry these facts (they live on the requisition).
+const ApprovedRequisitionPanel = ({ requisition, loading }) => {
+  if (loading) {
+    return (
+      <div className="p-4 rounded-xl border border-[var(--border)] bg-[var(--bg-card)]">
+        <p className="text-[12px] text-[var(--text-muted)]">Loading approved request…</p>
+      </div>
+    );
+  }
+  if (!requisition) return null;
+  const band = requisition.approved_salary_band_min != null
+    ? `${money(requisition.approved_salary_band_min)} – ${money(requisition.approved_salary_band_max)}`
+    : 'Not yet approved';
+  const items = [
+    ['Requisition ID', requisition.request_no],
+    ['Department', requisition.department_name || '—'],
+    ['Position', requisition.designation_name || '—'],
+    ['Reporting To', requisition.reporting_manager_name || '—'],
+    ['No. of Positions', requisition.approved_headcount ?? requisition.vacancy ?? '—'],
+    ['Required Skills', requisition.essential_skills || '—'],
+    ['Experience', requisition.experience_required || '—'],
+    ['Approved Budget', band],
+  ];
+  return (
+    <div className="p-4 rounded-xl border border-[var(--border)] bg-[var(--bg-card)] space-y-3">
+      <h3 className="text-[10.5px] font-bold uppercase tracking-widest text-[var(--text-muted)]">
+        Approved Requisition (read-only)
+      </h3>
+      <div className="grid grid-cols-2 gap-3">
+        {items.map(([label, value]) => (
+          <div key={label}>
+            <span className={READONLY_LABEL}>{label}</span>
+            <p className="text-[12.5px] font-semibold text-[var(--text-main)] break-words">{value}</p>
+          </div>
+        ))}
+      </div>
+      <div>
+        <span className={READONLY_LABEL}>Business Justification</span>
+        <p className="text-[12.5px] text-[var(--text-main)] whitespace-pre-wrap">
+          {requisition.business_justification || '—'}
+        </p>
+      </div>
+      <Link to={`/hrms/internal-requisitions/${requisition.request_no}`}
+        className="inline-flex items-center gap-1.5 text-[11.5px] font-bold text-[var(--accent-indigo)]">
+        <ExternalLink size={12} /> Open full requisition
+      </Link>
+    </div>
+  );
+};
+
 const JdLibrary = () => {
   const { can, scope, companyId } = useHrms();
   const { showSuccess, showError } = useNotification();
@@ -69,9 +152,13 @@ const JdLibrary = () => {
   const [selected, setSelected] = useState(null);
   const [form, setForm] = useState({});
   const [saving, setSaving] = useState(false);
+  const [requisition, setRequisition] = useState(null);
+  const [reqLoading, setReqLoading] = useState(false);
 
   const canWrite = can(CAP.JD_WRITE);
   const locked = selected?.status === 'Approved';
+  const preBudget = requisition && PRE_BUDGET_STATES.has(requisition.approval_status);
+  const editable = canWrite && !locked && !preBudget;
 
   const load = useCallback(async () => {
     if (!companyId) { setLoading(false); return; }
@@ -96,10 +183,19 @@ const JdLibrary = () => {
     setSelected(jd);
     setForm({
       title: jd.title || '', responsibilities: jd.responsibilities || '',
+      job_summary: jd.job_summary || '',
       skills: jd.skills || '', qualifications: jd.qualifications || '',
       experience: jd.experience || '', ctc: jd.ctc || '',
       location: jd.location || '', benefits: jd.benefits || '',
+      key_competencies: jd.key_competencies || '', culture_fit: jd.culture_fit || '',
+      additional_requirements: jd.additional_requirements || '',
     });
+    setRequisition(null);
+    setReqLoading(true);
+    getRequisition(jd.request_no, scope)
+      .then(({ data }) => setRequisition(data))
+      .catch(() => setRequisition(null))
+      .finally(() => setReqLoading(false));
   };
 
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
@@ -125,17 +221,9 @@ const JdLibrary = () => {
     <div className="space-y-6">
       <HrmsPageHeader
         icon={FileText}
-        title="Job Descriptions"
-        subtitle="JDs are authored with their requisition and approved together — manage them from the requisition."
-        actions={
-          <div className="flex items-center gap-2">
-            <HrmsScopeBar />
-            <Link to="/hrms/requisitions"
-              className="h-9 px-3.5 rounded-lg border border-[var(--border)] text-[12px] font-bold text-[var(--text-muted)] flex items-center gap-1.5">
-              <ExternalLink size={14} /> Go to requisitions
-            </Link>
-          </div>
-        }
+        title="Job Description"
+        subtitle="Step 3 — written by HR once Management or Finance has approved headcount and budget."
+        actions={<HrmsScopeBar />}
       />
 
       <div className="flex flex-wrap items-center gap-2">
@@ -154,97 +242,135 @@ const JdLibrary = () => {
 
       {rows.length === 0 ? (
         <HrmsEmpty icon={FileText} title="No job descriptions yet"
-          hint="JDs are created with their requisition in Hiring Requisitions." />
+          hint="Raise a requisition on the Requisitions screen — its JD opens here once budget is approved." />
       ) : (
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-          <div className="space-y-2 lg:max-h-[70vh] lg:overflow-y-auto">
+          <div className="space-y-2 lg:max-h-[70vh] lg:overflow-y-auto lg:pr-1">
+            <p className="px-0.5 text-[11px] text-[var(--text-muted)]">
+              {rows.length} job description{rows.length === 1 ? '' : 's'}
+            </p>
             {rows.map((jd) => (
               <button key={jd.jd_no} type="button" onClick={() => select(jd)}
-                className={`w-full text-left p-3 rounded-xl border transition-colors ${
+                className={`relative w-full text-left p-3 pl-4 rounded-xl border overflow-hidden transition-colors ${
                   selected?.jd_no === jd.jd_no
                     ? 'border-[var(--accent-indigo)] bg-[var(--accent-indigo-bg)]'
                     : 'border-[var(--border)] bg-[var(--bg-card)] hover:border-[var(--accent-indigo)]'}`}>
+                {/* The status colour runs down the edge so the list scans by state without
+                    reading every chip. */}
+                <span className="absolute left-0 top-0 bottom-0 w-1"
+                  style={{ background: STATUS_BAR[jd.status] || 'var(--border)' }} />
                 <div className="flex items-center justify-between gap-2">
                   <span className="font-mono text-[11.5px] text-[var(--text-muted)]">{jd.jd_no}</span>
-                  <span className={`px-2 py-0.5 rounded-md text-[10.5px] font-bold ${
+                  <span className={`px-2 py-0.5 rounded-md text-[10.5px] font-bold shrink-0 ${
                     STATUS_TONES[jd.status] || 'bg-[var(--input-bg)] text-[var(--text-muted)]'}`}>
                     {jd.status}
                   </span>
                 </div>
-                <p className="mt-1 text-[13px] font-semibold text-[var(--text-main)] truncate">
+                <p className="mt-1 text-[13.5px] font-bold text-[var(--text-main)] truncate">
                   {jd.title || 'Untitled'}
                 </p>
-                <p className="text-[11.5px] text-[var(--text-muted)]">{jd.request_no}</p>
+                <p className="text-[11.5px] text-[var(--text-muted)] font-mono">{jd.request_no}</p>
               </button>
             ))}
           </div>
 
-          <div className="lg:col-span-2">
+          <div className="lg:col-span-2 space-y-4">
             {!selected ? (
               <HrmsEmpty icon={FileText} title="Select a job description"
-                hint="Pick one from the list to view or edit its content." />
+                hint="Pick one from the list to view or write its content." />
             ) : (
-              <div className="p-4 rounded-xl border border-[var(--border)] bg-[var(--bg-card)] space-y-4">
-                <div className="flex items-start justify-between gap-3 flex-wrap">
-                  <div>
-                    <p className="font-mono text-[12px] text-[var(--text-muted)]">{selected.jd_no}</p>
-                    <p className="text-[15px] font-bold text-[var(--text-main)]">{selected.title || 'Untitled'}</p>
-                    <p className="text-[12px] text-[var(--text-muted)]">
-                      Linked to {selected.request_no} · v{selected.version || 1}
-                    </p>
+              <>
+                <ApprovedRequisitionPanel requisition={requisition} loading={reqLoading} />
+
+                {preBudget && (
+                  <div className="p-3.5 rounded-lg border border-[var(--accent-orange)]/30 bg-[var(--accent-orange-bg)]
+                                  text-[12px] text-[var(--accent-orange)] flex items-start gap-2">
+                    <Lock size={14} className="shrink-0 mt-0.5" />
+                    The Job Description cannot be written until Management or Finance approves
+                    headcount and budget for this requisition ({requisition?.approval_status}).
                   </div>
-                  {locked ? (
-                    <span className="h-8 px-3 rounded-lg bg-[var(--input-bg)] text-[var(--text-main)] text-[12px] font-bold flex items-center gap-1.5">
-                      <Rocket size={14} /> Posting enabled
-                    </span>
-                  ) : canWrite && (
-                    <button type="button" onClick={save} disabled={saving}
-                      className="h-8 px-3.5 rounded-lg bg-[var(--accent-indigo)] text-white text-[12px] font-bold flex items-center gap-1.5 disabled:opacity-50">
-                      <Save size={14} /> {saving ? 'Saving…' : 'Save'}
-                    </button>
+                )}
+
+                <div className="p-4 rounded-xl border border-[var(--border)] bg-[var(--bg-card)] space-y-4">
+                  <div className="flex items-start justify-between gap-3 flex-wrap">
+                    <div>
+                      <p className="font-mono text-[12px] text-[var(--text-muted)]">{selected.jd_no}</p>
+                      <p className="text-[15px] font-bold text-[var(--text-main)]">{selected.title || 'Untitled'}</p>
+                      <p className="text-[12px] text-[var(--text-muted)]">
+                        Linked to {selected.request_no} · v{selected.version || 1}
+                      </p>
+                    </div>
+                    {locked ? (
+                      <span className="h-8 px-3 rounded-lg bg-[var(--input-bg)] text-[var(--text-main)] text-[12px] font-bold flex items-center gap-1.5">
+                        <Rocket size={14} /> Approved for Recruitment
+                      </span>
+                    ) : editable && (
+                      <button type="button" onClick={save} disabled={saving}
+                        className="h-8 px-3.5 rounded-lg bg-[var(--accent-indigo)] text-white text-[12px] font-bold flex items-center gap-1.5 disabled:opacity-50">
+                        <Save size={14} /> {saving ? 'Saving…' : 'Save Job Description'}
+                      </button>
+                    )}
+                  </div>
+
+                  {locked && (
+                    <div className="p-3 rounded-lg border border-[var(--border)] bg-[var(--input-bg)] text-[12px] text-[var(--text-muted)]">
+                      This JD is approved and locked — it is what was signed off on and what
+                      candidates will see. Raise a new requisition to hire on different terms.
+                    </div>
                   )}
+                  {selected.status === 'Pending Approval' && !preBudget && (
+                    <div className="p-3 rounded-lg border border-[var(--border)] bg-[var(--input-bg)] text-[12px] text-[var(--text-muted)]">
+                      Once this is saved, prepare the Position Scorecard next — the hiring
+                      manager approves it (and Management too, for managerial+ roles) before
+                      this JD becomes Approved for Recruitment.
+                    </div>
+                  )}
+                  {selected.status === 'Rejected' && selected.md_remarks && (
+                    <div className="p-3 rounded-lg border border-[var(--accent-red)]/30 bg-[var(--accent-red-bg)] text-[12px] text-[var(--accent-red)]">
+                      Rejected: {selected.md_remarks}
+                    </div>
+                  )}
+
+                  <JdArea id="jd-summary" label="Job Summary" rows={3} value={form.job_summary}
+                    onChange={set('job_summary')} editable={editable} />
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <JdField id="jd-title" label="Title" value={form.title} onChange={set('title')}
+                      editable={editable} />
+                    <JdField id="jd-loc" label="Location" value={form.location} onChange={set('location')}
+                      editable={editable} />
+                    <JdField id="jd-exp" label="Required Experience" value={form.experience} onChange={set('experience')}
+                      editable={editable} />
+                    <JdField id="jd-ctc" label="CTC" value={form.ctc} onChange={set('ctc')}
+                      editable={editable} />
+                  </div>
+
+                  <JdArea id="jd-resp" label="Key Responsibilities" rows={5} value={form.responsibilities}
+                    onChange={set('responsibilities')} editable={editable} />
+                  <JdArea id="jd-skills" label="Required Skills" value={form.skills} onChange={set('skills')}
+                    editable={editable} />
+                  <JdArea id="jd-qual" label="Qualifications" value={form.qualifications} onChange={set('qualifications')}
+                    editable={editable} />
+                  <JdArea id="jd-comp" label="Key Competencies" value={form.key_competencies}
+                    onChange={set('key_competencies')} editable={editable} />
+                  <JdArea id="jd-culture" label="Culture-Fit Expectations" value={form.culture_fit}
+                    onChange={set('culture_fit')} editable={editable} />
+                  <JdArea id="jd-extra" label="Additional Requirements" value={form.additional_requirements}
+                    onChange={set('additional_requirements')} editable={editable} />
+                  <JdArea id="jd-ben" label="Benefits" value={form.benefits} onChange={set('benefits')}
+                    editable={editable} />
                 </div>
 
-                {locked && (
-                  <div className="p-3 rounded-lg border border-[var(--border)] bg-[var(--input-bg)] text-[12px] text-[var(--text-muted)]">
-                    This JD is approved and locked — it is what the MD signed off on and what
-                    candidates will see. Raise a new requisition to hire on different terms.
-                  </div>
+                {!preBudget && !locked && (
+                  <Link to="/hrms/scorecards"
+                    className="flex items-center justify-between gap-2 p-4 rounded-xl border
+                              border-[var(--border)] bg-[var(--bg-card)] text-[13px]
+                              font-semibold text-[var(--accent-indigo)] hover:border-[var(--accent-indigo)]">
+                    Next: prepare the Position Scorecard
+                    <ArrowRight size={15} />
+                  </Link>
                 )}
-                {selected.status === 'Pending Approval' && (
-                  <div className="p-3 rounded-lg border border-[var(--border)] bg-[var(--input-bg)] text-[12px] text-[var(--text-muted)]">
-                    Approved together with requisition{' '}
-                    <Link to="/hrms/requisitions" className="font-bold text-[var(--accent-indigo)]">
-                      {selected.request_no}
-                    </Link> — HR reviews it and the MD approves it as one decision.
-                  </div>
-                )}
-                {selected.status === 'Rejected' && selected.md_remarks && (
-                  <div className="p-3 rounded-lg border border-[var(--accent-red)]/30 bg-[var(--accent-red-bg)] text-[12px] text-[var(--accent-red)]">
-                    Rejected: {selected.md_remarks}
-                  </div>
-                )}
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <JdField id="jd-title" label="Title" value={form.title} onChange={set('title')}
-                    editable={canWrite && !locked} />
-                  <JdField id="jd-loc" label="Location" value={form.location} onChange={set('location')}
-                    editable={canWrite && !locked} />
-                  <JdField id="jd-exp" label="Experience" value={form.experience} onChange={set('experience')}
-                    editable={canWrite && !locked} />
-                  <JdField id="jd-ctc" label="CTC" value={form.ctc} onChange={set('ctc')}
-                    editable={canWrite && !locked} />
-                </div>
-
-                <JdArea id="jd-resp" label="Responsibilities" rows={5} value={form.responsibilities}
-                  onChange={set('responsibilities')} editable={canWrite && !locked} />
-                <JdArea id="jd-skills" label="Skills" value={form.skills} onChange={set('skills')}
-                  editable={canWrite && !locked} />
-                <JdArea id="jd-qual" label="Qualifications" value={form.qualifications} onChange={set('qualifications')}
-                  editable={canWrite && !locked} />
-                <JdArea id="jd-ben" label="Benefits" value={form.benefits} onChange={set('benefits')}
-                  editable={canWrite && !locked} />
-              </div>
+              </>
             )}
           </div>
         </div>

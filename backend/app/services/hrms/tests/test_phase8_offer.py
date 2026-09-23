@@ -300,7 +300,13 @@ async def main() -> None:
             issued["access_code"], {"action": "accept", "signature": "Cand CAN-001"})
         check("accepted", accepted["status"] == M.OfferStatus.ACCEPTED.value)
         got = (await candidates.find_one({"uk": "CAN-001"}))["application_status"]
-        check("candidate advances to Offer Accepted", got == S.OFFER_ACCEPTED.value)
+        # BA Functional Design §7.5: onboarding opens automatically the moment an offer is
+        # accepted (trigger: "Offer accepted"), which itself advances the candidate straight
+        # on to Pre-Onboarding -- accepting no longer leaves them resting at Offer Accepted.
+        check("candidate advances to Pre-Onboarding (onboarding auto-starts on acceptance)",
+              got == S.PRE_ONBOARDING.value)
+        onb = await mongo.get_collection(M.COLL_ONBOARDING).find_one({"uk": "CAN-001"})
+        check("an onboarding case was actually opened", onb is not None)
         check("HR notified", any(s[0] == "role" for s in sent))
         check("acceptance audited",
               any(x["action"] == M.AUDIT_OFFER_ACCEPTED for x in audit_log.docs))

@@ -52,11 +52,11 @@ from app.models.hrms import (
     is_iso_date, stage_rank,
 )
 # ── Phase 11-R (Items 4, 6) ──
-from app.models.hrms import ClientShareStatus, budget_status
+from app.models.hrms import budget_status
 # ── Internal recruitment track ──
 from app.models.hrms import (
     COLL_EMPLOYEE_PROFILES, COLL_PROBATION_REVIEWS, COLL_REFERENCE_CHECKS,
-    REFERENCE_CLEARS_OFFER, ProbationOutcome, RequisitionTrack,
+    REFERENCE_CLEARS_OFFER, ProbationOutcome, REQUISITION_TRACK_INTERNAL,
 )
 from app.utils.hrms_access import can, hrms_role
 
@@ -82,47 +82,17 @@ async def _manager_requisitions(actor: dict, company_id: str) -> list:
     return [r["request_no"] for r in rows if r.get("request_no")]
 
 
-async def _client_requisitions(company_id: str, client_id: str) -> list:
-    """The requisition numbers belonging to one client (Phase 11-R, Item 4).
-
-    Fails CLOSED in the same way `_manager_requisitions` does: a client with no
-    requisitions yields `$in: []`, which matches nothing rather than everything. A filter
-    that silently widens when it finds nothing is how a scoping bug becomes a data leak.
-    """
-    rows = await get_collection(COLL_REQUISITIONS).find(
-        {"company_id": str(company_id), "client_id": str(client_id)},
-        {"request_no": 1}).to_list(5000)
-    return [r["request_no"] for r in rows if r.get("request_no")]
-
-
-async def _scope(actor: dict, company_id: str, client_id: str = None) -> dict:
+async def _scope(actor: dict, company_id: str) -> dict:
     """The base `$match` for every aggregation in this module.
 
     A MANAGER is narrowed to their own requisitions. Everyone else with `analytics.read`
     sees the company. This is applied to EVERY query below without exception -- there is no
     "just this one summary" path that skips it.
-
-    Phase 11-R adds an optional CLIENT narrowing. It composes with the manager narrowing by
-    INTERSECTION, never replacing it: a hiring manager filtering by client sees the
-    requisitions that are both theirs and that client's, so the filter can only ever narrow
-    what they may see, never widen it. `company_id` remains the only tenant boundary --
-    `client_id` is a reporting dimension inside one tenant, not a second security rule.
     """
     base = {"company_id": str(company_id)}
-    is_manager = hrms_role(actor) == HrmsRole.MANAGER
-
-    if not client_id:
-        if not is_manager:
-            return base
-        return {**base,
-                "request_no": {"$in": await _manager_requisitions(actor, company_id)}}
-
-    client_reqs = await _client_requisitions(company_id, client_id)
-    if not is_manager:
-        return {**base, "request_no": {"$in": client_reqs}}
-
-    own = set(await _manager_requisitions(actor, company_id))
-    return {**base, "request_no": {"$in": [r for r in client_reqs if r in own]}}
+    if hrms_role(actor) != HrmsRole.MANAGER:
+        return base
+    return {**base, "request_no": {"$in": await _manager_requisitions(actor, company_id)}}
 
 
 def _scoped_by_request(scope: dict, field: str = "request_no") -> dict:
@@ -221,8 +191,7 @@ def _effective(candidate: dict, evidence: dict) -> int:
 # Dashboard
 # ─────────────────────────────────────────────────────────────
 async def dashboard(actor: dict, company_id: str, *, date_from: str = None,
-                    date_to: str = None, client_id: str = None,
-                    track: str = None) -> dict:
+                    date_to: str = None, track: str = None) -> dict:
     """Headline KPIs plus the positions/vacancy summary.
 
     Every tile carries the `link` and `filter` the UI needs to deep-link into the screen
@@ -230,15 +199,14 @@ async def dashboard(actor: dict, company_id: str, *, date_from: str = None,
     to take on trust.
     """
     start, end = parse_range(date_from, date_to)
-    scope = await _scope(actor, company_id, client_id)
+    scope = await _scope(actor, company_id)
 
     candidates = await get_collection(COLL_CANDIDATES).find(
         {**scope, **_window("applied_at", start, end)},
-        # Phase 11-R: client_share and the referral fields ride along, so the new tiles are
-        # computed from the SAME single read rather than adding a second pass.
+        # Phase 11-R: the referral fields ride along, so the new tiles are computed from
+        # the SAME single read rather than adding a second pass.
         {"uk": 1, "application_status": 1, "source": 1, "applied_at": 1,
-         "client_share": 1, "client_share_status": 1, "is_referral": 1,
-         "referral_source": 1}).to_list(SCAN_CAP)
+         "is_referral": 1, "referral_source": 1}).to_list(SCAN_CAP)
     evidence = await _evidence_ranks(scope)
 
     reqs = await get_collection(COLL_REQUISITIONS).find(
@@ -269,7 +237,8 @@ async def dashboard(actor: dict, company_id: str, *, date_from: str = None,
     open_reqs = [r for r in reqs if r.get("closing_status") == ReqClosing.OPEN.value]
     total_vacancy = sum(int(r.get("vacancy") or 1) for r in open_reqs)
     awaiting = sum(1 for r in reqs if r.get("approval_status") in
-                   (ReqApproval.PENDING_HR.value, ReqApproval.PENDING_MD.value))
+                   (ReqApproval.PENDING_HR_VERIFICATION.value, ReqApproval.PENDING_BUDGET.value,
+                    ReqApproval.PENDING_ESCALATION.value, ReqApproval.PENDING_SCORECARD.value))
 
     offers_sent = sum(1 for o in offers if o.get("status") != OfferStatus.DRAFT.value)
     offers_accepted = sum(1 for o in offers if o.get("status") == OfferStatus.ACCEPTED.value)
@@ -280,33 +249,15 @@ async def dashboard(actor: dict, company_id: str, *, date_from: str = None,
     return {
         "range": {"from": start.strftime("%Y-%m-%d"), "to": end.strftime("%Y-%m-%d")},
         "scoped_to_own_requisitions": hrms_role(actor) == HrmsRole.MANAGER,
-        # ── Phase 11-R, Item 4 ──
-        "client_id": client_id,
         "cv_metrics": cv,
-        # CV review -> selection -> client sharing -> client verdict -> joining, as stages.
+        # CV review -> selection -> joining, as stages.
         "cv_funnel": _cv_funnel(cv),
         # ── Internal track ── the SOP §10 KPI block, present only when asked for. Omitting
         # it by default keeps the existing payload byte-for-byte for every caller written
         # before the internal track existed.
         "internal_kpis": (await internal_kpis(actor, company_id, date_from=date_from,
                                               date_to=date_to)
-                          if track == RequisitionTrack.INTERNAL.value else None),
-        "client_metrics": {
-            "shared": cv["shared_with_client"],
-            "shortlisted": cv["client_shortlisted"],
-            "rejected": cv["client_rejected"],
-            "awaiting_verdict": cv["client_awaiting"],
-            # Of the CVs the client has actually ANSWERED on. Measuring against everything
-            # shared would report a low rate for a client who is simply slow, which is a
-            # different problem and would read as a quality one.
-            "shortlist_rate": conversion(
-                cv["client_shortlisted"],
-                cv["client_shortlisted"] + cv["client_rejected"]),
-        },
-        # Populated only when no single client is selected — the comparison IS the
-        # "all clients" view.
-        "client_comparison": (None if client_id else
-                              await _client_comparison(actor, company_id, start, end)),
+                          if track == REQUISITION_TRACK_INTERNAL else None),
         "kpis": [
             {"key": "candidates", "label": "Candidates", "value": len(candidates),
              "hint": "Applications received in this period",
@@ -319,7 +270,7 @@ async def dashboard(actor: dict, company_id: str, *, date_from: str = None,
              "hint": f"{total_vacancy} vacancies to fill",
              "link": "/hrms/requisitions"},
             {"key": "awaiting_approval", "label": "Awaiting approval", "value": awaiting,
-             "hint": "Requisitions with HR or MD",
+             "hint": "Requisitions still in the approval chain",
              "link": "/hrms/requisitions"},
             {"key": "interviews", "label": "Interviews", "value": len(interviews),
              "hint": f"{sum(1 for i in interviews if i.get('status') == InterviewStatus.COMPLETED.value)} completed",
@@ -350,21 +301,6 @@ async def dashboard(actor: dict, company_id: str, *, date_from: str = None,
             {"key": "cvs_rejected", "label": "CVs rejected", "value": cv["rejected"],
              "hint": "Rejected, declined, duplicated or failed",
              "link": "/hrms/candidates", "filter": {"status": AppStatus.REJECTED.value}},
-            {"key": "shared_with_client", "label": "Shared with client",
-             "value": cv["shared_with_client"],
-             "hint": f"{cv['client_awaiting']} awaiting a verdict",
-             "link": "/hrms/candidates",
-             "filter": {"status": AppStatus.SHARED_WITH_CLIENT.value}},
-            {"key": "client_shortlisted", "label": "Client shortlisted",
-             "value": cv["client_shortlisted"],
-             "hint": "The client's own shortlist",
-             "link": "/hrms/candidates",
-             "filter": {"status": AppStatus.CLIENT_SHORTLISTED.value}},
-            {"key": "client_rejected", "label": "Client rejections",
-             "value": cv["client_rejected"],
-             "hint": "Rejected by the client after review",
-             "link": "/hrms/candidates",
-             "filter": {"status": AppStatus.CLIENT_REJECTED.value}},
             {"key": "joinings", "label": "Total joinings", "value": cv["joinings"],
              "hint": "Joined or converted to an employee record",
              "link": "/hrms/onboarding"},
@@ -400,10 +336,10 @@ async def dashboard(actor: dict, company_id: str, *, date_from: str = None,
 
 
 # ─────────────────────────────────────────────────────────────
-# Phase 11-R, Item 4 — CV and client metrics
+# Phase 11-R, Item 4 — CV metrics
 # ─────────────────────────────────────────────────────────────
-# Every figure below is DERIVED from data that already exists after the client-share write
-# path lands, and every one is computed from the ALREADY-SCOPED candidate list rather than
+# Every figure below is DERIVED from data that already exists, and every one is computed
+# from the ALREADY-SCOPED candidate list rather than
 # by issuing its own query — so none of them can accidentally escape `_scope`.
 #
 # The formulas, stated once here and repeated in PHASE_11R_REPORT:
@@ -411,8 +347,7 @@ async def dashboard(actor: dict, company_id: str, *, date_from: str = None,
 #   reviewed    = somebody has ACTED on the CV: it cleared the shortlist bar, or it carries
 #                 a status that is itself a review outcome (Under Review, Rejected,
 #                 Duplicate, On Hold). A CV sitting at Applied has not been reviewed.
-#   shortlisted = effective_rank >= rank(Shortlisted)  -- the internal selection that
-#                 precedes sharing anything with a client
+#   shortlisted = effective_rank >= rank(Shortlisted)  -- cleared our own screening
 #   selected    = effective_rank >= rank(Selected)     -- the FINAL selection, after
 #                 assessment and interview
 #   rejected    = status in the rejection set (a STATUS, not a rank: a rejection is a
@@ -431,7 +366,7 @@ async def dashboard(actor: dict, company_id: str, *, date_from: str = None,
 # both. The set below is the smallest honest correction: rank 1 statuses that DO represent a
 # human decision, plus everything above the band.
 REJECTION_STATUSES = {
-    AppStatus.REJECTED.value, AppStatus.CLIENT_REJECTED.value, AppStatus.DUPLICATE.value,
+    AppStatus.REJECTED.value, AppStatus.DUPLICATE.value,
     AppStatus.ASSESSMENT_FAILED.value, AppStatus.OFFER_DECLINED.value,
 }
 JOINED_STATUSES = {AppStatus.JOINED.value, AppStatus.EMPLOYEE_CREATED.value,
@@ -450,23 +385,6 @@ def _cv_metrics(candidates: list, ranks: list) -> dict:
     rank_shortlisted = stage_rank(AppStatus.SHORTLISTED.value)
     rank_selected = stage_rank(AppStatus.SELECTED.value)
 
-    shared = shortlisted = rejected_by_client = awaiting = 0
-    for c in candidates:
-        share = c.get("client_share") or {}
-        # `shared_at` is the fact of the share; `client_share_status` is the denormalised
-        # verdict. Reading the sub-document first means a row written before the flat field
-        # existed still counts.
-        if not share.get("shared_at"):
-            continue
-        shared += 1
-        verdict = share.get("status") or c.get("client_share_status")
-        if verdict == ClientShareStatus.SHORTLISTED.value:
-            shortlisted += 1
-        elif verdict == ClientShareStatus.REJECTED.value:
-            rejected_by_client += 1
-        elif verdict in (None, ClientShareStatus.PENDING.value):
-            awaiting += 1
-
     reviewed = sum(1 for c, r in zip(candidates, ranks)
                    if r >= rank_shortlisted
                    or c.get("application_status") in REVIEW_OUTCOME_STATUSES)
@@ -480,10 +398,6 @@ def _cv_metrics(candidates: list, ranks: list) -> dict:
         "selected": sum(1 for r in ranks if r >= rank_selected),
         "rejected": sum(1 for c in candidates
                         if c.get("application_status") in REJECTION_STATUSES),
-        "shared_with_client": shared,
-        "client_shortlisted": shortlisted,
-        "client_rejected": rejected_by_client,
-        "client_awaiting": awaiting,
         "joinings": sum(1 for c in candidates
                         if c.get("application_status") in JOINED_STATUSES),
         "referrals": sum(1 for c in candidates if c.get("is_referral")),
@@ -493,17 +407,15 @@ def _cv_metrics(candidates: list, ranks: list) -> dict:
 
 # The recruitment funnel this dashboard exists to show, declared ONCE:
 #
-#   CV received -> reviewed -> shortlisted -> shared with client -> client shortlisted
-#               -> selected -> joined
+#   CV received -> reviewed -> shortlisted -> selected -> joined
 #
 # Each entry is (key, label, hint). The values come straight from `_cv_metrics`, so the
 # funnel and the KPI tiles cannot disagree -- they are the same numbers, arranged.
+#
 CV_FUNNEL_STAGES = [
     ("total",              "CVs received",       "Applications in this period"),
     ("reviewed",           "Reviewed",           "Somebody has acted on the CV"),
     ("shortlisted",        "Shortlisted",        "Cleared our own screening"),
-    ("shared_with_client", "Shared with client", "Sent to the client for their verdict"),
-    ("client_shortlisted", "Client shortlisted", "The client's own shortlist"),
     ("selected",           "Selected",           "Final selection after interview"),
     ("joinings",           "Joined",             "Joined or converted to an employee"),
 ]
@@ -513,10 +425,7 @@ def _cv_funnel(cv: dict) -> list:
     """The CV funnel as stages, with the drop-off between each pair.
 
     `of_previous` is null rather than a number over 100% wherever a stage exceeds the one
-    above it. That is not defensive rounding -- it is a real and MEANINGFUL shape: an
-    in-house requisition never shares a CV with a client, so `selected` can legitimately
-    exceed `shared_with_client`. Printing "340%" there would read as a bug in the dashboard
-    rather than what it is, a mix of client and in-house hiring in one view.
+    above it, so a legacy row cannot print "340%" and read as a bug in the dashboard.
 
     `of_total` is always against CVs received, so every bar stays comparable.
     """
@@ -618,7 +527,7 @@ async def internal_kpis(actor: dict, company_id: str, *, date_from: str = None,
     start, end = parse_range(date_from, date_to)
     scope = await _scope(actor, company_id)
 
-    req_query = {**scope, "requisition_track": RequisitionTrack.INTERNAL.value}
+    req_query = {**scope, "requisition_track": REQUISITION_TRACK_INTERNAL}
     filters = {}
     if department_id:
         req_query["department_id"] = str(department_id)
@@ -955,102 +864,11 @@ def _separation_date(profile: dict):
     return None
 
 
-async def _client_names(client_ids) -> dict:
-    """Current names for a set of client ids, read from Companies.
-
-    Requisitions denormalise `client_name` at write time, which is right for speed but goes
-    stale the moment a company is renamed. Under the old HRMS client master a rename fanned
-    out across every affected row in a bulk write; clients are companies now, and HRMS does
-    not own that write -- so the name is refreshed on READ instead. One query per report, and
-    a rename is correct everywhere immediately rather than after a sync step somebody has to
-    remember.
-    """
-    ids = {str(c) for c in client_ids if c}
-    if not ids:
-        return {}
-    from app.services.hrms_client_service import COLL_COMPANIES
-
-    oids = []
-    for i in ids:
-        try:
-            oids.append(ObjectId(i))
-        except (InvalidId, TypeError):
-            continue
-    if not oids:
-        return {}
-    rows = await get_collection(COLL_COMPANIES).find(
-        {"_id": {"$in": oids}}, {"name": 1}).to_list(len(oids))
-    return {str(r["_id"]): r.get("name") for r in rows}
-
-
-async def _client_comparison(actor: dict, company_id: str, start: datetime,
-                             end: datetime) -> list:
-    """One row per client, for the "all clients" view.
-
-    Bounded work: one requisition read, one candidate read, then arithmetic. The naive
-    shape — re-running `dashboard` per client — would issue six reads per client and get
-    slower with every client won.
-    """
-    scope = await _scope(actor, company_id)
-    reqs = await get_collection(COLL_REQUISITIONS).find(
-        {**scope}, {"request_no": 1, "client_id": 1, "client_name": 1, "vacancy": 1,
-                    "closing_status": 1}).to_list(SCAN_CAP)
-    if not reqs:
-        return []
-
-    by_request = {r["request_no"]: r for r in reqs if r.get("request_no")}
-    candidates = await get_collection(COLL_CANDIDATES).find(
-        {**scope, **_window("applied_at", start, end)},
-        {"uk": 1, "application_status": 1, "request_no": 1, "client_share": 1,
-         "client_share_status": 1}).to_list(SCAN_CAP)
-    evidence = await _evidence_ranks(scope)
-
-    names = await _client_names(r.get("client_id") for r in reqs)
-
-    buckets = {}
-    for r in reqs:
-        # Requisitions with no client are grouped under a single explicit bucket rather
-        # than dropped: "in-house" is an answer, and silently omitting those rows would make
-        # the comparison's total disagree with the dashboard's.
-        key = r.get("client_id") or "__none__"
-        bucket = buckets.setdefault(key, {
-            "client_id": r.get("client_id"),
-            "client_name": (names.get(str(r.get("client_id")))
-                            or r.get("client_name") or "In-house / no client"),
-            "requisitions": 0, "vacancies": 0, "candidates": [], "ranks": [],
-        })
-        bucket["requisitions"] += 1
-        if r.get("closing_status") == ReqClosing.OPEN.value:
-            bucket["vacancies"] += int(r.get("vacancy") or 1)
-
-    for c in candidates:
-        req = by_request.get(c.get("request_no"))
-        key = (req or {}).get("client_id") or "__none__"
-        bucket = buckets.get(key)
-        if not bucket:
-            continue
-        bucket["candidates"].append(c)
-        bucket["ranks"].append(_effective(c, evidence))
-
-    rows = []
-    for bucket in buckets.values():
-        metrics = _cv_metrics(bucket["candidates"], bucket["ranks"])
-        rows.append({
-            "client_id": bucket["client_id"],
-            "client_name": bucket["client_name"],
-            "requisitions": bucket["requisitions"],
-            "vacancies": bucket["vacancies"],
-            **metrics,
-        })
-    rows.sort(key=lambda r: (-r["total"], r["client_name"]))
-    return rows
-
-
 # ─────────────────────────────────────────────────────────────
 # Phase 11-R, Item 4 — position-wise CV status matrix
 # ─────────────────────────────────────────────────────────────
 async def positions(actor: dict, company_id: str, *, date_from: str = None,
-                    date_to: str = None, client_id: str = None) -> dict:
+                    date_to: str = None) -> dict:
     """Rows = requisition, columns = a count for every application status.
 
     Same `_scope`, same SCAN_CAP, same window validation as everything else here. Read-only.
@@ -1060,30 +878,29 @@ async def positions(actor: dict, company_id: str, *, date_from: str = None,
     vanishing from a report somebody trusts.
     """
     start, end = parse_range(date_from, date_to)
-    scope = await _scope(actor, company_id, client_id)
+    scope = await _scope(actor, company_id)
 
     reqs = await get_collection(COLL_REQUISITIONS).find(
         {**scope, **_window("created_at", start, end)},
         {"request_no": 1, "designation_name": 1, "department_name": 1, "vacancy": 1,
          "urgency_level": 1, "closing_status": 1, "approval_status": 1,
-         "client_id": 1, "client_name": 1, "requisition_type": 1}).to_list(SCAN_CAP)
+         "requisition_type": 1}).to_list(SCAN_CAP)
     if not reqs:
         return {"range": {"from": start.strftime("%Y-%m-%d"), "to": end.strftime("%Y-%m-%d")},
-                "statuses": [s.value for s in AppStatus], "rows": [], "total": 0,
+                "statuses": [s.value for s in AppStatus],
+                "rows": [], "total": 0,
                 "scoped_to_own_requisitions": hrms_role(actor) == HrmsRole.MANAGER}
 
     request_nos = [r["request_no"] for r in reqs if r.get("request_no")]
     candidates = await get_collection(COLL_CANDIDATES).find(
         {**scope, "request_no": {"$in": request_nos}},
-        {"uk": 1, "application_status": 1, "request_no": 1, "client_share": 1,
-         "client_share_status": 1}).to_list(SCAN_CAP)
+        {"uk": 1, "application_status": 1, "request_no": 1}).to_list(SCAN_CAP)
     evidence = await _evidence_ranks(scope)
 
     grouped = {}
     for c in candidates:
         grouped.setdefault(c.get("request_no"), []).append(c)
 
-    names = await _client_names(r.get("client_id") for r in reqs)
     statuses = [s.value for s in AppStatus]
     rows = []
     for r in reqs:
@@ -1098,8 +915,6 @@ async def positions(actor: dict, company_id: str, *, date_from: str = None,
             "request_no": r.get("request_no"),
             "designation": r.get("designation_name"),
             "department": r.get("department_name"),
-            "client_name": (names.get(str(r.get("client_id")))
-                            or r.get("client_name")),
             "requisition_type": r.get("requisition_type"),
             "vacancy": int(r.get("vacancy") or 1),
             "urgency": r.get("urgency_level"),
@@ -1164,14 +979,14 @@ async def _time_to_hire(scope: dict, start: datetime, end: datetime) -> dict:
 # Funnel
 # ─────────────────────────────────────────────────────────────
 async def funnel(actor: dict, company_id: str, *, date_from: str = None,
-                 date_to: str = None, client_id: str = None) -> dict:
+                 date_to: str = None) -> dict:
     """The hiring funnel, by effective rank.
 
     Each stage counts candidates who reached AT LEAST that stage, so the series can never
     increase -- which is what makes stage-to-stage conversion meaningful.
     """
     start, end = parse_range(date_from, date_to)
-    scope = await _scope(actor, company_id, client_id)
+    scope = await _scope(actor, company_id)
 
     candidates = await get_collection(COLL_CANDIDATES).find(
         {**scope, **_window("applied_at", start, end)},
@@ -1220,7 +1035,7 @@ async def funnel(actor: dict, company_id: str, *, date_from: str = None,
 # Breakdowns
 # ─────────────────────────────────────────────────────────────
 async def breakdown(actor: dict, company_id: str, by: str, *, date_from: str = None,
-                    date_to: str = None, client_id: str = None) -> dict:
+                    date_to: str = None) -> dict:
     """Group counts along one allow-listed dimension."""
     spec = BREAKDOWN_FIELDS.get(by)
     if not spec:
@@ -1228,7 +1043,7 @@ async def breakdown(actor: dict, company_id: str, by: str, *, date_from: str = N
     collection, field, label = spec
 
     start, end = parse_range(date_from, date_to)
-    scope = await _scope(actor, company_id, client_id)
+    scope = await _scope(actor, company_id)
     date_field = "applied_at" if collection == COLL_CANDIDATES else "created_at"
 
     rows = await get_collection(collection).aggregate([
@@ -1281,13 +1096,6 @@ def _derive(entity: str, row: dict) -> dict:
         row = dict(row)
         row["budget_status"] = budget_status(row)
         return row
-    if entity == "candidates":
-        row = dict(row)
-        # Prefer the sub-document, fall back to the denormalised field, so rows written at
-        # any point since this phase read correctly.
-        share = row.get("client_share") or {}
-        row["client_share_status"] = share.get("status") or row.get("client_share_status")
-        return row
     return row
 
 
@@ -1302,11 +1110,10 @@ def _cell(value):
 
 
 async def _query(actor: dict, company_id: str, entity: str, *, search: str = None,
-                 date_from: str = None, date_to: str = None,
-                 client_id: str = None) -> tuple:
+                 date_from: str = None, date_to: str = None) -> tuple:
     spec = _spec(entity)
     start, end = parse_range(date_from, date_to)
-    scope = await _scope(actor, company_id, client_id)
+    scope = await _scope(actor, company_id)
 
     query = {**scope, **_window(spec["date_field"], start, end)}
     if search:
@@ -1320,11 +1127,10 @@ async def _query(actor: dict, company_id: str, entity: str, *, search: str = Non
 
 async def report(actor: dict, company_id: str, entity: str, *, page: int = 1,
                  page_size: int = None, search: str = None, date_from: str = None,
-                 date_to: str = None, client_id: str = None) -> dict:
+                 date_to: str = None) -> dict:
     """One page of a detailed report."""
     spec, query, (start, end) = await _query(
-        actor, company_id, entity, search=search, date_from=date_from, date_to=date_to,
-        client_id=client_id)
+        actor, company_id, entity, search=search, date_from=date_from, date_to=date_to)
 
     page = max(1, int(page or 1))
     page_size = max(1, min(int(page_size or 25), MAX_REPORT_PAGE_SIZE))
@@ -1352,12 +1158,10 @@ async def report(actor: dict, company_id: str, entity: str, *, page: int = 1,
 
 
 async def export_rows(actor: dict, company_id: str, entity: str, *, search: str = None,
-                      date_from: str = None, date_to: str = None,
-                      client_id: str = None) -> dict:
+                      date_from: str = None, date_to: str = None) -> dict:
     """Every row for an export, up to the cap, plus an honest truncation flag."""
     spec, query, (start, end) = await _query(
-        actor, company_id, entity, search=search, date_from=date_from, date_to=date_to,
-        client_id=client_id)
+        actor, company_id, entity, search=search, date_from=date_from, date_to=date_to)
 
     columns = _project(spec, can(actor, Cap.EMPLOYEE_SALARY_READ))
     coll = get_collection(spec["collection"])
