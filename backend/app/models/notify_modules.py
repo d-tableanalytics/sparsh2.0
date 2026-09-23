@@ -86,7 +86,7 @@ def _trigger(slug: str, label: str, description: str, channels=BOTH, group: str 
 DELEGATION_VARIABLES = [  # task_notifications._build_context
     "task_name", "assigned_user", "assigned_by", "actor_name", "deadline", "critical_level",
     "description", "task_status", "task_category", "name", "date", "day", "time",
-    "reason", "doer_name", "remark", "old_deadline", "new_deadline",
+    "reason", "doer_name", "remark", "old_deadline", "new_deadline", "requested_by_name",
     "parent_task", "subtask_name", "loop_person",
     # Reassignment + the time-driven nudges. Populated by whichever trigger raises them and
     # empty elsewhere, which is harmless — render_template only substitutes the keys a body
@@ -170,11 +170,27 @@ NOTIFY_MODULES: Dict[str, dict] = {
             _trigger("task_deadline_revised", "Deadline Revised",
                      "The due date moves. Goes to everyone on the task.",
                      group="While work is running"),
+            _trigger("task_deadline_revision_requested", "Deadline Revision Requested",
+                     "The doer asks for the deadline to be moved. The date does NOT move yet. "
+                     "Goes to the assigner, who approves or rejects it.",
+                     group="While work is running"),
+            _trigger("task_deadline_revision_approved", "Deadline Revision Approved",
+                     "The assigner approves the request — this is when the new deadline takes "
+                     "effect. Goes to the doer.",
+                     group="While work is running"),
+            _trigger("task_deadline_revision_rejected", "Deadline Revision Rejected",
+                     "The assigner turns the request down and the original deadline stands. "
+                     "Goes to the doer.",
+                     group="While work is running"),
             _trigger("task_blocked", "Task Blocked",
                      "The doer flags the task as blocked. Goes to the assigner.",
                      group="While work is running"),
             _trigger("task_dependent_on_other", "Dependent on Other",
                      "The task is handed to another doer it now depends on.",
+                     group="While work is running"),
+            _trigger("task_dependency_resolved", "Dependency Completed",
+                     "The doer finishes the dependency and the task returns to the assignee who "
+                     "raised it, for review and final completion. Goes to that assignee.",
                      group="While work is running"),
             _trigger("task_follow_up_added", "Follow-up Added",
                      "A follow-up is posted. Goes to everyone on the task.",

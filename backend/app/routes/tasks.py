@@ -6,6 +6,7 @@ from bson import ObjectId
 import asyncio
 import json
 import re
+import uuid
 
 from app.db.mongodb import get_collection
 from app.controllers.auth_controller import (
@@ -63,9 +64,23 @@ _INTERNAL_TASK_CLAUSE = {"notification_scope": {"$ne": "company"},
 # (schedule/completed/canceled/reschedule) stays authoritative for the Calendar page.
 # "in_progress_reopened" is only reached via the assigner's Reopen action on a task that
 # went to verification — never a directly-picked status.
+# ─── Deadline revision cap ───
+# A deadline may be moved twice, and no more. Past that the date stands: a task whose deadline
+# can keep sliding has no deadline. Counted over `deadline_history`, so it covers BOTH ways a
+# revision can happen — the assigner revising directly and an assignee's request being approved.
+#
+# A Reopen is exempt. It sets a new deadline as part of sending work back for rework (see the
+# Reopen flow in TaskDetailsModal), so counting it would let two revisions strand the assigner
+# with a task they can no longer reopen. Those entries are stamped kind="reopen".
+MAX_DEADLINE_REVISIONS = 2
+
 WORKFLOW_STATUSES = [
     "pending", "accepted", "in_progress", "dependent_on_others",
     "blocked", "verification", "completed", "in_progress_reopened",
+    # Set by the system only, when a dependency doer finishes their part: the task goes back to
+    # the assignee who delegated it, who reviews it and performs the final completion. It is an
+    # OPEN state — the task is not done and can still run overdue.
+    "dependency_completed",
 ]
 
 
@@ -283,6 +298,23 @@ async def _fetch_tasks(
     return results
 
 
+def _pending_deadline_request(doc: dict) -> Optional[dict]:
+    """The assignee's deadline revision request still awaiting the assigner's verdict, or None.
+    At most one can be pending: raising a new one supersedes whatever was outstanding."""
+    for req in reversed(doc.get("deadline_requests") or []):
+        if isinstance(req, dict) and req.get("status") == "pending":
+            return req
+    return None
+
+
+def _deadline_revision_count(doc: dict) -> int:
+    """How many of this task's MAX_DEADLINE_REVISIONS have been used. Reopens don't count."""
+    return len([
+        h for h in (doc.get("deadline_history") or [])
+        if isinstance(h, dict) and h.get("kind") != "reopen"
+    ])
+
+
 def _serialize_task(doc: dict, current_user_id: str, report_ids: set = None,
                     admin_company_id: str = None) -> dict:
     ws = _resolve_workflow_status(doc)
@@ -335,6 +367,9 @@ def _serialize_task(doc: dict, current_user_id: str, report_ids: set = None,
         # everyone else on the task keeps seeing it parked at "Dependent on Other".
         "dependencyDoerId": doc.get("dependency_doer_id"),
         "dependencyDepth": len(doc.get("dependency_stack") or []),
+        # True while an assignee's deadline revision request is waiting on the assigner, so a
+        # row can badge it without fetching the detail payload.
+        "hasPendingDeadlineRequest": _pending_deadline_request(doc) is not None,
     }
 
 
@@ -379,7 +414,20 @@ def _serialize_task_detail(doc: dict, current_user_id: str) -> dict:
         "completionAttachments": doc.get("completion_attachments") or [],
         "remarks": doc.get("remarks") or [],
         "statusHistory": doc.get("status_history") or [],
+        # Who actually closed the task out, and when. On a verification-required task that is
+        # the assigner approving it, not the assignee who submitted it — which is exactly the
+        # distinction the Involved Parties card exists to make.
+        "completedBy": doc.get("completed_by"),
+        "completedAt": doc.get("completed_at"),
         "deadlineHistory": doc.get("deadline_history") or [],
+        # Deadline revision requests raised by assignees: the whole trail (so the decisions stay
+        # auditable) plus the one still awaiting a verdict, which is what the UI acts on.
+        "deadlineRequests": doc.get("deadline_requests") or [],
+        "pendingDeadlineRequest": _pending_deadline_request(doc),
+        # The revision budget, so the UI can retire the Revise action on its own instead of
+        # offering a calendar that the backend will refuse.
+        "deadlineRevisionCount": _deadline_revision_count(doc),
+        "deadlineRevisionLimit": MAX_DEADLINE_REVISIONS,
         "followUps": doc.get("follow_ups") or [],
         "followUpCount": len(doc.get("follow_ups") or []),
         # Reminders are written by the task form (POST /calendar/events stores them on the
@@ -542,6 +590,9 @@ async def tasks_dashboard(
     status_key_map = {
         "pending": "pending", "accepted": "accepted", "in_progress": "inProgress",
         "in_progress_reopened": "inProgress",
+        # The dependency is done but the task is not — it sits with the assignee, who still has
+        # to review and close it, so it belongs on the In Progress card.
+        "dependency_completed": "inProgress",
         "dependent_on_others": "dependentOnOthers", "blocked": "blocked",
         "verification": "verification", "completed": "completed",
     }
@@ -889,6 +940,14 @@ async def update_task_status(task_id: str, body: dict, current_user: dict = Depe
     # as create/update. Blocked captures the doer name only — no hand-off.
     reassign_doer = None
     if new_status == "dependent_on_others" and doer_id and doer_id != existing.get("dependency_doer_id"):
+        # A task cannot be made to wait on somebody who is already doing it — including the
+        # caller. The hand-off ADDS the doer to the assignees, so this would also mean adding
+        # someone who is already there and leaving the task depending on itself.
+        if doer_id in (existing.get("target_staff_id") or []):
+            raise HTTPException(
+                status_code=400,
+                detail="That person is already working on this task — pick someone else for the task to depend on.",
+            )
         bad = await get_ineligible_recipient_ids(current_user, [doer_id])
         if bad:
             raise HTTPException(status_code=403, detail=recipient_denied_message(current_user))
@@ -911,7 +970,20 @@ async def update_task_status(task_id: str, body: dict, current_user: dict = Depe
     # the assigner) — both to update status and to verify/finalize/reopen.
     is_manager = await _is_manager_of_assignee(existing, current_user)
     if not (is_admin or is_creator or is_assignee or is_manager):
-        raise HTTPException(status_code=403, detail="Not authorized to update this task")
+        # The commonest way to arrive here is not a permissions mistake but a stale screen: a
+        # dependency doer is taken OFF the task the moment they resolve it (the stack pops and
+        # the task returns to whoever delegated it), so a details modal opened beforehand keeps
+        # offering them a control that is no longer theirs. Say which of the two it is.
+        was_doer = any(
+            isinstance(h, dict) and str(h.get("doer_id") or "") == user_id
+            for h in (existing.get("status_history") or [])
+        )
+        raise HTTPException(
+            status_code=403,
+            detail=("You completed your dependency on this task, so it has gone back to the "
+                    "assignee for final completion and is no longer yours to update."
+                    if was_doer else "Not authorized to update this task"),
+        )
 
     old_status = _resolve_workflow_status(existing)
     # Only the assigner/delegator (creator), an admin, or the assignee's reporting manager may
@@ -935,15 +1007,12 @@ async def update_task_status(task_id: str, body: dict, current_user: dict = Depe
     # verification rules below — which gate the real assignee's completion — must not be charged
     # to the doer.
     #
-    # Where the hand-back lands depends on what is left to do:
-    #   • Verification Required = YES → the assignee resumes at In Progress and later submits for
-    #     verification, so the existing verification flow runs untouched (assigner approves/reopens).
-    #   • Verification Required = NO  → once the chain has fully unwound back to the real assignee
-    #     there is nothing left for anyone to do, so the assignee's task is auto-completed. It must
-    #     NOT travel on to the assigner.
-    # Auto-completion still respects the checklist / evidence gates: if either is outstanding the
-    # task simply resumes In Progress so the assignee can satisfy it, rather than 400-ing the doer
-    # out of resolving a dependency that is genuinely done.
+    # A resolved dependency NEVER completes the task, however far the chain has unwound. A assigns
+    # to B, B makes it Dependent on Other to C: C finishing their part returns the task to B at In
+    # Progress so B can review the work and complete it themselves. Whoever delegated the
+    # dependency owns the task and owns the decision that it is done — the person who held only
+    # the dependency cannot close it out over their head, and an auto-completion would also skip
+    # B's checklist / evidence gates and their Request for Verification step.
     dependency_stack = existing.get("dependency_stack") or []
     prev_level = dependency_stack[-1] if dependency_stack else None
     resolving_dependency = (
@@ -951,21 +1020,15 @@ async def update_task_status(task_id: str, body: dict, current_user: dict = Depe
         and prev_level is not None
         and existing.get("dependency_doer_id") == user_id
     )
-    auto_complete_on_return = False
-    if resolving_dependency:
-        fully_unwound = len(dependency_stack) == 1  # popping this level returns it to the assignee
-        checklist_clear = not [
-            c for c in (existing.get("checklist") or [])
-            if not (isinstance(c, dict) and c.get("completed"))
-        ]
-        evidence_clear = not existing.get("evidence_required") or bool(existing.get("completion_attachments") or [])
-        auto_complete_on_return = (
-            fully_unwound
-            and not existing.get("verification_required")
-            and checklist_clear
-            and evidence_clear
+    # Nobody picks this one out of a dropdown — it only ever describes a dependency that was
+    # just resolved, and accepting it from a client would let anyone park a task there.
+    if new_status == "dependency_completed" and not resolving_dependency:
+        raise HTTPException(
+            status_code=400,
+            detail="Dependency Completed is set automatically when the dependency doer finishes — it cannot be chosen.",
         )
-        new_status = "completed" if auto_complete_on_return else "in_progress"
+    if resolving_dependency:
+        new_status = "dependency_completed"
 
     if new_status == "completed":
         # Completion rule: every check point (checklist item) must be done first.
@@ -1020,9 +1083,8 @@ async def update_task_status(task_id: str, body: dict, current_user: dict = Depe
         names = await _user_names(returned_to)
         returned_names = ", ".join(names.get(uid, "the assignee") for uid in returned_to) or "the assignee"
         actor = current_user.get("full_name") or current_user.get("email")
-        history_note = f"Dependency completed by {actor}. Task returned to {returned_names}."
-        if auto_complete_on_return:
-            history_note += " No verification required — task auto-completed."
+        history_note = (f"Dependency completed by {actor}. Task returned to {returned_names} "
+                        f"for review and final completion.")
     was_completed = old_status == "completed"
     if new_status == "completed" and not was_completed:
         updates["completed_at"] = datetime.now(timezone.utc)
@@ -1096,7 +1158,10 @@ async def update_task_status(task_id: str, body: dict, current_user: dict = Depe
     # exactly one notification: an assigner approving a verification gets "verification
     # approved" (to the assignee), not that plus a generic "completed".
     if old_status != new_status or history_note:
-        if reassign_doer or new_status == "dependent_on_others":
+        if resolving_dependency:
+            # The hand-back, addressed to the assignee who now has to review and close it.
+            notify_event = "dependency_resolved"
+        elif reassign_doer or new_status == "dependent_on_others":
             notify_event = "dependent_on_other"
         elif new_status == "verification":
             notify_event = "verification_requested"
@@ -1111,7 +1176,6 @@ async def update_task_status(task_id: str, body: dict, current_user: dict = Depe
         elif new_status == "blocked":
             notify_event = "blocked"
         else:
-            # Includes the dependency hand-back (doer completes → task returns to In Progress).
             notify_event = "updated"
 
         await notify_task_event(
@@ -1341,16 +1405,26 @@ async def delete_completion_attachment(task_id: str, attachment_id: str, current
 
 
 # ─── Deadline / Date Revision ───
-# The assigner/delegator (creator) or an admin may revise a task's deadline (`end`) at any
-# time ("Date Revision"). The ASSIGNEE may also revise it ("Revision") — e.g. when they can't
-# finish by the current deadline they pick a new one. Every change is stamped into
+# The assigner/delegator (creator), an admin, or the assignee's reporting manager may revise a
+# task's deadline (`end`) directly ("Date Revision"). Every such change is stamped into
 # `deadline_history` (with who revised it), so the trail stays auditable for the assigner.
+#
+# The ASSIGNEE cannot move the deadline on their own. When they can't finish by the current one
+# they REQUEST a revision through this same endpoint: the proposed date is parked on
+# `deadline_requests` as `pending` and the deadline itself does not move. Only once the assigner
+# approves it (POST .../deadline-requests/{id}/approve) does `end` change and the revision land
+# in `deadline_history` — so the revised deadline only "continues" with sign-off. A rejection
+# leaves the original deadline standing.
+#
+# Either way a task gets MAX_DEADLINE_REVISIONS of them and no more (`context` == "reopen"
+# marks the Reopen flow's own deadline, which is exempt — see the constant).
 #
 # The reason is optional — the history renderer treats a missing reason as "not captured".
 @router.patch("/{task_id}/deadline")
 async def revise_task_deadline(task_id: str, body: dict, current_user: dict = Depends(require_task_access)):
     new_end = body.get("end")
     reason = (body.get("reason") or "").strip() or None
+    claims_reopen = (body.get("context") or "").strip().lower() == "reopen"
     if not new_end:
         raise HTTPException(status_code=400, detail="A new deadline (end) is required")
 
@@ -1370,6 +1444,42 @@ async def revise_task_deadline(task_id: str, body: dict, current_user: dict = De
     if old_end == new_end:
         return {"id": task_id, "end": new_end}
 
+    # ─── Doer or not ───
+    # Who needs approval is decided by the caller's role ON THIS TASK, not by their role on the
+    # platform. Someone doing a task that somebody else gave them is the doer, Super Admin or
+    # not, and the whole point of the approval is that the person who SET the deadline is the
+    # one who agrees to move it. Letting an admin-flagged doer revise their own deadline
+    # outright would quietly exempt exactly the people most likely to hold that flag.
+    #
+    # A self-assigned task is the one exception and needs no rule of its own: there the creator
+    # IS the assignee, so is_creator is true and they revise directly — there is nobody else to
+    # ask.
+    acts_as_doer = is_assignee and not is_creator
+
+    # A completed task's deadline is history: moving it would rewrite whether the work landed
+    # on time, and there is nothing left to deliver by the new date. The Reopen flow is exempt
+    # because it is the one thing that legitimately gives a finished task a future again.
+    if _resolve_workflow_status(existing) == "completed" and not claims_reopen:
+        raise HTTPException(
+            status_code=400,
+            detail="This task is completed — its deadline can no longer be revised.",
+        )
+
+    # Reopening is the assigner's move, so only they can claim the exemption that comes with it.
+    # Otherwise an assignee could spend the budget and then keep going by simply posting
+    # context="reopen" — the flag is a client's word, and this is the only place it is taken.
+    is_reopen = claims_reopen and not acts_as_doer and (is_admin or is_creator or is_manager)
+
+    # The budget is checked before anything is written — and before an assignee is allowed to
+    # RAISE a request, so nobody waits on an approval that could never be granted.
+    if not is_reopen:
+        _assert_deadline_revisions_left(existing)
+
+    # The doer raises a request; the assigner (and an admin or reporting manager acting over
+    # the task rather than doing it) revises outright.
+    if acts_as_doer:
+        return await _raise_deadline_request(task_id, col_name, existing, current_user, new_end, reason)
+
     revision = {
         "old_end": old_end,
         "new_end": new_end,
@@ -1377,6 +1487,8 @@ async def revise_task_deadline(task_id: str, body: dict, current_user: dict = De
         "revised_by": str(current_user["_id"]),
         "revised_by_name": current_user.get("full_name") or current_user.get("email"),
         "revised_at": datetime.now(timezone.utc),
+        # Reopens are exempt from the cap, so the trail has to say which kind this was.
+        "kind": "reopen" if is_reopen else "revision",
     }
     await get_collection(col_name).update_one(
         {"_id": ObjectId(task_id)},
@@ -1401,6 +1513,222 @@ async def revise_task_deadline(task_id: str, body: dict, current_user: dict = De
         extra={"old_end": old_end, "new_end": new_end, "reason": reason},
     )
     return {"id": task_id, "end": new_end}
+
+
+# ─── Deadline revision requests (assignee proposes ▸ assigner decides) ───
+# The assignee's side of "Revise". Nothing about the task changes when a request is raised —
+# the deadline only moves on approval, which is where `deadline_history` gets its entry, so the
+# existing audit trail keeps meaning "the deadline actually moved, and who moved it".
+
+
+def _assert_deadline_revisions_left(existing: dict) -> None:
+    """Refuse a revision once the task has used its MAX_DEADLINE_REVISIONS."""
+    used = _deadline_revision_count(existing)
+    if used >= MAX_DEADLINE_REVISIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=(f"This task's deadline has already been revised {used} times "
+                    f"(limit {MAX_DEADLINE_REVISIONS}). No further revision is allowed."),
+        )
+
+
+async def _can_decide_deadline_request(existing: dict, current_user: dict) -> bool:
+    """Who may approve/reject a request — the assigner (creator), an admin, or the assignee's
+    reporting manager. A doer is excluded even when they hold one of those roles elsewhere,
+    for the same reason they cannot revise directly (see acts_as_doer)."""
+    user_id = str(current_user["_id"])
+    if user_id in (existing.get("target_staff_id") or []) and existing.get("user_id") != user_id:
+        return False
+    return bool(
+        current_user.get("role") == "superadmin"
+        or is_company_task_admin(existing, current_user)
+        or existing.get("user_id") == user_id
+        or await _is_manager_of_assignee(existing, current_user)
+    )
+
+
+async def _raise_deadline_request(task_id: str, col_name: str, existing: dict,
+                                  current_user: dict, new_end, reason):
+    """Park an assignee's proposed deadline as a pending request and tell the assigner."""
+    now = datetime.now(timezone.utc)
+    pending = _pending_deadline_request(existing)
+    if pending:
+        # Only one request may be outstanding — a fresh proposal supersedes the old one rather
+        # than leaving the assigner two competing dates to choose between.
+        await get_collection(col_name).update_one(
+            {"_id": ObjectId(task_id), "deadline_requests.id": pending.get("id")},
+            {"$set": {"deadline_requests.$.status": "superseded", "deadline_requests.$.decided_at": now}},
+        )
+
+    request = {
+        "id": uuid.uuid4().hex,
+        "old_end": existing.get("end"),
+        "new_end": new_end,
+        "reason": reason,
+        "requested_by": str(current_user["_id"]),
+        "requested_by_name": current_user.get("full_name") or current_user.get("email"),
+        "requested_at": now,
+        "status": "pending",
+        "decided_by": None,
+        "decided_by_name": None,
+        "decided_at": None,
+        "decision_remark": None,
+    }
+    await get_collection(col_name).update_one(
+        {"_id": ObjectId(task_id)},
+        {"$push": {"deadline_requests": request}, "$set": {"updated_at": now}},
+    )
+    await log_activity(current_user, "Update Task", col_name,
+                       f"Task {task_id}: deadline revision requested",
+                       meta={"task_id": task_id, "group_id": existing.get("group_id")})
+
+    recipients = task_events.recipients_for(existing) | await _manager_ids_for_task(existing)
+    await task_events.publish(recipients, {
+        "type": "task_updated",
+        "task_id": task_id,
+        "title": existing.get("title"),
+        "assigned_to": existing.get("target_staff_id") or [],
+        "assigned_by": existing.get("user_id"),
+        "watchers": existing.get("watchers") or [],
+        "actor_id": str(current_user["_id"]),
+    })
+    await notify_task_event(
+        "deadline_revision_requested",
+        existing,
+        current_user,
+        extra={"old_end": existing.get("end"), "new_end": new_end, "reason": reason},
+    )
+    # `end` is deliberately the UNCHANGED deadline: the caller must not show the new date as live.
+    return {
+        "id": task_id,
+        "end": existing.get("end"),
+        "status": "pending_approval",
+        "deadline_request": request,
+        "message": "Deadline revision requested — awaiting the assigner's approval.",
+    }
+
+
+async def _decide_deadline_request(task_id: str, request_id: str, body: dict,
+                                   current_user: dict, approve: bool):
+    remark = (body.get("remark") or body.get("reason") or "").strip() or None
+    existing, col_name = await _get_task_or_404(task_id)
+
+    if not await _can_decide_deadline_request(existing, current_user):
+        raise HTTPException(
+            status_code=403,
+            detail="Only the assigner, an admin, or the reporting manager can decide a deadline revision request.",
+        )
+
+    request = next((r for r in (existing.get("deadline_requests") or [])
+                    if isinstance(r, dict) and r.get("id") == request_id), None)
+    if not request:
+        raise HTTPException(status_code=404, detail="Deadline revision request not found")
+    # Belt and braces over the rule above: whoever asked for it never gets to grant it.
+    if str(request.get("requested_by")) == str(current_user["_id"]):
+        raise HTTPException(
+            status_code=403,
+            detail="A deadline revision has to be approved by the assigner, not by the person who asked for it.",
+        )
+    if request.get("status") != "pending":
+        raise HTTPException(status_code=400,
+                            detail="This request was already " + str(request.get("status")) + ".")
+    # Re-checked here, not just when the request was raised: the assigner may have revised the
+    # deadline directly in the meantime and used the budget up. A rejection is always allowed —
+    # it changes nothing and lets them clear a request they can no longer grant.
+    if approve:
+        # Same rule as revising: the deadline of a finished task is not moved. A REJECTION is
+        # still allowed, so a request left hanging when the task completed can be cleared.
+        if _resolve_workflow_status(existing) == "completed":
+            raise HTTPException(
+                status_code=400,
+                detail="This task is completed — its deadline can no longer be revised. Reject the request to clear it.",
+            )
+        _assert_deadline_revisions_left(existing)
+
+    now = datetime.now(timezone.utc)
+    verdict = "approved" if approve else "rejected"
+    updates = {"$set": {
+        "deadline_requests.$.status": verdict,
+        "deadline_requests.$.decided_by": str(current_user["_id"]),
+        "deadline_requests.$.decided_by_name": current_user.get("full_name") or current_user.get("email"),
+        "deadline_requests.$.decided_at": now,
+        "deadline_requests.$.decision_remark": remark,
+        "updated_at": now,
+    }}
+
+    new_end = request.get("new_end")
+    # The deadline in force right now — not the one captured when the request was raised, since
+    # the assigner may have revised it in the meantime.
+    old_end = existing.get("end")
+    if approve:
+        # Approval is what actually moves the deadline, and it is the approval that goes into
+        # `deadline_history` — stamped with BOTH the approver and whoever asked for it.
+        updates["$set"]["end"] = new_end
+        updates["$push"] = {"deadline_history": {
+            "old_end": old_end,
+            "new_end": new_end,
+            "reason": request.get("reason"),
+            "revised_by": str(current_user["_id"]),
+            "revised_by_name": current_user.get("full_name") or current_user.get("email"),
+            "revised_at": now,
+            "kind": "revision",
+            "request_id": request_id,
+            "requested_by": request.get("requested_by"),
+            "requested_by_name": request.get("requested_by_name"),
+            "decision_remark": remark,
+        }}
+
+    await get_collection(col_name).update_one(
+        {"_id": ObjectId(task_id), "deadline_requests.id": request_id}, updates,
+    )
+    await log_activity(current_user, "Update Task", col_name,
+                       f"Task {task_id}: deadline revision request {verdict}",
+                       meta={"task_id": task_id, "group_id": existing.get("group_id")})
+
+    projected = {**existing, **({"end": new_end} if approve else {})}
+    recipients = task_events.recipients_for(existing) | await _manager_ids_for_task(existing)
+    await task_events.publish(recipients, {
+        "type": "task_updated",
+        "task_id": task_id,
+        "title": existing.get("title"),
+        "assigned_to": existing.get("target_staff_id") or [],
+        "assigned_by": existing.get("user_id"),
+        "watchers": existing.get("watchers") or [],
+        "actor_id": str(current_user["_id"]),
+    })
+    await notify_task_event(
+        f"deadline_revision_{verdict}",
+        projected,
+        current_user,
+        extra={
+            "old_end": old_end,
+            "new_end": new_end,
+            "reason": request.get("reason"),
+            "remark": remark,
+            "requested_by": request.get("requested_by"),
+            "requested_by_name": request.get("requested_by_name"),
+        },
+    )
+    return {
+        "id": task_id,
+        "end": new_end if approve else old_end,
+        "status": verdict,
+        "request_id": request_id,
+    }
+
+
+@router.post("/{task_id}/deadline-requests/{request_id}/approve")
+async def approve_deadline_request(task_id: str, request_id: str, body: dict = None,
+                                   current_user: dict = Depends(require_task_access)):
+    """Approve the assignee's proposed deadline — this is the moment `end` actually moves."""
+    return await _decide_deadline_request(task_id, request_id, body or {}, current_user, approve=True)
+
+
+@router.post("/{task_id}/deadline-requests/{request_id}/reject")
+async def reject_deadline_request(task_id: str, request_id: str, body: dict = None,
+                                  current_user: dict = Depends(require_task_access)):
+    """Reject it — the original deadline stands, and the assignee is told why."""
+    return await _decide_deadline_request(task_id, request_id, body or {}, current_user, approve=False)
 
 
 @router.delete("/{task_id}")

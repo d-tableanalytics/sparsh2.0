@@ -17,6 +17,10 @@ export const STATUS_CONFIG = {
   verification: { label: 'Pending Verification', shortLabel: 'Verification', icon: Eye, color: 'var(--accent-indigo)', bg: 'var(--accent-indigo-bg)', border: 'var(--accent-indigo-border)' },
   completed: { label: 'Completed', shortLabel: 'Completed', icon: CheckCircle, color: 'var(--accent-green)', bg: 'var(--accent-green-bg)', border: 'var(--accent-green-border)' },
   in_progress_reopened: { label: 'In Progress (Reopened)', shortLabel: 'Reopened', icon: RotateCcw, color: 'var(--accent-orange)', bg: 'var(--accent-orange-bg)', border: 'var(--accent-orange-border)' },
+  // The dependency doer has finished; the task is back with the assignee who delegated it, for
+  // review and final completion. Indigo (a hand-off, like Acknowledged / Pending Verification)
+  // rather than green — nothing is done until the assignee completes it.
+  dependency_completed: { label: 'Dependency Completed', shortLabel: 'Dependency Done', icon: Link2, color: 'var(--accent-indigo)', bg: 'var(--accent-indigo-bg)', border: 'var(--accent-indigo-border)' },
 };
 
 export const EXTRA_CARD_CONFIG = {
@@ -36,6 +40,20 @@ export const CARD_KEY_TO_STATUS = {
   verification: 'verification',
   completed: 'completed',
 };
+
+// Which summary card a task counts towards. Statuses with no card of their own are open work
+// in the assignee's hands, so they land on In Progress — matching the backend's own bucketing
+// (tasks.py status_key_map). Without this they fell through and were counted by no card at all,
+// leaving the cards adding up to less than Total.
+export const cardKeyForStatus = (status) => {
+  const own = Object.keys(CARD_KEY_TO_STATUS).find(k => CARD_KEY_TO_STATUS[k] === status);
+  return own || (status === 'completed' ? 'completed' : 'inProgress');
+};
+
+// The statuses a given card stands for — the inverse of cardKeyForStatus, so clicking a card
+// filters to exactly the rows it counted.
+export const statusesForCardKey = (key) =>
+  WORKFLOW_STATUSES.filter(s => cardKeyForStatus(s) === key);
 
 // Full 11-card order (Dashboard page): adds In Time / Delayed on top of the workflow states.
 export const SUMMARY_CARD_ORDER = [

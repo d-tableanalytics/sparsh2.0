@@ -41,6 +41,7 @@ STATUS_COLORS = {
     "dependent_on_others": "var(--accent-yellow)",
     "blocked": "var(--accent-red)",
     "verification": "var(--accent-yellow)",
+    "dependency_completed": "var(--accent-indigo)",
     "completed": "var(--accent-green)",
 }
 STATUS_LABELS = {
@@ -50,6 +51,7 @@ STATUS_LABELS = {
     "dependent_on_others": "Dependent",
     "blocked": "Blocked",
     "verification": "Awaiting Approval",  # v1: verification surfaced as "awaiting approval"
+    "dependency_completed": "Dependency Completed",
     "completed": "Completed",
 }
 PRIORITY_COLORS = {

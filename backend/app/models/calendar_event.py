@@ -96,7 +96,18 @@ class CalendarEventBase(BaseModel):
     # (the assignment-time files) so the two never mix in the UI.
     completion_attachments: List[Dict] = [] # [{id, name, key, url, uploaded_by, uploaded_at}]
     # Deadline (`end`) revision trail — only the assigner/delegator can revise.
+    # Each entry may also carry kind ("revision" | "reopen") and, when it came from an
+    # assignee's request, request_id / requested_by / requested_by_name / decision_remark.
     deadline_history: List[Dict] = [] # [{old_end, new_end, reason, revised_by, revised_by_name, revised_at}]
+    # Deadline revision REQUESTS raised by an assignee. The assignee cannot move the deadline
+    # themselves — they propose a new one and the assigner (or an admin / the reporting manager)
+    # approves or rejects it. Only an APPROVED request moves `end` and writes into
+    # `deadline_history` above, so the revised deadline "continues" only once it is signed off.
+    # At most one entry is ever `pending`; raising another supersedes it.
+    # [{id, old_end, new_end, reason, requested_by, requested_by_name, requested_at,
+    #   status: pending|approved|rejected|superseded, decided_by, decided_by_name,
+    #   decided_at, decision_remark}]
+    deadline_requests: List[Dict] = []
     # Follow-Ups raised by In-Loop members (watchers) / participants — a nudge + remark.
     # The count is simply len(follow_ups). Additive/optional; existing tasks default to [].
     follow_ups: List[Dict] = [] # [{id, by, by_name, remark, created_at}]

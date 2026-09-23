@@ -12,9 +12,20 @@ export const getTaskDetail = (taskId) => api.get(`/tasks/${taskId}`);
 // otherwise. For Dependent on Other, a `doerId` reassigns the task to that doer (backend rule).
 export const updateTaskStatus = (taskId, workflow_status, reason, doerName, doerId) =>
   api.patch(`/tasks/${taskId}/status`, { workflow_status, reason, doer_name: doerName, doer_id: doerId });
-// Deadline / Date Revision — assigner/delegator only (backend-enforced).
-export const reviseTaskDeadline = (taskId, end, reason) =>
-  api.patch(`/tasks/${taskId}/deadline`, { end, reason });
+// Deadline / Date Revision. The assigner/delegator, an admin or the assignee's reporting
+// manager revises the deadline outright. An ASSIGNEE's call raises a revision REQUEST instead
+// (the response carries status:'pending_approval' + deadline_request) — the deadline does not
+// move until the assigner approves it below. All backend-enforced.
+// `context` is 'reopen' when the new deadline is part of sending a task back for rework —
+// those don't count against the two-revision limit (backend: MAX_DEADLINE_REVISIONS).
+export const reviseTaskDeadline = (taskId, end, reason, context) =>
+  api.patch(`/tasks/${taskId}/deadline`, { end, reason, context });
+// The assigner's verdict on a pending request. Approving is what actually moves the deadline;
+// rejecting leaves the original one standing. `remark` is optional on both.
+export const approveDeadlineRequest = (taskId, requestId, remark) =>
+  api.post(`/tasks/${taskId}/deadline-requests/${requestId}/approve`, { remark });
+export const rejectDeadlineRequest = (taskId, requestId, remark) =>
+  api.post(`/tasks/${taskId}/deadline-requests/${requestId}/reject`, { remark });
 export const softDeleteTask = (taskId) => api.delete(`/tasks/${taskId}`);
 export const restoreTask = (taskId) => api.post(`/tasks/${taskId}/restore`);
 

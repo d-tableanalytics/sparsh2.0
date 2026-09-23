@@ -285,6 +285,18 @@ DEFAULT_TEMPLATES = {
         "subject": "Deadline Revised: {{task_name}}",
         "body": "Hello {{name}},\n\n{{actor_name}} has revised the deadline for the task '{{task_name}}'.\n\nPrevious deadline: {{old_deadline}}\nNew deadline: {{new_deadline}}\nReason: {{reason}}\n\nRegards,\nSparsh Notifications"
     },
+    "task_deadline_revision_requested_email": {
+        "subject": "Deadline Revision Requested: {{task_name}}",
+        "body": "Hello {{name}},\n\n{{actor_name}} has requested a revision of the deadline for the task '{{task_name}}'.\n\nCurrent deadline: {{old_deadline}}\nRequested deadline: {{new_deadline}}\nReason: {{reason}}\n\nThe deadline has NOT changed yet - please approve or reject the request.\n\nRegards,\nSparsh Notifications"
+    },
+    "task_deadline_revision_approved_email": {
+        "subject": "Deadline Revision Approved: {{task_name}}",
+        "body": "Hello {{name}},\n\n{{actor_name}} has approved the deadline revision requested by {{requested_by_name}} for the task '{{task_name}}'.\n\nPrevious deadline: {{old_deadline}}\nNew deadline: {{new_deadline}}\nRemark: {{remark}}\n\nThe new deadline is now in force.\n\nRegards,\nSparsh Notifications"
+    },
+    "task_deadline_revision_rejected_email": {
+        "subject": "Deadline Revision Rejected: {{task_name}}",
+        "body": "Hello {{name}},\n\n{{actor_name}} has rejected the deadline revision requested by {{requested_by_name}} for the task '{{task_name}}'.\n\nRequested deadline: {{new_deadline}}\nRemark: {{remark}}\n\nThe original deadline of {{old_deadline}} still stands.\n\nRegards,\nSparsh Notifications"
+    },
     "task_blocked_email": {
         "subject": "Task Blocked: {{task_name}}",
         "body": "Hello {{name}},\n\n{{actor_name}} has marked the task '{{task_name}}' as Blocked.\n\nReason: {{reason}}\n\nRegards,\nSparsh Notifications"
@@ -292,6 +304,10 @@ DEFAULT_TEMPLATES = {
     "task_dependent_on_other_email": {
         "subject": "Task Dependent on Other: {{task_name}}",
         "body": "Hello {{name}},\n\n{{actor_name}} has marked the task '{{task_name}}' as Dependent on Other, waiting on {{doer_name}}.\n\nReason: {{reason}}\nDeadline: {{deadline}}\n\nRegards,\nSparsh Notifications"
+    },
+    "task_dependency_resolved_email": {
+        "subject": "Dependency Completed: {{task_name}}",
+        "body": "Hello {{name}},\n\n{{actor_name}} has completed the dependency on the task '{{task_name}}'.\n\nThe task is back with you for review and final completion.\n\nDeadline: {{deadline}}\n\nRegards,\nSparsh Notifications"
     },
     "task_follow_up_added_email": {
         "subject": "Follow-up on: {{task_name}}",

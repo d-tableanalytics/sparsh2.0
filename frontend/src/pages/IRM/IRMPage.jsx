@@ -182,8 +182,14 @@ const Breakdown = ({ row, columns, companyId, period, canFillFor, onScoreSaved }
             )}
             {(p.source !== 'task' || p.weighted) && (
               <div className="flex items-center justify-between gap-2">
+                {/* Name the pair for what it actually counts. "Weighted credit" is true of the
+                    task parameters, where `achieved` is a sum of per-task weights — but on
+                    attendance it is days, and on a rating form it is points. */}
                 <dt className="text-[var(--text-muted)]">
-                  {p.source === 'form' ? 'Rating points' : 'Weighted credit'}
+                  {p.source === 'form' ? 'Rating points'
+                    : p.source === 'attendance' ? 'Punctual days'
+                    : p.source === 'manual' ? 'Reported'
+                    : 'Weighted credit'}
                 </dt>
                 <dd className="font-bold tabular-nums">
                   {fmtNum(p.achieved, '0')} / {fmtNum(p.assigned, '0')}
@@ -192,6 +198,20 @@ const Breakdown = ({ row, columns, companyId, period, canFillFor, onScoreSaved }
                       {' '}({p.ratings} × {p.scale_max})
                     </span>
                   )}
+                </dd>
+              </div>
+            )}
+            {/* Why the rest of the days were not punctual. Without it "4 / 7" states a
+                shortfall and explains nothing, and the three counts are already on the payload. */}
+            {p.source === 'attendance' && p.assigned > 0 && p.achieved < p.assigned && (
+              <div className="flex items-center justify-between gap-2">
+                <dt className="text-[var(--text-muted)]">Missed on</dt>
+                <dd className="font-bold tabular-nums text-right">
+                  {[
+                    p.late_in ? `${p.late_in} late in` : null,
+                    p.early_out ? `${p.early_out} early out` : null,
+                    p.missing_out ? `${p.missing_out} no out punch` : null,
+                  ].filter(Boolean).join(', ')}
                 </dd>
               </div>
             )}
