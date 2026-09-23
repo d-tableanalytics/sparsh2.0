@@ -3,14 +3,14 @@ import {  AnimatePresence , motion } from 'framer-motion';
 import {
   ArrowLeft, Trash2, Pencil, FileText, History, Info, Users, Layers, Plus,
   Paperclip, CheckSquare, Square, X, Tags as TagsIcon,
-  ShieldCheck, CalendarClock, FileCheck2, Save, Bell,
+  ShieldCheck, CalendarClock, FileCheck2, Save, Bell, Check,
 } from 'lucide-react';
 import api from '../../services/api';
 import {
   getTaskDetail, updateTaskStatus, updateChecklistItem,
   deleteChecklistItem, uploadTaskAttachment, softDeleteTask,
   uploadCompletionAttachment, deleteCompletionAttachment, reviseTaskDeadline,
-  addTaskFollowUp,
+  addTaskFollowUp, approveDeadlineRequest, rejectDeadlineRequest,
 } from '../../services/taskApi';
 import { getHolidays } from '../../services/holidayApi';
 import { useAuth } from '../../context/AuthContext';
@@ -35,6 +35,7 @@ const SYSTEM_STATUS_MESSAGE = {
   dependent_on_others: 'Marked as Dependent on Other',
   verification: 'Verification requested',
   in_progress_reopened: 'Task reopened',
+  dependency_completed: 'Dependency completed — back with the assignee for final completion',
   completed: 'Task completed',
 };
 
@@ -63,6 +64,10 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, scope, onChanged, onEdit })
   const [uploadingEvidence, setUploadingEvidence] = useState(false);
   const [deadlinePickerOpen, setDeadlinePickerOpen] = useState(false);
   const [savingDeadline, setSavingDeadline] = useState(false);
+  // The assigner's verdict on an assignee's pending deadline revision request: an optional
+  // remark that rides along with Approve / Reject.
+  const [decisionRemark, setDecisionRemark] = useState('');
+  const [decidingRequest, setDecidingRequest] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
   // Reopen requires the assigner to set a NEW deadline before the task goes back to the assignee.
@@ -94,17 +99,22 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, scope, onChanged, onEdit })
   // `silent` refetches update the data in place WITHOUT flipping `loading` — so the modal
   // never flashes its "Loading task details..." state after in-modal actions (status
   // change, comment, attach, deadline revise). Only the very first open shows the spinner.
-  const fetchDetail = useCallback(async ({ silent = false } = {}) => {
-    if (!taskId) return;
+  // Returns false ONLY when `tolerate403` is set and the task came back 403 — i.e. the viewer
+  // can no longer see it, which after some actions is the expected outcome rather than an
+  // error. Every other case keeps the old behaviour and returns true.
+  const fetchDetail = useCallback(async ({ silent = false, tolerate403 = false } = {}) => {
+    if (!taskId) return true;
     if (!silent) setLoading(true);
     try {
       const res = await getTaskDetail(taskId);
       setTask(res.data);
     } catch (err) {
+      if (tolerate403 && err.response?.status === 403) return false;
       showError(err.response?.data?.detail || 'Failed to load task details');
     } finally {
       if (!silent) setLoading(false);
     }
+    return true;
   }, [taskId, showError]);
 
   useEffect(() => {
@@ -165,8 +175,19 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, scope, onChanged, onEdit })
     try {
       await updateTaskStatus(taskId, status, reason, doerName, doerId);
       if (resolvingDependency) {
-        showSuccess('Dependency completed — the task is back with the assignee');
-      } else if (status === 'completed' && task?.verificationRequired && !canAdminister) {
+        showSuccess('Dependency completed — the task is back with the assignee for final completion');
+        // Resolving the dependency hands the task back and takes this viewer off it, so the
+        // refetch below may legitimately come back 403. That is the shape of success here, not
+        // a failure: refresh the list behind and close, rather than contradicting the message
+        // above with "Not authorized to view this task". A doer who is also in the loop can
+        // still see it, so the modal only closes when the task has genuinely gone.
+        onChanged?.();
+        setReasonStatus(null);
+        const stillVisible = await fetchDetail({ silent: true, tolerate403: true });
+        if (!stillVisible) onClose();
+        return;
+      }
+      if (status === 'completed' && task?.verificationRequired && !canAdminister) {
         // Verification-required tasks completed by the assignee are routed to "verification"
         // by the backend — the silent refetch below reflects whatever the server decided.
         showSuccess('Verification requested — sent to the assigner');
@@ -175,6 +196,23 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, scope, onChanged, onEdit })
       onChanged?.();
       setReasonStatus(null);
     } catch (err) {
+      // A 403 here usually means the task moved on while this modal sat open — most often the
+      // viewer resolved a dependency, which hands the task back and takes them off it. Re-read
+      // it: if it is still theirs the message explains why the move was refused; if it is not,
+      // the modal is stale, so close it rather than leave a control that can only fail.
+      if (err.response?.status === 403) {
+        try {
+          await getTaskDetail(taskId);
+          showError(err.response?.data?.detail || 'Not authorized to update this task');
+          fetchDetail({ silent: true });
+        } catch {
+          showError(err.response?.data?.detail
+            || 'This task is no longer yours — it has moved on since you opened it.');
+          onChanged?.();
+          onClose();
+        }
+        return;
+      }
       showError(err.response?.data?.detail || 'Failed to update status');
     } finally {
       setSavingReason(false);
@@ -206,7 +244,7 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, scope, onChanged, onEdit })
       // Set the new deadline first (assigner-only endpoint), then flip status to Reopened,
       // which hands the task back to the assignee for rework. Reuses the existing APIs — the
       // remark lands in both the deadline-revision history and the status history.
-      await reviseTaskDeadline(taskId, iso, remark);
+      await reviseTaskDeadline(taskId, iso, remark, 'reopen');
       await updateTaskStatus(taskId, 'in_progress_reopened', remark);
       showSuccess('Task reopened — sent back to the assignee for rework');
       fetchDetail({ silent: true });
@@ -236,17 +274,45 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, scope, onChanged, onEdit })
     }
   };
 
+  // One control, two outcomes: the assigner / reporting manager revises the deadline outright,
+  // while an assignee's pick comes back as a pending REQUEST (the backend decides which, from
+  // who is calling) — so the toast has to say which of the two just happened.
   const handleReviseDeadline = async (iso, remark) => {
     setSavingDeadline(true);
     try {
-      await reviseTaskDeadline(taskId, iso, remark);
-      showSuccess('Deadline revised');
+      const res = await reviseTaskDeadline(taskId, iso, remark);
+      showSuccess(res?.data?.status === 'pending_approval'
+        ? 'Deadline revision requested — awaiting the assigner’s approval'
+        : 'Deadline revised');
       fetchDetail({ silent: true });
       onChanged?.();
     } catch (err) {
       showError(err.response?.data?.detail || 'Failed to revise deadline');
     } finally {
       setSavingDeadline(false);
+    }
+  };
+
+  // Approve / reject the assignee's pending request. Approving is the moment the revised
+  // deadline takes effect and lands in the deadline history; rejecting leaves the original
+  // deadline in force.
+  const handleDecideDeadlineRequest = async (approve) => {
+    const req = task?.pendingDeadlineRequest;
+    if (!req) return;
+    setDecidingRequest(true);
+    try {
+      const decide = approve ? approveDeadlineRequest : rejectDeadlineRequest;
+      await decide(taskId, req.id, decisionRemark.trim());
+      setDecisionRemark('');
+      showSuccess(approve
+        ? 'Deadline revision approved — the new deadline is now in force'
+        : 'Deadline revision rejected — the original deadline stands');
+      fetchDetail({ silent: true });
+      onChanged?.();
+    } catch (err) {
+      showError(err.response?.data?.detail || 'Failed to decide the deadline revision request');
+    } finally {
+      setDecidingRequest(false);
     }
   };
 
@@ -388,6 +454,30 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, scope, onChanged, onEdit })
   // Assigner-side actions (approve/reopen a verification, revise the deadline) — also the
   // reporting manager and the company MD, who administer these tasks like an admin.
   const canAdminister = (canManage && !isPureWatcher) || isReportingManager || isCompanyAdmin;
+  // ─── Whose deadline is it to move ───
+  // Doing somebody else's task makes you the DOER, whatever your role on the platform: an admin
+  // or reporting manager who is also an assignee asks for a new deadline like anyone else, and
+  // cannot approve their own request. (Deliberately narrower than canAdminister, which still
+  // governs verification and edit/delete — this is about the deadline alone.) Mirrors
+  // acts_as_doer in routes/tasks.py; the backend enforces it regardless of what is rendered.
+  const actsAsDoer = !!task && (task.assignedTo || []).includes(user?._id) && !task.isCreator;
+  const canDecideDeadline = canAdminister && !actsAsDoer;
+  // A doer can only ASK for a new deadline — the backend turns their calendar pick into a
+  // pending request. Say so everywhere the action is offered.
+  const revisionLabel = canDecideDeadline ? 'Revise' : 'Request Revision';
+  // ─── The two-revision budget ───
+  // A deadline may be moved twice and no more (backend: MAX_DEADLINE_REVISIONS), counting the
+  // assigner's own revisions and the assignee requests they approved alike. Once it is spent the
+  // action is withdrawn from both sides rather than left to fail on submit. A Reopen is exempt
+  // and is not offered here anyway — it has its own control on the verification screen.
+  const deadlineRevisionLimit = task?.deadlineRevisionLimit ?? 2;
+  const deadlineRevisionsUsed = task?.deadlineRevisionCount ?? 0;
+  const deadlineRevisionsLeft = Math.max(0, deadlineRevisionLimit - deadlineRevisionsUsed);
+  // A completed task's deadline is settled — it decides whether the work landed on time, so
+  // there is nothing left to revise and no one left to revise it for. Withdraws the assigner's
+  // Revise button and the doer's Revise / Request Revision option together, both of which gate
+  // on this. (The backend refuses it either way.)
+  const canReviseDeadline = deadlineRevisionsLeft > 0 && task?.status !== 'completed';
   // Editing/deleting the task definition belongs to the assigner (creator) / admins — NOT the
   // assignee (their "My Tasks" view) and NOT a pure watcher (their Subscribed view). So hide
   // Edit + Delete for a doer who isn't also the creator, and for in-loop-only members. A
@@ -417,8 +507,21 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, scope, onChanged, onEdit })
     }));
     (task.deadlineHistory || []).forEach((d, i) => items.push({
       id: `deadline-${i}`, kind: 'system', by: d.revised_by_name, reason: d.reason, at: d.revised_at,
-      text: `Deadline revised${d.new_end ? ` to ${formatDateTime(d.new_end)}` : ''}`,
+      text: `Deadline revised${d.new_end ? ` to ${formatDateTime(d.new_end)}` : ''}`
+        + (d.requested_by_name ? ` (${d.requested_by_name}’s request approved)` : ''),
     }));
+    // The request side of the trail: raising one, and a rejection (an approval already shows up
+    // above as the revision it caused, so it isn't repeated here).
+    (task.deadlineRequests || []).forEach((r) => {
+      items.push({
+        id: `dlreq-${r.id}`, kind: 'system', by: r.requested_by_name, reason: r.reason, at: r.requested_at,
+        text: `Deadline revision requested${r.new_end ? ` to ${formatDateTime(r.new_end)}` : ''}`,
+      });
+      if (r.status === 'rejected') items.push({
+        id: `dlreq-${r.id}-rejected`, kind: 'system', by: r.decided_by_name, reason: r.decision_remark, at: r.decided_at,
+        text: 'Deadline revision rejected — the original deadline stands',
+      });
+    });
     return items.sort((a, b) => new Date(a.at || 0) - new Date(b.at || 0));
   })();
 
@@ -443,6 +546,47 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, scope, onChanged, onEdit })
   // Other"), but it isn't theirs to move until the doer resolves it — so their control is frozen.
   const isAwaitingDependency = isAssignee && !!task?.dependencyDoerId && !isDependencyDoer;
   const dependencyDoerName = userMap[task?.dependencyDoerId] || 'the dependency doer';
+  // ─── The person this task depends on ───
+  // Named whenever the task HAS a dependency, not only while one is outstanding. Resolving a
+  // dependency takes the doer off the task, and the card then said nothing at all about the
+  // person who actually did that part — which is the opposite of what Involved Parties is for.
+  //   • live      — dependencyDoerId, the person it is waiting on right now
+  //   • resolved  — the last hand-off in the status history, which also covers a doer who was
+  //                 typed as a free-text name and never added to the task as a user
+  const dependencyPerson = (() => {
+    if (!task) return null;
+    if (task.dependencyDoerId) {
+      return { id: task.dependencyDoerId, name: userMap[task.dependencyDoerId] || 'Unknown', resolved: false };
+    }
+    const handOff = [...(task.statusHistory || [])].reverse()
+      .find(h => h.new_status === 'dependent_on_others' && (h.doer_name || h.doer_id));
+    if (!handOff) return null;
+    return {
+      id: handOff.doer_id || null,
+      name: (handOff.doer_id && userMap[handOff.doer_id]) || handOff.doer_name || 'Unknown',
+      resolved: true,
+    };
+  })();
+
+  // ─── Who performed the final completion ───
+  // Almost always somebody the card already names — the assignee who finished it, or the
+  // assigner who approved it — so it is marked against THEIR row rather than repeating the
+  // person as a separate entry. Only a completer who appears nowhere else (an admin closing
+  // somebody's task) still needs a row of their own.
+  const completedById = task?.status === 'completed' ? task?.completedBy : null;
+  const completionBadge = (id) => (completedById && id && String(id) === String(completedById) ? (
+    <span className="ml-auto text-right shrink-0">
+      <span className="block text-[9px] font-black uppercase tracking-wider text-[var(--accent-green)]">Final Complete</span>
+      {task.completedAt && (
+        <span className="block text-[9px] font-bold text-[var(--text-muted)]">{formatDate(task.completedAt)}</span>
+      )}
+    </span>
+  ) : null);
+  const completerHasOwnRow = !!completedById && (
+    String(completedById) === String(task?.assignedBy)
+    || (task?.assignedTo || []).some(id => String(id) === String(completedById))
+    || (dependencyPerson?.id && String(dependencyPerson.id) === String(completedById))
+  );
   const requestingVerification = task?.verificationRequired && !canAdminister && !isDependencyDoer;
   // Dependency doer → Complete, Dependent on Other (chain it on), Revise. Nothing else.
   // Normal assignee → Accept, Dependent on Other, Blocked, Revise + the completion option.
@@ -450,13 +594,13 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, scope, onChanged, onEdit })
     ? [
       ...(canComplete ? [['completed', 'Complete']] : []),
       ['dependent_on_others', 'Dependent on Other'],
-      [REVISION_OPT, 'Revise'],
+      ...(canReviseDeadline ? [[REVISION_OPT, revisionLabel]] : []),
     ]
     : [
       ['accepted', 'Acknowledged Delegation'],
       ['dependent_on_others', 'Dependent on Other'],
       ['blocked', 'Blocked'],
-      [REVISION_OPT, 'Revise'],
+      ...(canReviseDeadline ? [[REVISION_OPT, revisionLabel]] : []),
       ...(canComplete ? [['completed', requestingVerification ? 'Request for Verification' : 'Complete']] : []),
     ];
   // Only show the current status as a separate (disabled) line when it isn't already one of the
@@ -653,14 +797,72 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, scope, onChanged, onEdit })
                       <p className="text-[9px] font-black text-[var(--text-muted)] uppercase">Deadline</p>
                       <div className="flex items-center gap-2 flex-wrap">
                         <p className="font-bold text-[var(--text-main)]">{task.end ? formatDateTime(task.end) : '—'}</p>
-                        {/* Date Revision — assigner/delegator (backend-enforced), never in-loop. */}
-                        {canAdminister && (
+                        {/* Date Revision — assigner/delegator (backend-enforced), never in-loop.
+                            Withdrawn once the task's two revisions are spent. */}
+                        {canDecideDeadline && canReviseDeadline && (
                           <button type="button" onClick={() => setDeadlinePickerOpen(true)} disabled={savingDeadline}
                             className="flex items-center gap-1 px-2 py-0.5 rounded-lg text-[9px] font-black uppercase tracking-wider border bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] border-[var(--accent-indigo-border)] hover:opacity-90 disabled:opacity-50">
                             <CalendarClock size={11} /> {savingDeadline ? 'Saving...' : 'Revise'}
                           </button>
                         )}
                       </div>
+                      {/* How much of the revision budget is left. Shown only once one has been
+                          used, so an untouched deadline isn't captioned with a limit nobody has
+                          come near yet. */}
+                      {deadlineRevisionsUsed > 0 && (
+                        <p className={`mt-1 text-[9px] font-black uppercase tracking-wider ${canReviseDeadline ? 'text-[var(--text-muted)]' : 'text-[var(--accent-red)]'}`}>
+                          {canReviseDeadline
+                            ? `Revisions used ${deadlineRevisionsUsed} of ${deadlineRevisionLimit}`
+                            : `Revision limit reached (${deadlineRevisionLimit} of ${deadlineRevisionLimit}) — this deadline is final`}
+                        </p>
+                      )}
+                      {/* Pending deadline revision request. The date above is still the one in
+                          force — it only moves when the assigner approves below. */}
+                      {task.pendingDeadlineRequest && (
+                        <div className="mt-2 p-3 rounded-xl border bg-[var(--accent-yellow-bg)] border-[var(--accent-yellow-border)]">
+                          <p className="flex items-center gap-1.5 text-[9px] font-black uppercase tracking-wider text-[var(--accent-yellow)]">
+                            <CalendarClock size={11} /> Deadline Revision Requested
+                          </p>
+                          <p className="mt-1 text-[11px] font-bold text-[var(--text-muted)]">
+                            {task.pendingDeadlineRequest.old_end ? formatDateTime(task.pendingDeadlineRequest.old_end) : '—'}
+                            <span className="mx-1">→</span>
+                            <span className="text-[var(--accent-indigo)]">
+                              {task.pendingDeadlineRequest.new_end ? formatDateTime(task.pendingDeadlineRequest.new_end) : '—'}
+                            </span>
+                            <span className="opacity-70"> · {task.pendingDeadlineRequest.requested_by_name || 'Unknown'}</span>
+                          </p>
+                          {task.pendingDeadlineRequest.reason && (
+                            <p className="mt-1 pl-2 border-l-2 border-[var(--border)] text-[11px] font-medium text-[var(--text-main)] leading-relaxed">
+                              {task.pendingDeadlineRequest.reason}
+                            </p>
+                          )}
+                          {canDecideDeadline ? (
+                            <div className="mt-2 space-y-2">
+                              <input value={decisionRemark} onChange={e => setDecisionRemark(e.target.value)}
+                                placeholder="Remark (optional)"
+                                className="w-full px-2.5 py-1.5 bg-[var(--bg-card)] border border-[var(--border)] rounded-lg text-[11px] font-bold outline-none focus:border-[var(--accent-indigo)]" />
+                              <div className="flex items-center gap-2">
+                                {/* Approving would move the deadline of a finished task; rejecting
+                                    just clears a request that events have overtaken. */}
+                                {task.status !== 'completed' && (
+                                <button type="button" disabled={decidingRequest} onClick={() => handleDecideDeadlineRequest(true)}
+                                  className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-[9px] font-black uppercase tracking-wider border bg-[var(--accent-green-bg)] text-[var(--accent-green)] border-[var(--accent-green-border)] hover:opacity-90 disabled:opacity-50">
+                                  <Check size={11} /> {decidingRequest ? 'Saving...' : 'Approve'}
+                                </button>
+                                )}
+                                <button type="button" disabled={decidingRequest} onClick={() => handleDecideDeadlineRequest(false)}
+                                  className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-[9px] font-black uppercase tracking-wider border bg-[var(--accent-red-bg)] text-[var(--accent-red)] border-[var(--accent-red-border)] hover:opacity-90 disabled:opacity-50">
+                                  <X size={11} /> Reject
+                                </button>
+                              </div>
+                            </div>
+                          ) : (
+                            <p className="mt-1.5 text-[10px] font-bold text-[var(--text-muted)]">
+                              Awaiting the assigner’s approval — the current deadline still applies.
+                            </p>
+                          )}
+                        </div>
+                      )}
                     </div>
                     <div><p className="text-[9px] font-black text-[var(--text-muted)] uppercase">Evidence</p><p className="font-bold text-[var(--text-main)]">{task.evidenceRequired ? 'Required' : 'Optional'}</p></div>
                     <div><p className="text-[9px] font-black text-[var(--text-muted)] uppercase">Verification</p><p className="font-bold text-[var(--text-main)]">{task.verificationRequired ? 'Required' : 'Not Required'}</p></div>
@@ -746,15 +948,61 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, scope, onChanged, onEdit })
                       {getInitials(userMap[task.assignedBy])}
                     </div>
                     <div><p className="text-[9px] font-black text-[var(--text-muted)] uppercase">Assigned By</p><p className="text-[12px] font-bold text-[var(--text-main)]">{userMap[task.assignedBy] || 'Unknown'}</p></div>
+                    {completionBadge(task.assignedBy)}
                   </div>
-                  {(task.assignedTo || []).map(id => (
+                  {/* A live dependency doer is on target_staff_id like an assignee, but they hold
+                      the dependency only — never the task — so they get their own row below. */}
+                  {(task.assignedTo || []).filter(id => id !== task.dependencyDoerId).map(id => (
                     <div key={id} className="flex items-center gap-2">
                       <div className="w-8 h-8 rounded-full flex items-center justify-center text-white font-black text-[10px] shrink-0" style={{ background: 'var(--avatar-bg)' }}>
                         {getInitials(userMap[id])}
                       </div>
-                      <div><p className="text-[9px] font-black text-[var(--text-muted)] uppercase">Assigned To</p><p className="text-[12px] font-bold text-[var(--text-main)]">{userMap[id] || 'Unknown'}</p></div>
+                      <div>
+                        <p className="text-[9px] font-black text-[var(--text-muted)] uppercase">Assigned To</p>
+                        <p className="text-[12px] font-bold text-[var(--text-main)]">{userMap[id] || 'Unknown'}</p>
+                      </div>
+                      {completionBadge(id)}
                     </div>
                   ))}
+                  {/* Only when the completer is on the task in no other capacity — otherwise
+                      their own row carries the mark, on the right. */}
+                  {completedById && !completerHasOwnRow && (
+                    <div className="flex items-center gap-2">
+                      <div className="w-8 h-8 rounded-full flex items-center justify-center text-white font-black text-[10px] shrink-0" style={{ background: 'var(--avatar-bg)' }}>
+                        {getInitials(userMap[task.completedBy])}
+                      </div>
+                      <div className="min-w-0">
+                        <p className="text-[9px] font-black text-[var(--text-muted)] uppercase">
+                          Final Completion By
+                          {task.completedAt && (
+                            <span className="ml-1 text-[var(--accent-green)]">· {formatDate(task.completedAt)}</span>
+                          )}
+                        </p>
+                        <p className="text-[12px] font-bold text-[var(--text-main)]">
+                          {userMap[task.completedBy] || 'Unknown'}
+                        </p>
+                      </div>
+                    </div>
+                  )}
+                  {dependencyPerson && (
+                    <div className="flex items-center gap-2">
+                      <div className="w-8 h-8 rounded-full flex items-center justify-center text-white font-black text-[10px] shrink-0" style={{ background: 'var(--avatar-bg)' }}>
+                        {getInitials(dependencyPerson.name)}
+                      </div>
+                      <div className="min-w-0">
+                        <p className="text-[9px] font-black text-[var(--text-muted)] uppercase">
+                          Depend On Other
+                          {/* Says whether the task is still waiting on them, so the row doesn't
+                              read as an open dependency once they have finished their part. */}
+                          {dependencyPerson.resolved && (
+                            <span className="ml-1 text-[var(--accent-green)]">· Completed</span>
+                          )}
+                        </p>
+                        <p className="text-[12px] font-bold text-[var(--text-main)]">{dependencyPerson.name}</p>
+                      </div>
+                      {completionBadge(dependencyPerson.id)}
+                    </div>
+                  )}
                   {task.watchers?.length > 0 && (
                     <div>
                       <p className="text-[9px] font-black text-[var(--text-muted)] uppercase mb-1.5">In Loop</p>
@@ -1037,7 +1285,7 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, scope, onChanged, onEdit })
       isOpen={deadlinePickerOpen}
       onClose={() => setDeadlinePickerOpen(false)}
       value={task?.end}
-      title="Revise Deadline"
+      title={canDecideDeadline ? 'Revise Deadline' : 'Request Deadline Revision'}
       onApply={(iso, remark) => handleReviseDeadline(iso, remark)}
       holidayDates={holidayDates} weeklyOffs={WEEKLY_OFFS} onBlocked={showError}
       disablePast
@@ -1062,6 +1310,9 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, scope, onChanged, onEdit })
       isOpen={!!reasonStatus}
       status={reasonStatus}
       users={users}
+      // Whoever already holds the task — its assignees (which includes the caller, and any doer
+      // it was previously handed to) — cannot be the person it now waits on.
+      excludeIds={[...(task?.assignedTo || []), task?.dependencyDoerId].filter(Boolean)}
       saving={savingReason}
       onClose={() => setReasonStatus(null)}
       onSubmit={({ reason, doerName, doerId }) => doStatusUpdate(reasonStatus, { reason, doerName, doerId })}

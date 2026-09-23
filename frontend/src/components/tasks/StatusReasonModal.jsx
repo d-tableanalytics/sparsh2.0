@@ -8,7 +8,12 @@ import { SelectField } from '../common/StyledSelect';
 // same). "Dependent on Other" additionally needs a Doer Name — the task is reassigned to that
 // doer — so the doer picker is shown only for that status. "Blocked" needs a reason only.
 // Shares the header/footer shape of the module's other small modals (PickerModal / TaskTagsModal).
-const StatusReasonModal = ({ isOpen, status, users = [], onClose, onSubmit, saving = false }) => {
+//
+// `excludeIds` are the people who already hold the task — its assignees and any doer it is
+// already waiting on. A task cannot depend on the person doing it, so offering them was an
+// invitation to a hand-off that means nothing (and, for the caller themselves, a task waiting
+// on itself).
+const StatusReasonModal = ({ isOpen, status, users = [], excludeIds = [], onClose, onSubmit, saving = false }) => {
   const [doerId, setDoerId] = useState('');
   const [reason, setReason] = useState('');
 
@@ -24,6 +29,8 @@ const StatusReasonModal = ({ isOpen, status, users = [], onClose, onSubmit, savi
   // Only "Dependent on Other" needs a doer (it reassigns the task); "Blocked" needs a reason only.
   const needsDoer = status === 'dependent_on_others';
   const label = STATUS_CONFIG[status]?.label || status;
+  const excluded = new Set((excludeIds || []).filter(Boolean).map(String));
+  const doerChoices = users.filter(u => !excluded.has(String(u._id)));
   const doerName = users.find(u => u._id === doerId)?.full_name || users.find(u => u._id === doerId)?.email || '';
   const canSave = reason.trim() && (!needsDoer || doerId) && !saving;
 
@@ -49,7 +56,12 @@ const StatusReasonModal = ({ isOpen, status, users = [], onClose, onSubmit, savi
                 <label className="text-[9px] font-black text-[var(--text-muted)] uppercase tracking-widest">Doer Name *</label>
                 <SelectField value={doerId} onChange={setDoerId} className="mt-1 w-full"
                   options={[{ id: '', name: 'Select a doer...' },
-                            ...users.map(u => ({ id: u._id, name: u.full_name || u.email }))]} />
+                            ...doerChoices.map(u => ({ id: u._id, name: u.full_name || u.email }))]} />
+                {!doerChoices.length && (
+                  <p className="mt-1 text-[10px] font-bold text-[var(--accent-red)]">
+                    There is nobody else to hand this to — everyone available already holds this task.
+                  </p>
+                )}
               </div>
             )}
             <div>

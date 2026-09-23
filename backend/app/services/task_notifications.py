@@ -39,8 +39,16 @@ TASK_EVENT_SLUGS = {
     "verification_requested": "task_verification_requested",
     "verification_approved": "task_verification_approved",
     "deadline_revised": "task_deadline_revised",
+    # Assignee asks for the deadline to move; the assigner approves or rejects it. Only
+    # the approval actually moves the date (see tasks._decide_deadline_request).
+    "deadline_revision_requested": "task_deadline_revision_requested",
+    "deadline_revision_approved": "task_deadline_revision_approved",
+    "deadline_revision_rejected": "task_deadline_revision_rejected",
     "blocked": "task_blocked",
     "dependent_on_other": "task_dependent_on_other",
+    # The dependency doer finished their part: the task goes back to the assignee who
+    # delegated it, for review and final completion — it never completes itself.
+    "dependency_resolved": "task_dependency_resolved",
     "follow_up_added": "task_follow_up_added",
     "subtask_created": "task_subtask_created",
     "in_loop_added": "task_in_loop_added",
@@ -68,8 +76,12 @@ _IN_APP = {
     "verification_requested": ("Verification Requested", "info"),
     "verification_approved": ("Verification Approved", "success"),
     "deadline_revised": ("Deadline Revised", "warning"),
+    "deadline_revision_requested": ("Deadline Revision Requested", "warning"),
+    "deadline_revision_approved": ("Deadline Revision Approved", "success"),
+    "deadline_revision_rejected": ("Deadline Revision Rejected", "error"),
     "blocked": ("Task Blocked", "error"),
     "dependent_on_other": ("Task Dependent on Other", "warning"),
+    "dependency_resolved": ("Dependency Completed", "info"),
     "follow_up_added": ("Follow-up Added", "info"),
     "subtask_created": ("Subtask Created", "info"),
     "in_loop_added": ("Added to Task Loop", "info"),
@@ -117,9 +129,20 @@ def recipients_for_event(event: str, task: dict, extra: Optional[dict] = None) -
     if event == "dependent_on_other":
         # The doer the task was handed to, plus the assigner tracking it.
         return _ids(extra.get("doer_id")) | assigner | watchers
+    if event == "dependency_resolved":
+        # The task is back with whoever delegated the dependency — `assignees` is already the
+        # popped list, so this is exactly them (the doer has been dropped) — plus the watchers.
+        return assignees | watchers
     if event in ("accepted", "completed", "verification_requested", "blocked"):
         # Progress reported upward, to the person who delegated it.
         return assigner | watchers
+    if event == "deadline_revision_requested":
+        # The assignee is ASKING for more time — it is the assigner who has to answer.
+        return assigner | watchers
+    if event in ("deadline_revision_approved", "deadline_revision_rejected"):
+        # The verdict goes back to whoever asked for it (plus the rest of the doers/watchers,
+        # since an approved request changes the date they all work to).
+        return _ids(extra.get("requested_by")) | assignees | watchers
     if event in ("reopened", "verification_approved"):
         # The assigner's verdict, reported back down to whoever did the work.
         return assignees | watchers
@@ -279,6 +302,8 @@ def _build_context(event: str, task: dict, actor_name: str, extra: Optional[dict
         "remark": extra.get("remark") or "",
         "old_deadline": format_datetime_standard(extra.get("old_end")) if extra.get("old_end") else "Not set",
         "new_deadline": format_datetime_standard(extra.get("new_end")) if extra.get("new_end") else "Not set",
+        # Who asked for the deadline revision (the deadline_revision_* triggers).
+        "requested_by_name": extra.get("requested_by_name") or "",
         "parent_task": extra.get("parent_title") or "",
         "subtask_name": extra.get("subtask_title") or "",
         # ─── Reassignment + time-driven nudges ───

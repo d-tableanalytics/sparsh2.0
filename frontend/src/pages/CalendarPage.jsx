@@ -1254,6 +1254,18 @@ const CalendarPage = () => {
                     ref={calendarRef} plugins={[dayGridPlugin, timeGridPlugin, listPlugin, multiMonthPlugin, interactionPlugin]}
                     initialView="dayGridMonth" headerToolbar={false} events={filteredEvents} height="auto" selectable={true}
                     datesSet={(arg) => setCurrentViewDate(arg.view.currentStart)}
+                    // ─── No phantom bar on the day AFTER the one an entry belongs to ───
+                    // A task is published with start == end (its deadline — see anchorOf), so
+                    // FullCalendar drops the end and applies its default one-hour duration. A task
+                    // due at 23:30 therefore "ends" at 00:30 the next day, and with the default
+                    // threshold of 00:00 ANY spill past midnight claims that day: the next cell drew
+                    // a second, untitled bar for a task that isn't due then — untitled because it is
+                    // the same segment continuing, and the title is rendered once, at its start. It
+                    // was a phantom in every other respect too: the day summary for that cell listed
+                    // nothing, and clicking the bar opened the PREVIOUS day.
+                    // Requiring three hours into the next day keeps a genuinely multi-day session
+                    // spanning exactly as before, while a few minutes past midnight no longer does.
+                    nextDayThreshold="03:00:00"
 
                     select={handleDateSelect}
                     eventClick={(info) => openDaySummary(dayKey(info.event.startStr))}

@@ -24,7 +24,8 @@ const tooltipStyle = {
 const STATUS_COLOR = {
   pending: 'var(--accent-orange)', accepted: 'var(--accent-indigo)', in_progress: 'var(--accent-indigo)',
   dependent_on_others: 'var(--accent-yellow)', blocked: 'var(--accent-red)',
-  verification: 'var(--accent-yellow)', completed: 'var(--accent-green)',
+  verification: 'var(--accent-yellow)', dependency_completed: 'var(--accent-indigo)',
+  completed: 'var(--accent-green)',
 };
 
 const fmtDate = (v) => {

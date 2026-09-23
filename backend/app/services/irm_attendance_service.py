@@ -22,6 +22,7 @@ replaces the day it covers and leaves every other day alone.
 """
 import io
 import logging
+import re
 from datetime import datetime, time, timedelta
 from typing import Dict, List, Optional, Tuple
 
@@ -47,6 +48,22 @@ COLUMN_ALIASES: Dict[str, Tuple[str, ...]] = {
 
 EXPORT_COLUMNS = ["Employee ID", "Name", "Email", "Date", "In Time", "Out Time",
                   "Late In", "Early Out", "Punctual"]
+
+
+def columns_for(people: Dict[str, dict]) -> List[str]:
+    """The columns a template/export should carry for THIS roster.
+
+    Employee ID is the importer's first and most reliable matcher, but only for a company that
+    actually holds employee codes. Where none are stored the column can never match anything —
+    it is an empty column inviting somebody to type codes this system does not know, and a
+    wrong code is worse than a blank one because it can land a row on the wrong person. So it
+    is offered only when at least one person on the roster has a code; Email and Name carry the
+    matching otherwise. The importer still ACCEPTS the column (and its aliases) from whatever
+    file a client's device produces — this decides only what we hand out.
+    """
+    if any((p or {}).get("employee_id") for p in (people or {}).values()):
+        return list(EXPORT_COLUMNS)
+    return [c for c in EXPORT_COLUMNS if c != "Employee ID"]
 
 
 def _norm_header(value) -> str:
@@ -86,11 +103,19 @@ def _to_date(value) -> Optional[str]:
     return None
 
 
+# "6:30 PM", "6:30pm", "6:30 p.m." — the tail of a 12-hour time, however it was typed.
+_MERIDIEM_RE = re.compile(r"\s*([ap])\.?\s*m\.?\s*$", re.IGNORECASE)
+
+
 def _to_hhmm(value) -> Optional[str]:
-    """Any of the shapes a punch time arrives in → 'HH:MM', or None when absent.
+    """Any of the shapes a punch time arrives in → 'HH:MM' (24-hour), or None when absent.
 
     Excel is the awkward one: a cell formatted as a time comes back as a datetime, as a
     `time`, or as a fraction of a day (0.4 == 09:36) depending on how it was written.
+
+    Text cells are the other awkward one, because people write clock times the way they say
+    them. "6:30 PM" is 18:30 and must not be read as 06:30 — a twelve-hour error scores as an
+    early-out on every day of the month and nothing about the import looks wrong.
     """
     if value is None:
         return None
@@ -107,6 +132,13 @@ def _to_hhmm(value) -> Optional[str]:
     raw = str(value).strip()
     if not raw or raw.lower() in ("nan", "nat", "none", "-", "--"):
         return None
+    # Take the AM/PM off first — otherwise the split below throws away the time and keeps
+    # the "PM", and the whole cell reads as unparseable.
+    meridiem = None
+    match = _MERIDIEM_RE.search(raw)
+    if match:
+        meridiem = match.group(1).lower()
+        raw = raw[:match.start()].strip()
     if " " in raw:                      # '2026-08-11 09:41:00'
         raw = raw.split(" ")[-1]
     raw = raw.replace(".", ":")
@@ -117,9 +149,35 @@ def _to_hhmm(value) -> Optional[str]:
         hh, mm = int(parts[0]), int(parts[1])
     except ValueError:
         return None
+    if meridiem and not (1 <= hh <= 12):
+        return None                     # "19:30 PM" is not a time anybody meant
+    if meridiem == "p" and hh < 12:
+        hh += 12
+    elif meridiem == "a" and hh == 12:
+        hh = 0
     if not (0 <= hh <= 23 and 0 <= mm <= 59):
         return None
     return f"{hh:02d}:{mm:02d}"
+
+
+def _text(value) -> str:
+    """A cell as clean text, with the blanks pandas invents treated as blank.
+
+    A blank Excel cell arrives as float('nan'), which is truthy — so `value or ""` keeps it
+    and str() turns it into the literal string "nan". Everything that reads an identity
+    column goes through here, so a missing Employee ID reads as absent rather than as a
+    person called "nan".
+    """
+    if value is None:
+        return ""
+    # A column of numeric employee codes containing even ONE blank is typed as float by
+    # pandas, so code 101 arrives as 101.0 and no longer matches the stored "101". Render a
+    # whole number as a whole number. (Identity columns only — punch times take their own
+    # path through _to_hhmm, where a fraction of a day is meaningful.)
+    if isinstance(value, float) and not isinstance(value, bool) and value.is_integer():
+        return str(int(value))
+    raw = str(value).strip()
+    return "" if raw.lower() in ("nan", "nat", "none") else raw
 
 
 def _minutes(hhmm: Optional[str]) -> Optional[int]:
@@ -239,14 +297,16 @@ async def import_attendance(company_id: str, content: bytes, filename: str,
 
         pid = None
         for field, table in (("employee_id", by_emp), ("email", by_email), ("name", by_name)):
-            key = str(cell(field) or "").strip().lower()
+            key = _text(cell(field)).lower()
             if key and key in table:
                 pid = table[key]
                 break
         if not pid:
-            label = (str(cell("employee_id") or "").strip()
-                     or str(cell("email") or "").strip()
-                     or str(cell("name") or "").strip()
+            # Name the row by whatever it DID carry, so the report says which person to fix
+            # rather than just how many rows failed.
+            label = (_text(cell("employee_id"))
+                     or _text(cell("email"))
+                     or _text(cell("name"))
                      or "(blank)")
             if label not in seen_unmatched:
                 seen_unmatched.add(label)
@@ -341,6 +401,7 @@ async def export_attendance(company_id: str, period: Optional[str],
     rows = await get_collection(COLL_IRM_ATTENDANCE).find(query).sort("date", 1).to_list(50000)
     shift = await get_shift(company_id)
 
+    columns = columns_for(people)
     records = []
     for r in rows:
         person = people.get(str(r.get("person_id"))) or {}
@@ -357,7 +418,7 @@ async def export_attendance(company_id: str, period: Optional[str],
             "Punctual": "Yes" if verdict["punctual"] else "No",
         })
 
-    frame = pd.DataFrame(records, columns=EXPORT_COLUMNS)
+    frame = pd.DataFrame(records, columns=columns)
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
         frame.to_excel(writer, index=False, sheet_name="Attendance")
@@ -385,9 +446,12 @@ def roster_template(people: Dict[str, dict]) -> bytes:
 
     Date, In Time and Out Time are left blank: one row per person per day is what the
     importer expects, so these rows are the starting point rather than the whole month.
+
+    The Employee ID column appears only for a roster that has employee codes — see columns_for.
     """
     import pandas as pd
 
+    columns = columns_for(people)
     records = [{
         "Employee ID": p.get("employee_id") or "",
         "Name": p.get("name") or "",
@@ -402,7 +466,7 @@ def roster_template(people: Dict[str, dict]) -> bytes:
         "Punctual": "",
     } for p in sorted(people.values(), key=lambda x: (x.get("name") or "").lower())]
 
-    frame = pd.DataFrame(records, columns=EXPORT_COLUMNS)
+    frame = pd.DataFrame(records, columns=columns)
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
         frame.to_excel(writer, index=False, sheet_name="Attendance")

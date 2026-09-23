@@ -11,7 +11,7 @@ import { openTaskEventStream } from '../../services/taskEventsApi';
 import { getHolidays } from '../../services/holidayApi';
 import { useAuth } from '../../context/AuthContext';
 import { useNotification } from '../../context/NotificationContext';
-import { STATUS_CONFIG, LIST_CARD_ORDER, CARD_KEY_TO_STATUS, statusOptions, statusOptionLabel, REASON_REQUIRED_STATUSES, VERIFICATION_ACTIONS } from './statusConfig';
+import { STATUS_CONFIG, LIST_CARD_ORDER, CARD_KEY_TO_STATUS, cardKeyForStatus, statusesForCardKey, statusOptions, statusOptionLabel, REASON_REQUIRED_STATUSES, VERIFICATION_ACTIONS } from './statusConfig';
 import { exportTasksToCsv, groupTasksByRecurrence, isRecurringTask, summarizeSeries, formatOccurrenceDate } from './taskDisplayUtils';
 import StatusSummaryCards from './StatusSummaryCards';
 import TaskKindTabs from './TaskKindTabs';
@@ -230,8 +230,10 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
     const s = { totalTasks: scopedTasks.length, overdue: 0, pending: 0, accepted: 0, dependentOnOthers: 0, blocked: 0, inProgress: 0, verification: 0, completed: 0 };
     scopedTasks.forEach(t => {
       if (t.isOverdue) s.overdue += 1;
-      const key = Object.keys(CARD_KEY_TO_STATUS).find(k => CARD_KEY_TO_STATUS[k] === t.status);
-      if (key) s[key] += 1;
+      // Every task lands on exactly one card — a status without a card of its own (Reopened,
+      // Dependency Completed) counts as In Progress rather than being counted by nothing.
+      const key = cardKeyForStatus(t.status);
+      if (key in s) s[key] += 1;
     });
     return s;
   }, [scopedTasks]);
@@ -239,7 +241,11 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
   const visibleTasks = useMemo(() => {
     let rows = scopedTasks;
     if (statusFilter === 'overdue') rows = rows.filter(t => t.isOverdue);
-    else if (statusFilter !== 'all') rows = rows.filter(t => t.status === statusFilter);
+    else if (statusFilter !== 'all') {
+      // Filter by what the card COUNTED, so a card showing 3 opens a list of 3.
+      const statuses = statusesForCardKey(filterToCardKey(statusFilter));
+      rows = rows.filter(t => (statuses.length ? statuses.includes(t.status) : t.status === statusFilter));
+    }
 
     rows = [...rows].sort((a, b) => {
       let cmp = 0;
@@ -473,9 +479,19 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
   };
 
   // Who the row is "with" — the assigner on my/subscribed lists, the assignees on delegated.
+  // A dependency doer is ADDED to the assignee list when a task is handed on (the real assignee
+  // stays there, and still owns it), so listing everyone read as though the task had two
+  // assignees. They are named on their own line instead — see dependencyNoteOf.
   const counterpartOf = (task) => (scope === 'delegated'
-    ? ((task.assignedTo || []).map(id => userMap[id] || id).join(', ') || 'Myself')
+    ? ((task.assignedTo || []).filter(id => id !== task.dependencyDoerId)
+        .map(id => userMap[id] || id).join(', ') || 'Myself')
     : (userMap[task.assignedBy] || 'Someone'));
+
+  // The person the task is currently waiting on, for the line under the assignee. Only on the
+  // delegated list, where the cell shows assignees at all.
+  const dependencyNoteOf = (task) => (scope === 'delegated' && task.dependencyDoerId
+    ? `Dependent on Other: ${userMap[task.dependencyDoerId] || 'Unknown'}`
+    : null);
 
   // Only the Recurring tab gets the series detail line — on a one-time delegation there's no
   // series to summarise, and every row would just read "One Time".
@@ -730,7 +746,7 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
                           </span>
                         </td>
                       )}
-                      <td className="px-4 py-3"><AssigneeCell name={counterpartOf(task)} /></td>
+                      <td className="px-4 py-3"><AssigneeCell name={counterpartOf(task)} note={dependencyNoteOf(task)} /></td>
                       <td className="px-4 py-3"><PriorityPill priority={task.priority} /></td>
                       <td className="px-4 py-3">{renderStatusCell(task)}</td>
                       <td className="px-4 py-3"><DateCell value={task.createdAt} /></td>
@@ -900,6 +916,8 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
         isOpen={!!reasonTarget}
         status={reasonTarget?.status}
         users={users}
+        // Same rule as the details modal: a task can't be made to wait on someone already on it.
+        excludeIds={[...(reasonTarget?.task?.assignedTo || []), reasonTarget?.task?.dependencyDoerId].filter(Boolean)}
         saving={savingReason}
         onClose={() => setReasonTarget(null)}
         onSubmit={({ reason, doerName, doerId }) => doStatusUpdate(reasonTarget.task, reasonTarget.status, { reason, doerName, doerId })}

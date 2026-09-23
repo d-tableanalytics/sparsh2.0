@@ -45,7 +45,9 @@ export const CategoryPill = ({ name }) => {
 // Yellow is left out of the avatar palette — white initials on it fail to read.
 const AVATAR_ACCENTS = ['indigo', 'green', 'orange', 'red'];
 
-export const AssigneeCell = ({ name }) => {
+// `note` is a second line under the name — used to name the person a task is waiting on
+// ("Dependent on Other: Cara") without passing them off as one of its assignees.
+export const AssigneeCell = ({ name, note }) => {
   const label = name || '—';
   return (
     <span className="inline-flex items-center gap-2 min-w-0">
@@ -53,7 +55,12 @@ export const AssigneeCell = ({ name }) => {
         style={{ background: `var(--accent-${accentFor(label, AVATAR_ACCENTS)})` }}>
         {getInitials(label)}
       </span>
-      <span className="text-[12px] font-bold text-[var(--text-main)] truncate">{label}</span>
+      <span className="min-w-0">
+        <span className="block text-[12px] font-bold text-[var(--text-main)] truncate">{label}</span>
+        {note && (
+          <span className="block text-[9px] font-black uppercase tracking-wider text-[var(--accent-yellow)] truncate">{note}</span>
+        )}
+      </span>
     </span>
   );
 };
