@@ -55,13 +55,21 @@ import { canAccessHrms, isClientTrackUser } from '../../features/hrms/access';
  * the headings afterwards, never the other way round.
  */
 const visibleSubmodules = (submodules, user, clientTrackOnly) => {
+  // The client-track rule belongs to the module that DECLARES it, not to the sidebar at
+  // large. `clientTrackOnly` is one flag for the whole viewer, so applying it everywhere
+  // filtered every module's submodules down to the ones marked `clientTrack` — a mark that
+  // exists on a single HRMS entry. Other modules therefore lost their entire drawer and
+  // rendered a parent that opens onto nothing (IRM, for one, which client roles may use).
+  // Honouring it only where a group actually uses it keeps HRMS exactly as it was.
+  const groupUsesClientTrack = submodules.some((sub) => sub.clientTrack);
+  const restrictToClientTrack = clientTrackOnly && groupUsesClientTrack;
   const kept = submodules.filter((sub) => (
     sub.section
       || ((!sub.roles || sub.roles.includes(user?.role))
         // A client company's user holds CLIENT_TRACK_CAPS and nothing else, so every
         // entry but Client Hiring leads to a screen the API answers 403. Offering them a
         // full HRMS menu would be a list of doors that do not open.
-        && (!clientTrackOnly || sub.clientTrack))
+        && (!restrictToClientTrack || sub.clientTrack))
   ));
   return kept.filter((sub, i) => {
     if (!sub.section) return true;
