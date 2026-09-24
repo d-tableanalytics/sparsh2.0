@@ -1185,13 +1185,25 @@ async def _build_escalation_chain(actor: dict, company_id: str, req: dict) -> li
     here. A second walk would be a second set of depth caps and cycle guards to keep in
     step with the first, and the one that drifts is the one that loops forever.
 
-    Three properties:
+    Four properties:
       * the RAISER is never a rung on their own ladder,
       * the chain is de-duplicated (a shared manager appears once),
-      * it is capped at MAX_ESCALATION_LEVELS.
+      * the reporting-line rungs are capped at MAX_ESCALATION_LEVELS,
+      * and the LAST rung is always an MD.
 
-    Returns [] when nobody resolves. The caller treats that as "route straight to MD" — it
-    must never be read as "approved".
+    The MD rung is the mandatory one. Everything above it comes from the reporting line —
+    who escalates to whom is an org-chart fact, not a role — but an over-sanction requisition
+    that never reached an MD would make a promise the screen already prints ("MD approval
+    remains mandatory whatever the escalation chain decides") untrue: the gate it lands on
+    next, scorecard-approve, is open to a hiring manager. So the MD is appended rather than
+    hoped for, and sits OUTSIDE the cap, which bounds the reporting walk and not the control.
+
+    Any MD may clear any rung (Cap.REQUISITION_APPROVE_MD), so naming one here decides who is
+    asked, never who is allowed.
+
+    Returns [] only when nobody resolves AND the company has no MD on record. The caller
+    treats that as "route straight on with MD approval still required" — it must never be
+    read as "approved".
     """
     raiser_id = str(req.get("created_by") or "")
     if not raiser_id:
@@ -1229,7 +1241,62 @@ async def _build_escalation_chain(actor: dict, company_id: str, req: dict) -> li
             "acted_by": None,
             "remarks": None,
         })
+
+    # ── The mandatory last rung ──
+    # Appended only when the reporting line did not already pass through an MD, so a line
+    # that ends at one is left exactly as it is rather than naming them twice.
+    if not any(str(rung.get("role") or "").strip().upper() == "MD" for rung in chain):
+        md = await _company_md(company_id, exclude_ids=seen)
+        if md:
+            chain.append({
+                "level": len(chain) + 1,
+                "user_id": str(md["_id"]),
+                "name": (md.get("full_name")
+                         or f"{md.get('first_name') or ''} {md.get('last_name') or ''}".strip()
+                         or md.get("email") or "MD"),
+                "role": "MD",
+                "status": EscalationStatus.PENDING.value,
+                "acted_at": None,
+                "acted_by": None,
+                "remarks": None,
+                # Marks a rung that is there by rule rather than by reporting line, so the
+                # screen can say why somebody outside the raiser's chain is being asked.
+                "mandatory": True,
+            })
     return chain
+
+
+async def _company_md(company_id: str, *, exclude_ids=None) -> Optional[dict]:
+    """The MD an escalation must ultimately reach, or None if the company has none.
+
+    Looks in whichever identity collection holds this tenant's people —
+    `tenant_identity_source` — because Sparsh's own staff carry no company_id while every
+    other company's people are learners keyed by one, and a hard-coded lookup answers "no MD"
+    for exactly one of those two.
+
+    Deterministic when there are several: the same requisition must not name a different MD
+    depending on which document the driver returned first. Any MD may act on any rung
+    regardless, so this decides who is ASKED, not who may approve.
+    """
+    from app.utils.hrms_access import tenant_identity_source
+
+    exclude = {str(x) for x in (exclude_ids or set())}
+    try:
+        source, base = await tenant_identity_source(str(company_id))
+        rows = await get_collection(source).find(
+            {**base, "governance_role": {"$in": ["MD", "md", "Md"]},
+             "is_active": {"$ne": False}},
+            {"full_name": 1, "first_name": 1, "last_name": 1, "email": 1},
+        ).to_list(50)
+    except Exception as e:                                    # noqa: BLE001
+        print(f"[WARN] HRMS escalation MD lookup failed: {e}")
+        return None
+
+    candidates = [r for r in rows if str(r["_id"]) not in exclude]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda r: str(r["_id"]))
+    return candidates[0]
 
 
 async def _notify_escalation(current, request_no, chain, level, company_id, snapshot):

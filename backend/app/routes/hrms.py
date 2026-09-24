@@ -5719,6 +5719,28 @@ async def create_client_interview(
         current_user, scope_company_id(current_user, company_id), body.model_dump())
 
 
+@router.get("/client-interviews/panel-options")
+async def client_interview_panel_options(
+    current_user: dict = Depends(get_current_user),
+):
+    """Who may be put on a client interview panel — Sparsh's own people.
+
+    The panel is typed as free text (`panel: List[str]`, by name) because it is recorded
+    for the client's benefit rather than resolved to accounts the way the internal track's
+    panel is. Typed names go wrong in the ways typed names always do: a misspelling, a
+    person who left, two spellings of the same colleague across two interviews. This hands
+    the picker the real list so the recorded name is a real one.
+
+    Gated on the capability that SCHEDULES the interview, not on EMPLOYEE_READ: anybody who
+    may compose a panel must be able to see the names, and a picker that needs a second,
+    unrelated permission is a picker that silently comes back empty.
+
+    Declared before /client-interviews/{cin_no} so the static path wins.
+    """
+    _require(current_user, Cap.CLIENT_INTERVIEW_MANAGE)
+    return {"panel_options": await client_ints.panel_options()}
+
+
 @router.get("/client-interviews/{cin_no}")
 async def get_client_interview(
     cin_no: str,

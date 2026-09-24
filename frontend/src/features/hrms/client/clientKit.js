@@ -211,3 +211,14 @@ export const useSourceableRequisitions = (scope, { enabled = true } = {}) => {
 
   return { requisitions: rows, loading };
 };
+
+export const cvHref = (value) => {
+  const raw = String(value || '').trim();
+  if (!raw) return null;
+  try {
+    const url = new URL(raw);
+    return (url.protocol === 'http:' || url.protocol === 'https:') ? url.href : null;
+  } catch {
+    return null;
+  }
+};

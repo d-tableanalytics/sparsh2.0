@@ -55,9 +55,24 @@ export const HIRING_WORKSPACE = {
       tabs: [
         // The way in: what is waiting on whom, across every open position.
         { label: 'Overview', to: '/hrms/internal-hiring', icon: LayoutDashboard, cap: CAP.REQUISITION_READ },
+        // In chain order: HR verifies the requisition is complete BEFORE anyone is asked to
+        // pay for it (Pending HR Verification -> Pending Budget Approval -> ...), so the tab
+        // that clears the first gate sits before the board that clears the second.
+        //
+        // Gated on the capability that CLEARS it rather than on REQUISITION_READ: a tab
+        // nobody on it can act in is a tab that only takes up room — everybody else still
+        // sees the same rows on the board beside it.
+        { label: 'HR Verification', to: '/hrms/hr-verification', icon: ClipboardCheck, cap: CAP.REQUISITION_REVIEW_HR },
         { label: 'Headcount & Budget Approval', to: '/hrms/internal-requisitions', icon: ClipboardList, cap: CAP.REQUISITION_READ },
+        // The order the work is actually done in: the JD describes the role, the scorecard
+        // sets the bar it will be hired against, and the final gate approves the requisition
+        // — which approves that JD in the same step. The gate is last because it is what
+        // releases everything above it, not something done alongside them.
         { label: 'Job Descriptions', to: '/hrms/jd', icon: ScrollText, cap: CAP.JD_READ },
         { label: 'Scorecards', to: '/hrms/scorecards', icon: Target, cap: CAP.SCORECARD_READ },
+        // Gated on the capability that CLEARS it, like HR Verification: the hiring manager
+        // and Management. Everyone else still sees these rows on the board above.
+        { label: 'Final Requisition Approval', to: '/hrms/final-approval', icon: ShieldCheck, cap: CAP.SCORECARD_APPROVE },
       ],
     },
     {

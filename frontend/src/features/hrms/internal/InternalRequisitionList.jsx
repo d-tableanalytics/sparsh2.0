@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { Building, Timer, Table2, ListTodo, Wallet } from 'lucide-react';
+import { Building, Timer, Table2, ListTodo, Wallet, ClipboardCheck } from 'lucide-react';
 import { useHrms } from '../HrmsContext';
 import { CAP } from '../access';
 import HrmsPageHeader from '../common/HrmsPageHeader';
@@ -29,6 +29,12 @@ import { REQUISITION_SOP_LABEL, sopLabelFor } from './sopLabels';
  *
  * The action offered on each row is derived from the requisition's own state and the caller's
  * capabilities, never from a fixed set of buttons that 403 when pressed.
+ *
+ * `stage` narrows the screen to ONE gate — /hrms/hr-verification passes "Pending HR
+ * Verification" so HR opens on their own queue instead of scanning a board of four gates for
+ * the rows that are theirs. It is the same component deliberately: the gate table, the
+ * approval dialog, the SLA panel and the columns are shared, so a second screen cannot drift
+ * from the first about what a gate is or who may clear it. Without it, nothing changes.
  */
 
 /** state -> (action, who clears it, capability). One table, so the button, the label and the
@@ -38,6 +44,8 @@ const GATES = {
     action: 'hr-verify', reject: 'hr-reject', cap: CAP.REQUISITION_REVIEW_HR,
     label: 'Verify', who: 'HR',
     blurb: 'HR checks the role and its justification are complete.',
+    // Decided on its own page. See ownsDecision below.
+    page: { to: '/hrms/hr-verification', label: 'HR Verification' },
   },
   'Pending Budget Approval': {
     action: 'budget-approve', reject: 'budget-reject',
@@ -52,8 +60,36 @@ const GATES = {
   },
   'Pending Scorecard Approval': {
     action: 'scorecard-approve', reject: 'scorecard-reject', cap: CAP.SCORECARD_APPROVE,
-    label: 'Approve', who: 'the hiring manager',
-    blurb: 'Needs an approved position scorecard before it can be approved.',
+    // "Approve" alone read as "approve the scorecard", which is a different action on a
+    // different screen and is already done by the time a requisition reaches this gate.
+    label: 'Approve requisition', who: 'the hiring manager',
+    blurb: 'The last gate. The position scorecard is already signed off; approving here '
+      + 'approves the requisition itself and makes its JD publishable.',
+    page: { to: '/hrms/final-approval', label: 'Final Requisition Approval' },
+  },
+};
+
+/**
+ * What a single-gate page calls itself.
+ *
+ * A queue filtered to one gate is a different SCREEN to the person using it — HR opens "HR
+ * Verification", the hiring manager opens "Final Requisition Approval" — even though both
+ * are this component with a filter. Naming them here keeps the workspace tab, the page
+ * heading and the explanation in one place, so a tab can never be labelled one thing and
+ * open onto a heading that says another.
+ */
+const STAGE_PAGES = {
+  'Pending HR Verification': {
+    title: 'HR Verification',
+    lead: 'HR checks each requisition is complete and justified. Clearing it here sends the '
+      + 'requisition on to the budget gate — it does not approve the headcount or the spend.',
+  },
+  'Pending Scorecard Approval': {
+    title: 'Final Requisition Approval',
+    lead: 'The last gate. HR has verified the requisition, Management or Finance has approved '
+      + 'the budget, and the position scorecard is already signed off on the Scorecards page. '
+      + 'Approving here approves the REQUISITION itself, and its JD is approved in the same '
+      + 'step — which is what makes the role publishable.',
   },
 };
 
@@ -92,7 +128,7 @@ const BudgetCell = ({ r }) => {
   );
 };
 
-const InternalRequisitionList = () => {
+const InternalRequisitionList = ({ stage = null }) => {
   const { scope, companyId, companyName, can } = useHrms();
   const navigate = useNavigate();
   const { showSuccess, showError } = useNotification();
@@ -129,6 +165,23 @@ const InternalRequisitionList = () => {
     const gate = GATES[row.approval_status];
     return gate && can(gate.cap) ? gate : null;
   };
+
+  /**
+   * Whether THIS screen takes the decision on a gate, or points at the screen that does.
+   *
+   * A single-gate page owns its gate by definition — it exists for nothing else. The full
+   * board owns only the gates with no page of their own: the budget gate it is named after,
+   * and the escalation detour that hangs off it. Handing a hiring manager "Approve
+   * requisition" from a screen titled "Headcount & Budget Approval" is what made the two
+   * scorecard approvals hard to tell apart in the first place.
+   */
+  const ownsDecision = (gate) => !!gate && (!!stage || !gate.page);
+
+  // One gate's queue, or the whole board. The filter is on the requisition's own status, so
+  // a row leaves this screen the moment it is cleared — which is what makes it a queue.
+  const visibleRows = stage ? rows.filter((r) => r.approval_status === stage) : rows;
+  const stageGate = stage ? GATES[stage] : null;
+  const stagePage = stage ? STAGE_PAGES[stage] : null;
 
   const act = async (row, action, remarks, _salary, budget) => {
     setBusy(true);
@@ -182,6 +235,14 @@ const InternalRequisitionList = () => {
         return (
           <>
             <Chip tone={toneFor(r.approval_status)}>{r.approval_status}</Chip>
+            {/* An escalation that was BYPASSED — over sanction, but nobody above the raiser
+                resolved, so it routed straight on. The server records why precisely so this
+                is visible; until this line, nothing showed it. */}
+            {r.escalation_note && (
+              <span className="block text-[10.5px] text-[var(--accent-orange)] mt-0.5">
+                {r.escalation_note}
+              </span>
+            )}
             {sop && (
               <span className="block text-[10.5px] text-[var(--text-muted)] italic mt-0.5">
                 SOP: {sop}
@@ -200,10 +261,17 @@ const InternalRequisitionList = () => {
         const gate = gateFor(r);
         return (
           <div className="flex flex-col items-end gap-1.5">
-            {gate && (
+            {ownsDecision(gate) && (
               <Btn tone="primary" onClick={() => setDeciding({ row: r, gate })}>
                 {gate.label}
               </Btn>
+            )}
+            {gate && !ownsDecision(gate) && (
+              <Link to={gate.page.to}
+                    className="text-[11.5px] font-semibold text-[var(--accent-indigo)]
+                               hover:underline whitespace-nowrap">
+                Decide in {gate.page.label} →
+              </Link>
             )}
             <Btn tone="ghost" onClick={() => setSlaFor(r)}>
               <Timer size={13} /> SLA
@@ -231,6 +299,11 @@ const InternalRequisitionList = () => {
                 SOP: {sopLabelFor(r.approval_status, REQUISITION_SOP_LABEL)}
               </span>
             )}
+            {r.escalation_note && (
+              <span className="block text-[10.5px] text-[var(--accent-orange)] mt-0.5">
+                {r.escalation_note}
+              </span>
+            )}
           </div>
         </div>
         <Facts items={[
@@ -244,10 +317,19 @@ const InternalRequisitionList = () => {
           { label: 'Raised', value: day(r.created_at) },
         ]} />
         <div className="flex gap-2 flex-wrap">
-          {gate && (
+          {/* Same rule as the table: this screen acts on its own gate, and points at the
+              page that owns the others. Without it the buttons come back on mobile. */}
+          {ownsDecision(gate) && (
             <Btn tone="primary" onClick={() => setDeciding({ row: r, gate })}>
               {gate.label}
             </Btn>
+          )}
+          {gate && !ownsDecision(gate) && (
+            <Link to={gate.page.to}
+                  className="inline-flex items-center text-[11.5px] font-semibold
+                             text-[var(--accent-indigo)] hover:underline">
+              Decide in {gate.page.label} →
+            </Link>
           )}
           <Btn tone="ghost" onClick={() => setSlaFor(r)}>SLA</Btn>
           <Btn tone="ghost"
@@ -262,14 +344,19 @@ const InternalRequisitionList = () => {
   return (
     <div className="space-y-5">
       <HrmsPageHeader
-        icon={Wallet}
-        title="Headcount & Budget Approval"
-        subtitle={`${companyName || 'This company'}'s open requisitions — what was `
-          + 'requested against what Management or Finance has sanctioned. Raise a new '
-          + 'request from the Overview screen.'}
+        icon={stage ? ClipboardCheck : Wallet}
+        title={stagePage?.title
+          || (stage ? `${stageGate?.label || stage} queue` : 'Headcount & Budget Approval')}
+        subtitle={stage
+          ? (stagePage?.lead
+             || `${stageGate?.blurb || ''} Cleared here, the requisition moves on to the next gate.`)
+          : `${companyName || 'This company'}'s open requisitions — what was `
+            + 'requested against what Management or Finance has sanctioned. Raise a new '
+            + 'request from the Overview screen.'}
       />
       <HrmsScopeBar />
 
+      {!stage && (
       <div className="flex items-center gap-2" role="tablist" aria-label="View">
         {[
           { key: 'queue', label: 'Action queue', icon: <ListTodo size={14} /> },
@@ -290,6 +377,7 @@ const InternalRequisitionList = () => {
           </button>
         ))}
       </div>
+      )}
 
       {view === 'tracker' && <InternalTracker />}
 
@@ -298,12 +386,14 @@ const InternalRequisitionList = () => {
 
       {view === 'queue' && !loading && !error && (
         <RecordList
-          rows={rows} columns={columns} renderCard={renderCard}
+          rows={visibleRows} columns={columns} renderCard={renderCard}
           keyOf={(r) => r.request_no}
           empty={<HrmsEmpty
             icon={Building}
-            title="No internal requisitions"
-            hint="Raise one from the Overview screen — it's created on the internal track."
+            title={stage ? 'Nothing waiting' : 'No internal requisitions'}
+            hint={stage
+              ? `No requisition is sitting at ${stage}. They appear here the moment one does.`
+              : "Raise one from the Overview screen — it's created on the internal track."}
           />}
         />
       )}

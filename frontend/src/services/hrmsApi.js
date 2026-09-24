@@ -1050,6 +1050,12 @@ export const getClientCompanies = (params) =>
   api.get('/hrms/client-companies', { params });
 
 // ── Client Hiring, step 2b — the job posting and its applications ──
+// Who may sit on a client interview panel — Sparsh's own people. Gated on the same
+// capability that schedules the interview, so the picker can never offer somebody the
+// API would refuse.
+export const getClientPanelOptions = () =>
+  api.get('/hrms/client-interviews/panel-options');
+
 export const getClientPostings = (params) =>
   api.get('/hrms/client-postings', { params });
 export const getClientPosting = (postingNo, params) =>

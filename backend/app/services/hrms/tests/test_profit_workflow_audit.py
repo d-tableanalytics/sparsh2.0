@@ -290,12 +290,13 @@ async def main() -> None:  # noqa: PLR0915
                           IV.create_client_interview(RECRUITER, ACME, {
                               "ccn_no": ccn, "scheduled_at": "2026-09-25T10:30:00Z"}),
                           409)
-        # NOTE the asymmetry, and it is deliberate rather than an oversight: the audit
-        # brief names FIVE client-only decisions, and the assessment review is not one of
-        # them. No Sparsh governance ROLE holds CLIENT_ASSESSMENT_REVIEW -- the recruiter
-        # and the Team Lead are both refused below -- but a superadmin still does, through
-        # the administrative grant. Flagged in the report as a judgement call rather than
-        # silently widened here, because widening the exclusive set is the user's call.
+        # The asymmetry this used to record is gone. No Sparsh governance ROLE held
+        # CLIENT_ASSESSMENT_REVIEW -- the recruiter and the Team Lead are both refused
+        # below -- but a superadmin still did, through the administrative grant, and the
+        # gap was flagged in the report as a judgement call rather than silently widened.
+        # The call has since been made: marking the client's review is the CLIENT's, so the
+        # capability joined CLIENT_DECISION_CAPS and is now subtracted from every Sparsh
+        # role, the owner included.
         for label, actor in (("Recruiter", RECRUITER), ("Team Lead", LEAD)):
             await expect_http(f"{label} cannot mark the client's review",
                               AS.act_on_client_assessment(actor, ACME, cas,
@@ -304,8 +305,13 @@ async def main() -> None:  # noqa: PLR0915
         check("no Sparsh governance role holds the assessment-review capability",
               not any(HA.can(a, M.Cap.CLIENT_ASSESSMENT_REVIEW)
                       for a in (RECRUITER, LEAD, FINANCE, MD)))
-        check("superadmin does, via the administrative grant (see report)",
-              HA.can(OWNER, M.Cap.CLIENT_ASSESSMENT_REVIEW))
+        check("not even the owner does -- it is a client decision now",
+              not HA.can(OWNER, M.Cap.CLIENT_ASSESSMENT_REVIEW))
+        await expect_http("superadmin cannot mark the client's review",
+                          AS.act_on_client_assessment(OWNER, ACME, cas, "client-review"),
+                          403, "client_assessment.review")
+        check("the owner can still READ the assessment they administer",
+              HA.can(OWNER, M.Cap.CLIENT_ASSESSMENT_READ))
         await AS.act_on_client_assessment(ACME_USER, ACME, cas, "client-review")
         check("client review opens the interview stage",
               (await AS.get_client_assessment(LEAD, ACME, cas))["status"]

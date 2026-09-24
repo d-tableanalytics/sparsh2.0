@@ -247,6 +247,10 @@ const TelephonicBoard = () => {
         <RecordModal
           scope={scope}
           preset={adding}
+          // Who a phone screen is actually the next step for: shortlisted on an internal
+          // vacancy and not yet cleared by a call. The same list the "To call" strip is
+          // drawn from, so the picker and the strip can never disagree.
+          eligible={queue}
           onClose={() => setAdding(null)}
           onDone={() => { setAdding(null); load(); }}
           showSuccess={showSuccess} showError={showError}
@@ -256,7 +260,8 @@ const TelephonicBoard = () => {
   );
 };
 
-const RecordModal = ({ scope, preset, onClose, onDone, showSuccess, showError }) => {
+const RecordModal = ({ scope, preset, eligible = [], onClose, onDone,
+                      showSuccess, showError }) => {
   const [form, setForm] = useState({
     uk: preset?.uk || '',
     screened_on: new Date().toISOString().slice(0, 10),
@@ -315,9 +320,34 @@ const RecordModal = ({ scope, preset, onClose, onDone, showSuccess, showError })
     >
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         <div>
-          <label className={LABEL} htmlFor="tel-uk">Candidate ID *</label>
-          <input id="tel-uk" value={form.uk} onChange={set('uk')} className={FIELD}
-            placeholder="CAN-001" readOnly={Boolean(preset?.uk)} />
+          <label className={LABEL} htmlFor="tel-uk">Candidate *</label>
+          {preset?.uk ? (
+            // Opened from the queue: the candidate is decided, so it reads as a fact
+            // rather than a field somebody could change by accident.
+            <input id="tel-uk" value={`${preset.candidate_name || ''} (${preset.uk})`.trim()}
+              className={FIELD} readOnly />
+          ) : eligible.length ? (
+            <select id="tel-uk" value={form.uk} onChange={set('uk')} className={FIELD}>
+              <option value="">Select a candidate…</option>
+              {eligible.map((c) => (
+                <option key={c.uk} value={c.uk}>
+                  {c.candidate_name || c.uk} — {c.designation_name || c.request_no}
+                  {c.attempts ? ` · ${c.attempts} call${c.attempts === 1 ? '' : 's'} so far` : ''}
+                </option>
+              ))}
+            </select>
+          ) : (
+            // Nobody is eligible. Saying so beats an empty dropdown, and typing an ID is
+            // still allowed because the server, not this screen, is the authority on it.
+            <>
+              <input id="tel-uk" value={form.uk} onChange={set('uk')} className={FIELD}
+                placeholder="CAN-001" />
+              <p className="mt-1 text-[11px] text-[var(--text-muted)]">
+                Nobody is waiting for a call right now — a candidate appears here once they
+                are shortlisted on an internal vacancy.
+              </p>
+            </>
+          )}
         </div>
         <div>
           <label className={LABEL} htmlFor="tel-date">Screened on</label>

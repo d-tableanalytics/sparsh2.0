@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field, EmailStr
+from pydantic import BaseModel, Field, EmailStr, field_validator
 from typing import Optional, List
 from datetime import datetime
 from enum import Enum
@@ -9,6 +9,13 @@ class UserRole(str, Enum):
     CLIENTADMIN = "clientadmin"
     CLIENTUSER = "clientuser"
     CUSTOM = "custom"
+
+# The governance ladder, kept in step with models/hrms.ASSIGNABLE_GOVERNANCE_ROLES, which
+# is the authority for it. Named here rather than imported because this module is loaded by
+# auth and by every route that touches a user, and it should not pull the whole HRMS model
+# tree in to validate one string. test_governance_role_field.py asserts the two agree.
+GOVERNANCE_ROLES = {"MD", "HR", "FINANCE", "HOD", "IMPLEMENTOR"}
+
 
 class UserBase(BaseModel):
     email: EmailStr
@@ -33,6 +40,33 @@ class UserBase(BaseModel):
     # Optional with a None default, so no existing user record changes meaning.
     leadership_level: Optional[str] = None  # "L4" | "L5" | "L6" | "L7"
 
+    # The governance ladder (MD / HR / FINANCE / HOD / IMPLEMENTOR), declared HERE on the
+    # base class so it is accepted when an account is CREATED and not only read back.
+    #
+    # Distinct from `role` above, deliberately. `role` is what the account may REACH across
+    # the ERP (superadmin / admin / coach / staff); this is what the person IS in the
+    # organisation. It is read platform-wide, not by one module:
+    #
+    #   auth_controller.client_rank  the MD > HR > HOD > Implementor ladder, which decides
+    #                                who may assign work to whom
+    #   Task & Delegation            a company MD administers their own company's tasks
+    #   TPMS                         governance departments, form links, dashboards,
+    #                                escalations and the client export
+    #   Leadership Score             the HR / MD gates
+    #   Forms                        a form's audience is a governance role (hod / md)
+    #   HRMS                         hrms_role(): HR verifies a requisition, a HOD approves
+    #                                the scorecard, Finance approves the budget
+    #
+    # Making "HOD" a `role` instead would strand the account: every role gate in the app,
+    # the staff directory filter and the sidebar each enumerate the four platform roles, and
+    # a fifth value is absent from all of them.
+    #
+    # Until this line, UserCreate silently dropped the field — pydantic ignores what a model
+    # does not declare — so the only write path was the HRMS Role & Access screen.
+    # UserResponse has always declared it; see the note there about the flags this class has
+    # dropped before.
+    governance_role: Optional[str] = None
+
     # Profile / HR fields (self-editable via PATCH /users/me — see user.py)
     emergency_mobile: Optional[str] = None
     reporting_manager: Optional[str] = None
@@ -49,6 +83,27 @@ class UserBase(BaseModel):
         "templates": {"create": False, "read": True, "update": False, "delete": False},
         "forms": {"create": False, "read": True, "update": False, "delete": False}
     }
+
+    @field_validator("governance_role", mode="before")
+    @classmethod
+    def _normalise_governance_role(cls, value):
+        """Upper-case it, treat blank as unset, and refuse anything unrecognised.
+
+        A typo is otherwise invisible until somebody wonders why the new HR cannot verify a
+        requisition: hrms_role() resolves an unknown value to INTERNAL/EMPLOYEE and says
+        nothing about why. Better to refuse the save than to create an account that looks
+        right and is not.
+        """
+        if value is None:
+            return None
+        text = str(value).strip().upper()
+        if not text:
+            return None
+        if text not in GOVERNANCE_ROLES:
+            raise ValueError(
+                f"governance_role must be one of {sorted(GOVERNANCE_ROLES)}, or empty.")
+        return text
+
 
 class UserCreate(UserBase):
     password: str

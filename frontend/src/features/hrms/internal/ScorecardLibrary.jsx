@@ -20,6 +20,14 @@ import {
  * What "good" looks like for one vacancy, agreed BEFORE anybody is interviewed. HR drafts,
  * the hiring manager approves, and Management approves as well for managerial roles.
  *
+ * ── The approval on THIS page is the scorecard's own ──
+ * It signs the document: these are the criteria we will hire against. It does not approve
+ * the requisition and does not publish anything. The requisition then has its own last gate
+ * ("Final scorecard gate", on the requisition), which is what approves the role and turns
+ * its JD publishable — and which the server refuses until the signature collected here is
+ * in. Two approvals, two owners' intent, one word apart on screen; the wording throughout
+ * this file exists to keep them apart.
+ *
  * The builder shows a live weight breakdown as percentages. Weights do not have to sum to
  * anything — "SQL twice as important as culture fit" is the judgement being captured — but a
  * reader still wants to know what 3-2-1 actually means in practice, so the screen does that
@@ -456,7 +464,8 @@ const ApproveModal = ({ row, scope, onClose, onDone, showSuccess, showError }) =
       const { data } = await approveScorecard(row.scr_no,
         { decision, signature: signature.trim(), remarks: remarks.trim() }, scope);
       showSuccess(data.status === 'Approved'
-        ? `${row.scr_no} approved`
+        ? `${row.scr_no} approved — the bar is set. The requisition still needs its final `
+          + 'scorecard gate before the JD can be published.'
         : `${row.scr_no} recorded — still waiting on `
           + `${(data.approval_state?.outstanding_roles || []).join(', ') || 'approval'}`);
       onDone();
@@ -469,14 +478,16 @@ const ApproveModal = ({ row, scope, onClose, onDone, showSuccess, showError }) =
 
   return (
     <Modal
-      title={`Review ${row.scr_no}`} labelledBy="scr-approve-title"
-      subtitle={row.title || row.designation_name} onClose={onClose}
+      title={`Approve scorecard ${row.scr_no}`} labelledBy="scr-approve-title"
+      subtitle={`${row.title || row.designation_name || ''} — signing the criteria this role `
+        + 'will be hired against. The requisition is approved separately, at its own gate.'}
+      onClose={onClose}
       footer={(
         <>
           <Btn onClick={onClose} disabled={busy}>Cancel</Btn>
           <Btn tone="danger" onClick={() => decide('Fail')} disabled={busy}>Send back</Btn>
           <Btn tone="primary" onClick={() => decide('Pass')} disabled={busy}>
-            <CheckCircle2 size={14} /> {busy ? 'Working…' : 'Approve'}
+            <CheckCircle2 size={14} /> {busy ? 'Working…' : 'Approve scorecard'}
           </Btn>
         </>
       )}

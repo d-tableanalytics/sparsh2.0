@@ -1594,12 +1594,13 @@ def _seed_client_track_caps() -> None:
     })
 
 # ─────────────────────────────────────────────────────────────
-# The five decisions that belong to the CLIENT and to nobody at Sparsh
+# The decisions that belong to the CLIENT and to nobody at Sparsh
 # ─────────────────────────────────────────────────────────────
-# PRO-fit gives the client company five decision points, and the value of the whole track
-# rests on them being genuinely theirs: the scorecard approval, the CV verdict, the
-# selection after interview, the offer release and the joining confirmation. Sparsh
-# sources, screens, administers, scores, verifies and chases -- but does not decide.
+# PRO-fit gives the client company its own decision points, and the value of the whole track
+# rests on them being genuinely theirs: the scorecard approval, the CV verdict, signing off
+# the assessment result, the selection after interview, the offer release and the joining
+# confirmation. Sparsh sources, screens, administers, scores, verifies and chases -- but does
+# not decide.
 #
 # Keeping them out of ROLE_CAPABILITIES was not enough. `capabilities_for` resolves the
 # ADMIN role to "every member of Cap", deliberately, so that a capability added in a later
@@ -1652,10 +1653,14 @@ def _seed_client_decision_caps() -> None:
     CLIENT_DECISION_CAPS.update({
         Cap.CLIENT_SCORECARD_APPROVE,    # 1. the benchmark they will be measured against
         Cap.CLIENT_CANDIDATE_DECIDE,     # 2. the CV verdict, which opens the assessment
-        Cap.CLIENT_INTERVIEW_DECIDE,     # 3. the selection after the interview
-        Cap.CLIENT_OFFER_RELEASE,        # 4. releasing their own employment contract
-        Cap.CLIENT_JOINING_CONFIRM,      # 5. confirming somebody actually started
-        # 6. approving pay above the range they approved. Same logic as the five above:
+        # 3. signing off the assessment result. Sparsh administers the test and marks it;
+        # saying "we have read this and accept it" is the client reading Sparsh's own work,
+        # so a Sparsh role that could tick it would be marking its own homework.
+        Cap.CLIENT_ASSESSMENT_REVIEW,
+        Cap.CLIENT_INTERVIEW_DECIDE,     # 4. the selection after the interview
+        Cap.CLIENT_OFFER_RELEASE,        # 5. releasing their own employment contract
+        Cap.CLIENT_JOINING_CONFIRM,      # 6. confirming somebody actually started
+        # 7. approving pay above the range they approved. Same logic as the six above:
         # it commits the CLIENT's money, so no Sparsh role may do it on their behalf.
         Cap.CLIENT_OFFER_DEVIATE,
     })

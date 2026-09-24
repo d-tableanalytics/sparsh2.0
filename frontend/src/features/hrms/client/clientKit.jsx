@@ -2,8 +2,8 @@ import React, { useState } from 'react';
 import { useHrms } from '../HrmsContext';
 import { Btn, Chip, Modal } from '../internal/internalKit.jsx';
 import { FIELD, LABEL, TEXTAREA } from '../internal/internalKit';
-import { Building2 } from 'lucide-react';
-import { CLIENT_TONE, ClientScopeContext } from './clientKit';
+import { Building2, ExternalLink, FileText } from 'lucide-react';
+import { CLIENT_TONE, ClientScopeContext, cvHref } from './clientKit';
 
 /**
  * HRMS ▸ Client Hiring ▸ shared pieces for the stage screens.
@@ -163,6 +163,38 @@ export const MoveModal = ({ move, busy, onClose, onSubmit }) => {
         )}
       </div>
     </Modal>
+  );
+};
+
+/**
+ * The candidate's CV, as something you can actually open.
+ *
+ * `cv_reference` is a free-text field — "Link or file reference" — so it holds a URL for
+ * some candidates and a filing reference like "CV-2026-014, shared drive" for others. A
+ * link is rendered only when the value really is one, because a reference styled as a link
+ * that goes nowhere is worse than plain text.
+ *
+ * Only http(s) is linkified. The value is typed by a person and rendered into an href, so
+ * `javascript:` and `data:` URLs are exactly the thing that must never become clickable
+ * here. Anything else falls through to text.
+ */
+export const CvLink = ({ value, compact }) => {
+  const raw = String(value || '').trim();
+  if (!raw) return compact ? null : <span>—</span>;
+  const href = cvHref(raw);
+  if (!href) {
+    // A reference rather than a link: say so, and show it, so it can still be acted on.
+    return compact
+      ? <span className="text-[11px] text-[var(--text-muted)]">CV: {raw}</span>
+      : <span>{raw}</span>;
+  }
+  return (
+    <a href={href} target="_blank" rel="noopener noreferrer"
+      className={`inline-flex items-center gap-1 font-semibold text-[var(--accent-indigo)]
+        hover:underline ${compact ? 'text-[11px]' : 'text-[12.5px]'}`}>
+      <FileText size={compact ? 11 : 13} /> {compact ? 'CV' : 'Open CV / résumé'}
+      <ExternalLink size={compact ? 10 : 12} />
+    </a>
   );
 };
 
