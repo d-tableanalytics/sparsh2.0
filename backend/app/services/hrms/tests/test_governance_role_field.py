@@ -88,8 +88,12 @@ def main() -> int:
           HA.hrms_role(staff(governance_role="FINANCE")) == M.HrmsRole.FINANCE)
     check("MD resolves to the MD rung",
           HA.hrms_role(staff(governance_role="MD")) == M.HrmsRole.MD)
-    check("no rung means the ordinary internal role",
-          HA.hrms_role(staff()) == M.HrmsRole.INTERNAL)
+    # Every staff member is an employee (product owner, 2026-09-26): no rung means
+    # EMPLOYEE self-service. Only a platform admin keeps the separate support/admin role.
+    check("no rung means an ordinary employee",
+          HA.hrms_role(staff()) == M.HrmsRole.EMPLOYEE)
+    check("...except a platform admin, who keeps HRMS support/admin",
+          HA.hrms_role(staff(role="admin")) == M.HrmsRole.INTERNAL)
 
     section("It is a governance rung, NOT a platform role")
     # The distinction this whole change rests on: `role` is what the account may reach,

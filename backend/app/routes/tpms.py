@@ -43,7 +43,9 @@ from app.services.tpms_schedule_service import (
 from app.services.tpms_client_export_service import (
     ExportNotPermitted, build_client_report, export_client_workbook,
 )
-from app.services.tpms_upload_service import list_task_uploads, upload_task_file
+from app.services.tpms_upload_service import (
+    list_task_uploads, upload_counts, upload_required_activities, upload_task_file,
+)
 from app.services.tpms_dashboard_service import (
     get_analytics, get_employee_activity, get_escalation_dashboard, get_hod_dashboard,
     get_implementation_tracker, get_learner_dashboard, get_logs_report,
@@ -703,6 +705,7 @@ async def list_tpms_schedules(
 
     uid = str(current_user.get("_id"))
     events = []
+    flagged = await upload_required_activities()     # the catalogue's CURRENT setting
     for coll in CAL_COLLECTIONS:
         for e in await get_collection(coll).find(query).to_list(2000):
             is_doer = uid in {str(m) for m in (e.get("assigned_member_ids") or [])}
@@ -726,13 +729,20 @@ async def list_tpms_schedules(
                 "reschedule_count": e.get("reschedule_count") or 0,
                 "learner_done": bool(e.get("learner_done")),
                 "completed_at": e.get("completed_at"),
-                "upload_required": bool((e.get("activity_meta") or {}).get("upload_required")),
+                # The occurrence's own snapshot OR the activity's current setting — an
+                # occurrence scheduled before the activity required uploads had no flag, so
+                # its attachments panel never showed.
+                "upload_required": bool((e.get("activity_meta") or {}).get("upload_required"))
+                                   or (e.get("activity") in flagged),
                 "reminder_count": len(e.get("reminders") or []),
                 "mine": mine,
                 "is_doer": is_doer,
                 "scheduled_by": e.get("scheduled_by_side") or "",       # M1 — internal | client
                 "scheduled_by_name": e.get("scheduled_by_name") or "",
             })
+    counts = await upload_counts([ev["id"] for ev in events if ev["upload_required"]])
+    for ev in events:
+        ev["upload_count"] = counts.get(ev["id"], 0)
     events.sort(key=lambda x: (x["date"], x["time"]))
     return {"events": events}
 

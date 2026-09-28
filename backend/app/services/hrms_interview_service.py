@@ -793,7 +793,11 @@ async def update_interview(actor: dict, company_id: str, interview_no: str,
     await audit(actor, action, ENTITY_INTERVIEW, interview_no,
                 ", ".join(sorted(k for k in updates if k != "updated_at")), company_id)
 
-    fresh = await get_collection(COLL_INTERVIEWS).find_one({"interview_no": interview_no})
+    # Scoped by company: `interview_no` is unique only within one. Unscoped, a reschedule
+    # here could read ANOTHER tenant's interview of the same number — and then notify that
+    # company's panel and candidate about it, and return it to this caller.
+    fresh = await get_collection(COLL_INTERVIEWS).find_one(
+        {"interview_no": interview_no, "company_id": str(company_id)})
     told = None
     if rescheduled:
         await _notify_scheduled(fresh, rescheduled=True)
@@ -927,7 +931,8 @@ async def evaluate_interview(actor: dict, company_id: str, interview_no: str,
 
     await _advance_candidate(actor, company_id, current, outcome)
 
-    fresh = await get_collection(COLL_INTERVIEWS).find_one({"interview_no": interview_no})
+    fresh = await get_collection(COLL_INTERVIEWS).find_one(
+        {"interview_no": interview_no, "company_id": str(company_id)})
     return _out(fresh)
 
 

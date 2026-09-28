@@ -1945,6 +1945,9 @@ class Cap(str, Enum):
     ATTENDANCE_REGULARIZE_REQUEST = "attendance.regularize_request"
     ATTENDANCE_REGULARIZE_APPROVE = "attendance.regularize_approve"
     ATTENDANCE_LOCK              = "attendance.lock"          # monthly closure (§7.12)
+    # Seeing the monthly-closure dashboard without being able to lock/unlock it — the MD's
+    # review-only view. Whoever may lock may of course also look (see capabilities_for).
+    ATTENDANCE_CLOSURE_READ      = "attendance.closure_read"
     OD_REQUEST = "od.request"
     OD_APPROVE = "od.approve"
     LEAVE_READ         = "leave.read"
@@ -8810,7 +8813,8 @@ class AdvancePolicyIn(BaseModel):
 
 
 class SalaryAdvanceIn(BaseModel):
-    employee_code: str
+    # Omitted by an employee requesting for themselves — the service resolves their own.
+    employee_code: Optional[str] = None
     amount: float
     reason: Optional[str] = None
 

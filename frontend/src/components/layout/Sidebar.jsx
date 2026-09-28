@@ -230,7 +230,21 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
   // True for a client company's own user: they reach Client Hiring and nothing else.
   const clientTrackOnly = isClientTrackUser(user);
 
-  const hrmsSubmodules = [
+  // Every Sparsh staff member is an employee. Somebody with no HRMS duty (no governance
+  // role, not a platform admin) gets their OWN pages only — the same split the API makes
+  // in utils/hrms_access.hrms_role, so no link leads to a "no access" screen.
+  const isHrmsEmployeeOnly = user?.role !== 'superadmin' && user?.role !== 'admin'
+    && ['staff', 'coach'].includes(user?.role)
+    && !(user?.governance_role || '').trim();
+  const hrmsSelfService = [
+    { section: 'My HR' },
+    { name: 'Attendance', path: '/hrms/attendance', icon: Clock },
+    { name: 'Leave & C-Off', path: '/hrms/leave', icon: CalendarCheck },
+    { name: 'Payslip & Advance', path: '/hrms/payroll', icon: Wallet },
+    { name: 'My PIP', path: '/hrms/pip', icon: TrendingDown },
+    { name: 'Letters', path: '/hrms/letters', icon: FileCog },
+  ];
+  const hrmsSubmodules = isHrmsEmployeeOnly ? hrmsSelfService : ([
     { section: 'Overview' },
     { name: 'Dashboard', path: '/hrms/dashboard', icon: BarChart3 },
     { name: 'Employees', path: '/hrms/employees', icon: Users },
@@ -353,7 +367,7 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
       // capability gates are unchanged -- they are simply not advertised in the nav.
       // Re-add an entry here if one of them needs a door again.
     ] : []),
-  ];
+  ]);
 
   const links = [
     { name: 'Dashboard', path: '/', icon: LayoutDashboard, roles: ['superadmin', 'admin', 'clientadmin', 'clientuser', 'coach', 'staff'] },

@@ -4,6 +4,8 @@ import { useHrms } from '../HrmsContext';
 import { CAP } from '../access';
 import HrmsPageHeader from '../common/HrmsPageHeader';
 import BoardTabs from '../common/BoardTabs';
+import { ProcessGuide } from '../common/ProcessGuide';
+import { MOVEMENT_GUIDES } from '../common/processGuides';
 import HrmsScopeBar from '../common/HrmsScopeBar';
 import { HrmsLoading, HrmsError, HrmsEmpty } from '../common/HrmsStates';
 import { useNotification } from '../../../context/NotificationContext';
@@ -86,12 +88,14 @@ const EmployeePicker = ({ scope, value, onChange, placeholder }) => {
           border border-[var(--border)] bg-[var(--bg-card)] shadow-lg">
           {searching && <p className="px-3 py-2 text-[12px] text-[var(--text-muted)]">Searching…</p>}
           {!searching && options.map((o) => (
-            <button key={o.user_id} type="button"
+            <button key={o.user_id} type="button" disabled={!o.employee_code}
               onClick={() => { onChange(o); setOptions([]); }}
-              className="block w-full text-left px-3 py-2 text-[12.5px] hover:bg-[var(--input-bg)]">
+              className="block w-full text-left px-3 py-2 text-[12.5px] hover:bg-[var(--input-bg)] disabled:opacity-60 disabled:cursor-not-allowed disabled:hover:bg-transparent">
               <span className="text-[var(--text-main)]">{o.name}</span>
               <span className="block text-[11px] text-[var(--text-muted)]">
-                {o.employee_code} · {o.designation || '—'} · {o.employment_status}
+                {o.employee_code
+                  ? `${o.employee_code} · ${o.designation || '—'} · ${o.employment_status || '—'}`
+                  : 'No employee profile yet — open them on the Employees page to create one.'}
               </span>
             </button>
           ))}
@@ -128,11 +132,12 @@ const MovementsBoard = () => {
       <HrmsPageHeader
         icon={GitBranch}
         title="Employee Movements & Discipline"
-        subtitle="Promotions, transfers and compensation changes; discipline, absconding and retirement alerts."
+        subtitle="Promotions, transfers and pay changes; discipline, absence without notice, and retirement reminders."
       />
       <HrmsScopeBar />
 
       <BoardTabs tabs={TABS} value={tab} onChange={setTab} label="Movements sections" />
+      {MOVEMENT_GUIDES[tab] && <ProcessGuide key={tab} guide={MOVEMENT_GUIDES[tab]} />}
 
       {tab === 'Movements' && (
         <MovementsTab scope={scope} companyId={companyId} can={can}
@@ -334,11 +339,17 @@ const ProposeMovementModal = ({ scope, onClose, onDone, showSuccess, showError }
       {!DESIGNATION_TYPES.has(movementType) && movementType !== 'Manager Change' && (
         <div>
           <label className={LABEL} htmlFor="move-value">
-            {movementType === 'Compensation Change' ? 'Proposed Monthly Salary *' : 'Proposed Value *'}
+            {movementType === 'Compensation Change' ? 'New monthly salary (₹, before deductions) *' : 'Proposed Value *'}
           </label>
           <input id="move-value" value={freeValue} className={FIELD}
             type={movementType === 'Compensation Change' ? 'number' : 'text'}
             onChange={(e) => setFreeValue(e.target.value)} />
+          {movementType === 'Compensation Change' && (
+            <p className="mt-1 text-[11px] text-[var(--text-muted)]">
+              Once approved, this becomes their salary in payroll from the effective date — every
+              earning line is scaled to the new total. They must already have a salary set.
+            </p>
+          )}
         </div>
       )}
       <div>
@@ -768,7 +779,7 @@ const AbscondingPolicyModal = ({ policy, scope, onClose, onDone, showSuccess, sh
 
   return (
     <Modal title="Absconding Policy" labelledBy="absc-policy-title"
-      subtitle="§7.19 — adjustable defaults, not a frozen rule." onClose={onClose}
+      subtitle="Starting values — you can change them." onClose={onClose}
       footer={(
         <>
           <Btn onClick={onClose} disabled={busy}>Cancel</Btn>
@@ -806,7 +817,7 @@ const FlagAbscondingModal = ({ scope, onClose, onDone, showSuccess, showError })
 
   return (
     <Modal title="Flag Absconding" labelledBy="absc-flag-title"
-      subtitle="3 consecutive unexplained working days without acceptable communication (§7.19)."
+      subtitle="For an employee absent for 3 working days in a row with no explanation. The date cannot be in the future."
       onClose={onClose}
       footer={(
         <>
@@ -969,8 +980,8 @@ const RetirementTab = ({ scope, companyId, can, showSuccess, showError }) => {
       {policy && !policy.policy_confirmed && (
         <div className="rounded-xl border border-[var(--accent-orange-bg)] bg-[var(--accent-orange-bg)]
           p-3.5 text-[12px] text-[var(--accent-orange)]">
-          Retirement age ({policy.retirement_age}) is an adjustable DEFAULT, not the client's
-          confirmed policy — §7.20 leaves the exact age unconfirmed.
+          The retirement age ({policy.retirement_age}) is a starting value that has not been
+          confirmed as company policy yet. Change it with Edit Policy once it is agreed.
         </div>
       )}
       <div className="flex items-center justify-between">
@@ -994,19 +1005,27 @@ const RetirementTab = ({ scope, companyId, can, showSuccess, showError }) => {
               ) },
               { key: 'dob', label: 'Date of Birth', render: (r) => <span>{day(r.date_of_birth)}</span> },
               { key: 'retirement', label: 'Retirement Date', align: 'right',
-                render: (r) => <span className="font-semibold">{day(r.retirement_date)}</span> },
+                render: (r) => (
+                  <div className="flex flex-col items-end gap-1">
+                    <span className="font-semibold">{day(r.retirement_date)}</span>
+                    {r.overdue
+                      ? <Chip tone="bad">Overdue — still active</Chip>
+                      : <Chip tone="warn">Upcoming</Chip>}
+                  </div>
+                ) },
             ]}
             renderCard={(r) => (
               <Facts items={[
                 { label: 'Employee', value: r.display_name || r.employee_code },
                 { label: 'Date of Birth', value: day(r.date_of_birth) },
-                { label: 'Retirement Date', value: day(r.retirement_date) },
+                { label: 'Retirement Date', value: `${day(r.retirement_date)}${r.overdue ? ' — overdue' : ''}` },
               ]} />
             )}
             keyOf={(r) => r.employee_code}
           />
         ) : (
-          <HrmsEmpty icon={Clock4} title="No upcoming retirements in the alert window" />
+          <HrmsEmpty icon={Clock4} title="No upcoming retirements in the alert window"
+            hint="Alerts need a date of birth on the employee's profile (Employees → Personal)." />
         )
       )}
       {editingPolicy && (

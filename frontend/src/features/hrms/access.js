@@ -214,6 +214,7 @@ export const CAP = {
   ATTENDANCE_REGULARIZE_REQUEST: 'attendance.regularize_request',
   ATTENDANCE_REGULARIZE_APPROVE: 'attendance.regularize_approve',
   ATTENDANCE_LOCK: 'attendance.lock',
+  ATTENDANCE_CLOSURE_READ: 'attendance.closure_read',
   OD_REQUEST: 'od.request',
   OD_APPROVE: 'od.approve',
   LEAVE_READ: 'leave.read',

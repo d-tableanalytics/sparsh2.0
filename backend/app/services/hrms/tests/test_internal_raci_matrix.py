@@ -405,9 +405,32 @@ async def main() -> None:
         # says this assertion was rewritten to follow.
         CLIENT_TRACK = {c for c in M.Cap if c.value.startswith("client_")}
         md_missing = set(M.Cap) - set(M.ROLE_CAPABILITIES[M.HrmsRole.MD])
+        # ATTENDANCE_CLOSURE_READ is granted in capabilities_for (to whoever may lock, and to
+        # the MD), not listed per role.
         check("(actual) on the INTERNAL track the MD holds every capability but one",
-              md_missing - SELF_SERVICE_ONLY - CLIENT_TRACK
+              md_missing - SELF_SERVICE_ONLY - CLIENT_TRACK - {M.Cap.ATTENDANCE_CLOSURE_READ}
               == {M.Cap.REQUISITION_REVIEW_HR})
+
+        # ...but what the MD can actually DO is decided by capabilities_for, and there the MD
+        # is review-only for Payroll and Attendance (product owner, 2026-09-28): every read
+        # kept, every action withheld — and each action still held by somebody else.
+        from app.utils.hrms_access import MD_REVIEW_ONLY_WITHHELD, capabilities_for
+        md_user = {"role": "staff", "governance_role": "MD", "_source_collection": "staff"}
+        md_caps = capabilities_for(md_user)
+        check("the MD can take NO payroll or attendance action",
+              not (md_caps & MD_REVIEW_ONLY_WITHHELD))
+        check("...but can review all of it",
+              {M.Cap.PAYROLL_READ, M.Cap.SALARY_STRUCTURE_READ, M.Cap.ADVANCE_READ,
+               M.Cap.VARIABLE_PAY_READ, M.Cap.ATTENDANCE_READ, M.Cap.ATTENDANCE_CLOSURE_READ} <= md_caps)
+        orphaned = [c.name for c in MD_REVIEW_ONLY_WITHHELD
+                    if not any(c in M.ROLE_CAPABILITIES[r] for r in M.ROLE_CAPABILITIES
+                               if r not in (M.HrmsRole.MD, M.HrmsRole.ADMIN))]
+        check("...and every action taken from the MD is still held by another role",
+              not orphaned or set(orphaned) <= {"ATTENDANCE_REGULARIZE_REQUEST", "OD_REQUEST", "ADVANCE_REQUEST"})
+        check("the MD does not apply for leave or claim C-Off (not an employee)",
+              M.Cap.LEAVE_APPLY not in md_caps and M.Cap.COFF_EARN_REQUEST not in md_caps)
+        check("...but still sees leave and approves other people's",
+              M.Cap.LEAVE_READ in md_caps and M.Cap.LEAVE_APPROVE in md_caps)
 
         # What the MD does hold on the client track is oversight, and that is asserted
         # positively so "withheld" cannot quietly become "absent altogether".

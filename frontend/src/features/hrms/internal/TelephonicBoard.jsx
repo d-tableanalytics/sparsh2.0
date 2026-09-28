@@ -181,7 +181,7 @@ const TelephonicBoard = () => {
               To call ({queue.length})
             </h2>
             <p className="text-[11.5px] text-[var(--text-muted)]">
-              Shortlisted on an internal vacancy, not yet cleared by a call.
+              On an internal vacancy and heading for the panel, not yet cleared by a call.
             </p>
           </div>
           <ul className="mt-3 flex flex-wrap gap-2">
@@ -344,7 +344,7 @@ const RecordModal = ({ scope, preset, eligible = [], onClose, onDone,
                 placeholder="CAN-001" />
               <p className="mt-1 text-[11px] text-[var(--text-muted)]">
                 Nobody is waiting for a call right now — a candidate appears here once they
-                are shortlisted on an internal vacancy.
+                are CV-shortlisted on an internal vacancy, and stays until a call clears them.
               </p>
             </>
           )}

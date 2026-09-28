@@ -124,7 +124,13 @@ export const PayslipDocument = ({ slip }) => (
           <p className="text-[11px] font-bold uppercase tracking-wide text-slate-500 mb-2">Earnings</p>
           {[...slip.earnings, ...slip.other_earnings].map((r) => (
             <div key={r.label} className="flex justify-between text-[12.5px] py-1">
-              <span>{r.label}</span><span>{money(r.amount)}</span>
+              <span>
+                {r.label}
+                {r.full_amount != null && (
+                  <span className="text-slate-400 text-[11px]"> (of {money(r.full_amount)})</span>
+                )}
+              </span>
+              <span>{money(r.amount)}</span>
             </div>
           ))}
           {!slip.earnings.length && !slip.other_earnings.length && (

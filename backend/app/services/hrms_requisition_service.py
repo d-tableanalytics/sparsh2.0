@@ -526,7 +526,8 @@ async def get_requisition(actor: dict, company_id: str, request_no: str,
 
     out = _out(doc)
     if with_jd and doc.get("jd_no"):
-        jd = await get_collection(COLL_JOB_DESCRIPTIONS).find_one({"jd_no": doc["jd_no"]})
+        jd = await get_collection(COLL_JOB_DESCRIPTIONS).find_one(
+            {"jd_no": doc["jd_no"], "company_id": str(company_id)})
         out["jd"] = _out(jd) if jd else None
     return out
 

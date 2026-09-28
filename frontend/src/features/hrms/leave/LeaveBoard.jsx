@@ -4,7 +4,11 @@ import { useHrms } from '../HrmsContext';
 import { CAP } from '../access';
 import HrmsPageHeader from '../common/HrmsPageHeader';
 import BoardTabs from '../common/BoardTabs';
+import { useSelfEmployee } from '../common/useSelfEmployee';
+import SelfEmployeeChip from '../common/SelfEmployeeChip';
 import HrmsScopeBar from '../common/HrmsScopeBar';
+import { ProcessGuide, NextStep } from '../common/ProcessGuide';
+import { LEAVE_GUIDE, leaveNextStep } from '../common/processGuides';
 import { HrmsLoading, HrmsError, HrmsEmpty } from '../common/HrmsStates';
 import { useNotification } from '../../../context/NotificationContext';
 import {
@@ -26,6 +30,8 @@ import { Btn, Chip, Facts, Modal, RecordList } from '../internal/internalKit.jsx
 const TABS = ['Leave Requests', 'Balances', 'Compensatory Off', 'Leave Policy'];
 
 const EmployeePicker = ({ scope, value, onChange }) => {
+  // An employee acts for themselves only (and cannot search the directory): lock to "You".
+  const self = useSelfEmployee(value, onChange);
   const [search, setSearch] = useState('');
   const [debounced, setDebounced] = useState('');
   const [options, setOptions] = useState([]);
@@ -53,6 +59,7 @@ const EmployeePicker = ({ scope, value, onChange }) => {
     return () => { live = false; };
   }, [debounced, value, scope]);
 
+  if (self.selfOnly) return <SelfEmployeeChip me={self.me} />;
   if (value) {
     return (
       <div className="flex items-center justify-between gap-2 rounded-lg border
@@ -77,12 +84,14 @@ const EmployeePicker = ({ scope, value, onChange }) => {
           border border-[var(--border)] bg-[var(--bg-card)] shadow-lg">
           {searching && <p className="px-3 py-2 text-[12px] text-[var(--text-muted)]">Searching…</p>}
           {!searching && options.map((o) => (
-            <button key={o.user_id} type="button"
+            <button key={o.user_id} type="button" disabled={!o.employee_code}
               onClick={() => { onChange(o); setOptions([]); }}
-              className="block w-full text-left px-3 py-2 text-[12.5px] hover:bg-[var(--input-bg)]">
+              className="block w-full text-left px-3 py-2 text-[12.5px] hover:bg-[var(--input-bg)] disabled:opacity-60 disabled:cursor-not-allowed disabled:hover:bg-transparent">
               <span className="text-[var(--text-main)]">{o.name}</span>
               <span className="block text-[11px] text-[var(--text-muted)]">
-                {o.employee_code} · {o.designation || '—'} · {o.employment_status}
+                {o.employee_code
+                  ? `${o.employee_code} · ${o.designation || '—'} · ${o.employment_status || '—'}`
+                  : 'No employee profile yet — open them on the Employees page to create one.'}
               </span>
             </button>
           ))}
@@ -119,9 +128,10 @@ const LeaveBoard = () => {
       <HrmsPageHeader
         icon={CalendarDays}
         title="Leave & Compensatory Off"
-        subtitle="Apply, approve, track balances and configure the leave-type register."
+        subtitle="Apply for leave, follow its approval, and see how much is left."
       />
       <HrmsScopeBar />
+      <ProcessGuide guide={LEAVE_GUIDE} />
 
       <BoardTabs tabs={TABS} value={tab} onChange={setTab} label="Leave sections" />
 
@@ -171,6 +181,7 @@ const LeaveTab = ({ scope, companyId, can, showSuccess, showError }) => {
       <>
         <span className="font-semibold text-[var(--text-main)]">{r.employee_name || r.employee_code}</span>
         <span className="block text-[11px] text-[var(--text-muted)]">{r.leave_no}</span>
+        <NextStep step={leaveNextStep(r, can(CAP.LEAVE_APPROVE))} className="mt-1.5" />
       </>
     ) },
     { key: 'type', label: 'Type', render: (r) => (
@@ -210,6 +221,7 @@ const LeaveTab = ({ scope, companyId, can, showSuccess, showError }) => {
         { label: 'Dates', value: `${day(r.start_date)} – ${day(r.end_date)} (${r.days_count}d)` },
         { label: 'Reason', value: r.reason },
       ]} />
+      <NextStep step={leaveNextStep(r, can(CAP.LEAVE_APPROVE))} />
       <div className="flex gap-1.5">
         {can(CAP.LEAVE_APPROVE) && ['Pending', 'Manager Approved'].includes(r.status) && (
           <Btn tone="ghost" onClick={() => setActing({ row: r, mode: 'act' })}>Act</Btn>
@@ -287,7 +299,7 @@ const ApplyModal = ({ scope, onClose, onDone, showSuccess, showError }) => {
 
   return (
     <Modal title="Apply Leave" labelledBy="leave-apply-title"
-      subtitle="Balance is validated before the request is even raised (§7.10)."
+      subtitle="The leave balance is checked before the request is sent."
       onClose={onClose}
       footer={(
         <>
@@ -327,6 +339,9 @@ const ApplyModal = ({ scope, onClose, onDone, showSuccess, showError }) => {
           </div>
         )}
       </div>
+      <p className="-mt-1 text-[11px] text-[var(--text-muted)]">
+        Only working days are counted — Saturdays, Sundays and company holidays in the range are free.
+      </p>
       <div>
         <label className={LABEL} htmlFor="leave-reason">Reason</label>
         <textarea id="leave-reason" rows={2} value={reason} className={TEXTAREA}
@@ -481,6 +496,12 @@ const CoffTab = ({ scope, companyId, can, showSuccess, showError }) => {
     { key: 'expiry', label: 'Expires', render: (r) => (
       <span className="text-[var(--text-main)]">{r.expiry_date ? day(r.expiry_date) : '—'}</span>
     ) },
+    // How much of the credit is still usable — a half-day leave now takes half a day.
+    { key: 'left', label: 'Days Left', render: (r) => (
+      <span className="text-[var(--text-main)]">
+        {['Available', 'Used'].includes(r.status) ? `${(r.remaining_days ?? r.credited_days ?? 1)} of ${r.credited_days ?? 1}` : '—'}
+      </span>
+    ) },
     { key: 'status', label: 'Status', align: 'right', render: (r) => (
       <div className="flex flex-col items-end gap-1.5">
         <Chip tone={attLeaveToneFor(r.status)}>{r.status}</Chip>
@@ -500,6 +521,7 @@ const CoffTab = ({ scope, companyId, can, showSuccess, showError }) => {
       <Facts items={[
         { label: 'Worked On', value: day(r.earned_for_date) },
         { label: 'Expires', value: r.expiry_date ? day(r.expiry_date) : '—' },
+        { label: 'Days Left', value: ['Available', 'Used'].includes(r.status) ? `${(r.remaining_days ?? r.credited_days ?? 1)} of ${r.credited_days ?? 1}` : '—' },
         { label: 'Note', value: r.note },
       ]} />
       {can(CAP.COFF_APPROVE) && r.status === 'Pending Approval' && (
@@ -555,7 +577,7 @@ const CoffEarnModal = ({ scope, onClose, onDone, showSuccess, showError }) => {
 
   return (
     <Modal title="Log Worked Holiday" labelledBy="coff-earn-title"
-      subtitle="Approved work on a weekly off/holiday earns a Compensatory Off credit (§7.11)."
+      subtitle="Worked on a Saturday, Sunday or company holiday? Once approved, that earns a day off in return. Each day can be claimed once."
       onClose={onClose}
       footer={(
         <>
@@ -648,9 +670,9 @@ const PolicyTab = ({ scope, companyId, can, showSuccess, showError }) => {
     <div className="space-y-4">
       <div className="rounded-xl border border-[var(--accent-orange-bg)] bg-[var(--accent-orange-bg)]
         p-3.5 text-[12px] text-[var(--accent-orange)]">
-        These policy numbers are adjustable DEFAULTS, not the client's confirmed policy —
-        §22.8 leaves CL/SL/EL/C-Off entitlement, accrual, carry-forward and expiry explicitly
-        unconfirmed. Edit them once the client's HR policy is frozen.
+        These numbers are starting values, not the company's confirmed policy. How many
+        casual, sick and earned leave days people get, how they build up, carry over and
+        expire is still to be confirmed. Edit them once the HR policy is agreed.
       </div>
       {loading && <HrmsLoading label="Loading leave types…" />}
       {error && !loading && <HrmsError message={error} onRetry={load} />}
@@ -745,7 +767,7 @@ const PolicyEditModal = ({ type, scope, onClose, onDone, showSuccess, showError 
       </label>
       <label className="flex items-center gap-2 text-[12px] text-[var(--text-muted)]">
         <input type="checkbox" checked={confirmed} onChange={(e) => setConfirmed(e.target.checked)} />
-        Client has confirmed this policy (§22.8)
+        The company has confirmed this policy
       </label>
     </Modal>
   );

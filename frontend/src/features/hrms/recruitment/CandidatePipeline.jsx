@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import {
   Users2, Search, Plus, LayoutGrid, List as ListIcon, Columns3, X, Route, AlertTriangle,
   Mail, Phone, Save, Trash2, FileText, Download, Link2, Globe, Paperclip,
-  Image as ImageIcon, Check, Minus,
+  Image as ImageIcon, Check, Minus, Bookmark,
 } from 'lucide-react';
 import { useNotification } from '../../../context/NotificationContext';
 import { useHrms } from '../HrmsContext';
@@ -13,7 +13,7 @@ import { HrmsLoading, HrmsError, HrmsEmpty } from '../common/HrmsStates';
 import {
   getCandidates, getCandidate, updateCandidate, deleteCandidate, createCandidate,
   getRequisitions, getCandidateCv, getCandidateAttachment,
-  getAssessments, getTelephonicScreenings, getCandidateInterviews,
+  getAssessments, getTelephonicScreenings, getCandidateInterviews, setTalentPool,
 } from '../../../services/hrmsApi';
 import { CandidateJourneyModal } from './CandidateJourney';
 import { CANDIDATE_SOP_LABEL, sopLabelFor } from '../internal/sopLabels';
@@ -274,6 +274,129 @@ const Consent = ({ ok, at, label }) => (
     </p>
   </div>
 );
+
+/**
+ * Talent pool, from the candidate's own record — the only way in.
+ *
+ * Joining needs the candidate's consent to be kept for future roles. Usually that was ticked
+ * on the application form; if they agreed later (by email or on a call), HR records it here,
+ * explicitly, before the button unlocks. The server refuses a join without consent and caps
+ * how long it lasts at the record's keep-until date, so this form never promises longer.
+ */
+const TalentPoolSection = ({ c, canWrite, scope, onSaved, showSuccess, showError }) => {
+  const [tags, setTags] = useState((c.talent_pool_tags || []).join(', '));
+  const [agreedLater, setAgreedLater] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const consented = !!c.consent_to_retain;
+  const parsedTags = tags.split(',').map((t) => t.trim()).filter(Boolean);
+
+  const save = async (joining) => {
+    setBusy(true);
+    try {
+      const { data } = await setTalentPool(c.uk, joining
+        ? { talent_pool: true, talent_pool_tags: parsedTags, consent_to_retain: consented || agreedLater }
+        : { talent_pool: false, remarks: 'Removed from the candidate record' }, scope);
+      showSuccess(joining
+        ? (c.talent_pool ? 'Talent-pool tags updated' : `${c.candidate_name} added to the talent pool`)
+        : `${c.candidate_name} removed from the talent pool`);
+      setEditing(false);
+      onSaved(data);
+    } catch (err) {
+      showError(err?.response?.data?.detail || 'Could not update the talent pool.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const tagInput = (
+    <div>
+      <label htmlFor="tp-tags" className="block text-[11px] font-bold text-[var(--text-muted)] mb-1">
+        Tags <span className="font-normal">— skills or roles to find them by, separated by commas</span>
+      </label>
+      <input id="tp-tags" value={tags} onChange={(e) => setTags(e.target.value)}
+        placeholder="e.g. python, sales, team lead"
+        className="w-full h-9 px-3 rounded-lg border border-[var(--border)] bg-[var(--input-bg)] text-[13px] text-[var(--text-main)]" />
+    </div>
+  );
+
+  if (c.talent_pool) {
+    return (
+      <Section title="Talent pool">
+        <div className="rounded-lg border border-[var(--accent-green,#16a34a)]/30 bg-[var(--accent-green-bg)] p-3 space-y-2">
+          <p className="text-[12.5px] font-bold text-[var(--text-main)] flex items-center gap-1.5">
+            <Bookmark size={14} className="text-[var(--accent-green,#16a34a)]" /> In the talent pool
+          </p>
+          <p className="text-[11.5px] text-[var(--text-muted)]">
+            Kept for future roles{c.consent_expires_at ? ` until ${new Date(c.consent_expires_at).toLocaleDateString()}` : ''}.
+            Find them under HRMS → Talent Pool.
+          </p>
+          {!editing && (c.talent_pool_tags || []).length > 0 && (
+            <div className="flex flex-wrap gap-1.5">
+              {c.talent_pool_tags.map((t) => (
+                <span key={t} className="px-2 py-0.5 rounded-full bg-[var(--bg-card)] text-[11px] font-semibold text-[var(--text-main)]">{t}</span>
+              ))}
+            </div>
+          )}
+          {editing && tagInput}
+          {canWrite && (
+            <div className="flex gap-2 pt-1">
+              {editing ? (
+                <>
+                  <button type="button" disabled={busy} onClick={() => save(true)}
+                    className="h-8 px-3 rounded-lg bg-[var(--accent-indigo)] text-white text-[12px] font-bold disabled:opacity-50">Save tags</button>
+                  <button type="button" disabled={busy} onClick={() => setEditing(false)}
+                    className="h-8 px-3 rounded-lg border border-[var(--border)] text-[12px] font-bold text-[var(--text-muted)]">Cancel</button>
+                </>
+              ) : (
+                <>
+                  <button type="button" onClick={() => setEditing(true)}
+                    className="h-8 px-3 rounded-lg border border-[var(--border)] bg-[var(--bg-card)] text-[12px] font-bold text-[var(--text-main)]">Edit tags</button>
+                  <button type="button" disabled={busy} onClick={() => save(false)}
+                    className="h-8 px-3 rounded-lg border border-[var(--border)] bg-[var(--bg-card)] text-[12px] font-bold text-[var(--accent-red)] disabled:opacity-50">Remove from pool</button>
+                </>
+              )}
+            </div>
+          )}
+        </div>
+      </Section>
+    );
+  }
+
+  if (!canWrite) return null;
+  const ready = consented || agreedLater;
+  return (
+    <Section title="Talent pool">
+      <div className="rounded-lg border border-[var(--border)] p-3 space-y-2.5">
+        <p className="text-[12px] text-[var(--text-muted)]">
+          Keep this candidate on file so they can be offered a future role — even if this one
+          does not work out.
+        </p>
+        {consented ? (
+          <p className="text-[12px] text-[var(--text-main)] flex items-start gap-1.5">
+            <Check size={14} className="mt-0.5 shrink-0 text-[var(--accent-green,#16a34a)]" />
+            They agreed to be kept for future roles on their application.
+          </p>
+        ) : (
+          <label className="flex items-start gap-2 text-[12px] text-[var(--text-main)] cursor-pointer">
+            <input type="checkbox" className="mt-0.5" checked={agreedLater}
+              onChange={(e) => setAgreedLater(e.target.checked)} />
+            <span>
+              They did not agree on their application. Tick this only if they have agreed
+              since — by email or on a call — to their CV being kept for future roles.
+            </span>
+          </label>
+        )}
+        {tagInput}
+        <button type="button" disabled={busy || !ready} onClick={() => save(true)}
+          title={ready ? undefined : 'The candidate must agree first'}
+          className="h-8 px-3 rounded-lg bg-[var(--accent-indigo)] text-white text-[12px] font-bold flex items-center gap-1.5 disabled:opacity-50">
+          <Bookmark size={13} /> {busy ? 'Adding…' : 'Add to talent pool'}
+        </button>
+      </div>
+    </Section>
+  );
+};
 
 const Drawer = ({ uk, onClose, onChanged }) => {
   const { can, scope } = useHrms();
@@ -578,6 +701,10 @@ const Drawer = ({ uk, onClose, onChanged }) => {
                 </p>
               )}
             </Section>
+
+            <TalentPoolSection key={`${c.uk}-${c.talent_pool}`} c={c} canWrite={canWrite} scope={scope}
+              onSaved={(data) => { setC(data); onChanged?.(); }}
+              showSuccess={showSuccess} showError={showError} />
           </div>
         )}
       </aside>

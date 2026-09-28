@@ -7,12 +7,13 @@ import { CAP } from '../access';
 import HrmsPageHeader from '../common/HrmsPageHeader';
 import { HrmsLoading, HrmsError } from '../common/HrmsStates';
 import {
-  getEmployee, updateEmployee, getEmployeeHierarchy, getDepartments, getDesignations,
+  getEmployee, createEmployee, updateEmployee, getEmployeeHierarchy, getDepartments, getDesignations,
   getAppointments,
 } from '../../../services/hrmsApi';
 import DocumentPanel from '../documents/DocumentPanel';
 import AppointmentPaper from '../recruitment/AppointmentPaper';
 import GmpPanel from './GmpPanel';
+import EmployeeSalaryStructure from '../payroll/EmployeeSalaryStructure';
 
 /**
  * HRMS ▸ employee profile.
@@ -27,6 +28,8 @@ import GmpPanel from './GmpPanel';
 
 const TABS = [
   { key: 'job', label: 'Job' },
+  // What payroll pays from — the same panel as Payroll ▸ Salary Structure.
+  { key: 'salary', label: 'Salary', cap: 'salary_structure.read' },
   { key: 'personal', label: 'Personal' },
   { key: 'statutory', label: 'Statutory & Bank' },
   { key: 'reporting', label: 'Reporting' },
@@ -155,9 +158,21 @@ const EmployeeProfile = () => {
       });
       if (canSetSalary && form.base_salary !== '') payload.base_salary = Number(form.base_salary);
 
-      const { data } = await updateEmployee(userId, payload, scope);
+      // No profile yet → this Save CREATES one (the banner above promises exactly that).
+      // PATCH only updates an existing profile, so it answered "Employee not found".
+      // Blank fields are left out of a create rather than sent as null, so the server's
+      // defaults (Active, Full-time, an auto-issued employee code) apply.
+      let data;
+      if (employee.has_profile) {
+        ({ data } = await updateEmployee(userId, payload, scope));
+      } else {
+        const fresh = Object.fromEntries(Object.entries(payload).filter(([, v]) => v != null));
+        await createEmployee({ ...fresh, user_id: userId }, scope);
+        ({ data } = await getEmployee(userId, scope));
+      }
       setEmployee(data);
-      showSuccess('Profile saved');
+      showSuccess(employee.has_profile ? 'Profile saved'
+        : `Profile created — employee code ${data.employee_code}`);
     } catch (err) {
       showError(err?.response?.data?.detail || 'Could not save the profile.');
     } finally {
@@ -204,7 +219,7 @@ const EmployeeProfile = () => {
       )}
 
       <div className="flex gap-1 border-b border-[var(--border)] overflow-x-auto">
-        {TABS.map((t) => (
+        {TABS.filter((t) => !t.cap || can(t.cap)).map((t) => (
           <button
             key={t.key} type="button" onClick={() => setTab(t.key)}
             className={`px-3.5 py-2 text-[12.5px] font-bold whitespace-nowrap border-b-2 -mb-px transition-colors ${
@@ -263,6 +278,11 @@ const EmployeeProfile = () => {
                 {!canSetSalary && (
                   <p className="mt-1 text-[11px] text-[var(--text-muted)]">You can view but not change salary.</p>
                 )}
+                <p className="mt-1 text-[11px] text-[var(--text-muted)]">
+                  For reference only — payroll does not use this. Set what they are paid in the{' '}
+                  <button type="button" onClick={() => setTab('salary')}
+                    className="font-bold text-[var(--accent-indigo)] hover:underline">Salary tab</button>.
+                </p>
               </div>
             )}
             <div>
@@ -387,6 +407,18 @@ const EmployeeProfile = () => {
           <p className="text-[13px] text-[var(--text-muted)]">
             This employee has no employee code yet, so documents cannot be filed against
             them. One is issued when their onboarding completes.
+          </p>
+        )
+      )}
+
+      {tab === 'salary' && (
+        employee?.employee_code ? (
+          <EmployeeSalaryStructure employeeCode={employee.employee_code}
+            employeeName={employee.name} employmentStatus={employee.employment_status} />
+        ) : (
+          <p className="text-[13px] text-[var(--text-muted)]">
+            This person has no employee profile yet, so payroll cannot pay them. Fill in the
+            Job tab and save to create one — then set their salary here.
           </p>
         )
       )}

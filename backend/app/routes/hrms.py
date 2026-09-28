@@ -4005,7 +4005,7 @@ async def list_regularizations(
     company_id: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user),
 ):
-    _require(current_user, Cap.ATTENDANCE_REGULARIZE_REQUEST)
+    _require(current_user, Cap.ATTENDANCE_READ)   # a LIST: reading, not requesting (scoped by the service)
     return await attendance_mgmt.list_regularizations(
         current_user, _company(current_user, company_id), status=status,
         employee_code=employee_code, limit=limit)
@@ -4043,7 +4043,7 @@ async def list_od_requests(
     company_id: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user),
 ):
-    _require(current_user, Cap.OD_REQUEST)
+    _require(current_user, Cap.ATTENDANCE_READ)   # a LIST: reading, not requesting (scoped by the service)
     return await attendance_mgmt.list_od_requests(
         current_user, _company(current_user, company_id), status=status,
         employee_code=employee_code, limit=limit)
@@ -4067,8 +4067,9 @@ async def closure_dashboard(
     company_id: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user),
 ):
-    """§7.12 steps 84-85: what is still open before this period can be locked."""
-    _require(current_user, Cap.ATTENDANCE_LOCK)
+    """§7.12 steps 84-85: what is still open before this period can be locked. Readable
+    by the MD for review; locking and unlocking stay ATTENDANCE_LOCK."""
+    _require(current_user, Cap.ATTENDANCE_CLOSURE_READ)
     return await attendance_mgmt.closure_dashboard(
         current_user, _company(current_user, company_id), period)
 
@@ -4756,6 +4757,18 @@ async def save_advance_policy(
         current_user, _company(current_user, company_id), body.model_dump())
 
 
+@router.get("/advances/my-eligibility")
+async def my_advance_eligibility(
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """The caller's OWN eligibility — what an employee's request form shows. Declared before
+    /advances/{adv_no} so the static path wins."""
+    _require(current_user, Cap.ADVANCE_REQUEST)
+    return await advance_mgmt.check_eligibility(
+        current_user, _company(current_user, company_id), None)
+
+
 @router.get("/advances/eligibility/{employee_code}")
 async def check_advance_eligibility(
     employee_code: str,
@@ -4977,7 +4990,7 @@ async def list_pips(
     company_id: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user),
 ):
-    _require(current_user, Cap.PIP_READ)
+    _require(current_user, Cap.MODULE_ACCESS)   # scoped in the service: own plan / team / all
     return await pip_mgmt.list_pips(
         current_user, _company(current_user, company_id), employee_code=employee_code,
         status=status, limit=limit)
@@ -4989,7 +5002,7 @@ async def get_pip(
     company_id: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user),
 ):
-    _require(current_user, Cap.PIP_READ)
+    _require(current_user, Cap.MODULE_ACCESS)   # scoped in the service: own plan / team / all
     return await pip_mgmt.get_pip(current_user, _company(current_user, company_id), pip_no)
 
 
@@ -5000,7 +5013,10 @@ async def acknowledge_pip(
     current_user: dict = Depends(get_current_user),
 ):
     """§22.5 step 217 — self-service, enforced to the plan's OWN employee."""
-    _require(current_user, Cap.PIP_ACKNOWLEDGE)
+    # Not PIP_ACKNOWLEDGE: whoever the plan is for acknowledges it, whatever their role —
+    # an HOD placed on a PIP could not, and it sat in Draft forever. The service enforces
+    # that the caller IS the plan's employee.
+    _require(current_user, Cap.MODULE_ACCESS)
     return await pip_mgmt.acknowledge_pip(
         current_user, _company(current_user, company_id), pip_no)
 

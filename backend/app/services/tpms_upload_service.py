@@ -20,7 +20,7 @@ from typing import List, Optional
 from fastapi import HTTPException, UploadFile
 
 from app.db.mongodb import get_collection
-from app.models.tpms import COLL_TASK_UPLOADS, UPLOAD_MAX_BYTES, period_from_date
+from app.models.tpms import COLL_ACTIVITIES, COLL_TASK_UPLOADS, UPLOAD_MAX_BYTES, period_from_date
 from app.services.s3_service import get_signed_url, upload_file_to_s3_with_key
 
 logger = logging.getLogger(__name__)
@@ -41,6 +41,37 @@ def _display_name(user: dict) -> str:
             or user.get("email") or "Unknown")
 
 
+async def upload_required_activities() -> set:
+    """Names of the activities the catalogue CURRENTLY flags upload_required."""
+    rows = await get_collection(COLL_ACTIVITIES).find(
+        {"upload_required": True}, {"name": 1}).to_list(500)
+    return {r.get("name") for r in rows if r.get("name")}
+
+
+async def requires_upload(doc: dict, flagged: Optional[set] = None) -> bool:
+    """An occurrence needs proof if its own snapshot says so OR its activity does today.
+
+    The snapshot alone is not enough: occurrences scheduled before an activity was set to
+    require uploads carry no flag, so their uploads were refused and their attachments hidden.
+    """
+    if (doc.get("activity_meta") or {}).get("upload_required"):
+        return True
+    flagged = flagged if flagged is not None else await upload_required_activities()
+    return doc.get("activity") in flagged
+
+
+async def upload_counts(event_ids: List[str]) -> dict:
+    """event_id -> number of files attached, for a page of calendar occurrences."""
+    if not event_ids:
+        return {}
+    rows = await get_collection(COLL_TASK_UPLOADS).find(
+        {"event_id": {"$in": [str(i) for i in event_ids]}}, {"event_id": 1}).to_list(10000)
+    counts: dict = {}
+    for r in rows:
+        counts[r["event_id"]] = counts.get(r["event_id"], 0) + 1
+    return counts
+
+
 async def upload_task_file(user: dict, event_id: str, file: UploadFile) -> dict:
     from app.services.tpms_lifecycle_service import find_tpms_event
     doc, _coll = await find_tpms_event(event_id)
@@ -52,9 +83,10 @@ async def upload_task_file(user: dict, event_id: str, file: UploadFile) -> dict:
 
     # Uploads are only accepted for activities flagged `upload_required` in the catalogue.
     meta = doc.get("activity_meta") or {}
-    if not meta.get("upload_required"):
+    if not await requires_upload(doc):
         raise HTTPException(status_code=400,
-                            detail="This activity does not require a file upload.")
+                            detail=f"\"{doc.get('activity') or 'This activity'}\" does not take a file "
+                                   f"upload. Turn on \"Upload required\" for it in Activity Management first.")
 
     payload = await file.read()
     if len(payload) > UPLOAD_MAX_BYTES:

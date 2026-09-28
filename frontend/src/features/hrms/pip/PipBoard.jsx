@@ -71,12 +71,14 @@ const EmployeePicker = ({ scope, value, onChange }) => {
           border border-[var(--border)] bg-[var(--bg-card)] shadow-lg">
           {searching && <p className="px-3 py-2 text-[12px] text-[var(--text-muted)]">Searching…</p>}
           {!searching && options.map((o) => (
-            <button key={o.user_id} type="button"
+            <button key={o.user_id} type="button" disabled={!o.employee_code}
               onClick={() => { onChange(o); setOptions([]); }}
-              className="block w-full text-left px-3 py-2 text-[12.5px] hover:bg-[var(--input-bg)]">
+              className="block w-full text-left px-3 py-2 text-[12.5px] hover:bg-[var(--input-bg)] disabled:opacity-60 disabled:cursor-not-allowed disabled:hover:bg-transparent">
               <span className="text-[var(--text-main)]">{o.name}</span>
               <span className="block text-[11px] text-[var(--text-muted)]">
-                {o.employee_code} · {o.designation || '—'} · {o.employment_status}
+                {o.employee_code
+                  ? `${o.employee_code} · ${o.designation || '—'} · ${o.employment_status || '—'}`
+                  : 'No employee profile yet — open them on the Employees page to create one.'}
               </span>
             </button>
           ))}
@@ -151,7 +153,7 @@ const PipBoard = () => {
       <HrmsPageHeader
         icon={TrendingDown}
         title="Performance Improvement Plan"
-        subtitle="Objectives, support, periodic reviews and the final outcome (§22.5)."
+        subtitle="A structured plan to help someone meet expectations: goals, support, regular reviews and an outcome."
         actions={can(CAP.PIP_MANAGE) && (
           <Btn tone="primary" onClick={() => setInitiating(true)}>
             <TrendingDown size={14} /> Initiate PIP
@@ -228,7 +230,7 @@ const InitiateModal = ({ scope, onClose, onDone, showSuccess, showError }) => {
 
   return (
     <Modal title="Initiate PIP" labelledBy="pip-init-title"
-      subtitle="§22.5 steps 215-216." onClose={onClose}
+      subtitle="The employee is asked to acknowledge it before reviews begin." onClose={onClose}
       footer={(
         <>
           <Btn onClick={onClose} disabled={busy}>Cancel</Btn>
@@ -303,6 +305,7 @@ const PipDetailModal = ({ pipNo, scope, can, onClose, onDone, showSuccess, showE
   const [closureResult, setClosureResult] = useState('Successfully Closed');
   const [finalRating, setFinalRating] = useState('');
   const [decisionRemarks, setDecisionRemarks] = useState('');
+  const [extensionDate, setExtensionDate] = useState('');
   const { busy, run } = useSubmit(showSuccess, showError, () => { load(); onDone(); });
 
   const load = useCallback(async () => {
@@ -356,11 +359,28 @@ const PipDetailModal = ({ pipNo, scope, can, onClose, onDone, showSuccess, showE
             </div>
           )}
 
-          {detail.status === 'Draft' && can(CAP.PIP_ACKNOWLEDGE) && (
-            <Btn tone="primary" disabled={busy} onClick={() => run(
-              () => acknowledgePip(pipNo, scope), 'PIP acknowledged.')}>
-              {busy ? 'Working…' : 'Acknowledge'}
-            </Btn>
+          {detail.status === 'Draft' && detail.is_mine && (
+            <div className="rounded-xl bg-[var(--accent-indigo-bg)] p-3.5 space-y-2">
+              <p className="text-[12.5px] text-[var(--text-main)]">
+                This plan is for you. Read the gap, objectives and support above, then acknowledge
+                that you have seen it. Reviews start once you do.
+              </p>
+              <Btn tone="primary" disabled={busy} onClick={() => run(
+                () => acknowledgePip(pipNo, scope), 'PIP acknowledged.')}>
+                {busy ? 'Working…' : 'Acknowledge'}
+              </Btn>
+            </div>
+          )}
+          {detail.status === 'Draft' && !detail.is_mine && (
+            <p className="text-[12px] text-[var(--text-muted)]">
+              Waiting for {detail.employee_name || detail.employee_code} to acknowledge the plan.
+              Reviews and the outcome open after that.
+            </p>
+          )}
+          {detail.extensions?.length > 0 && (
+            <p className="text-[12px] text-[var(--text-muted)]">
+              Extended {detail.extensions.length} time(s) — now runs to {day(detail.target_end_date)}.
+            </p>
           )}
 
           {detail.reviews?.length > 0 && (
@@ -378,9 +398,9 @@ const PipDetailModal = ({ pipNo, scope, can, onClose, onDone, showSuccess, showE
             </div>
           )}
 
-          {detail.status === 'Active' && can(CAP.PIP_MANAGE) && (
+          {detail.status === 'Active' && can(CAP.PIP_MANAGE) && !detail.is_mine && (
             <div className="rounded-xl border border-[var(--border)] p-3.5 space-y-2.5">
-              <p className={LABEL}>Record Review (§22.5 step 218)</p>
+              <p className={LABEL}>Record Review</p>
               <input value={progress} className={FIELD} placeholder="Progress"
                 onChange={(e) => setProgress(e.target.value)} />
               <textarea rows={2} value={managerComments} className={TEXTAREA}
@@ -394,24 +414,36 @@ const PipDetailModal = ({ pipNo, scope, can, onClose, onDone, showSuccess, showE
             </div>
           )}
 
-          {['Draft', 'Active'].includes(detail.status) && can(CAP.PIP_DECIDE) && (
+          {detail.status === 'Active' && can(CAP.PIP_DECIDE) && !detail.is_mine && (
             <div className="rounded-xl border border-[var(--border)] p-3.5 space-y-2.5">
-              <p className={LABEL}>Record Outcome (§22.5 step 220)</p>
+              <p className={LABEL}>Record Outcome</p>
               <select value={closureResult} className={FIELD}
                 onChange={(e) => setClosureResult(e.target.value)}>
                 {['Successfully Closed', 'Extended', 'Further Action Required',
                   'Separation Recommended'].map((o) => <option key={o} value={o}>{o}</option>)}
               </select>
-              <input value={finalRating} className={FIELD} placeholder="Final rating"
-                onChange={(e) => setFinalRating(e.target.value)} />
+              {closureResult === 'Extended' ? (
+                <div>
+                  <label className={LABEL} htmlFor="pip-extend">New target end date *</label>
+                  <input id="pip-extend" type="date" value={extensionDate} className={FIELD}
+                    min={detail.target_end_date} onChange={(e) => setExtensionDate(e.target.value)} />
+                  <p className="mt-1 text-[11px] text-[var(--text-muted)]">
+                    The plan stays open and reviews continue until this date.
+                  </p>
+                </div>
+              ) : (
+                <input value={finalRating} className={FIELD} placeholder="Final rating"
+                  onChange={(e) => setFinalRating(e.target.value)} />
+              )}
               <textarea rows={2} value={decisionRemarks} className={TEXTAREA} placeholder="Remarks"
                 onChange={(e) => setDecisionRemarks(e.target.value)} />
-              <Btn tone="primary" disabled={busy} onClick={() => run(
+              <Btn tone="primary" disabled={busy || (closureResult === 'Extended' && !extensionDate)} onClick={() => run(
                 () => decidePip(pipNo, {
                   closure_result: closureResult, final_rating: finalRating.trim() || undefined,
+                  extension_date: closureResult === 'Extended' ? extensionDate : undefined,
                   remarks: decisionRemarks.trim() || undefined,
-                }, scope), 'Outcome recorded.')}>
-                {busy ? 'Working…' : 'Record Outcome'}
+                }, scope), closureResult === 'Extended' ? 'PIP extended.' : 'Outcome recorded.')}>
+                {busy ? 'Working…' : closureResult === 'Extended' ? 'Extend PIP' : 'Record Outcome'}
               </Btn>
             </div>
           )}

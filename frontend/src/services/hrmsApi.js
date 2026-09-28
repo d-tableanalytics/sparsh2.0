@@ -868,6 +868,8 @@ export const saveAdvancePolicy = (payload, params) =>
 export const checkAdvanceEligibility = (employeeCode, params) =>
   api.get(`/hrms/advances/eligibility/${employeeCode}`, { params });
 export const requestAdvance = (payload, params) => api.post('/hrms/advances', payload, { params });
+export const getMyAdvanceEligibility = (params) =>
+  api.get('/hrms/advances/my-eligibility', { params });
 export const listAdvances = (params) => api.get('/hrms/advances', { params });
 export const getAdvance = (advNo, params) => api.get(`/hrms/advances/${advNo}`, { params });
 export const actOnAdvance = (advNo, payload, params) =>

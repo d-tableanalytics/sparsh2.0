@@ -71,6 +71,15 @@ async def flag_case(actor: dict, company_id: str, payload: dict) -> dict:
     if not employee_code:
         raise HTTPException(status_code=422, detail="Select an employee.")
     profile = await _get_profile(company_id, employee_code)
+    from app.services import hrms_people_scope as scope
+    await scope.assert_may_act_for(actor, company_id, employee_code, "flag absconding")
+    from app.models.hrms import is_iso_date
+    flagged = payload.get("flagged_date") or _today()
+    if not is_iso_date(flagged):
+        raise HTTPException(status_code=422, detail="The date must be YYYY-MM-DD.")
+    if flagged > _today():
+        raise HTTPException(status_code=422,
+                            detail="An absence is flagged after it happens — the date cannot be in the future.")
 
     existing_open = await get_collection(COLL_ABSCONDING_CASES).find_one({
         "company_id": str(company_id), "employee_code": employee_code,
@@ -82,7 +91,7 @@ async def flag_case(actor: dict, company_id: str, payload: dict) -> dict:
             detail=f"{employee_code} already has an open absconding case "
                    f"({existing_open['case_no']}).")
 
-    flagged_date = payload.get("flagged_date") or _today()
+    flagged_date = flagged
     year = datetime.now(timezone.utc).year
     case_no = await next_business_id("absconding_case", str(company_id), year)
     now = datetime.now(timezone.utc)
@@ -90,7 +99,8 @@ async def flag_case(actor: dict, company_id: str, payload: dict) -> dict:
         "case_no": case_no,
         "company_id": str(company_id),
         "employee_code": employee_code,
-        "employee_name": profile.get("display_name") or profile.get("full_name"),
+        "employee_name": await scope.name_of(profile),
+        "flagged_by": str(actor.get("_id") or ""),
         "flagged_date": flagged_date,
         "notes": payload.get("notes"),
         "status": AbscondingStatus.FLAGGED.value,
@@ -113,6 +123,10 @@ async def list_cases(actor: dict, company_id: str, *, status: Optional[str] = No
         query["status"] = status
     if employee_code:
         query["employee_code"] = employee_code
+    from app.services import hrms_people_scope as scope
+    limit_to = await scope.scope_filter(actor, company_id, initiated_field="flagged_by")
+    if limit_to:
+        query.update(limit_to)
     rows = await get_collection(COLL_ABSCONDING_CASES).find(query).sort(
         "created_at", -1).to_list(limit)
     return [_out(r) for r in rows]
@@ -127,10 +141,17 @@ async def _get_case(company_id: str, case_no: str) -> dict:
 
 
 async def get_case(actor: dict, company_id: str, case_no: str) -> dict:
-    return _out(await _get_case(company_id, case_no))
+    doc = await _get_case(company_id, case_no)
+    from app.services import hrms_people_scope as scope
+    limit_to = await scope.scope_filter(actor, company_id, initiated_field="flagged_by")
+    if limit_to and not await get_collection(COLL_ABSCONDING_CASES).find_one(
+            {"_id": doc["_id"], **limit_to}, {"_id": 1}):
+        raise HTTPException(status_code=404, detail=f"Absconding case '{case_no}' not found.")
+    return _out(doc)
 
 
 async def log_contact_attempt(actor: dict, company_id: str, case_no: str, payload: dict) -> dict:
+    await get_case(actor, company_id, case_no)            # 404 outside the caller's scope
     doc = await _get_case(company_id, case_no)
     if doc["status"] not in OPEN_ABSCONDING_STATUSES:
         raise HTTPException(status_code=409, detail=f"{case_no} is already \"{doc['status']}\".")
@@ -153,6 +174,7 @@ def _days_since(iso_date: str) -> int:
 
 async def send_warning(actor: dict, company_id: str, case_no: str, stage: str,
                        payload: dict) -> dict:
+    await get_case(actor, company_id, case_no)            # 404 outside the caller's scope
     """§7.19 steps 150-152: First, then Second, each gated on the configured window since the
     case was flagged (First) or the first warning was sent (Second) — the SLA clock the BA doc
     names explicitly, enforced here rather than left to whoever remembers to check a calendar.

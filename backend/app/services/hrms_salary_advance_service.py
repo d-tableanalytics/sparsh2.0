@@ -24,11 +24,12 @@ from app.models.hrms import (
     COLL_EMPLOYEE_PROFILES, COLL_PROBATION_REVIEWS, COLL_SALARY_ADVANCES, COLL_SETTINGS,
     DEFAULT_ADVANCE_POLICY,
     ENTITY_ADVANCE, OPEN_ADVANCE_STATUSES,
-    AdvanceStatus, ProbationOutcome,
+    AdvanceStatus, HrmsRole, ProbationOutcome,
 )
 from app.services.hrms_audit_service import audit
 from app.services.hrms_id_service import next_business_id
 from app.services.hrms_payroll_service import get_current_structure, _structure_gross, _load_component_types
+from app.utils.hrms_access import hrms_role
 
 
 def _out(doc: dict) -> dict:
@@ -51,6 +52,36 @@ async def _get_profile(company_id: str, employee_code: str) -> dict:
     if not profile:
         raise HTTPException(status_code=404, detail="No employee with that code in this company.")
     return profile
+
+
+async def _code_for(actor: dict, company_id: str, requested: Optional[str]) -> str:
+    """Whose advance this is. An EMPLOYEE acts for themselves only — the code is resolved
+    from THEIR profile, and naming anybody else is refused rather than quietly swapped, so a
+    tampered request fails loudly. Everyone else (HR/MD acting on someone's behalf) must name
+    the employee.
+
+    Without this an employee could raise an advance in a colleague's name — recovered from
+    the colleague's next payroll — and read anyone's maximum eligible amount, which is a
+    fixed share of their gross, i.e. their salary.
+    """
+    requested = str(requested or "").strip()
+    from app.utils.hrms_access import sees_all_people
+    if sees_all_people(actor):
+        if not requested:
+            raise HTTPException(status_code=422, detail="Select the employee.")
+        return requested
+    own = await get_collection(COLL_EMPLOYEE_PROFILES).find_one(
+        {"company_id": str(company_id), "user_id": str(actor.get("_id") or "")},
+        {"employee_code": 1})
+    own_code = (own or {}).get("employee_code")
+    if not own_code:
+        raise HTTPException(
+            status_code=404,
+            detail="Your account has no employee profile, so you cannot request an advance. "
+                   "Ask HR to set one up.")
+    if requested and requested != own_code:
+        raise HTTPException(status_code=403, detail="You can only request an advance for yourself.")
+    return own_code
 
 
 async def _is_confirmed(company_id: str, employee_code: str) -> bool:
@@ -93,9 +124,11 @@ async def _max_eligible(company_id: str, employee_code: str, policy: dict) -> fl
     return round(gross * (policy["max_percent_of_gross"] / 100.0), 2)
 
 
-async def check_eligibility(actor: dict, company_id: str, employee_code: str) -> dict:
+async def check_eligibility(actor: dict, company_id: str, employee_code: Optional[str]) -> dict:
     """Exposed as its own read so the UI can show WHY before the employee even opens the
-    request form (§7.14 steps 101-104), not only reject after submission."""
+    request form (§7.14 steps 101-104), not only reject after submission. An employee may
+    only ask about themselves (see _code_for) — the answer carries 40% of gross."""
+    employee_code = await _code_for(actor, company_id, employee_code)
     policy = await get_advance_policy(company_id)
     today = _today()
     confirmed = await _is_confirmed(company_id, employee_code)
@@ -115,10 +148,10 @@ async def check_eligibility(actor: dict, company_id: str, employee_code: str) ->
 
 
 async def request_advance(actor: dict, company_id: str, payload: dict) -> dict:
-    employee_code = str(payload.get("employee_code") or "").strip()
+    employee_code = await _code_for(actor, company_id, payload.get("employee_code"))
     amount = float(payload.get("amount") or 0)
-    if not employee_code or amount <= 0:
-        raise HTTPException(status_code=422, detail="employee_code and a positive amount are required.")
+    if amount <= 0:
+        raise HTTPException(status_code=422, detail="Enter an amount greater than zero.")
     profile = await _get_profile(company_id, employee_code)
 
     eligibility = await check_eligibility(actor, company_id, employee_code)
@@ -142,8 +175,9 @@ async def request_advance(actor: dict, company_id: str, payload: dict) -> dict:
     now = datetime.now(timezone.utc)
     doc = {
         "adv_no": adv_no, "company_id": str(company_id), "employee_code": employee_code,
-        "employee_name": profile.get("display_name") or profile.get("full_name"),
+        "employee_name": await _name_of(profile),
         "amount": amount, "max_eligible_amount": eligibility["max_eligible_amount"],
+        "requested_by": str(actor.get("_id") or ""),
         "reason": payload.get("reason"), "quarter": eligibility["quarter"],
         "status": AdvanceStatus.PENDING.value,
         "action_by": None, "action_at": None, "action_remarks": None,
@@ -154,6 +188,11 @@ async def request_advance(actor: dict, company_id: str, payload: dict) -> dict:
     await audit(actor, AUDIT_ADVANCE_REQUESTED, ENTITY_ADVANCE, adv_no,
                f"{employee_code}, {amount}", company_id)
     return _out(doc)
+
+
+async def _name_of(profile: dict) -> Optional[str]:
+    from app.services.hrms_payroll_service import _employee_names, _name_of as _payroll_name
+    return _payroll_name(profile, await _employee_names([profile]))
 
 
 async def list_advances(actor: dict, company_id: str, *, status: Optional[str] = None,

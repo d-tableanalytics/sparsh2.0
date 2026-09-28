@@ -52,9 +52,19 @@ def _require_visibility(actor: dict, case: dict) -> None:
 
 
 async def _get_profile_name(company_id: str, employee_code: str) -> Optional[str]:
-    profile = await get_collection(COLL_EMPLOYEE_PROFILES).find_one(
-        {"company_id": str(company_id), "employee_code": employee_code})
-    return (profile or {}).get("display_name") or (profile or {}).get("full_name")
+    from app.services.hrms_people_scope import name_for_code
+    return await name_for_code(company_id, employee_code)
+
+
+async def _assert_not_involved(actor: dict, company_id: str, case: dict) -> None:
+    """Nobody sees or runs a case they are part of — respondent, complainant or witness.
+    The live test had HR reading and investigating a case in which HR was the accused."""
+    from app.services.hrms_people_scope import own_code
+    mine = await own_code(actor, company_id)
+    if mine and any(p.get("employee_code") == mine for p in case.get("persons_involved") or []):
+        raise HTTPException(
+            status_code=403,
+            detail="You are named in this case, so it is handled by someone else.")
 
 
 async def create_case(actor: dict, company_id: str, payload: dict) -> dict:
@@ -73,6 +83,12 @@ async def create_case(actor: dict, company_id: str, payload: dict) -> dict:
             can(actor, Cap.DISCIPLINE_POSH_READ) or can(actor, Cap.DISCIPLINE_POSH_MANAGE)):
         raise HTTPException(status_code=403, detail="This case requires POSH-level access.")
 
+    from app.services.hrms_people_scope import own_code
+    mine = await own_code(actor, company_id)
+    if mine and any((p.get("employee_code") if isinstance(p, dict) else p.employee_code) == mine
+                    for p in persons):
+        raise HTTPException(status_code=403,
+                            detail="You are one of the people involved, so someone else must file this case.")
     resolved_persons = []
     for p in persons:
         code = p.get("employee_code") if isinstance(p, dict) else p.employee_code
@@ -124,6 +140,10 @@ async def list_cases(actor: dict, company_id: str, *, status: Optional[str] = No
         query["confidentiality_level"] = {"$ne": ConfidentialityLevel.RESTRICTED.value}
     rows = await get_collection(COLL_DISCIPLINE_CASES).find(query).sort(
         "created_at", -1).to_list(limit)
+    from app.services.hrms_people_scope import own_code
+    mine = await own_code(actor, company_id)
+    rows = [r for r in rows
+            if not (mine and any(p.get("employee_code") == mine for p in r.get("persons_involved") or []))]
     return [_out(r) for r in rows]
 
 
@@ -138,12 +158,14 @@ async def _get_case(company_id: str, case_no: str) -> dict:
 async def get_case(actor: dict, company_id: str, case_no: str) -> dict:
     doc = await _get_case(company_id, case_no)
     _require_visibility(actor, doc)
+    await _assert_not_involved(actor, company_id, doc)
     return _out(doc)
 
 
 async def add_investigation_note(actor: dict, company_id: str, case_no: str, payload: dict) -> dict:
     doc = await _get_case(company_id, case_no)
     _require_visibility(actor, doc)
+    await _assert_not_involved(actor, company_id, doc)
     if doc["status"] == DisciplineStatus.CLOSED.value:
         raise HTTPException(status_code=409, detail=f"{case_no} is already closed.")
 
@@ -164,6 +186,7 @@ async def add_investigation_note(actor: dict, company_id: str, case_no: str, pay
 async def record_recommendation(actor: dict, company_id: str, case_no: str, payload: dict) -> dict:
     doc = await _get_case(company_id, case_no)
     _require_visibility(actor, doc)
+    await _assert_not_involved(actor, company_id, doc)
     if doc["status"] == DisciplineStatus.CLOSED.value:
         raise HTTPException(status_code=409, detail=f"{case_no} is already closed.")
 
@@ -186,6 +209,7 @@ async def decide_case(actor: dict, company_id: str, case_no: str, payload: dict)
     bypass the POSH gate either."""
     doc = await _get_case(company_id, case_no)
     _require_visibility(actor, doc)
+    await _assert_not_involved(actor, company_id, doc)
     if doc["status"] not in (DisciplineStatus.RECOMMENDATION_RECORDED.value,
                              DisciplineStatus.UNDER_INVESTIGATION.value):
         raise HTTPException(
@@ -208,6 +232,7 @@ async def decide_case(actor: dict, company_id: str, case_no: str, payload: dict)
 async def close_case(actor: dict, company_id: str, case_no: str, payload: dict) -> dict:
     doc = await _get_case(company_id, case_no)
     _require_visibility(actor, doc)
+    await _assert_not_involved(actor, company_id, doc)
     if doc["status"] != DisciplineStatus.DECIDED.value:
         raise HTTPException(status_code=409, detail=f"{case_no} needs a decision before closing.")
 

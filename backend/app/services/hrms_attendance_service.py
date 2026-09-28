@@ -41,6 +41,7 @@ from app.models.hrms import (
 from app.services.hrms_audit_service import audit
 from app.services.hrms_id_service import next_business_id
 from app.utils.hrms_access import hrms_role
+from app.utils.hrms_access import sees_all_people
 
 USER_COLLECTIONS = ("learners", "staff")
 
@@ -130,15 +131,18 @@ async def _scope_query(actor: dict, company_id: str, query: dict) -> dict:
     records, MANAGER sees their own plus their team's, everyone else (HR/MD/ADMIN) sees the
     whole company — the query already carries that. Fails CLOSED: an employee with no linked
     profile sees nothing rather than everything."""
-    role = hrms_role(actor)
-    if role == HrmsRole.EMPLOYEE:
-        own = await _own_employee_code(actor, company_id)
-        query["employee_code"] = own or "__none__"
-    elif role == HrmsRole.MANAGER:
-        own = await _own_employee_code(actor, company_id)
+    # Scoped by what the role is FOR, not by `role == EMPLOYEE`: every staff member now
+    # holds the read capability for their OWN records, so an EMPLOYEE-only check would hand
+    # Finance, support staff and everyone else the whole company's.
+    if sees_all_people(actor):
+        return query
+    own = await _own_employee_code(actor, company_id)
+    if hrms_role(actor) == HrmsRole.MANAGER:
         team = await _team_employee_codes(actor, company_id)
         codes = list({c for c in ([own] if own else []) + team})
         query["employee_code"] = {"$in": codes or ["__none__"]}
+    else:
+        query["employee_code"] = own or "__none__"
     return query
 
 
@@ -154,6 +158,17 @@ async def _assert_self_or_privileged(actor: dict, company_id: str, employee_code
     if role == HrmsRole.MANAGER and employee_code in await _team_employee_codes(actor, company_id):
         return
     raise HTTPException(status_code=403, detail="You may only act on your own record.")
+
+
+async def _assert_may_decide(actor: dict, company_id: str, employee_code: str, what: str) -> None:
+    """Nobody decides their own request; a manager decides only for their own team."""
+    own = await _own_employee_code(actor, company_id)
+    if own and own == employee_code:
+        raise HTTPException(status_code=403, detail=f"You cannot approve your own {what}.")
+    if hrms_role(actor) == HrmsRole.MANAGER and \
+            employee_code not in await _team_employee_codes(actor, company_id):
+        raise HTTPException(status_code=403,
+                            detail=f"A manager can decide {what} only for their own team.")
 
 
 # ─────────────────────────────────────────────────────────────
@@ -339,6 +354,7 @@ async def act_on_regularization(actor: dict, company_id: str, req_no: str, paylo
         raise HTTPException(status_code=404, detail=f"Regularisation '{req_no}' not found.")
     if doc["status"] not in (CorrectionStatus.PENDING.value, CorrectionStatus.MANAGER_APPROVED.value):
         raise HTTPException(status_code=409, detail=f"{req_no} is already \"{doc['status']}\".")
+    await _assert_may_decide(actor, company_id, doc["employee_code"], "regularisation")
 
     decision = payload.get("decision")
     now = datetime.now(timezone.utc)
@@ -446,6 +462,7 @@ async def act_on_od(actor: dict, company_id: str, od_no: str, payload: dict) -> 
         raise HTTPException(status_code=404, detail=f"OD request '{od_no}' not found.")
     if doc["status"] != OdStatus.PENDING.value:
         raise HTTPException(status_code=409, detail=f"{od_no} is already \"{doc['status']}\".")
+    await _assert_may_decide(actor, company_id, doc["employee_code"], "Outdoor Duty request")
 
     approved = bool(payload.get("approved"))
     now = datetime.now(timezone.utc)
@@ -590,11 +607,13 @@ async def late_coming_summary(actor: dict, company_id: str, *, employee_code: Op
     # two batched lookups, not one.
     codes = {r["employee_code"] for r in rows}
     departments = {}
+    names = {}
     if codes:
         from app.models.hrms import COLL_DEPARTMENTS
         profiles = await get_collection(COLL_EMPLOYEE_PROFILES).find(
             {"company_id": str(company_id), "employee_code": {"$in": list(codes)}},
-            {"employee_code": 1, "department_id": 1}).to_list(len(codes))
+            {"employee_code": 1, "department_id": 1, "user_id": 1, "display_name": 1,
+             "full_name": 1, "identity_snapshot": 1}).to_list(len(codes))
         dept_names = {
             str(d["_id"]): d.get("name")
             for d in await get_collection(COLL_DEPARTMENTS).find(
@@ -602,10 +621,16 @@ async def late_coming_summary(actor: dict, company_id: str, *, employee_code: Op
         }
         departments = {p["employee_code"]: dept_names.get(p.get("department_id"))
                        for p in profiles}
+        # Names, so the tab reads "Dummy HOD" rather than a bare EMP code — identity lives on
+        # the user document, never on the profile (same resolution payroll uses).
+        from app.services.hrms_payroll_service import _employee_names, _name_of
+        user_names = await _employee_names(profiles)
+        names = {p["employee_code"]: _name_of(p, user_names) for p in profiles}
 
     return {
         "total_late_days": len(rows),
         "dates": [{"work_date": r["work_date"], "employee_code": r["employee_code"],
+                   "employee_name": names.get(r["employee_code"]),
                    "late_minutes": r["late_minutes"],
                    "department": departments.get(r["employee_code"])} for r in rows],
     }

@@ -174,9 +174,15 @@ async def main() -> None:
 
     async def approve_internal(request_no):
         await RS.act_on_requisition(HR, COMPANY, request_no, "hr-verify")
-        await RS.act_on_requisition(FIN, COMPANY, request_no, "budget-approve", budget={
+        state = await RS.act_on_requisition(FIN, COMPANY, request_no, "budget-approve", budget={
             "approved_headcount": 3, "approved_salary_band_min": 400000.0,
             "approved_salary_band_max": 450000.0})
+        # No sanctioned strength is set in this suite, so every requisition is over sanction
+        # and escalates. Its raiser reports to nobody, so the ladder is exactly the mandatory
+        # MD rung — which the MD clears here. (This suite is about closure, not escalation;
+        # test_phase11_sanction and test_sanction_to_jd_e2e own that.)
+        while state.get("approval_status") == M.ReqApproval.PENDING_ESCALATION.value:
+            state = await RS.act_on_requisition(MD, COMPANY, request_no, "escalate-approve")
         card = await SC.create_scorecard(HR, COMPANY, {
             "request_no": request_no, "criteria": [{"label": "Core"}]})
         await SC.approve_scorecard(HOD, COMPANY, card["scr_no"],

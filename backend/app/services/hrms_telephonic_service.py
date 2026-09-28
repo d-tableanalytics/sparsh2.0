@@ -453,12 +453,30 @@ async def update_screening(actor: dict, company_id: str, tel_no: str,
     return result
 
 
-async def screenable_candidates(actor: dict, company_id: str) -> list:
-    """Internal-track candidates a phone screen is the next step for.
+# Every stage from which a candidate can still reach the panel without having had a call.
+# The assessment stages are here because CV Shortlist sends assessment roles straight to
+# Assessment Pending — see screenable_candidates.
+PHONE_SCREEN_STAGES = (
+    AppStatus.UNDER_REVIEW, AppStatus.SHORTLISTED,
+    AppStatus.ASSESSMENT_PENDING, AppStatus.ASSESSMENT_COMPLETED, AppStatus.ASSESSMENT_PASSED,
+)
 
-    Shortlisted and not yet screened. Deliberately internal-track only: the client track has
-    no telephonic step in its process, and offering the action there would invite somebody to
-    record one and then wonder why nothing gated on it.
+
+async def screenable_candidates(actor: dict, company_id: str) -> list:
+    """Internal-track candidates the interview gate will demand a phone screen from.
+
+    Asks exactly the question assert_telephonic_cleared asks, so the queue and the gate cannot
+    disagree: still BEFORE the panel, no passing screen, no interview already booked, and no
+    approved waiver.
+
+    "Before the panel" includes the assessment stages. CV Shortlist on a role that requires an
+    assessment goes straight to Assessment Pending, so a queue limited to Shortlisted never
+    showed those candidates — and the gate then refused their interview for want of a call the
+    screen had never offered.
+
+    Deliberately internal-track only: the client track has no telephonic step in its process,
+    and offering the action there would invite somebody to record one and then wonder why
+    nothing gated on it.
     """
     reqs = await get_collection(COLL_REQUISITIONS).find(
         {"company_id": str(company_id),
@@ -474,8 +492,7 @@ async def screenable_candidates(actor: dict, company_id: str) -> list:
          # Fails CLOSED in the same way every other scoped read here does: an empty list is
          # an `$in: []`, matching nothing rather than everything.
          "request_no": {"$in": request_nos},
-         "application_status": {"$in": [AppStatus.SHORTLISTED.value,
-                                        AppStatus.UNDER_REVIEW.value]}},
+         "application_status": {"$in": [s.value for s in PHONE_SCREEN_STAGES]}},
         {"uk": 1, "candidate_name": 1, "request_no": 1, "application_status": 1,
          "can_contact": 1}).to_list(2000)
 
@@ -484,6 +501,14 @@ async def screenable_candidates(actor: dict, company_id: str) -> list:
         rows = await get_collection(COLL_TELEPHONIC).find(
             {"company_id": str(company_id), "uk": c["uk"]}).to_list(50)
         if any(r.get("outcome") in TELEPHONIC_CLEARS_INTERVIEW for r in rows):
+            continue
+        # The gate's other two exits: already interviewing (never gated retroactively), or
+        # waived by an approved exception. Neither needs a call, so neither is on the list.
+        if await get_collection(COLL_INTERVIEWS).count_documents(
+                {"company_id": str(company_id), "uk": c["uk"]}):
+            continue
+        from app.services.hrms_exception_service import approved_exception_for
+        if await approved_exception_for(company_id, "telephonic", c.get("request_no"), c["uk"]):
             continue
         out.append({
             "uk": c["uk"],

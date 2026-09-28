@@ -9,6 +9,8 @@ import { useHrms } from '../HrmsContext';
 import { CAP } from '../access';
 import HrmsPageHeader from '../common/HrmsPageHeader';
 import HrmsScopeBar from '../common/HrmsScopeBar';
+import { ProcessGuide, NextStep, NextStepBanner } from '../common/ProcessGuide';
+import { ONBOARDING_GUIDE, onboardingNextStep } from '../common/processGuides';
 import { HrmsLoading, HrmsError, HrmsEmpty } from '../common/HrmsStates';
 import {
   getOnboardings, getOnboardableCandidates, getOnboarding, startOnboarding,
@@ -303,6 +305,8 @@ const Detail = ({ onbNo, onClose, onChanged }) => {
 
           {row && !loading && (
             <>
+              <NextStepBanner step={onboardingNextStep(row, { inCase: true })} />
+
               {/* Employee ID — the headline once issued */}
               {row.employee_id && (
                 <div className="rounded-xl border border-[var(--border)] bg-[var(--accent-indigo-bg)] px-4 py-3 flex items-center gap-3">
@@ -970,7 +974,7 @@ const OnboardingBoard = () => {
       <HrmsPageHeader
         icon={UserPlus}
         title="Onboarding Cases"
-        subtitle="Where a candidate becomes an employee"
+        subtitle="Where a candidate becomes an employee — click a card to work on it."
         actions={mayWrite && (
           <button type="button" onClick={() => setStarting(true)}
             className={`${BTN} bg-[var(--accent-indigo)] text-white flex items-center gap-1.5`}>
@@ -979,6 +983,7 @@ const OnboardingBoard = () => {
         )}
       />
       <HrmsScopeBar />
+      <ProcessGuide guide={ONBOARDING_GUIDE} />
 
       <div className="flex flex-wrap items-center gap-2">
         <div className="relative flex-1 min-w-[220px]">
@@ -1051,6 +1056,8 @@ const OnboardingBoard = () => {
                   </span>
                 )}
               </div>
+              <NextStep step={onboardingNextStep(r)}
+                className="mt-3 pt-2.5 border-t border-[var(--border)]" />
             </button>
           ))}
         </div>

@@ -188,6 +188,14 @@ async def send_assessment(actor: dict, company_id: str, payload: dict) -> dict:
     due = payload.get("due_date")
     if due and not is_iso_date(due):
         raise HTTPException(status_code=422, detail="Due date must be YYYY-MM-DD.")
+    # The due date is also the link's expiry (register_link below), so a past one mints a
+    # link that is dead on arrival -- the candidate opens it and is told it has closed.
+    # Same UTC 'YYYY-MM-DD' comparison effective_link_status uses to expire it.
+    if due and due < datetime.now(timezone.utc).strftime("%Y-%m-%d"):
+        raise HTTPException(
+            status_code=422,
+            detail="The due date is in the past. The link expires on the due date, so the "
+                   "candidate could not open it — pick today or a later date.")
 
     candidate = await get_collection(COLL_CANDIDATES).find_one(
         {"uk": uk, "company_id": str(company_id)})
@@ -330,7 +338,10 @@ async def review_assessment(actor: dict, company_id: str, assessment_no: str,
     await audit(actor, AUDIT_ASSESSMENT_REVIEWED, ENTITY_ASSESSMENT, assessment_no,
                 f"{slot} decision: {decision.value}", company_id)
 
-    fresh = await coll.find_one({"assessment_no": assessment_no})
+    # Scoped by company: `assessment_no` is unique only within one, so reading it back
+    # unscoped could return another tenant's ASM of the same number — and resolve THAT.
+    fresh = await coll.find_one(
+        {"assessment_no": assessment_no, "company_id": str(company_id)})
     if _is_resolved(fresh):
         await _resolve(actor, company_id, fresh)
     else:
@@ -350,7 +361,8 @@ async def review_assessment(actor: dict, company_id: str, assessment_no: str,
                 f"The hiring manager has reviewed {fresh.get('candidate_name')}.",
                 link="/hrms/assessments")
 
-    final = await coll.find_one({"assessment_no": assessment_no})
+    final = await coll.find_one(
+        {"assessment_no": assessment_no, "company_id": str(company_id)})
     out = _out(final)
     out.pop("access_code", None)
     out["lifecycle"] = _lifecycle(final)
@@ -359,13 +371,23 @@ async def review_assessment(actor: dict, company_id: str, assessment_no: str,
 
 async def _resolve(actor: dict, company_id: str, doc: dict) -> None:
     """Both slots decided: close the assessment and move the candidate."""
+    # Every later step here — the candidate lookup, the stage move, the audit rows, the
+    # notifications — is keyed on the CALLER's company but reads its uk and manager off the
+    # document. A document from another company would therefore move the wrong candidate and
+    # tell the wrong manager. Refuse rather than half-apply.
+    if str(doc.get("company_id")) != str(company_id):
+        raise HTTPException(
+            status_code=409,
+            detail="This assessment does not belong to the company being acted on.")
     outcome = _outcome_of(doc)
     now = datetime.now(timezone.utc)
     target = (AppStatus.ASSESSMENT_PASSED if outcome == Decision.PASS.value
               else AppStatus.ASSESSMENT_FAILED)
 
+    # The document's OWN company, not the caller's: the two are the same on every correct
+    # call, and if they ever are not, this must not rewrite a different tenant's record.
     await get_collection(COLL_ASSESSMENTS).update_one(
-        {"assessment_no": doc["assessment_no"]},
+        {"assessment_no": doc["assessment_no"], "company_id": str(doc.get("company_id"))},
         {"$set": {"status": AssessmentStatus.REVIEWED.value, "outcome": outcome,
                   "resolved_at": now}})
 
