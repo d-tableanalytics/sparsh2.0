@@ -210,6 +210,10 @@ NOTIFY_MODULES: Dict[str, dict] = {
             _trigger("task_reopened", "Task Reopened",
                      "The assigner reopens the task. Goes to the doer.",
                      group="Finishing & sign-off"),
+            _trigger("task_rejected", "Task Rejected",
+                     "The assigner rejects a completed task outright (verification off). "
+                     "Goes to the doer.",
+                     group="Finishing & sign-off"),
             # ─── Time-driven (raised by the daily sweep, not by any user action) ───
             _trigger("task_due_reminder_daily", "Daily Due Reminder",
                      "Every day until the task is completed or its due date is reached. Goes "

@@ -37,6 +37,7 @@ const SYSTEM_STATUS_MESSAGE = {
   in_progress_reopened: 'Task reopened',
   dependency_completed: 'Dependency completed — back with the assignee for final completion',
   completed: 'Task completed',
+  rejected: 'Task rejected by the delegator — closed',
 };
 
 const systemStatusMessage = (h) => {
@@ -186,6 +187,9 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, scope, onChanged, onEdit })
         const stillVisible = await fetchDetail({ silent: true, tolerate403: true });
         if (!stillVisible) onClose();
         return;
+      }
+      if (status === 'rejected') {
+        showSuccess('Task rejected — the doer has been told why.');
       }
       if (status === 'completed' && task?.verificationRequired && !canAdminister) {
         // Verification-required tasks completed by the assignee are routed to "verification"
@@ -619,6 +623,16 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, scope, onChanged, onEdit })
     if (val === APPROVE_OPT) { handleFinalComplete(); return; }
     if (val === REOPEN_OPT) { handleReopen(); }
   };
+  // Verification OFF: the doer's Complete closes the task at once, so the delegator reviews it
+  // AFTER the fact, with two choices — Reject (the work is wrong altogether; a reason is
+  // required and the task is closed) or Reopen (it needs changes; back to the doer with a new
+  // deadline, the same Reopen flow verification uses).
+  const REJECT_OPT = '__reject__';
+  const isCompletedForReview = !!task && task.status === 'completed' && !task.verificationRequired && canAdminister;
+  const handleCompletedReviewSelect = (val) => {
+    if (val === REJECT_OPT) { setReasonStatus('rejected'); return; }
+    if (val === REOPEN_OPT) { handleReopen(); }
+  };
 
   return (
     <>
@@ -693,6 +707,23 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, scope, onChanged, onEdit })
                       <ShieldCheck size={13} /> {cfg.label}
                     </span>
                   )
+                ) : task.status === 'rejected' ? (
+                  // Rejected is final for everyone: nothing moves it any further.
+                  <span className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider border"
+                    title="Rejected by the delegator — the task is closed"
+                    style={{ background: curCfg.bg, color: curCfg.color, borderColor: curCfg.border }}>
+                    {curLabel} · Closed
+                  </span>
+                ) : isCompletedForReview ? (
+                  <select value={curDisplayStatus} disabled={reopening || savingReason}
+                    onChange={e => handleCompletedReviewSelect(e.target.value)}
+                    title="Review the completed work: Reject it, or Reopen it for changes"
+                    className="px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider border outline-none cursor-pointer disabled:opacity-50"
+                    style={{ background: curCfg.bg, color: curCfg.color, borderColor: curCfg.border }}>
+                    <option value={curDisplayStatus} disabled>{reopening ? 'Reopening…' : curLabel}</option>
+                    <option value={REJECT_OPT}>Reject — work is incorrect</option>
+                    <option value={REOPEN_OPT}>Reopen — needs changes</option>
+                  </select>
                 ) : isAwaitingDependency ? (
                   // The dependency is out with someone else: the task stays the assignee's, but
                   // it's parked at "Dependent on Other" until the doer resolves it.

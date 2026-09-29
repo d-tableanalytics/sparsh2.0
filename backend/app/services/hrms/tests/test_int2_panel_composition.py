@@ -156,7 +156,7 @@ async def main() -> None:
         return [{"user_id": uid, **flags} for uid in user_ids]
 
     def booking(uk, **over):
-        base = {"uk": uk, "round": "HR Round", "mode": "Virtual",
+        base = {"uk": uk, "round": "Panel Interview", "mode": "Virtual",
                 "scheduled_at": SOON, "duration_min": 45,
                 "interviewer_id": U_HR, "meeting_link": "https://meet.example.com/x"}
         base.update(over)
@@ -199,7 +199,7 @@ async def main() -> None:
             "a mid-level panel of HR alone",
             lambda: IV.assert_panel_composition(
                 [{"user_id": U_HR, "role": "hr"}], M.DesignationLevel.MID),
-            422, "still missing: manager")
+            422, "still missing: hod / manager")
         expect_http_sync(
             "a managerial panel with no Management",
             lambda: IV.assert_panel_composition(
@@ -343,6 +343,10 @@ async def main() -> None:
         check("and the warning says the booking WAS made",
               "has been made" in (warning or "").lower())
 
+        # A round is held once per candidate: cancel the earlier booking before re-booking.
+        for d in interviews.docs:
+            if d.get("uk") == "CAN-001":
+                d["status"] = M.InterviewStatus.CANCELLED.value
         third = await IV.schedule_interview(
             HR, COMPANY, booking("CAN-001", panel=panel(U_HR2, U_HOD)))
         check("an out-of-window booking still succeeds -- it is a preference, not a rule",

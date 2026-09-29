@@ -276,6 +276,10 @@ DEFAULT_TEMPLATES = {
         "subject": "Task Reopened: {{task_name}}",
         "body": "Hello {{name}},\n\n{{actor_name}} has reopened the task '{{task_name}}'. It needs further work.\n\nReason: {{reason}}\nDeadline: {{deadline}}\n\nRegards,\nSparsh Notifications"
     },
+    "task_rejected_email": {
+        "subject": "Task Rejected: {{task_name}}",
+        "body": "Hello {{name}},\n\n{{actor_name}} has rejected the task '{{task_name}}'. The task is closed.\n\nReason: {{reason}}\n\nRegards,\nSparsh Notifications"
+    },
     "task_verification_requested_email": {
         "subject": "Verification Requested: {{task_name}}",
         "body": "Hello {{name}},\n\n{{actor_name}} has submitted the task '{{task_name}}' for your verification.\n\nPlease review it and either approve the completion or reopen the task.\n\nRegards,\nSparsh Notifications"

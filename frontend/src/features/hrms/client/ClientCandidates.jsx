@@ -685,6 +685,7 @@ const CandidateJourney = ({ row, busy, onClose, onAct, onChanged }) => {
                       </p>
                       {i.recording_link && i.status !== 'Scheduled' && (
                         <a href={i.recording_link} target="_blank" rel="noreferrer"
+          title="Watch only — interview recordings can be watched but not downloaded, to protect the candidate."
                           className="text-[11px] font-semibold text-[var(--accent-indigo)]">
                           Watch the recording
                         </a>

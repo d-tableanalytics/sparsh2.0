@@ -15,7 +15,7 @@ Phase 1 ships the foundation only. Later phases add their routers/endpoints here
 """
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
 from app.controllers.auth_controller import get_current_user
@@ -1129,6 +1129,20 @@ async def schedulable_candidates(
     _require(current_user, Cap.INTERVIEW_SCHEDULE)
     return {"candidates": await interviews.schedulable_candidates(
         current_user, _company(current_user, company_id))}
+
+
+@router.get("/interviews/panel-options")
+async def interview_panel_options(
+    uk: Optional[str] = Query(None),
+    round_name: Optional[str] = Query(None, alias="round"),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Who may interview (HR, HOD/Manager, MD) and the roles this candidate's panel needs.
+    Declared before /interviews/{no} so the static path wins."""
+    _require(current_user, Cap.INTERVIEW_SCHEDULE)
+    return await interviews.panel_options(current_user, _company(current_user, company_id), uk,
+                                          round_name)
 
 
 @router.post("/interviews", status_code=201)
@@ -2705,7 +2719,7 @@ async def list_shortlist_reviews(
     _require(current_user, Cap.SHORTLIST_READ)
     return await shortlists.list_shortlist_reviews(
         current_user, _company(current_user, company_id),
-        request_no=request_no, outcome=outcome, uk=uk, limit=limit)
+        request_no=request_no, outcome=outcome, uk=uk, limit=limit, only_mine=True)
 
 
 @router.post("/shortlist-reviews", status_code=201)
@@ -2717,7 +2731,30 @@ async def create_shortlist_review(
     """Convene a sitting. Convening decides nothing until the outcome is Finalised."""
     _require(current_user, Cap.SHORTLIST_WRITE)
     return await shortlists.create_shortlist_review(
-        current_user, _company(current_user, company_id), body.model_dump())
+        current_user, _company(current_user, company_id), body.model_dump(),
+        own_verdicts_only=True)
+
+
+@router.get("/shortlist-reviews/committee-options")
+async def shortlist_committee_options(
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Who may sit on a shortlisting committee: HR and HOD / Managers, by name and role."""
+    _require(current_user, Cap.SHORTLIST_READ)
+    opts = await interviews.panel_options(current_user, _company(current_user, company_id))
+    return {"people": [p for p in opts["people"] if p["role"] in ("hr", "manager")]}
+
+
+@router.get("/shortlist-reviews/awaiting")
+async def shortlist_awaiting(
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Interviewed internal candidates the committee has not decided on yet.
+    Declared before /shortlist-reviews/{slr_no} so the static path wins."""
+    _require(current_user, Cap.SHORTLIST_READ)
+    return await shortlists.awaiting_committee(_company(current_user, company_id))
 
 
 @router.get("/shortlist-reviews/{slr_no}")
@@ -2728,9 +2765,26 @@ async def get_shortlist_review(
 ):
     _require(current_user, Cap.SHORTLIST_READ)
     doc = await shortlists.get_shortlist_review(_company(current_user, company_id), slr_no)
-    if not doc:
+    # Only the sitting's members and its convener see it; 404 so it does not even confirm
+    # the sitting exists.
+    if not doc or not shortlists._involved(doc, current_user):
         raise HTTPException(status_code=404, detail="Shortlist review not found.")
     return doc
+
+
+@router.post("/shortlist-reviews/{slr_no}/verdict")
+async def record_shortlist_verdict(
+    slr_no: str,
+    body: dict = Body(...),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """A committee member's OWN verdict: {"decision": "Agree" | "Object", "remarks": ...}.
+    When the last member answers, the sitting decides itself."""
+    _require(current_user, Cap.SHORTLIST_READ)
+    return await shortlists.record_verdict(
+        current_user, _company(current_user, company_id), slr_no,
+        (body or {}).get("decision"), (body or {}).get("remarks"))
 
 
 @router.patch("/shortlist-reviews/{slr_no}")
@@ -2742,9 +2796,13 @@ async def update_shortlist_review(
 ):
     """Record members, candidates or the outcome. A DECIDED sitting is frozen."""
     _require(current_user, Cap.SHORTLIST_WRITE)
+    company = _company(current_user, company_id)
+    doc = await shortlists.get_shortlist_review(company, slr_no)
+    if not doc or not shortlists._involved(doc, current_user):
+        raise HTTPException(status_code=404, detail="Shortlist review not found.")
     return await shortlists.update_shortlist_review(
-        current_user, _company(current_user, company_id), slr_no,
-        body.model_dump(exclude_unset=True))
+        current_user, company, slr_no, body.model_dump(exclude_unset=True),
+        own_verdicts_only=True)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -3513,6 +3571,24 @@ async def get_interview_media(
     _require(current_user, Cap.INTERVIEW_READ)
     return await interview_media.get_media(
         _company(current_user, company_id), interview_no)
+
+
+@router.get("/interviews/{interview_no}/recording/download")
+async def download_interview_recording(
+    interview_no: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Download the interview's recording. Open to whoever can see the interview -- the same
+    scope as the list (HR all; the interviewer and panel their own). A client is refused:
+    their recording is watch-only, through their share."""
+    from app.utils.hrms_access import is_client_side_user
+    if is_client_side_user(current_user):
+        raise HTTPException(status_code=403,
+                            detail="Recordings are shared with clients to watch, not download.")
+    company = _company(current_user, company_id)
+    doc = await interviews._require_visible(current_user, company, interview_no)
+    return await interview_media.download_recording(current_user, company, doc)
 
 
 @router.post("/interviews/{interview_no}/media/{kind}", status_code=201)

@@ -110,8 +110,9 @@ const ClientInterviews = ({ embedded, onChanged }) => {
     { key: 'rec', label: 'Recording',
       render: (r) => (r.recording_link && r.status !== 'Scheduled' ? (
         <a href={r.recording_link} target="_blank" rel="noreferrer"
+          title="Watch only — interview recordings can be watched but not downloaded, to protect the candidate."
           className="text-[11.5px] font-semibold text-[var(--accent-indigo)]">
-          Watch
+          Watch (view only)
         </a>
       ) : <span className="text-[var(--text-muted)]">—</span>) },
     { key: 'status', label: 'Status', align: 'right',

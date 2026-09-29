@@ -60,6 +60,8 @@ from app.models.hrms import (
 # ── Phase INT-2 ── interview governance (SOP §5).
 from app.models.hrms import (
     COLL_DESIGNATIONS, COLL_INTERVIEW_WINDOWS, FINAL_ROUND, FINAL_ROUND_PASSING, WEEKDAYS,
+    FINAL_ROUND_PANEL_ROLES, PANEL_ROUND, internal_rounds_for, final_round_is_mandatory,
+    COLL_SHORTLIST_REVIEWS, SHORTLIST_CLEARS_SELECTION,
     REQUISITION_TRACK_INTERNAL, designation_level, final_round_is_mandatory, required_panel_roles,
 )
 from app.services.hrms_audit_service import audit
@@ -140,6 +142,77 @@ async def _resolve_interviewer(company_id: str, interviewer_id: str) -> dict:
         raise HTTPException(
             status_code=422, detail="The interviewer must be a user of this company.")
     return person
+
+
+# Who conducts interviews: the roles the panel rule itself counts (REQUIRED_PANEL_ROLES).
+PANEL_ROLES = (HrmsRole.HR, HrmsRole.MANAGER, HrmsRole.MD)
+PANEL_ROLE_LABEL = {HrmsRole.HR.value: "HR", HrmsRole.MANAGER.value: "HOD / Manager",
+                    HrmsRole.MD.value: "MD"}
+
+
+def _role_words(values) -> str:
+    return ", ".join(PANEL_ROLE_LABEL.get(getattr(v, "value", v), str(getattr(v, "value", v)))
+                     for v in values)
+
+
+async def panel_options(actor: dict, company_id: str, uk: str = None,
+                        round_name: str = None) -> dict:
+    """The people who may interview, and what this candidate's vacancy requires of a panel.
+
+    Eligible = users of this company whose HRMS role is one the panel rule counts (HR,
+    HOD/Manager, MD). Everyone else — Finance, ordinary staff, support — does not sit on an
+    interview panel, so offering them only produced a panel the server then refused.
+    """
+    from app.utils.hrms_access import tenant_identity_source
+    source, base = await tenant_identity_source(company_id)
+    users = await get_collection(source).find(
+        {**base, "is_active": {"$ne": False}},
+        {"full_name": 1, "first_name": 1, "last_name": 1, "email": 1, "role": 1,
+         "governance_role": 1, "_source_collection": 1}).to_list(2000)
+    people = []
+    for u in users:
+        u.setdefault("_source_collection", source)
+        role = hrms_role(u)
+        if role in PANEL_ROLES:
+            people.append({"user_id": str(u["_id"]), "name": _person_name(u),
+                           "role": role.value, "role_label": PANEL_ROLE_LABEL[role.value]})
+    order = {r.value: i for i, r in enumerate(PANEL_ROLES)}
+    people.sort(key=lambda p: (order.get(p["role"], 9), p["name"].lower()))
+
+    required, internal, rounds, level = [], False, [], None
+    if uk:
+        cand = await get_collection(COLL_CANDIDATES).find_one(
+            {"uk": uk, "company_id": str(company_id)}, {"request_no": 1})
+        req = await _requisition_for(company_id, (cand or {}).get("request_no"))
+        internal = _is_internal(req)
+        if internal:
+            level = await _level_for(company_id, req)
+            booked = {r.get("round"): r for r in await get_collection(COLL_INTERVIEWS).find(
+                {"company_id": str(company_id), "uk": uk, "status": _LIVE_INTERVIEW},
+                {"round": 1, "interview_no": 1, "status": 1, "outcome": 1}).to_list(50)}
+            panel_passed = any((r.get("outcome") in FINAL_ROUND_PASSING)
+                               for n, r in booked.items() if n != FINAL_ROUND.value)
+            for r in internal_rounds_for(level):
+                held = booked.get(r.value) or (None if r is FINAL_ROUND else next(
+                    (b for n, b in booked.items() if n != FINAL_ROUND.value), None))
+                reason = None
+                if held:
+                    reason = (f"already held ({held.get('interview_no')}, {held.get('status')}"
+                              + (f", {held.get('outcome')}" if held.get("outcome") else "") + ")")
+                elif r is FINAL_ROUND and not panel_passed:
+                    reason = "after the Panel Interview is passed"
+                rounds.append({"value": r.value, "label": round_label(r.value, level),
+                               "available": reason is None, "reason": reason})
+            chosen = round_name if round_name in [r["value"] for r in rounds] else next(
+                (r["value"] for r in rounds if r["available"]), rounds[0]["value"])
+            round_name = chosen
+            required = [r.value for r in (FINAL_ROUND_PANEL_ROLES if chosen == FINAL_ROUND.value
+                                          else required_panel_roles(level))]
+    return {"people": people, "internal": internal, "required_roles": required,
+            "required_labels": [PANEL_ROLE_LABEL.get(r, r) for r in required],
+            "rounds": rounds, "round": round_name if internal else None,
+            "designation_level": getattr(level, "value", level),
+            "two_interviews": bool(internal and final_round_is_mandatory(level))}
 
 
 def _person_name(doc: dict) -> str:
@@ -233,7 +306,10 @@ def assert_panel_composition(panel: list, level, *, round_name: str = None) -> N
     A RECUSED member is counted as absent (SOP §11): somebody who has stood down over a
     conflict cannot also be the reason the panel is quorate.
     """
-    required = required_panel_roles(level)
+    # The Management final interview is Management's own sitting; every other round on the
+    # internal track is the panel, whose make-up depends on the band.
+    required = (list(FINAL_ROUND_PANEL_ROLES) if round_name == FINAL_ROUND.value
+                else required_panel_roles(level))
     active = [m for m in (panel or []) if not m.get("recused")]
     covered = {m.get("role") for m in active if m.get("role")}
 
@@ -244,18 +320,81 @@ def assert_panel_composition(panel: list, level, *, round_name: str = None) -> N
             recused_note = (" A recused member does not count towards the panel.")
         raise HTTPException(
             status_code=422,
-            detail=(f"This role needs a panel covering "
-                    f"{', '.join(r.value for r in required)}. Still missing: "
-                    f"{', '.join(missing)}.{recused_note}"))
+            detail=(f"This vacancy needs an interview panel with {_role_words(required)}. "
+                    f"Still missing: {_role_words(missing)} — add them under Interview panel."
+                    f"{recused_note}"))
 
     people = {str(m.get("user_id")) for m in active if m.get("user_id")}
     if len(people) < len(required):
         raise HTTPException(
             status_code=422,
             detail=(f"A panel of {len(people)} cannot cover {len(required)} required roles. "
-                    f"{', '.join(r.value for r in required)} must be "
+                    f"{_role_words(required)} must be "
                     f"{len(required)} different people -- one person holding two of the "
                     f"seats is not a panel."))
+
+
+# Bookings that still stand: a cancelled or no-show interview can be booked again.
+_LIVE_INTERVIEW = {"$nin": ["Cancelled", "No Show"]}
+
+
+def round_label(round_name: str, level=None) -> str:
+    """How the internal track names its rounds on screen."""
+    if round_name == PANEL_ROUND.value:
+        return "Panel Interview (" + _role_words(required_panel_roles(level)) + ")"
+    if round_name == FINAL_ROUND.value:
+        return "Management Interview — MD's final decision"
+    return round_name
+
+
+async def assert_internal_round_allowed(company_id: str, uk: str, level, round_name: str) -> None:
+    """SOP §5 on the internal track: junior / mid sit ONE interview, the Panel Interview;
+    senior / managerial sit the Panel Interview and then the Management final interview.
+    Each is held once -- a cancelled or no-show booking may be rebooked."""
+    allowed = [r.value for r in internal_rounds_for(level)]
+    band = getattr(level, "value", level)
+    if round_name not in allowed:
+        if round_name == FINAL_ROUND.value:
+            detail = (f'A "{band}" role has one interview only — the Panel Interview '
+                      f"(HR + HOD). The Management interview is for senior and managerial roles.")
+        else:
+            detail = ("Internal hiring uses the Panel Interview"
+                      + (" and then the Management Interview" if len(allowed) > 1 else "")
+                      + f' — "{round_name}" is not a round here.')
+        raise HTTPException(status_code=422, detail=detail)
+
+    # A round booked under the old names (HR Round, Technical, Manager Round) IS the panel
+    # interview on this track, so it counts towards "held once" too.
+    same_round = {"$ne": FINAL_ROUND.value} if round_name == PANEL_ROUND.value else round_name
+    existing = await get_collection(COLL_INTERVIEWS).find_one(
+        {"company_id": str(company_id), "uk": uk, "round": same_round,
+         "status": _LIVE_INTERVIEW},
+        {"interview_no": 1, "status": 1})
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail=(f"This candidate already has the {round_label(round_name, level)} "
+                    f"({existing.get('interview_no')}, {existing.get('status')}). It is held "
+                    f"once — change the date on that booking, or cancel it first."))
+
+    if round_name == FINAL_ROUND.value:
+        # The Management interview comes after the panel: a passed earlier round must exist.
+        passed = await get_collection(COLL_INTERVIEWS).find_one(
+            {"company_id": str(company_id), "uk": uk, "round": {"$ne": FINAL_ROUND.value},
+             "outcome": {"$in": list(FINAL_ROUND_PASSING)}}, {"_id": 1})
+        if not passed:
+            raise HTTPException(
+                status_code=409,
+                detail=("The Management interview comes after the Panel Interview. Hold the "
+                         "Panel Interview first and record a Pass."))
+
+
+async def committee_agreed(company_id: str, uk: str) -> bool:
+    """Whether a recorded committee sitting has put this candidate forward."""
+    rows = await get_collection(COLL_SHORTLIST_REVIEWS).find(
+        {"company_id": str(company_id), "outcome": {"$in": list(SHORTLIST_CLEARS_SELECTION)}},
+        {"candidate_uks": 1}).to_list(500)
+    return any(uk in (r.get("candidate_uks") or []) for r in rows)
 
 
 async def assert_final_round_complete(company_id: str, candidate: dict, req: dict) -> None:
@@ -397,6 +536,13 @@ async def list_interviews(actor: dict, company_id: str, *, status: str = None,
         # Whether THIS caller may evaluate is decided server-side, so the UI never offers a
         # button the API will refuse.
         item["can_evaluate"] = _may_evaluate(actor, r)
+        # What the row's Download button needs to know -- never the storage key itself.
+        rec = r.get("recording") or {}
+        item["recording"] = ({"name": rec.get("name"), "is_external": bool(rec.get("external_url")),
+                              "uploaded_at": rec.get("uploaded_at"),
+                              "uploaded_by_name": rec.get("uploaded_by_name"),
+                              "size_bytes": rec.get("size_bytes")} if rec else None)
+        item.pop("recording_history", None)
         when = r.get("scheduled_at")
         if isinstance(when, datetime):
             aware = when if when.tzinfo else when.replace(tzinfo=timezone.utc)
@@ -465,7 +611,7 @@ def _is_schedulable(candidate: dict) -> bool:
     # can legally reach Interview Scheduled (or is already in the interview chain).
     return (can_transition(status, AppStatus.INTERVIEW_SCHEDULED.value)
             or current in (AppStatus.INTERVIEW_SCHEDULED, AppStatus.TECHNICAL_ROUND,
-                           AppStatus.MD_ROUND))
+                           AppStatus.MD_ROUND, AppStatus.FINAL_INTERVIEW_REQUIRED))
 
 
 # -------------------------------------------------------------
@@ -535,6 +681,22 @@ async def schedule_interview(actor: dict, company_id: str, payload: dict) -> dic
         await assert_telephonic_cleared(company_id, candidate, req)
 
         level = await _level_for(company_id, req)
+        await assert_internal_round_allowed(company_id, uk, level, round_name)
+
+        # The interviewer conducts it, so they must be someone who sits on panels, and they
+        # count as a panel member whether or not the form listed them again.
+        lead_role = hrms_role(await tenant_member(company_id, payload.get("interviewer_id")) or {})
+        if round_name == FINAL_ROUND.value and lead_role != HrmsRole.MD:
+            raise HTTPException(
+                status_code=422,
+                detail="The Management interview is conducted by the MD — choose the MD as interviewer.")
+        if lead_role not in PANEL_ROLES:
+            raise HTTPException(
+                status_code=422,
+                detail="The interviewer must be HR, an HOD / Manager or the MD.")
+        if payload.get("interviewer_id") and not any(
+                m["user_id"] == str(payload["interviewer_id"]) for m in panel):
+            panel = await _resolve_panel(company_id, [{"user_id": payload["interviewer_id"]}]) + panel
         assert_panel_composition(panel, level, round_name=round_name)
         window_warning = await interview_window_warning(company_id, req, when)
 
@@ -581,7 +743,15 @@ async def schedule_interview(actor: dict, company_id: str, payload: dict) -> dic
         doc["short_notice"] = doc["notice_hours"] < INTERVIEW_NOTICE_HOURS
     await get_collection(COLL_INTERVIEWS).insert_one(dict(doc))
 
-    if can_transition(status, AppStatus.INTERVIEW_SCHEDULED.value):
+    if (round_name == FINAL_ROUND.value and status == AppStatus.FINAL_INTERVIEW_REQUIRED.value
+            and can_transition(status, AppStatus.MD_ROUND.value)):
+        # The committee routed them here; booking the round is them entering it.
+        await get_collection(COLL_CANDIDATES).update_one(
+            {"uk": uk, "company_id": str(company_id)},
+            {"$set": {"application_status": AppStatus.MD_ROUND.value, "updated_at": now}})
+        await audit(actor, AUDIT_STAGE_CHANGED, ENTITY_CANDIDATE, uk,
+                    f"{status} -> {AppStatus.MD_ROUND.value}", company_id)
+    elif can_transition(status, AppStatus.INTERVIEW_SCHEDULED.value):
         await get_collection(COLL_CANDIDATES).update_one(
             {"uk": uk, "company_id": str(company_id)},
             {"$set": {"application_status": AppStatus.INTERVIEW_SCHEDULED.value,
@@ -951,6 +1121,22 @@ async def _advance_candidate(actor: dict, company_id: str, interview: dict,
             target = PASS_NEXT[InterviewRound(interview.get("round"))]
         except (ValueError, KeyError):
             return
+        req = await _requisition_for(company_id, interview.get("request_no"))
+        if _is_internal(req) and interview.get("round") != FINAL_ROUND.value:
+            # Internal hiring has one panel interview; a round booked under the old names
+            # (HR Round, Technical, Manager Round) counts as it rather than chaining on to a
+            # "Technical Round" that no longer exists here.
+            target = PASS_NEXT[PANEL_ROUND]
+            if final_round_is_mandatory(await _level_for(company_id, req)):
+                # Senior / managerial: a panel pass goes straight to the Management interview
+                # with the MD, whose decision after it is the final commit.
+                target = AppStatus.FINAL_INTERVIEW_REQUIRED
+                if interview.get("interviewer_id"):
+                    await notify_user(
+                        interview["interviewer_id"],
+                        f"{interview.get('candidate_name')} passed the Panel Interview",
+                        "Next: schedule the Management interview with the MD, who makes the "
+                        "final decision.", kind="info", link="/hrms/interviews")
     else:
         target = OUTCOME_STATUS[outcome]
 

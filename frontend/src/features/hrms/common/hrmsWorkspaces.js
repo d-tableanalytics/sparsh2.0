@@ -2,7 +2,7 @@ import {
   ClipboardList, ScrollText, Megaphone, UserCircle,
   ClipboardCheck, ListChecks, CalendarDays, FileSignature, UserPlus, PieChart,
   BadgeCheck, Target, PhoneCall, Users2, Phone, Scale,
-  ShieldCheck, Briefcase, LayoutDashboard, Star,
+  ShieldCheck, Briefcase, LayoutDashboard,
   HeartHandshake, GraduationCap, HeartPulse, CalendarClock,
   Building2,
 } from 'lucide-react';
@@ -98,10 +98,6 @@ export const HIRING_WORKSPACE = {
         // you were booked for is an inherent right ... that must not be revocable by a
         // permission edit" (routes/hrms.py list_interviews docstring).
         { label: 'Interviews', to: '/hrms/interviews', icon: CalendarDays, cap: null },
-        // Every requisition's Shortlisted-tier candidates on one screen instead of a column
-        // buried in the Kanban board. Distinct from "Shortlist Committee": this is a VIEW,
-        // that is the DECISION.
-        { label: 'Shortlisted', to: '/hrms/shortlisted', icon: Star, cap: CAP.CANDIDATE_READ },
         // The shortlisting committee (SOP step 10) sits between the panel and the final
         // interview, and gates `Selected`.
         { label: 'Shortlist Committee', to: '/hrms/shortlist-reviews', icon: Users2, cap: CAP.SHORTLIST_READ },

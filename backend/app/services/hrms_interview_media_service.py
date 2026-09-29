@@ -47,6 +47,7 @@ from app.config.settings import settings
 from app.db.mongodb import get_collection
 from app.models.hrms import (
     AUDIT_INTERVIEW_MEDIA_REMOVED, AUDIT_INTERVIEW_RECORDING_ADDED,
+    AUDIT_INTERVIEW_RECORDING_DOWNLOADED,
     AUDIT_INTERVIEW_RECORDING_VIEWED, AUDIT_INTERVIEW_REPORT_ADDED,
     AUDIT_INTERVIEW_REPORT_VIEWED, COLL_CANDIDATES, COLL_INTERVIEWS,
     ENTITY_CANDIDATE, MAX_RECORDING_BYTES, MAX_REPORT_BYTES, RECORDING_MIME,
@@ -322,6 +323,36 @@ async def interviews_for_candidate(company_id: str, uk: str, *,
             })
         out.append(item)
     return out
+
+
+async def download_recording(actor: dict, company_id: str, interview: dict) -> dict:
+    """A download of the recording, for someone on the Sparsh side who can see the interview.
+
+    `interview` is already scope-checked by the caller. A stored file comes back as a
+    short-lived link that DOWNLOADS under a readable name; a recording that lives in the
+    conferencing tool comes back as that link -- its download is the hosting tool's, not ours.
+    Every download is audited, as every client view is.
+    """
+    entry = interview.get("recording")
+    no = interview.get("interview_no")
+    if not entry:
+        raise HTTPException(
+            status_code=404,
+            detail="No recording is attached to this interview yet.")
+    await audit(actor, AUDIT_INTERVIEW_RECORDING_DOWNLOADED, ENTITY_INTERVIEW, no,
+                f"Interview recording for {interview.get('candidate_name')}", company_id)
+    if entry.get("external_url"):
+        return {"external_url": entry["external_url"], "name": entry.get("name")}
+
+    from app.services.s3_service import get_signed_url
+    name = entry.get("name") or f"{no}-recording"
+    readable = safe_filename(f"{no} {interview.get('candidate_name') or ''} {name}".strip())
+    url = get_signed_url(entry["key"], expires_in=15 * 60, download_as=readable)
+    if not url:
+        raise HTTPException(status_code=503,
+                            detail="The recording could not be opened right now.")
+    return {"download_url": url, "name": readable, "mime_type": entry.get("mime_type"),
+            "size_bytes": entry.get("size_bytes")}
 
 
 # ─────────────────────────────────────────────────────────────

@@ -127,14 +127,14 @@ export const Facts = ({ items }) => (
 );
 
 /** A modal shell. Labelled for screen readers and closable on Escape. */
-export const Modal = ({ title, subtitle, onClose, children, footer, labelledBy }) => (
+export const Modal = ({ title, subtitle, onClose, children, footer, labelledBy, wide }) => (
   <div
     className="fixed inset-0 z-[60] grid place-items-center bg-black/40 backdrop-blur-sm p-4"
     role="dialog" aria-modal="true" aria-labelledby={labelledBy}
     onKeyDown={(e) => { if (e.key === 'Escape') onClose(); }}
   >
-    <div className="w-full max-w-lg max-h-[90vh] flex flex-col rounded-2xl
-      border border-[var(--border)] bg-[var(--bg-card)] shadow-xl">
+    <div className={`w-full ${wide ? 'max-w-2xl' : 'max-w-lg'} max-h-[90vh] flex flex-col rounded-2xl
+      border border-[var(--border)] bg-[var(--bg-card)] shadow-xl`}>
       <div className="px-5 py-4 border-b border-[var(--border)]">
         <h2 id={labelledBy} className="text-[15px] font-bold text-[var(--text-main)]">
           {title}

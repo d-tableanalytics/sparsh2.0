@@ -6,9 +6,11 @@ import HrmsPageHeader from '../common/HrmsPageHeader';
 import HrmsScopeBar from '../common/HrmsScopeBar';
 import { HrmsLoading, HrmsError, HrmsEmpty } from '../common/HrmsStates';
 import { useNotification } from '../../../context/NotificationContext';
+import { useAuth } from '../../../context/AuthContext';
 import {
   getShortlistReviews, getShortlistReview, createShortlistReview, updateShortlistReview,
-  getRequisitions, getCandidates, getEmployees,
+  getShortlistAwaiting, getCommitteeOptions, recordShortlistVerdict,
+  getRequisitions, getCandidates,
 } from '../../../services/hrmsApi';
 import { FIELD, LABEL, TEXTAREA, day, toneFor } from './internalKit';
 import { Btn, Chip, Facts, Modal, RecordList } from './internalKit.jsx';
@@ -52,11 +54,17 @@ const ShortlistCommittee = () => {
 
   const [rows, setRows] = useState([]);
   const [pending, setPending] = useState(0);
+  const [awaitingMe, setAwaitingMe] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [outcome, setOutcome] = useState('');
   const [convening, setConvening] = useState(false);
   const [deciding, setDeciding] = useState(null);
+  // Interviewed and not yet decided -- who this page exists to move forward.
+  const [awaiting, setAwaiting] = useState([]);
+  // Senior / managerial candidates the committee put forward: the MD decides after the
+  // Management interview.
+  const [forMd, setForMd] = useState([]);
   const [busy, setBusy] = useState(false);
 
   const canWrite = can(CAP.SHORTLIST_WRITE);
@@ -71,6 +79,10 @@ const ShortlistCommittee = () => {
       });
       setRows(data?.shortlist_reviews || []);
       setPending(data?.pending ?? 0);
+      setAwaitingMe(data?.awaiting_me ?? 0);
+      const waiting = await getShortlistAwaiting(scope).catch(() => null);
+      setAwaiting(waiting?.data?.candidates || []);
+      setForMd(waiting?.data?.final_commit || []);
     } catch (err) {
       setError(err?.response?.data?.detail || 'Could not load the committee record.');
     } finally {
@@ -118,6 +130,14 @@ const ShortlistCommittee = () => {
       },
     },
     {
+      key: 'mine',
+      label: 'Your part',
+      render: (r) => (r.my_verdict === 'Pending' ? <Chip tone="warn">Your approval needed</Chip>
+        : r.my_verdict === 'Agree' ? <Chip tone="good">You approved</Chip>
+          : r.my_verdict === 'Object' ? <Chip tone="bad">You did not approve</Chip>
+            : <span className="text-[11.5px] text-[var(--text-muted)]">{r.i_convened ? 'You convened it' : '—'}</span>),
+    },
+    {
       key: 'outcome',
       label: 'Outcome',
       render: (r) => (
@@ -129,9 +149,12 @@ const ShortlistCommittee = () => {
       key: 'act',
       label: '',
       align: 'right',
-      render: (r) => (canWrite && r.outcome === 'Pending' ? (
-        <Btn onClick={() => setDeciding(r)}>Decide</Btn>
-      ) : null),
+      render: (r) => (
+        <Btn tone={r.outcome === 'Pending' && r.my_verdict === 'Pending' ? 'primary' : 'ghost'}
+          onClick={() => setDeciding(r)}>
+          {r.outcome === 'Pending' && r.my_verdict === 'Pending' ? 'Give your verdict' : 'Open'}
+        </Btn>
+      ),
     },
   ];
 
@@ -140,7 +163,7 @@ const ShortlistCommittee = () => {
       <HrmsPageHeader
         icon={Users2}
         title="Shortlisting committee"
-        subtitle="HR and the Department Head jointly finalise the shortlist before the final interview (SOP section 5)."
+        subtitle="Junior / mid roles: after the panel interview, HR and the HOD decide together. Senior / managerial roles skip the committee — the MD decides after the Management interview."
         actions={canWrite && (
           <Btn tone="primary" onClick={() => setConvening(true)}>
             <Plus size={14} /> Convene
@@ -149,15 +172,101 @@ const ShortlistCommittee = () => {
       />
       <HrmsScopeBar />
 
-      {pending > 0 && (
-        <div className="rounded-xl border border-[var(--accent-orange)]/30
-          bg-[var(--accent-orange-bg)] px-4 py-3">
-          <p className="text-[12.5px] font-semibold text-[var(--accent-orange)]">
-            {pending} sitting{pending === 1 ? '' : 's'} convened and not yet decided.
+      {awaitingMe > 0 && (
+        <div className="rounded-xl border border-[var(--accent-indigo)]/30 bg-[var(--accent-indigo-bg)] px-4 py-3">
+          <p className="text-[12.5px] font-semibold text-[var(--accent-indigo)]">
+            {awaitingMe} sitting{awaitingMe === 1 ? ' is' : 's are'} waiting for your approval.
           </p>
           <p className="text-[11.5px] text-[var(--text-muted)] mt-0.5">
-            A candidate cannot reach Selected until a sitting has finalised them.
+            Open it with “Give your verdict” below. Only you can approve for yourself; the decision
+            records once every member has answered.
           </p>
+        </div>
+      )}
+      {pending > awaitingMe && (
+        <p className="text-[11.5px] text-[var(--text-muted)]">
+          {pending - awaitingMe} other sitting{pending - awaitingMe === 1 ? ' is' : 's are'} still waiting for another member’s verdict.
+        </p>
+      )}
+
+      <div className="rounded-xl border border-[var(--border)] bg-[var(--bg-card)]">
+        <div className="px-4 py-3 border-b border-[var(--border)]">
+          <p className="text-[13px] font-bold text-[var(--text-main)]">
+            Waiting for the committee{awaiting.length ? ` (${awaiting.length})` : ''}
+          </p>
+          <p className="text-[11.5px] text-[var(--text-muted)] mt-0.5">
+            Candidates who passed their panel interview. HR and the HOD decide on them together,
+            using the scoring guide: 4.0+ strong · 3.0–3.99 consider / hold · below 3.0 reject.
+          </p>
+        </div>
+        {!awaiting.length ? (
+          <p className="px-4 py-3 text-[12px] text-[var(--text-muted)]">
+            Nobody is waiting — candidates appear here once their panel interview is recorded as a Pass.
+          </p>
+        ) : (
+          <ul className="divide-y divide-[var(--border)]">
+            {awaiting.map((c) => (
+              <li key={c.uk} className="px-4 py-2.5 flex flex-wrap items-center gap-x-4 gap-y-1.5">
+                <div className="min-w-0 flex-1">
+                  <p className="text-[13px] font-semibold text-[var(--text-main)]">
+                    {c.candidate_name} <span className="text-[11px] font-normal text-[var(--text-muted)]">{c.uk}</span>
+                  </p>
+                  <p className="text-[11px] text-[var(--text-muted)]">
+                    {c.designation_name || c.request_no} · {c.request_no}
+                    {c.designation_level ? ` · ${c.designation_level}` : ''}
+                    {' · '}{c.round} {c.interview_no} — {c.outcome}
+                  </p>
+                </div>
+                <Chip tone={c.band === 'Strong' ? 'good' : c.band === 'Reject' ? 'bad' : 'warn'}
+                  title="Interview score (average of the panel's ratings) and its band in the scoring guide">
+                  {c.average_score != null ? `${c.average_score} · ${c.band}` : 'not scored'}
+                </Chip>
+                {c.pending_slr_no ? (
+                  <Chip tone="warn" title="A sitting naming this candidate is convened and not yet decided">
+                    in {c.pending_slr_no} — decide it below
+                  </Chip>
+                ) : canWrite && (
+                  <Btn tone="primary" onClick={() => setConvening({ requestNo: c.request_no, uks: [c.uk] })}>
+                    Convene committee
+                  </Btn>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+
+      {forMd.length > 0 && (
+        <div className="rounded-xl border border-[var(--border)] bg-[var(--bg-card)]">
+          <div className="px-4 py-3 border-b border-[var(--border)]">
+            <p className="text-[13px] font-bold text-[var(--text-main)]">
+              Waiting for the MD&apos;s final decision ({forMd.length})
+            </p>
+            <p className="text-[11.5px] text-[var(--text-muted)] mt-0.5">
+              Senior / managerial roles. They passed the Panel Interview, so the MD interviews them
+              (Management interview) and records the final decision on the Interviews page —
+              Approve makes them Selected. No committee is needed for these roles.
+            </p>
+          </div>
+          <ul className="divide-y divide-[var(--border)]">
+            {forMd.map((c) => (
+              <li key={c.uk} className="px-4 py-2.5 flex flex-wrap items-center gap-x-4 gap-y-1.5">
+                <div className="min-w-0 flex-1">
+                  <p className="text-[13px] font-semibold text-[var(--text-main)]">
+                    {c.candidate_name} <span className="text-[11px] font-normal text-[var(--text-muted)]">{c.uk}</span>
+                  </p>
+                  <p className="text-[11px] text-[var(--text-muted)]">{c.designation_name || c.request_no} · {c.request_no}</p>
+                </div>
+                <Chip tone={c.interview_no ? (c.interview_status === 'Completed' ? 'good' : 'neutral') : 'warn'}>
+                  {!c.interview_no
+                    ? 'Management interview not booked yet'
+                    : c.interview_status === 'Completed'
+                      ? `${c.interview_no} done — ${c.outcome || 'MD to record the decision'}`
+                      : `${c.interview_no} booked for ${day(c.scheduled_at)}`}
+                </Chip>
+              </li>
+            ))}
+          </ul>
         </div>
       )}
 
@@ -200,9 +309,10 @@ const ShortlistCommittee = () => {
                 { label: 'Members', value: r.committee_state?.member_count },
                 { label: 'Decided', value: day(r.decided_at) },
               ]} />
-              {canWrite && r.outcome === 'Pending' && (
-                <Btn onClick={() => setDeciding(r)}>Decide</Btn>
-              )}
+              <Btn tone={r.outcome === 'Pending' && r.my_verdict === 'Pending' ? 'primary' : 'ghost'}
+                onClick={() => setDeciding(r)}>
+                {r.outcome === 'Pending' && r.my_verdict === 'Pending' ? 'Give your verdict' : 'Open'}
+              </Btn>
             </div>
           )}
         />
@@ -210,11 +320,12 @@ const ShortlistCommittee = () => {
 
       {convening && (
         <ConveneModal
+          initial={typeof convening === 'object' ? convening : null}
           scope={scope}
           busy={busy}
           setBusy={setBusy}
           onClose={() => setConvening(false)}
-          onDone={() => { setConvening(false); load(); showSuccess('Sitting convened.'); }}
+          onDone={() => { setConvening(false); load(); showSuccess('Sitting convened — each member has been asked for their approval.'); }}
           onError={(m) => showError(m)}
         />
       )}
@@ -225,7 +336,16 @@ const ShortlistCommittee = () => {
           scope={scope}
           busy={busy}
           onError={showError}
-          onClose={() => setDeciding(null)}
+          onVerdict={(doc) => {
+            if (doc?.outcome && doc.outcome !== 'Pending') {
+              showSuccess(`Everyone has answered — ${deciding.slr_no} is ${doc.outcome}.`);
+              setDeciding(null);
+            } else {
+              showSuccess('Your verdict is recorded. Waiting for the other members.');
+            }
+            load();
+          }}
+          onClose={() => { setDeciding(null); load(); }}
           onSubmit={async (value) => {
             setBusy(true);
             try {
@@ -246,36 +366,77 @@ const ShortlistCommittee = () => {
   );
 };
 
-/** Convene a sitting: pick the requisition, the candidates on it and who sat. */
-const ConveneModal = ({ scope, busy, setBusy, onClose, onDone, onError }) => {
+/** One numbered block of the convene form (module-level so inputs keep focus). */
+const Step = ({ n, title, hint, right, children }) => (
+  <section className="space-y-2">
+    <div className="flex items-start justify-between gap-2">
+      <div className="min-w-0">
+        <p className="flex items-center gap-2 text-[12.5px] font-bold text-[var(--text-main)]">
+          <span className="h-5 w-5 grid place-items-center rounded-full bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] text-[10.5px]">{n}</span>
+          {title}
+        </p>
+        {hint && <p className="mt-0.5 ml-7 text-[11px] text-[var(--text-muted)]">{hint}</p>}
+      </div>
+      {right}
+    </div>
+    <div className="ml-7">{children}</div>
+  </section>
+);
+
+const COMMITTEE_SEATS = [['hr', 'HR'], ['manager', 'HOD / Manager']];
+
+/** Convene a sitting: pick the vacancy, the candidates on it and who sits. */
+const ConveneModal = ({ initial, scope, busy, setBusy, onClose, onDone, onError }) => {
   const [reqs, setReqs] = useState([]);
   const [people, setPeople] = useState([]);
   const [candidates, setCandidates] = useState([]);
-  const [requestNo, setRequestNo] = useState('');
-  const [picked, setPicked] = useState([]);
+  // The panel's result per candidate (from "Waiting for the committee").
+  const [evidence, setEvidence] = useState({});
+  // Opened from "Waiting for the committee": the vacancy and the candidate come pre-filled.
+  const [requestNo, setRequestNo] = useState(initial?.requestNo || '');
+  const [picked, setPicked] = useState(initial?.uks || []);
   const [members, setMembers] = useState([]);
   const [notes, setNotes] = useState('');
 
   useEffect(() => {
     getRequisitions({ ...scope })
-      .then(({ data }) => setReqs(data?.requisitions || []))
+      // A committee sits on the INTERNAL track only.
+      .then(({ data }) => setReqs((data?.requisitions || [])
+        .filter((r) => !r.requisition_track || r.requisition_track === 'internal')))
       .catch(() => setReqs([]));
-    // A committee member needs a real login account — a profile onboarded before the
-    // person has one (`pending_user_link`) has no `user_id`, so it cannot be picked here.
-    getEmployees(scope)
-      .then(({ data }) => setPeople((data?.employees || []).filter((e) => e.user_id)))
+    // Only the people who can sit: HR and HOD / Managers, by name.
+    getCommitteeOptions(scope)
+      .then(({ data }) => setPeople(data?.people || []))
       .catch(() => setPeople([]));
+    getShortlistAwaiting(scope)
+      .then(({ data }) => setEvidence(Object.fromEntries(
+        (data?.candidates || []).map((c) => [c.uk, c]))))
+      .catch(() => setEvidence({}));
   }, [scope]);
 
   useEffect(() => {
     if (!requestNo) { setCandidates([]); setPicked([]); return; }
+    const prefilled = initial?.requestNo;
+    setPicked((p) => (prefilled === requestNo ? p : []));
     getCandidates({ ...scope, request_no: requestNo })
       .then(({ data }) => setCandidates(data?.candidates || []))
       .catch(() => setCandidates([]));
-  }, [requestNo, scope]);
+  }, [requestNo, scope, initial?.requestNo]);
 
   const toggle = (list, setList, value) =>
     setList(list.includes(value) ? list.filter((v) => v !== value) : [...list, value]);
+
+  const byId = Object.fromEntries(people.map((p) => [p.user_id, p]));
+  const seated = new Set(members.map((id) => byId[id]?.role).filter(Boolean));
+  const seatsMissing = COMMITTEE_SEATS.filter(([r]) => !seated.has(r)).map(([, l]) => l);
+  const interviewed = candidates.filter((c) => evidence[c.uk]);
+  const req = reqs.find((r) => r.request_no === requestNo);
+
+  const blockers = [
+    !requestNo && 'choose the vacancy',
+    requestNo && !picked.length && 'tick at least one candidate',
+    seatsMissing.length > 0 && `add ${seatsMissing.join(' and ')} to the committee`,
+  ].filter(Boolean);
 
   const submit = async () => {
     setBusy(true);
@@ -283,7 +444,8 @@ const ConveneModal = ({ scope, busy, setBusy, onClose, onDone, onError }) => {
       await createShortlistReview({
         request_no: requestNo,
         candidate_uks: picked,
-        committee_members: members.map((user_id) => ({ user_id, decision: 'Agree' })),
+        // Nobody is pre-approved: each member gives their own verdict afterwards.
+        committee_members: members.map((user_id) => ({ user_id, decision: 'Pending' })),
         outcome: 'Pending',
         notes,
       }, scope);
@@ -297,79 +459,132 @@ const ConveneModal = ({ scope, busy, setBusy, onClose, onDone, onError }) => {
 
   return (
     <Modal
+      wide
       title="Convene a shortlisting committee"
-      subtitle="Convening decides nothing. Finalise it once the committee has agreed."
+      subtitle="Each member you add is asked for their own approval. Nothing is decided until every member has answered."
       labelledBy="slr-convene"
       onClose={onClose}
       footer={(
-        <>
-          <Btn onClick={onClose}>Cancel</Btn>
-          <Btn tone="primary" disabled={busy || !requestNo || !members.length}
-            onClick={submit}>
-            Convene
-          </Btn>
-        </>
-      )}
-    >
-      <div>
-        <label className={LABEL} htmlFor="slr-req">Requisition *</label>
-        <select id="slr-req" className={FIELD} value={requestNo}
-          onChange={(e) => setRequestNo(e.target.value)}>
-          <option value="">Choose an internal requisition</option>
-          {reqs.map((r) => (
-            <option key={r.request_no} value={r.request_no}>
-              {r.request_no} — {r.designation_name}
-            </option>
-          ))}
-        </select>
-      </div>
-
-      {!!candidates.length && (
-        <div>
-          <span className={LABEL}>Candidates</span>
-          <div className="space-y-1.5 max-h-52 overflow-y-auto">
-            {candidates.map((c) => (
-              <label key={c.uk}
-                className="flex items-center gap-2.5 text-[12.5px] text-[var(--text-main)]">
-                <input type="checkbox" checked={picked.includes(c.uk)}
-                  onChange={() => toggle(picked, setPicked, c.uk)} />
-                <span className="flex-1 min-w-0 truncate">{c.candidate_name}</span>
-                {/* The evidence, beside the name. Advice, never a decision. */}
-                {c.scorecard_band && (
-                  <Chip tone={toneFor(c.scorecard_band)} title="Scoring decision guide">
-                    {c.scorecard_score} · {c.scorecard_band}
-                  </Chip>
-                )}
-              </label>
-            ))}
+        <div className="flex w-full flex-wrap items-center justify-between gap-2">
+          <p className="text-[11.5px] text-[var(--text-muted)] min-w-0">
+            {blockers.length
+              ? <>To convene: {blockers.join(', ')}.</>
+              : <span className="font-semibold text-[var(--accent-green,#16a34a)]">
+                Ready — {picked.length} candidate{picked.length === 1 ? '' : 's'}, {members.length} member{members.length === 1 ? '' : 's'}.
+              </span>}
+          </p>
+          <div className="flex gap-2 ml-auto">
+            <Btn onClick={onClose}>Cancel</Btn>
+            <Btn tone="primary" disabled={busy || blockers.length > 0} onClick={submit}>
+              {busy ? 'Convening…' : 'Convene'}
+            </Btn>
           </div>
         </div>
       )}
-
-      <div>
-        <span className={LABEL}>Committee members *</span>
-        <p className="text-[11px] text-[var(--text-muted)] mb-1.5">
-          SOP section 5 needs HR and the Department Head — two different people. The server
-          checks the roles; it will not accept one person covering both.
-        </p>
-        <div className="space-y-1.5 max-h-40 overflow-y-auto">
-          {people.map((p) => (
-            <label key={p.user_id}
-              className="flex items-center gap-2.5 text-[12.5px] text-[var(--text-main)]">
-              <input type="checkbox" checked={members.includes(p.user_id)}
-                onChange={() => toggle(members, setMembers, p.user_id)} />
-              <span className="truncate">{p.display_name || p.full_name || p.email}</span>
-            </label>
+    >
+      <Step n="1" title="Vacancy">
+        <select id="slr-req" className={FIELD} value={requestNo}
+          onChange={(e) => setRequestNo(e.target.value)}>
+          <option value="">Choose an internal vacancy…</option>
+          {reqs.map((r) => (
+            <option key={r.request_no} value={r.request_no}>
+              {r.designation_name || 'Untitled role'} — {r.request_no}
+            </option>
           ))}
-        </div>
-      </div>
+        </select>
+        {req?.department_name && (
+          <p className="mt-1 text-[11px] text-[var(--text-muted)]">{req.department_name}</p>
+        )}
+      </Step>
 
-      <div>
-        <label className={LABEL} htmlFor="slr-notes">Notes</label>
-        <textarea id="slr-notes" rows={3} className={TEXTAREA} value={notes}
+      <Step n="2" title="Candidates to decide on"
+        hint="The panel's interview score is beside each name — 4.0+ strong · 3.0–3.99 consider / hold · below 3.0 reject. It is advice; the committee decides."
+        right={interviewed.length > 1 && (
+          <button type="button" onClick={() => setPicked(interviewed.map((c) => c.uk))}
+            className="shrink-0 text-[11px] font-bold text-[var(--accent-indigo)]">
+            Tick all interviewed
+          </button>
+        )}>
+        {!requestNo ? (
+          <p className="text-[12px] text-[var(--text-muted)]">Choose the vacancy first.</p>
+        ) : !candidates.length ? (
+          <p className="text-[12px] text-[var(--text-muted)]">No candidates on this vacancy.</p>
+        ) : (
+          <div className="rounded-xl border border-[var(--border)] divide-y divide-[var(--border)] max-h-56 overflow-y-auto">
+            {candidates.map((c) => {
+              const ev = evidence[c.uk];
+              const on = picked.includes(c.uk);
+              return (
+                <label key={c.uk}
+                  className={`flex items-center gap-3 px-3 py-2 cursor-pointer ${on ? 'bg-[var(--accent-indigo-bg)]' : ''}`}>
+                  <input type="checkbox" checked={on} onChange={() => toggle(picked, setPicked, c.uk)} />
+                  <span className="min-w-0 flex-1">
+                    <span className="block text-[13px] font-semibold text-[var(--text-main)]">{c.candidate_name}</span>
+                    <span className="block text-[11px] text-[var(--text-muted)]">
+                      {c.uk} · {c.application_status}
+                      {ev ? ` · ${ev.round} ${ev.interview_no} — ${ev.outcome}` : ''}
+                    </span>
+                  </span>
+                  {ev ? (
+                    <Chip tone={ev.band === 'Strong' ? 'good' : ev.band === 'Reject' ? 'bad' : 'warn'}
+                      title="Interview score and its band in the scoring guide">
+                      {ev.average_score != null ? `${ev.average_score} · ${ev.band}` : 'not scored'}
+                    </Chip>
+                  ) : c.scorecard_band ? (
+                    <Chip tone={toneFor(c.scorecard_band)} title="Scoring decision guide">
+                      {c.scorecard_score} · {c.scorecard_band}
+                    </Chip>
+                  ) : (
+                    <span className="text-[11px] text-[var(--text-muted)]">not interviewed yet</span>
+                  )}
+                </label>
+              );
+            })}
+          </div>
+        )}
+      </Step>
+
+      <Step n="3" title="Committee members"
+        hint="One from HR and one HOD / Manager — two different people. The server checks the roles."
+        right={(
+          <span className={`shrink-0 text-[11px] font-bold px-2 py-0.5 rounded-full ${seatsMissing.length
+            ? 'bg-[var(--accent-orange-bg)] text-[var(--accent-orange)]'
+            : 'bg-[var(--accent-green-bg,var(--accent-indigo-bg))] text-[var(--accent-green,#16a34a)]'}`}>
+            {seatsMissing.length ? `Needed: ${seatsMissing.join(', ')}` : 'Committee complete'}
+          </span>
+        )}>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+          {COMMITTEE_SEATS.map(([role, title]) => {
+            const inSeat = people.filter((p) => p.role === role);
+            return (
+              <div key={role} className="rounded-lg bg-[var(--input-bg)] p-2 space-y-1.5">
+                <p className="flex items-center justify-between text-[10.5px] font-bold uppercase tracking-wider text-[var(--text-muted)]">
+                  {title}
+                  <span className={seated.has(role) ? 'text-[var(--accent-green,#16a34a)]' : 'text-[var(--accent-orange)]'}>
+                    {seated.has(role) ? '✓ set' : 'needed'}
+                  </span>
+                </p>
+                {!inSeat.length && <p className="text-[11px] text-[var(--text-muted)]">Nobody with this role</p>}
+                {inSeat.map((p) => (
+                  <label key={p.user_id}
+                    className={`flex items-center gap-2 rounded-md border px-2 py-1.5 text-[12.5px] cursor-pointer bg-[var(--bg-card)] ${
+                      members.includes(p.user_id) ? 'border-[var(--accent-indigo)]' : 'border-transparent'}`}>
+                    <input type="checkbox" checked={members.includes(p.user_id)}
+                      onChange={() => toggle(members, setMembers, p.user_id)} />
+                    <span className="font-semibold text-[var(--text-main)] break-words">{p.name}</span>
+                  </label>
+                ))}
+              </div>
+            );
+          })}
+        </div>
+      </Step>
+
+      <Step n="4" title="Notes (optional)">
+        <textarea id="slr-notes" rows={2} className={TEXTAREA} value={notes}
           onChange={(e) => setNotes(e.target.value)}
-          placeholder="What the committee weighed up." />
-      </div>
+          placeholder="What the committee weighed up — strengths, concerns, comparisons." />
+      </Step>
     </Modal>
   );
 };
@@ -392,12 +607,20 @@ const ConveneModal = ({ scope, busy, setBusy, onClose, onDone, onError }) => {
  * rule is never re-implemented here: a predicted outcome that disagreed with the recorded
  * one would be worse than no prediction at all.
  */
-const DecideModal = ({ review, scope, busy, onClose, onSubmit, onError }) => {
+const VERDICT_CHIP = {
+  Agree: ['good', 'Approved'], Object: ['bad', 'Did not approve'], Pending: ['warn', 'Waiting'],
+};
+
+const DecideModal = ({ review, scope, busy, onClose, onSubmit, onError, onVerdict }) => {
+  const { user } = useAuth();
+  const me = String(user?._id || '');
   const [full, setFull] = useState(null);
   const [people, setPeople] = useState([]);
   const [adding, setAdding] = useState('');
   const [saving, setSaving] = useState(false);
   const [loadErr, setLoadErr] = useState(null);
+  const [reason, setReason] = useState('');
+  const [objecting, setObjecting] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -412,8 +635,8 @@ const DecideModal = ({ review, scope, busy, onClose, onSubmit, onError }) => {
   useEffect(() => { load(); }, [load]);
 
   useEffect(() => {
-    getEmployees(scope)
-      .then(({ data }) => setPeople((data?.employees || []).filter((e) => e.user_id)))
+    getCommitteeOptions(scope)
+      .then(({ data }) => setPeople(data?.people || []))
       .catch(() => setPeople([]));
   }, [scope]);
 
@@ -421,17 +644,36 @@ const DecideModal = ({ review, scope, busy, onClose, onSubmit, onError }) => {
   const state = full?.committee_state || review.committee_state || {};
   const preview = full?.commit_preview || null;
   const uks = full?.candidate_uks || review.candidate_uks || [];
+  const decided = (full?.outcome || review.outcome) !== 'Pending';
+  const iConvened = String(full?.convened_by || review.convened_by || '') === me;
+  const waitingIds = state.awaiting_ids || [];
+  // A member's own answer counts; a verdict stamped by whoever convened (old sittings) does not.
+  const verdictOf = (m) => (waitingIds.includes(String(m.user_id)) ? 'Pending' : m.decision);
+  const mine = members.find((m) => String(m.user_id) === me);
+  const myTurn = !decided && mine && !mine.recused && verdictOf(mine) === 'Pending';
 
-  /** Persist the committee as it now stands, then re-read the server's verdict. */
+  const give = async (decision) => {
+    setSaving(true);
+    try {
+      const { data } = await recordShortlistVerdict(review.slr_no,
+        { decision, remarks: decision === 'Object' ? reason.trim() : undefined }, scope);
+      setFull(data);
+      setObjecting(false);
+      setReason('');
+      onVerdict?.(data);
+    } catch (err) {
+      onError(err?.response?.data?.detail || 'Your verdict could not be recorded.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  /** Convener only: change who sits. Existing answers are kept by the server. */
   const saveMembers = async (next) => {
     setSaving(true);
     try {
       await updateShortlistReview(review.slr_no, {
-        committee_members: next.map((m) => ({
-          user_id: m.user_id,
-          decision: m.decision || 'Agree',
-          recused: !!m.recused,
-        })),
+        committee_members: next.map((m) => ({ user_id: m.user_id, decision: 'Pending', recused: !!m.recused })),
       }, scope);
       await load();
     } catch (err) {
@@ -441,133 +683,138 @@ const DecideModal = ({ review, scope, busy, onClose, onSubmit, onError }) => {
     }
   };
 
-  const setVerdict = (userId, decision) =>
-    saveMembers(members.map((m) => (m.user_id === userId ? { ...m, decision } : m)));
-
-  const removeMember = (userId) =>
-    saveMembers(members.filter((m) => m.user_id !== userId));
-
-  const addMember = () => {
-    if (!adding) return;
-    saveMembers([...members, { user_id: adding, decision: 'Agree' }]);
-    setAdding('');
-  };
-
-  const unpicked = people.filter(
-    (p) => !members.some((m) => String(m.user_id) === String(p.user_id)));
-  const outcome = preview?.outcome;
+  const unpicked = people.filter((p) => !members.some((m) => String(m.user_id) === String(p.user_id)));
   const working = busy || saving;
+  const everyoneAnswered = !waitingIds.length && state.complete;
 
   return (
     <Modal
-      title={`Final Commit — ${review.slr_no}`}
-      subtitle="A decided sitting is frozen. A second decision is a second sitting."
+      title={`Committee approval — ${review.slr_no}`}
+      subtitle={decided
+        ? `Decided: ${full?.outcome || review.outcome}. A decided sitting is frozen.`
+        : 'Each member approves for themselves. The decision records once everyone has answered.'}
       labelledBy="slr-decide"
       onClose={onClose}
       footer={(
-        <>
-          <Btn onClick={onClose} disabled={working}>Cancel</Btn>
-          <Btn tone={outcome === 'Rejected' ? 'danger' : 'primary'}
-            disabled={working || !outcome}
-            onClick={() => onSubmit(outcome)}>
-            {working ? 'Working…' : `Record ${outcome || ''}`.trim()}
-          </Btn>
-        </>
+        <div className="flex w-full flex-wrap items-center justify-between gap-2">
+          <p className="text-[11.5px] text-[var(--text-muted)]">
+            {decided ? 'This sitting is closed.'
+              : waitingIds.length ? `Waiting for: ${(state.awaiting || []).join(', ')}.`
+                : !state.complete ? `Still needed on the committee: ${(state.outstanding_roles || []).join(', ')}.`
+                  : 'Everyone has answered.'}
+          </p>
+          <div className="flex gap-2 ml-auto">
+            <Btn onClick={onClose} disabled={working}>Close</Btn>
+            {/* Only when everyone has answered but it was not recorded (e.g. an older sitting). */}
+            {!decided && everyoneAnswered && preview?.outcome && mine && (
+              <Btn tone={preview.outcome === 'Rejected' ? 'danger' : 'primary'} disabled={working}
+                onClick={() => onSubmit(preview.outcome)}>
+                Record {preview.outcome}
+              </Btn>
+            )}
+          </div>
+        </div>
       )}
     >
       <Facts items={[
         { label: 'Requisition', value: review.request_no },
-        { label: 'Candidates', value: uks.length },
+        { label: 'Candidates', value: uks.join(', ') || '—' },
         { label: 'Role level', value: preview?.designation_level || '—' },
       ]} />
 
+      {myTurn && (
+        <div className="rounded-xl border border-[var(--accent-indigo)] bg-[var(--accent-indigo-bg)] p-3 space-y-2">
+          <p className="text-[13px] font-bold text-[var(--accent-indigo)]">Your verdict is needed</p>
+          <p className="text-[11.5px] text-[var(--text-muted)]">
+            Do you approve {uks.length === 1 ? 'this candidate' : 'these candidates'} going forward?
+            Only you can answer for yourself.
+          </p>
+          {objecting ? (
+            <>
+              <textarea rows={2} className={TEXTAREA} value={reason} autoFocus
+                onChange={(e) => setReason(e.target.value)}
+                placeholder="Why not? This goes on record (required)." />
+              <div className="flex gap-2">
+                <Btn tone="danger" disabled={working || !reason.trim()} onClick={() => give('Object')}>
+                  Confirm: do not approve
+                </Btn>
+                <Btn disabled={working} onClick={() => setObjecting(false)}>Back</Btn>
+              </div>
+            </>
+          ) : (
+            <div className="flex gap-2">
+              <Btn tone="primary" disabled={working} onClick={() => give('Agree')}>Approve</Btn>
+              <Btn disabled={working} onClick={() => setObjecting(true)}>Do not approve</Btn>
+            </div>
+          )}
+        </div>
+      )}
+
       <div>
-        <p className={LABEL}>Committee verdicts</p>
+        <p className={LABEL}>Committee members</p>
         <div className="mt-1.5 space-y-1.5">
           {members.map((m) => {
-            const objecting = m.decision === 'Object';
+            const v = verdictOf(m);
+            const [tone, text] = VERDICT_CHIP[v] || ['neutral', v];
+            const isMe = String(m.user_id) === me;
             return (
               <div key={m.user_id}
-                className="flex items-center justify-between gap-3 rounded-lg border border-[var(--border)] px-3 py-2">
+                className={`flex items-start justify-between gap-3 rounded-lg border px-3 py-2 ${isMe ? 'border-[var(--accent-indigo)]' : 'border-[var(--border)]'}`}>
                 <div className="min-w-0">
-                  <p className="text-[12.5px] font-semibold text-[var(--text-main)] truncate">
-                    {m.name || m.user_id}
+                  <p className="text-[12.5px] font-semibold text-[var(--text-main)]">
+                    {m.name || m.user_id}{isMe ? ' (you)' : ''}
                   </p>
                   <p className="text-[11px] text-[var(--text-muted)]">
-                    {m.role || 'no HRMS role'}{m.recused ? ' · recused' : ''}
+                    {m.role === 'hr' ? 'HR' : m.role === 'manager' ? 'HOD / Manager' : (m.role || 'no HRMS role')}
+                    {m.recused ? ' · recused' : ''}
                   </p>
+                  {v === 'Object' && m.remarks && (
+                    <p className="mt-1 text-[11.5px] text-[var(--text-main)]">“{m.remarks}”</p>
+                  )}
                 </div>
                 <div className="flex items-center gap-1.5 shrink-0">
-                  <Btn tone={objecting ? 'ghost' : 'primary'} disabled={working}
-                    onClick={() => setVerdict(m.user_id, 'Agree')}>
-                    Approve
-                  </Btn>
-                  <Btn tone={objecting ? 'danger' : 'ghost'} disabled={working}
-                    onClick={() => setVerdict(m.user_id, 'Object')}>
-                    Do not approve
-                  </Btn>
-                  <Btn disabled={working} onClick={() => removeMember(m.user_id)}>
-                    Remove
-                  </Btn>
+                  <Chip tone={tone}>{text}</Chip>
+                  {iConvened && !decided && !isMe && (
+                    <Btn disabled={working} onClick={() => saveMembers(members.filter((x) => x.user_id !== m.user_id))}>
+                      Remove
+                    </Btn>
+                  )}
                 </div>
               </div>
             );
           })}
           {!members.length && (
-            <p className="text-[12px] text-[var(--text-muted)]">
-              Nobody is on this committee yet.
-            </p>
+            <p className="text-[12px] text-[var(--text-muted)]">Nobody is on this committee yet.</p>
           )}
         </div>
 
-        <div className="mt-2 flex items-center gap-2">
-          <select className={FIELD} value={adding} aria-label="Add a committee member"
-            onChange={(e) => setAdding(e.target.value)}>
-            <option value="">Add a member…</option>
-            {unpicked.map((p) => (
-              <option key={p.user_id} value={p.user_id}>
-                {p.display_name || p.full_name || p.employee_code}
-              </option>
-            ))}
-          </select>
-          <Btn disabled={working || !adding} onClick={addMember}>Add</Btn>
-        </div>
+        {iConvened && !decided && (
+          <div className="mt-2 flex items-center gap-2">
+            <select className={FIELD} value={adding} aria-label="Add a committee member"
+              onChange={(e) => setAdding(e.target.value)}>
+              <option value="">Add a member (they will be asked)…</option>
+              {unpicked.map((p) => (
+                <option key={p.user_id} value={p.user_id}>{p.name} — {p.role_label}</option>
+              ))}
+            </select>
+            <Btn disabled={working || !adding}
+              onClick={() => { saveMembers([...members, { user_id: adding }]); setAdding(''); }}>
+              Add
+            </Btn>
+          </div>
+        )}
       </div>
 
-      {!state.complete && (
-        <p className="text-[12px] text-[var(--accent-orange)] font-semibold">
-          Still needed: {(state.outstanding_roles || []).join(', ')}. A sitting can only be
-          committed once Human Resources and the hiring manager are both on it, as two
-          different people.
-        </p>
-      )}
-      {loadErr && (
-        <p className="text-[12px] text-[var(--accent-red,var(--accent-orange))]">{loadErr}</p>
-      )}
+      {loadErr && <p className="text-[12px] text-[var(--accent-red,var(--accent-orange))]">{loadErr}</p>}
 
-      {outcome ? (
+      {preview?.outcome && !decided && (
         <div>
-          <p className={LABEL}>This commit records</p>
+          <p className={LABEL}>{everyoneAnswered ? 'This sitting decides' : 'If everyone keeps their current answer'}</p>
           <div className="flex items-center gap-2 mt-1">
-            <Chip tone={outcomeTone(outcome)}>{outcome}</Chip>
+            <Chip tone={outcomeTone(preview.outcome)}>{preview.outcome}</Chip>
             <span className="text-[12px] text-[var(--text-muted)]">{preview.because}</span>
           </div>
-          <p className="text-[11.5px] text-[var(--text-muted)] mt-2">
-            {outcome === 'Selected'
-              ? 'The named candidates move to Selected and can be made an offer.'
-              : outcome === 'Rejected'
-                ? 'The named candidates are rejected on this requisition.'
-                : 'The named candidates go to the Management final round. Nobody is selected until it is passed.'}
-          </p>
         </div>
-      ) : !loadErr && (
-        <p className="text-[12px] text-[var(--text-muted)]">
-          {!state.complete
-            ? 'Add the missing member above and the outcome will appear here.'
-            : !uks.length
-              ? 'This sitting names no candidates, so there is nothing to decide about.'
-              : 'Working out what this sitting decides…'}
-        </p>
       )}
     </Modal>
   );

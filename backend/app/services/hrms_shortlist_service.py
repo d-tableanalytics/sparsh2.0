@@ -50,7 +50,7 @@ from app.models.hrms import (
     FINAL_ROUND_PASSING, RETENTION_YEARS, SHORTLIST_CLEARS_SELECTION,
     SHORTLIST_COMMITTEE_ROLES, SHORTLIST_LIVE_OUTCOMES, SHORTLIST_MIN_MEMBERS,
     CommitteeDecision, REQUISITION_TRACK_INTERNAL, ShortlistOutcome, can_transition,
-    final_commit_outcome, score_band,
+    final_commit_outcome, score_band, final_round_is_mandatory,
 )
 from app.services.hrms_audit_service import audit
 from app.services.hrms_id_service import next_business_id
@@ -160,6 +160,12 @@ async def _resolve_members(company_id: str, members) -> list:
     return out
 
 
+def _unanswered(members: list) -> list:
+    """Active members who have not given their own verdict (see record_verdict)."""
+    return [m for m in (members or []) if not m.get("recused")
+            and (m.get("decision") == CommitteeDecision.PENDING.value or not m.get("decided_at"))]
+
+
 def committee_state(members: list) -> dict:
     """Who is covered, who is missing, and whether that is a committee at all.
 
@@ -184,6 +190,10 @@ def committee_state(members: list) -> dict:
         "member_count": len(people),
         "objections": [m.get("name") for m in active
                        if m.get("decision") == CommitteeDecision.OBJECT.value],
+        # Asked and not yet answered BY THEMSELVES -- a verdict stamped by whoever convened
+        # (the old behaviour) is not an answer. The sitting waits until this is empty.
+        "awaiting": [m.get("name") for m in _unanswered(active)],
+        "awaiting_ids": [str(m.get("user_id")) for m in _unanswered(active)],
         "complete": complete,
     }
 
@@ -203,9 +213,36 @@ def assert_committee_complete(members: list) -> None:
 # -------------------------------------------------------------
 # Read
 # -------------------------------------------------------------
+def _actor_id(actor: dict) -> str:
+    return str((actor or {}).get("_id") or "")
+
+
+def _involved(doc: dict, actor: dict) -> bool:
+    """A sitting's members and its convener -- the only people who see it."""
+    me = _actor_id(actor)
+    return bool(me) and (str(doc.get("convened_by") or "") == me or any(
+        str(m.get("user_id")) == me for m in doc.get("committee_members") or []))
+
+
+def _lock_verdicts(actor: dict, members: list, previous: list = None) -> list:
+    """Nobody sets another member's verdict. Everyone but the actor keeps what they had
+    (or Pending, if new); the actor's own entry is what they sent."""
+    me = _actor_id(actor)
+    before = {str(m.get("user_id")): m for m in (previous or [])}
+    out = []
+    for m in members:
+        uid = str(m.get("user_id"))
+        if uid != me:
+            prior = before.get(uid) or {}
+            m = {**m, "decision": prior.get("decision") or CommitteeDecision.PENDING.value,
+                 "remarks": prior.get("remarks")}
+        out.append(m)
+    return out
+
+
 async def list_shortlist_reviews(actor: dict, company_id: str, *, request_no: str = None,
                                  outcome: str = None, uk: str = None,
-                                 limit: int = 100) -> dict:
+                                 limit: int = 100, only_mine: bool = False) -> dict:
     query = {"company_id": str(company_id)}
     if request_no:
         query["request_no"] = request_no
@@ -216,7 +253,15 @@ async def list_shortlist_reviews(actor: dict, company_id: str, *, request_no: st
     limit = max(1, min(int(limit or 100), 200))
     rows = await get_collection(COLL_SHORTLIST_REVIEWS).find(query).sort(
         "created_at", -1).to_list(limit)
-    out = [{**_out(r), "committee_state": committee_state(r.get("committee_members"))}
+    if only_mine:
+        rows = [r for r in rows if _involved(r, actor)]
+    me = _actor_id(actor)
+    out = [{**_out(r), "committee_state": committee_state(r.get("committee_members")),
+            "my_verdict": next(((m.get("decision") if m.get("decided_at")
+                                 else CommitteeDecision.PENDING.value)
+                                for m in r.get("committee_members") or []
+                                if str(m.get("user_id")) == me), None),
+            "i_convened": str(r.get("convened_by") or "") == me}
            for r in rows]
     return {
         "shortlist_reviews": out,
@@ -224,7 +269,108 @@ async def list_shortlist_reviews(actor: dict, company_id: str, *, request_no: st
         # What a governance screen leads with: sittings that were convened and never decided.
         "pending": sum(1 for r in out
                        if r.get("outcome") == ShortlistOutcome.PENDING.value),
+        # The approval requests addressed to the caller and not yet answered.
+        "awaiting_me": sum(1 for r in out
+                           if r.get("outcome") == ShortlistOutcome.PENDING.value
+                           and r.get("my_verdict") == CommitteeDecision.PENDING.value),
     }
+
+
+# Where a candidate sits while the committee has still to decide on them: in or just past
+# the interview. Selected / rejected / offered people are past the committee already.
+_AWAITING_STATUSES = {
+    AppStatus.INTERVIEW_SCHEDULED.value, AppStatus.TECHNICAL_ROUND.value,
+    AppStatus.MD_ROUND.value, AppStatus.ON_HOLD.value,
+}
+
+
+async def awaiting_committee(company_id: str) -> dict:
+    """Internal candidates who have been interviewed and not yet decided by a committee.
+
+    "Interviewed" = a panel interview (any round but the Management final) recorded as Pass
+    or Hold. "Not yet decided" = not named in a sitting whose outcome is recorded. A pending
+    sitting that already names them is shown beside them, so nobody convenes a second one.
+    """
+    from app.services.hrms_interview_service import _level_for
+    interviews = await get_collection(COLL_INTERVIEWS).find(
+        {"company_id": str(company_id), "round": {"$ne": FINAL_ROUND.value},
+         "outcome": {"$in": ["Pass", "Hold"]}}).sort("scheduled_at", -1).to_list(1000)
+    latest = {}
+    for iv in interviews:
+        latest.setdefault(iv.get("uk"), iv)
+    reqs = {}
+
+    sittings = await get_collection(COLL_SHORTLIST_REVIEWS).find(
+        {"company_id": str(company_id), "candidate_uks": {"$in": list(latest)}},
+        {"slr_no": 1, "candidate_uks": 1, "outcome": 1}).to_list(500)
+    decided, pending = set(), {}
+    for s in sittings:
+        for uk in s.get("candidate_uks") or []:
+            if s.get("outcome") == ShortlistOutcome.PENDING.value:
+                pending.setdefault(uk, s.get("slr_no"))
+            else:
+                decided.add(uk)
+
+    bands = await _bands(company_id)
+    out = []
+    for uk, iv in latest.items():
+        if uk in decided:
+            continue
+        cand = await get_collection(COLL_CANDIDATES).find_one(
+            {"uk": uk, "company_id": str(company_id)},
+            {"uk": 1, "candidate_name": 1, "request_no": 1, "application_status": 1})
+        if not cand or cand.get("application_status") not in _AWAITING_STATUSES:
+            continue
+        no = cand.get("request_no")
+        if no not in reqs:
+            reqs[no] = await get_collection(COLL_REQUISITIONS).find_one(
+                {"request_no": no, "company_id": str(company_id)}) or {}
+        req = reqs[no]
+        if req.get("requisition_track") != REQUISITION_TRACK_INTERNAL:
+            continue
+        level = await _level_for(company_id, req)
+        if final_round_is_mandatory(level):
+            continue    # senior / managerial go to the MD, not the committee
+        score = iv.get("average_score")
+        out.append({
+            "uk": uk, "candidate_name": cand.get("candidate_name"), "request_no": no,
+            "designation_name": req.get("designation_name"),
+            "designation_level": getattr(level, "value", level),
+            "application_status": cand.get("application_status"),
+            "interview_no": iv.get("interview_no"), "round": iv.get("round"),
+            "interviewed_on": iv.get("scheduled_at"), "outcome": iv.get("outcome"),
+            "average_score": score, "band": score_band(score, bands),
+            "pending_slr_no": pending.get(uk),
+        })
+    # Senior / managerial candidates the committee put forward: the MD's final decision,
+    # after the Management interview, is what remains.
+    final = []
+    routed = await get_collection(COLL_CANDIDATES).find(
+        {"company_id": str(company_id),
+         "application_status": {"$in": [AppStatus.FINAL_INTERVIEW_REQUIRED.value,
+                                        AppStatus.MD_ROUND.value]}},
+        {"uk": 1, "candidate_name": 1, "request_no": 1, "application_status": 1}).to_list(500)
+    for cand in routed:
+        no = cand.get("request_no")
+        if no not in reqs:
+            reqs[no] = await get_collection(COLL_REQUISITIONS).find_one(
+                {"request_no": no, "company_id": str(company_id)}) or {}
+        if reqs[no].get("requisition_track") != REQUISITION_TRACK_INTERNAL:
+            continue
+        booked = await get_collection(COLL_INTERVIEWS).find(
+            {"company_id": str(company_id), "uk": cand["uk"], "round": FINAL_ROUND.value,
+             "status": {"$nin": ["Cancelled", "No Show"]}}).sort("scheduled_at", -1).to_list(5)
+        iv = booked[0] if booked else None
+        final.append({
+            "uk": cand["uk"], "candidate_name": cand.get("candidate_name"), "request_no": no,
+            "designation_name": reqs[no].get("designation_name"),
+            "application_status": cand.get("application_status"),
+            "interview_no": (iv or {}).get("interview_no"),
+            "scheduled_at": (iv or {}).get("scheduled_at"),
+            "interview_status": (iv or {}).get("status"),
+            "outcome": (iv or {}).get("outcome"),
+        })
+    return {"candidates": out, "total": len(out), "final_commit": final}
 
 
 async def get_shortlist_review(company_id: str, slr_no: str) -> Optional[dict]:
@@ -270,6 +416,13 @@ async def assert_shortlist_cleared(company_id: str, candidate: dict, req: dict) 
     request_no = (req or {}).get("request_no")
     uk = (candidate or {}).get("uk")
     if not request_no or not uk:
+        return
+
+    # Senior / managerial roles have no committee: after the panel, the MD interviews them
+    # and the MD's decision is the final commit (assert_final_round_complete asks for it).
+    from app.services.hrms_interview_service import _level_for
+    from app.models.hrms import final_round_is_mandatory
+    if final_round_is_mandatory(await _level_for(company_id, req)):
         return
 
     cleared = await get_collection(COLL_SHORTLIST_REVIEWS).find_one({
@@ -506,6 +659,13 @@ async def _resolve_outcome(company_id: str, req: dict, members, uks, raw):
     # Committing is the act that decides someone's candidacy, so THAT is what needs a real
     # committee. Convening one and coming back to it later is a normal way to work.
     assert_committee_complete(members)
+    waiting = [m.get("name") for m in (members or []) if not m.get("recused")
+               and m.get("decision") == CommitteeDecision.PENDING.value]
+    if waiting:
+        raise HTTPException(
+            status_code=409,
+            detail=(f"Waiting for {', '.join(waiting)} to give their verdict. Each member "
+                    f"approves for themselves; the decision records once everyone has."))
     if not uks:
         raise HTTPException(
             status_code=422,
@@ -516,14 +676,21 @@ async def _resolve_outcome(company_id: str, req: dict, members, uks, raw):
     return ShortlistOutcome(preview["outcome"]), preview
 
 
-async def create_shortlist_review(actor: dict, company_id: str, payload: dict) -> dict:
-    """Convene a committee sitting. Convening decides nothing until the outcome is set."""
+async def create_shortlist_review(actor: dict, company_id: str, payload: dict, *,
+                                  own_verdicts_only: bool = False) -> dict:
+    """Convene a committee sitting. Convening decides nothing until the outcome is set.
+
+    `own_verdicts_only` (set by the API): every member but the convener starts Pending and
+    is asked; nobody records a verdict for somebody else.
+    """
     request_no = clean_text(payload.get("request_no"), limit=40)
     if not request_no:
         raise HTTPException(status_code=422, detail="Choose a requisition.")
     req = await _require_internal_requisition(company_id, request_no)
 
     members = await _resolve_members(company_id, payload.get("committee_members"))
+    if own_verdicts_only:
+        members = _lock_verdicts(actor, members)
     candidates = await _resolve_candidates(company_id, request_no,
                                            payload.get("candidate_uks"))
     uks = [c["uk"] for c in candidates]
@@ -567,6 +734,9 @@ async def create_shortlist_review(actor: dict, company_id: str, payload: dict) -
     if preview:
         skipped = await _apply_commit(actor, company_id, outcome, uks, slr_no)
 
+    if own_verdicts_only:
+        await _ask_members(actor, doc)
+
     out = _out(doc)
     out["committee_state"] = committee_state(members)
     if skipped:
@@ -575,8 +745,73 @@ async def create_shortlist_review(actor: dict, company_id: str, payload: dict) -
     return out
 
 
+async def _ask_members(actor: dict, doc: dict) -> None:
+    """Tell each member who still has to answer that their approval is needed."""
+    from app.services.hrms_notify_service import notify_user
+    names = ", ".join(doc.get("candidate_uks") or [])
+    for m in doc.get("committee_members") or []:
+        if (m.get("decision") == CommitteeDecision.PENDING.value and not m.get("recused")
+                and str(m.get("user_id")) != _actor_id(actor)):
+            await notify_user(
+                str(m["user_id"]), f"Your approval is needed — {doc.get('slr_no')}",
+                f"{_actor_name(actor)} asked for your verdict on {names} "
+                f"({doc.get('request_no')}). Approve or do not approve on the Shortlist "
+                f"Committee page.", link="/hrms/shortlist-reviews")
+
+
+async def record_verdict(actor: dict, company_id: str, slr_no: str, decision: str,
+                         remarks: str = None) -> dict:
+    """A member gives THEIR OWN verdict. When the last member answers, it decides itself."""
+    coll = get_collection(COLL_SHORTLIST_REVIEWS)
+    current = await coll.find_one({"slr_no": slr_no, "company_id": str(company_id)})
+    if not current or not _involved(current, actor):
+        raise HTTPException(status_code=404, detail="Shortlist review not found.")
+    if current.get("outcome") != ShortlistOutcome.PENDING.value:
+        raise HTTPException(status_code=409,
+                            detail=f'{slr_no} is already decided ("{current.get("outcome")}").')
+    me = _actor_id(actor)
+    members = current.get("committee_members") or []
+    mine = next((m for m in members if str(m.get("user_id")) == me), None)
+    if not mine:
+        raise HTTPException(
+            status_code=403,
+            detail="Only the committee members give a verdict, each for themselves.")
+    if mine.get("recused"):
+        raise HTTPException(status_code=409,
+                            detail="You recused yourself from this sitting.")
+    try:
+        value = CommitteeDecision(getattr(decision, "value", decision))
+    except ValueError:
+        value = None
+    if value not in (CommitteeDecision.AGREE, CommitteeDecision.OBJECT):
+        raise HTTPException(status_code=422, detail="Choose Approve or Do not approve.")
+    note = clean_text(remarks, limit=2000)
+    if value is CommitteeDecision.OBJECT and not note:
+        raise HTTPException(status_code=422,
+                            detail="Say why you do not approve — the reason goes on record.")
+
+    now = datetime.now(timezone.utc)
+    updated = [({**m, "decision": value.value, "remarks": note, "decided_at": now}
+                if str(m.get("user_id")) == me else m) for m in members]
+    result = await coll.update_one(
+        {"slr_no": slr_no, "company_id": str(company_id),
+         "outcome": ShortlistOutcome.PENDING.value},
+        {"$set": {"committee_members": updated, "updated_at": now}})
+    if result.matched_count == 0:
+        raise HTTPException(status_code=409, detail="This sitting was just decided. Reload.")
+    await audit(actor, AUDIT_SHORTLIST_DECIDED, ENTITY_SHORTLIST, slr_no,
+                f"{_actor_name(actor)}: {value.value}", company_id)
+
+    # Everyone has answered and the committee is quorate: the decision records itself.
+    state = committee_state(updated)
+    if state["complete"] and not state["awaiting"] and current.get("candidate_uks"):
+        return await update_shortlist_review(actor, company_id, slr_no,
+                                             {"outcome": ShortlistOutcome.SELECTED.value})
+    return await get_shortlist_review(company_id, slr_no)
+
+
 async def update_shortlist_review(actor: dict, company_id: str, slr_no: str,
-                                  payload: dict) -> dict:
+                                  payload: dict, *, own_verdicts_only: bool = False) -> dict:
     """Record members, candidates or the outcome.
 
     A DECIDED sitting is frozen. What the committee agreed on the day is the record; a
@@ -595,8 +830,16 @@ async def update_shortlist_review(actor: dict, company_id: str, slr_no: str,
 
     updates = {}
     if payload.get("committee_members") is not None:
-        updates["committee_members"] = await _resolve_members(
-            company_id, payload["committee_members"])
+        resolved = await _resolve_members(company_id, payload["committee_members"])
+        if own_verdicts_only:
+            before = {str(m.get("user_id")) for m in current.get("committee_members") or []}
+            after = {str(m.get("user_id")) for m in resolved}
+            if before != after and str(current.get("convened_by") or "") != _actor_id(actor):
+                raise HTTPException(
+                    status_code=403,
+                    detail="Only the person who convened this sitting changes who sits on it.")
+            resolved = _lock_verdicts(actor, resolved, current.get("committee_members"))
+        updates["committee_members"] = resolved
     if payload.get("candidate_uks") is not None:
         candidates = await _resolve_candidates(
             company_id, current.get("request_no"), payload["candidate_uks"])
@@ -609,6 +852,12 @@ async def update_shortlist_review(actor: dict, company_id: str, slr_no: str,
     decided, preview = None, None
     if payload.get("outcome") is not None:
         members = updates.get("committee_members", current.get("committee_members"))
+        waiting = [m.get("name") for m in _unanswered(members)]
+        if own_verdicts_only and waiting and payload.get("outcome") != ShortlistOutcome.PENDING.value:
+            raise HTTPException(
+                status_code=409,
+                detail=(f"Waiting for {', '.join(waiting)} to give their verdict. Each member "
+                        f"approves for themselves; the decision records once everyone has."))
         uks = updates.get("candidate_uks", current.get("candidate_uks"))
         req = await get_collection(COLL_REQUISITIONS).find_one(
             {"request_no": current.get("request_no"), "company_id": str(company_id)}) or {}
