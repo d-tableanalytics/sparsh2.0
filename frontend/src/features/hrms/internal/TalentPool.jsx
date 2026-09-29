@@ -171,7 +171,7 @@ const TalentPool = () => {
         <HrmsEmpty
           icon={Bookmark}
           title="Nobody in the pool yet"
-          hint="Candidates join the pool from their own record, and only where they consented to being kept."
+          hint="To add someone: HRMS → Candidates, open the candidate, and click Add to talent pool in their details. They must have agreed to be kept for future roles."
         />
       )}
       {!loading && !error && !!rows.length && (

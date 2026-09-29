@@ -1,3 +1,4 @@
+import { Navigate } from 'react-router-dom';
 import React from 'react';
 import { Users2, ShieldCheck, Building2, KeyRound } from 'lucide-react';
 import { useHrms } from './HrmsContext';
@@ -33,6 +34,8 @@ const HrmsHome = () => {
 
   if (loading) return <HrmsLoading label="Loading HRMS…" />;
   if (error) return <HrmsError message={error} onRetry={reload} />;
+  // An employee's HRMS is their own pages; start them on the one they use most.
+  if (role === 'employee') return <Navigate to="/hrms/leave" replace />;
 
   return (
     <div className="space-y-6">

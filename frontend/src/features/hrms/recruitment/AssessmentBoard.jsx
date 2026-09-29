@@ -65,6 +65,9 @@ const SendModal = ({ onClose, onSent }) => {
     uk: '', title: '', instructions: '', link: '', max_score: 100, due_date: '',
   });
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
+  // The link expires on the due date, so a past date would send a link that cannot be opened.
+  const today = new Date().toLocaleDateString('en-CA');
+  const duePast = Boolean(form.due_date) && form.due_date < today;
 
   useEffect(() => {
     getAssessableCandidates(scope)
@@ -149,14 +152,19 @@ const SendModal = ({ onClose, onSent }) => {
           </div>
           <div>
             <label className={LABEL} htmlFor="a-due">Due date</label>
-            <input id="a-due" type="date" value={form.due_date} onChange={set('due_date')} className={FIELD} />
+            <input id="a-due" type="date" min={today} value={form.due_date} onChange={set('due_date')} className={FIELD} />
+            <p className={`mt-1 text-[11px] ${duePast ? 'text-rose-600 font-semibold' : 'text-[var(--text-muted)]'}`}>
+              {duePast
+                ? 'This date has passed — the link would already be expired. Pick today or later.'
+                : 'The link stops working after this date. Leave blank for no deadline.'}
+            </p>
           </div>
           <div className="flex justify-end gap-2 pt-1">
             <button type="button" onClick={onClose}
               className="h-9 px-4 rounded-lg border border-[var(--border)] text-[12px] font-bold text-[var(--text-muted)]">
               Cancel
             </button>
-            <button type="submit" disabled={saving || !form.uk || !form.title.trim()}
+            <button type="submit" disabled={saving || !form.uk || !form.title.trim() || duePast}
               className="h-9 px-4 rounded-lg bg-[var(--accent-indigo)] text-white text-[12px] font-bold disabled:opacity-50">
               {saving ? 'Sending…' : 'Send'}
             </button>

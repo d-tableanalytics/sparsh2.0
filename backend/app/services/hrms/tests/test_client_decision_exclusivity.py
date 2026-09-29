@@ -112,15 +112,19 @@ async def main() -> None:
     # =================================================================
     section("The client-owned decisions are named, and they are the right ones")
     # =================================================================
-    # Five originally, six since the salary deviation was added. The number is asserted so
-    # that widening this set is always a deliberate edit to this line and never a side
-    # effect: every entry here is a capability SUPERADMIN LOSES, which is exactly the kind
-    # of change that should not be able to happen quietly.
-    check("exactly six capabilities are reserved", len(M.CLIENT_DECISION_CAPS) == 6)
+    # Five originally; six with the salary deviation; seven since the assessment review
+    # joined them (marking the client's own sign-off is the client's). The number is
+    # asserted so that widening this set is always a deliberate edit to this line and never
+    # a side effect: every entry here is a capability SUPERADMIN LOSES, which is exactly the
+    # kind of change that should not be able to happen quietly.
+    check("exactly seven capabilities are reserved", len(M.CLIENT_DECISION_CAPS) == 7)
     check("they are the client's own decision points",
           {c.name for c in M.CLIENT_DECISION_CAPS} == {
               "CLIENT_SCORECARD_APPROVE",
               "CLIENT_CANDIDATE_DECIDE",
+              # Sparsh administers and marks the assessment; accepting the result is the
+              # client's sign-off on Sparsh's own work.
+              "CLIENT_ASSESSMENT_REVIEW",
               "CLIENT_INTERVIEW_DECIDE",
               "CLIENT_OFFER_RELEASE",
               "CLIENT_JOINING_CONFIRM",

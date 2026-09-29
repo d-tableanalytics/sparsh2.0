@@ -155,6 +155,51 @@ def _structure_gross(structure: Optional[dict]) -> float:
     ), 2)
 
 
+def _structure_deductions(structure: Optional[dict]) -> float:
+    """The Deduction lines of a salary structure — e.g. a fixed monthly Professional Tax.
+
+    These used to be dropped: only Earning lines were read, so a structure's own deductions
+    never left anyone's pay. They are a fixed monthly amount and are NOT prorated for LOP —
+    a deduction set on the structure is what the employee owes for the month, not per day.
+    """
+    if not structure:
+        return 0.0
+    return round(sum(
+        float(c.get("amount") or 0) for c in structure.get("components", [])
+        if _component_type_cache.get(c.get("code")) == ComponentType.DEDUCTION.value
+    ), 2)
+
+
+async def _employee_names(profiles: list) -> dict:
+    """user_id -> display name, for profiles that do not carry their own.
+
+    Identity lives on the user document (staff/learners), never duplicated onto the profile,
+    so a Sparsh staff profile has no name of its own — every payroll record for one came out
+    as `employee_name: null` and the run table showed bare codes.
+    """
+    ids = [ObjectId(p["user_id"]) for p in profiles
+           if p.get("user_id") and ObjectId.is_valid(str(p["user_id"]))]
+    names: dict = {}
+    if not ids:
+        return names
+    for coll in ("staff", "learners"):
+        rows = await get_collection(coll).find(
+            {"_id": {"$in": ids}},
+            {"full_name": 1, "first_name": 1, "last_name": 1, "email": 1}).to_list(len(ids))
+        for u in rows:
+            names[str(u["_id"])] = (
+                u.get("full_name")
+                or f"{u.get('first_name') or ''} {u.get('last_name') or ''}".strip()
+                or u.get("email"))
+    return names
+
+
+def _name_of(profile: dict, names: dict) -> Optional[str]:
+    return (profile.get("display_name") or profile.get("full_name")
+            or names.get(str(profile.get("user_id") or ""))
+            or (profile.get("identity_snapshot") or {}).get("name"))
+
+
 # ─────────────────────────────────────────────────────────────
 # §7.12 integration — payable/LOP days from Attendance's own records
 # ─────────────────────────────────────────────────────────────
@@ -241,6 +286,7 @@ async def calculate_payroll(actor: dict, company_id: str, period: str) -> dict:
     now = datetime.now(timezone.utc)
     await get_collection(COLL_PAYROLL_RECORDS).delete_many(
         {"company_id": str(company_id), "period": period})
+    names = await _employee_names(profiles)
 
     for profile in profiles:
         employee_code = profile["employee_code"]
@@ -249,6 +295,9 @@ async def calculate_payroll(actor: dict, company_id: str, period: str) -> dict:
         days = await _payable_days(company_id, employee_code, period)
         proration = (days["payable_days"] / days["days_in_period"]) if days["days_in_period"] else 0
         prorated_gross = round(gross_structured * proration, 2)
+        # Nothing earned, nothing deducted: with no paid days a fixed deduction (e.g. PT) made
+        # net pay NEGATIVE (-200) for everyone who had no attendance in the month.
+        structured_deductions = _structure_deductions(structure) if prorated_gross > 0 else 0.0
 
         # Auto roll-up: open salary-advance recovery for this employee (§7.13 step 93).
         advance = await get_collection(COLL_SALARY_ADVANCES).find_one({
@@ -273,10 +322,11 @@ async def calculate_payroll(actor: dict, company_id: str, period: str) -> dict:
 
         doc = {
             "company_id": str(company_id), "period": period, "employee_code": employee_code,
-            "employee_name": profile.get("display_name") or profile.get("full_name"),
+            "employee_name": _name_of(profile, names),
             "days_in_period": days["days_in_period"], "payable_days": days["payable_days"],
             "lop_days": days["lop_days"],
             "structured_gross": gross_structured, "prorated_gross": prorated_gross,
+            "structured_deductions": structured_deductions,
             "advance_recovery": advance_recovery, "variable_pay_payout": variable_pay_payout,
             "vp_record_id": str(vp_record["_id"]) if vp_record else None,
             "advance_id": str(advance["_id"]) if advance else None,
@@ -313,7 +363,9 @@ def _totals(record: dict) -> dict:
     gross = (record["prorated_gross"] + record["variable_pay_payout"] + record["arrears"]
             + record["reimbursements"] + record["other_earnings"]
             + _adjustment_sum(record, ComponentType.EARNING.value))
-    deductions = (record["pf"] + record["esi"] + record["pt"] + record["tds"]
+    # `.get`: records calculated before structure deductions were counted have no such key.
+    deductions = (float(record.get("structured_deductions") or 0)
+                 + record["pf"] + record["esi"] + record["pt"] + record["tds"]
                  + record["advance_recovery"] + record["notice_recovery"]
                  + record["other_deductions"]
                  + _adjustment_sum(record, ComponentType.DEDUCTION.value))
@@ -333,7 +385,8 @@ async def list_records(actor: dict, company_id: str, period: str) -> list:
     same enforced-ownership pattern PIP/Letters/Appointments already establish. Every other
     role holding PAYROLL_READ sees the run's full population, as before."""
     query = {"company_id": str(company_id), "period": period}
-    if hrms_role(actor) == HrmsRole.EMPLOYEE:
+    from app.utils.hrms_access import sees_all_payroll
+    if not sees_all_payroll(actor):
         own = await _own_employee_code(actor, company_id)
         query["employee_code"] = own or "__none__"
     rows = await get_collection(COLL_PAYROLL_RECORDS).find(query

@@ -127,7 +127,8 @@ async def main() -> None:
     # ---------------------------------------------------------
     check("superadmin  -> ADMIN",    A.hrms_role(SUPERADMIN) == M.HrmsRole.ADMIN)
     check("staff admin -> INTERNAL", A.hrms_role(STAFF_ADMIN) == M.HrmsRole.INTERNAL)
-    check("coach       -> INTERNAL", A.hrms_role(COACH) == M.HrmsRole.INTERNAL)
+    # Every staff member is an employee; only a platform admin keeps support/admin.
+    check("coach       -> EMPLOYEE", A.hrms_role(COACH) == M.HrmsRole.EMPLOYEE)
     check("clientadmin -> MD",       A.hrms_role(CLIENT_MD) == M.HrmsRole.MD)
     check("gov HR      -> HR",       A.hrms_role(CLIENT_HR) == M.HrmsRole.HR)
     check("gov HOD     -> MANAGER",  A.hrms_role(CLIENT_HOD) == M.HrmsRole.MANAGER)

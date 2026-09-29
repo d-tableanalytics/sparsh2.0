@@ -37,6 +37,7 @@ from app.models.hrms import (
 from app.services.hrms_audit_service import audit
 from app.services.hrms_id_service import next_business_id
 from app.utils.hrms_access import hrms_role
+from app.utils.hrms_access import sees_all_people
 
 USER_COLLECTIONS = ("learners", "staff")
 
@@ -64,6 +65,75 @@ def _days_between(start: str, end: str) -> int:
     y1, m1, d1 = (int(x) for x in start.split("-"))
     y2, m2, d2 = (int(x) for x in end.split("-"))
     return (date(y2, m2, d2) - date(y1, m1, d1)).days + 1
+
+
+def _n(x) -> str:
+    """2.0 -> "2", 0.5 -> "0.5": day counts read as people say them."""
+    x = float(x or 0)
+    return str(int(x)) if x == int(x) else f"{x:g}"
+
+
+def _iso(d: str) -> date:
+    y, m, dd = (int(x) for x in d.split("-"))
+    return date(y, m, dd)
+
+
+async def _company_holidays(company_id: str) -> set:
+    """This company's holiday dates. Leave ALWAYS skips them when recorded — unlike the SLA
+    maths, whose opt-in (`honour_holidays`) is about deadlines, not about charging someone a
+    day of leave for a day the office was shut."""
+    from app.models.hrms import COLL_HOLIDAYS
+    rows = await get_collection(COLL_HOLIDAYS).find(
+        {"company_id": str(company_id)}, {"holiday_date": 1}).to_list(1000)
+    return {str(r["holiday_date"])[:10] for r in rows if r.get("holiday_date")}
+
+
+def _is_working_day(d: date, holidays: set) -> bool:
+    """Saturday and Sunday are off — the same WEEKEND the rest of HRMS uses
+    (hrms_sla_service) — as is any date on the company's holiday calendar."""
+    from app.services.hrms_sla_service import WEEKEND
+    return d.weekday() not in WEEKEND and d.isoformat() not in holidays
+
+
+async def _working_days(company_id: str, start: str, end: str) -> list:
+    """The working dates in [start, end]. Leave is charged for these only: a Friday-to-
+    Monday leave is 2 days, not 4 — the weekend was never a day anybody had to take off."""
+    holidays = await _company_holidays(company_id)
+    out, cursor, last = [], _iso(start), _iso(end)
+    while cursor <= last:
+        if _is_working_day(cursor, holidays):
+            out.append(cursor.isoformat())
+        cursor += timedelta(days=1)
+    return out
+
+
+async def _person(profile: dict) -> str:
+    from app.services.hrms_payroll_service import _employee_names, _name_of
+    return _name_of(profile, await _employee_names([profile])) or profile.get("employee_code")
+
+
+async def _overlapping_leave(company_id: str, employee_code: str, start: str, end: str,
+                             exclude_leave_no: Optional[str] = None) -> Optional[dict]:
+    """An open or approved leave of this employee that shares any date with [start, end]."""
+    query = {"company_id": str(company_id), "employee_code": employee_code,
+             "status": {"$in": list(OPEN_LEAVE_STATUSES | {LeaveStatus.APPROVED.value})},
+             "start_date": {"$lte": end}, "end_date": {"$gte": start}}
+    if exclude_leave_no:
+        query["leave_no"] = {"$ne": exclude_leave_no}
+    return await get_collection(COLL_LEAVES).find_one(query)
+
+
+async def _pending_days(company_id: str, employee_code: str, leave_type: str,
+                        year: Optional[int] = None) -> float:
+    """Days already asked for and not yet decided. The balance is only debited at final
+    approval, so without counting these, two pending 7-day requests against 8 days each
+    passed the check — and approving both took the balance to -6."""
+    rows = await get_collection(COLL_LEAVES).find({
+        "company_id": str(company_id), "employee_code": employee_code,
+        "leave_type": leave_type, "status": {"$in": list(OPEN_LEAVE_STATUSES)},
+    }).to_list(500)
+    return sum(float(r.get("days_count") or 0) for r in rows
+               if year is None or str(r.get("start_date", ""))[:4] == str(year))
 
 
 async def _get_profile(company_id: str, employee_code: str) -> dict:
@@ -114,15 +184,18 @@ async def _team_employee_codes(actor: dict, company_id: str) -> list:
 
 
 async def _scope_query(actor: dict, company_id: str, query: dict) -> dict:
-    role = hrms_role(actor)
-    if role == HrmsRole.EMPLOYEE:
-        own = await _own_employee_code(actor, company_id)
-        query["employee_code"] = own or "__none__"
-    elif role == HrmsRole.MANAGER:
-        own = await _own_employee_code(actor, company_id)
+    # Scoped by what the role is FOR, not by `role == EMPLOYEE`: every staff member now
+    # holds the read capability for their OWN records, so an EMPLOYEE-only check would hand
+    # Finance, support staff and everyone else the whole company's.
+    if sees_all_people(actor):
+        return query
+    own = await _own_employee_code(actor, company_id)
+    if hrms_role(actor) == HrmsRole.MANAGER:
         team = await _team_employee_codes(actor, company_id)
         codes = list({c for c in ([own] if own else []) + team})
         query["employee_code"] = {"$in": codes or ["__none__"]}
+    else:
+        query["employee_code"] = own or "__none__"
     return query
 
 
@@ -136,6 +209,17 @@ async def _assert_self_or_privileged(actor: dict, company_id: str, employee_code
     if role == HrmsRole.MANAGER and employee_code in await _team_employee_codes(actor, company_id):
         return
     raise HTTPException(status_code=403, detail="You may only act on your own record.")
+
+
+async def _assert_may_decide(actor: dict, company_id: str, employee_code: str, what: str) -> None:
+    """Nobody decides their own request; a manager decides only for their own team."""
+    own = await _own_employee_code(actor, company_id)
+    if own and own == employee_code:
+        raise HTTPException(status_code=403, detail=f"You cannot approve your own {what}.")
+    if hrms_role(actor) == HrmsRole.MANAGER and \
+            employee_code not in await _team_employee_codes(actor, company_id):
+        raise HTTPException(status_code=403,
+                            detail=f"A manager can decide {what} only for their own team.")
 
 
 # ─────────────────────────────────────────────────────────────
@@ -216,6 +300,9 @@ def _closing(bal: dict) -> float:
 async def get_leave_balances(actor: dict, company_id: str, employee_code: str,
                              year: Optional[int] = None) -> list:
     await _get_profile(company_id, employee_code)
+    # Your own balance, your team's if you manage one, anyone's for HR/MD. Found by the live
+    # self-service test: any caller holding LEAVE_READ could read any colleague's balance.
+    await _assert_self_or_privileged(actor, company_id, employee_code)
     year = year or datetime.now(timezone.utc).year
     types = await list_leave_types(actor, company_id)
     out = []
@@ -269,23 +356,43 @@ async def apply_leave(actor: dict, company_id: str, payload: dict) -> dict:
         raise HTTPException(status_code=422, detail=f"'{leave_type}' is not an active leave type.")
 
     half_day = bool(payload.get("half_day"))
-    days_count = 0.5 if half_day else _days_between(start_date, end_date)
+    if half_day and end_date != start_date:
+        raise HTTPException(status_code=422, detail="A half day is a single date — set the end date to the start date.")
+    working = await _working_days(company_id, start_date, end_date)
+    if not working:
+        raise HTTPException(
+            status_code=422,
+            detail="Every date chosen is a weekend or a company holiday — no leave is needed.")
+    days_count = 0.5 if half_day else float(len(working))
 
-    # §7.10 step 71: eligibility/balance validation before the request is even raised.
+    clash = await _overlapping_leave(company_id, employee_code, start_date, end_date)
+    if clash:
+        raise HTTPException(
+            status_code=409,
+            detail=(f"{await _person(profile)} already has {clash['leave_no']} "
+                    f"({clash['leave_type']}, {clash['start_date']} to {clash['end_date']}, "
+                    f"{clash['status']}) on some of these dates."))
+
+    # §7.10 step 71: eligibility/balance validation before the request is even raised —
+    # against what is left once the requests still awaiting a decision are counted.
     if leave_type == "C-Off":
-        available = await _coff_available_balance(company_id, employee_code)
+        available = (await _coff_available_balance(company_id, employee_code)
+                     - await _pending_days(company_id, employee_code, "C-Off"))
         if days_count > available:
             raise HTTPException(
                 status_code=422,
-                detail=f"Only {available} C-Off day(s) available; {days_count} requested.")
+                detail=f"Only {_n(max(available, 0))} C-Off day(s) available; {_n(days_count)} requested.")
     else:
         year = int(start_date[:4])
         bal = await _get_balance(company_id, employee_code, leave_type, year)
-        if days_count > _closing(bal):
+        pending = await _pending_days(company_id, employee_code, leave_type, year)
+        available = _closing(bal) - pending
+        if days_count > available:
             raise HTTPException(
                 status_code=422,
-                detail=f"Insufficient {leave_type} balance: {_closing(bal)} available, "
-                       f"{days_count} requested.")
+                detail=(f"Insufficient {leave_type} balance: {_n(max(available, 0))} available"
+                        f"{f' ({_n(pending)} more already requested and awaiting approval)' if pending else ''}, "
+                        f"{_n(days_count)} requested."))
 
     year = datetime.now(timezone.utc).year
     leave_no = await next_business_id("leave", str(company_id), year)
@@ -294,7 +401,7 @@ async def apply_leave(actor: dict, company_id: str, payload: dict) -> dict:
         "leave_no": leave_no,
         "company_id": str(company_id),
         "employee_code": employee_code,
-        "employee_name": profile.get("display_name") or profile.get("full_name"),
+        "employee_name": await _person(profile),
         "reporting_manager_id": await _reporting_manager_id(profile),
         "leave_type": leave_type,
         "start_date": start_date,
@@ -302,6 +409,7 @@ async def apply_leave(actor: dict, company_id: str, payload: dict) -> dict:
         "half_day": half_day,
         "half_session": payload.get("half_session"),
         "days_count": days_count,
+        "leave_dates": working[:1] if half_day else working,
         "reason": payload.get("reason"),
         "attachment": payload.get("attachment"),
         "status": LeaveStatus.PENDING.value,
@@ -348,6 +456,7 @@ async def act_on_leave(actor: dict, company_id: str, leave_no: str, payload: dic
     doc = await _get_leave(company_id, leave_no)
     if doc["status"] not in (LeaveStatus.PENDING.value, LeaveStatus.MANAGER_APPROVED.value):
         raise HTTPException(status_code=409, detail=f"{leave_no} is already \"{doc['status']}\".")
+    await _assert_may_decide(actor, company_id, doc["employee_code"], "leave")
 
     decision = payload.get("decision")
     now = datetime.now(timezone.utc)
@@ -368,6 +477,12 @@ async def act_on_leave(actor: dict, company_id: str, leave_no: str, payload: dic
             raise HTTPException(
                 status_code=409,
                 detail=f"{leave_no} needs the manager's approval before HR's final sign-off.")
+        # Two steps are only two checks if two people take them.
+        if doc.get("manager_action_by") and doc["manager_action_by"] == str(actor.get("_id") or ""):
+            raise HTTPException(
+                status_code=409,
+                detail=(f"You gave the manager approval for {leave_no}, so the final approval "
+                        f"must come from someone else in HR."))
         await _debit_on_approval(company_id, doc, now)
         updates.update({"status": LeaveStatus.APPROVED.value,
                         "hr_action_by": str(actor.get("_id") or ""),
@@ -384,41 +499,67 @@ async def act_on_leave(actor: dict, company_id: str, leave_no: str, payload: dic
 async def _debit_on_approval(company_id: str, leave: dict, now: datetime) -> None:
     """§7.10 step 75: ledger + attendance calendar update on final approval."""
     if leave["leave_type"] == "C-Off":
-        used_batches = await _debit_coff(
+        usage = await _debit_coff(
             company_id, leave["employee_code"], leave["days_count"], leave["leave_no"])
         await get_collection(COLL_LEAVES).update_one(
-            {"_id": leave["_id"]}, {"$set": {"coff_batches_used": used_batches}})
+            {"_id": leave["_id"]},
+            {"$set": {"coff_batches_used": [u["batch_id"] for u in usage], "coff_usage": usage}})
     else:
         year = int(leave["start_date"][:4])
         bal = await _get_balance(company_id, leave["employee_code"], leave["leave_type"], year)
+        # Re-checked here, not just at apply: the balance may have moved since.
+        if leave["days_count"] > _closing(bal):
+            raise HTTPException(
+                status_code=409,
+                detail=(f"Only {_n(_closing(bal))} {leave['leave_type']} day(s) left now, and "
+                        f"{leave['leave_no']} needs {_n(leave['days_count'])}. Reject or return it."))
         await get_collection(COLL_LEAVE_BALANCES).update_one(
             {"_id": bal["_id"]},
             {"$inc": {"used": leave["days_count"]}, "$set": {"updated_at": now}})
 
-    # Attendance calendar: mark every day in range On Leave, unless already locked.
-    start_y, start_m, start_d = (int(x) for x in leave["start_date"].split("-"))
-    end_y, end_m, end_d = (int(x) for x in leave["end_date"].split("-"))
-    cursor = date(start_y, start_m, start_d)
-    last = date(end_y, end_m, end_d)
+    # Attendance calendar: mark the leave's WORKING days On Leave (a weekend inside the range
+    # stays a Weekly Off), unless already locked. The day's previous status is kept so a
+    # cancellation can put it back rather than leave "On Leave" behind.
+    dates = leave.get("leave_dates") or await _working_days(
+        company_id, leave["start_date"], leave["end_date"])
     from app.models.hrms import AttendanceStatus
     from app.db.mongodb import get_collection as _gc
-    while cursor <= last:
-        wd = cursor.isoformat()
+    for wd in dates:
         existing = await _gc("hrms_attendance").find_one(
             {"company_id": str(company_id), "employee_code": leave["employee_code"], "work_date": wd})
-        if not (existing and existing.get("locked")):
-            await _gc("hrms_attendance").update_one(
-                {"company_id": str(company_id), "employee_code": leave["employee_code"],
-                 "work_date": wd},
-                {"$set": {"status": AttendanceStatus.ON_LEAVE.value, "source": "leave",
-                          "leave_ref": leave["leave_no"], "updated_at": now},
-                 "$setOnInsert": {"company_id": str(company_id),
-                                  "employee_code": leave["employee_code"], "work_date": wd,
-                                  "created_at": now, "locked": False, "worked_minutes": None,
-                                  "late_minutes": 0}},
-                upsert=True,
-            )
-        cursor += timedelta(days=1)
+        if existing and existing.get("locked"):
+            continue
+        keep = {}
+        if existing and existing.get("leave_ref") != leave["leave_no"]:
+            keep = {"pre_leave_status": existing.get("status")}
+        await _gc("hrms_attendance").update_one(
+            {"company_id": str(company_id), "employee_code": leave["employee_code"],
+             "work_date": wd},
+            {"$set": {"status": AttendanceStatus.ON_LEAVE.value, "source": "leave",
+                      "leave_ref": leave["leave_no"], "updated_at": now, **keep},
+             "$setOnInsert": {"company_id": str(company_id),
+                              "employee_code": leave["employee_code"], "work_date": wd,
+                              "created_at": now, "locked": False, "worked_minutes": None,
+                              "late_minutes": 0, "created_by_leave": True}},
+            upsert=True,
+        )
+
+
+async def _undo_leave_attendance(company_id: str, leave_no: str) -> None:
+    """Put attendance back the way it was before `leave_no` was approved. A day the leave
+    itself created is removed; a day that already had a status gets that status back. Locked
+    days are left alone — a closed month is changed only by an authorised reopen."""
+    coll = get_collection("hrms_attendance")
+    rows = await coll.find({"company_id": str(company_id), "leave_ref": leave_no}).to_list(400)
+    for r in rows:
+        if r.get("locked"):
+            continue
+        if r.get("pre_leave_status"):
+            await coll.update_one({"_id": r["_id"]}, {
+                "$set": {"status": r["pre_leave_status"], "updated_at": datetime.now(timezone.utc)},
+                "$unset": {"leave_ref": "", "source": "", "pre_leave_status": ""}})
+        else:
+            await coll.delete_one({"_id": r["_id"]})
 
 
 async def cancel_leave(actor: dict, company_id: str, leave_no: str, reason: str) -> dict:
@@ -435,9 +576,22 @@ async def cancel_leave(actor: dict, company_id: str, leave_no: str, reason: str)
                   "cancelled_at": now, "updated_at": now}},
     )
     if was_approved:
-        if doc["leave_type"] == "C-Off":
+        await _undo_leave_attendance(company_id, leave_no)
+        if doc["leave_type"] == "C-Off" and doc.get("coff_usage"):
+            # Give back exactly what this leave took from each batch — a half-day leave
+            # took half a day, and must not hand back a whole one.
+            from bson import ObjectId
+            for u in doc["coff_usage"]:
+                await get_collection(COLL_COFF_LEDGER).update_one(
+                    {"_id": ObjectId(u["batch_id"]), "company_id": str(company_id)},
+                    {"$inc": {"remaining_days": float(u["days"])},
+                     "$set": {"status": CoffLedgerStatus.AVAILABLE.value},
+                     "$pull": {"usage": {"leave_no": leave_no}}})
+        elif doc["leave_type"] == "C-Off":
+            # Scoped by company: `leave_no` is issued per company, so unscoped this frees the
+            # comp-off credits consumed by the same-numbered leave in EVERY other tenant.
             await get_collection(COLL_COFF_LEDGER).update_many(
-                {"used_in_leave_no": leave_no},
+                {"used_in_leave_no": leave_no, "company_id": str(company_id)},
                 {"$set": {"status": CoffLedgerStatus.AVAILABLE.value, "used_in_leave_no": None,
                           "used_at": None}})
         else:
@@ -461,6 +615,25 @@ async def request_coff_earn(actor: dict, company_id: str, payload: dict) -> dict
             status_code=422, detail="employee_code and earned_for_date are required.")
     await _get_profile(company_id, employee_code)
     await _assert_self_or_privileged(actor, company_id, employee_code)
+    try:
+        worked_on = _iso(earned_for_date)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=422, detail="The worked date must be YYYY-MM-DD.")
+    if earned_for_date > _today():
+        raise HTTPException(status_code=422, detail="C-Off is claimed after the day was worked, not before.")
+    if _is_working_day(worked_on, await _company_holidays(company_id)):
+        raise HTTPException(
+            status_code=422,
+            detail=(f"{worked_on.strftime('%a %d %b %Y')} is a normal working day. C-Off is earned "
+                    f"only for work on a weekend or a company holiday."))
+    already = await get_collection(COLL_COFF_LEDGER).find_one({
+        "company_id": str(company_id), "employee_code": employee_code,
+        "earned_for_date": earned_for_date,
+        "status": {"$ne": CoffLedgerStatus.REJECTED.value}})
+    if already:
+        raise HTTPException(
+            status_code=409,
+            detail=f"{earned_for_date} has already been claimed ({already['status']}).")
 
     now = datetime.now(timezone.utc)
     doc = {
@@ -506,6 +679,7 @@ async def act_on_coff_earn(actor: dict, company_id: str, batch_id: str, payload:
         raise HTTPException(status_code=404, detail="C-Off earn request not found.")
     if doc["status"] != CoffLedgerStatus.PENDING_APPROVAL.value:
         raise HTTPException(status_code=409, detail=f"Already \"{doc['status']}\".")
+    await _assert_may_decide(actor, company_id, doc["employee_code"], "C-Off claim")
 
     approved = bool(payload.get("approved"))
     now = datetime.now(timezone.utc)
@@ -518,6 +692,7 @@ async def act_on_coff_earn(actor: dict, company_id: str, batch_id: str, payload:
         y, m, d = (int(x) for x in earned.split("-"))
         updates["status"] = CoffLedgerStatus.AVAILABLE.value
         updates["expiry_date"] = (date(y, m, d) + timedelta(days=expiry_days)).isoformat()
+        updates["remaining_days"] = float(doc.get("credited_days", 1))
     else:
         updates["status"] = CoffLedgerStatus.REJECTED.value
     await get_collection(COLL_COFF_LEDGER).update_one({"_id": oid}, {"$set": updates})
@@ -533,7 +708,14 @@ async def _coff_available_balance(company_id: str, employee_code: str) -> float:
         "company_id": str(company_id), "employee_code": employee_code,
         "status": CoffLedgerStatus.AVAILABLE.value, "expiry_date": {"$gte": today},
     }).to_list(1000)
-    return sum(r.get("credited_days", 0) for r in rows)
+    return sum(_left_on(r) for r in rows)
+
+
+def _left_on(batch: dict) -> float:
+    """What is still usable on one C-Off batch. Batches credited before partial use
+    existed carry no `remaining_days`, and are whole."""
+    left = batch.get("remaining_days")
+    return float(batch.get("credited_days", 0) if left is None else left)
 
 
 async def _debit_coff(company_id: str, employee_code: str, days_needed: float,
@@ -547,21 +729,30 @@ async def _debit_coff(company_id: str, employee_code: str, days_needed: float,
         "status": CoffLedgerStatus.AVAILABLE.value, "expiry_date": {"$gte": today},
     }).sort("expiry_date", 1).to_list(1000)
 
-    remaining = days_needed
-    used_ids = []
-    now = datetime.now(timezone.utc)
+    # Take only what is needed from each batch, oldest-expiring first. A half-day leave
+    # used to mark a whole one-day batch Used, silently losing the other half.
+    remaining = float(days_needed)
+    plan = []
     for batch in batches:
         if remaining <= 0:
             break
-        used_ids.append(str(batch["_id"]))
-        remaining -= batch.get("credited_days", 0)
-    if remaining > 0:
+        take = min(_left_on(batch), remaining)
+        if take <= 0:
+            continue
+        plan.append((batch, take))
+        remaining -= take
+    if remaining > 1e-9:
         raise HTTPException(status_code=409, detail="C-Off balance changed; insufficient at approval time.")
 
-    from bson import ObjectId
-    if used_ids:
-        await get_collection(COLL_COFF_LEDGER).update_many(
-            {"_id": {"$in": [ObjectId(i) for i in used_ids]}},
-            {"$set": {"status": CoffLedgerStatus.USED.value, "used_at": now,
-                      "used_in_leave_no": leave_no}})
-    return used_ids
+    now = datetime.now(timezone.utc)
+    usage = []
+    for batch, take in plan:
+        left = round(_left_on(batch) - take, 2)
+        await get_collection(COLL_COFF_LEDGER).update_one(
+            {"_id": batch["_id"]},
+            {"$set": {"remaining_days": left,
+                      "status": CoffLedgerStatus.USED.value if left <= 0 else CoffLedgerStatus.AVAILABLE.value,
+                      "used_at": now, "used_in_leave_no": leave_no},
+             "$push": {"usage": {"leave_no": leave_no, "days": take, "at": now}}})
+        usage.append({"batch_id": str(batch["_id"]), "days": take})
+    return usage

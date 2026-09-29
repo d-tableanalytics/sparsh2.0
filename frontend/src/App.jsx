@@ -430,6 +430,14 @@ const AppRoutes = () => {
             and is not duplicated there. */}
         <Route path="client-candidate-pool" element={<ClientCandidatePool />} />
         <Route path="internal-requisitions" element={<InternalRequisitionList />} />
+        {/* HR's own queue onto the same board: every requisition waiting on HR verification,
+            and nothing else. Same component, filtered — see its `stage` prop. */}
+        <Route path="hr-verification"
+               element={<InternalRequisitionList stage="Pending HR Verification" />} />
+        {/* The last gate, on its own page so it is not read as the scorecard's approval:
+            this one approves the REQUISITION and publishes its JD. */}
+        <Route path="final-approval"
+               element={<InternalRequisitionList stage="Pending Scorecard Approval" />} />
         {/* Phase INT-15 (spec 29) -- one position, end to end. Nested under the list so
             the workspace tab stays lit on the detail page. */}
         <Route path="internal-requisitions/:requestNo"

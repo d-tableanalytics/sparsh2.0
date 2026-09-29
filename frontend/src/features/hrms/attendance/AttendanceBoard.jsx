@@ -1,10 +1,14 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Clock, Search, Lock, Unlock } from 'lucide-react';
 import { useHrms } from '../HrmsContext';
-import { CAP } from '../access';
+import { CAP, HRMS_ROLE } from '../access';
 import HrmsPageHeader from '../common/HrmsPageHeader';
 import BoardTabs from '../common/BoardTabs';
+import { useSelfEmployee } from '../common/useSelfEmployee';
+import SelfEmployeeChip from '../common/SelfEmployeeChip';
 import HrmsScopeBar from '../common/HrmsScopeBar';
+import { ProcessGuide } from '../common/ProcessGuide';
+import { ATTENDANCE_GUIDE } from '../common/processGuides';
 import { HrmsLoading, HrmsError, HrmsEmpty } from '../common/HrmsStates';
 import { useNotification } from '../../../context/NotificationContext';
 import {
@@ -32,6 +36,8 @@ const TABS = ['Attendance', 'Regularizations', 'Outdoor Duty', 'Late Coming', 'M
 const EXCEPTION_TYPES = ['Missing Punch', 'Wrong Time', 'Forgot to Mark', 'System Error', 'Other'];
 
 const EmployeePicker = ({ scope, value, onChange }) => {
+  // An employee acts for themselves only (and cannot search the directory): lock to "You".
+  const self = useSelfEmployee(value, onChange);
   const [search, setSearch] = useState('');
   const [debounced, setDebounced] = useState('');
   const [options, setOptions] = useState([]);
@@ -59,6 +65,7 @@ const EmployeePicker = ({ scope, value, onChange }) => {
     return () => { live = false; };
   }, [debounced, value, scope]);
 
+  if (self.selfOnly) return <SelfEmployeeChip me={self.me} />;
   if (value) {
     return (
       <div className="flex items-center justify-between gap-2 rounded-lg border
@@ -83,12 +90,14 @@ const EmployeePicker = ({ scope, value, onChange }) => {
           border border-[var(--border)] bg-[var(--bg-card)] shadow-lg">
           {searching && <p className="px-3 py-2 text-[12px] text-[var(--text-muted)]">Searching…</p>}
           {!searching && options.map((o) => (
-            <button key={o.user_id} type="button"
+            <button key={o.user_id} type="button" disabled={!o.employee_code}
               onClick={() => { onChange(o); setOptions([]); }}
-              className="block w-full text-left px-3 py-2 text-[12.5px] hover:bg-[var(--input-bg)]">
+              className="block w-full text-left px-3 py-2 text-[12.5px] hover:bg-[var(--input-bg)] disabled:opacity-60 disabled:cursor-not-allowed disabled:hover:bg-transparent">
               <span className="text-[var(--text-main)]">{o.name}</span>
               <span className="block text-[11px] text-[var(--text-muted)]">
-                {o.employee_code} · {o.designation || '—'} · {o.employment_status}
+                {o.employee_code
+                  ? `${o.employee_code} · ${o.designation || '—'} · ${o.employment_status || '—'}`
+                  : 'No employee profile yet — open them on the Employees page to create one.'}
               </span>
             </button>
           ))}
@@ -116,20 +125,28 @@ const useSubmit = (showSuccess, showError, onDone) => {
 };
 
 const AttendanceBoard = () => {
-  const { scope, companyId, can } = useHrms();
+  const { scope, companyId, can, role } = useHrms();
   const { showSuccess, showError } = useNotification();
   const [tab, setTab] = useState('Attendance');
+  const tabs = TABS.filter((t) => t !== 'Monthly Closure' || can(CAP.ATTENDANCE_CLOSURE_READ));
 
   return (
     <div className="space-y-6">
       <HrmsPageHeader
         icon={Clock}
         title="Attendance"
-        subtitle="Daily capture, regularisation, Outdoor Duty and monthly closure."
+        subtitle="Who came in each day, corrections, field work, and locking the month."
       />
       <HrmsScopeBar />
+      {role === HRMS_ROLE.MD && (
+        <div className="rounded-xl border border-[var(--border)] bg-[var(--input-bg)] px-4 py-3 text-[12.5px] text-[var(--text-main)]">
+          <span className="font-bold">Review-only.</span> You can see everything here. Changes are made by
+          {' '}{'HR (attendance, closure) and managers (approvals)'}.
+        </div>
+      )}
+      <ProcessGuide guide={ATTENDANCE_GUIDE} />
 
-      <BoardTabs tabs={TABS} value={tab} onChange={setTab} label="Attendance sections" />
+      <BoardTabs tabs={tabs} value={tab} onChange={setTab} label="Attendance sections" />
 
       {tab === 'Attendance' && (
         <AttendanceTab scope={scope} companyId={companyId} can={can}
@@ -188,11 +205,19 @@ const LateComingTab = ({ scope, companyId }) => {
     (acc[d.work_date] = acc[d.work_date] || []).push(d);
     return acc;
   }, {});
+  // Per person: how many late days, and how many minutes late in total — the second is the
+  // number a lateness conversation is actually about (three 1-minute slips vs one hour).
   const byEmployee = dates.reduce((acc, d) => {
-    acc[d.employee_code] = (acc[d.employee_code] || 0) + 1;
+    const e = acc[d.employee_code] || { count: 0, minutes: 0, name: d.employee_name };
+    e.count += 1;
+    e.minutes += d.late_minutes || 0;
+    acc[d.employee_code] = e;
     return acc;
   }, {});
-  const employeeRows = Object.entries(byEmployee).sort((a, b) => b[1] - a[1]);
+  const employeeRows = Object.entries(byEmployee)
+    .sort((a, b) => b[1].count - a[1].count || b[1].minutes - a[1].minutes);
+  const nameOf = (code) => byEmployee[code]?.name || code;
+  const lateLabel = (m) => (m >= 60 ? `${Math.floor(m / 60)} h ${m % 60} min` : `${m} min`);
   const byDepartment = dates.reduce((acc, d) => {
     const key = d.department || 'Unassigned';
     acc[key] = (acc[key] || 0) + 1;
@@ -215,7 +240,7 @@ const LateComingTab = ({ scope, companyId }) => {
             onChange={(e) => setPeriod(e.target.value)} />
         </div>
         {focusEmployee && (
-          <Btn onClick={() => setFocusEmployee(null)}>Clear filter ({focusEmployee})</Btn>
+          <Btn onClick={() => setFocusEmployee(null)}>Clear filter ({nameOf(focusEmployee)})</Btn>
         )}
       </div>
 
@@ -226,7 +251,7 @@ const LateComingTab = ({ scope, companyId }) => {
         <div className="space-y-4">
           <div className="rounded-xl border border-[var(--border)] bg-[var(--bg-card)] p-4">
             <p className="text-[10.5px] font-bold uppercase tracking-widest text-[var(--text-muted)]">
-              Total Late-Coming Days{focusEmployee ? ` · ${focusEmployee}` : ''}
+              Total Late-Coming Days{focusEmployee ? ` · ${nameOf(focusEmployee)}` : ''}
             </p>
             <p className="mt-1 text-[24px] font-bold text-[var(--text-main)]">
               {focusEmployee ? shown.length : summary.total_late_days}
@@ -245,7 +270,7 @@ const LateComingTab = ({ scope, companyId }) => {
                 const dateStr = `${period}-${String(day).padStart(2, '0')}`;
                 const hits = lateByDate[dateStr];
                 return (
-                  <div key={dateStr} title={hits ? hits.map((h) => `${h.employee_code}: ${h.late_minutes}m`).join(', ') : undefined}
+                  <div key={dateStr} title={hits ? hits.map((h) => `${h.employee_name || h.employee_code}: ${lateLabel(h.late_minutes)} late`).join(', ') : undefined}
                     className={`h-14 rounded-lg border text-[11.5px] flex flex-col items-center justify-center gap-0.5
                       ${hits
                         ? 'border-[var(--accent-red)]/40 bg-[var(--accent-red-bg)] text-[var(--accent-red)] font-bold'
@@ -277,11 +302,17 @@ const LateComingTab = ({ scope, companyId }) => {
             <div>
               <p className={LABEL}>By Employee</p>
               <div className="space-y-1.5">
-                {employeeRows.map(([code, count]) => (
+                {employeeRows.map(([code, { count, minutes, name }]) => (
                   <button key={code} type="button" onClick={() => setFocusEmployee(code)}
-                    className="w-full flex items-center justify-between rounded-lg border border-[var(--border)]
+                    title="Show only this person's late days"
+                    className="w-full flex items-center justify-between gap-3 rounded-lg border border-[var(--border)]
                       bg-[var(--bg-card)] px-3 py-2 text-left hover:border-[var(--accent-indigo)]">
-                    <span className="text-[12.5px] font-semibold text-[var(--text-main)]">{code}</span>
+                    <span className="min-w-0">
+                      <span className="block text-[12.5px] font-semibold text-[var(--text-main)] truncate">{name || code}</span>
+                      <span className="block text-[11px] text-[var(--text-muted)]">
+                        {name ? `${code} · ` : ''}{lateLabel(minutes)} late in total
+                      </span>
+                    </span>
                     <Chip tone={count >= 5 ? 'bad' : count >= 2 ? 'warn' : 'neutral'}>{count} day(s)</Chip>
                   </button>
                 ))}
@@ -415,7 +446,7 @@ const MarkModal = ({ scope, onClose, onDone, showSuccess, showError }) => {
 
   return (
     <Modal title="Mark Attendance" labelledBy="att-mark-title"
-      subtitle="The daily engine derives status/late-minutes from the company's shift policy."
+      subtitle="Present, absent and late are worked out from the company's shift timings."
       onClose={onClose}
       footer={(
         <>
@@ -487,7 +518,7 @@ const RegularizeModal = ({ scope, onClose, onDone, showSuccess, showError }) => 
 
   return (
     <Modal title="Request Regularisation" labelledBy="att-reg-title"
-      subtitle="Routes to the reporting manager, then HR for final sign-off (§7.9)."
+      subtitle="Goes to the reporting manager first, then HR for the final approval."
       onClose={onClose}
       footer={(
         <>
@@ -862,9 +893,10 @@ const ClosureTab = ({ scope, companyId, can, showSuccess, showError }) => {
 
   useEffect(() => { load(); }, [load]);
 
-  if (!can(CAP.ATTENDANCE_LOCK)) {
+  if (!can(CAP.ATTENDANCE_CLOSURE_READ)) {
     return <HrmsEmpty icon={Lock} title="Monthly closure is managed by HR" />;
   }
+  const canLock = can(CAP.ATTENDANCE_LOCK);
 
   return (
     <div className="space-y-4">
@@ -902,7 +934,7 @@ const ClosureTab = ({ scope, companyId, can, showSuccess, showError }) => {
                 </p>
               )}
             </div>
-            {dash.status === 'Locked' ? (
+            {!canLock ? null : dash.status === 'Locked' ? (
               <Btn onClick={() => setUnlocking(true)}><Unlock size={14} /> Unlock</Btn>
             ) : (
               <Btn tone="primary" disabled={busy || !dash.ready_to_lock}
@@ -936,7 +968,7 @@ const UnlockModal = ({ period, scope, onClose, onDone, showSuccess, showError })
   };
   return (
     <Modal title={`Unlock ${period}`} labelledBy="unlock-title"
-      subtitle="Post-lock changes require an authorised, reasoned reopen (§7.12)."
+      subtitle="Once a month is locked, changing it means an authorised person reopens it and gives a reason."
       onClose={onClose}
       footer={(
         <>

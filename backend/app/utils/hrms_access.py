@@ -86,7 +86,8 @@ def hrms_role(user: dict) -> Optional[HrmsRole]:
                governance_role HR      → HR
                governance_role FINANCE → FINANCE   (the budget authority)
                governance_role HOD     → MANAGER   (hiring manager)
-               no governance_role      → INTERNAL  (operator + support, reads only)
+               platform role admin     → INTERNAL  (HRMS support/admin — kept separate)
+               anyone else             → EMPLOYEE  (every staff member is an employee)
     Tenant:    clientadmin             → MD        (top of the company's ladder)
                governance_role as above, anything else → EMPLOYEE (self-service only)
 
@@ -112,7 +113,14 @@ def hrms_role(user: dict) -> Optional[HrmsRole]:
         if role in INTERNAL_OWNER_ROLES:
             return HrmsRole.ADMIN
         governance = (user.get("governance_role") or "").strip().upper()
-        return GOVERNANCE_TO_HRMS.get(governance, HrmsRole.INTERNAL)
+        if governance in GOVERNANCE_TO_HRMS:
+            return GOVERNANCE_TO_HRMS[governance]
+        # Every staff member is an employee. Only platform admins keep the HRMS
+        # support/admin role, which stays separate from self-service. This used to send
+        # EVERY staff member without a governance role to INTERNAL -- a support role with no
+        # self-service at all -- so ordinary staff could not apply for their own leave,
+        # read their own payslip or acknowledge their own PIP.
+        return HrmsRole.INTERNAL if role == "admin" else HrmsRole.EMPLOYEE
 
     if role == "clientadmin":
         return HrmsRole.MD
@@ -382,7 +390,64 @@ def capabilities_for(user: dict) -> Set[Cap]:
     # supplier who could raise the client's requirement could also set its salary range --
     # the figure that supplier is later measured against, and the one the client is asked
     # to approve deviations from.
+    # -- Self-service ---------------------------------------------------------------
+    # Every Sparsh staff member is an employee, whatever else they do here.
+    if is_internal_user(user):
+        caps |= STAFF_SELF_SERVICE_CAPS
+
+    # -- Monthly closure: whoever may lock it may see it; the MD may see it too ------------
+    if Cap.ATTENDANCE_LOCK in caps or role == HrmsRole.MD:
+        caps.add(Cap.ATTENDANCE_CLOSURE_READ)
+
+    # -- The MD reviews Payroll and Attendance, and changes nothing in either ----------
+    # Last, so the self-service grant above cannot hand an action back.
+    if role == HrmsRole.MD:
+        caps -= MD_REVIEW_ONLY_WITHHELD
+
     return caps - CLIENT_DECISION_CAPS - CLIENT_OWNED_CAPS
+
+
+# What every Sparsh staff member may do with THEIR OWN records, whatever else their role
+# holds. Granting these is safe only because every service scopes the data by
+# `sees_all_people` / `sees_all_payroll` below rather than by `role == EMPLOYEE`.
+STAFF_SELF_SERVICE_CAPS = frozenset({
+    Cap.MODULE_ACCESS,
+    Cap.LEAVE_READ, Cap.LEAVE_APPLY, Cap.COFF_EARN_REQUEST,
+    Cap.ATTENDANCE_READ, Cap.ATTENDANCE_REGULARIZE_REQUEST, Cap.OD_REQUEST,
+    Cap.PAYROLL_READ, Cap.ADVANCE_REQUEST,
+    Cap.PIP_READ, Cap.PIP_ACKNOWLEDGE,
+})
+
+# The MD reviews Payroll and Attendance but acts on neither: every capability that changes
+# something in those two areas is withheld, the reads (PAYROLL_READ, SALARY_STRUCTURE_READ,
+# ADVANCE_READ, VARIABLE_PAY_READ, ATTENDANCE_READ, ATTENDANCE_CLOSURE_READ) are kept. Each of
+# these still has another holder — HR processes, Finance approves pay, HR/managers approve
+# attendance requests — so nothing becomes impossible to do.
+MD_REVIEW_ONLY_WITHHELD = frozenset({
+    Cap.ATTENDANCE_MARK, Cap.ATTENDANCE_REGULARIZE_REQUEST, Cap.ATTENDANCE_REGULARIZE_APPROVE,
+    Cap.ATTENDANCE_LOCK, Cap.OD_REQUEST, Cap.OD_APPROVE,
+    Cap.PAYROLL_PROCESS, Cap.PAYROLL_APPROVE, Cap.SALARY_STRUCTURE_MANAGE,
+    Cap.ADVANCE_REQUEST, Cap.ADVANCE_APPROVE, Cap.ADVANCE_APPROVE_EMERGENCY,
+    Cap.VARIABLE_PAY_PROCESS, Cap.VARIABLE_PAY_APPROVE, Cap.VARIABLE_PAY_HOLD_MANAGE,
+    # The MD is not an employee, so does not apply for leave or claim C-Off for themselves
+    # (product owner, 2026-09-28). Viewing leave and approving other people's is unchanged.
+    Cap.LEAVE_APPLY, Cap.COFF_EARN_REQUEST,
+})
+
+# Whose records a role is FOR. Everyone else holding the matching read capability sees their
+# own (and a MANAGER, where the area has a team view, their team's).
+PEOPLE_DATA_ROLES = frozenset({HrmsRole.ADMIN, HrmsRole.HR, HrmsRole.MD})
+PAYROLL_DATA_ROLES = frozenset({HrmsRole.ADMIN, HrmsRole.HR, HrmsRole.MD, HrmsRole.FINANCE})
+
+
+def sees_all_people(user: dict) -> bool:
+    """Leave, attendance, C-Off, PIP, advances: may this caller see EVERYONE's?"""
+    return hrms_role(user) in PEOPLE_DATA_ROLES
+
+
+def sees_all_payroll(user: dict) -> bool:
+    """Payroll records and payslips: may this caller see EVERYONE's? (Finance approves pay.)"""
+    return hrms_role(user) in PAYROLL_DATA_ROLES
 
 
 def can(user: dict, capability: Cap) -> bool:

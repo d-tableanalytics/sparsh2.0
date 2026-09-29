@@ -605,9 +605,13 @@ async def get_public_posting(code: str) -> dict:
         return {"ok": True, "external": True, "external_url": posting.get("external_url"),
                 "title": posting.get("title")}
 
-    jd = await get_collection(COLL_JOB_DESCRIPTIONS).find_one({"jd_no": posting.get("jd_no")}) or {}
+    # The posting's OWN company. This page is public, so an unscoped read here would put
+    # another company's job description in front of an anonymous applicant.
+    owner = str(posting.get("company_id"))
+    jd = await get_collection(COLL_JOB_DESCRIPTIONS).find_one(
+        {"jd_no": posting.get("jd_no"), "company_id": owner}) or {}
     req = await get_collection(COLL_REQUISITIONS).find_one(
-        {"request_no": posting.get("request_no")}) or {}
+        {"request_no": posting.get("request_no"), "company_id": owner}) or {}
 
     return {
         "ok": True,
@@ -789,7 +793,7 @@ async def submit_application(code: str, payload: dict) -> dict:
     # Checked BEFORE any upload is stored, alongside the referral validation, so a rejected
     # form never costs storage.
     req_for_track = await get_collection(COLL_REQUISITIONS).find_one(
-        {"request_no": posting.get("request_no")}) or {}
+        {"request_no": posting.get("request_no"), "company_id": str(company_id)}) or {}
     is_internal = req_for_track.get("requisition_track") == REQUISITION_TRACK_INTERNAL
     if is_internal:
         if not payload.get("eeo_ack"):
@@ -915,7 +919,7 @@ async def submit_application(code: str, payload: dict) -> dict:
     # Also tell the requisition's assigned recruiter -- they own this pipeline, and a
     # role-wide notification alone lets everyone assume someone else is handling it.
     req = await get_collection(COLL_REQUISITIONS).find_one(
-        {"request_no": posting.get("request_no")}) or {}
+        {"request_no": posting.get("request_no"), "company_id": str(company_id)}) or {}
     if req.get("assignee_id"):
         await notify_user(req["assignee_id"], f"New application for {title}",
                           f"{name} applied via {channel}.",

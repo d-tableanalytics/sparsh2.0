@@ -45,15 +45,43 @@ async def _get_profile(company_id: str, employee_code: str) -> dict:
     return profile
 
 
+def _sees_all(actor: dict) -> bool:
+    """HR, MD and the owner see every plan. Everybody else is scoped (see _scope_query)."""
+    from app.utils.hrms_access import sees_all_people
+    return sees_all_people(actor)
+
+
 async def _scope_query(actor: dict, company_id: str, query: dict) -> dict:
-    """An EMPLOYEE caller (holds PIP_READ only for their own acknowledgement screen, per
-    the Cap.PIP_READ comment in models/hrms.py) sees only their own plans; everyone else
-    who holds PIP_READ (HR/MD/MANAGER) sees the company's. Fails CLOSED: an employee with
-    no linked profile sees nothing rather than everything."""
-    if hrms_role(actor) == HrmsRole.EMPLOYEE:
-        own = await _own_employee_code(actor, company_id)
-        query["employee_code"] = own or "__none__"
+    """Who sees which PIPs. A PIP is sensitive performance data.
+
+      HR / MD / owner   every plan in the company.
+      MANAGER           their own team's (people who report to them), plus any they started.
+                        Used to be the WHOLE company — the live test had a manager reading a
+                        colleague's PIP.
+      anyone else       their OWN plan only — whatever their role. The person on a PIP must
+                        be able to open it to acknowledge it; an HOD placed on one used to be
+                        unable to, leaving it stuck in Draft.
+
+    Fails CLOSED: somebody with no linked profile and no team sees nothing.
+    """
+    if _sees_all(actor):
+        return query
+    own = await _own_employee_code(actor, company_id)
+    if hrms_role(actor) == HrmsRole.MANAGER:
+        from app.services.hrms_leave_service import _team_employee_codes
+        team = await _team_employee_codes(actor, company_id)
+        codes = list({c for c in ([own] if own else []) + team})
+        query["$or"] = [{"employee_code": {"$in": codes or ["__none__"]}},
+                        {"initiated_by": str(actor.get("_id") or "")}]
+        return query
+    query["employee_code"] = own or "__none__"
     return query
+
+
+async def _with_mine(actor: dict, company_id: str, doc: dict) -> dict:
+    out = _out(doc)
+    out["is_mine"] = (await _own_employee_code(actor, company_id)) == doc.get("employee_code")
+    return out
 
 
 async def _own_employee_code(actor: dict, company_id: str) -> Optional[str]:
@@ -64,8 +92,31 @@ async def _own_employee_code(actor: dict, company_id: str) -> Optional[str]:
 
 
 async def initiate_pip(actor: dict, company_id: str, payload: dict) -> dict:
+    from app.models.hrms import is_iso_date
     employee_code = str(payload.get("employee_code") or "").strip()
     profile = await _get_profile(company_id, employee_code)
+
+    start, end = payload.get("start_date"), payload.get("target_end_date")
+    if not (start and end and is_iso_date(start) and is_iso_date(end)):
+        raise HTTPException(status_code=422, detail="Start and target end dates are required (YYYY-MM-DD).")
+    if end <= start:
+        raise HTTPException(status_code=422, detail="The target end date must be after the start date.")
+    if not str(payload.get("gap_statement") or "").strip():
+        raise HTTPException(status_code=422, detail="Describe the performance gap the plan addresses.")
+    if (await _own_employee_code(actor, company_id)) == employee_code:
+        raise HTTPException(status_code=403, detail="You cannot put yourself on a PIP.")
+    open_plan = await get_collection(COLL_PIP_RECORDS).find_one({
+        "company_id": str(company_id), "employee_code": employee_code,
+        "status": {"$in": [PipStatus.DRAFT.value, PipStatus.ACTIVE.value]}})
+    if open_plan:
+        raise HTTPException(
+            status_code=409,
+            detail=(f"{open_plan['pip_no']} is still open for this employee "
+                    f"({open_plan['status']}). Close or extend it rather than starting another."))
+    if hrms_role(actor) == HrmsRole.MANAGER:
+        from app.services.hrms_leave_service import _team_employee_codes
+        if employee_code not in await _team_employee_codes(actor, company_id):
+            raise HTTPException(status_code=403, detail="A manager can start a PIP only for their own team.")
 
     year = datetime.now(timezone.utc).year
     pip_no = await next_business_id("pip", str(company_id), year)
@@ -74,7 +125,7 @@ async def initiate_pip(actor: dict, company_id: str, payload: dict) -> dict:
         "pip_no": pip_no,
         "company_id": str(company_id),
         "employee_code": employee_code,
-        "employee_name": profile.get("display_name") or profile.get("full_name"),
+        "employee_name": await _name(profile),
         "initiated_by": str(actor.get("_id") or ""),
         "review_reference": payload.get("review_reference"),
         "issue_category": payload.get("issue_category"),
@@ -87,6 +138,7 @@ async def initiate_pip(actor: dict, company_id: str, payload: dict) -> dict:
         "support": [dict(s) if isinstance(s, dict) else s.model_dump()
                    for s in (payload.get("support") or [])],
         "reviews": [],
+        "extensions": [],
         "status": PipStatus.DRAFT.value,
         "acknowledged_at": None,
         "closure_result": None, "final_rating": None, "extension_date": None,
@@ -109,7 +161,12 @@ async def list_pips(actor: dict, company_id: str, *, employee_code: Optional[str
     query = await _scope_query(actor, company_id, query)
     rows = await get_collection(COLL_PIP_RECORDS).find(query).sort(
         "created_at", -1).to_list(min(limit, MAX_PIP_LIST_PAGE))
-    return [_out(r) for r in rows]
+    return [await _with_mine(actor, company_id, r) for r in rows]
+
+
+async def _name(profile: dict):
+    from app.services.hrms_payroll_service import _employee_names, _name_of
+    return _name_of(profile, await _employee_names([profile]))
 
 
 async def _get_pip(company_id: str, pip_no: str) -> dict:
@@ -122,11 +179,17 @@ async def _get_pip(company_id: str, pip_no: str) -> dict:
 
 async def get_pip(actor: dict, company_id: str, pip_no: str) -> dict:
     doc = await _get_pip(company_id, pip_no)
-    if hrms_role(actor) == HrmsRole.EMPLOYEE:
-        own = await _own_employee_code(actor, company_id)
-        if own != doc["employee_code"]:
-            raise HTTPException(status_code=403, detail="You may only view your own PIP.")
-    return _out(doc)
+    if not _sees_all(actor):
+        visible = await get_collection(COLL_PIP_RECORDS).find_one(
+            await _scope_query(actor, company_id, {"company_id": str(company_id), "pip_no": pip_no}))
+        if not visible:
+            raise HTTPException(status_code=404, detail=f"PIP '{pip_no}' not found.")
+    return await _with_mine(actor, company_id, doc)
+
+
+async def _assert_not_own(actor: dict, company_id: str, doc: dict, what: str) -> None:
+    if (await _own_employee_code(actor, company_id)) == doc["employee_code"]:
+        raise HTTPException(status_code=403, detail=f"You cannot {what} your own PIP.")
 
 
 async def acknowledge_pip(actor: dict, company_id: str, pip_no: str) -> dict:
@@ -151,6 +214,8 @@ async def acknowledge_pip(actor: dict, company_id: str, pip_no: str) -> dict:
 async def add_review(actor: dict, company_id: str, pip_no: str, payload: dict) -> dict:
     """§22.5 step 218."""
     doc = await _get_pip(company_id, pip_no)
+    await get_pip(actor, company_id, pip_no)          # 404 if outside the caller's scope
+    await _assert_not_own(actor, company_id, doc, "review")
     if doc["status"] != PipStatus.ACTIVE.value:
         raise HTTPException(
             status_code=409,
@@ -175,10 +240,36 @@ async def decide_pip(actor: dict, company_id: str, pip_no: str, payload: dict) -
     "no workflow silently triggers another" boundary Phase MOVE-1's absconding-to-separation
     hand-off crosses only on an explicit final action, never automatically."""
     doc = await _get_pip(company_id, pip_no)
-    if doc["status"] not in (PipStatus.ACTIVE.value, PipStatus.DRAFT.value):
+    await _assert_not_own(actor, company_id, doc, "decide")
+    if doc["status"] == PipStatus.DRAFT.value:
+        raise HTTPException(
+            status_code=409,
+            detail=(f"{doc.get('employee_name') or doc['employee_code']} has not acknowledged "
+                    f"{pip_no} yet. An outcome can only be recorded for a plan they have seen."))
+    if doc["status"] != PipStatus.ACTIVE.value:
         raise HTTPException(status_code=409, detail=f"{pip_no} is already \"{doc['status']}\".")
 
     now = datetime.now(timezone.utc)
+    if payload.get("closure_result") == "Extended":
+        # An extension is more time, not an ending: the plan stays Active, reviews continue,
+        # and the target end date moves. It used to CLOSE the plan (with no new date at all).
+        new_end = payload.get("extension_date")
+        from app.models.hrms import is_iso_date
+        if not (new_end and is_iso_date(new_end)):
+            raise HTTPException(status_code=422, detail="Choose the new target end date for the extension.")
+        if new_end <= (doc.get("target_end_date") or ""):
+            raise HTTPException(
+                status_code=422,
+                detail=f"The new end date must be after the current one ({doc.get('target_end_date')}).")
+        await get_collection(COLL_PIP_RECORDS).update_one(
+            {"_id": doc["_id"]},
+            {"$set": {"target_end_date": new_end, "extension_date": new_end, "updated_at": now},
+             "$push": {"extensions": {"from": doc.get("target_end_date"), "to": new_end,
+                                      "by": str(actor.get("_id") or ""), "at": now,
+                                      "remarks": payload.get("remarks")}}})
+        await audit(actor, AUDIT_PIP_DECIDED, ENTITY_PIP, pip_no, f"Extended to {new_end}", company_id)
+        return await get_pip(actor, company_id, pip_no)
+
     await get_collection(COLL_PIP_RECORDS).update_one(
         {"_id": doc["_id"]},
         {"$set": {"status": PipStatus.CLOSED.value,

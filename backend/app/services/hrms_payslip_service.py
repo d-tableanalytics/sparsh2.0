@@ -65,15 +65,27 @@ async def _resolve_employee_code(actor: dict, company_id: str,
                                   requested: Optional[str]) -> str:
     """An EMPLOYEE caller always gets their OWN code, regardless of what was requested —
     the same untrusted-input treatment hrms_appointment_service._scope_filter applies to a
-    caller-supplied `uk`. Every other role must name one explicitly."""
-    if hrms_role(actor) == HrmsRole.EMPLOYEE:
+    caller-supplied `uk`. Every other role may name one; naming none means their own — the
+    "My Payslip" tab asks exactly that, for HR as much as for anybody else."""
+    from app.utils.hrms_access import sees_all_payroll
+    if not sees_all_payroll(actor):
+        # Everyone outside HR/MD/Finance reads their OWN payslip only — whatever code they
+        # asked for. (Once every staff member holds PAYROLL_READ for self-service, an
+        # EMPLOYEE-only check would let a manager or support user read anybody's.)
         own = await _own_employee_code(actor, company_id)
         if not own:
             raise HTTPException(status_code=404, detail="You have no linked employee profile.")
         return own
-    if not requested:
-        raise HTTPException(status_code=422, detail="employee_code is required.")
-    return requested
+    if requested:
+        return requested
+    own = await _own_employee_code(actor, company_id)
+    if not own:
+        raise HTTPException(
+            status_code=404,
+            detail="Your account has no employee profile in this company, so there is no "
+                   "payslip of your own. To see an employee's payslip, open it from a run "
+                   "on the Payroll Runs tab.")
+    return own
 
 
 def _line(label: str, amount) -> Optional[dict]:
@@ -118,13 +130,34 @@ def _compose_payslip(record: dict, *, period: str, run_status: Optional[str],
     `structured_gross` total). Nothing is recalculated. Shared by `get_payslip` (one
     employee) and `list_payslips` (a whole run), so the two can never render differently for
     the same record."""
-    earnings = []
+    earnings, structured_deductions = [], []
     for c in (structure or {}).get("components", []):
         meta = component_meta.get(c.get("code")) or {}
+        row = _line(meta.get("name") or c.get("code"), c.get("amount"))
+        if not row:
+            continue
         if meta.get("component_type") == ComponentType.EARNING.value:
-            row = _line(meta.get("name") or c.get("code"), c.get("amount"))
-            if row:
-                earnings.append(row)
+            earnings.append(row)
+        elif (meta.get("component_type") == ComponentType.DEDUCTION.value
+              and record.get("structured_deductions")):
+            # Only when the record actually deducted them — a record calculated before
+            # structure deductions were counted must not show a line its total never took.
+            structured_deductions.append(row)
+
+    # Show each earning at what was actually PAID for the month, with the full-month figure
+    # alongside. Listing full-month amounts over a prorated Gross made the lines add up to
+    # 50,000 above a "Gross Earnings ₹25,806.45" — correct, and indistinguishable from an
+    # error to anybody reading it. Split in proportion, with the rounding remainder on the
+    # last line so the lines sum to the record's own prorated_gross exactly.
+    full_total = sum(r["amount"] for r in earnings)
+    paid_total = float(record.get("prorated_gross") or 0)
+    if earnings and full_total and round(paid_total, 2) != round(full_total, 2):
+        ratio = paid_total / full_total
+        for r in earnings:
+            r["full_amount"] = r["amount"]
+            r["amount"] = round(r["full_amount"] * ratio, 2)
+        earnings[-1]["amount"] = round(
+            earnings[-1]["amount"] + paid_total - sum(r["amount"] for r in earnings), 2)
 
     proration_note = None
     if record["payable_days"] != record["days_in_period"]:
@@ -153,7 +186,7 @@ def _compose_payslip(record: dict, *, period: str, run_status: Optional[str],
         _line("Other Earnings", record.get("other_earnings")),
     ] if row] + adjustment_earnings
 
-    deductions = [row for row in [
+    deductions = structured_deductions + [row for row in [
         _line("PF", record.get("pf")),
         _line("ESI", record.get("esi")),
         _line("Professional Tax", record.get("pt")),
@@ -222,7 +255,8 @@ async def list_payslips(actor: dict, company_id: str, period: str) -> list:
     """§22.7 "bulk payslip" — every payslip in one run, HR-only (an EMPLOYEE holding
     PAYROLL_READ is scoped to their own single record everywhere else in this module; a
     listing across the whole run must not become the one place that scope is forgotten)."""
-    if hrms_role(actor) == HrmsRole.EMPLOYEE:
+    from app.utils.hrms_access import sees_all_payroll
+    if not sees_all_payroll(actor):
         raise HTTPException(status_code=403, detail="You may only view your own payslip.")
 
     records = await get_collection(COLL_PAYROLL_RECORDS).find(

@@ -352,6 +352,10 @@ async def main() -> None:
     # =========================================================================
     section("8. The work queue is internal-track only")
     # =========================================================================
+    # A fresh shortlisted internal candidate with no call yet -- the one the queue exists for.
+    candidates.docs.append({"uk": "CAN-009", "company_id": COMPANY, "request_no": REQ_INT,
+                            "candidate_name": "Unscreened",
+                            "application_status": M.AppStatus.SHORTLISTED.value})
     queue = await TEL.screenable_candidates(HR, COMPANY)
     ukeys = {r["uk"] for r in queue}
     check("the client-track candidate is absent -- the client process has no phone-screen "
@@ -359,7 +363,13 @@ async def main() -> None:
           "CAN-C01" not in ukeys)
     check("candidates already cleared by a call are absent",
           "CAN-001" not in ukeys and "CAN-006" not in ukeys)
-    check("a shortlisted, unscreened internal candidate is present", "CAN-007" in ukeys)
+    # The queue asks the gate's own question (test_phone_queue_matches_gate), so the gate's
+    # other exits leave it too: CAN-007 was waived by an approved exception in section 7, and
+    # CAN-008 is already being interviewed.
+    check("a waived candidate is absent -- the gate already lets them through",
+          "CAN-007" not in ukeys)
+    check("a candidate already being interviewed is absent", "CAN-008" not in ukeys)
+    check("a shortlisted, unscreened internal candidate is present", "CAN-009" in ukeys)
     check("attempt counts are carried so repeat chasing is visible",
           all("attempts" in r for r in queue))
 

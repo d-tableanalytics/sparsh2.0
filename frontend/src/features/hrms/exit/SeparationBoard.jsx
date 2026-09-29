@@ -10,6 +10,8 @@ import { useNotification } from '../../../context/NotificationContext';
 import { getSeparations, initiateSeparation, getEmployees } from '../../../services/hrmsApi';
 import { FIELD, LABEL, TEXTAREA, day, toneFor } from '../internal/internalKit';
 import { Btn, Chip, Facts, Modal, RecordList } from '../internal/internalKit.jsx';
+import { ProcessGuide, NextStep } from '../common/ProcessGuide';
+import { EXIT_GUIDE, separationNextStep } from '../common/processGuides';
 
 /**
  * HRMS ▸ Exit Management (BA/Functional Design §7.18, §22.2, §7.21).
@@ -76,11 +78,12 @@ const SeparationBoard = () => {
           <span className="block text-[11px] text-[var(--text-muted)]">
             {r.employee_code} · {r.sep_no}
           </span>
+          <NextStep step={separationNextStep(r)} className="mt-1.5" />
         </>
       ) },
     { key: 'type', label: 'Exit Type',
       render: (r) => <span className="text-[var(--text-main)]">{r.exit_type}</span> },
-    { key: 'notice', label: 'Notice / LWD',
+    { key: 'notice', label: 'Last Working Day',
       render: (r) => (
         <>
           <span className="text-[var(--text-main)]">
@@ -118,9 +121,10 @@ const SeparationBoard = () => {
       </div>
       <Facts items={[
         { label: 'Exit Type', value: r.exit_type },
-        { label: 'LWD', value: day(r.final_lwd || r.recommended_lwd || r.calculated_lwd) },
+        { label: 'Last Day', value: day(r.final_lwd || r.recommended_lwd || r.calculated_lwd) },
         { label: 'Notice', value: `${r.calculated_notice_days}d` },
       ]} />
+      <NextStep step={separationNextStep(r)} />
       <Link to={`/hrms/separations/${r.sep_no}`}>
         <Btn tone="ghost">Open case</Btn>
       </Link>
@@ -140,6 +144,7 @@ const SeparationBoard = () => {
         )}
       />
       <HrmsScopeBar />
+      <ProcessGuide guide={EXIT_GUIDE} />
 
       <div className="flex items-center gap-2">
         <label className="flex items-center gap-2 text-[12px] text-[var(--text-muted)]">
@@ -237,7 +242,7 @@ const InitiateModal = ({ scope, onClose, onDone, showSuccess, showError }) => {
       }, scope);
       showSuccess(
         `${data.sep_no} opened — calculated notice ${data.calculated_notice_days} day`
-        + `${data.calculated_notice_days === 1 ? '' : 's'} (LWD ${day(data.calculated_lwd)}).`);
+        + `${data.calculated_notice_days === 1 ? '' : 's'} (last working day ${day(data.calculated_lwd)}).`);
       onDone(data.sep_no);
     } catch (err) {
       showError(err?.response?.data?.detail || 'Could not initiate this separation.');
@@ -285,13 +290,15 @@ const InitiateModal = ({ scope, onClose, onDone, showSuccess, showError }) => {
                   <p className="px-3 py-2 text-[12px] text-[var(--text-muted)]">Searching…</p>
                 )}
                 {!searching && options.map((o) => (
-                  <button key={o.user_id} type="button"
+                  <button key={o.user_id} type="button" disabled={!o.employee_code}
                     onClick={() => { setEmployee(o); setOptions([]); }}
                     className="block w-full text-left px-3 py-2 text-[12.5px]
-                      hover:bg-[var(--input-bg)]">
+                      hover:bg-[var(--input-bg)] disabled:opacity-60 disabled:cursor-not-allowed disabled:hover:bg-transparent">
                     <span className="text-[var(--text-main)]">{o.name}</span>
                     <span className="block text-[11px] text-[var(--text-muted)]">
-                      {o.employee_code} · {o.designation || '—'} · {o.employment_status}
+                      {o.employee_code
+                  ? `${o.employee_code} · ${o.designation || '—'} · ${o.employment_status || '—'}`
+                  : 'No employee profile yet — open them on the Employees page to create one.'}
                     </span>
                   </button>
                 ))}
@@ -316,7 +323,7 @@ const InitiateModal = ({ scope, onClose, onDone, showSuccess, showError }) => {
             onChange={(e) => setResignationDate(e.target.value)} />
         </div>
         <div>
-          <label className={LABEL} htmlFor="sep-lwd">Proposed LWD</label>
+          <label className={LABEL} htmlFor="sep-lwd">Proposed Last Working Day</label>
           <input id="sep-lwd" type="date" value={proposedLwd} className={FIELD}
             onChange={(e) => setProposedLwd(e.target.value)} />
           <p className="mt-1 text-[11px] text-[var(--text-muted)]">

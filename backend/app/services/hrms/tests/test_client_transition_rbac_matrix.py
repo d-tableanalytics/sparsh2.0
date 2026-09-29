@@ -202,33 +202,26 @@ async def main() -> None:
               not unusable)
         for x in unusable:
             print(f"        {x}")
-        # ── The one documented exception ──
-        # `client-review` (the client reading the assessment result) is named like a client
-        # decision and IS held by the client, but CLIENT_ASSESSMENT_REVIEW was never added
-        # to CLIENT_DECISION_CAPS -- so Superadmin keeps it, by virtue of ADMIN resolving
-        # to every capability minus the excluded sets. No other Sparsh role holds it.
-        #
-        # It is therefore the ONLY client-* action a Sparsh role can perform. That is a
-        # live decision for the product owner, not a bug this file should silently pass
-        # over: pinned here so it stays visible and cannot widen unnoticed. If the sixth
-        # gate is ever made exclusive, delete this block -- the general rule above will
-        # then cover it.
-        KNOWN = {"CLIENT_ASSESSMENT_TRANSITIONS.client-review "
-                 "(CLIENT_ASSESSMENT_REVIEW) -> ['Client admin', 'Client user']"}
-        unexpected = [x for x in client_leak if x not in KNOWN]
-        check(f"no Sparsh-owned action reaches a client-track caller, beyond the one "
-              f"documented exception ({len(unexpected)} unexpected)", not unexpected)
+        # ── There is no longer an exception ──
+        # `client-review` (the client signing off the assessment result) used to be the one
+        # client-* action a Sparsh role could perform: CLIENT_ASSESSMENT_REVIEW was not in
+        # CLIENT_DECISION_CAPS, so Superadmin held it through the administrative grant. The
+        # product owner has since made it exclusive — marking the client's review is the
+        # client's — so, as this block used to instruct, the special case is gone and the
+        # general rule below covers it like every other client decision.
+        unexpected = list(client_leak)
+        check(f"no Sparsh-owned action reaches a client-track caller "
+              f"({len(unexpected)} unexpected)", not unexpected)
         for x in unexpected:
             print(f"        {x}")
         review_holders = [w for w in holders[("CLIENT_ASSESSMENT_TRANSITIONS",
                                               "client-review")]
                           if w in SPARSH_SIDE]
-        check("the exception is exactly Superadmin and nobody else on the Sparsh side",
-              review_holders == ["Sparsh Superadmin"])
+        check("no Sparsh role — not even Superadmin — can mark the client's review",
+              not review_holders)
         others = [f"{t}.{a}" for (t, a), who in holders.items()
-                  if a.startswith("client-") and a != "client-review"
-                  and any(w in SPARSH_SIDE for w in who)]
-        check("every OTHER client-* action is refused to all of Sparsh", not others)
+                  if a.startswith("client-") and any(w in SPARSH_SIDE for w in who)]
+        check("every client-* action is refused to all of Sparsh", not others)
         for x in others:
             print(f"        {x}")
 

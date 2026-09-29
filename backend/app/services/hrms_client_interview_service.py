@@ -87,6 +87,45 @@ def _rating(value, label: str) -> Optional[float]:
     return round(score, 2)
 
 
+async def panel_options() -> list:
+    """Sparsh's own people, as pickable panel members.
+
+    Sparsh conducts the client-track interview (SOP section 12), so the panel is drawn from
+    the operator's staff and never from the client's roster — the client watches the
+    recording, they do not sit on it.
+
+    Inactive accounts are left out: somebody who has left cannot be scheduled onto an
+    interview, and offering them is how a leaver's name ends up on next month's record.
+    """
+    from app.utils.hrms_access import internal_company_id, tenant_identity_source
+
+    cid = await internal_company_id()
+    source, base = await tenant_identity_source(cid or "")
+    rows = await get_collection(source).find(
+        {**base, "is_active": {"$ne": False}},
+        {"full_name": 1, "first_name": 1, "last_name": 1, "email": 1,
+         "role": 1, "governance_role": 1, "designation": 1},
+    ).to_list(2000)
+
+    people = []
+    for r in rows:
+        name = (r.get("full_name")
+                or f"{r.get('first_name') or ''} {r.get('last_name') or ''}".strip()
+                or r.get("email"))
+        if not name:
+            continue
+        people.append({
+            "id": str(r["_id"]),
+            "name": name,
+            "email": r.get("email"),
+            # Shown beside the name so two colleagues with the same first name are
+            # distinguishable in the list.
+            "designation": r.get("designation") or r.get("governance_role") or "",
+        })
+    people.sort(key=lambda p: p["name"].lower())
+    return people
+
+
 def _panel(value) -> list:
     if value is None:
         return []

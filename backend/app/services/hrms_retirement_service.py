@@ -59,16 +59,26 @@ async def list_upcoming_retirements(actor: dict, company_id: str) -> list:
     someone already separated has nothing left to alert on."""
     policy = await get_retirement_policy(company_id)
     horizon = date.today()
-    alert_year = horizon.year + (1 if horizon.month + policy["alert_months_ahead"] > 12 else 0)
-    alert_month = ((horizon.month - 1 + policy["alert_months_ahead"]) % 12) + 1
-    cutoff = date(alert_year, alert_month, horizon.day if horizon.day <= 28 else 28).isoformat()
+    # N months ahead, by real month arithmetic (the old year/month maths was wrong for a
+    # window of 12 months or more).
+    months = horizon.year * 12 + horizon.month - 1 + int(policy["alert_months_ahead"])
+    cutoff = date(months // 12, months % 12 + 1, min(horizon.day, 28)).isoformat()
 
-    rows = await get_collection(COLL_EMPLOYEE_PROFILES).find({
+    query = {
         "company_id": str(company_id),
         "employment_status": {"$nin": [EmploymentStatus.RESIGNED.value,
                                        EmploymentStatus.TERMINATED.value]},
         "date_of_birth": {"$ne": None},
-    }).to_list(2000)
+    }
+    # A manager sees their own team's alerts (each carries a date of birth), not everyone's.
+    from app.services import hrms_people_scope as scope
+    limit_to = await scope.scope_filter(actor, company_id)
+    if limit_to:
+        query.update(limit_to)
+    rows = await get_collection(COLL_EMPLOYEE_PROFILES).find(query).to_list(2000)
+    names = {}
+    from app.services.hrms_payroll_service import _employee_names, _name_of
+    names = await _employee_names(rows)
 
     upcoming = []
     for r in rows:
@@ -76,12 +86,16 @@ async def list_upcoming_retirements(actor: dict, company_id: str) -> list:
         if not dob:
             continue
         retirement_date = _retirement_date(dob, policy["retirement_age"])
-        if horizon.isoformat() <= retirement_date <= cutoff:
+        # Past retirement age and STILL active is the most urgent alert, not a silent gap —
+        # the old list showed future dates only, so an overdue retirement never surfaced.
+        overdue = retirement_date < horizon.isoformat()
+        if overdue or retirement_date <= cutoff:
             upcoming.append({
                 "employee_code": r.get("employee_code"),
-                "display_name": r.get("display_name") or r.get("full_name"),
+                "display_name": _name_of(r, names),
                 "date_of_birth": dob,
                 "retirement_date": retirement_date,
+                "overdue": overdue,
             })
     upcoming.sort(key=lambda x: x["retirement_date"])
     return upcoming

@@ -113,6 +113,12 @@ const UserManagement = () => {
         first_name: '', last_name: '', email: '', password: '',
         mobile: '', role: 'coach', is_active: true,
         session_type: 'Both', department: 'Other',
+        // The governance ladder, separate from `role` above: `role` is what the ACCOUNT may
+        // reach, this is what the PERSON is in the organisation. HRMS resolves HR / HOD /
+        // FINANCE / MD from here (hrms_role()), so it decides who verifies a requisition,
+        // approves a scorecard or approves a budget. Empty by default — most team members
+        // sit on no rung, and guessing one would hand out authority nobody asked for.
+        governance_role: '',
         reporting_manager: '', level: '',
         permissions: {
             batches: { create: false, read: true, update: false, delete: false },
@@ -351,6 +357,30 @@ const UserManagement = () => {
                                             <Shield size={12} className="text-[var(--accent-indigo)]" /> Hierarchy Level
                                         </label>
                                         <input className="w-full bg-[var(--input-bg)] px-5 py-3 rounded-2xl border border-[var(--border)] text-[14px] font-black focus:border-[var(--accent-indigo)] outline-none" placeholder="e.g. L1, L2, Manager" value={staffForm.level || ''} onChange={e => setStaffForm({ ...staffForm, level: e.target.value })} />
+                                    </div>
+                                </div>
+
+                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                                    <div className="space-y-1.5">
+                                        <label className="text-[10px] font-black text-[var(--text-muted)] uppercase px-2 flex items-center gap-1.5">
+                                            <Network size={12} className="text-[var(--accent-indigo)]" /> Governance Role
+                                        </label>
+                                        <select className="w-full bg-[var(--input-bg)] px-4 py-2.5 rounded-xl border border-[var(--border)] text-[13px] font-black uppercase" value={staffForm.governance_role || ''} onChange={e => setStaffForm({ ...staffForm, governance_role: e.target.value })}>
+                                            <option value="">— None —</option>
+                                            <option value="HR">HR</option>
+                                            <option value="HOD">HOD</option>
+                                            <option value="FINANCE">Finance</option>
+                                            <option value="MD">MD</option>
+                                            <option value="IMPLEMENTOR">Implementor</option>
+                                        </select>
+                                        {/* Said plainly, because the two role fields sit inches apart and
+                                            answer different questions — and because this one is read across the
+                                            ERP, not by a single module. */}
+                                        <p className="text-[10px] font-bold text-[var(--text-muted)] px-2">
+                                            Where they sit in the organisation (MD &gt; HR &gt; HOD &gt; Implementor).
+                                            Used across the ERP — Tasks, TPMS, Leadership, Forms and HRMS read it to
+                                            decide who assigns, approves, verifies and escalates.
+                                        </p>
                                     </div>
                                 </div>
 

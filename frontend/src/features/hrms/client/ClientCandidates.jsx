@@ -16,7 +16,7 @@ import {
 } from '../../../services/hrmsApi';
 import { FIELD, LABEL, TEXTAREA, day, money } from '../internal/internalKit';
 import { Btn, Facts, Modal, RecordList } from '../internal/internalKit.jsx';
-import { Detail, Moves, StatusChip, WhoseMove, PanelHeader } from './clientKit.jsx';
+import { CvLink, Detail, Moves, StatusChip, WhoseMove, PanelHeader } from './clientKit.jsx';
 import {
   useClientList, useClientScope, useSourceableRequisitions,
 } from './clientKit';
@@ -161,6 +161,9 @@ const ClientCandidates = ({ embedded, onChanged }) => {
           <span className="block text-[11px] text-[var(--text-muted)]">
             {r.ccn_no} · {r.cr_no}
           </span>
+          {/* The CV is the thing the client is being asked to judge, so it opens from the
+              row itself rather than only from inside the panel. */}
+          <CvLink value={r.cv_reference} compact />
         </>
       ) },
     { key: 'employer', label: 'Current',
@@ -211,6 +214,7 @@ const ClientCandidates = ({ embedded, onChanged }) => {
           <p className="text-[11.5px] text-[var(--text-muted)]">
             {r.ccn_no} · {r.cr_no}
           </p>
+          <CvLink value={r.cv_reference} compact />
         </div>
         <StatusChip status={r.status} />
       </div>
@@ -599,6 +603,9 @@ const CandidateJourney = ({ row, busy, onClose, onAct, onChanged }) => {
             {row.tfs_score != null ? row.tfs_score : '—'}
           </Detail>
           <Detail label="PI score">{row.pi_score != null ? row.pi_score : '—'}</Detail>
+          {/* SOP section 14 lists the CV among what the client receives, and the API has
+              always shared `cv_reference` — the screen simply never showed it. */}
+          <Detail label="CV / résumé" span><CvLink value={row.cv_reference} /></Detail>
           {row.screening_notes && (
             <Detail label="Screening notes" span>{row.screening_notes}</Detail>
           )}

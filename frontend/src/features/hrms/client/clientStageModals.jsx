@@ -1,6 +1,7 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { FIELD, LABEL, TEXTAREA } from '../internal/internalKit';
 import { Btn, Modal } from '../internal/internalKit.jsx';
+import { getClientPanelOptions } from '../../../services/hrmsApi';
 
 /**
  * HRMS ▸ Client Hiring ▸ the forms the assessment and interview stages collect.
@@ -116,9 +117,31 @@ const ScoreModal = ({ row, busy, onClose, onSubmit }) => {
 
 const InterviewModal = ({ busy, onClose, onSubmit }) => {
   const [form, setForm] = useState({
-    scheduled_at: '', mode: 'Virtual', meeting_link: '', panel: '',
+    scheduled_at: '', mode: 'Virtual', meeting_link: '',
   });
+  // The panel, as the ids of the people picked. Sent as NAMES because that is what the
+  // record stores (ClientInterviewIn.panel is a list of names) — the ids exist only so the
+  // picker can tell two colleagues with the same name apart while choosing.
+  const [panelIds, setPanelIds] = useState([]);
+  const [options, setOptions] = useState([]);
+  const [optionsError, setOptionsError] = useState(false);
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
+
+  useEffect(() => {
+    let live = true;
+    getClientPanelOptions()
+      .then(({ data }) => { if (live) setOptions(data?.panel_options || []); })
+      // A picker that cannot load is not a reason to block the scheduling: fall back to
+      // the typed field below rather than leaving somebody unable to book the interview.
+      .catch(() => { if (live) setOptionsError(true); });
+    return () => { live = false; };
+  }, []);
+
+  const toggle = (id) => setPanelIds((cur) =>
+    (cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id]));
+  const panelNames = options
+    .filter((o) => panelIds.includes(o.id))
+    .map((o) => o.name);
   return (
     <Modal
       title="Schedule the interview"
@@ -132,9 +155,11 @@ const InterviewModal = ({ busy, onClose, onSubmit }) => {
               scheduled_at: new Date(form.scheduled_at).toISOString(),
               mode: form.mode,
               meeting_link: form.meeting_link || undefined,
-              panel: form.panel
-                ? form.panel.split(',').map((p) => p.trim()).filter(Boolean)
-                : [],
+              // The fallback only carries names when the picker itself failed to load.
+              panel: panelNames.length
+                ? panelNames
+                : (form.panel_fallback || '')
+                  .split(',').map((x) => x.trim()).filter(Boolean),
             })}>
             {busy ? 'Saving…' : 'Schedule'}
           </Btn>
@@ -156,8 +181,53 @@ const InterviewModal = ({ busy, onClose, onSubmit }) => {
           <Field id="iv-link" label="Meeting link" value={form.meeting_link}
             onChange={set('meeting_link')} />
         </div>
-        <Field id="iv-panel" label="Panel" value={form.panel} onChange={set('panel')}
-          placeholder="Names, comma separated" />
+        {/* Sparsh conducts the interview, so the panel is drawn from Sparsh's own people.
+            Typed names went wrong in the ordinary ways — a misspelling, somebody who has
+            left, two spellings of one colleague across two interviews. */}
+        <div>
+          <span className={LABEL}>Panel</span>
+          {optionsError ? (
+            <>
+              <input className={FIELD} value={form.panel_fallback || ''}
+                placeholder="Names, comma separated"
+                onChange={(e) => setForm((f) => ({ ...f, panel_fallback: e.target.value }))} />
+              <p className="mt-1 text-[11px] text-[var(--accent-orange)]">
+                The interviewer list could not be loaded — type the names instead.
+              </p>
+            </>
+          ) : (
+            <div className="mt-1 max-h-40 overflow-y-auto rounded-lg border
+              border-[var(--border)] divide-y divide-[var(--border)]">
+              {options.length === 0 ? (
+                <p className="px-3 py-2 text-[11.5px] text-[var(--text-muted)]">
+                  Loading interviewers…
+                </p>
+              ) : options.map((o) => (
+                <label key={o.id}
+                  className="flex items-center gap-2 px-3 py-2 cursor-pointer
+                    hover:bg-[var(--input-bg)]">
+                  <input type="checkbox" checked={panelIds.includes(o.id)}
+                    onChange={() => toggle(o.id)} />
+                  <span className="min-w-0">
+                    <span className="block text-[12.5px] text-[var(--text-main)]">
+                      {o.name}
+                    </span>
+                    {(o.designation || o.email) && (
+                      <span className="block text-[11px] text-[var(--text-muted)] truncate">
+                        {[o.designation, o.email].filter(Boolean).join(' · ')}
+                      </span>
+                    )}
+                  </span>
+                </label>
+              ))}
+            </div>
+          )}
+          {!optionsError && panelNames.length > 0 && (
+            <p className="mt-1 text-[11px] text-[var(--text-muted)]">
+              {panelNames.length} on the panel: {panelNames.join(', ')}
+            </p>
+          )}
+        </div>
       </div>
     </Modal>
   );

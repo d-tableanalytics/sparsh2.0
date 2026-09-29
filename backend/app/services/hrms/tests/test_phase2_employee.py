@@ -387,6 +387,8 @@ async def main() -> None:
         M.COLL_DEPARTMENTS: departments, M.COLL_DESIGNATIONS: designations,
         M.COLL_EMPLOYEE_PROFILES: profiles, M.COLL_COUNTERS: counters,
         M.COLL_AUDIT_LOG: audit_log,
+        # Sparsh Magic's own tenant: its people are `staff`, not `learners`.
+        "companies": FakeCollection([{"_id": "SPARSH", "is_internal": True}]),
     }
     original = mongo.get_collection
     mongo.get_collection = lambda name: store.setdefault(name, FakeCollection())
@@ -395,7 +397,7 @@ async def main() -> None:
     import app.services.hrms_masters_service as MS
     import app.services.hrms_audit_service as AS
     import app.services.hrms_id_service as IS
-    for mod in (ES, MS, AS, IS):
+    for mod in (ES, MS, AS, IS, A):
         mod.get_collection = mongo.get_collection
 
     HR = {"_id": U_HR, "role": "clientuser", "_source_collection": "learners",
@@ -509,7 +511,13 @@ async def main() -> None:
         await expect_http("user from another company", ES.create_profile(
             HR, COMPANY, {"user_id": U_OTHER}), 403, "another company")
         await expect_http("Sparsh staff cannot be a client employee", ES.create_profile(
-            HR, COMPANY, {"user_id": U_STAFF}), 422, "company users")
+            HR, COMPANY, {"user_id": U_STAFF}), 403, "another company")
+        # ...but CAN be one of Sparsh Magic's own. This used to be refused too ("Only company
+        # users can be added as employees"), so no Sparsh employee could ever get a profile —
+        # and without a profile, never be paid.
+        own = await ES.create_profile(SUPER, "SPARSH", {"user_id": U_STAFF})
+        check("Sparsh staff CAN be an employee of Sparsh Magic itself",
+              own.get("employee_code", "").startswith("EMP-"))
         await expect_http("missing user_id", ES.create_profile(HR, COMPANY, {}), 422)
 
         section("Employee -- validation")

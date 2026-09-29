@@ -10,6 +10,7 @@ import {
   createSchedule as createTpmsSchedule,
   updateSchedule as updateTpmsSchedule,
   uploadScheduleFile,
+  getScheduleUploads,
 } from '../../services/tpmsApi';
 import { useAuth } from '../../context/AuthContext';
 import { useNotification } from '../../context/NotificationContext';
@@ -228,9 +229,15 @@ const ScheduleCalendarModal = ({ isOpen, onClose, onSaved, mode = 'erp', event =
 
   const [form, setForm] = useState(emptyForm());
   const [uploadFile, setUploadFile] = useState(null);
+  // Files already attached to the occurrence being edited — so an upload can be SEEN.
+  const [attached, setAttached] = useState([]);
   const selectedActivityMeta = (activities || []).find((a) => (typeof a === 'string' ? a : a.name) === form.activity);
   const uploadRequired = !!(selectedActivityMeta && typeof selectedActivityMeta === 'object' && selectedActivityMeta.upload_required);
   useEffect(() => { setUploadFile(null); }, [isOpen, form.activity]);
+  useEffect(() => {
+    if (!isOpen || !isEditing || !event?.id) { setAttached([]); return; }
+    getScheduleUploads(event.id).then(({ data }) => setAttached(data?.uploads || [])).catch(() => setAttached([]));
+  }, [isOpen, isEditing, event?.id]);
 
   const [companyName, setCompanyName] = useState('');
   const [companies, setCompanies] = useState([]);
@@ -435,19 +442,37 @@ const ScheduleCalendarModal = ({ isOpen, onClose, onSaved, mode = 'erp', event =
     try {
       if (isEditing) {
         await updateTpmsSchedule(event.id, payload);
+        // Say what actually happened to the file. The failure used to flash for a moment and
+        // then be covered by a plain "Activity updated.", so an unattached file looked attached.
         if (uploadRequired && uploadFile) {
-          try { await uploadScheduleFile(event.id, uploadFile); }
-          catch { showError('Activity updated, but the file upload failed — attach it from the activity card.'); }
+          try {
+            await uploadScheduleFile(event.id, uploadFile);
+            showSuccess(`Activity updated — "${uploadFile.name}" attached.`);
+          } catch (err) {
+            showError(`Activity updated, but "${uploadFile.name}" was NOT attached: `
+              + `${err.response?.data?.detail || 'the upload failed'}. Attach it from the activity card.`);
+          }
+        } else {
+          showSuccess('Activity updated.');
         }
-        showSuccess('Activity updated.');
       } else {
         const res = await createTpmsSchedule(payload);
         const eventIds = res?.data?.event_ids || [];
-        if (uploadRequired && uploadFile && eventIds.length) {
-          try { await uploadScheduleFile(eventIds[0], uploadFile); }
-          catch { showError('Activity scheduled, but the file upload failed — attach it from the activity card.'); }
+        let fileNote = '';
+        if (uploadRequired && uploadFile) {
+          if (!eventIds.length) {
+            showError(`Activity scheduled, but "${uploadFile.name}" was NOT attached. Attach it from the activity card.`);
+          } else {
+            try {
+              await uploadScheduleFile(eventIds[0], uploadFile);
+              fileNote = ` "${uploadFile.name}" attached to the first occurrence.`;
+            } catch (err) {
+              showError(`Activity scheduled, but "${uploadFile.name}" was NOT attached: `
+                + `${err.response?.data?.detail || 'the upload failed'}. Attach it from the activity card.`);
+            }
+          }
         }
-        showSuccess('Activity scheduled — reminders and mails are on their way.');
+        showSuccess(`Activity scheduled — reminders and mails are on their way.${fileNote}`);
       }
       setUploadFile(null);
       onSaved?.();
@@ -739,6 +764,18 @@ const ScheduleCalendarModal = ({ isOpen, onClose, onSaved, mode = 'erp', event =
                   <span className="text-[10px] font-black uppercase text-indigo-600 tracking-widest">📎 Upload for {form.activity}</span>
                   <span className="text-[9px] font-black px-1.5 py-0.5 rounded bg-orange-50 text-orange-500 uppercase tracking-wide">Required</span>
                 </div>
+                {attached.length > 0 && (
+                  <div className="mb-2 space-y-1">
+                    <p className="text-[10.5px] font-bold text-gray-600">Already attached ({attached.length})</p>
+                    {attached.map((f) => (
+                      <a key={f._id} href={f.url || undefined} target="_blank" rel="noreferrer"
+                        className="block text-[12px] font-semibold text-indigo-700 hover:underline truncate">
+                        📄 {f.file_name}
+                        <span className="text-gray-500 font-normal"> · {f.uploaded_by_name || ''}{f.uploaded_at ? ` · ${new Date(f.uploaded_at).toLocaleDateString()}` : ''}</span>
+                      </a>
+                    ))}
+                  </div>
+                )}
                 <input type="file" onChange={(e) => setUploadFile(e.target.files?.[0] || null)}
                   className="block w-full text-[12px] text-gray-600 file:mr-3 file:px-3 file:py-1.5 file:rounded-lg file:border-0 file:bg-indigo-600 file:text-white file:text-[11px] file:font-black file:cursor-pointer file:hover:brightness-110" />
                 <p className="text-[10px] text-gray-400 font-medium mt-2">

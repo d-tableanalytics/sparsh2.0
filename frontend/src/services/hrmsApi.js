@@ -868,6 +868,8 @@ export const saveAdvancePolicy = (payload, params) =>
 export const checkAdvanceEligibility = (employeeCode, params) =>
   api.get(`/hrms/advances/eligibility/${employeeCode}`, { params });
 export const requestAdvance = (payload, params) => api.post('/hrms/advances', payload, { params });
+export const getMyAdvanceEligibility = (params) =>
+  api.get('/hrms/advances/my-eligibility', { params });
 export const listAdvances = (params) => api.get('/hrms/advances', { params });
 export const getAdvance = (advNo, params) => api.get(`/hrms/advances/${advNo}`, { params });
 export const actOnAdvance = (advNo, payload, params) =>
@@ -1050,6 +1052,12 @@ export const getClientCompanies = (params) =>
   api.get('/hrms/client-companies', { params });
 
 // ── Client Hiring, step 2b — the job posting and its applications ──
+// Who may sit on a client interview panel — Sparsh's own people. Gated on the same
+// capability that schedules the interview, so the picker can never offer somebody the
+// API would refuse.
+export const getClientPanelOptions = () =>
+  api.get('/hrms/client-interviews/panel-options');
+
 export const getClientPostings = (params) =>
   api.get('/hrms/client-postings', { params });
 export const getClientPosting = (postingNo, params) =>

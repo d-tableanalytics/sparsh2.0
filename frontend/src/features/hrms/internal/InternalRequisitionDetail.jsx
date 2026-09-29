@@ -1,14 +1,19 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
-import { ArrowLeft, Check, CircleDot, Circle, Users, Clock } from 'lucide-react';
+import {
+  ArrowLeft, Check, CircleDot, Circle, Users, Clock, ShieldCheck, Megaphone,
+  AlertTriangle,
+} from 'lucide-react';
 import { useHrms } from '../HrmsContext';
 import { CAP } from '../access';
 import { HrmsLoading, HrmsError, HrmsEmpty } from '../common/HrmsStates';
 import {
-  getRequisition, getRequisitionSla, getScorecards, getCandidates,
+  getRequisition, getRequisitionSla, getScorecards, getCandidates, actOnRequisition,
 } from '../../../services/hrmsApi';
+import { useNotification } from '../../../context/NotificationContext';
+import ApprovalDialog from '../recruitment/ApprovalDialog';
 import { CARD, day, money } from './internalKit';
-import { Chip, Facts } from './internalKit.jsx';
+import { Btn, Chip, Facts } from './internalKit.jsx';
 import { REQUISITION_SOP_LABEL, sopLabelFor } from './sopLabels';
 
 /**
@@ -80,7 +85,10 @@ const InternalRequisitionDetail = () => {
   const { requestNo } = useParams();
   const navigate = useNavigate();
   const { scope, companyId, can } = useHrms();
+  const { showSuccess, showError } = useNotification();
 
+  const [gateOpen, setGateOpen] = useState(false);
+  const [gateBusy, setGateBusy] = useState(false);
   const [req, setReq] = useState(null);
   const [sla, setSla] = useState(null);
   const [scorecard, setScorecard] = useState(null);
@@ -126,6 +134,25 @@ const InternalRequisitionDetail = () => {
   if (!req) return <HrmsEmpty title="Not found" hint={`No requisition ${requestNo}.`} />;
 
   const status = req.approval_status;
+  // The server refuses the gate unless an APPROVED scorecard exists (assert_scorecard_approved),
+  // so the screen reads the same condition rather than offering a button that 422s.
+  const scorecardReady = scorecard?.status === 'Approved';
+
+  const clearGate = async (action, remarks) => {
+    setGateBusy(true);
+    try {
+      await actOnRequisition(requestNo, { action, remarks }, scope);
+      showSuccess(action === 'scorecard-approve'
+        ? `${requestNo} approved — ${req.jd_no || 'its JD'} is now publishable.`
+        : `${requestNo} sent back.`);
+      setGateOpen(false);
+      load();
+    } catch (err) {
+      showError(err?.response?.data?.detail || 'Could not record the decision.');
+    } finally {
+      setGateBusy(false);
+    }
+  };
   const approved = status === 'Approved';
   const rejected = status === 'Rejected';
 
@@ -240,6 +267,41 @@ const InternalRequisitionDetail = () => {
             )}
           </section>
 
+          {/* Over sanction, and what happened about it. The snapshot is stored at each
+              approval so the approver sees the figures the decision rested on; the note is
+              written only when the ladder could NOT be built, which is the case most worth
+              surfacing — an escalation that was skipped for want of a reporting line. */}
+          {(req.escalation_note || req.sanction_snapshot?.is_over_sanction) && (
+            <section className={`${CARD} p-4 border-[var(--accent-orange)]`}>
+              <h2 className="flex items-center gap-1.5 text-[10.5px] font-bold uppercase
+                             tracking-widest text-[var(--accent-orange)] mb-2">
+                <AlertTriangle size={13} /> Over sanctioned strength
+              </h2>
+              {req.sanction_snapshot && (
+                <p className="text-[12.5px] text-[var(--text-main)]">
+                  {req.sanction_snapshot.actual} filled
+                  {' '}· {req.sanction_snapshot.open_requisitions} committed
+                  {' '}· {req.sanction_snapshot.requested} requested
+                  {' '}against {req.sanction_snapshot.sanctioned == null
+                    ? 'no sanctioned figure'
+                    : `a sanctioned strength of ${req.sanction_snapshot.sanctioned}`}.
+                </p>
+              )}
+              {req.escalation_note && (
+                <p className="mt-1.5 text-[12.5px] text-[var(--accent-orange)]">
+                  {req.escalation_note}
+                </p>
+              )}
+              {req.escalation_note && (
+                <p className="mt-1.5 text-[11.5px] text-[var(--text-muted)]">
+                  Give the raiser a reporting manager if this should have gone up a line —
+                  the ladder is built from it, and an escalation cannot be rebuilt after the
+                  budget gate has been cleared.
+                </p>
+              )}
+            </section>
+          )}
+
           {/* Scorecard */}
           {can(CAP.SCORECARD_READ) && (
             <section className={`${CARD} p-4`}>
@@ -291,6 +353,108 @@ const InternalRequisitionDetail = () => {
                     ))}
                   </ul>
                 </>
+              )}
+            </section>
+          )}
+
+          {/* ── The final scorecard GATE ──
+              Deliberately its own section, below the scorecard it depends on. The two were
+              being read as one thing: signing SCR-xxxx sets the bar, and this approves the
+              REQUISITION and publishes its JD. Same word, different object, different
+              screen — so this says which is which, shows whether the precondition is met,
+              and is the only place on this page that can move the requisition. */}
+          {can(CAP.SCORECARD_APPROVE) && status === 'Pending Scorecard Approval' && (
+            <section className={`${CARD} p-4 border-[var(--accent-indigo)]`}>
+              <div className="flex items-center justify-between gap-2 mb-2.5">
+                <h2 className="flex items-center gap-1.5 text-[10.5px] font-bold uppercase
+                               tracking-widest text-[var(--accent-indigo)]">
+                  <ShieldCheck size={13} /> Final scorecard gate
+                </h2>
+                <Chip tone={scorecardReady ? 'good' : 'warn'}>
+                  {scorecardReady ? 'Ready to approve' : 'Blocked'}
+                </Chip>
+              </div>
+
+              {/* What this action does, as three facts rather than a sentence people skim. */}
+              <ol className="space-y-1.5 text-[12.5px] mb-3">
+                <li className="flex items-start gap-2">
+                  <Check size={14} className={scorecardReady
+                    ? 'mt-0.5 shrink-0 text-[var(--accent-green)]'
+                    : 'mt-0.5 shrink-0 text-[var(--text-muted)]'} />
+                  <span>
+                    <b>Scorecard {scorecardReady ? 'approved' : 'not approved yet'}</b>
+                    {scorecard ? ` — ${scorecard.scr_no}` : ''}
+                    <span className="block text-[11.5px] text-[var(--text-muted)]">
+                      Signed on the Scorecards page. That approval sets the bar; it does not
+                      approve this requisition.
+                    </span>
+                  </span>
+                </li>
+                <li className="flex items-start gap-2">
+                  <CircleDot size={14} className="mt-0.5 shrink-0 text-[var(--accent-indigo)]" />
+                  <span>
+                    <b>Approve the requisition</b> — this action
+                    <span className="block text-[11.5px] text-[var(--text-muted)]">
+                      The last gate in the chain. HR verified it, Finance or Management paid
+                      for it; you are agreeing this is the right bar to hire against.
+                    </span>
+                  </span>
+                </li>
+                <li className="flex items-start gap-2">
+                  <Megaphone size={14} className="mt-0.5 shrink-0 text-[var(--text-muted)]" />
+                  <span>
+                    <b>The JD becomes publishable</b>
+                    <span className="block text-[11.5px] text-[var(--text-muted)]">
+                      {req.jd_no ? `${req.jd_no} is approved automatically in the same step` : 'Its JD is approved automatically in the same step'}
+                      {' '}— there is no separate JD approval — and it then appears in
+                      &ldquo;Create a job posting&rdquo;.
+                    </span>
+                  </span>
+                </li>
+              </ol>
+
+              {scorecardReady ? (
+                <Btn tone="primary" onClick={() => setGateOpen(true)} disabled={gateBusy}>
+                  <ShieldCheck size={14} /> {gateBusy ? 'Working…' : 'Approve requisition'}
+                </Btn>
+              ) : (
+                <p className="text-[12px] text-[var(--text-muted)]">
+                  {scorecard
+                    ? 'The scorecard is drafted but not approved yet, so this gate is refused.'
+                    : 'No position scorecard exists for this requisition yet, so this gate is refused.'}{' '}
+                  <Link to="/hrms/scorecards" className="font-bold text-[var(--accent-indigo)]">
+                    Go to Scorecards
+                  </Link>
+                </p>
+              )}
+            </section>
+          )}
+
+          {/* The other half of the same story: once the gate is cleared, say so, and say
+              what it produced. "Approved" on its own left people wondering whether the JD
+              needed approving too — it does not, and this is where that is answered. */}
+          {status === 'Approved' && (
+            <section className={`${CARD} p-4`}>
+              <div className="flex items-center justify-between gap-2 mb-2">
+                <h2 className="flex items-center gap-1.5 text-[10.5px] font-bold uppercase
+                               tracking-widest text-[var(--text-muted)]">
+                  <ShieldCheck size={13} /> Final scorecard gate
+                </h2>
+                <Chip tone="good">Cleared</Chip>
+              </div>
+              <p className="text-[12.5px] text-[var(--text-main)]">
+                The requisition is approved{req.approved_by_name ? ` by ${req.approved_by_name}` : ''}
+                {req.scorecard_approved_at || req.approved_at
+                  ? ` on ${day(req.scorecard_approved_at || req.approved_at)}` : ''}.
+                {' '}{req.jd_no ? `${req.jd_no} was approved` : 'Its JD was approved'} in the
+                same step — no separate JD approval — so the role can be advertised.
+              </p>
+              {can(CAP.POSTING_READ) && (
+                <Link to="/hrms/postings"
+                      className="inline-flex items-center gap-1.5 mt-2 text-[12px] font-bold
+                                 text-[var(--accent-indigo)]">
+                  <Megaphone size={13} /> Create a job posting
+                </Link>
               )}
             </section>
           )}
@@ -423,6 +587,23 @@ const InternalRequisitionDetail = () => {
           </section>
         </div>
       </div>
+
+      {/* The same dialog the queue board uses for this gate — one approval dialog, so the
+          two entry points cannot ask for different things or word the decision differently. */}
+      {gateOpen && (
+        <ApprovalDialog
+          title={`Approve requisition — ${requestNo}`}
+          subtitle={'The final scorecard gate. The position scorecard is already signed off; '
+            + 'this approves the requisition itself and makes its JD publishable.'}
+          approveLabel="Approve requisition"
+          rejectLabel="Send back"
+          busy={gateBusy}
+          requisition={req}
+          onApprove={(remarks) => clearGate('scorecard-approve', remarks)}
+          onReject={(remarks) => clearGate('scorecard-reject', remarks)}
+          onClose={() => setGateOpen(false)}
+        />
+      )}
     </div>
   );
 };

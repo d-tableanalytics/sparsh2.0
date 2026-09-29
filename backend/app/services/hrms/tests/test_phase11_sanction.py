@@ -382,20 +382,31 @@ async def main() -> None:
               == M.EscalationStatus.REJECTED.value)
 
         # =================================================================
-        section("An orphaned raiser fails CLOSED -- never auto-approved")
+        section("An orphaned raiser still reaches the MD -- never auto-approved")
         # =================================================================
+        # The raiser reports to nobody, so the reporting walk yields no rungs. The ladder is
+        # therefore exactly the mandatory one: the MD. It used to skip escalation entirely
+        # and merely note that it had, which left an over-sanction requisition standing at a
+        # gate a hiring manager may clear -- with no MD anywhere in its history.
         sent.clear()
         orphaned = await RS.create_requisition(ORPHAN, COMPANY, payload())
         routed = await to_budget_gate(orphaned["request_no"])
-        check("with no reporting line it routes STRAIGHT TO the scorecard gate",
-              routed["approval_status"] == M.ReqApproval.PENDING_SCORECARD.value)
+        check("with no reporting line it still ESCALATES",
+              routed["approval_status"] == M.ReqApproval.PENDING_ESCALATION.value)
         check("it is NOT auto-approved",
               routed["approval_status"] != M.ReqApproval.APPROVED.value)
-        check("no phantom chain is invented", routed["escalation_chain"] == [])
-        check("the gap is recorded in the audit trail, not swallowed",
-              any(a["action"] == M.AUDIT_REQ_ESCALATED
-                  and "no reporting chain" in (a.get("detail") or "").lower()
-                  for a in audit_log.docs))
+        chain = routed["escalation_chain"]
+        check("no phantom reporting chain is invented -- exactly one rung", len(chain) == 1)
+        check("and that rung is the MD", chain[0]["role"] == "MD")
+        check("marked as there by rule, not by reporting line",
+              chain[0].get("mandatory") is True)
+        check("it is the company's actual MD", chain[0]["user_id"] == U_MD)
+        check("the MD is the one asked", any(
+            kind == "user" and str(uid) == U_MD for kind, uid, *_ in sent))
+        cleared = await RS.act_on_requisition(MD, COMPANY, orphaned["request_no"],
+                                              "escalate-approve")
+        check("clearing it moves on to the scorecard gate",
+              cleared["approval_status"] == M.ReqApproval.PENDING_SCORECARD.value)
 
         # =================================================================
         section("Committed vacancies -- the double-spend guard")

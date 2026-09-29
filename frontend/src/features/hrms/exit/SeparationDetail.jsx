@@ -20,6 +20,8 @@ import {
 } from '../../../services/hrmsApi';
 import { CARD, FIELD, LABEL, TEXTAREA, SECTION_TITLE, day, money, toneFor } from '../internal/internalKit';
 import { Btn, Chip, Facts, Modal, RecordList } from '../internal/internalKit.jsx';
+import { ProcessGuide, NextStepBanner } from '../common/ProcessGuide';
+import { EXIT_GUIDE, separationNextStep } from '../common/processGuides';
 
 /**
  * HRMS ▸ Exit Management ▸ one case, end to end (§7.18, §22.2, §7.21).
@@ -155,6 +157,7 @@ const SeparationDetail = () => {
   const isClosed = sep.stage === 'Closed' || sep.stage === 'Withdrawn';
   const needsDecision = !sep.final_lwd && !sep.recommended_lwd;
   const pendingApproval = !!sep.recommended_lwd && !sep.final_lwd;
+  const next = separationNextStep(sep);
 
   const handoverColumns = [
     { key: 'task', label: 'Task', render: (r) => (
@@ -272,14 +275,18 @@ const SeparationDetail = () => {
           </div>
         </div>
 
+        <div className="mt-4">
+          <NextStepBanner step={next} />
+        </div>
+
         <div className="mt-4 pt-4 border-t border-[var(--border)]">
           <Facts items={[
             { label: 'Resignation Date', value: day(sep.resignation_date) },
             { label: 'Calculated Notice', value: `${sep.calculated_notice_days} day${sep.calculated_notice_days === 1 ? '' : 's'}` },
-            { label: 'Calculated LWD', value: day(sep.calculated_lwd) },
-            { label: 'Notice Basis', value: sep.notice_basis },
-            sep.recommended_lwd && { label: 'Recommended LWD', value: day(sep.recommended_lwd) },
-            sep.final_lwd && { label: 'Final LWD', value: day(sep.final_lwd) },
+            { label: 'Last Working Day (calculated)', value: day(sep.calculated_lwd) },
+            { label: 'Notice Based On', value: sep.notice_basis },
+            sep.recommended_lwd && { label: 'Last Working Day (proposed)', value: day(sep.recommended_lwd) },
+            sep.final_lwd && { label: 'Last Working Day (final)', value: day(sep.final_lwd) },
             sep.waiver_days ? { label: 'Waiver', value: `${sep.waiver_days} day(s)` } : null,
           ]} />
         </div>
@@ -296,7 +303,7 @@ const SeparationDetail = () => {
           <div className="mt-4 pt-4 border-t border-[var(--border)] flex items-center justify-between gap-3
             rounded-lg bg-[var(--accent-orange-bg)] px-3 py-2.5">
             <p className="text-[12px] text-[var(--accent-orange)] font-semibold">
-              A revised LWD / notice waiver is awaiting approval (BR-016).
+              A changed last working day or notice waiver is waiting for approval.
             </p>
             {canApproveSep && (
               <Btn tone="primary" onClick={() => setApproving(true)}>Review</Btn>
@@ -306,6 +313,9 @@ const SeparationDetail = () => {
 
         {sep.progress && (
           <div className="mt-4 pt-4 border-t border-[var(--border)]">
+            <p className="text-[10.5px] font-bold uppercase tracking-widest text-[var(--text-muted)] mb-2">
+              Progress
+            </p>
             <Facts items={[
               { label: 'Handover', value: `${sep.progress.handover.done}/${sep.progress.handover.total}` },
               { label: 'Clearance', value: `${sep.progress.clearance.done}/${sep.progress.clearance.total}` },
@@ -318,8 +328,10 @@ const SeparationDetail = () => {
         )}
       </div>
 
+      <ProcessGuide guide={EXIT_GUIDE} current={next?.step} />
+
       {/* ── Handover Plan ── */}
-      <Section icon={ClipboardList} title="Handover Plan" subtitle="§22.2 — knowledge/task transfer to a successor."
+      <Section icon={ClipboardList} title="Handover Plan" subtitle="Work the employee must pass on, and who accepts it."
         actions={canHandoverWrite && !isClosed && (
           <Btn tone="ghost" onClick={() => setAddingHandover(true)}><Plus size={13} /> Add Task</Btn>
         )}>
@@ -339,7 +351,7 @@ const SeparationDetail = () => {
 
       {/* ── Departmental Clearance ── */}
       <Section icon={ShieldCheck} title="Departmental Clearance"
-        subtitle="Manager, HR, IT, Admin and Finance clearance — opened automatically once notice is accepted."
+        subtitle="Manager, HR, IT, Admin and Finance each sign off. These appear once the last working day is agreed."
         actions={canClearanceManage && !isClosed && (
           <Btn tone="ghost" onClick={() => setAddingClearance(true)}><Plus size={13} /> Add Task</Btn>
         )}>
@@ -361,7 +373,7 @@ const SeparationDetail = () => {
       </Section>
 
       {/* ── Asset Returns ── */}
-      <Section icon={Laptop} title="Asset Return Requests" subtitle="§22.2 — company/client assets issued to this employee."
+      <Section icon={Laptop} title="Asset Return Requests" subtitle="Laptop, ID card and other items the employee must give back."
         actions={canClearanceManage && !isClosed && (
           <Btn tone="ghost" onClick={() => setAddingAsset(true)}><Plus size={13} /> Request Return</Btn>
         )}>
@@ -380,7 +392,7 @@ const SeparationDetail = () => {
       </Section>
 
       {/* ── Access Clearance ── */}
-      <Section icon={KeyRound} title="Access Clearance" subtitle="Email, applications, VPN, physical access, cards/keys."
+      <Section icon={KeyRound} title="Access Clearance" subtitle="Email, software, VPN, building access, cards and keys to switch off."
         actions={canClearanceManage && !isClosed && (
           <Btn tone="ghost" onClick={() => setAddingAccess(true)}><Plus size={13} /> Add Item</Btn>
         )}>
@@ -399,7 +411,7 @@ const SeparationDetail = () => {
       </Section>
 
       {/* ── Exit Interview ── */}
-      <Section icon={MessageSquareText} title="Exit Interview" subtitle="§22.2 step 195."
+      <Section icon={MessageSquareText} title="Exit Interview" subtitle="A conversation about why they are leaving and how their time here went."
         actions={canInterviewWrite && !isClosed && (
           <Btn tone="ghost" onClick={() => setEditingInterview(true)}>
             {interview ? 'Edit' : 'Record'}
@@ -426,7 +438,7 @@ const SeparationDetail = () => {
       </Section>
 
       {/* ── Full & Final Settlement ── */}
-      <Section icon={Wallet} title="Full & Final Settlement" subtitle="§7.21 — no payroll engine behind this yet; figures are entered by hand."
+      <Section icon={Wallet} title="Full & Final Settlement" subtitle="The final payment: salary due, leave encashment and any recoveries. Amounts are typed in by hand."
         actions={(
           <div className="flex items-center gap-2">
             {canFnfPrepare && !isClosed && (!fnf || fnf.status === 'Draft' || fnf.status === 'Rejected') && (
@@ -469,7 +481,7 @@ const SeparationDetail = () => {
       {/* ── Nominee & legal documentation (§7.20 step 157) — Demise/Missing cases ── */}
       {(sep.exit_type === 'Demise' || sep.exit_type === 'Missing') && (
         <Section icon={HeartHandshake} title="Nominee & Legal Documentation"
-          subtitle="§7.20 — recorded sensitively for a demise/missing case."
+          subtitle="For a death or missing-person case: who receives the dues, and the legal papers."
           actions={canManage && (
             <Btn tone="ghost" onClick={() => setEditingNominee(true)}>
               {sep.nominee_details ? 'Edit' : 'Record'}
@@ -617,7 +629,7 @@ const DecisionModal = ({ sep, scope, onClose, onDone, showSuccess, showError }) 
 
   return (
     <Modal title="Record Decision" labelledBy="sep-decide-title"
-      subtitle={`${sep.sep_no} · calculated LWD ${day(sep.calculated_lwd)}`}
+      subtitle={`${sep.sep_no} · calculated last working day ${day(sep.calculated_lwd)}`}
       onClose={onClose}
       footer={(
         <>
@@ -635,11 +647,11 @@ const DecisionModal = ({ sep, scope, onClose, onDone, showSuccess, showError }) 
       )}>
       <p className="text-[12px] text-[var(--text-muted)]">
         Leave everything blank to accept the calculated notice as-is — it becomes final
-        immediately. Any revision here needs approval before it takes effect (BR-016).
+        immediately. Any change here needs approval before it takes effect.
       </p>
       <div className="grid grid-cols-2 gap-3">
         <div>
-          <label className={LABEL} htmlFor="dec-lwd">Revised LWD</label>
+          <label className={LABEL} htmlFor="dec-lwd">Changed Last Working Day</label>
           <input id="dec-lwd" type="date" value={revisedLwd} className={FIELD}
             onChange={(e) => setRevisedLwd(e.target.value)} />
         </div>
@@ -673,7 +685,7 @@ const ApprovalModal = ({ sep, scope, onClose, onDone, showSuccess, showError }) 
   );
   return (
     <Modal title="Approve or Reject" labelledBy="sep-approve-title"
-      subtitle={`${sep.sep_no} · recommended LWD ${day(sep.recommended_lwd)}`}
+      subtitle={`${sep.sep_no} · proposed last working day ${day(sep.recommended_lwd)}`}
       onClose={onClose}
       footer={(
         <>
@@ -685,8 +697,8 @@ const ApprovalModal = ({ sep, scope, onClose, onDone, showSuccess, showError }) 
         </>
       )}>
       <Facts items={[
-        { label: 'Calculated LWD', value: day(sep.calculated_lwd) },
-        { label: 'Recommended LWD', value: day(sep.recommended_lwd) },
+        { label: 'Last Working Day (calculated)', value: day(sep.calculated_lwd) },
+        { label: 'Last Working Day (proposed)', value: day(sep.recommended_lwd) },
         sep.waiver_days ? { label: 'Waiver', value: `${sep.waiver_days} day(s)` } : null,
         sep.shortfall_days ? { label: 'Shortfall', value: `${sep.shortfall_days} day(s)` } : null,
       ]} />
@@ -764,8 +776,9 @@ const CloseModal = ({ sep, scope, onClose, onDone, onClosed, showSuccess, showEr
         </>
       )}>
       <p className="text-[12px] text-[var(--text-muted)]">
-        BR-025: closure needs every handover and clearance task accepted/cleared and F&F paid.
-        The employee is deactivated and moved to Resigned/Terminated on close.
+        A case can close only when every handover task is accepted, every clearance is signed
+        off and the final settlement is paid. Closing deactivates the employee and marks them
+        Resigned or Terminated.
       </p>
       {blocked && (
         <div className="rounded-lg bg-[var(--accent-orange-bg)] px-3 py-2.5 text-[12px] text-[var(--accent-orange)]">
@@ -1294,7 +1307,7 @@ const NomineeModal = ({ sep, scope, onClose, onDone, showSuccess, showError }) =
 
   return (
     <Modal title="Nominee & Legal Documentation" labelledBy="nominee-title"
-      subtitle={`${sep.sep_no} · §7.20 step 157`} onClose={onClose}
+      subtitle={sep.sep_no} onClose={onClose}
       footer={(
         <>
           <Btn onClick={onClose} disabled={busy}>Cancel</Btn>

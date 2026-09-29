@@ -185,6 +185,9 @@ async def main() -> None:
                           422, "http")
         await expect_http("malformed due date", send("CAN-006", due_date="31-12-2026"),
                           422, "YYYY-MM-DD")
+        # The due date is the link's expiry: a past one would mint a link dead on arrival.
+        await expect_http("a due date already in the past", send("CAN-006", due_date="2020-01-01"),
+                          422, "in the past")
 
         section("Sending moves the candidate into the assessment stage")
         cand2 = await candidates.find_one({"uk": "CAN-002"})

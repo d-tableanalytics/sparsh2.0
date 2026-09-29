@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  ClipboardCheck, Search, X, AlertTriangle, CheckCircle2, PauseCircle, XCircle, Forward,
+  ClipboardCheck, Search, X, AlertTriangle, CheckCircle2, PauseCircle, XCircle,
   Eye, Copy as CopyIcon,
 } from 'lucide-react';
 import { useNotification } from '../../../context/NotificationContext';
@@ -54,22 +54,27 @@ const TABS = [
 ];
 
 // Grouped and coloured by what each one DOES to the candidate, so the bar reads as three
-// kinds of decision rather than six identical pills: move them forward (indigo), leave
+// kinds of decision rather than a row of identical pills: move them forward (indigo), leave
 // them exactly where they are but note something about them (neutral), or take them out of
-// contention (red). `hint` is the tooltip a first-time user needs — "Forward" in particular
-// reads as ambiguous without one.
+// contention (red).
+//
+// Called "CV Shortlist" rather than "Shortlist" because the module shortlists twice and the
+// bare word did not say which: this is HR's verdict on the CV, while the Shortlisted board
+// and the Shortlist Committee are the later, joint decision. Same server action
+// (ScreenAction.SHORTLIST) — only the label says which stage you are standing in.
+//
+// "Assign to Recruiter" was removed from this bar at the user's request. The server action
+// (ScreenAction.FORWARD) is deliberately left in place, so restoring the entry is all that
+// is needed to bring it back.
 const ACTIONS = [
-  { key: 'shortlist', label: 'Shortlist', icon: CheckCircle2, tone: 'primary',
-    hint: 'Move forward to the next stage (assessment or interview).' },
+  { key: 'shortlist', label: 'CV Shortlist', icon: CheckCircle2, tone: 'primary',
+    hint: 'HR clears this CV: move forward to the next stage (assessment or interview).' },
   { key: 'review',    label: 'Mark Reviewed', icon: Eye, tone: 'neutral',
     hint: 'Note that HR has looked at this CV, without deciding yet.' },
   { key: 'hold',      label: 'Put on Hold', icon: PauseCircle, tone: 'neutral',
     hint: 'Pause this candidate — keeps them in the pool, off the active queue.' },
   { key: 'duplicate', label: 'Mark Duplicate', icon: CopyIcon, tone: 'neutral',
     hint: 'Flag as a repeat application from someone already in the pipeline.' },
-  { key: 'forward',   label: 'Assign to Recruiter', icon: Forward, tone: 'neutral',
-    needsRecipient: true,
-    hint: 'Hand this CV to another recruiter to work on — does not change their stage.' },
   { key: 'reject',    label: 'Reject', icon: XCircle, tone: 'danger', needsRemark: true,
     hint: 'Remove from consideration for this role. A reason is required.' },
 ];

@@ -73,8 +73,12 @@ async def _current_value(company_id: str, profile: dict, movement_type: str) -> 
     if movement_type in (MovementType.DESIGNATION_CHANGE.value, MovementType.PROMOTION.value):
         return profile.get("designation_id")
     if movement_type == MovementType.COMPENSATION_CHANGE.value:
-        base_salary = profile.get("base_salary")
-        return str(base_salary) if base_salary is not None else None
+        # What payroll ACTUALLY pays: the monthly earnings of the salary structure in force.
+        from app.services.hrms_payroll_service import (
+            get_current_structure, _load_component_types, _structure_gross)
+        await _load_component_types(profile["company_id"])
+        gross = _structure_gross(await get_current_structure(profile["company_id"], profile["employee_code"]))
+        return str(int(gross) if gross == int(gross) else gross) if gross else None
     if movement_type == MovementType.MANAGER_CHANGE.value:
         user = await _find_user(profile.get("user_id"))
         return (user or {}).get("reporting_manager")
@@ -92,7 +96,47 @@ async def initiate_movement(actor: dict, company_id: str, payload: dict) -> dict
         raise HTTPException(status_code=422, detail="An effective date is required.")
 
     profile = await _get_profile(company_id, employee_code)
+    from app.services import hrms_people_scope as scope
+    await scope.assert_may_act_for(actor, company_id, employee_code, "propose a movement")
     current_value = await _current_value(company_id, profile, movement_type)
+    to_value = str(payload.get("to_value") or "").strip()
+    if not to_value and movement_type not in (MovementType.GRADE_CHANGE.value, MovementType.LOCATION_CHANGE.value):
+        raise HTTPException(status_code=422, detail="Enter the proposed new value.")
+
+    # Validate the new value NOW, not on the effective date: an approved movement that then
+    # fails to apply is a decision nobody can see was never carried out.
+    if movement_type in (MovementType.DESIGNATION_CHANGE.value, MovementType.PROMOTION.value):
+        try:
+            ok = await get_collection(COLL_DESIGNATIONS).find_one(
+                {"_id": ObjectId(to_value), "company_id": str(company_id)}, {"_id": 1})
+        except (InvalidId, TypeError):
+            ok = None
+        if not ok:
+            raise HTTPException(status_code=422, detail="Choose a designation that exists in this company.")
+    if movement_type == MovementType.COMPENSATION_CHANGE.value:
+        try:
+            amount = float(to_value)
+        except ValueError:
+            raise HTTPException(status_code=422, detail="Enter the new monthly salary as a number.")
+        if amount <= 0:
+            raise HTTPException(status_code=422, detail="The new monthly salary must be more than zero.")
+        if current_value is None:
+            raise HTTPException(
+                status_code=422,
+                detail="This employee has no salary set yet. Set it on their Salary tab first; "
+                       "a compensation change then revises it.")
+    if current_value is not None and str(current_value) == to_value:
+        raise HTTPException(status_code=422, detail="That is what they already have — nothing would change.")
+    pending = await get_collection(COLL_EMPLOYEE_MOVEMENTS).find_one({
+        "company_id": str(company_id), "employee_code": employee_code,
+        "movement_type": movement_type,
+        "status": {"$in": [MovementStatus.PENDING.value, MovementStatus.APPROVED.value]}})
+    if pending:
+        raise HTTPException(
+            status_code=409,
+            detail=(f"{pending['move_no']} ({getattr(movement_type, 'value', movement_type)}, "
+                    f"{pending['status']}) is already open "
+                    f"for this employee. Approve or reject it first."))
 
     year = datetime.now(timezone.utc).year
     move_no = await next_business_id("movement", str(company_id), year)
@@ -101,10 +145,11 @@ async def initiate_movement(actor: dict, company_id: str, payload: dict) -> dict
         "move_no": move_no,
         "company_id": str(company_id),
         "employee_code": employee_code,
-        "employee_name": profile.get("display_name") or profile.get("full_name"),
+        "employee_name": await scope.name_of(profile),
+        "initiated_by": str(actor.get("_id") or ""),
         "movement_type": movement_type,
         "current_value": current_value,
-        "proposed_value": payload.get("to_value"),
+        "proposed_value": to_value,
         "effective_date": effective_date,
         "reason": payload.get("reason"),
         "supporting_document": payload.get("supporting_document"),
@@ -128,6 +173,11 @@ async def list_movements(actor: dict, company_id: str, *, employee_code: Optiona
         query["employee_code"] = employee_code
     if status:
         query["status"] = status
+    # A manager sees their team's movements (salary changes included), not the company's.
+    from app.services import hrms_people_scope as scope
+    limit_to = await scope.scope_filter(actor, company_id, initiated_field="initiated_by")
+    if limit_to:
+        query.update(limit_to)
     rows = await get_collection(COLL_EMPLOYEE_MOVEMENTS).find(query).sort(
         "created_at", -1).to_list(min(limit, MAX_MOVEMENT_LIST_PAGE))
     return [_out(r) for r in rows]
@@ -148,6 +198,13 @@ async def act_on_movement(actor: dict, company_id: str, move_no: str, payload: d
     doc = await _get_movement(company_id, move_no)
     if doc["status"] != MovementStatus.PENDING.value:
         raise HTTPException(status_code=409, detail=f"{move_no} is already \"{doc['status']}\".")
+    # Two people: whoever proposed it does not also approve it, and nobody decides their own.
+    if doc.get("initiated_by") and doc["initiated_by"] == str(actor.get("_id") or ""):
+        raise HTTPException(status_code=403,
+                            detail="You proposed this movement, so someone else must approve or reject it.")
+    from app.services import hrms_people_scope as scope
+    if (await scope.own_code(actor, company_id)) == doc["employee_code"]:
+        raise HTTPException(status_code=403, detail="You cannot decide a movement about yourself.")
 
     approved = bool(payload.get("approved"))
     now = datetime.now(timezone.utc)
@@ -194,6 +251,28 @@ async def _apply_one(company_id: str, movement: dict) -> dict:
         await get_collection(COLL_EMPLOYEE_PROFILES).update_one(
             {"company_id": str(company_id), "employee_code": employee_code},
             {"$set": {"base_salary": new_salary, "updated_at": now}})
+        # Payroll pays from the SALARY STRUCTURE, never from base_salary — so an approved
+        # revision used to change nothing anybody was paid. It now becomes a new structure
+        # from the effective date: every earning line scaled to the new monthly total (the
+        # rounding remainder on the largest), deductions left as they were.
+        from app.services.hrms_payroll_service import (
+            get_current_structure, _load_component_types, _component_type_cache)
+        from app.models.hrms import COLL_SALARY_STRUCTURES, ComponentType
+        await _load_component_types(company_id)
+        base = await get_current_structure(company_id, employee_code, movement["effective_date"])
+        if base and base.get("components"):
+            lines = [dict(c) for c in base["components"]]
+            earn = [c for c in lines if _component_type_cache.get(c.get("code")) == ComponentType.EARNING.value]
+            old_total = sum(float(c.get("amount") or 0) for c in earn)
+            if old_total > 0:
+                for c in earn:
+                    c["amount"] = round(float(c["amount"]) * new_salary / old_total, 2)
+                largest = max(earn, key=lambda c: c["amount"])
+                largest["amount"] = round(largest["amount"] + new_salary - sum(c["amount"] for c in earn), 2)
+                await get_collection(COLL_SALARY_STRUCTURES).insert_one({
+                    "company_id": str(company_id), "employee_code": employee_code,
+                    "effective_from": movement["effective_date"], "components": lines,
+                    "source_movement": movement["move_no"], "created_at": now, "updated_at": now})
     elif movement_type == MovementType.MANAGER_CHANGE.value:
         profile = await get_collection(COLL_EMPLOYEE_PROFILES).find_one(
             {"company_id": str(company_id), "employee_code": employee_code})

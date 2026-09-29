@@ -604,16 +604,18 @@ async def create_profile(actor: dict, company_id: str, payload: dict) -> dict:
     if not user_id:
         raise HTTPException(status_code=422, detail="A user must be selected.")
 
-    user, coll = await _find_user(user_id)
+    user, _coll = await _find_user(user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found.")
-    if coll != "learners":
-        # HRMS is a client-company module: employees are a company's own people. Guarding
-        # this stops a Sparsh staff account being turned into a client's employee record.
-        raise HTTPException(
-            status_code=422,
-            detail="Only company users can be added as employees.")
-    if str(user.get("company_id") or "") != str(company_id):
+    # Membership through tenant_identity_source, like every other "is this person in this
+    # company" check: Sparsh Magic's own people are `staff` with no company_id, a client's
+    # are its `learners`. This used to accept learners only, so Add Employee offered Sparsh's
+    # staff (list_linkable_users resolves the same way) and then refused every one of them —
+    # nobody at Sparsh could get a profile, and so nobody could be paid. The guard it was
+    # there for still holds: a staff account is not a member of any CLIENT company, and a
+    # learner is not a member of Sparsh Magic.
+    from app.utils.hrms_access import tenant_member
+    if not await tenant_member(company_id, user_id, {"_id": 1}):
         raise HTTPException(status_code=403, detail="That user belongs to another company.")
 
     profiles = get_collection(COLL_EMPLOYEE_PROFILES)
@@ -667,7 +669,11 @@ async def update_profile(actor: dict, user_id: str, payload: dict, company_id: s
     user, coll = await _find_user(user_id)
     if not user:
         raise HTTPException(status_code=404, detail="Employee not found.")
-    if str(user.get("company_id") or "") != str(company_id):
+    # Membership through tenant_identity_source (see create_profile): Sparsh's own staff carry
+    # no company_id, so the flat comparison this replaced refused EVERY edit to a staff
+    # member's profile with "Employee not found".
+    from app.utils.hrms_access import tenant_member
+    if not await tenant_member(company_id, user_id, {"_id": 1}):
         raise HTTPException(status_code=404, detail="Employee not found.")
 
     profiles = get_collection(COLL_EMPLOYEE_PROFILES)

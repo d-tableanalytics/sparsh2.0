@@ -4,6 +4,8 @@ import { useHrms } from '../HrmsContext';
 import { CAP } from '../access';
 import HrmsPageHeader from '../common/HrmsPageHeader';
 import HrmsScopeBar from '../common/HrmsScopeBar';
+import { ProcessGuide } from '../common/ProcessGuide';
+import { PREBOARDING_GUIDE } from '../common/processGuides';
 import { HrmsLoading, HrmsError, HrmsEmpty } from '../common/HrmsStates';
 import { useNotification } from '../../../context/NotificationContext';
 import {
@@ -137,9 +139,10 @@ const PreboardingBoard = () => {
       <HrmsPageHeader
         icon={HeartHandshake}
         title="Pre-Joiners"
-        subtitle="Staying in touch between the accepted offer and the first day (SOP section 6). Tracking, not a gate — nothing is blocked by it."
+        subtitle="Staying in touch between the accepted offer and the first day. This is for keeping track — it never blocks anything."
       />
       <HrmsScopeBar />
+      <ProcessGuide guide={PREBOARDING_GUIDE} />
 
       {atRisk > 0 && (
         <div className="rounded-xl border border-[var(--accent-red)]/30
