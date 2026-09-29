@@ -44,6 +44,8 @@ async def connect_to_mongo():
         await _ensure_hrms_collections(db_connection.db)
         # Provision the IRM collections (weightage config + score snapshots).
         await _ensure_irm_collections(db_connection.db)
+        # Enforce username uniqueness on the two user collections.
+        await _ensure_username_indexes(db_connection.db)
 
         print(f"[OK] Successfully connected to MongoDB (Database: {settings.DATABASE_NAME})")
         
@@ -220,6 +222,33 @@ async def close_mongo_connection():
     if db_connection.client:
         db_connection.client.close()
         print("Closed MongoDB connection")
+
+async def _ensure_username_indexes(db):
+    """Unique index on `username` for both user collections.
+
+    PARTIAL, not plain-unique: usernames are issued to new accounts from here on, and a plain
+    unique index treats every document still missing the field as sharing one null — so the
+    second such document would be rejected and user creation would break for everybody until
+    the backfill had finished. The filter indexes only documents that actually have a
+    username, which makes the index safe to add before the backfill rather than after.
+
+    Mongo cannot span an index across two collections, so this is a safety net against a
+    direct write; the real check is username_service.username_exists(), which looks in both.
+
+    Failures never block startup, matching every other provisioning step here — but they ARE
+    logged loudly, because an absent index means a duplicate could be written unnoticed.
+    """
+    for coll_name in ("staff", "learners"):
+        try:
+            await db[coll_name].create_index(
+                [("username", 1)],
+                unique=True,
+                name="uniq_username",
+                partialFilterExpression={"username": {"$type": "string"}},
+            )
+        except Exception as e:
+            print(f"[WARN] username index on {coll_name} not created: {e}")
+
 
 async def _ensure_irm_collections(db):
     """Idempotently create the IRM collections and their indexes. No seeding: a company

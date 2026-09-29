@@ -237,6 +237,13 @@ const MemberDetails = () => {
                                            <p className="text-[9px] font-black text-[var(--text-muted)] uppercase tracking-[0.2em] group-hover/card:text-white/60">Hierarchy Level</p>
                                            <div className="flex items-center gap-2 text-[var(--text-main)] font-black text-[14px] group-hover/card:text-white truncate"><Layers size={16} className="text-black group-hover/card:text-white shrink-0" /> {user.level || '—'}</div>
                                        </div>
+                                       {/* Read-only: the username is a login credential the server issues, so it is
+                                           shown here for an admin to pass on, never edited in place. Changing one
+                                           would lock the holder out with nothing on screen to say why. */}
+                                       <div className="bg-white/50 backdrop-blur-sm p-4 rounded-[20px] border border-[var(--border)] space-y-1 group/card hover:bg-black transition-all">
+                                           <p className="text-[9px] font-black text-[var(--text-muted)] uppercase tracking-[0.2em] group-hover/card:text-white/60">Username</p>
+                                           <div className="flex items-center gap-2 text-[var(--text-main)] font-black text-[14px] group-hover/card:text-white truncate font-mono"><UserCircle2 size={16} className="text-[var(--accent-indigo)] group-hover/card:text-white shrink-0" /> {user.username || 'Not issued yet'}</div>
+                                       </div>
                                    </div>
                                )}
                                

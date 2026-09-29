@@ -55,10 +55,21 @@ export const AuthProvider = ({ children }) => {
     setLoading(false);
   }, []);
 
-  const login = async (username, password) => {
+  /**
+   * Sign in with a username OR an email address.
+   *
+   * `companyId` is only ever needed to break a tie: one email can now belong to accounts in
+   * several companies (the same person consulting for two clients), and the server answers
+   * that first attempt with 409 and the list. The caller shows the list and calls again with
+   * the one they picked. A username identifies one account on its own, so it never gets here.
+   */
+  const login = async (identifier, password, companyId) => {
     const formData = new FormData();
-    formData.append('username', username);
+    // The field is still called `username` because that is what the OAuth2 password form
+    // specifies; it carries whichever of the two credentials the user typed.
+    formData.append('username', identifier);
     formData.append('password', password);
+    if (companyId) formData.append('company_id', companyId);
 
     const API_URL = import.meta.env.VITE_API_BASE_URL || '/api';
     const response = await axios.post(`${API_URL}/auth/token`, formData);

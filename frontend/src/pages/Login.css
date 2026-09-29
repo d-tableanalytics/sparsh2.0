@@ -234,3 +234,130 @@
     display: none;
   }
 }
+/* ─── Credential tabs: sign in with an email, or a company username ───
+   Both are real credentials, so neither is styled as secondary — the tab simply says which
+   one the field below is expecting. */
+.credential-tabs {
+  display: flex;
+  gap: 0.25rem;
+  padding: 0.25rem;
+  margin-bottom: 1.25rem;
+  background: #f1f5f9;
+  border-radius: 0.65rem;
+}
+
+.credential-tab {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  padding: 0.55rem 0.5rem;
+  border: none;
+  border-radius: 0.5rem;
+  background: transparent;
+  color: #64748b;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.credential-tab:hover { color: #334155; }
+
+.credential-tab.is-active {
+  background: #ffffff;
+  color: #4f46e5;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
+}
+
+.input-hint {
+  margin: 0.4rem 0 0;
+  font-size: 0.76rem;
+  color: #94a3b8;
+  line-height: 1.4;
+}
+
+/* ─── Company chooser ───
+   Shown only when one email belongs to accounts in several companies. The password is
+   already verified by this point; all that is missing is which account was meant. */
+.account-chooser-head {
+  display: flex;
+  gap: 0.65rem;
+  align-items: flex-start;
+  padding: 0.85rem 0.9rem;
+  margin-bottom: 1rem;
+  border: 1px solid #e2e8f0;
+  border-radius: 0.65rem;
+  background: #f8fafc;
+  color: #4f46e5;
+}
+
+.account-chooser-head strong {
+  display: block;
+  font-size: 0.92rem;
+  color: #0f172a;
+}
+
+.account-chooser-head p {
+  margin: 0.2rem 0 0;
+  font-size: 0.8rem;
+  line-height: 1.45;
+  color: #64748b;
+}
+
+.account-choices {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.account-choice {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.15rem;
+  width: 100%;
+  padding: 0.75rem 0.9rem;
+  border: 1px solid #e2e8f0;
+  border-radius: 0.65rem;
+  background: #ffffff;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.account-choice:hover:not(:disabled) {
+  border-color: #4f46e5;
+  box-shadow: 0 1px 3px rgba(79, 70, 229, 0.15);
+}
+
+.account-choice:disabled { opacity: 0.6; cursor: default; }
+
+.account-choice-name {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: #0f172a;
+}
+
+.account-choice-meta {
+  font-size: 0.76rem;
+  color: #94a3b8;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.account-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin-top: 1rem;
+  padding: 0;
+  border: none;
+  background: none;
+  color: #64748b;
+  font-size: 0.82rem;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.account-back:hover { color: #4f46e5; }

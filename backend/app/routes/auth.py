@@ -1,4 +1,5 @@
-from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
+from fastapi import APIRouter, Depends, Form, HTTPException, status, BackgroundTasks
+import re
 from typing import Optional
 from fastapi.security import OAuth2PasswordRequestForm
 from datetime import datetime, timedelta
@@ -21,6 +22,7 @@ import logging
 logger = logging.getLogger("auth")
 from app.models.auth import Token, PasswordChange, ForgotPasswordRequest, ResetPasswordRequest, AdminMemberUpdate
 from app.services.activity_log_service import log_activity
+from app.services.username_service import assign_username
 from app.services.notification_service import send_notification_from_template, send_otp_email
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
@@ -218,6 +220,9 @@ async def register(user: UserCreate, background_tasks: BackgroundTasks, current_
     ln = user.last_name or ""
     user_dict["full_name"] = f"{fn} {ln}".strip()
     user_dict["created_at"] = datetime.utcnow()
+    # Issued here rather than asked for: the number has to be the next free one in that
+    # company, which only the server can know.
+    await assign_username(user_dict, user_dict.get("company_id"))
     
     result = await col.insert_one(user_dict)
     user_dict["_id"] = str(result.inserted_id)
@@ -230,6 +235,7 @@ async def register(user: UserCreate, background_tasks: BackgroundTasks, current_
         context={
             "name": user_dict["first_name"],
             "email": user_dict["email"],
+            "username": user_dict.get("username") or "",
             "password": raw_password,
             "role": user_dict["role"],
             "login_url": "https://sparsh.app/login"
@@ -243,22 +249,97 @@ async def register(user: UserCreate, background_tasks: BackgroundTasks, current_
     return user_dict
 
 
-@router.post("/token", response_model=Token)
-async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends()):
-    logger.info(f"Login attempt for username: {form_data.username}")
-    # Search Staff first
-    user = await get_collection("staff").find_one({"email": form_data.username})
-    if not user:
-        # Search Learners
-        user = await get_collection("learners").find_one({"email": form_data.username})
+async def _find_login_candidates(identifier: str) -> list:
+    """Every account an identifier could mean, across both user collections.
 
-    if not user or not verify_password(form_data.password, user["password"]):
-        logger.warning(f"Login failed (invalid credentials) for username: {form_data.username}")
+    A USERNAME matches at most one account by construction, so it is tried first and wins
+    outright. An EMAIL may now match several — one person, two client companies — which is
+    exactly the case the username was introduced for; all of them are returned and the caller
+    decides what to do about it.
+
+    Both comparisons are case-insensitive: nobody types their own address with the same
+    capitalisation twice, and a login that depends on it is a support ticket.
+    """
+    exact = {"$regex": f"^{re.escape(identifier.strip())}$", "$options": "i"}
+
+    by_username = []
+    for coll in ("staff", "learners"):
+        async for doc in get_collection(coll).find({"username": exact}):
+            doc["_source_collection"] = coll
+            by_username.append(doc)
+    if by_username:
+        return by_username
+
+    by_email = []
+    for coll in ("staff", "learners"):
+        async for doc in get_collection(coll).find({"email": exact}):
+            doc["_source_collection"] = coll
+            by_email.append(doc)
+    return by_email
+
+
+async def _company_label(company_id) -> str:
+    if not company_id:
+        return "Sparsh (internal)"
+    try:
+        doc = await get_collection("companies").find_one({"_id": ObjectId(str(company_id))})
+        return (doc or {}).get("name") or "Unknown company"
+    except Exception:
+        return "Unknown company"
+
+
+@router.post("/token", response_model=Token)
+async def login_for_access_token(
+    form_data: OAuth2PasswordRequestForm = Depends(),
+    company_id: Optional[str] = Form(None),
+):
+    """Sign in with a username or an email address.
+
+    `company_id` is only needed to break a tie: when one address belongs to accounts in
+    several companies the first attempt comes back with the list, and the client re-submits
+    naming one. A username never needs it.
+    """
+    identifier = (form_data.username or "").strip()
+    logger.info(f"Login attempt for identifier: {identifier}")
+
+    candidates = await _find_login_candidates(identifier)
+    # Only the accounts whose password actually matches. Filtering by password BEFORE asking
+    # which company also means the prompt cannot be used to discover where somebody holds an
+    # account — a wrong password looks identical whether the address exists or not.
+    matched = [u for u in candidates if u.get("password")
+               and verify_password(form_data.password, u["password"])]
+
+    if company_id:
+        matched = [u for u in matched if str(u.get("company_id") or "") == str(company_id)]
+
+    if not matched:
+        logger.warning(f"Login failed (invalid credentials) for identifier: {identifier}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect username or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
+
+    if len(matched) > 1:
+        # One address, several accounts. Answer with the choices rather than picking: guessing
+        # here signs somebody into the wrong company's data with no sign anything went wrong.
+        choices = [{
+            "company_id": str(u.get("company_id") or ""),
+            "company_name": await _company_label(u.get("company_id")),
+            "username": u.get("username"),
+            "role": u.get("role"),
+        } for u in matched]
+        logger.info(f"Login ambiguous for {identifier}: {len(choices)} accounts")
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "message": "This email is used for more than one company. "
+                           "Choose which one to sign in to, or use your username.",
+                "accounts": choices,
+            },
+        )
+
+    user = matched[0]
 
     if user.get("is_active") == False:
         logger.warning(f"Login blocked (deactivated account): {form_data.username}")
@@ -271,7 +352,10 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
     access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
         data={
-            "sub": user["email"], 
+            # The user's id, never their email: an address can name more than one account
+            # (the same person in two client companies) and the session must not be ambiguous.
+            "sub": str(user["_id"]),
+            "username": user.get("username"),
             "role": user["role"],
             "full_name": user.get("full_name") or f"{user.get('first_name') or ''} {user.get('last_name') or ''}".strip() or "User",
             "email": user.get("email"),
