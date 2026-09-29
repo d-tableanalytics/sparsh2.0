@@ -77,13 +77,20 @@ export const groupTasksByRecurrence = (tasks) => {
   });
 };
 
+// The short "Delegation ID" a task is known by on screen: the last 8 characters of its id.
+export const delegationId = (id) => String(id || '').slice(-8).toUpperCase();
+
 // No dedicated CSV/export library is installed anywhere in the project, so this uses
 // the plain Blob + anchor-download browser API rather than pulling in a new dependency.
 export const exportTasksToCsv = (tasks, userMap, filename = 'tasks.csv') => {
-  const headers = ['Title', 'Category', 'Assigned To', 'Status', 'Frequency', 'Priority', 'Due Date'];
+  // Delegation ID first, exactly as the task's details screen shows it (the last 8 characters
+  // of the task id, in capitals), so a row in the sheet can be matched to the task on screen.
+  const headers = ['Delegation ID', 'Title', 'Category', 'Assigned By', 'Assigned To', 'Status', 'Frequency', 'Priority', 'Due Date'];
   const rows = tasks.map(t => [
+    delegationId(t.id),
     t.title || '',
     t.category || '',
+    userMap[t.assignedBy] || t.assignedBy || '',
     (t.assignedTo || []).map(id => userMap[id] || id).join('; ') || 'Myself',
     t.status || '',
     formatFrequencyLabel(t.frequency),

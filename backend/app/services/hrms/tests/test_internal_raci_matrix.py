@@ -617,7 +617,7 @@ async def main() -> None:
               M.REQUIRED_PANEL_ROLES[M.DesignationLevel.MID.value]
               == [M.HrmsRole.HR, M.HrmsRole.MANAGER])
         iv = await IV.schedule_interview(HR, COMPANY, {
-            "uk": UK, "round": M.InterviewRound.MANAGER.value,
+            "uk": UK, "round": M.InterviewRound.PANEL.value,
             "scheduled_at": (datetime.now(timezone.utc) + timedelta(days=3)).isoformat(),
             "mode": M.InterviewMode.VIRTUAL.value, "duration_min": 45,
             "interviewer_id": U_HOD,

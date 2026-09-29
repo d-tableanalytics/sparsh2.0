@@ -81,6 +81,10 @@ WORKFLOW_STATUSES = [
     # the assignee who delegated it, who reviews it and performs the final completion. It is an
     # OPEN state — the task is not done and can still run overdue.
     "dependency_completed",
+    # The delegator rejected a completed task outright (verification OFF): the work was wrong,
+    # not merely in need of changes (that is Reopen). Terminal — the task is closed, runs no
+    # longer overdue, and counts as neither pending nor completed.
+    "rejected",
 ]
 
 
@@ -164,7 +168,7 @@ def _parse_iso(value):
 
 
 def _is_overdue(doc: dict, workflow_status: str, now: datetime) -> bool:
-    if workflow_status == "completed":
+    if workflow_status in ("completed", "rejected"):
         return False
     due_dt = _parse_iso(doc.get("end") or doc.get("start"))
     if not due_dt:
@@ -581,7 +585,7 @@ async def tasks_dashboard(
     summary = {
         "totalTasks": 0, "overdue": 0, "pending": 0, "accepted": 0,
         "dependentOnOthers": 0, "blocked": 0, "inProgress": 0,
-        "verification": 0, "completed": 0, "inTime": 0, "delayed": 0,
+        "verification": 0, "completed": 0, "rejected": 0, "inTime": 0, "delayed": 0,
     }
     # A reopened task is in progress again — the status only records that it has been round
     # once. Without this it fell through to the default bucket and was counted as work nobody
@@ -595,6 +599,8 @@ async def tasks_dashboard(
         "dependency_completed": "inProgress",
         "dependent_on_others": "dependentOnOthers", "blocked": "blocked",
         "verification": "verification", "completed": "completed",
+        # Closed by the delegator — its own card, so it is neither In Progress nor Completed.
+        "rejected": "rejected",
     }
 
     monthly_buckets = {}
@@ -994,6 +1000,26 @@ async def update_task_status(task_id: str, body: dict, current_user: dict = Depe
     if new_status == "in_progress_reopened" and not is_assigner_or_admin:
         raise HTTPException(status_code=403, detail="Only the assigner can reopen this task.")
 
+    # ─── Reject (verification OFF) ───
+    # A rejected task is closed: nothing moves it any further.
+    if old_status == "rejected":
+        raise HTTPException(
+            status_code=409,
+            detail="This task was rejected and is closed. Create a new task if the work is still needed.")
+    if new_status == "rejected":
+        if not is_assigner_or_admin:
+            raise HTTPException(status_code=403, detail="Only the delegator can reject this task.")
+        if old_status != "completed":
+            raise HTTPException(status_code=400, detail="Only a completed task can be rejected.")
+        if existing.get("verification_required"):
+            # Verification-ON tasks keep their own sign-off flow (Pending Verification ->
+            # Approve / Reopen); Reject is the verification-OFF delegator's call only.
+            raise HTTPException(
+                status_code=400,
+                detail="This task uses verification — review it from Pending Verification instead.")
+        if not reason:
+            raise HTTPException(status_code=400, detail="Give the reason for rejecting this task.")
+
     # ─── Dependency stack ───
     # "Dependent on Other" hands the task to a dependency doer, who owns ONLY that dependency —
     # ownership of the task itself stays with the assignee who raised it. Each hand-off pushes the
@@ -1090,6 +1116,13 @@ async def update_task_status(task_id: str, body: dict, current_user: dict = Depe
         updates["completed_at"] = datetime.now(timezone.utc)
         updates["completed_by"] = user_id
         updates["status"] = "completed"  # keep legacy Calendar page status in sync
+    elif was_completed and new_status == "rejected":
+        # Not done, and not open either: the legacy calendar status says so too.
+        updates["completed_at"] = None
+        updates["completed_by"] = None
+        updates["status"] = "rejected"
+        updates["rejected_at"] = datetime.now(timezone.utc)
+        updates["rejected_by"] = user_id
     elif was_completed and new_status != "completed":
         updates["completed_at"] = None
         updates["completed_by"] = None
@@ -1133,6 +1166,8 @@ async def update_task_status(task_id: str, body: dict, current_user: dict = Depe
         event_type = "task_verification_requested"
     elif old_status == "verification" and new_status == "in_progress_reopened":
         event_type = "task_verification_rejected"
+    elif new_status == "rejected":
+        event_type = "task_rejected"
     else:
         event_type = "task_updated"
 
@@ -1169,6 +1204,8 @@ async def update_task_status(task_id: str, body: dict, current_user: dict = Depe
             notify_event = "verification_approved"
         elif new_status == "in_progress_reopened":
             notify_event = "reopened"
+        elif new_status == "rejected":
+            notify_event = "rejected"
         elif new_status == "completed":
             notify_event = "completed"
         elif new_status == "accepted":

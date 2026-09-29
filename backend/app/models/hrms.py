@@ -4314,6 +4314,9 @@ class InterviewRound(str, Enum):
     TECHNICAL = "Technical"
     MANAGER   = "Manager Round"
     MD        = "MD Round"
+    # SOP §5, internal track: THE interview -- one sitting of HR + the Department Head (plus
+    # Management for senior roles). Replaces the HR / Technical / Manager chain there.
+    PANEL     = "Panel Interview"
 
 
 class InterviewMode(str, Enum):
@@ -4357,6 +4360,10 @@ PASS_NEXT = {
     InterviewRound.TECHNICAL: AppStatus.MD_ROUND,
     InterviewRound.MANAGER:   AppStatus.MD_ROUND,
     InterviewRound.MD:        AppStatus.SELECTED,
+    # Junior / mid: the panel is the only interview, so a pass goes for selection (still
+    # gated by the shortlisting committee). Senior+ is special-cased in the service: the
+    # Management interview still stands between them and selection.
+    InterviewRound.PANEL:     AppStatus.SELECTED,
 }
 
 # Fail and Hold are round-independent.
@@ -6688,6 +6695,18 @@ FINAL_ROUND = InterviewRound.MD
 # deferred, and treating it as clearance would let an undecided candidate reach an offer.
 FINAL_ROUND_PASSING = {Outcome.PASS.value}
 
+# The internal track's interviews, per band: ONE Panel Interview; senior / managerial add the
+# Management final interview. Read by the scheduler and by the schedule dialog's round list.
+PANEL_ROUND = InterviewRound.PANEL
+# Who conducts the Management final interview: Management (the MD). HR and the HOD already
+# sat on the panel; this sitting is Management's own.
+FINAL_ROUND_PANEL_ROLES = [HrmsRole.MD]
+
+
+def internal_rounds_for(level) -> list:
+    """The rounds an internal-track candidate at this band sits, in order."""
+    return [PANEL_ROUND] + ([FINAL_ROUND] if final_round_is_mandatory(level) else [])
+
 
 class ShortlistOutcome(str, Enum):
     """What the committee decided -- the Final Commit.
@@ -6746,6 +6765,8 @@ SHORTLIST_REJECTS = {ShortlistOutcome.REJECTED.value}
 class CommitteeDecision(str, Enum):
     AGREE  = "Agree"
     OBJECT = "Object"
+    # Asked, not yet answered. Only the member themselves moves it to Agree / Object.
+    PENDING = "Pending"
 
 
 def final_commit_outcome(members, *, level=None, final_round_passed: bool = False):
@@ -7764,6 +7785,7 @@ AUDIT_INTERVIEW_RECORDING_ADDED = "interview recording uploaded"
 AUDIT_INTERVIEW_MEDIA_REMOVED   = "interview evidence removed"
 AUDIT_INTERVIEW_REPORT_VIEWED   = "interview report opened by client"
 AUDIT_INTERVIEW_RECORDING_VIEWED = "interview recording watched by client"
+AUDIT_INTERVIEW_RECORDING_DOWNLOADED = "interview recording downloaded"
 
 
 class InterviewMediaIn(BaseModel):

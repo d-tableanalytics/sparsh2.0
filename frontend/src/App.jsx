@@ -88,7 +88,6 @@ import MasterManager from './features/hrms/people/MasterManager';
 import JdLibrary from './features/hrms/recruitment/JdLibrary';
 import PostingList from './features/hrms/recruitment/PostingList';
 import CandidatePipeline from './features/hrms/recruitment/CandidatePipeline';
-import ShortlistedCandidates from './features/hrms/recruitment/ShortlistedCandidates';
 import ScreeningBoard from './features/hrms/recruitment/ScreeningBoard';
 import AssessmentBoard from './features/hrms/recruitment/AssessmentBoard';
 import InterviewBoard from './features/hrms/recruitment/InterviewBoard';
@@ -388,7 +387,8 @@ const AppRoutes = () => {
         <Route path="postings"           element={<PostingList />} />
         {/* Pipeline — candidates, triage and the audit-trail journey (Phase 5). */}
         <Route path="candidates"         element={<CandidatePipeline />} />
-        <Route path="shortlisted"        element={<ShortlistedCandidates />} />
+        {/* The old "Shortlisted" page was removed: the same people are the Shortlisted column of the Candidates board. */}
+        <Route path="shortlisted"        element={<Navigate to="/hrms/candidates" replace />} />
         <Route path="screening"          element={<ScreeningBoard />} />
         <Route path="assessments"        element={<AssessmentBoard />} />
         <Route path="interviews"         element={<InterviewBoard />} />

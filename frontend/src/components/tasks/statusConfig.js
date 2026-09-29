@@ -1,6 +1,6 @@
 import {
   Clock, CheckCircle2, PlayCircle, Link2, Ban, Eye, CheckCircle, AlertTriangle, RotateCcw,
-  AlertCircle, ArrowDown, ListChecks,
+  AlertCircle, ArrowDown, ListChecks, XCircle,
 } from 'lucide-react';
 
 // Central status → visual mapping for the Task Management module. Deliberately reuses
@@ -17,6 +17,8 @@ export const STATUS_CONFIG = {
   verification: { label: 'Pending Verification', shortLabel: 'Verification', icon: Eye, color: 'var(--accent-indigo)', bg: 'var(--accent-indigo-bg)', border: 'var(--accent-indigo-border)' },
   completed: { label: 'Completed', shortLabel: 'Completed', icon: CheckCircle, color: 'var(--accent-green)', bg: 'var(--accent-green-bg)', border: 'var(--accent-green-border)' },
   in_progress_reopened: { label: 'In Progress (Reopened)', shortLabel: 'Reopened', icon: RotateCcw, color: 'var(--accent-orange)', bg: 'var(--accent-orange-bg)', border: 'var(--accent-orange-border)' },
+  // The delegator rejected a completed task outright (verification off). Closed — red, final.
+  rejected: { label: 'Rejected', shortLabel: 'Rejected', icon: XCircle, color: 'var(--accent-red)', bg: 'var(--accent-red-bg)', border: 'var(--accent-red-border)' },
   // The dependency doer has finished; the task is back with the assignee who delegated it, for
   // review and final completion. Indigo (a hand-off, like Acknowledged / Pending Verification)
   // rather than green — nothing is done until the assignee completes it.
@@ -39,6 +41,7 @@ export const CARD_KEY_TO_STATUS = {
   blocked: 'blocked',
   verification: 'verification',
   completed: 'completed',
+  rejected: 'rejected',
 };
 
 // Which summary card a task counts towards. Statuses with no card of their own are open work
@@ -66,6 +69,7 @@ export const SUMMARY_CARD_ORDER = [
   ['inProgress', STATUS_CONFIG.in_progress],
   ['verification', STATUS_CONFIG.verification],
   ['completed', STATUS_CONFIG.completed],
+  ['rejected', STATUS_CONFIG.rejected],
   ['inTime', EXTRA_CARD_CONFIG.inTime],
   ['delayed', EXTRA_CARD_CONFIG.delayed],
 ];
@@ -84,6 +88,7 @@ export const LIST_CARD_ORDER = [
   ['inProgress', STATUS_CONFIG.in_progress],
   ['verification', STATUS_CONFIG.verification],
   ['completed', STATUS_CONFIG.completed],
+  ['rejected', STATUS_CONFIG.rejected],
 ];
 
 // 6-card order for the Group Dashboard tab (Overdue/Pending/In Progress/Completed/In

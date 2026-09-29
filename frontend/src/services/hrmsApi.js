@@ -164,6 +164,8 @@ export const assessUrlFor = (code) => `${window.location.origin}/assess/${code}`
 export const getInterviews = (params) => api.get('/hrms/interviews', { params });
 export const getSchedulableCandidates = (params) =>
   api.get('/hrms/interviews/schedulable', { params });
+export const getInterviewPanelOptions = (uk, params) =>
+  api.get('/hrms/interviews/panel-options', { params: { ...params, uk } });
 export const scheduleInterview = (payload, params) =>
   api.post('/hrms/interviews', payload, { params });
 export const updateInterview = (no, payload, params) =>
@@ -176,6 +178,18 @@ export const evaluateInterview = (no, payload, params) =>
 /** Calendar invite download URL (served as a file, not emailed — see PHASE_7_REPORT). */
 export const inviteUrlFor = (no) =>
   `${import.meta.env.VITE_API_BASE_URL || '/api'}/hrms/interviews/${no}/invite.ics`;
+// Through the API client, so the login token and the company go with it — a bare link sends
+// neither, and the server refuses it.
+export const downloadInterviewInvite = (no, params) =>
+  api.get(`/hrms/interviews/${no}/invite.ics`, { params, responseType: 'blob' });
+// The interview recording: a short-lived download link (or the Meet / Zoom link it lives at).
+export const downloadInterviewRecording = (no, params) =>
+  api.get(`/hrms/interviews/${no}/recording/download`, { params });
+// Attach / remove the recording or report. body: { name, mime_type, data } or { external_url }.
+export const attachInterviewMedia = (no, kind, body, params) =>
+  api.post(`/hrms/interviews/${no}/media/${kind}`, body, { params });
+export const removeInterviewMedia = (no, kind, params) =>
+  api.delete(`/hrms/interviews/${no}/media/${kind}`, { params });
 
 // ── Offers ──
 export const getOffers = (params) => api.get('/hrms/offers', { params });
@@ -471,6 +485,15 @@ export const getSlaBreaches = (params) => api.get('/hrms/sla/breaches', { params
 
 /** The internal shortlisting committee (SOP §5). HR and the Department Head jointly
  *  finalise the shortlist, and a FINALISED record is what lifts the gate on `Selected`. */
+// Interviewed internal candidates the committee has not decided on yet.
+// HR and HOD / Managers who may sit on a committee, by name and role.
+export const getCommitteeOptions = (params) =>
+  api.get('/hrms/shortlist-reviews/committee-options', { params });
+// A committee member's OWN verdict: { decision: 'Agree' | 'Object', remarks }.
+export const recordShortlistVerdict = (slrNo, body, params) =>
+  api.post(`/hrms/shortlist-reviews/${slrNo}/verdict`, body, { params });
+export const getShortlistAwaiting = (params) =>
+  api.get('/hrms/shortlist-reviews/awaiting', { params });
 export const getShortlistReviews = (params) =>
   api.get('/hrms/shortlist-reviews', { params });
 export const getShortlistReview = (slrNo, params) =>

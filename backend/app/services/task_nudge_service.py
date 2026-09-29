@@ -55,7 +55,7 @@ WEEKLY_INTERVAL_DAYS = 7
 VERIFICATION_INTERVAL_DAYS = 2      # "every alternate day"
 
 # A task in one of these states is finished business and is never nudged about.
-TERMINAL_STATUSES = {"completed"}
+TERMINAL_STATUSES = {"completed", "rejected"}   # a rejected task is closed: no reminders
 
 # The sweep is a safety net, not an archive crawler. Overdue alerts are only raised for
 # deadlines missed inside this window, so a gap in the sweep (downtime, a stopped worker) still

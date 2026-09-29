@@ -36,6 +36,7 @@ TASK_EVENT_SLUGS = {
     "accepted": "task_accepted",
     "completed": "task_completed",
     "reopened": "task_reopened",
+    "rejected": "task_rejected",
     "verification_requested": "task_verification_requested",
     "verification_approved": "task_verification_approved",
     "deadline_revised": "task_deadline_revised",
@@ -73,6 +74,7 @@ _IN_APP = {
     "accepted": ("Task Accepted", "success"),
     "completed": ("Task Completed", "success"),
     "reopened": ("Task Reopened", "warning"),
+    "rejected": ("Task Rejected", "error"),
     "verification_requested": ("Verification Requested", "info"),
     "verification_approved": ("Verification Approved", "success"),
     "deadline_revised": ("Deadline Revised", "warning"),
@@ -143,7 +145,7 @@ def recipients_for_event(event: str, task: dict, extra: Optional[dict] = None) -
         # The verdict goes back to whoever asked for it (plus the rest of the doers/watchers,
         # since an approved request changes the date they all work to).
         return _ids(extra.get("requested_by")) | assignees | watchers
-    if event in ("reopened", "verification_approved"):
+    if event in ("reopened", "verification_approved", "rejected"):
         # The assigner's verdict, reported back down to whoever did the work.
         return assignees | watchers
     if event in ("due_reminder_daily", "due_reminder_weekly"):

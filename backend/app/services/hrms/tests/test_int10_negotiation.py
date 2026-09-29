@@ -465,7 +465,7 @@ async def main() -> None:
     HR_ACTOR = {**HR, "_id": ObjectId(U_HR)}
 
     def booking(uk, when):
-        return {"uk": uk, "round": M.InterviewRound.HR.value, "scheduled_at": when,
+        return {"uk": uk, "round": M.InterviewRound.PANEL.value, "scheduled_at": when,
                 "duration_min": 45, "mode": M.InterviewMode.VIRTUAL.value,
                 "meeting_link": "https://meet.example.com/room", "interviewer_id": U_HR,
                 "panel": [{"user_id": U_HR, "role": "hr"},
@@ -481,7 +481,7 @@ async def main() -> None:
           and told[0]["uk"] == "CAN-INT")
     check("and the variables carry the round, a time LABELLED in the operating zone, and "
           "the place",
-          told[0]["variables"]["round"] == M.InterviewRound.HR.value
+          told[0]["variables"]["round"] == M.InterviewRound.PANEL.value
           and told[0]["variables"]["when"].endswith("IST")
           and "meet.example.com" in told[0]["variables"]["where"])
     check("notice_hours / short_notice are stamped on the booking",
@@ -495,6 +495,10 @@ async def main() -> None:
     # -- The warning tells the truth when the send did NOT happen --
     reply["status"] = "Skipped"
     told.clear()
+    # A round is held once per candidate, so the earlier booking is cancelled first --
+    # what HR does before re-booking in real life.
+    for d in store[M.COLL_INTERVIEWS].docs:
+        d["status"] = M.InterviewStatus.CANCELLED.value
     booked2 = await IV.schedule_interview(HR_ACTOR, C1, booking("CAN-INT", soon.isoformat()))
     check("when the send was skipped the warning says the candidate has NOT been emailed "
           "-- a claim nobody checked is how a warning becomes a lie",
@@ -504,6 +508,10 @@ async def main() -> None:
 
     # -- Adequate notice: told, no warning --
     told.clear()
+    # A round is held once per candidate, so the earlier booking is cancelled first --
+    # what HR does before re-booking in real life.
+    for d in store[M.COLL_INTERVIEWS].docs:
+        d["status"] = M.InterviewStatus.CANCELLED.value
     booked3 = await IV.schedule_interview(HR_ACTOR, C1, booking("CAN-INT", later.isoformat()))
     check("two days ahead: the candidate is still told", len(told) == 1)
     check("and there is no short-notice warning",

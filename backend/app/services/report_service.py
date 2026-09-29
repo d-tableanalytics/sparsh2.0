@@ -151,6 +151,9 @@ def _apply(stat: dict, doc: dict, now: datetime) -> None:
     stat["assigned"] += 1
     if ws == "completed":
         stat["completed"] += 1
+    elif ws == "rejected":
+        # Closed by the delegator: not work still owed, so never "pending".
+        stat["rejected"] = stat.get("rejected", 0) + 1
     else:
         stat["pending"] += 1
     if ws == "in_progress":
