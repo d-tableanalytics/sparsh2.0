@@ -87,9 +87,10 @@ export const separationNextStep = (sep) => {
 export const ONBOARDING_GUIDE = {
   id: 'onboarding',
   title: 'How onboarding works',
-  intro: 'From an accepted offer to a new employee who is ready on day one. Click a card to work on it.',
+  intro: 'From a sent appointment letter to a new employee who is ready on day one. Click a card to work on it.',
   steps: [
-    { title: 'Start onboarding', text: 'Click Start onboarding once the candidate has accepted the offer.' },
+    { title: 'Appointment letter first', text: 'After the offer is accepted, send the appointment letter. Onboarding opens automatically once it is sent.' },
+    { title: 'Start onboarding', text: 'If it did not open by itself, click Start onboarding — only candidates whose letter was sent are listed.' },
     { title: 'Joining form', text: 'Send them the form link. They fill in personal, bank and ID details and upload documents.' },
     { title: 'Check documents', text: 'Look at each document and mark their details verified.' },
     { title: 'First day', text: 'On the day they join, confirm the date they actually reported.' },
@@ -166,10 +167,10 @@ export const ATTENDANCE_GUIDE = {
   title: 'How attendance works',
   intro: 'Record each day, fix mistakes, then lock the month so pay can be worked out from it.',
   steps: [
-    { title: 'Record each day', text: 'Click Mark Attendance to record who came in, and when.' },
+    { title: 'Record each day', text: 'Staff Check in / Check out at the office (location checked), HR imports the biometric file, or HR marks the day.' },
     { title: 'Fix mistakes', text: 'Forgot to punch in? Request Regularisation. The manager, then HR, approves it.' },
-    { title: 'Work away from office', text: 'Client visits and field work go under Outdoor Duty.' },
-    { title: 'Check late arrivals', text: 'The Late Coming tab shows who came in late, and how often.' },
+    { title: 'Away or different hours', text: 'Field work goes under Outdoor Duty; different working hours under Flexible Timing (manager approves).' },
+    { title: 'Check late arrivals', text: 'Late Coming shows who came in late, within or beyond the monthly buffer. Timing, grace and buffer are in Settings.' },
     { title: 'Lock the month', text: 'In Monthly Closure, lock the month once it is final. Payroll uses these days.' },
   ],
 };

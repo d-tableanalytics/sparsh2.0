@@ -46,7 +46,7 @@ const FILTERS = [
 ];
 
 const ClientCandidatePool = ({ embedded, onChanged }) => {
-  const { can, isInternal } = useHrms();
+  const { can, isInternal, loading: accessLoading } = useHrms();
   const { showSuccess, showError } = useNotification();
 
   const [rows, setRows] = useState([]);
@@ -59,7 +59,13 @@ const ClientCandidatePool = ({ embedded, onChanged }) => {
 
   const canSource = can(CAP.CLIENT_CANDIDATE_WRITE);
 
+  // Reading the pool needs the same capability as sourcing from it. Without it, say so
+  // plainly instead of calling the API for a 403.
+  const noAccess = !accessLoading && !canSource;
+
   const load = useCallback(async () => {
+    if (accessLoading) return;
+    if (!canSource) { setLoading(false); return; }
     setLoading(true);
     setError(null);
     try {
@@ -71,7 +77,7 @@ const ClientCandidatePool = ({ embedded, onChanged }) => {
     } finally {
       setLoading(false);
     }
-  }, [term]);
+  }, [term, accessLoading, canSource]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -219,10 +225,14 @@ const ClientCandidatePool = ({ embedded, onChanged }) => {
         })}
       </div>
 
-      {loading && <HrmsLoading label="Loading the pool…" />}
-      {error && !loading && <HrmsError message={error} onRetry={load} />}
+      {noAccess && (
+        <HrmsEmpty icon={Archive} title="This pool is HR's sourcing tool"
+          hint="Only HR can browse rejected and available candidates and share them into another requisition. Ask your HR team if you would like someone considered for a role." />
+      )}
+      {!noAccess && loading && <HrmsLoading label="Loading the pool…" />}
+      {!noAccess && error && !loading && <HrmsError message={error} onRetry={load} />}
 
-      {!loading && !error && (
+      {!noAccess && !loading && !error && (
         <RecordList
           rows={shown} columns={columns} renderCard={renderCard}
           keyOf={(r) => `${r.from_company_id}:${r.ccn_no}`}

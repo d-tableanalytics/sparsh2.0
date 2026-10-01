@@ -373,6 +373,11 @@ async def create_candidate(actor: dict, company_id: str, payload: dict) -> dict:
     # files as one, exactly as it does on the public form.
     from app.services.hrms_referral_service import resolve_referral
     doc.update(await resolve_referral(payload, company_id, source_from_applicant=False))
+    # Source Analytics: the platform this CV came from, kept on the candidate for the
+    # whole journey so every later stage is attributed to it.
+    from app.models.hrms import platform_for_candidate
+    doc["source_platform"] = platform_for_candidate(
+        payload.get("source_platform"), doc.get("source"), doc.get("is_referral"))
 
     # ── Phase 12 ── the CV itself.
     #
@@ -530,6 +535,14 @@ async def update_candidate(actor: dict, company_id: str, uk: str, payload: dict)
                          ("cover_note", 4000), ("remarks", 2000)):
         if field in payload:
             updates[field] = clean_text(payload[field], limit=limit)
+
+    if "source_platform" in payload:
+        from app.models.hrms import normalise_platform
+        raw = clean_text(payload.get("source_platform"), limit=40)
+        key = normalise_platform(raw) if raw else None
+        if raw and not key:
+            raise HTTPException(status_code=422, detail="Choose a job portal / platform from the list.")
+        updates["source_platform"] = key
 
     if "can_email" in payload:
         email = clean_text(payload["can_email"], limit=180)

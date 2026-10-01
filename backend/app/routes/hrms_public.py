@@ -41,6 +41,8 @@ Rules for this file, all enforced by tests in test_phase4_public_security.py:
    enabled company, and checking the toggle here would let an applicant infer a client's
    subscription state from a shared link.
 """
+from typing import Optional
+
 from fastapi import APIRouter, Request
 
 from app.models.hrms import (
@@ -79,7 +81,7 @@ router = APIRouter(prefix="/hrms/public", tags=["HRMS Public"])
 
 
 @router.get("/apply/{code}")
-async def public_job_ad(code: str, request: Request):
+async def public_job_ad(code: str, request: Request, src: Optional[str] = None):
     """The job ad behind a public application link.
 
     Rate limited generously -- browsing an ad is cheap, and a shared office or campus IP
@@ -90,6 +92,10 @@ async def public_job_ad(code: str, request: Request):
     await assert_link_live(code)
     result = await postings.get_public_posting(code)
     await links.record_open(code)
+    # Job Portal Reach: which platform's tracked link brought this visitor. Best effort.
+    from app.services.hrms_reach_service import record_view
+    await record_view(code, (src or "")[:40], client_ip(request),
+                      request.headers.get("user-agent") or "")
     return result
 
 

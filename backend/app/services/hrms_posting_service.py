@@ -904,6 +904,12 @@ async def submit_application(code: str, payload: dict) -> dict:
     # through a LinkedIn post is a referral, and filing it under LinkedIn would overstate
     # that channel.
     doc.update(referral)
+    # Job Portal Reach: the platform whose tracked link the applicant came through. Kept
+    # apart from `source` (what the applicant SAYS) -- this one is what the link proves.
+    from app.models.hrms import normalise_platform, platform_for_candidate
+    doc["source_platform"] = platform_for_candidate(
+        normalise_platform(payload.get("src")) or payload.get("platform"),
+        doc.get("source"), doc.get("is_referral"))
     await get_collection(COLL_CANDIDATES).insert_one(dict(doc))
 
     channel = doc.get("source") or "the application form"

@@ -323,9 +323,10 @@ async def main() -> None:
               .isdisjoint({s.value for s in M.ReqApproval}))
         check("and their own transition table",
               set(M.CLIENT_REQ_TRANSITIONS) & set(M.INTERNAL_REQ_TRANSITIONS) == set())
+        # The budget-approval step was removed; `budget-skip` only moves legacy rows on.
         check("the internal chain is untouched",
               set(M.INTERNAL_REQ_TRANSITIONS) == {
-                  "hr-verify", "hr-reject", "budget-approve", "budget-reject",
+                  "hr-verify", "hr-reject", "budget-skip",
                   "escalate-approve", "escalate-reject",
                   "scorecard-approve", "scorecard-reject"})
     finally:

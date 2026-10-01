@@ -69,6 +69,26 @@ export const getMasterSuggestions = (params) =>
 
 // ── Employees ──
 export const getEmployees = (params) => api.get('/hrms/employees', { params });
+// ── Self check-in / check-out (geo-fenced) ──
+export const getSelfPunchToday = (params) => api.get('/hrms/attendance/self-punch/today', { params });
+// ── Flexible timing + biometric import ──
+export const getFlexiRequests = (params) => api.get('/hrms/attendance/flexi', { params });
+export const requestFlexi = (body, params) => api.post('/hrms/attendance/flexi', body, { params });
+export const actOnFlexi = (no, body, params) => api.post(`/hrms/attendance/flexi/${no}/action`, body, { params });
+export const importBiometric = (file, params) => {
+  const form = new FormData();
+  form.append('file', file);
+  return api.post('/hrms/attendance/import', form, { params });
+};
+export const selfPunch = (body, params) => api.post('/hrms/attendance/self-punch', body, { params });
+export const getOfficeLocations = (params) => api.get('/hrms/attendance/offices', { params });
+export const saveOfficeLocations = (body, params) => api.put('/hrms/attendance/offices', body, { params });
+// ── Dynamic Roles & Permissions ──
+export const getHrmsPermissions = (params) => api.get('/hrms/access/permissions', { params });
+export const saveHrmsPermission = (cap, body, params) =>
+  api.put(`/hrms/access/permissions/${encodeURIComponent(cap)}`, body, { params });
+export const resetHrmsPermission = (cap, params) =>
+  api.delete(`/hrms/access/permissions/${encodeURIComponent(cap)}`, { params });
 export const getEmployee = (userId, params) =>
   api.get(`/hrms/employees/${userId}`, { params });
 export const createEmployee = (payload, params) =>
@@ -91,8 +111,8 @@ export const createRequisition = (payload, params) =>
 export const updateRequisition = (requestNo, payload, params) =>
   api.patch(`/hrms/requisitions/${requestNo}`, payload, { params });
 /** One transition of the approval chain.
- *  action = 'hr-verify' | 'hr-reject' | 'budget-approve' | 'budget-reject'
- *         | 'scorecard-approve' | 'scorecard-reject' | 'escalate-approve' | 'escalate-reject' */
+ *  action = 'hr-verify' | 'hr-reject' | 'escalate-approve' | 'escalate-reject'
+ *         | 'scorecard-approve' | 'scorecard-reject'   (no budget step: HR verify goes straight on) */
 export const actOnRequisition = (requestNo, payload, params) =>
   api.post(`/hrms/requisitions/${requestNo}/approve`, payload, { params });
 
@@ -124,6 +144,17 @@ export const deletePosting = (code, params) =>
 /** Preview the public apply URL for a posting code. Kept here so the one place that knows
  *  the public URL shape is the API client, not each component. */
 export const applyUrlFor = (code) => `${window.location.origin}/apply/${code}`;
+
+/** Job Portal Reach: the platforms a posting can be shared on, each with its own tracked
+ *  link. Keys must match JOB_PLATFORMS on the server (an unknown key counts as untagged). */
+export const JOB_PLATFORMS = [
+  ['linkedin', 'LinkedIn'], ['naukri', 'Naukri'], ['indeed', 'Indeed'], ['apna', 'Apna'], ['foundit', 'Foundit'],
+  ['shine', 'Shine'], ['website', 'Company Website'], ['referral', 'Referral'],
+  ['social', 'Social Media'], ['whatsapp', 'WhatsApp'], ['other', 'Other'],
+];
+export const trackedApplyUrl = (code, platform) => `${applyUrlFor(code)}?src=${platform}`;
+/** A candidate's platform key -> its label ("naukri" -> "Naukri"). */
+export const platformLabel = (key) => (JOB_PLATFORMS.find(([k]) => k === key) || [])[1] || null;
 
 // ── Candidates, screening, journey ──
 export const getCandidates = (params) => api.get('/hrms/candidates', { params });
@@ -370,6 +401,8 @@ export const evaluateAgainstScorecard = (uk, payload, params) =>
 
 /** Reference checks. Mandatory before an internal offer; optional on the client track. */
 export const getReferenceChecks = (params) => api.get('/hrms/reference-checks', { params });
+export const getReferenceEligible = (params) =>
+  api.get('/hrms/reference-checks/eligible', { params });
 export const getReferenceCheck = (refNo, params) =>
   api.get(`/hrms/reference-checks/${refNo}`, { params });
 export const createReferenceCheck = (payload, params) =>
@@ -432,6 +465,8 @@ export const getInternalTracker = (params) =>
  * figure would pass it today.
  */
 export const getNegotiationRounds = (params) => api.get('/hrms/negotiations', { params });
+export const getNegotiationEligible = (params) =>
+  api.get('/hrms/negotiations/eligible', { params });
 export const recordNegotiationRound = (payload, params) =>
   api.post('/hrms/negotiations', payload, { params });
 export const getCandidateNegotiation = (uk, params) =>
@@ -494,6 +529,8 @@ export const recordShortlistVerdict = (slrNo, body, params) =>
   api.post(`/hrms/shortlist-reviews/${slrNo}/verdict`, body, { params });
 export const getShortlistAwaiting = (params) =>
   api.get('/hrms/shortlist-reviews/awaiting', { params });
+// Internal hiring: Candidate Source Analytics.
+export const getSourceAnalytics = (params) => api.get('/hrms/analytics/sources', { params });
 export const getShortlistReviews = (params) =>
   api.get('/hrms/shortlist-reviews', { params });
 export const getShortlistReview = (slrNo, params) =>

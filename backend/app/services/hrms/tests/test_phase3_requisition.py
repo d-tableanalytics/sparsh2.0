@@ -321,9 +321,9 @@ async def main() -> None:
         # =================================================================
         section("Approval chain: the happy path")
         # =================================================================
-        # The band Management records at the budget gate. No sanctioned strength is
-        # seeded in this file, so clearing the gate lands in escalation (fail closed):
-        # "cleared the budget gate" is what is asserted, never "Approved".
+        # No budget-approval step: HR verification goes straight on. No sanctioned strength
+        # is seeded in this file, so it lands in Management's Headcount Approval (fail
+        # closed); in sanction it would land on the scorecard.
         BAND = {"approved_headcount": 1, "approved_salary_band_min": 500000,
                 "approved_salary_band_max": 900000}
         CLEARED = {M.ReqApproval.PENDING_SCORECARD.value,
@@ -331,28 +331,22 @@ async def main() -> None:
 
         no = r1["request_no"]
         after_hr = await RS.act_on_requisition(HR, COMPANY, no, "hr-verify", "Looks right")
-        check("hr-verify -> Pending Budget Approval",
-              after_hr["approval_status"] == M.ReqApproval.PENDING_BUDGET.value)
+        check("hr-verify goes straight on (no budget step)",
+              after_hr["approval_status"] in CLEARED)
         check("HR reviewer stamped", after_hr["hr_reviewed_by"] == U_HR)
         check("HR remark stored", after_hr["hr_remarks"] == "Looks right")
-        check("JD still pending after HR stage",
-              after_hr["jd"]["status"] == M.JdStatus.PENDING_APPROVAL.value)
-        check("MD notified", any(s[0] == "role" and "MD" in s[1] for s in sent))
-
-        after_md = await RS.act_on_requisition(MD, COMPANY, no, "budget-approve", "Go ahead",
-                                               budget=BAND)
-        check("budget-approve clears the budget gate", after_md["approval_status"] in CLEARED)
-        check("approver stamped", after_md["budget_approved_by"] == U_MD)
-        check("the approved band is recorded on the requisition",
-              after_md["approved_salary_band_min"] == 500000
-              and after_md["approved_salary_band_max"] == 900000)
+        check("the approved headcount is taken from the vacancies",
+              after_hr["approved_headcount"] == max(1, int(r1.get("vacancy") or 1)))
         check("the JD is NOT yet approved -- the scorecard gate is still ahead",
-              after_md["jd"]["status"] != M.JdStatus.APPROVED.value)
-        check("creator notified that the role is funded",
-              any(s[0] == "user" and s[1] == U_HOD and "funded" in s[2].lower() for s in sent))
-        check("both stages audited",
-              any(a["action"] == M.AUDIT_REQ_HR_VERIFIED for a in audit_log.docs)
-              and any(a["action"] == M.AUDIT_REQ_BUDGET_OK for a in audit_log.docs))
+              after_hr["jd"]["status"] != M.JdStatus.APPROVED.value)
+        check("nobody is asked for budget approval any more",
+              not any(s[0] == "role" and "FINANCE" in s[1] for s in sent))
+        await expect_http("the old budget-approve action", RS.act_on_requisition(
+            MD, COMPANY, no, "budget-approve", budget=BAND), 422, "Invalid action")
+        check("creator notified that HR verified it",
+              any(s[0] == "user" and s[1] == U_HOD and "verified" in s[2].lower() for s in sent))
+        check("the verification is audited",
+              any(a["action"] == M.AUDIT_REQ_HR_VERIFIED for a in audit_log.docs))
 
         # =================================================================
         section("Approval chain: every status x action pair")
@@ -366,7 +360,14 @@ async def main() -> None:
         # escalate-reject) extends the coverage automatically instead of failing an
         # arithmetic assertion that was only ever a restatement of the table's size.
         legal = {(a, spec[0].value) for a, spec in M.INTERNAL_REQ_TRANSITIONS.items()}
-        actions = tuple(M.INTERNAL_REQ_TRANSITIONS)
+        # One pair is deliberately NOT an error: the final gate now runs by itself when the
+        # scorecard is signed off, so final-approving an already-Approved requisition (a
+        # stale screen) returns it unchanged instead of refusing. Counted as allowed.
+        legal.add(("scorecard-approve", M.ReqApproval.APPROVED.value))
+        # `budget-skip` is excluded: it only ever runs automatically, so a manual call is a
+        # 422 before its status is even looked at (asserted separately below).
+        actions = tuple(a for a in M.INTERNAL_REQ_TRANSITIONS if a != "budget-skip")
+        legal = {(a, st) for a, st in legal if a != "budget-skip"}
         expected_illegal = len(actions) * len(list(M.ReqApproval)) - len(legal)
         illegal_ok = 0
         for action in actions:
@@ -404,16 +405,12 @@ async def main() -> None:
             HR, COMPANY, "HR-REQ-2026-999", "hr-verify"), 404)
 
         await RS.act_on_requisition(HR, COMPANY, n2, "hr-verify")
-        await expect_http("HR cannot perform the budget stage", RS.act_on_requisition(
-            HR, COMPANY, n2, "budget-approve", budget=BAND), 403)
-        await expect_http("budget-reject without a remark", RS.act_on_requisition(
-            MD, COMPANY, n2, "budget-reject"), 422, "remark is required")
-        await expect_http("a budget approval with no band", RS.act_on_requisition(
-            MD, COMPANY, n2, "budget-approve", None, budget={}), 422, "salary band")
-        await expect_http("a negative band", RS.act_on_requisition(
-            MD, COMPANY, n2, "budget-approve", None,
-            budget={"approved_headcount": 1, "approved_salary_band_min": -5,
-                    "approved_salary_band_max": 10}), 422, "negative")
+        await expect_http("verifying twice", RS.act_on_requisition(
+            HR, COMPANY, n2, "hr-verify"), 409)
+        await expect_http("budget-reject no longer exists", RS.act_on_requisition(
+            MD, COMPANY, n2, "budget-reject", "no"), 422, "Invalid action")
+        await expect_http("the legacy budget-skip cannot be pressed by hand", RS.act_on_requisition(
+            HR, COMPANY, n2, "budget-skip"), 422)
 
         section("Rejection closes the requisition and the JD")
         r3 = await RS.create_requisition(HOD, COMPANY, base_payload())
@@ -483,9 +480,8 @@ async def main() -> None:
         jd7 = r7["jd"]["jd_no"]
         # SOP 3: the JD is written once Management has cleared headcount and budget.
         await expect_http("a JD edit before budget approval", RS.update_jd(
-            HR, COMPANY, jd7, {"benefits": "too early"}), 409, "approved headcount and budget")
+            HR, COMPANY, jd7, {"benefits": "too early"}), 409, "until HR has verified")
         await RS.act_on_requisition(HR, COMPANY, r7["request_no"], "hr-verify")
-        await RS.act_on_requisition(MD, COMPANY, r7["request_no"], "budget-approve", budget=BAND)
         updated = await RS.update_jd(HR, COMPANY, jd7, {"benefits": "PF + insurance"})
         check("JD editable while pending", updated["benefits"] == "PF + insurance")
         check("version bumps on edit", updated["version"] == 2)
@@ -544,9 +540,11 @@ async def main() -> None:
         # APPROVED is reachable from exactly one row, and only from PENDING_MD with the MD
         # capability -- asserted from the model itself so a later "shortcut" fails loudly.
         check("the chain's actions are declared",
-              {"hr-verify", "hr-reject", "budget-approve", "budget-reject",
+              {"hr-verify", "hr-reject",
                "scorecard-approve", "scorecard-reject"} <= set(M.INTERNAL_REQ_TRANSITIONS))
-        check("budget approval cannot be skipped", M.budget_approval_is_mandatory())
+        check("there is no budget-approval step",
+              not {"budget-approve", "budget-reject"} & set(M.INTERNAL_REQ_TRANSITIONS))
+        check("the approval chain is sound", M.approval_chain_is_sound())
         # Subset, not equality: REQ_AUDIT_ACTIONS also labels the internal track's actions,
         # which have their own table. What this asserts is what it always meant -- no client
         # action may transition without leaving a labelled trail.
@@ -555,9 +553,9 @@ async def main() -> None:
         check("hr actions require the HR capability",
               all(spec[2] == M.Cap.REQUISITION_REVIEW_HR
                   for a, spec in M.INTERNAL_REQ_TRANSITIONS.items() if a.startswith("hr-")))
-        check("budget actions require the budget capability",
-              all(spec[2] == M.Cap.REQUISITION_APPROVE_BUDGET
-                  for a, spec in M.INTERNAL_REQ_TRANSITIONS.items() if a.startswith("budget-")))
+        check("no transition needs the budget capability any more",
+              all(spec[2] != M.Cap.REQUISITION_APPROVE_BUDGET
+                  for spec in M.INTERNAL_REQ_TRANSITIONS.values()))
         check("both rejects demand a remark",
               all(spec[3] for a, spec in M.INTERNAL_REQ_TRANSITIONS.items() if a.endswith("-reject")))
         check("no transition leaves the declared status set",

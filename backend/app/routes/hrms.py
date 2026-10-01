@@ -15,7 +15,7 @@ Phase 1 ships the foundation only. Later phases add their routers/endpoints here
 """
 from typing import Optional
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import StreamingResponse
 
 from app.controllers.auth_controller import get_current_user
@@ -198,6 +198,9 @@ from app.utils.hrms_access import (
 async def _hrms_company_gate(current_user: dict = Depends(get_current_user)) -> None:
     """Router-wide guard — see module docstring."""
     await ensure_hrms_enabled(current_user)
+    # Keep this caller's company's Roles & Permissions rules fresh (cached, TTL-bounded).
+    from app.utils.hrms_permission_policy import refresh_for_user
+    await refresh_for_user(current_user)
 
 
 router = APIRouter(prefix="/hrms", tags=["HRMS"], dependencies=[Depends(_hrms_company_gate)])
@@ -646,7 +649,8 @@ async def act_on_requisition(
 ):
     """One transition of the approval chain.
 
-    hr-verify | budget-approve | scorecard-approve, each with its -reject twin
+    hr-verify | escalate-approve | scorecard-approve, each with its -reject twin (the
+    budget-approval step was removed: HR verification goes straight on)
     (+ escalate-approve | escalate-reject when over sanctioned strength)
 
     The per-action capability is enforced inside the service from the same transition
@@ -1573,6 +1577,52 @@ async def analytics_funnel(
         date_from=date_from, date_to=date_to)
 
 
+@router.get("/analytics/reach")
+async def analytics_portal_reach(
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+    posting_code: Optional[str] = Query(None),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Job Portal Reach for internal hiring: per platform tracked link, how many people
+    reached the job page, how many applied, and the conversion between them."""
+    from app.utils.hrms_access import is_client_side_user
+    from app.services.hrms_reach_service import reach_analytics
+    if is_client_side_user(current_user):
+        raise HTTPException(status_code=403,
+                            detail="Job Portal Reach covers internal hiring only.")
+    _require(current_user, Cap.ANALYTICS_READ)
+    return await reach_analytics(
+        current_user, _company(current_user, company_id),
+        date_from=date_from, date_to=date_to, posting_code=posting_code)
+
+
+@router.get("/analytics/sources")
+async def analytics_candidate_sources(
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+    request_no: Optional[str] = Query(None),
+    department: Optional[str] = Query(None, max_length=120),
+    position: Optional[str] = Query(None, max_length=160),
+    platform: Optional[str] = Query(None, max_length=40),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Candidate Source Analytics for internal hiring: per source, application -> shortlist
+    -> selection -> joining, the rates between, and how fast each source gets there.
+    Sparsh Magic's own hiring only -- a client-side user is refused."""
+    from app.utils.hrms_access import is_client_side_user
+    if is_client_side_user(current_user):
+        raise HTTPException(status_code=403,
+                            detail="Candidate Source Analytics covers internal hiring only.")
+    _require(current_user, Cap.ANALYTICS_READ)
+    return await analytics.source_analytics(
+        current_user, _company(current_user, company_id),
+        date_from=date_from, date_to=date_to, request_no=request_no,
+        department=department, position=position, platform=platform)
+
+
 @router.get("/analytics/breakdown")
 async def analytics_breakdown(
     by: BreakdownBy = Query(BreakdownBy.SOURCE),
@@ -2117,6 +2167,16 @@ async def create_reference_check(
         current_user, _company(current_user, company_id), body.model_dump())
 
 
+@router.get("/reference-checks/eligible")
+async def reference_check_eligible(
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Candidates a reference check can be recorded for, with their current company."""
+    _require(current_user, Cap.REFERENCE_WRITE)
+    return {"candidates": await references.eligible_candidates(_company(current_user, company_id))}
+
+
 @router.get("/reference-checks/{ref_no}")
 async def get_reference_check(
     ref_no: str,
@@ -2299,6 +2359,16 @@ async def record_negotiation_round(
     _require(current_user, Cap.NEGOTIATION_WRITE)
     return await negotiation.record_round(
         current_user, _company(current_user, company_id), body.model_dump())
+
+
+@router.get("/negotiations/eligible")
+async def negotiation_eligible(
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Candidates a negotiation round can be recorded for, with expectation, CTC and band."""
+    _require(current_user, Cap.NEGOTIATION_WRITE)
+    return {"candidates": await negotiation.eligible_candidates(_company(current_user, company_id))}
 
 
 @router.get("/negotiations/{neg_no}")
@@ -2728,8 +2798,9 @@ async def create_shortlist_review(
     company_id: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user),
 ):
-    """Convene a sitting. Convening decides nothing until the outcome is Finalised."""
-    _require(current_user, Cap.SHORTLIST_WRITE)
+    """Convene a sitting -- send the committee approval request. HR only
+    (`shortlist.convene`); every member is then asked for their own verdict."""
+    _require(current_user, Cap.SHORTLIST_CONVENE)
     return await shortlists.create_shortlist_review(
         current_user, _company(current_user, company_id), body.model_dump(),
         own_verdicts_only=True)
@@ -4030,6 +4101,110 @@ async def mark_attendance(
         current_user, _company(current_user, company_id), body.model_dump())
 
 
+# ── Attendance rules: flexible timing and biometric import ──
+@router.post("/attendance/flexi", status_code=201)
+async def request_flexi_timing(
+    body: dict = Body(...),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Ask for different hours over dates: {employee_code, from_date, to_date, shift_start,
+    shift_end, reason}."""
+    _require(current_user, Cap.ATTENDANCE_FLEXI_REQUEST)
+    from app.services import hrms_attendance_rules_service as rules
+    return await rules.request_flexi(current_user, _company(current_user, company_id), body or {})
+
+
+@router.get("/attendance/flexi")
+async def list_flexi_timing(
+    status: Optional[str] = Query(None),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.ATTENDANCE_READ)
+    from app.services import hrms_attendance_rules_service as rules
+    return {"requests": await rules.list_flexi(current_user, _company(current_user, company_id),
+                                               status=status)}
+
+
+@router.post("/attendance/flexi/{flexi_no}/action")
+async def act_on_flexi_timing(
+    flexi_no: str,
+    body: dict = Body(...),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Approve or reject: {approved: bool, remarks}. Never your own."""
+    _require(current_user, Cap.ATTENDANCE_FLEXI_APPROVE)
+    from app.services import hrms_attendance_rules_service as rules
+    return await rules.act_on_flexi(current_user, _company(current_user, company_id), flexi_no,
+                                    body or {})
+
+
+@router.post("/attendance/import")
+async def import_biometric_attendance(
+    file: UploadFile = File(...),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Load the biometric machine's export (CSV / Excel). First punch = in, last = out."""
+    _require(current_user, Cap.ATTENDANCE_IMPORT)
+    raw = await file.read()
+    if len(raw) > 10 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="The file is larger than 10 MB.")
+    from app.services import hrms_attendance_rules_service as rules
+    return await rules.import_biometric(current_user, _company(current_user, company_id),
+                                        file.filename or "", raw)
+
+
+# ── Self check-in / check-out, geo-fenced to the company's offices ──
+@router.get("/attendance/offices")
+async def list_office_locations(
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.ATTENDANCE_READ)
+    from app.services import hrms_self_punch_service as selfpunch
+    return {"offices": await selfpunch.get_offices(_company(current_user, company_id))}
+
+
+@router.put("/attendance/offices")
+async def save_office_locations(
+    body: dict = Body(...),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Replace the office list: {"offices": [{name, lat, lng, radius_m}]}. Same gate as the
+    shift policy -- it is attendance configuration."""
+    _require(current_user, Cap.LEAVE_POLICY_MANAGE)
+    from app.services import hrms_self_punch_service as selfpunch
+    return {"offices": await selfpunch.save_offices(
+        current_user, _company(current_user, company_id), (body or {}).get("offices") or [])}
+
+
+@router.get("/attendance/self-punch/today")
+async def self_punch_today(
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.ATTENDANCE_SELF_PUNCH)
+    from app.services import hrms_self_punch_service as selfpunch
+    return await selfpunch.today(current_user, _company(current_user, company_id))
+
+
+@router.post("/attendance/self-punch")
+async def self_punch(
+    body: dict = Body(...),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Check yourself in or out: {"action": "in"|"out", "lat", "lng", "accuracy"}. Refused
+    unless the location is inside one of the company's offices."""
+    _require(current_user, Cap.ATTENDANCE_SELF_PUNCH)
+    from app.services import hrms_self_punch_service as selfpunch
+    return await selfpunch.punch(current_user, _company(current_user, company_id), body or {})
+
+
 @router.get("/attendance")
 async def list_attendance(
     employee_code: Optional[str] = Query(None),
@@ -5171,6 +5346,46 @@ async def get_employee_360(
 # ─────────────────────────────────────────────────────────────
 # Phase ACCESS-1 — User / Role / Permission Administration (SM-HR-051)
 # ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
+# Dynamic Roles & Permissions — who may do each HRMS action, per company.
+# ─────────────────────────────────────────────────────────────
+@router.get("/access/permissions")
+async def hrms_list_permissions(
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Every HRMS action by module and workflow step, with its default and current rule."""
+    _require(current_user, Cap.PERMISSIONS_MANAGE)
+    from app.services import hrms_permission_service as perms
+    return await perms.list_permissions(_company(current_user, company_id))
+
+
+@router.put("/access/permissions/{cap}")
+async def hrms_save_permission(
+    cap: str,
+    body: dict = Body(...),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Set who may do one action: {"roles": [...], "allow_users": [...], "deny_users": [...]}."""
+    _require(current_user, Cap.PERMISSIONS_MANAGE)
+    from app.services import hrms_permission_service as perms
+    return await perms.save_permission(current_user, _company(current_user, company_id), cap,
+                                       body or {})
+
+
+@router.delete("/access/permissions/{cap}")
+async def hrms_reset_permission(
+    cap: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Put one action back to its default."""
+    _require(current_user, Cap.PERMISSIONS_MANAGE)
+    from app.services import hrms_permission_service as perms
+    return await perms.reset_permission(current_user, _company(current_user, company_id), cap)
+
+
 @router.get("/access/role-matrix")
 async def hrms_role_matrix(current_user: dict = Depends(get_current_user)):
     """Read-only "review access" table — which capabilities each HRMS role holds, sourced

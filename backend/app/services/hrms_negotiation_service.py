@@ -102,9 +102,9 @@ async def _requisition_with_band(company_id: str, candidate: dict) -> dict:
     if req.get("approved_salary_band_min") is None or req.get("approved_salary_band_max") is None:
         raise HTTPException(
             status_code=409,
-            detail=(f'{req.get("request_no")} has no approved salary band yet. SOP step 9 '
-                    f"is negotiation WITHIN the approved budget, and there is no such thing "
-                    f"before Management/Finance approve one (step 2)."))
+            detail=(f'{req.get("request_no")} has no approved salary band yet. Negotiation '
+                    f"happens WITHIN the band, which HR records at HR verification (or which "
+                    f"comes from a standing salary band for the role)."))
     return req
 
 
@@ -231,6 +231,61 @@ async def negotiation_for(actor: dict, company_id: str, uk: str) -> dict:
 # ─────────────────────────────────────────────────────────────
 # Write
 # ─────────────────────────────────────────────────────────────
+# Candidates in the selection stretch -- interviewed or being interviewed, up to the offer.
+# Both a reference check and a salary negotiation happen here, before the offer goes out.
+_SELECTION_STAGES = [
+    "Interview Scheduled", "Technical Round", "MD Round", "Final Interview Required",
+    "Selected", "Offer Generated",
+]
+
+
+async def _selection_candidates(company_id: str) -> list:
+    """Internal-track candidates in the selection stretch, with their requisition."""
+    rows = await get_collection(COLL_CANDIDATES).find(
+        {"company_id": str(company_id), "application_status": {"$in": _SELECTION_STAGES}},
+        {"uk": 1, "candidate_name": 1, "request_no": 1, "application_status": 1,
+         "current_company": 1, "current_ctc": 1, "expected_ctc": 1, "notice_period": 1,
+         "designation_name": 1}).to_list(500)
+    reqs, out = {}, []
+    for c in rows:
+        no = c.get("request_no")
+        if no not in reqs:
+            reqs[no] = await get_collection(COLL_REQUISITIONS).find_one(
+                {"request_no": no, "company_id": str(company_id)}) or {}
+        req = reqs[no]
+        if req.get("requisition_track") != REQUISITION_TRACK_INTERNAL:
+            continue
+        out.append((c, req))
+    return out
+
+
+async def eligible_candidates(company_id: str) -> list:
+    """Who a negotiation round can be recorded for: the selection stretch, on a requisition
+    with an approved salary band, and not already at the round limit. Carries the
+    candidate's stated expectation and current CTC, and the band, so the form fills itself."""
+    out = []
+    for c, req in await _selection_candidates(company_id):
+        if req.get("approved_salary_band_min") is None or req.get("approved_salary_band_max") is None:
+            continue
+        rounds = await get_collection(COLL_NEGOTIATIONS).count_documents(
+            {"company_id": str(company_id), "uk": c["uk"]})
+        if rounds >= MAX_NEGOTIATION_ROUNDS:
+            continue
+        out.append({
+            "uk": c["uk"], "candidate_name": c.get("candidate_name"),
+            "request_no": c.get("request_no"),
+            "designation_name": req.get("designation_name"),
+            "application_status": c.get("application_status"),
+            "expected_ctc": c.get("expected_ctc"), "current_ctc": c.get("current_ctc"),
+            "notice_period": c.get("notice_period"),
+            "band_min": req.get("approved_salary_band_min"),
+            "band_max": req.get("approved_salary_band_max"),
+            "rounds_so_far": rounds,
+        })
+    out.sort(key=lambda x: (x["candidate_name"] or "").lower())
+    return out
+
+
 async def record_round(actor: dict, company_id: str, payload: dict) -> dict:
     """Record one round. Decides nothing; the offer gate is still the control."""
     uk = (payload.get("uk") or "").strip()

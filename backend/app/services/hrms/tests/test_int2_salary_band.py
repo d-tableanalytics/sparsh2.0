@@ -171,43 +171,43 @@ async def main() -> None:
               "reason" in prefill["hint"].lower())
 
         # =================================================================
-        section("Matching the standing band stamps `master`")
+        section("No budget step: the standing band is stamped automatically")
         # =================================================================
-        await RQ.act_on_requisition(FIN, COMPANY, "HR-REQ-2026-001", "budget-approve",
-                                    budget={"approved_headcount": 2,
-                                            "approved_salary_band_min": 500000,
-                                            "approved_salary_band_max": 800000})
+        # The budget-approval step was removed. A requisition left at "Pending Budget
+        # Approval" is moved on automatically and takes the STANDING band for its role.
+        moved = await RQ.advance_legacy_budget(HR, COMPANY, "HR-REQ-2026-001")
         approved = await reqs.find_one({"request_no": "HR-REQ-2026-001"})
+        check("a legacy row at the removed budget step is moved on", moved == 1
+              and approved["approval_status"] != M.ReqApproval.PENDING_BUDGET.value)
         check("the band is stamped on the requisition",
-              approved["approved_salary_band_min"] == 500000)
+              approved["approved_salary_band_min"] == 500000
+              and approved["approved_salary_band_max"] == 800000)
         check("and its source is recorded as the master",
               approved["band_source"] == M.BAND_SOURCE_MASTER)
         check("with the master row it came from, so the two are traceable",
               approved["band_master_no"] == band["band_no"])
+        check("the approved headcount is the vacancies asked for",
+              approved["approved_headcount"] == 2)
 
         # =================================================================
-        section("An override is allowed, stamped, and must be explained")
+        section("Nobody approves a budget any more")
         # =================================================================
         await expect_http(
-            "approving a DIFFERENT band with no reason",
+            "the old budget-approve action",
             RQ.act_on_requisition(FIN, COMPANY, "HR-REQ-2026-002", "budget-approve",
                                   budget={"approved_headcount": 1,
                                           "approved_salary_band_min": 900000,
                                           "approved_salary_band_max": 1400000}),
-            422, "differs from the standing band")
-
-        await RQ.act_on_requisition(
-            FIN, COMPANY, "HR-REQ-2026-002", "budget-approve",
-            remarks="Scarce skill; agreed with the MD out of cycle.",
-            budget={"approved_headcount": 1,
-                    "approved_salary_band_min": 900000,
-                    "approved_salary_band_max": 1400000})
-        overridden = await reqs.find_one({"request_no": "HR-REQ-2026-002"})
-        check("with a reason it goes through", overridden["approved_salary_band_min"] == 900000)
-        check("and is stamped `manual`, so the deviation is visible",
-              overridden["band_source"] == M.BAND_SOURCE_MANUAL)
-        check("the reason is on the record rather than in somebody's memory",
-              "scarce skill" in (overridden["budget_remarks_approver"] or "").lower())
+            422, "Invalid action")
+        await expect_http(
+            "moving a legacy row on by hand",
+            RQ.act_on_requisition(FIN, COMPANY, "HR-REQ-2026-002", "budget-skip"),
+            422, "runs by itself")
+        await RQ.advance_legacy_budget(HR, COMPANY, "HR-REQ-2026-002")
+        second = await reqs.find_one({"request_no": "HR-REQ-2026-002"})
+        check("the second legacy row also takes the standing band, not a typed one",
+              second["approved_salary_band_min"] == 500000
+              and second["band_source"] == M.BAND_SOURCE_MASTER)
 
         # =================================================================
         section("The classification rule is pure and testable on its own")

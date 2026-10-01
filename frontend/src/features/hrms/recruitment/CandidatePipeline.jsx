@@ -14,6 +14,7 @@ import {
   getCandidates, getCandidate, updateCandidate, deleteCandidate, createCandidate,
   getRequisitions, getCandidateCv, getCandidateAttachment,
   getAssessments, getTelephonicScreenings, getCandidateInterviews, setTalentPool,
+  JOB_PLATFORMS, platformLabel,
 } from '../../../services/hrmsApi';
 import { CandidateJourneyModal } from './CandidateJourney';
 import { CANDIDATE_SOP_LABEL, sopLabelFor } from '../internal/sopLabels';
@@ -206,7 +207,10 @@ const CandidateCard = ({ candidate: c, onOpen }) => (
     <div className="mt-2 flex items-center gap-1.5 flex-wrap">
       <StageBadge status={c.application_status} />
       {c.source && (
-        <span className="text-[10.5px] text-[var(--text-muted)]">{c.source}</span>
+        <span className="text-[10.5px] text-[var(--text-muted)]">
+          {c.source}{platformLabel(c.source_platform) && platformLabel(c.source_platform) !== c.source
+            ? ` · ${platformLabel(c.source_platform)}` : ''}
+        </span>
       )}
     </div>
   </button>
@@ -421,6 +425,21 @@ const Drawer = ({ uk, onClose, onChanged }) => {
 
   useEffect(() => { load(); }, [load]);
 
+  // Source Analytics: correct the platform (an older CV filed as plain "Job Portal").
+  const savePlatform = async (key) => {
+    setSaving(true);
+    try {
+      const { data } = await updateCandidate(uk, { source_platform: key || null }, scope);
+      setC(data);
+      showSuccess(key ? `Job portal set to ${platformLabel(key)}` : 'Job portal cleared');
+      onChanged();
+    } catch (err) {
+      showError(err?.response?.data?.detail || 'Could not update the job portal.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const move = async (status) => {
     const previous = c.application_status;
     // Optimistic: the move is almost always legal (the options came from the server), so
@@ -591,6 +610,14 @@ const Drawer = ({ uk, onClose, onChanged }) => {
                 ['Department', c.department_name],
                 ['Applied on', c.applied_at ? new Date(c.applied_at).toLocaleDateString() : null],
                 ['Source', c.source],
+                ['Job portal / platform', canWrite ? (
+                  <select aria-label="Job portal / platform" disabled={saving}
+                    value={c.source_platform || ''} onChange={(e) => savePlatform(e.target.value)}
+                    className="h-7 px-2 rounded-md border border-[var(--border)] bg-[var(--input-bg)] text-[12px] text-[var(--text-main)]">
+                    <option value="">Not specified</option>
+                    {JOB_PLATFORMS.map(([k, label]) => <option key={k} value={k}>{label}</option>)}
+                  </select>
+                ) : platformLabel(c.source_platform)],
                 ['Requisition', c.request_no],
                 ['Job posting', c.posting_code],
                 ['Job description', c.jd_no],
@@ -720,7 +747,7 @@ const AddModal = ({ onClose, onCreated }) => {
   const { scope } = useHrms();
   const { showSuccess, showError } = useNotification();
   const [form, setForm] = useState({
-    candidate_name: '', can_email: '', can_contact: '', source: 'Direct Application',
+    candidate_name: '', can_email: '', can_contact: '', source: 'Direct Application', source_platform: '',
     total_experience: '', qualification: '', current_ctc: '', expected_ctc: '',
     current_location: '', current_company: '', current_designation: '', notice_period: '',
     linkedin: '', portfolio: '', cover_note: '',
@@ -758,7 +785,8 @@ const AddModal = ({ onClose, onCreated }) => {
       // EVERY non-referral add, so those fields are only included when actually referred.
       const { is_referral, referred_by, referral_source, referrer_employee_code,
         referral_relation, ...rest } = form;
-      const payload = { ...rest, request_no: form.request_no || null, is_referral };
+      const payload = { ...rest, request_no: form.request_no || null, is_referral,
+        source_platform: form.source_platform || null };
       if (is_referral) {
         Object.assign(payload, {
           referred_by, referral_source, referrer_employee_code, referral_relation,
@@ -821,6 +849,15 @@ const AddModal = ({ onClose, onCreated }) => {
               <label className={LABEL} htmlFor="c-source">Source</label>
               <select id="c-source" value={form.source} onChange={set('source')} className={FIELD}>
                 {SOURCES.map((s) => <option key={s} value={s}>{s}</option>)}
+              </select>
+            </div>
+            <div>
+              {/* Source Analytics attributes the whole journey to this. Blank = worked out
+                  from the source above (e.g. Company Website), or "Not specified". */}
+              <label className={LABEL} htmlFor="c-platform">Job portal / platform</label>
+              <select id="c-platform" value={form.source_platform} onChange={set('source_platform')} className={FIELD}>
+                <option value="">— From the source above —</option>
+                {JOB_PLATFORMS.map(([k, label]) => <option key={k} value={k}>{label}</option>)}
               </select>
             </div>
             <div>
@@ -1202,7 +1239,12 @@ const CandidatePipeline = () => {
                   <td className="px-4 py-2.5 text-[var(--text-muted)] whitespace-nowrap">
                     {c.applied_at ? new Date(c.applied_at).toLocaleDateString() : '—'}
                   </td>
-                  <td className="px-4 py-2.5 text-[var(--text-main)]">{c.source || '—'}</td>
+                  <td className="px-4 py-2.5 text-[var(--text-main)]">
+                    {c.source || '—'}
+                    {platformLabel(c.source_platform) && platformLabel(c.source_platform) !== c.source && (
+                      <span className="block text-[11px] text-[var(--text-muted)]">{platformLabel(c.source_platform)}</span>
+                    )}
+                  </td>
                   <td className="px-4 py-2.5 text-[var(--text-muted)]">{c.total_experience || '—'}</td>
                   <td className="px-4 py-2.5 text-[var(--text-muted)]">{c.current_location || '—'}</td>
                   <td className="px-4 py-2.5"><StageBadge status={c.application_status} /></td>

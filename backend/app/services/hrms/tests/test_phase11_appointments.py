@@ -205,8 +205,12 @@ async def main() -> None:
         check("the signature is recorded", out["signature"] == "R. Mehta")
 
         moved = await candidates.find_one({"uk": "CAN-001"})
-        check("the candidate advances to Appointment Letter Sent",
-              moved["application_status"] == S.APPOINTMENT_LETTER_SENT.value)
+        # Sending the letter moves the candidate to Appointment Letter Sent, and onboarding
+        # then opens automatically (the letter is what unlocks it), taking them on to
+        # Pre-Onboarding. Either stage proves the letter was sent and recorded.
+        check("the candidate advances past Appointment Letter Sent (onboarding opens next)",
+              moved["application_status"] in (S.APPOINTMENT_LETTER_SENT.value,
+                                               S.PRE_ONBOARDING.value))
         check("the stage move is audited",
               any(a["action"] == M.AUDIT_STAGE_CHANGED
                   and "Appointment Letter Sent" in (a.get("detail") or "")
@@ -359,9 +363,9 @@ async def main() -> None:
               M.can_transition(S.OFFER_ACCEPTED, S.APPOINTMENT_LETTER_SENT))
         check("Appointment Letter Sent -> Pre-Onboarding is legal",
               M.can_transition(S.APPOINTMENT_LETTER_SENT, S.PRE_ONBOARDING))
-        check("the DIRECT Offer Accepted -> Pre-Onboarding edge is kept "
-              "(the letter is optional)",
-              M.can_transition(S.OFFER_ACCEPTED, S.PRE_ONBOARDING))
+        check("the DIRECT Offer Accepted -> Pre-Onboarding edge is GONE "
+              "(the letter is mandatory before onboarding)",
+              not M.can_transition(S.OFFER_ACCEPTED, S.PRE_ONBOARDING))
         check("it is onboardable", S.APPOINTMENT_LETTER_SENT in M.ONBOARDABLE_STATUSES)
         check("it counts as filling the vacancy", S.APPOINTMENT_LETTER_SENT in M.FILLED_STATUSES)
         check("it ranks in the accepted band, not above it",

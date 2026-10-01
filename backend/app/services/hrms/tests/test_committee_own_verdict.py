@@ -106,6 +106,15 @@ async def main() -> None:
         return next(c for c in store[M.COLL_CANDIDATES].docs if c["uk"] == uk)["application_status"]
 
     try:
+        section("Only HR sends the approval request")
+        can = lambda u: M.Cap.SHORTLIST_CONVENE in HACC.capabilities_for(u)  # noqa: E731
+        check("HR may convene (send the request)", can(HR))
+        check("the HOD may not", not can(HOD))
+        check("the MD may not", not can(actor(str(ObjectId()), "MD")))
+        check("Finance may not", not can(actor(str(ObjectId()), "FINANCE")))
+        check("...but the HOD can still answer a request (reads the committee)",
+              M.Cap.SHORTLIST_READ in HACC.capabilities_for(HOD))
+
         section("Convening asks each member; nobody is pre-approved")
         # HR tries to convene with the HOD already marked as agreeing.
         rec = await SL.create_shortlist_review(HR, COMPANY, {

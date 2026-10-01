@@ -953,7 +953,16 @@ async def update_event(event_id: str, updates: dict, background_tasks: Backgroun
 
     if not (is_admin or has_update_perm or is_creator or is_company_admin):
         raise HTTPException(status_code=403, detail="Not authorized to edit this event.")
-         
+
+    # Uploaded FILES are owned by /tasks/{id}/attachments (upload and delete), not by this
+    # edit. The task form sends only its link-type attachments, so taking `attachments` as
+    # given would wipe every file uploaded to the task the moment it was saved. Keep the
+    # stored files; take only the links from the form.
+    if "attachments" in updates:
+        stored_files = [a for a in (existing.get("attachments") or []) if a.get("type") != "link"]
+        sent_links = [a for a in (updates.get("attachments") or []) if (a or {}).get("type") == "link"]
+        updates["attachments"] = stored_files + sent_links
+
     # ─── Record Completion Timestamp ───
     if updates.get("status") == "completed" and existing.get("status") != "completed":
         updates["completed_at"] = datetime.now(timezone.utc)

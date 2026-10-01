@@ -45,10 +45,8 @@ import { REQUISITION_SOP_LABEL, sopLabelFor } from './sopLabels';
 const GATES = [
   { key: 'hr', label: 'HR verification', waiting: 'Pending HR Verification',
     who: 'HR checks the role and its justification.' },
-  { key: 'budget', label: 'Budget approval', waiting: 'Pending Budget Approval',
-    who: 'Management or Finance approve the headcount and the salary band.' },
-  { key: 'escalation', label: 'Escalation', waiting: 'Pending Escalation',
-    who: 'Raised above the sanctioned headcount, so it routes up the reporting line.',
+  { key: 'escalation', label: 'Headcount approval', waiting: 'Pending Escalation',
+    who: 'Raised above the sanctioned headcount, so Management must approve the extra headcount.',
     // Only ever shown when it actually happened -- most requisitions never escalate.
     conditional: true },
   { key: 'scorecard', label: 'Scorecard approval', waiting: 'Pending Scorecard Approval',
@@ -220,7 +218,7 @@ const InternalRequisitionDetail = () => {
           <div className="text-right">
             <div className="flex flex-wrap items-center justify-end gap-1.5">
               <Chip tone="accent">Internal hiring</Chip>
-              <Chip tone={approved ? 'good' : rejected ? 'bad' : 'warn'}>{status}</Chip>
+              <Chip tone={approved ? 'good' : rejected ? 'bad' : 'warn'}>{status === 'Pending Escalation' ? 'Pending Management Approval' : status}</Chip>
               {req.closing_status && req.closing_status !== 'Open' && (
                 <Chip tone="neutral">{req.closing_status}</Chip>
               )}
@@ -287,12 +285,19 @@ const InternalRequisitionDetail = () => {
                     : `a sanctioned strength of ${req.sanction_snapshot.sanctioned}`}.
                 </p>
               )}
-              {req.escalation_note && (
-                <p className="mt-1.5 text-[12.5px] text-[var(--accent-orange)]">
-                  {req.escalation_note}
+              {req.md_clearance && (
+                <p className="mt-1.5 text-[12.5px] font-semibold text-[var(--accent-green,#16a34a)]">
+                  Cleared by {req.md_clearance.by || 'the MD'} ({req.md_clearance.how}) — nothing
+                  more is needed from the MD; it moves on to the next step.
                 </p>
               )}
-              {req.escalation_note && (
+              {req.escalation_note && !req.md_clearance && (
+                <p className="mt-1.5 text-[12.5px] text-[var(--accent-orange)]">
+                  Not cleared by the MD: no escalation chain could be built for the raiser when the
+                  budget was approved, so it went on without an MD step.
+                </p>
+              )}
+              {req.escalation_note && !req.md_clearance && (
                 <p className="mt-1.5 text-[11.5px] text-[var(--text-muted)]">
                   Give the raiser a reporting manager if this should have gone up a line —
                   the ladder is built from it, and an escalation cannot be rebuilt after the
@@ -593,8 +598,8 @@ const InternalRequisitionDetail = () => {
       {gateOpen && (
         <ApprovalDialog
           title={`Approve requisition — ${requestNo}`}
-          subtitle={'The final scorecard gate. The position scorecard is already signed off; '
-            + 'this approves the requisition itself and makes its JD publishable.'}
+          subtitle={'Normally automatic: the HOD signing off the position scorecard approves the '
+            + 'requisition and sends it to job posting. Use this only if it is still waiting.'}
           approveLabel="Approve requisition"
           rejectLabel="Send back"
           busy={gateBusy}

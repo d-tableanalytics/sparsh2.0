@@ -540,10 +540,18 @@ async def approve_scorecard(actor: dict, company_id: str, scr_no: str,
     link = "/hrms/scorecards"
     name = current.get("designation_name") or current.get("request_no")
     if state["complete"]:
+        # The HOD's sign-off is the final approval: if the budget gate is already cleared,
+        # the requisition is approved now and goes straight to job posting.
+        from app.services.hrms_requisition_service import finalise_if_scorecard_approved
+        finalised = await finalise_if_scorecard_approved(
+            actor, company_id, current.get("request_no"))
         await notify_hrms_role(
             company_id, ["HR"], f"Scorecard {scr_no} is fully approved",
-            f"The bar for {name} is set. Sourcing can begin once the budget gate is "
-            f"cleared.", kind="success", link=link, email=True)
+            (f"The bar for {name} is set and the requisition is approved — its job posting "
+             f"can go out now." if finalised else
+             f"The bar for {name} is set. The requisition is approved automatically once "
+             f"the budget gate is cleared."),
+            kind="success", link=link, email=True)
     elif state["outstanding_roles"] == prev_state["outstanding_roles"]:
         # The signature satisfied nothing new -- a re-sign. The chase already went out
         # when the state first moved; repeating it is how an alert becomes noise.

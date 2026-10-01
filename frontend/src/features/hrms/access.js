@@ -30,6 +30,8 @@ export const HRMS_ROLE = {
 export const CAP = {
   MODULE_ACCESS: 'module.access',
   MODULE_ADMIN: 'module.admin',
+  // Roles & Permissions: who may change which role / person holds each action.
+  PERMISSIONS_MANAGE: 'permissions.manage',
   AUDIT_READ: 'audit.read',
 
   // Phase 2
@@ -154,6 +156,8 @@ export const CAP = {
   // Finance approves what a role costs, never who fills it.
   SHORTLIST_READ: 'shortlist.read',
   SHORTLIST_WRITE: 'shortlist.write',
+  // Sending the committee approval request — HR only.
+  SHORTLIST_CONVENE: 'shortlist.convene',
   // Pre-boarding engagement (SOP §6). Tracking, not a gate — nothing is blocked by it,
   // which is why there is no third "approve" capability.
   PREBOARDING_READ: 'preboarding.read',
@@ -215,6 +219,11 @@ export const CAP = {
   ATTENDANCE_REGULARIZE_APPROVE: 'attendance.regularize_approve',
   ATTENDANCE_LOCK: 'attendance.lock',
   ATTENDANCE_CLOSURE_READ: 'attendance.closure_read',
+  // Checking yourself in / out, only from inside an office.
+  ATTENDANCE_SELF_PUNCH: 'attendance.self_punch',
+  ATTENDANCE_FLEXI_REQUEST: 'attendance.flexi_request',
+  ATTENDANCE_FLEXI_APPROVE: 'attendance.flexi_approve',
+  ATTENDANCE_IMPORT: 'attendance.import',
   OD_REQUEST: 'od.request',
   OD_APPROVE: 'od.approve',
   LEAVE_READ: 'leave.read',

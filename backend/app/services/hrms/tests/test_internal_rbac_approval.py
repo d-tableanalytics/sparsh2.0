@@ -245,27 +245,19 @@ async def main() -> None:
         # =================================================================
         section("3. Unauthorised approval is refused at every wrong door")
         # =================================================================
-        # The sequence is enforced as well as the permission: even the right approver
-        # cannot reach past the stage the requisition is actually at.
+        # There is no budget-approval step any more: HR verification is the first gate and
+        # only HR may clear it. The old budget action is simply unknown now.
+        for label, who in (("Finance", FIN), ("HOD", HOD), ("an ordinary employee", EMP)):
+            await expect_http(
+                f"{label} tries to verify (HR's step)",
+                RS.act_on_requisition(who, COMPANY, REQ, "hr-verify"), 403, "not authorised")
         await expect_http(
-            "HR attempts the budget approval",
-            RS.act_on_requisition(HR, COMPANY, REQ, "budget-approve", budget=BUDGET),
-            403, "not authorised")
-        await expect_http(
-            "HOD attempts the budget approval",
-            RS.act_on_requisition(HOD, COMPANY, REQ, "budget-approve", budget=BUDGET),
-            403, "not authorised")
-        await expect_http(
-            "an ordinary employee attempts the budget approval",
-            RS.act_on_requisition(EMP, COMPANY, REQ, "budget-approve", budget=BUDGET),
-            403, "not authorised")
-        await expect_http(
-            "Finance tries to skip HR verification and approve the budget now",
+            "the removed budget-approve action is unknown",
             RS.act_on_requisition(FIN, COMPANY, REQ, "budget-approve", budget=BUDGET),
-            409, "not \"Pending Budget Approval\"")
+            422, "invalid action")
         await expect_http(
-            "HOD tries to verify (HR's step)",
-            RS.act_on_requisition(HOD, COMPANY, REQ, "hr-verify"), 403, "not authorised")
+            "the legacy budget-skip cannot be pressed by hand",
+            RS.act_on_requisition(HR, COMPANY, REQ, "budget-skip"), 422)
         await expect_http(
             "a client-chain action on an internal requisition is simply unknown",
             RS.act_on_requisition(MD, COMPANY, REQ, "md-approve"), 422, "invalid action")
@@ -273,60 +265,42 @@ async def main() -> None:
               await status_of(REQ) == M.ReqApproval.PENDING_HR_VERIFICATION.value)
 
         # =================================================================
-        section("4. Nothing may be sourced before the budget clears")
+        section("4. Nothing may be sourced before HR verifies it")
         # =================================================================
         await expect_http(
             "adding a candidate while awaiting HR verification",
             CS.create_candidate(HR, COMPANY, candidate(request_no=REQ)),
-            409, "budget approval")
-
-        verified = await RS.act_on_requisition(HR, COMPANY, REQ, "hr-verify")
-        check("HR verification moves it to Pending Budget Approval",
-              verified["approval_status"] == M.ReqApproval.PENDING_BUDGET.value)
-        check("HR verification is stamped with who and when",
-              verified.get("hr_reviewed_by") == U_HR and verified.get("hr_reviewed_at"))
-
-        await expect_http(
-            "adding a candidate after HR verification but before the budget",
-            CS.create_candidate(HR, COMPANY, candidate(request_no=REQ)),
-            409, "no internal role may be sourced")
+            409, "verified by HR")
         check("the sourcing gate is declared in the model, not in a service",
               M.PRE_BUDGET_STATES == {M.ReqApproval.PENDING_HR_VERIFICATION.value,
                                       M.ReqApproval.PENDING_BUDGET.value})
-        check("budget approval is structurally mandatory (Approved is unreachable "
-              "without passing through it)", M.budget_approval_is_mandatory())
+        check("the chain is structurally sound (no budget step; Approved only via the "
+              "scorecard)", M.approval_chain_is_sound())
 
         # =================================================================
-        section("5. Management/Finance reject it")
+        section("5. HR rejects it")
         # =================================================================
         await expect_http(
             "rejecting without a reason",
-            RS.act_on_requisition(FIN, COMPANY, REQ, "budget-reject"),
+            RS.act_on_requisition(HR, COMPANY, REQ, "hr-reject"),
             422, "remark is required")
         check("a rejection with no reason did not change the status",
-              await status_of(REQ) == M.ReqApproval.PENDING_BUDGET.value)
+              await status_of(REQ) == M.ReqApproval.PENDING_HR_VERIFICATION.value)
 
         rejected = await RS.act_on_requisition(
-            FIN, COMPANY, REQ, "budget-reject",
+            HR, COMPANY, REQ, "hr-reject",
             remarks="Headcount deferred to the next quarter's budget.")
-        check("rejected by Finance",
+        check("rejected by HR",
               rejected["approval_status"] == M.ReqApproval.REJECTED.value)
         check("the reason is on the record",
-              "deferred" in (rejected.get("md_remarks") or
-                             rejected.get("hr_remarks") or "").lower()
-              or any("deferred" in str(a.get("detail", "")).lower()
-                     for a in store[M.COLL_AUDIT_LOG].docs))
-        check("the rejection is audited under the internal-track budget action",
-              M.AUDIT_REQ_BUDGET_NO in audit_actions(REQ))
+              "deferred" in (rejected.get("hr_remarks") or "").lower())
+        check("the rejection is audited",
+              M.AUDIT_REQ_HR_REJECTED in audit_actions(REQ))
         check("no salary band was stamped by a rejection",
               (await store[M.COLL_REQUISITIONS].find_one(
                   {"request_no": REQ})).get("approved_salary_band_min") is None)
 
         section("5b. A rejected requisition is a dead end")
-        await expect_http(
-            "approving a rejected requisition",
-            RS.act_on_requisition(FIN, COMPANY, REQ, "budget-approve", budget=BUDGET),
-            409, "not \"Pending Budget Approval\"")
         await expect_http(
             "re-verifying a rejected requisition",
             RS.act_on_requisition(HR, COMPANY, REQ, "hr-verify"),
@@ -338,7 +312,7 @@ async def main() -> None:
 
         # The brief asks that a rejection "stops" the request. It stops the APPROVAL chain,
         # as asserted above. It does not stop sourcing, because the sourcing gate tests for
-        # two pre-budget states rather than for the presence of an approval.
+        # the pre-verification states rather than for the presence of an approval.
         blocked_after_rejection = True
         try:
             await CS.create_candidate(HR, COMPANY, candidate(request_no=REQ))
@@ -352,13 +326,13 @@ async def main() -> None:
                 "a rejected requisition does not block sourcing",
                 "PRE_BUDGET_STATES (models/hrms.py) lists only Pending HR Verification and "
                 "Pending Budget Approval, and neither candidate-insert path checks "
-                "closing_status or budget_approved_at. A requisition Finance REJECTED "
-                "therefore accepts hand-added CVs and talent-pool sourcing. Fix: make "
-                "assert_sourcing_allowed a positive check -- budget_approved_at present, "
-                "status in {Pending Scorecard Approval, Approved}, closing_status Open.")
+                "closing_status. A REJECTED requisition therefore accepts hand-added CVs "
+                "and talent-pool sourcing. Fix: make assert_sourcing_allowed a positive "
+                "check -- status in {Pending Scorecard Approval, Approved}, closing_status "
+                "Open.")
 
         # =================================================================
-        section("6. Resubmitted, approved, and moves on")
+        section("6. Resubmitted, verified, and moves on")
         # =================================================================
         resubmitted = await RS.create_requisition(HOD, COMPANY, payload(
             notes="Resubmission of " + REQ + " against the new quarter's budget."))
@@ -367,49 +341,19 @@ async def main() -> None:
         check("it starts at the beginning of the chain again",
               resubmitted["approval_status"] == M.ReqApproval.PENDING_HR_VERIFICATION.value)
 
-        await RS.act_on_requisition(HR, COMPANY, REQ2, "hr-verify")
-        check("HR verified the resubmission",
-              await status_of(REQ2) == M.ReqApproval.PENDING_BUDGET.value)
-
-        await expect_http(
-            "approving with no figures at all",
-            RS.act_on_requisition(FIN, COMPANY, REQ2, "budget-approve", budget={}),
-            422, "headcount and salary band")
-        await expect_http(
-            "approving with an inverted band",
-            RS.act_on_requisition(FIN, COMPANY, REQ2, "budget-approve", budget={
-                "approved_headcount": 1,
-                "approved_salary_band_min": float(ANNUAL + 30_000),
-                "approved_salary_band_max": float(ANNUAL - 20_000)}),
-            422, "cannot exceed")
-        await expect_http(
-            "approving zero headcount",
-            RS.act_on_requisition(FIN, COMPANY, REQ2, "budget-approve", budget={
-                "approved_headcount": 0,
-                "approved_salary_band_min": float(ANNUAL),
-                "approved_salary_band_max": float(ANNUAL)}),
-            422, "at least 1")
-        check("no failed approval left a partial band behind",
-              (await store[M.COLL_REQUISITIONS].find_one(
-                  {"request_no": REQ2})).get("approved_salary_band_min") is None)
-
-        approved = await RS.act_on_requisition(
-            FIN, COMPANY, REQ2, "budget-approve", budget=BUDGET,
-            remarks="Approved against Q1 headcount plan.")
-        check("Finance approval moves it to Pending Scorecard Approval",
-              approved["approval_status"] == M.ReqApproval.PENDING_SCORECARD.value)
-        check("the approved headcount is recorded", approved["approved_headcount"] == 1)
-        check(f"the salary band is stamped ({ANNUAL - 20_000:,.0f}-{ANNUAL + 30_000:,.0f})",
-              approved["approved_salary_band_min"] == float(ANNUAL - 20_000)
-              and approved["approved_salary_band_max"] == float(ANNUAL + 30_000))
-        check("the approver is recorded by name and id",
-              approved["budget_approved_by"] == U_FIN
-              and approved.get("budget_approved_by_name"))
-        check("the approval is timestamped", bool(approved.get("budget_approved_at")))
-        check("the approver's remark is kept",
-              "Q1 headcount" in (approved.get("budget_remarks_approver") or ""))
+        verified = await RS.act_on_requisition(HR, COMPANY, REQ2, "hr-verify",
+                                               remarks="Approved against Q1 headcount plan.")
+        check("within sanction, HR verification goes straight to Pending Scorecard Approval",
+              verified["approval_status"] == M.ReqApproval.PENDING_SCORECARD.value)
+        check("HR verification is stamped with who and when",
+              verified.get("hr_reviewed_by") == U_HR and verified.get("hr_reviewed_at"))
+        check("the approved headcount is taken from the vacancies",
+              verified["approved_headcount"] == 1)
+        check("no standing band exists for the role, so none is stamped (offers are then "
+              "not band-checked)", verified.get("approved_salary_band_min") is None)
+        check("HR's remark is kept", "Q1 headcount" in (verified.get("hr_remarks") or ""))
         check("the SLA clock for this milestone is stamped",
-              "budget_approved" in (approved.get("sla_actuals") or {}))
+              "budget_approved" in (verified.get("sla_actuals") or {}))
 
         section("6b. Sourcing opens exactly at the gate, and no earlier")
         opened = await CS.create_candidate(HR, COMPANY, candidate(request_no=REQ2))
@@ -472,12 +416,12 @@ async def main() -> None:
         # trail is answering "who authorised this", one row per decision.
         check("the raise is on the trail", M.AUDIT_REQ_CREATED in trail)
         check("HR verification is on the trail", M.AUDIT_REQ_HR_VERIFIED in trail)
-        check("the budget approval is on the trail", M.AUDIT_REQ_BUDGET_OK in trail)
+        check("there is no budget-approval row any more", M.AUDIT_REQ_BUDGET_OK not in trail)
         check("the scorecard approval is on the trail", M.AUDIT_REQ_SCORECARD_OK in trail)
         check("the rejected requisition kept its own separate trail, ending at the "
-              "budget rejection",
-              M.AUDIT_REQ_BUDGET_NO in audit_actions(REQ)
-              and M.AUDIT_REQ_BUDGET_OK not in audit_actions(REQ))
+              "HR rejection",
+              M.AUDIT_REQ_HR_REJECTED in audit_actions(REQ)
+              and M.AUDIT_REQ_HR_VERIFIED not in audit_actions(REQ))
 
         rows = [a for a in store[M.COLL_AUDIT_LOG].docs if a.get("entity_id") == REQ2]
         check("each audit row names the actor",
@@ -485,17 +429,12 @@ async def main() -> None:
         check("each audit row is timestamped", all(r.get("created_at") for r in rows))
         check("each audit row is scoped to the company",
               all(r.get("company_id") == COMPANY for r in rows))
-        budget_row = next(r for r in rows if r["action"] == M.AUDIT_REQ_BUDGET_OK)
-        check("the budget-approval row names FINANCE as the approver, not the raiser",
-              budget_row["actor_id"] == U_FIN)
         verify_row = next(r for r in rows if r["action"] == M.AUDIT_REQ_HR_VERIFIED)
         check("the verification row names HR", verify_row["actor_id"] == U_HR)
-        check("the trail is append-only in order raised -> verified -> budget -> scorecard",
+        check("the trail is append-only in order raised -> verified -> scorecard",
               [r["action"] for r in rows if r["action"] in (
-                  M.AUDIT_REQ_CREATED, M.AUDIT_REQ_HR_VERIFIED,
-                  M.AUDIT_REQ_BUDGET_OK, M.AUDIT_REQ_SCORECARD_OK)]
-              == [M.AUDIT_REQ_CREATED, M.AUDIT_REQ_HR_VERIFIED,
-                  M.AUDIT_REQ_BUDGET_OK, M.AUDIT_REQ_SCORECARD_OK])
+                  M.AUDIT_REQ_CREATED, M.AUDIT_REQ_HR_VERIFIED, M.AUDIT_REQ_SCORECARD_OK)]
+              == [M.AUDIT_REQ_CREATED, M.AUDIT_REQ_HR_VERIFIED, M.AUDIT_REQ_SCORECARD_OK])
 
     finally:
         mongo.get_collection = original

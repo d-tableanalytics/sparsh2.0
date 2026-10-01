@@ -8,7 +8,7 @@ import { HrmsLoading, HrmsError, HrmsEmpty } from '../common/HrmsStates';
 import { useNotification } from '../../../context/NotificationContext';
 import {
   getNegotiationRounds, getCandidateNegotiation, recordNegotiationRound,
-  getExceptions, raiseException,
+  getExceptions, raiseException, getNegotiationEligible,
 } from '../../../services/hrmsApi';
 import { FIELD, LABEL, TEXTAREA, day } from './internalKit';
 import {
@@ -248,12 +248,44 @@ const NegotiationBoard = () => {
   );
 };
 
+// "6 LPA", "6.5 lakh", "6,00,000", "600000" -> a number; anything else -> null, so the field
+// is left for HR rather than filled with a misreading.
+const toAmount = (text) => {
+  if (text == null) return null;
+  const raw = String(text).toLowerCase().replace(/,/g, '').trim();
+  const m = raw.match(/(\d+(?:\.\d+)?)/);
+  if (!m) return null;
+  let n = parseFloat(m[1]);
+  if (/lpa|lakh|lac|\bl\b/.test(raw)) n *= 100000;
+  else if (/\bk\b|thousand/.test(raw)) n *= 1000;
+  else if (/cr|crore/.test(raw)) n *= 10000000;
+  return Number.isFinite(n) && n > 0 ? Math.round(n) : null;
+};
+
 const RoundModal = ({ scope, preset, onClose, onDone, showSuccess, showError }) => {
   const [form, setForm] = useState({
     uk: preset?.uk || '', proposed_ctc: '', candidate_expectation: '', notes: '',
   });
   const [busy, setBusy] = useState(false);
   const set = (key) => (e) => setForm((f) => ({ ...f, [key]: e.target.value }));
+
+  // Pick from the candidates a round can be recorded for, instead of typing an id.
+  const [eligible, setEligible] = useState(null);
+  useEffect(() => {
+    getNegotiationEligible(scope)
+      .then(({ data }) => setEligible(data?.candidates || []))
+      .catch(() => setEligible([]));
+  }, [scope]);
+  const chosen = (eligible || []).find((c) => c.uk === form.uk);
+  const pick = (e) => {
+    const c = (eligible || []).find((x) => x.uk === e.target.value);
+    const asked = toAmount(c?.expected_ctc);
+    setForm((f) => ({
+      ...f, uk: e.target.value,
+      // What they told us they expect, as a starting figure HR can correct.
+      candidate_expectation: asked != null ? String(asked) : '',
+    }));
+  };
 
   const submit = async () => {
     if (!form.uk.trim() || !form.proposed_ctc) {
@@ -297,10 +329,31 @@ const RoundModal = ({ scope, preset, onClose, onDone, showSuccess, showError }) 
       )}
     >
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-        <div>
-          <label className={LABEL} htmlFor="neg-uk">Candidate ID *</label>
-          <input id="neg-uk" value={form.uk} onChange={set('uk')} className={FIELD}
-            placeholder="CAN-001" readOnly={Boolean(preset?.uk)} />
+        <div className="sm:col-span-2">
+          <label className={LABEL} htmlFor="neg-uk">Candidate *</label>
+          <select id="neg-uk" value={form.uk} onChange={pick} className={FIELD}
+            disabled={eligible === null || Boolean(preset?.uk)}>
+            <option value="">{eligible === null ? 'Loading…'
+              : eligible.length ? 'Choose a candidate…'
+                : 'No candidate is eligible (selection stage, on a requisition with an approved band)'}</option>
+            {preset?.uk && !(eligible || []).some((c) => c.uk === preset.uk) && (
+              <option value={preset.uk}>{preset.uk}</option>
+            )}
+            {(eligible || []).map((c) => (
+              <option key={c.uk} value={c.uk}>
+                {c.candidate_name} ({c.uk}) — {c.designation_name || c.request_no}
+                {c.rounds_so_far ? ` · ${c.rounds_so_far} round(s) so far` : ''}
+              </option>
+            ))}
+          </select>
+          {chosen && (
+            <p className="mt-1 text-[11px] text-[var(--text-muted)]">
+              Approved band: <b>{money(chosen.band_min)} – {money(chosen.band_max)}</b>
+              {chosen.current_ctc ? ` · current CTC ${chosen.current_ctc}` : ''}
+              {chosen.expected_ctc ? ` · expects ${chosen.expected_ctc}` : ''}
+              {chosen.notice_period ? ` · notice ${chosen.notice_period}` : ''}
+            </p>
+          )}
         </div>
         <div>
           <label className={LABEL} htmlFor="neg-asked">Candidate&rsquo;s expectation</label>

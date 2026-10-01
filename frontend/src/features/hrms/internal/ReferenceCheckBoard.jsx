@@ -6,7 +6,7 @@ import HrmsPageHeader from '../common/HrmsPageHeader';
 import HrmsScopeBar from '../common/HrmsScopeBar';
 import { HrmsLoading, HrmsError, HrmsEmpty } from '../common/HrmsStates';
 import { useNotification } from '../../../context/NotificationContext';
-import { getReferenceChecks, createReferenceCheck } from '../../../services/hrmsApi';
+import { getReferenceChecks, createReferenceCheck, getReferenceEligible } from '../../../services/hrmsApi';
 import { FIELD, LABEL, TEXTAREA, day, toneFor } from './internalKit';
 import {
   Btn, Chip, Facts, Modal, RecordList,
@@ -188,6 +188,24 @@ const RecordModal = ({ scope, onClose, onDone, showSuccess, showError }) => {
   const [busy, setBusy] = useState(false);
   const set = (key) => (e) => setForm((f) => ({ ...f, [key]: e.target.value }));
 
+  // Pick from the candidates who can have a reference taken, instead of typing an id.
+  const [eligible, setEligible] = useState(null);
+  useEffect(() => {
+    getReferenceEligible(scope)
+      .then(({ data }) => setEligible(data?.candidates || []))
+      .catch(() => setEligible([]));
+  }, [scope]);
+  const chosen = (eligible || []).find((c) => c.uk === form.uk);
+  const pick = (e) => {
+    const c = (eligible || []).find((x) => x.uk === e.target.value);
+    // Their current employer is the usual place a referee comes from -- a starting point
+    // HR can change, never a guess written over something already typed.
+    setForm((f) => ({
+      ...f, uk: e.target.value,
+      referee_organisation: f.referee_organisation || c?.current_company || '',
+    }));
+  };
+
   const submit = async () => {
     if (!form.uk.trim() || !form.referee_name.trim()) {
       showError('A candidate and a referee are both required.');
@@ -227,10 +245,27 @@ const RecordModal = ({ scope, onClose, onDone, showSuccess, showError }) => {
       )}
     >
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-        <div>
-          <label className={LABEL} htmlFor="ref-uk">Candidate ID *</label>
-          <input id="ref-uk" value={form.uk} onChange={set('uk')} className={FIELD}
-            placeholder="CAN-001" />
+        <div className="sm:col-span-2">
+          <label className={LABEL} htmlFor="ref-uk">Candidate *</label>
+          <select id="ref-uk" value={form.uk} onChange={pick} className={FIELD}
+            disabled={eligible === null}>
+            <option value="">{eligible === null ? 'Loading…'
+              : eligible.length ? 'Choose a candidate…' : 'No candidate is at the selection stage'}</option>
+            {(eligible || []).map((c) => (
+              <option key={c.uk} value={c.uk}>
+                {c.candidate_name} ({c.uk}) — {c.designation_name || c.request_no} · {c.application_status}
+                {c.cleared ? ' · already cleared' : c.references_on_record ? ` · ${c.references_on_record} on record` : ''}
+              </option>
+            ))}
+          </select>
+          {chosen && (
+            <p className="mt-1 text-[11px] text-[var(--text-muted)]">
+              {chosen.current_company ? `Currently at ${chosen.current_company}. ` : ''}
+              {chosen.cleared
+                ? 'A positive reference is already on record — this one is extra.'
+                : 'No positive reference yet — the offer is blocked until one is recorded.'}
+            </p>
+          )}
         </div>
         <div>
           <label className={LABEL} htmlFor="ref-name">Referee name *</label>

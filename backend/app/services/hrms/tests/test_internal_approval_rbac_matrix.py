@@ -167,7 +167,8 @@ async def main() -> None:
         # =================================================================
         section("3. Separation of duties -- nobody but the owner drives it alone")
         # =================================================================
-        CHAIN = ["hr-verify", "budget-approve", "scorecard-approve"]
+        # No budget-approval step any more: the chain is HR verification, then the scorecard.
+        CHAIN = ["hr-verify", "scorecard-approve"]
         for label in ACTORS:
             can_all = all(label in holders[a] for a in CHAIN)
             if label == "Superadmin":
@@ -176,7 +177,7 @@ async def main() -> None:
             else:
                 steps = [a for a in CHAIN if label in holders[a]]
                 check(f"{label} cannot drive the chain alone "
-                      f"(holds {len(steps)}/3: {steps or 'none'})", not can_all)
+                      f"(holds {len(steps)}/{len(CHAIN)}: {steps or 'none'})", not can_all)
 
         # =================================================================
         section("4. A client-track caller is refused the internal chain outright")

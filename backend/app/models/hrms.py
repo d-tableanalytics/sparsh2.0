@@ -36,6 +36,12 @@ from pydantic import BaseModel, Field
 # ─────────────────────────────────────────────────────────────
 # Phase 1 — foundation
 COLL_AUDIT_LOG        = "hrms_audit_log"
+# Per-company overrides of who holds each capability (Dynamic Roles & Permissions).
+COLL_PERMISSION_POLICIES = "hrms_permission_policies"
+# Flexible-timing requests (attendance rules).
+COLL_FLEXI_TIMING = "hrms_flexi_timing"
+# Visits to a posting's job page, per platform tracked link (Job Portal Reach).
+COLL_POSTING_VIEWS = "hrms_posting_views"
 COLL_COUNTERS         = "hrms_counters"
 
 # Phase 2 — employee master
@@ -271,6 +277,18 @@ COLL_PULSE_RESPONSES = "hrms_pulse_responses"
 # Format: (collection, keys, options)  — identical shape to TPMS_INDEXES.
 # ─────────────────────────────────────────────────────────────
 HRMS_INDEXES = [
+    # Job Portal Reach: one row per visitor per posting per platform per day.
+    (COLL_POSTING_VIEWS, [("posting_code", 1), ("platform", 1), ("visitor", 1), ("day", 1)],
+     {"unique": True, "name": "uniq_view_day"}),
+    (COLL_POSTING_VIEWS, [("company_id", 1), ("day", 1)], {"name": "by_company_day"}),
+    # Flexible timing requests (attendance rules).
+    (COLL_FLEXI_TIMING, [("company_id", 1), ("flexi_no", 1)],
+     {"unique": True, "name": "uniq_flexi_no"}),
+    (COLL_FLEXI_TIMING, [("company_id", 1), ("employee_code", 1), ("from_date", 1)],
+     {"name": "by_employee_dates"}),
+    # One rule per company per capability (Dynamic Roles & Permissions).
+    (COLL_PERMISSION_POLICIES, [("company_id", 1), ("cap", 1)],
+     {"unique": True, "name": "uniq_company_cap"}),
     # ── Phase 1 ──
     # Audit reads are always "what happened to this entity" or "what happened in this
     # company lately"; both are indexed so the Phase 5 candidate journey and the Phase 15
@@ -292,10 +310,14 @@ HRMS_INDEXES = [
                                                                "name": "uniq_user"}),
     (COLL_EMPLOYEE_PROFILES, [("company_id", 1), ("employment_status", 1)],
                                                               {"name": "by_company_status"}),
-    # Sparse: a profile may exist before a code is minted, but codes never collide.
+    # A profile may exist before a code is minted, but codes never collide.
+    # PARTIAL, not sparse. `sparse` does nothing on a COMPOUND index whose first field is
+    # always present (company_id): a document is indexed if ANY key exists, so every row
+    # without the second value is indexed as null -- and the second such row in a company
+    # fails with E11000. The partial filter indexes only rows that actually carry the value.
     (COLL_EMPLOYEE_PROFILES, [("company_id", 1), ("employee_code", 1)],
-                                                              {"unique": True, "sparse": True,
-                                                               "name": "uniq_company_code"}),
+     {"unique": True, "partialFilterExpression": {"employee_code": {"$type": "string"}},
+      "name": "uniq_company_code"}),
     (COLL_EMPLOYEE_PROFILES, [("company_id", 1), ("department_id", 1)],
                                                               {"name": "by_company_department"}),
     (COLL_DEPARTMENTS,  [("company_id", 1), ("name", 1)],     {"unique": True, "name": "uniq_company_name"}),
@@ -393,11 +415,16 @@ HRMS_INDEXES = [
     # company from ever starting onboarding.
     (COLL_ONBOARDING, [("company_id", 1), ("uk", 1)],         {"unique": True, "name": "uniq_candidate"}),
     (COLL_ONBOARDING, [("company_id", 1), ("status", 1)],     {"name": "by_company_status"}),
-    # Sparse: the id is minted partway through, so most rows have none yet. Composite with
+    # The id is minted partway through, so most rows have none yet. Composite with
     # company_id -- employee_id is minted per company by next_business_id, same as every
     # other business id in this file.
-    (COLL_ONBOARDING, [("company_id", 1), ("employee_id", 1)], {"unique": True, "sparse": True,
-                                                               "name": "uniq_employee_id"}),
+    # PARTIAL, not sparse. `sparse` does nothing on a COMPOUND index whose first field is
+    # always present (company_id): a document is indexed if ANY key exists, so every row
+    # without the second value is indexed as null -- and the second such row in a company
+    # fails with E11000. The partial filter indexes only rows that actually carry the value.
+    (COLL_ONBOARDING, [("company_id", 1), ("employee_id", 1)],
+     {"unique": True, "partialFilterExpression": {"employee_id": {"$type": "string"}},
+      "name": "uniq_employee_id"}),
 
     # -- Phase 10: date-ranged analytics ------------------------------------------
     # Every dashboard query is `company_id` + a date window. Without these the planner can
@@ -611,8 +638,13 @@ HRMS_INDEXES = [
                                                               "name": "uniq_srp_no"}),
     # One response per instrument per employee. The uniqueness IS the de-duplication, and
     # it is the only reason `employee_code` is stored at all -- see SURVEY_MIN_RESPONSES.
+    # PARTIAL, not sparse. `sparse` does nothing on a COMPOUND index whose first field is
+    # always present (company_id): a document is indexed if ANY key exists, so every row
+    # without the second value is indexed as null -- and the second such row in a company
+    # fails with E11000. The partial filter indexes only rows that actually carry the value.
     (COLL_SURVEY_RESPONSES, [("company_id", 1), ("srv_no", 1), ("employee_code", 1)],
-     {"unique": True, "sparse": True, "name": "uniq_survey_employee"}),
+     {"unique": True, "partialFilterExpression": {"employee_code": {"$type": "string"}},
+      "name": "uniq_survey_employee"}),
     (COLL_SURVEY_RESPONSES, [("request_no", 1)],             {"name": "by_request"}),
 
     (COLL_POLICIES, [("company_id", 1), ("policy_key", 1)],  {"unique": True,
@@ -1133,6 +1165,51 @@ class ClientCandidateStatus(str, Enum):
     DROPPED            = "Dropped Out"
     CLIENT_REJECTED    = "Client Rejected"      # the client passed on them
     WITHDRAWN          = "Withdrawn"            # the candidate stepped away
+
+
+# -- Candidate Source Analytics -------------------------------------------------------------
+# The standard list recruiters and applicants pick from. Free text still works; it is
+# normalised so "naukri.com", "Naukri" and "NAUKRI" count as one source.
+CANDIDATE_SOURCES = [
+    "LinkedIn", "Naukri", "Indeed", "Foundit (Monster)", "Shine", "Company website",
+    "Employee referral", "Consultant / agency", "Social media", "Walk-in", "Campus",
+    "Job posting", "Other",
+]
+_SOURCE_ALIASES = {
+    "linkedin": "LinkedIn", "linked in": "LinkedIn", "li": "LinkedIn",
+    "naukri": "Naukri", "naukri.com": "Naukri", "naukri com": "Naukri",
+    "indeed": "Indeed", "indeed.com": "Indeed",
+    "foundit": "Foundit (Monster)", "monster": "Foundit (Monster)", "monster india": "Foundit (Monster)",
+    "shine": "Shine", "shine.com": "Shine",
+    "website": "Company website", "company website": "Company website", "careers": "Company website",
+    "career page": "Company website", "careers page": "Company website",
+    "referral": "Employee referral", "employee referral": "Employee referral", "reference": "Employee referral",
+    "consultant": "Consultant / agency", "agency": "Consultant / agency", "vendor": "Consultant / agency",
+    "facebook": "Social media", "instagram": "Social media", "whatsapp": "Social media",
+    "twitter": "Social media", "x": "Social media", "social": "Social media", "social media": "Social media",
+    "walk in": "Walk-in", "walk-in": "Walk-in", "walkin": "Walk-in",
+    "campus": "Campus", "college": "Campus",
+    "job posting": "Job posting", "posting": "Job posting",
+    "other": "Other",
+}
+
+
+def normalise_source(text) -> Optional[str]:
+    """One spelling per source. Unknown text is kept (tidied), not thrown away."""
+    raw = " ".join(str(text or "").strip().split())
+    if not raw:
+        return None
+    key = raw.lower().replace("_", " ").replace("-", " ").rstrip(".")
+    if key in _SOURCE_ALIASES:
+        return _SOURCE_ALIASES[key]
+    key2 = raw.lower().rstrip(".")
+    if key2 in _SOURCE_ALIASES:
+        return _SOURCE_ALIASES[key2]
+    for standard in CANDIDATE_SOURCES:
+        if standard.lower() == key2:
+            return standard
+    return raw[:1].upper() + raw[1:120]
+
 
 
 # SOP section 13's decision guide, as data. "No candidate shall be shortlisted solely on
@@ -1710,6 +1787,10 @@ class Cap(str, Enum):
     # ── Phase 1 ──
     MODULE_ACCESS = "module.access"   # may open HRMS at all
     MODULE_ADMIN  = "module.admin"    # may administer HRMS configuration
+    # Dynamic Roles & Permissions: who may change which role / person holds each action.
+    # Held by the MD and platform Admins (the superadmin holds everything). Never itself
+    # editable, so nobody can configure the last manager of permissions out of the system.
+    PERMISSIONS_MANAGE = "permissions.manage"
     AUDIT_READ    = "audit.read"      # may read the audit trail
 
     # ── Phase 2: employee master ──
@@ -1855,6 +1936,9 @@ class Cap(str, Enum):
     # about who fills it. Same line REFERENCE_* and CANDIDATE_SCREEN already draw.
     SHORTLIST_READ  = "shortlist.read"
     SHORTLIST_WRITE = "shortlist.write"
+    # SENDING the committee approval request (convening a sitting) is HR's alone. The HOD,
+    # the MD and everybody else only answer a request addressed to them.
+    SHORTLIST_CONVENE = "shortlist.convene"
     # Pre-boarding engagement (SOP §6). Tracking, not a gate -- nothing is blocked by it,
     # which is why there is no third "approve" capability here.
     PREBOARDING_READ  = "preboarding.read"
@@ -1948,6 +2032,13 @@ class Cap(str, Enum):
     # Seeing the monthly-closure dashboard without being able to lock/unlock it — the MD's
     # review-only view. Whoever may lock may of course also look (see capabilities_for).
     ATTENDANCE_CLOSURE_READ      = "attendance.closure_read"
+    # Checking yourself in and out, only from inside an office (geo-fenced).
+    ATTENDANCE_SELF_PUNCH        = "attendance.self_punch"
+    # Flexible timing: asking for different hours over dates, and approving it.
+    ATTENDANCE_FLEXI_REQUEST     = "attendance.flexi_request"
+    ATTENDANCE_FLEXI_APPROVE     = "attendance.flexi_approve"
+    # Loading the biometric machine's export (CSV / Excel).
+    ATTENDANCE_IMPORT            = "attendance.import"
     OD_REQUEST = "od.request"
     OD_APPROVE = "od.approve"
     LEAVE_READ         = "leave.read"
@@ -2176,6 +2267,8 @@ class Cap(str, Enum):
 # is the documented break-glass path — see PHASE_3_REPORT Finding #1.)
 ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
     HrmsRole.INTERNAL: {
+        # Platform Admins configure Roles & Permissions (with the MD and the superadmin).
+        Cap.PERMISSIONS_MANAGE,
         # -- Client Hiring step 1 -- support staff see the pipeline, decide nothing.
         Cap.CLIENT_REQUISITION_READ, Cap.CLIENT_SCORECARD_READ,
         Cap.CLIENT_POSTING_READ,
@@ -2247,6 +2340,8 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
         Cap.LETTER_READ,
     },
     HrmsRole.MD: {
+        # The MD decides who may do what in HRMS (Roles & Permissions).
+        Cap.PERMISSIONS_MANAGE,
         # -- Client Hiring step 1 -- Operations Head oversight of the same decision.
         Cap.CLIENT_REQUISITION_READ, Cap.CLIENT_REQUISITION_REVIEW,
         # -- step 2 -- same oversight. Note the Operations Head does NOT hold
@@ -2337,6 +2432,7 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
         # with no separate HR user.
         Cap.ATTENDANCE_READ, Cap.ATTENDANCE_MARK,
         Cap.ATTENDANCE_REGULARIZE_REQUEST, Cap.ATTENDANCE_REGULARIZE_APPROVE,
+        Cap.ATTENDANCE_FLEXI_APPROVE, Cap.ATTENDANCE_IMPORT,
         Cap.ATTENDANCE_LOCK,
         Cap.OD_REQUEST, Cap.OD_APPROVE,
         Cap.LEAVE_READ, Cap.LEAVE_APPLY, Cap.LEAVE_APPROVE, Cap.LEAVE_POLICY_MANAGE,
@@ -2432,7 +2528,7 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
         # ── Phase INT-2 ── HR is "R" on every one of these lines too: it convenes the
         # shortlisting committee, runs pre-boarding engagement, sends candidate
         # communications, administers the surveys and maintains the policy register.
-        Cap.SHORTLIST_READ, Cap.SHORTLIST_WRITE,
+        Cap.SHORTLIST_READ, Cap.SHORTLIST_WRITE, Cap.SHORTLIST_CONVENE,
         Cap.PREBOARDING_READ, Cap.PREBOARDING_WRITE,
         Cap.COMM_READ, Cap.COMM_WRITE,
         Cap.SURVEY_READ,
@@ -2473,6 +2569,7 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
         # numbers once the client confirms them.
         Cap.ATTENDANCE_READ, Cap.ATTENDANCE_MARK,
         Cap.ATTENDANCE_REGULARIZE_REQUEST, Cap.ATTENDANCE_REGULARIZE_APPROVE,
+        Cap.ATTENDANCE_FLEXI_APPROVE, Cap.ATTENDANCE_IMPORT,
         Cap.ATTENDANCE_LOCK,
         Cap.OD_REQUEST, Cap.OD_APPROVE,
         Cap.LEAVE_READ, Cap.LEAVE_APPLY, Cap.LEAVE_APPROVE, Cap.LEAVE_POLICY_MANAGE,
@@ -2641,6 +2738,7 @@ ROLE_CAPABILITIES: Dict[HrmsRole, Set[Cap]] = {
         # named as a manager act anywhere in §7.8-7.12 or §22.8.
         Cap.ATTENDANCE_READ,
         Cap.ATTENDANCE_REGULARIZE_REQUEST, Cap.ATTENDANCE_REGULARIZE_APPROVE,
+        Cap.ATTENDANCE_FLEXI_APPROVE,
         Cap.OD_REQUEST, Cap.OD_APPROVE,
         Cap.LEAVE_READ, Cap.LEAVE_APPLY, Cap.LEAVE_APPROVE,
         Cap.COFF_EARN_REQUEST, Cap.COFF_APPROVE,
@@ -2873,6 +2971,7 @@ ID_FORMATS = {
                                  # since §22.8 puts C-Off in the same leave dropdown as the rest.
     "regularization": ("REG", True, 3),   # REG-2026-001
     "od":            ("OD",  True, 3),    # OD-2026-001
+    "flexi":         ("FT",  True, 3),    # FT-2026-001 (flexible timing)
     # No sequence for attendance rows, C-Off ledger batches or the monthly lock: attendance is
     # addressed by (employee_code, work_date), a lock by (company_id, period), and a C-Off
     # batch is a ledger line nobody cites by number — the same reasoning COLL_COMM_LOG's
@@ -3282,23 +3381,25 @@ class GenderPreference(str, Enum):
 # cannot happen, and adding a stage later is a data change rather than new control flow.
 #   action -> (required_status, resulting_status, capability, remark_required)
 #
-# The chain differs from a plain HR -> MD sign-off in two ways the SOP requires:
-#   * a MANDATORY budget gate before anything may be sourced (SOP §11), and
-#   * it ends on the position SCORECARD rather than a single MD sign-off, because
-#     Annexure B makes the HOD accountable for the scorecard and Management accountable
-#     for the budget -- two different people, two different gates.
+# The chain: HR verification -> [Management Approval, ONLY when the requisition is over
+# the sanctioned headcount] -> position SCORECARD -> Approved.
 #
-# The over-sanction detour hangs off `budget-approve`: there is no point asking a
-# reporting line to justify extra headcount before anyone has agreed to pay for it.
+# There is no separate budget-approval step any more (removed at the business's request):
+# HR verification goes straight on. The headcount check stays -- the over-sanction detour
+# now hangs off `hr-verify`, so a requisition asking for more people than were sanctioned
+# still goes up the Management Approval ladder before the scorecard.
+#
+# `budget-skip` exists only for requisitions that were ALREADY waiting at "Pending Budget
+# Approval" when the step was removed. Nobody clicks it: it runs automatically (see
+# hrms_requisition_service.advance_legacy_budget) and routes them exactly as `hr-verify`
+# would have.
 INTERNAL_REQ_TRANSITIONS = {
-    "hr-verify":         (ReqApproval.PENDING_HR_VERIFICATION, ReqApproval.PENDING_BUDGET,
+    "hr-verify":         (ReqApproval.PENDING_HR_VERIFICATION, ReqApproval.PENDING_SCORECARD,
                           Cap.REQUISITION_REVIEW_HR, False),
     "hr-reject":         (ReqApproval.PENDING_HR_VERIFICATION, ReqApproval.REJECTED,
                           Cap.REQUISITION_REVIEW_HR, True),
-    "budget-approve":    (ReqApproval.PENDING_BUDGET, ReqApproval.PENDING_SCORECARD,
-                          Cap.REQUISITION_APPROVE_BUDGET, False),
-    "budget-reject":     (ReqApproval.PENDING_BUDGET, ReqApproval.REJECTED,
-                          Cap.REQUISITION_APPROVE_BUDGET, True),
+    "budget-skip":       (ReqApproval.PENDING_BUDGET, ReqApproval.PENDING_SCORECARD,
+                          Cap.REQUISITION_REVIEW_HR, False),
     # The escalation ladder returns to the scorecard gate once exhausted.
     "escalate-approve":  (ReqApproval.PENDING_ESCALATION, ReqApproval.PENDING_SCORECARD,
                           Cap.REQUISITION_ESCALATE, False),
@@ -3310,33 +3411,35 @@ INTERNAL_REQ_TRANSITIONS = {
                           Cap.SCORECARD_APPROVE, True),
 }
 
-INTERNAL_ESCALATION_ROUTING = {"budget-approve": ReqApproval.PENDING_ESCALATION}
+# Over the sanctioned headcount -> the Management Approval ladder, straight after HR.
+INTERNAL_ESCALATION_ROUTING = {
+    "hr-verify":   ReqApproval.PENDING_ESCALATION,
+    "budget-skip": ReqApproval.PENDING_ESCALATION,
+}
 
-def budget_approval_is_mandatory() -> bool:
-    """Budget approval cannot be skipped, asserted from the table rather than trusted.
 
-    "No internal role may be sourced without prior written headcount and budget approval"
-    (SOP §11) holds exactly while: PENDING_BUDGET is on the ONLY road out of HR verification,
-    the single action that leaves it forward demands REQUISITION_APPROVE_BUDGET, and APPROVED
-    is unreachable without passing through it.
+def approval_chain_is_sound() -> bool:
+    """The internal chain, asserted from the table rather than trusted:
 
-    A later shortcut -- an `hr-verify` that lands straight on PENDING_SCORECARD, say -- would
-    silently delete the gate. This is what the test asserts, so that change fails loudly.
+    * no budget-approval step: nothing can be decided at PENDING_BUDGET by a person (its
+      only exit is the automatic `budget-skip` for legacy rows);
+    * HR verification is the first gate, and every route past it is checked for headcount
+      (INTERNAL_ESCALATION_ROUTING);
+    * APPROVED is reachable only through the scorecard gate.
     """
-    forward = [spec for action, spec in INTERNAL_REQ_TRANSITIONS.items()
-               if spec[0] is ReqApproval.PENDING_BUDGET
-               and spec[1] is not ReqApproval.REJECTED]
-    if not (len(forward) == 1 and forward[0][2] is Cap.REQUISITION_APPROVE_BUDGET):
+    if any(spec[2] is Cap.REQUISITION_APPROVE_BUDGET for spec in INTERNAL_REQ_TRANSITIONS.values()):
         return False
-    # Nothing may reach APPROVED except through the scorecard gate, which itself is only
-    # reachable from the budget gate or the escalation ladder that follows it.
+    budget_exits = {a for a, spec in INTERNAL_REQ_TRANSITIONS.items()
+                    if spec[0] is ReqApproval.PENDING_BUDGET}
+    if budget_exits != {"budget-skip"}:
+        return False
+    if INTERNAL_REQ_TRANSITIONS["hr-verify"][1] is not ReqApproval.PENDING_SCORECARD:
+        return False
+    if not {"hr-verify", "budget-skip"} <= set(INTERNAL_ESCALATION_ROUTING):
+        return False
     approved_from = {spec[0] for spec in INTERNAL_REQ_TRANSITIONS.values()
                      if spec[1] is ReqApproval.APPROVED}
-    if approved_from != {ReqApproval.PENDING_SCORECARD}:
-        return False
-    scorecard_from = {spec[0] for spec in INTERNAL_REQ_TRANSITIONS.values()
-                      if spec[1] is ReqApproval.PENDING_SCORECARD}
-    return scorecard_from == {ReqApproval.PENDING_BUDGET, ReqApproval.PENDING_ESCALATION}
+    return approved_from == {ReqApproval.PENDING_SCORECARD}
 
 # The escalation ladder is capped. A cyclic or absurdly deep reporting chain must not turn
 # one requisition into a twenty-step approval marathon.
@@ -3364,6 +3467,7 @@ AUDIT_REQ_ESC_REJECTED = "requisition rejected (escalation)"
 AUDIT_REQ_HR_VERIFIED  = "requisition HR-verified (internal)"
 AUDIT_REQ_BUDGET_OK    = "requisition budget approved (internal)"
 AUDIT_REQ_BUDGET_NO    = "requisition rejected at budget (internal)"
+AUDIT_REQ_BUDGET_SKIPPED = "requisition moved on: budget-approval step removed (internal)"
 AUDIT_REQ_SCORECARD_OK = "requisition scorecard approved (internal)"
 AUDIT_REQ_SCORECARD_NO = "requisition rejected at scorecard (internal)"
 
@@ -3372,8 +3476,7 @@ REQ_AUDIT_ACTIONS = {
     "escalate-approve": AUDIT_REQ_ESC_APPROVED,
     "escalate-reject":  AUDIT_REQ_ESC_REJECTED,
     "hr-verify":         AUDIT_REQ_HR_VERIFIED,
-    "budget-approve":    AUDIT_REQ_BUDGET_OK,
-    "budget-reject":     AUDIT_REQ_BUDGET_NO,
+    "budget-skip":       AUDIT_REQ_BUDGET_SKIPPED,
     "scorecard-approve": AUDIT_REQ_SCORECARD_OK,
     "scorecard-reject":  AUDIT_REQ_SCORECARD_NO,
 }
@@ -3439,12 +3542,12 @@ def budget_delta(req: dict):
 # budget figures disagree must say why -- an unexplained approval over a known disagreement
 # is exactly the record an audit later needs.
 REQ_CONDITIONAL_REMARKS = {
-    "budget-approve": lambda req: budget_status(req) == BudgetStatus.MISMATCH.value,
+    "hr-verify": lambda req: budget_status(req) == BudgetStatus.MISMATCH.value,
 }
 
 REQ_CONDITIONAL_REMARK_REASONS = {
-    "budget-approve": ("The sanctioned and HOD-approved budgets do not match. "
-                       "Record a remark explaining the approval."),
+    "hr-verify": ("The sanctioned and HOD-approved budgets do not match. "
+                  "Record a remark explaining the verification."),
 }
 
 
@@ -3603,7 +3706,8 @@ class RequisitionAction(BaseModel):
     action: str                            # one of INTERNAL_REQ_TRANSITIONS
     remarks: Optional[str] = None
     salary_change: Optional[float] = None  # MD may revise the offered CTC on approval
-    # ── Internal track ── required by `budget-approve` and ignored by every other action.
+    # ── Internal track ── no longer used: the budget step was removed and the headcount /
+    # band are now taken automatically at HR verification. Kept so older clients still parse.
     # Carried on the same body rather than on a parallel endpoint so the approval chain stays
     # ONE surface, which is what keeps the UI's ApprovalDialog reusable across both tracks.
     approved_headcount: Optional[int] = None
@@ -3815,6 +3919,53 @@ class ReferralSource(str, Enum):
     OTHER              = "Other"
 
 
+# The platforms HR can share a posting on, each with its own tracked apply link
+# (`/apply/<code>?src=<key>`). Keys are what the link carries; labels are what HR reads.
+JOB_PLATFORMS = [
+    ("linkedin", "LinkedIn"), ("naukri", "Naukri"), ("indeed", "Indeed"), ("apna", "Apna"),
+    ("foundit", "Foundit"), ("shine", "Shine"), ("website", "Company Website"),
+    ("referral", "Referral"), ("social", "Social Media"), ("whatsapp", "WhatsApp"),
+    ("other", "Other"),
+]
+JOB_PLATFORM_LABEL = dict(JOB_PLATFORMS)
+
+
+def normalise_platform(value) -> Optional[str]:
+    """A tracked-link key, or None for anything unknown (a typo'd link counts as untagged)."""
+    key = str(value or "").strip().lower()
+    if key in JOB_PLATFORM_LABEL:
+        return key
+    for k, label in JOB_PLATFORMS:
+        if label.lower() == key:
+            return k
+    return None
+
+
+# What a candidate's own `source` answer tells us about the platform, for a candidate who
+# did not come through a tracked link and was not given a platform explicitly. "Job Portal"
+# says nothing about WHICH portal, so it maps to None ("Not specified") rather than a guess.
+_SOURCE_TO_PLATFORM = {
+    "company website": "website", "social media": "social", "referral": "referral",
+    "employee": "referral", "ex-employee": "referral",
+    "job portal": None, "manual": None, "": None,
+}
+
+
+def platform_for_candidate(source_platform=None, source=None, is_referral=False) -> Optional[str]:
+    """The ONE rule for which platform a candidate is attributed to, used when they are
+    created AND when legacy rows are reported: an explicit platform (tracked link / chosen
+    on the form / picked by HR) wins; then a declared referral; then their `source`."""
+    explicit = normalise_platform(source_platform)
+    if explicit:
+        return explicit
+    if is_referral:
+        return "referral"
+    key = str(source or "").strip().lower()
+    if key in _SOURCE_TO_PLATFORM:
+        return _SOURCE_TO_PLATFORM[key]
+    return normalise_platform(key) or "other"
+
+
 # The `source` value a referred candidate is filed under, so referrals land in the existing
 # Phase 10 `source` breakdown rather than needing a parallel one.
 REFERRAL_SOURCE_LABEL = "Referral"
@@ -3870,6 +4021,11 @@ class PublicApplicationIn(BaseModel):
     referral_source: Optional[ReferralSource] = None
     referrer_employee_code: Optional[str] = None
     referral_relation: Optional[str] = None
+    # The tracked link the applicant arrived through (`?src=naukri`), for Job Portal Reach.
+    src: Optional[str] = Field(None, max_length=40)
+    # "Which job portal?" -- asked on the form when the channel is a job portal or social
+    # media and the link did not already say. Source Analytics attributes by it.
+    platform: Optional[str] = Field(None, max_length=40)
 
     # ── Phase INT-2 (SOP §11) ── the two acknowledgements the policy commits us to asking
     # for. BOTH are required on the internal track and stamped with a timestamp, because an
@@ -3956,11 +4112,10 @@ FORWARD_TRANSITIONS = {
     # this edge a revoked candidate is stranded -- no live offer, yet unable to receive one.
     AppStatus.OFFER_GENERATED:      {AppStatus.OFFER_ACCEPTED, AppStatus.OFFER_DECLINED,
                                      AppStatus.SELECTED},
-    # Both edges are kept deliberately. A company that issues appointment letters routes
-    # through APPOINTMENT_LETTER_SENT; one that does not goes straight to onboarding as it
-    # always has. Removing the direct edge would force a workflow on every existing client.
-    AppStatus.OFFER_ACCEPTED:       {AppStatus.APPOINTMENT_LETTER_SENT,
-                                     AppStatus.PRE_ONBOARDING},
+    # The appointment letter is MANDATORY: Offer Accepted -> Appointment Letter Sent ->
+    # Pre-Onboarding. The old direct Offer Accepted -> Pre-Onboarding edge is gone, so no
+    # path (the onboarding start, or a hand-set stage) can skip the letter.
+    AppStatus.OFFER_ACCEPTED:       {AppStatus.APPOINTMENT_LETTER_SENT},
     AppStatus.APPOINTMENT_LETTER_SENT: {AppStatus.PRE_ONBOARDING},
     AppStatus.PRE_ONBOARDING:       {AppStatus.JOINED},
     AppStatus.JOINED:               {AppStatus.EMPLOYEE_CREATED},
@@ -4148,6 +4303,8 @@ class CandidateIn(BaseModel):
     # posting does, and the Applicant Pool wants that link kept.
     posting_code: Optional[str] = None
     source: str = "Manual"
+    # The job portal / platform the CV came from (a JOB_PLATFORMS key), for Source Analytics.
+    source_platform: Optional[str] = Field(None, max_length=40)
     current_location: Optional[str] = None
     total_experience: Optional[str] = None
     qualification: Optional[str] = None
@@ -4196,6 +4353,9 @@ class CandidateUpdate(BaseModel):
     # found to have come from a portal or a referral, and the source breakdown is only
     # worth reading if it can be corrected.
     source: Optional[str] = None
+    # The job portal / platform (a JOB_PLATFORMS key), correctable for the same reason --
+    # Source Analytics attributes the whole journey to it. Blank clears it.
+    source_platform: Optional[str] = Field(None, max_length=40)
 
 
 class ScreenIn(BaseModel):
@@ -4764,10 +4924,10 @@ ONBOARD_SECTIONS = [
 # Aadhaar and bank details, and asking for those before the person has agreed to join
 # gathers sensitive identity data on someone who may still say no.
 #
-# Phase 11-R adds APPOINTMENT_LETTER_SENT: it sits strictly AFTER Offer Accepted, so the
-# consent argument above is satisfied a fortiori -- the candidate has agreed to join AND
-# been sent their appointment letter. Both are onboardable because the letter is optional.
-ONBOARDABLE_STATUSES = {AppStatus.OFFER_ACCEPTED, AppStatus.APPOINTMENT_LETTER_SENT}
+# The appointment letter is now MANDATORY before onboarding, so the only onboardable
+# stage is APPOINTMENT_LETTER_SENT: the candidate has accepted the offer AND been sent
+# their appointment letter.
+ONBOARDABLE_STATUSES = {AppStatus.APPOINTMENT_LETTER_SENT}
 
 AUDIT_ONBOARD_STARTED    = "onboarding started"
 AUDIT_ONBOARD_SUBMITTED  = "pre-onboarding submitted"
@@ -5647,7 +5807,7 @@ ANCHOR_MILESTONE = "milestone"
 ANCHOR_DATE      = "date"
 
 SLA_MILESTONES = [
-    {"key": "budget_approved",    "label": "Budget / headcount approved",
+    {"key": "budget_approved",    "label": "HR verified (headcount & budget)",
      "anchor": ANCHOR_MILESTONE,  "target_days": 3,  "measured_from": None},
     {"key": "scorecard_approved", "label": "Position scorecard approved",
      "anchor": ANCHOR_MILESTONE,  "target_days": 2,  "measured_from": "budget_approved"},

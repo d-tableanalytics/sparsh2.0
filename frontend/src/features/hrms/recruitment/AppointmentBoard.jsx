@@ -256,7 +256,7 @@ const AppointmentBoard = () => {
       <HrmsPageHeader
         icon={BadgeCheck}
         title="Appointment & Agreements"
-        subtitle="Issued after an offer is accepted, confirming joining terms"
+        subtitle="Required after an offer is accepted — sending it opens onboarding"
         actions={canWrite && (
           <button
             type="button"

@@ -71,12 +71,13 @@ EDITABLE_STATUSES = {ReqApproval.PENDING_ESCALATION.value,
 
 
 def assert_sourcing_allowed(req: dict) -> None:
-    """Refuse any sourcing against an internal requisition that has not cleared its budget.
+    """Refuse any sourcing against an internal requisition HR has not verified yet.
 
-    SOP §11: "No internal role may be sourced without prior written headcount and budget
-    approval from Management/Finance." Sourcing means publishing a posting or putting a
-    candidate against the requisition -- both are entry points into the pipeline, so both
-    call this.
+    There is no separate budget-approval step any more: HR verification is the gate (and a
+    requisition over the sanctioned headcount still needs Management's Headcount Approval
+    before its scorecard -- and so its posting -- can be approved). Sourcing means
+    publishing a posting or putting a candidate against the requisition -- both are entry
+    points into the pipeline, so both call this.
 
     It lives HERE, in the service that owns the approval chain, rather than being copied
     into the posting and candidate services. Two copies of a gate is one gate and one bug
@@ -88,9 +89,9 @@ def assert_sourcing_allowed(req: dict) -> None:
     if status in PRE_BUDGET_STATES:
         raise HTTPException(
             status_code=409,
-            detail=(f"{req.get('request_no')} has not cleared budget approval yet "
-                    f'(it is "{status}"). No internal role may be sourced before '
-                    f"Management or Finance has approved the headcount and salary band."))
+            detail=(f"{req.get('request_no')} has not been verified by HR yet "
+                    f'(it is "{status}"). No internal role may be sourced before HR has '
+                    f"verified the requisition."))
 
 
 def _oid(value: str, label: str) -> ObjectId:
@@ -466,10 +467,60 @@ def _visibility_filter(actor: dict) -> dict:
     return {}
 
 
+async def _md_clearance(company_id: str, doc: dict) -> Optional[dict]:
+    """Who with MD authority has already cleared an over-sanction requisition, if anyone.
+
+    "MD approval remains mandatory" is the rule; once an MD (or the superadmin, who holds the
+    MD's authority) has cleared it -- on a rung of the escalation ladder, or by approving
+    the budget themselves when no ladder could be built -- repeating the warning at the
+    next gate reads as if it is being sent back to the MD, when it is simply ready to move on.
+    """
+    if not (doc.get("sanction_snapshot") or {}).get("is_over_sanction"):
+        return None
+
+    async def md_authority(user_id) -> bool:
+        person = await tenant_member(company_id, str(user_id or "")) if user_id else None
+        return bool(person) and can(person, Cap.REQUISITION_APPROVE_MD)
+
+    for rung in doc.get("escalation_chain") or []:
+        if rung.get("status") == EscalationStatus.APPROVED.value and (
+                str(rung.get("role") or "").strip().upper() == "MD"
+                or await md_authority(rung.get("acted_by"))):
+            return {"by": rung.get("name"), "at": rung.get("acted_at"), "how": "escalation"}
+    if doc.get("budget_approved_by") and await md_authority(doc["budget_approved_by"]):
+        return {"by": doc.get("budget_approved_by_name"), "at": doc.get("budget_approved_at"),
+                "how": "budget approval"}
+    return None
+
+
+async def advance_legacy_budget(actor: dict, company_id: str, request_no: str = None) -> int:
+    """Move requisitions left at the removed budget-approval step on, exactly as HR
+    verification now would: Management Approval if over the sanctioned headcount, otherwise
+    the scorecard. Runs automatically when the requisitions are read; never raises."""
+    q = {"company_id": str(company_id), "requisition_track": REQUISITION_TRACK_INTERNAL,
+         "approval_status": ReqApproval.PENDING_BUDGET.value}
+    if request_no:
+        q["request_no"] = request_no
+    moved = 0
+    for row in await get_collection(COLL_REQUISITIONS).find(q, {"request_no": 1}).to_list(200):
+        try:
+            await act_on_requisition(
+                actor, company_id, row["request_no"], "budget-skip",
+                remarks="The budget-approval step was removed; moved on automatically.",
+                automatic=True)
+            moved += 1
+        except HTTPException:
+            continue  # moved by somebody else in the meantime, or no longer eligible
+        except Exception as e:  # noqa: BLE001
+            print(f"[WARN] HRMS legacy budget move failed for {row.get('request_no')}: {e}")
+    return moved
+
+
 async def list_requisitions(actor: dict, company_id: str, *, search: str = None,
                             approval_status: str = None, closing_status: str = None,
                             department_id: str = None,
                             limit: int = 100, skip: int = 0) -> dict:
+    await advance_legacy_budget(actor, company_id)
     # Only Sparsh Magic's own requisitions. Rows from the decommissioned client-hiring
     # track (a stored track of "client", or none at all on the oldest) are not part of
     # hiring any more; they stay in the database and out of every list.
@@ -510,7 +561,19 @@ async def list_requisitions(actor: dict, company_id: str, *, search: str = None,
         "open": await coll.count_documents({**base, "closing_status": ReqClosing.OPEN.value,
                                             "approval_status": ReqApproval.APPROVED.value}),
     }
-    return {"requisitions": [_out(r) for r in rows], "total": total,
+    out_rows = []
+    from app.services.hrms_scorecard_service import scorecard_for_requisition
+    for r in rows:
+        row = _out(r)
+        row["md_clearance"] = await _md_clearance(company_id, r)
+        # At the scorecard gate the board needs to know whether the scorecard is signed:
+        # only then is there anything to approve here (and normally it approves itself).
+        if r.get("approval_status") == ReqApproval.PENDING_SCORECARD.value:
+            card = await scorecard_for_requisition(company_id, r.get("request_no"))
+            row["scorecard_status"] = (card or {}).get("status")
+            row["scorecard_no"] = (card or {}).get("scr_no")
+        out_rows.append(row)
+    return {"requisitions": out_rows, "total": total,
             "limit": limit, "skip": skip, "stats": stats}
 
 
@@ -523,8 +586,12 @@ async def get_requisition(actor: dict, company_id: str, request_no: str,
     if not doc:
         # 404 rather than 403 for an out-of-scope row: a 403 would confirm the id exists.
         raise HTTPException(status_code=404, detail="Requisition not found.")
+    if doc.get("approval_status") == ReqApproval.PENDING_BUDGET.value:
+        if await advance_legacy_budget(actor, company_id, request_no):
+            doc = await get_collection(COLL_REQUISITIONS).find_one(query) or doc
 
     out = _out(doc)
+    out["md_clearance"] = await _md_clearance(company_id, doc)
     if with_jd and doc.get("jd_no"):
         jd = await get_collection(COLL_JOB_DESCRIPTIONS).find_one(
             {"jd_no": doc["jd_no"], "company_id": str(company_id)})
@@ -873,14 +940,15 @@ async def delete_requisition(actor: dict, company_id: str, request_no: str) -> d
 async def act_on_requisition(actor: dict, company_id: str, request_no: str,
                              action: str, remarks: str = None,
                              salary_change: float = None,
-                             budget: dict = None) -> dict:
+                             budget: dict = None, automatic: bool = False) -> dict:
     """Drive one transition of the approval state machine.
 
     Every rule is read from the transition table for the requisition's TRACK, and the write
     is a compare-and-swap on the current status, so concurrent approvals cannot both land.
 
-    `budget` carries the approved headcount and salary band, and is required by (and only
-    by) `budget-approve`.
+    There is no budget-approval step any more. At HR verification the approved headcount
+    and salary band are recorded: HR may type them (`budget`), otherwise headcount = the
+    vacancies and the band = the standing salary band for the role, when one exists.
     """
     coll = get_collection(COLL_REQUISITIONS)
     current = await coll.find_one({"request_no": request_no, "company_id": str(company_id)})
@@ -900,16 +968,31 @@ async def act_on_requisition(actor: dict, company_id: str, request_no: str,
 
     required_status, next_status, capability, remark_required = transitions[action]
 
-    if not can(actor, capability):
+    # `automatic` is the system finalising a requisition whose position scorecard the
+    # hiring manager has ALREADY signed off (finalise_if_scorecard_approved). The authority
+    # is those signatures, so it applies to the final scorecard gate only.
+    # `budget-skip` is the one-off move of a requisition left at the removed budget step.
+    if automatic and action not in ("scorecard-approve", "budget-skip"):
+        raise HTTPException(status_code=422, detail="Only the final approval runs automatically.")
+    if action == "budget-skip" and not automatic:
+        raise HTTPException(status_code=422, detail="This step runs by itself.")
+    if not automatic and not can(actor, capability):
         raise HTTPException(
             status_code=403,
             detail=("You are not authorised to perform this approval step. HR verifies, "
-                    "Management or Finance approves the budget, and the hiring manager "
-                    "approves the scorecard."))
+                    "Management approves extra headcount when a requisition is over the "
+                    "sanction, and the hiring manager approves the scorecard."))
 
     remarks = (remarks or "").strip()
     if remark_required and not remarks:
         raise HTTPException(status_code=422, detail="A remark is required when rejecting.")
+
+    # The final gate now runs by itself once the scorecard is signed off, so a hand click on
+    # an already-approved requisition (a screen opened before it happened) is not an error:
+    # the requisition is exactly where the click wanted it.
+    if (action == "scorecard-approve"
+            and current["approval_status"] == ReqApproval.APPROVED.value):
+        return await get_requisition(actor, company_id, request_no)
 
     if current["approval_status"] != required_status.value:
         raise HTTPException(
@@ -944,60 +1027,66 @@ async def act_on_requisition(actor: dict, company_id: str, request_no: str,
     # Validated BEFORE the state is written, so a malformed band cannot leave a requisition
     # marked approved with nothing to validate a later offer against. The figures are
     # mandatory precisely because the gate exists to record that a number was authorised.
+    # ── Headcount and salary band, recorded at HR verification ── the budget step that
+    # used to record these is gone. HR may type them in the verification dialog; anything
+    # left blank is taken automatically: headcount = the vacancies asked for, band = the
+    # standing salary band for the role (department / designation / grade) when one exists.
+    # The band is STAMPED here so a band edited later cannot retroactively change what an
+    # offer -- or a negotiation round -- on this requisition is checked against.
     budget_updates = {}
-    if action == "budget-approve":
-        payload = budget or {}
-        try:
-            headcount = int(payload.get("approved_headcount"))
-            band_min = float(payload.get("approved_salary_band_min"))
-            band_max = float(payload.get("approved_salary_band_max"))
-        except (TypeError, ValueError):
-            raise HTTPException(
-                status_code=422,
-                detail=("Record the approved headcount and salary band. The band is what "
-                        "every later offer on this requisition is checked against."))
-        if headcount < 1:
-            raise HTTPException(
-                status_code=422, detail="Approved headcount must be at least 1.")
-        if band_min < 0 or band_max < 0:
-            raise HTTPException(
-                status_code=422, detail="A salary band cannot be negative.")
-        if band_min > band_max:
-            raise HTTPException(
-                status_code=422,
-                detail="The minimum of the salary band cannot exceed its maximum.")
-        # ── Phase INT-2 (Annexure C) ── where the figures came from.
-        #
-        # The standing band master is a CONVENIENCE, never an authority: it pre-fills the
-        # approval form, and the offer check still reads the band stamped here rather than
-        # the master. That separation is what stops a band edited in April retroactively
-        # legalising an offer approved in March.
-        #
-        # An approver may still type something else -- Finance's standing band cannot know
-        # about a scarce skill or a counter-offer. What is insisted on is that the deviation
-        # is visible and explained: an override with no reason is indistinguishable from a
-        # typo, and "why is this role's band non-standard" is the first thing an audit asks.
+    if action in ("hr-verify", "budget-skip"):
         from app.services import hrms_salary_band_service as bands
-        prefill = await bands.prefill_for_requisition(company_id, current)
-        decision = bands.resolve_band_decision(prefill, payload)
-        if decision.get("override_reason_required") and not remarks:
-            raise HTTPException(
-                status_code=422,
-                detail=(f"This band differs from the standing band for the role "
-                        f'({decision.get("standing_min"):,.0f}-'
-                        f'{decision.get("standing_max"):,.0f}). Record why, so the '
-                        f"deviation is on the record rather than in somebody's memory."))
+        payload = (budget or {}) if action == "hr-verify" else {}
+        try:
+            prefill = await bands.prefill_for_requisition(company_id, current)
+        except Exception as e:  # noqa: BLE001 -- a band lookup must not block verification
+            print(f"[WARN] HRMS band prefill failed for {request_no}: {e}")
+            prefill = None
 
-        budget_updates = {
-            "approved_headcount": headcount,
-            "approved_salary_band_min": band_min,
-            "approved_salary_band_max": band_max,
-            "budget_remarks_approver": remarks or None,
-            "band_source": decision["band_source"],
-            # The master row this was taken from (or deviated from), so the two are
-            # traceable to each other without guessing from the numbers.
-            "band_master_no": decision.get("band_no"),
-        }
+        raw_hc = payload.get("approved_headcount")
+        try:
+            headcount = int(raw_hc) if raw_hc not in (None, "") else max(1, int(current.get("vacancy") or 1))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=422, detail="Approved headcount must be a whole number.")
+        if headcount < 1:
+            raise HTTPException(status_code=422, detail="Approved headcount must be at least 1.")
+        budget_updates = {"approved_headcount": headcount}
+
+        typed_min, typed_max = (payload.get("approved_salary_band_min"),
+                                payload.get("approved_salary_band_max"))
+        if typed_min not in (None, "") or typed_max not in (None, ""):
+            try:
+                band_min, band_max = float(typed_min), float(typed_max)
+            except (TypeError, ValueError):
+                raise HTTPException(
+                    status_code=422,
+                    detail="Give both the minimum and the maximum of the salary band, or neither.")
+            if band_min < 0 or band_max < 0:
+                raise HTTPException(status_code=422, detail="A salary band cannot be negative.")
+            if band_min > band_max:
+                raise HTTPException(
+                    status_code=422,
+                    detail="The minimum of the salary band cannot exceed its maximum.")
+            # A band different from the standing one is allowed, but must be explained.
+            decision = bands.resolve_band_decision(prefill, payload)
+            if decision.get("override_reason_required") and not remarks:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(f"This band differs from the standing band for the role "
+                            f'({decision.get("standing_min"):,.0f}-'
+                            f'{decision.get("standing_max"):,.0f}). Record why in the remark.'))
+            budget_updates.update({
+                "approved_salary_band_min": band_min, "approved_salary_band_max": band_max,
+                "band_source": decision["band_source"], "band_master_no": decision.get("band_no"),
+            })
+        elif prefill and prefill.get("approved_salary_band_min") is not None \
+                and prefill.get("approved_salary_band_max") is not None:
+            budget_updates.update({
+                "approved_salary_band_min": float(prefill["approved_salary_band_min"]),
+                "approved_salary_band_max": float(prefill["approved_salary_band_max"]),
+                "band_source": prefill.get("source"),
+                "band_master_no": prefill.get("band_no"),
+            })
 
     # ── Internal track ── the scorecard gate is only real if a scorecard actually exists and
     # has been approved. Without this the requisition could reach Approved while the bar it
@@ -1079,22 +1168,16 @@ async def act_on_requisition(actor: dict, company_id: str, request_no: str,
     if action.startswith("hr-"):
         updates.update({"hr_reviewed_by": actor_id, "hr_reviewed_by_name": actor_name,
                         "hr_reviewed_at": now, "hr_remarks": remarks or None})
+        if action == "hr-verify":
+            # SLA §8 milestone 1 ("HR verified (headcount & budget)") -- with the budget step
+            # gone, HR verification is the moment the headcount and budget are cleared.
+            updates["sla_actuals.budget_approved"] = now
+    elif action == "budget-skip":
+        updates["sla_actuals.budget_approved"] = now
     elif action.startswith("escalate-"):
         updates.update({"escalation_last_actor": actor_id,
                         "escalation_last_actor_name": actor_name,
                         "escalation_last_acted_at": now})
-    elif action.startswith("budget-"):
-        # ── Internal track ── who committed the company's money, and when. Recorded on the
-        # REJECT path too: "Finance declined this on the 4th" is as much a fact the audit
-        # needs as an approval is.
-        updates.update({"budget_approved_by": actor_id,
-                        "budget_approved_by_name": actor_name,
-                        "budget_approved_at": now})
-        if action == "budget-approve":
-            # SLA §8 milestone 1. Stamped here, at the moment it happened, rather than
-            # inferred later from the audit trail -- deriving a metric from prose written
-            # for a human is what the module already refuses to do for time-to-hire.
-            updates["sla_actuals.budget_approved"] = now
     elif action.startswith("scorecard-"):
         updates.update({"scorecard_approved_by": actor_id,
                         "scorecard_approved_by_name": actor_name,
@@ -1166,7 +1249,7 @@ async def act_on_requisition(actor: dict, company_id: str, request_no: str,
           and updates.get("approval_status") == ReqApproval.PENDING_SCORECARD.value):
         # The ladder is exhausted. The scorecard gate is next, and it is NOT optional -- the
         # transition table makes APPROVED reachable only from there
-        # (models.budget_approval_is_mandatory).
+        # (models.approval_chain_is_sound).
         await notify_hrms_role(
             company_id, ["HR"],
             f"Over-sanction requisition {request_no} cleared escalation",
@@ -1175,7 +1258,42 @@ async def act_on_requisition(actor: dict, company_id: str, request_no: str,
             f"{_sanction_sentence(current.get('sanction_snapshot') or {})}",
             kind="warning", link=f"/hrms/requisitions/{request_no}", email=True)
 
+    # The budget (or the escalation after it) is done. If the scorecard was already signed
+    # off, nothing is left to wait for: approve it now and send it on to job posting.
+    if updates.get("approval_status") == ReqApproval.PENDING_SCORECARD.value:
+        await finalise_if_scorecard_approved(actor, company_id, request_no)
+
     return await get_requisition(actor, company_id, request_no)
+
+
+async def finalise_if_scorecard_approved(actor: dict, company_id: str,
+                                         request_no: str) -> bool:
+    """Approve the requisition once its position scorecard is fully approved.
+
+    There is no separate final click any more: the HOD's scorecard sign-off IS the final
+    approval. Runs the same scorecard-approve transition (record, JD approval, notifications,
+    audit), so a requisition approved this way is indistinguishable from one approved by hand.
+    Returns True when it approved one. Never raises: the caller's own action already landed.
+    """
+    try:
+        req = await get_collection(COLL_REQUISITIONS).find_one(
+            {"request_no": request_no, "company_id": str(company_id)},
+            {"approval_status": 1, "requisition_track": 1})
+        if not req or req.get("approval_status") != ReqApproval.PENDING_SCORECARD.value:
+            return False
+        from app.services.hrms_scorecard_service import scorecard_for_requisition
+        from app.models.hrms import ScorecardStatus
+        card = await scorecard_for_requisition(company_id, request_no)
+        if not card or card.get("status") != ScorecardStatus.APPROVED.value:
+            return False
+        await act_on_requisition(
+            actor, company_id, request_no, "scorecard-approve",
+            remarks="Approved automatically: the position scorecard is fully approved.",
+            automatic=True)
+        return True
+    except HTTPException as e:
+        print(f"[WARN] auto-approval of {request_no} after scorecard sign-off skipped: {e.detail}")
+        return False
 
 
 async def _build_escalation_chain(actor: dict, company_id: str, req: dict) -> list:
@@ -1350,21 +1468,16 @@ async def _notify_transition(action, current, request_no, actor_name, remarks, c
     # would sit silently at the budget gate, which is exactly the "sat unseen in a queue"
     # failure this function exists to prevent.
     elif action == "hr-verify":
-        await notify_hrms_role(
-            company_id, ["MD", "FINANCE"],
-            f"Requisition {request_no} awaits budget approval",
-            f"{actor_name} (HR) verified the internal requisition for {designation}. "
-            f"No sourcing may begin until the headcount and budget are approved.",
-            link=link, email=True)
-    elif action == "budget-approve":
-        await notify_hrms_role(
-            company_id, ["HR"], f"Requisition {request_no} has budget approval",
-            f"{actor_name} approved the headcount and salary band for {designation}. "
-            f"The position scorecard is the next gate.", kind="success", link=link)
+        # Next is the scorecard (the HOD's), or -- over the sanctioned headcount -- the
+        # Management Approval ladder, whose rung act_on_requisition notifies itself.
         if creator:
-            await notify_user(creator, f"Requisition {request_no} is funded",
-                              f"Headcount and budget approved for {designation}.",
-                              kind="success", link=link)
+            await notify_user(
+                creator, f"Requisition {request_no} verified by HR",
+                f"{actor_name} (HR) verified your requisition for {designation}. "
+                f"Next: Management Approval if it is over the sanctioned headcount, "
+                f"otherwise the position scorecard.", kind="success", link=link)
+    elif action == "budget-skip":
+        return
     elif action == "scorecard-approve":
         if creator:
             await notify_user(creator, f"Requisition {request_no} approved",
@@ -1375,7 +1488,6 @@ async def _notify_transition(action, current, request_no, actor_name, remarks, c
             f"{designation} is approved and ready to source.", kind="success", link=link)
     else:
         stage = ("HR review" if action == "hr-reject"
-                 else "budget approval" if action == "budget-reject"
                  else "scorecard approval" if action == "scorecard-reject"
                  else "approval")
         if creator:
@@ -1476,8 +1588,8 @@ async def update_jd(actor: dict, company_id: str, jd_no: str, payload: dict) -> 
     if requisition and requisition.get("approval_status") in PRE_BUDGET_STATES:
         raise HTTPException(
             status_code=409,
-            detail=("The Job Description cannot be written until Management or Finance has "
-                    "approved headcount and budget for this requisition."))
+            detail=("The Job Description cannot be written until HR has verified "
+                    "this requisition."))
 
     clean = _validate_jd(payload, partial=True)
     if not clean:

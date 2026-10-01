@@ -177,8 +177,8 @@ async def main() -> None:
         # =================================================================
         section("The gates are asserted from the tables, not from prose")
         # =================================================================
-        check("budget approval is mandatory",
-              M.budget_approval_is_mandatory())
+        check("the approval chain is sound (no budget step; scorecard is the only way to Approved)",
+              M.approval_chain_is_sound())
         # Every action leaves a labelled trail, and no label is orphaned.
         check("every action has an audit label, and none is orphaned",
               set(M.INTERNAL_REQ_TRANSITIONS) == set(M.REQ_AUDIT_ACTIONS))
@@ -235,53 +235,24 @@ async def main() -> None:
             404)
 
         await expect_http(
-            "skipping HR verification straight to the budget gate",
+            "the removed budget-approve action",
             RS.act_on_requisition(FIN, COMPANY, IREQ, "budget-approve"),
-            409, 'not "Pending Budget Approval"')
+            422, "Invalid action")
+        await expect_http(
+            "Finance cannot verify in HR's place",
+            RS.act_on_requisition(FIN, COMPANY, IREQ, "hr-verify"),
+            403, "not authorised")
 
         state = await RS.act_on_requisition(HR, COMPANY, IREQ, "hr-verify",
                                             remarks="Role and justification check out.")
-        check("hr-verify moves it to Pending Budget Approval",
-              state["approval_status"] == M.ReqApproval.PENDING_BUDGET.value)
-
-        await expect_http(
-            "HR approving the budget it may only recommend",
-            RS.act_on_requisition(HR, COMPANY, IREQ, "budget-approve"),
-            403, "not authorised")
-        await expect_http(
-            "approving a budget without naming the figures",
-            RS.act_on_requisition(FIN, COMPANY, IREQ, "budget-approve"),
-            422, "approved headcount and salary band")
-        await expect_http(
-            "a band whose minimum exceeds its maximum",
-            RS.act_on_requisition(FIN, COMPANY, IREQ, "budget-approve",
-                                  budget={"approved_headcount": 2,
-                                          "approved_salary_band_min": 900000,
-                                          "approved_salary_band_max": 400000}),
-            422, "cannot exceed")
-        await expect_http(
-            "a headcount of zero",
-            RS.act_on_requisition(FIN, COMPANY, IREQ, "budget-approve",
-                                  budget={"approved_headcount": 0,
-                                          "approved_salary_band_min": 400000,
-                                          "approved_salary_band_max": 900000}),
-            422, "at least 1")
-
-        state = await RS.act_on_requisition(
-            FIN, COMPANY, IREQ, "budget-approve", remarks="Within the FY plan.",
-            budget={"approved_headcount": 2, "approved_salary_band_min": 400000,
-                    "approved_salary_band_max": 900000})
-        check("Finance clears the budget gate -> Pending Scorecard Approval",
+        check("within sanction, hr-verify goes straight to Pending Scorecard Approval",
               state["approval_status"] == M.ReqApproval.PENDING_SCORECARD.value)
-        check("the approved band is stored, because later offers are checked against it",
-              state["approved_salary_band_min"] == 400000
-              and state["approved_salary_band_max"] == 900000)
-        check("the approved headcount is stored", state["approved_headcount"] == 2)
-        check("who approved it is attributable", state["budget_approved_by"] == U_FIN)
-        check("the SLA milestone is stamped when it happened, not derived later",
+        check("the approved headcount is taken from the vacancies",
+              state["approved_headcount"] == max(1, int(internal_req.get("vacancy") or 1)))
+        check("the SLA milestone is stamped at HR verification, when it happened",
               (state.get("sla_actuals") or {}).get("budget_approved") is not None)
-        check("budget approval is audited",
-              any(a["action"] == M.AUDIT_REQ_BUDGET_OK for a in audit_log.docs))
+        check("HR verification is audited",
+              any(a["action"] == M.AUDIT_REQ_HR_VERIFIED for a in audit_log.docs))
 
         await expect_http(
             "Finance approving the scorecard, which is the HOD's call",
@@ -306,7 +277,7 @@ async def main() -> None:
               == M.JdStatus.APPROVED.value)
 
         # =================================================================
-        section("Escalation hangs off the BUDGET gate, not HR verification")
+        section("Headcount Approval (escalation) now hangs off HR verification")
         # =================================================================
         # Remove the sanctioned figure: no figure at all counts as over-sanction (fail
         # closed), which is the documented Phase 11-R rule and must still hold here.
@@ -315,14 +286,7 @@ async def main() -> None:
         esc = await RS.create_requisition(HOD, COMPANY, payload())
         EREQ = esc["request_no"]
         state = await RS.act_on_requisition(HR, COMPANY, EREQ, "hr-verify")
-        check("HR verification does NOT escalate -- nobody has agreed to pay yet",
-              state["approval_status"] == M.ReqApproval.PENDING_BUDGET.value)
-
-        state = await RS.act_on_requisition(
-            FIN, COMPANY, EREQ, "budget-approve",
-            budget={"approved_headcount": 2, "approved_salary_band_min": 100000,
-                    "approved_salary_band_max": 200000})
-        check("an over-sanction internal requisition escalates AFTER the budget gate",
+        check("an over-sanction internal requisition goes to Headcount Approval right after HR",
               state["approval_status"] == M.ReqApproval.PENDING_ESCALATION.value)
         check("a position with no sanctioned figure counts as over-sanction (fail closed)",
               (state.get("sanction_snapshot") or {}).get("is_over_sanction") is True)
@@ -349,7 +313,7 @@ async def main() -> None:
         # Each rung is rejected by the role that OWNS it -- the same separation of duties the
         # approve path enforces. Rejecting is not a lesser act than approving.
         for action, rejector in (("hr-reject", HR),
-                                 ("budget-reject", FIN),
+                                 ("escalate-reject", MD),
                                  ("scorecard-reject", HOD)):
             row = await RS.create_requisition(HOD, COMPANY,
                                               payload(requisition_track="internal"))
@@ -357,10 +321,6 @@ async def main() -> None:
             if action != "hr-reject":
                 await RS.act_on_requisition(HR, COMPANY, no, "hr-verify")
             if action == "scorecard-reject":
-                await RS.act_on_requisition(
-                    FIN, COMPANY, no, "budget-approve",
-                    budget={"approved_headcount": 1, "approved_salary_band_min": 1,
-                            "approved_salary_band_max": 2})
                 while (await reqs.find_one({"request_no": no}))["approval_status"] \
                         == M.ReqApproval.PENDING_ESCALATION.value:
                     await RS.act_on_requisition(MD, COMPANY, no, "escalate-approve")

@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import {
   Megaphone, Plus, Search, Copy, Check, ExternalLink, Radio, Users2, Trash2, Pause, Play,
-  Send, ShieldCheck, History, X,
+  Send, ShieldCheck, History, X, Link2,
 } from 'lucide-react';
 import { useNotification } from '../../../context/NotificationContext';
 import { useHrms } from '../HrmsContext';
@@ -11,7 +11,7 @@ import HrmsScopeBar from '../common/HrmsScopeBar';
 import { HrmsLoading, HrmsError, HrmsEmpty } from '../common/HrmsStates';
 import {
   getPostings, updatePosting, deletePosting, applyUrlFor,
-  publishPosting, approvePostingExecSearch, getPostingHistory,
+  publishPosting, approvePostingExecSearch, getPostingHistory, JOB_PLATFORMS, trackedApplyUrl,
 } from '../../../services/hrmsApi';
 import CreatePostingModal from './CreatePostingModal';
 
@@ -52,7 +52,7 @@ const Tile = ({ icon: Icon, label, value }) => (
 );
 
 const PostingCard = ({ posting: p, canWrite, canApproveExec, onCopy, copied, onStatus,
-                       onDelete, onPublish, onApproveExec, onHistory }) => {
+                       onDelete, onPublish, onApproveExec, onHistory, onLinks }) => {
   const isExternal = p.apply_link_mode === 'external';
   const link = isExternal ? p.external_url : applyUrlFor(p.posting_code);
   const isDraft = p.live_status === 'Draft';
@@ -131,9 +131,15 @@ const PostingCard = ({ posting: p, canWrite, canApproveExec, onCopy, copied, onS
               Applications made there do not appear here — it links out to another site.
             </p>
           ) : (
-            <p className="mt-1.5 text-[11px] text-[var(--text-muted)]">
-              Share this one link anywhere — applicants tell the form where they found the job.
-            </p>
+            <div className="mt-1.5 flex items-center justify-between gap-2">
+              <p className="text-[11px] text-[var(--text-muted)]">
+                Use a tracked link per portal to see which one brings the most reach.
+              </p>
+              <button type="button" onClick={() => onLinks(p)}
+                className="shrink-0 h-7 px-2.5 rounded-lg bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] text-[11px] font-bold flex items-center gap-1">
+                <Link2 size={12} /> Tracked links
+              </button>
+            </div>
           )}
         </div>
       ) : (
@@ -191,6 +197,46 @@ const PostingCard = ({ posting: p, canWrite, canApproveExec, onCopy, copied, onS
 
 /** The posting's own history, read from the audit trail the server already keeps -- so it
  *  cannot disagree with what actually happened to the posting. */
+/** One apply link per platform (`?src=naukri`), so Job Portal Reach can tell them apart. */
+const TrackedLinksModal = ({ posting, onCopy, copied, onClose }) => (
+  <div className="fixed inset-0 z-50 grid place-items-center bg-black/40 backdrop-blur-sm p-4">
+    <div className="w-full max-w-xl rounded-2xl border border-[var(--border)] bg-[var(--bg-card)] shadow-xl max-h-[85vh] flex flex-col">
+      <div className="flex items-start justify-between gap-3 px-5 py-4 border-b border-[var(--border)]">
+        <div>
+          <h2 className="text-[15px] font-bold text-[var(--text-main)] flex items-center gap-2">
+            <Link2 size={16} className="text-[var(--accent-indigo)]" />
+            Tracked links — {posting.posting_code}
+          </h2>
+          <p className="mt-0.5 text-[11.5px] text-[var(--text-muted)]">
+            Paste each portal&apos;s own link in its job ad. Applicants who use it are then
+            attributed to that portal in Source Analytics.
+          </p>
+        </div>
+        <button type="button" onClick={onClose}
+          className="p-1.5 rounded-lg text-[var(--text-muted)] hover:bg-[var(--input-bg)]">
+          <X size={17} />
+        </button>
+      </div>
+      <ul className="p-4 space-y-2 overflow-y-auto">
+        {JOB_PLATFORMS.map(([key, label]) => {
+          const url = trackedApplyUrl(posting.posting_code, key);
+          const id = `${posting.posting_code}:${key}`;
+          return (
+            <li key={key} className="flex items-center gap-2 p-2 rounded-lg bg-[var(--input-bg)]">
+              <span className="w-28 shrink-0 text-[12px] font-bold text-[var(--text-main)]">{label}</span>
+              <span className="flex-1 min-w-0 font-mono text-[11px] text-[var(--text-muted)] truncate">{url}</span>
+              <button type="button" onClick={() => onCopy(id, url)} title={`Copy the ${label} link`}
+                className="h-7 px-2 rounded-md text-[11px] font-bold flex items-center gap-1 text-[var(--text-muted)] hover:text-[var(--accent-indigo)]">
+                {copied === id ? <><Check size={13} /> Copied</> : <><Copy size={13} /> Copy</>}
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  </div>
+);
+
 const PostingHistoryModal = ({ posting, scope, onClose }) => {
   const [rows, setRows] = useState(null);
   const [error, setError] = useState(null);
@@ -263,6 +309,7 @@ const PostingList = () => {
   const [showCreate, setShowCreate] = useState(false);
   const [copied, setCopied] = useState(null);
   const [historyFor, setHistoryFor] = useState(null);
+  const [linksFor, setLinksFor] = useState(null);
 
   const canWrite = can(CAP.POSTING_WRITE);
   const canApproveExec = can(CAP.POSTING_APPROVE_EXEC_SEARCH);
@@ -395,7 +442,8 @@ const PostingList = () => {
             <PostingCard key={p.posting_code} posting={p} canWrite={canWrite}
               canApproveExec={canApproveExec}
               onCopy={copy} copied={copied} onStatus={setStatusFor} onDelete={remove}
-              onPublish={publish} onApproveExec={approveExec} onHistory={setHistoryFor} />
+              onPublish={publish} onApproveExec={approveExec} onHistory={setHistoryFor}
+              onLinks={setLinksFor} />
           ))}
         </div>
       )}
@@ -405,6 +453,11 @@ const PostingList = () => {
           onClose={() => setShowCreate(false)}
           onCreated={() => { setShowCreate(false); load(); }}
         />
+      )}
+
+      {linksFor && (
+        <TrackedLinksModal posting={linksFor} onCopy={copy} copied={copied}
+          onClose={() => setLinksFor(null)} />
       )}
 
       {historyFor && (

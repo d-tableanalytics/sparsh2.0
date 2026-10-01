@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { useParams } from 'react-router-dom';
+import { useParams, useSearchParams } from 'react-router-dom';
 import {
   Briefcase, MapPin, Clock, GraduationCap, PartyPopper, XCircle, Loader2, Upload, X,
 } from 'lucide-react';
@@ -45,8 +45,30 @@ const Fact = ({ icon: Icon, label, value }) => (
   ) : null
 );
 
+// A tracked link (`?src=naukri`) pre-answers "where did you find this job" -- the applicant
+// can still change it. Platforms with no obvious channel (referral, other) are left blank.
+const SRC_TO_CHANNEL = {
+  naukri: 'Job Portal', indeed: 'Job Portal', apna: 'Job Portal', foundit: 'Job Portal', shine: 'Job Portal',
+  linkedin: 'Social Media', social: 'Social Media', whatsapp: 'Social Media',
+  website: 'Company Website',
+};
+
+// "Which one?" -- asked when the channel is a job portal or social media, so Source
+// Analytics can tell Naukri from LinkedIn. Keys match JOB_PLATFORMS on the server.
+const PLATFORM_CHOICES = {
+  'Job Portal': [['naukri', 'Naukri'], ['indeed', 'Indeed'], ['apna', 'Apna'], ['linkedin', 'LinkedIn'],
+    ['foundit', 'Foundit'], ['shine', 'Shine'], ['other', 'Another job portal']],
+  'Social Media': [['linkedin', 'LinkedIn'], ['whatsapp', 'WhatsApp'], ['social', 'Other social media']],
+};
+const TRACKED = ['linkedin', 'naukri', 'indeed', 'apna', 'foundit', 'shine', 'website', 'referral',
+  'social', 'whatsapp', 'other'];
+
 const ApplyPage = () => {
   const { code } = useParams();
+  const [searchParams] = useSearchParams();
+  const src = (searchParams.get('src') || '').slice(0, 40).toLowerCase();
+  // A tracked link already says which platform -- no need to ask.
+  const linkPlatform = TRACKED.includes(src) ? src : '';
 
   const [job, setJob] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -67,10 +89,13 @@ const ApplyPage = () => {
     eeo_ack: false, data_use_ack: false, consent_to_retain: false,
     // ── Phase 11-R, Item 5 ── referral capture. Collapsed by default and entirely
     // optional, so the majority who were not referred see no extra fields at all.
-    is_referral: false, referred_by: '', referral_source: '',
+    is_referral: false, referred_by: '', referral_source: SRC_TO_CHANNEL[src] || '',
     referrer_employee_code: '', referral_relation: '',
+    platform: '',
   });
   const [resume, setResume] = useState(null);
+  const platformChoices = linkPlatform ? null : PLATFORM_CHOICES[form.referral_source];
+  const platformOk = !platformChoices || platformChoices.some(([k]) => k === form.platform);
   const [certificates, setCertificates] = useState([]);
 
   const set = (k) => (e) =>
@@ -78,7 +103,7 @@ const ApplyPage = () => {
 
   useEffect(() => {
     document.title = 'Apply';
-    getPublicJob(code)
+    getPublicJob(code, src)
       .then(({ data }) => {
         // An `external` posting is a signpost, not a form — send the applicant onward.
         if (data?.external && data.external_url) {
@@ -91,6 +116,7 @@ const ApplyPage = () => {
       .catch((err) => setLoadError(
         err?.response?.data?.detail || 'This application link is not valid.'))
       .finally(() => setLoading(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [code]);
 
   const pickResume = (e) => {
@@ -148,6 +174,10 @@ const ApplyPage = () => {
       setError('Please tell us where you found this job.');
       return;
     }
+    if (!platformOk) {
+      setError(`Please tell us which ${form.referral_source === 'Job Portal' ? 'job portal' : 'platform'}.`);
+      return;
+    }
     if (form.is_referral && !form.referred_by.trim()) {
       setError('Please enter the name of the person who referred you.');
       return;
@@ -159,7 +189,8 @@ const ApplyPage = () => {
     }
     setSubmitting(true);
     try {
-      const payload = { ...form };
+      const payload = { ...form, src: src || undefined,
+        platform: platformChoices ? form.platform : undefined };
       if (resume) payload.resume = await readFileAsUpload(resume);
       if (certificates.length) {
         payload.certificates = await Promise.all(certificates.map(readFileAsUpload));
@@ -421,11 +452,24 @@ const ApplyPage = () => {
                   <option value="Employee">Referred by an employee</option>
                   <option value="Ex-Employee">Referred by a former employee</option>
                   <option value="Consultant / Agency">A consultant or agency</option>
-                  <option value="Client">A client of the company</option>
+                  <option value="Company Website">Our company website</option>
                   <option value="Walk-in">Walk-in / notice board</option>
                   <option value="Other">Somewhere else</option>
                 </select>
               </div>
+
+              {platformChoices && (
+                <div>
+                  <label className={LABEL} htmlFor="a-platform">
+                    {form.referral_source === 'Job Portal' ? 'Which job portal? *' : 'Which platform? *'}
+                  </label>
+                  <select id="a-platform" required className={FIELD}
+                    value={platformOk ? form.platform : ''} onChange={set('platform')}>
+                    <option value="">Choose one…</option>
+                    {platformChoices.map(([k, label]) => <option key={k} value={k}>{label}</option>)}
+                  </select>
+                </div>
+              )}
 
               <label className="flex items-start gap-2.5 cursor-pointer">
                 <input

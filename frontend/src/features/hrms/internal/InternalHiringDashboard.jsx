@@ -29,10 +29,9 @@ import { Chip, Btn, Tile, FlowAccordion } from './internalKit.jsx';
  */
 const SOP_STAGES = [
   { n: '1', label: 'Requisition', to: '/hrms/internal-requisitions' },
-  // Its own step, not folded into Step 1 — SOP §Step 2 makes this a mandatory gate in its
-  // own right ("no internal role may be sourced without written headcount and budget
-  // approval"), cleared by Management/Finance, not the HOD who raises the requisition.
-  { n: '2', label: 'Headcount & Budget Approval', to: '/hrms/internal-requisitions' },
+  // HR verification, then Management's Headcount Approval ONLY when the requisition is over
+  // the sanctioned headcount. There is no separate budget-approval step.
+  { n: '2', label: 'HR Verification / Headcount', to: '/hrms/hr-verification' },
   { n: '3', label: 'Scorecard / JD', to: '/hrms/scorecards' },
   { n: '4–5', label: 'Sourcing', to: '/hrms/postings' },
   { n: '6', label: 'CV Screening', to: '/hrms/screening' },
@@ -117,7 +116,8 @@ const StageTracker = () => {
  */
 const APPROVAL_FLOW = [
   { actor: 'HOD', action: 'Raises the internal requisition — role, reporting line, business justification.' },
-  { actor: 'Management / Finance', action: 'Approves headcount and budget. Mandatory — nothing is sourced before this.' },
+  { actor: 'HR', action: 'Verifies the requisition. Nothing is sourced before this.' },
+  { actor: 'Management', action: 'Approves the extra headcount — only when the requisition is over the sanctioned headcount.' },
   { actor: 'HR', action: 'Drafts the JD and position scorecard, sends it to the HOD.' },
   { actor: 'HOD', action: 'Approves the scorecard — and Management too, for managerial+ roles.' },
   { actor: 'HR', action: 'Sources, screens, assesses, and coordinates the panel interview.' },
@@ -142,15 +142,6 @@ const ApprovalFlow = () => (
 /** One pending-action definition: how to count it, where it goes, who clears it. */
 const ACTIONS = [
   {
-    key: 'budget',
-    label: 'Budget approval required',
-    icon: Wallet,
-    who: 'Management or Finance',
-    detail: 'Nothing can be sourced until the headcount and salary band are approved.',
-    to: '/hrms/internal-requisitions',
-    match: (r) => r.approval_status === 'Pending Budget Approval',
-  },
-  {
     key: 'hr',
     label: 'HR verification required',
     icon: ClipboardCheck,
@@ -161,10 +152,10 @@ const ACTIONS = [
   },
   {
     key: 'escalation',
-    label: 'Escalation to clear',
+    label: 'Management approval',
     icon: AlertTriangle,
-    who: 'the reporting line',
-    detail: 'Raised above the sanctioned headcount, so it routes up the reporting line.',
+    who: 'Management',
+    detail: 'Raised above the sanctioned headcount, so Management must approve it.',
     to: '/hrms/internal-requisitions',
     match: (r) => r.approval_status === 'Pending Escalation',
   },
@@ -388,8 +379,8 @@ const InternalHiringDashboard = () => {
           <HrmsEmpty
             title="No internal requisitions yet"
             hint={`Raise one on the Requisitions screen. ${companyName || 'This company'}'s `
-              + 'own vacancies run through HR verification, budget approval and a position '
-              + 'scorecard before sourcing begins.'}
+              + 'own vacancies run through HR verification (and Management\'s headcount '
+              + 'approval when over the sanction) and a position scorecard before sourcing begins.'}
           />
         ) : (
           <>

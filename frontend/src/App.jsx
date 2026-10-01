@@ -99,6 +99,7 @@ import OnboardingBoard from './features/hrms/recruitment/OnboardingBoard';
 // boundaries -- which moved ~111 kB of existing code INTO the main chunk. Measured, see
 // PHASE_10_REPORT section 7.
 import RecruitmentDashboard from './features/hrms/analytics/RecruitmentDashboard';
+import SourceAnalytics from './features/hrms/analytics/SourceAnalytics';
 import RecruitmentReports from './features/hrms/analytics/RecruitmentReports';
 import ApplyPage from './pages/hrms/public/ApplyPage';
 import ClientApplyPage from './pages/hrms/public/ClientApplyPage';
@@ -151,6 +152,7 @@ import PipBoard from './features/hrms/pip/PipBoard';
 import AuditViewer from './features/hrms/admin/AuditViewer';
 // ── SM-HR-051 — User / Role / Permission Administration ──
 import RoleAccessAdmin from './features/hrms/admin/RoleAccessAdmin';
+import RolesPermissions from './features/hrms/admin/RolesPermissions';
 // ── Phase LETTER-1 — HR Letter / Document Generator (SM-HR-041) ──
 import LetterBoard from './features/hrms/letters/LetterBoard';
 // ── Phase ORIENT-1 — Orientation & Training (§22.3) ──
@@ -395,6 +397,9 @@ const AppRoutes = () => {
         <Route path="offers"             element={<OfferBoard />} />
         <Route path="onboarding"         element={<OnboardingBoard />} />
         <Route path="dashboard"          element={<RecruitmentDashboard />} />
+        {/* Internal hiring: Source Analytics -- hiring outcomes + portal reach views. */}
+        <Route path="source-analytics"   element={<SourceAnalytics />} />
+        <Route path="portal-reach"       element={<Navigate to="/hrms/source-analytics" replace />} />
         <Route path="reports"            element={<RecruitmentReports />} />
         {/* Phase 11-R — recruitment review enhancements (Items 2-4, 7). */}
         <Route path="documents"          element={<DocumentCenter />} />
@@ -484,6 +489,8 @@ const AppRoutes = () => {
         <Route path="audit"                element={<AuditViewer />} />
         {/* SM-HR-051 — User / Role / Permission Administration. */}
         <Route path="access"               element={<RoleAccessAdmin />} />
+        {/* Dynamic Roles & Permissions — MD / Super Admin / Admin decide who does what. */}
+        <Route path="permissions"          element={<RolesPermissions />} />
         {/* ── Phase INT-2 ── the remaining SOP controls. `shortlist-reviews` is a hiring
             stage and lives in the workspace tab strip; the rest are governance and live in
             the sidebar. The two navigations stay disjoint. */}

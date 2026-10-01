@@ -23,7 +23,8 @@ const publicApi = axios.create({
 });
 
 /** The job ad behind a shared application link. */
-export const getPublicJob = (code) => publicApi.get(`/hrms/public/apply/${code}`);
+export const getPublicJob = (code, src) =>
+  publicApi.get(`/hrms/public/apply/${code}`, { params: src ? { src } : undefined });
 
 /** Submit an application. Files are sent as base64 in the JSON body — the public form has
  *  no token, and this keeps one ingest shape for every candidate-facing upload. */

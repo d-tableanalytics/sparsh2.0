@@ -66,14 +66,21 @@ async def main() -> None:
         d.update(extra)
         return d
 
+    # Onboarding starts only after the appointment letter is sent, so the candidates this
+    # file onboards are at Appointment Letter Sent, each with a Sent letter on record.
     candidates = FakeCollection([
-        cand("CAN-001", S.OFFER_ACCEPTED.value),
+        cand("CAN-001", S.APPOINTMENT_LETTER_SENT.value),
         cand("CAN-002", S.SELECTED.value),              # accepted nothing yet
-        cand("CAN-003", S.OFFER_ACCEPTED.value),
-        cand("CAN-004", S.OFFER_ACCEPTED.value),
-        cand("CAN-005", S.OFFER_ACCEPTED.value),
+        cand("CAN-003", S.APPOINTMENT_LETTER_SENT.value),
+        cand("CAN-004", S.APPOINTMENT_LETTER_SENT.value),
+        cand("CAN-005", S.APPOINTMENT_LETTER_SENT.value),
         cand("CAN-006", S.INTERVIEW_SCHEDULED.value),
+        cand("CAN-007", S.OFFER_ACCEPTED.value),        # accepted, letter NOT sent yet
     ])
+    appointments = FakeCollection([
+        {"_id": ObjectId(), "appointment_no": f"APT-{uk}", "company_id": COMPANY, "uk": uk,
+         "status": M.AppointmentStatus.SENT.value}
+        for uk in ("CAN-001", "CAN-003", "CAN-004", "CAN-005")])
     reqs = FakeCollection([
         {"_id": ObjectId(), "request_no": "HR-REQ-2026-001", "company_id": COMPANY,
          "designation_name": "Analyst", "department_id": DEPT, "designation_id": DESIG,
@@ -106,7 +113,8 @@ async def main() -> None:
              M.COLL_OFFERS: offers, M.COLL_ONBOARDING: onboardings,
              M.COLL_EMPLOYEE_PROFILES: profiles, M.COLL_DEPARTMENTS: departments,
              M.COLL_DESIGNATIONS: designations, M.COLL_COUNTERS: counters,
-             M.COLL_AUDIT_LOG: audit_log, "learners": learners, "staff": FakeCollection()}
+             M.COLL_AUDIT_LOG: audit_log, M.COLL_APPOINTMENTS: appointments,
+             "learners": learners, "staff": FakeCollection()}
     original = mongo.get_collection
     mongo.get_collection = lambda name: store.setdefault(name, FakeCollection())
 
@@ -208,12 +216,18 @@ async def main() -> None:
         # before the candidate has agreed to join -- so it is asserted as "every onboardable
         # stage is at or past Offer Accepted", which is the rule, rather than as a pinned
         # set, which was only its Phase 9 instance.
-        check("nothing before Offer Accepted is onboardable",
-              M.ONBOARDABLE_STATUSES == {S.OFFER_ACCEPTED, S.APPOINTMENT_LETTER_SENT}
+        # The appointment letter is mandatory before onboarding: the only onboardable stage
+        # is Appointment Letter Sent (which is past Offer Accepted, so consent still holds).
+        check("only Appointment Letter Sent is onboardable",
+              M.ONBOARDABLE_STATUSES == {S.APPOINTMENT_LETTER_SENT}
               and all(M.stage_rank(s) >= M.stage_rank(S.OFFER_ACCEPTED)
                       for s in M.ONBOARDABLE_STATUSES))
-        check("the graph agrees: Offer Accepted -> Pre-Onboarding",
-              M.can_transition(S.OFFER_ACCEPTED, S.PRE_ONBOARDING))
+        check("the graph agrees: Appointment Letter Sent -> Pre-Onboarding, not Offer Accepted",
+              M.can_transition(S.APPOINTMENT_LETTER_SENT, S.PRE_ONBOARDING)
+              and not M.can_transition(S.OFFER_ACCEPTED, S.PRE_ONBOARDING))
+        await expect_http("starting onboarding for someone whose letter is not sent",
+                          OB.start_onboarding(HR, COMPANY, {"uk": "CAN-007"}),
+                          409, "appointment letter")
         check("the graph refuses Selected -> Pre-Onboarding, which is why Selected is out",
               not M.can_transition(S.SELECTED, S.PRE_ONBOARDING))
 
@@ -858,6 +872,16 @@ async def main() -> None:
         check("uniq_user is SPARSE so unlinked employees can coexist",
               uniq_user.get("sparse") is True and uniq_user.get("unique") is True)
         check("`employee` id format declared", "employee" in M.ID_FORMATS)
+        # `sparse` is a no-op on a compound index led by an always-present company_id: every
+        # row without the second value is indexed as null, and the SECOND such row in a
+        # company fails with E11000 ("Start onboarding" broke exactly this way).
+        for coll, name, field in ((M.COLL_ONBOARDING, "uniq_employee_id", "employee_id"),
+                                  (M.COLL_EMPLOYEE_PROFILES, "uniq_company_code", "employee_code"),
+                                  (M.COLL_SURVEY_RESPONSES, "uniq_survey_employee", "employee_code")):
+            spec = next(o for c, k, o in M.HRMS_INDEXES if c == coll and o.get("name") == name)
+            check(f"{name} is PARTIAL on a real {field} (not sparse), so rows without one coexist",
+                  spec.get("unique") is True and not spec.get("sparse")
+                  and spec.get("partialFilterExpression") == {field: {"$type": "string"}})
         check("checklist keys are unique",
               len(M.CHECKLIST_KEYS) == len(set(M.CHECKLIST_KEYS)))
         check("seed_checklist is pure -- two calls do not share state",
