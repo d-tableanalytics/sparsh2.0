@@ -303,8 +303,10 @@ async def main() -> None:
          {"HR"}, {"HOD", "FINANCE", "EMPLOYEE"}),
         ("Panel interview -- HOD evaluates", M.Cap.INTERVIEW_EVALUATE,
          {"HOD", "HR"}, {"FINANCE"}),
-        ("Internal shortlisting committee", M.Cap.SHORTLIST_WRITE,
-         {"HR", "HOD"}, {"FINANCE", "EMPLOYEE"}),
+        # HR alone SENDS the committee request (convenes); the HOD answers it with their own
+        # verdict (SHORTLIST_READ + membership), so the HOD no longer convenes.
+        ("Internal shortlisting committee", M.Cap.SHORTLIST_CONVENE,
+         {"HR"}, {"HOD", "FINANCE", "EMPLOYEE"}),
         ("Final interview (managerial+)",   M.Cap.INTERVIEW_DECIDE_MD,
          {"MD"}, {"HR", "HOD", "FINANCE", "EMPLOYEE"}),
         ("Reference check",                 M.Cap.REFERENCE_WRITE,
@@ -393,6 +395,8 @@ async def main() -> None:
         SELF_SERVICE_ONLY = {
             M.Cap.POLICY_ACKNOWLEDGE, M.Cap.PULSE_SUBMIT,
             M.Cap.EXIT_INTERVIEW_SUBMIT, M.Cap.GMP_READ, M.Cap.GMP_WRITE,
+            # Checking yourself in / out: every staff member's own act (self-service).
+            M.Cap.ATTENDANCE_SELF_PUNCH, M.Cap.ATTENDANCE_FLEXI_REQUEST,
         }
         # Client Hiring is a SEPARATE TRACK, and the Operations Head's universal grant does
         # not reach into it. Two kinds of capability are deliberately withheld there:
@@ -407,9 +411,11 @@ async def main() -> None:
         md_missing = set(M.Cap) - set(M.ROLE_CAPABILITIES[M.HrmsRole.MD])
         # ATTENDANCE_CLOSURE_READ is granted in capabilities_for (to whoever may lock, and to
         # the MD), not listed per role.
-        check("(actual) on the INTERNAL track the MD holds every capability but one",
+        # Two, both HR's own acts: HR's requisition verification, and sending the shortlisting
+        # committee request (convening) -- the MD answers committee requests, never sends them.
+        check("(actual) on the INTERNAL track the MD holds every capability but two",
               md_missing - SELF_SERVICE_ONLY - CLIENT_TRACK - {M.Cap.ATTENDANCE_CLOSURE_READ}
-              == {M.Cap.REQUISITION_REVIEW_HR})
+              == {M.Cap.REQUISITION_REVIEW_HR, M.Cap.SHORTLIST_CONVENE})
 
         # ...but what the MD can actually DO is decided by capabilities_for, and there the MD
         # is review-only for Payroll and Attendance (product owner, 2026-09-28): every read
@@ -426,7 +432,9 @@ async def main() -> None:
                     if not any(c in M.ROLE_CAPABILITIES[r] for r in M.ROLE_CAPABILITIES
                                if r not in (M.HrmsRole.MD, M.HrmsRole.ADMIN))]
         check("...and every action taken from the MD is still held by another role",
-              not orphaned or set(orphaned) <= {"ATTENDANCE_REGULARIZE_REQUEST", "OD_REQUEST", "ADVANCE_REQUEST"})
+              not orphaned or set(orphaned) <= {"ATTENDANCE_REGULARIZE_REQUEST", "OD_REQUEST", "ADVANCE_REQUEST",
+                                                "ATTENDANCE_SELF_PUNCH",
+                                                "ATTENDANCE_FLEXI_REQUEST"})
         check("the MD does not apply for leave or claim C-Off (not an employee)",
               M.Cap.LEAVE_APPLY not in md_caps and M.Cap.COFF_EARN_REQUEST not in md_caps)
         check("...but still sees leave and approves other people's",
@@ -489,46 +497,47 @@ async def main() -> None:
               any(s[0] == "role" and "HR" in s[1] for s in sent))
 
         # =================================================================
-        section("STAGE 2 -- Headcount & budget approval (Mgmt/Finance=A/R)")
+        section("STAGE 2 -- HR verification (no budget-approval step any more)")
         # =================================================================
-        await expect_http("HR (C) approves the budget",
-                          RS.act_on_requisition(HR, COMPANY, REQ, "budget-approve",
-                                                budget=BUDGET), 403, "not authorised")
-        await expect_http("HOD (C) approves the budget",
-                          RS.act_on_requisition(HOD, COMPANY, REQ, "budget-approve",
-                                                budget=BUDGET), 403, "not authorised")
-        await expect_http("an employee approves the budget",
-                          RS.act_on_requisition(EMP, COMPANY, REQ, "budget-approve",
-                                                budget=BUDGET), 403, "not authorised")
-        await RS.act_on_requisition(HR, COMPANY, REQ, "hr-verify")
-        check("HR's own step (verification) is allowed",
-              await status_of(REQ) == M.ReqApproval.PENDING_BUDGET.value)
+        # The budget-approval step was removed: HR verification goes straight on to the
+        # scorecard (or, over the sanctioned headcount, to Management's Headcount Approval).
+        for label, who in (("HOD (C) verifies", HOD), ("Finance verifies", FIN),
+                           ("an employee verifies", EMP)):
+            await expect_http(label, RS.act_on_requisition(who, COMPANY, REQ, "hr-verify"),
+                              403, "not authorised")
+        await expect_http("the removed budget-approve action",
+                          RS.act_on_requisition(FIN, COMPANY, REQ, "budget-approve",
+                                                budget=BUDGET), 422, "invalid action")
 
         section("STAGE 2b -- rejection returns it to a stopped state, then resubmit")
         await expect_http("rejecting with no comment",
-                          RS.act_on_requisition(FIN, COMPANY, REQ, "budget-reject"),
+                          RS.act_on_requisition(HR, COMPANY, REQ, "hr-reject"),
                           422, "remark is required")
-        await RS.act_on_requisition(FIN, COMPANY, REQ, "budget-reject",
+        await RS.act_on_requisition(HR, COMPANY, REQ, "hr-reject",
                                     remarks="Deferred to the next quarter.")
-        check("Finance (A) rejection lands on Rejected",
+        check("HR rejection lands on Rejected",
               await status_of(REQ) == M.ReqApproval.REJECTED.value)
         check("the rejection is audited with its comment",
-              any(r["action"] == M.AUDIT_REQ_BUDGET_NO and "Deferred" in (r.get("detail") or "")
+              any(r["action"] == M.AUDIT_REQ_HR_REJECTED and "Deferred" in (r.get("detail") or "")
                   for r in audit_rows(REQ)))
 
         # The live vacancy from here on.
         live = await RS.create_requisition(HOD, COMPANY, payload())
         REQ, JD = live["request_no"], live["jd_no"]
-        await RS.act_on_requisition(HR, COMPANY, REQ, "hr-verify")
+        # HR records the salary band at verification -- negotiation and offers are judged
+        # against it.
         approved = await RS.act_on_requisition(
-            FIN, COMPANY, REQ, "budget-approve", budget=BUDGET,
-            remarks="Approved against the Q1 headcount plan.")
-        check("Finance (A) approval moves it to Pending Scorecard Approval",
+            HR, COMPANY, REQ, "hr-verify", remarks="Verified against the Q1 headcount plan.",
+            budget=BUDGET)
+        check("HR's own step (verification) moves it straight to Pending Scorecard Approval",
               approved["approval_status"] == M.ReqApproval.PENDING_SCORECARD.value)
-        check("the approver, the band and the timestamp are recorded",
-              approved["budget_approved_by"] == U_FIN
-              and approved["approved_salary_band_min"] == BAND_MIN
-              and approved.get("budget_approved_at"))
+        check("the verifier, the headcount and the timestamp are recorded",
+              approved["hr_reviewed_by"] == U_HR
+              and approved["approved_headcount"] == 1
+              and approved.get("hr_reviewed_at"))
+        check("the band HR recorded is stamped on the requisition",
+              approved["approved_salary_band_min"] == BAND_MIN
+              and approved["approved_salary_band_max"] == BAND_MAX)
 
         # =================================================================
         section("STAGE 3 -- Position scorecard: HR=R drafts, HOD=A approves")
@@ -819,8 +828,7 @@ async def main() -> None:
             designation=desig_mgr, jd={"title": "HR Manager",
                                        "responsibilities": "Lead the HR function."}))
         MREQ = mgr["request_no"]
-        await RS.act_on_requisition(HR, COMPANY, MREQ, "hr-verify")
-        await RS.act_on_requisition(FIN, COMPANY, MREQ, "budget-approve", budget=BUDGET)
+        await RS.act_on_requisition(HR, COMPANY, MREQ, "hr-verify", budget=BUDGET)
         mcard = await SC.create_scorecard(HR, COMPANY, {
             "request_no": MREQ, "managerial": True,
             "criteria": [{"label": "Leadership",
@@ -846,19 +854,19 @@ async def main() -> None:
         # =================================================================
         rows = audit_rows(REQ)
         check("every step of the chain is on the trail",
-              {M.AUDIT_REQ_CREATED, M.AUDIT_REQ_HR_VERIFIED, M.AUDIT_REQ_BUDGET_OK,
+              {M.AUDIT_REQ_CREATED, M.AUDIT_REQ_HR_VERIFIED,
                M.AUDIT_REQ_SCORECARD_OK} <= {r["action"] for r in rows})
         check("each row names the actor", all(r.get("actor_id") for r in rows))
         check("each row names the actor in words too", all(r.get("actor_name") for r in rows))
         check("each row is timestamped", all(r.get("created_at") for r in rows))
         check("each row is company-scoped", all(r.get("company_id") == COMPANY for r in rows))
-        budget_row = next(r for r in rows if r["action"] == M.AUDIT_REQ_BUDGET_OK)
-        check("the budget row attributes the decision to FINANCE",
-              budget_row["actor_id"] == U_FIN and budget_row["actor_name"] == "Farid Finance")
-        check("the approver's comment is carried on the record",
+        verify_row = next(r for r in rows if r["action"] == M.AUDIT_REQ_HR_VERIFIED)
+        check("the verification row attributes the decision to HR",
+              verify_row["actor_id"] == U_HR and verify_row["actor_name"] == "Hana HR")
+        check("the verifier's comment is carried on the record",
               "Q1 headcount" in (
                   (await store[M.COLL_REQUISITIONS].find_one(
-                      {"request_no": REQ})).get("budget_remarks_approver") or ""))
+                      {"request_no": REQ})).get("hr_remarks") or ""))
         check("the exception decision is audited with its own actor",
               any(r.get("actor_id") == U_FIN for r in audit_rows(exc["exc_no"])))
         # The trail is append-only: nothing in the module updates or deletes an audit row.

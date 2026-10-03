@@ -376,10 +376,28 @@ async def start_onboarding(actor: dict, company_id: str, payload: dict) -> dict:
             status_code=409, detail="This candidate is already being onboarded.")
 
     stage = candidate.get("application_status")
+    if stage == AppStatus.OFFER_ACCEPTED.value:
+        raise HTTPException(
+            status_code=409,
+            detail=(f'{candidate.get("candidate_name") or uk} has accepted the offer, but the '
+                    f"appointment letter has not been sent yet. Send it from Appointment "
+                    f"Letters first — onboarding starts after the letter."))
     if stage not in {s.value for s in ONBOARDABLE_STATUSES}:
         raise HTTPException(
             status_code=409,
-            detail="Onboarding can only be started once the candidate has accepted an offer.")
+            detail=("Onboarding can only be started once the candidate has accepted an offer "
+                    "and been sent their appointment letter."))
+    # The stage says "sent"; the letter itself must agree -- issued, and not cancelled.
+    from app.models.hrms import COLL_APPOINTMENTS, AppointmentStatus
+    issued = {AppointmentStatus.SENT.value, AppointmentStatus.PENDING_ACK.value,
+              AppointmentStatus.ACKNOWLEDGED.value}
+    if not await get_collection(COLL_APPOINTMENTS).find_one(
+            {"uk": uk, "company_id": str(company_id), "status": {"$in": sorted(issued)}}):
+        raise HTTPException(
+            status_code=409,
+            detail=(f'No sent appointment letter was found for '
+                    f'{candidate.get("candidate_name") or uk}. Send the appointment letter '
+                    f"first — onboarding starts after the letter."))
 
     # Pull terms from the accepted offer, then the requisition. The offer is the more
     # authoritative source -- it is what the candidate actually agreed to.

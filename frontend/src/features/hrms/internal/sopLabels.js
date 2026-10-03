@@ -19,7 +19,7 @@
 export const REQUISITION_SOP_LABEL = {
   'Pending HR Verification':   { step: 2, sop: 'Submitted' },
   'Pending Budget Approval':   { step: 3, sop: 'Under Approval (Budget)' },
-  'Pending Escalation':        { step: 3, sop: 'Under Approval (Escalated)' },
+  'Pending Escalation':        { step: 3, sop: 'Under Approval (Management)' },
   'Pending Scorecard Approval': { step: 4, sop: 'Under Approval (Scorecard)' },
   Approved:                    { step: 4, sop: 'Approved' },
   Rejected:                    { step: 3, sop: 'Rejected / Closed' },

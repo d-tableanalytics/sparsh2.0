@@ -111,8 +111,9 @@ const StartModal = ({ onClose, onStarted }) => {
             ) : people.length === 0 ? (
               <p className="text-[12.5px] text-[var(--text-muted)]">
                 Nobody is ready to onboard. A candidate becomes onboardable once they have{' '}
-                <strong>accepted their offer</strong> — we ask for PAN, Aadhaar and bank
-                details, so we do not collect them from someone who may still say no.
+                <strong>accepted their offer</strong> and been <strong>sent their appointment
+                letter</strong> (Appointment Letters page). Sending the letter opens onboarding
+                automatically.
               </p>
             ) : (
               <select id="ob-uk" value={form.uk} className={FIELD}
@@ -1008,7 +1009,7 @@ const OnboardingBoard = () => {
         <HrmsEmpty
           icon={UserPlus}
           title="Nobody is being onboarded"
-          hint="Onboarding opens once a candidate accepts their offer."
+          hint="Onboarding opens once a candidate's appointment letter is sent (after they accept the offer)."
         />
       )}
 

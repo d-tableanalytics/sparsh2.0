@@ -887,39 +887,15 @@ async def respond_to_offer(code: str, payload: dict) -> dict:
         # The last vacancy may just have been filled.
         await reconcile_requisition_closure(None, company_id, doc.get("request_no"))
 
-        # ── BA Functional Design §7.5 ── "Pre-boarding & Joining Document Workflow",
-        # Trigger: "Offer accepted." -- the onboarding case (and the candidate's own
-        # secure document-upload portal) is meant to open THE MOMENT an offer is
-        # accepted, not once HR gets around to picking them from a list. Best-effort:
-        # the offer has already been recorded above, and a candidate must never see
-        # their acceptance fail because this fire-and-forget step hit a problem.
-        try:
-            from app.services.hrms_onboarding_service import start_onboarding
-            await start_onboarding(None, company_id, {
-                "uk": doc["uk"], "joining_date": doc.get("joining_date")})
-        except HTTPException as e:
-            # 409 is the expected, legal case: HR started the onboarding by hand first.
-            # Anything else means the pre-joiner case did NOT open, and swallowing that
-            # left a candidate who had accepted with no case and nobody aware of it.
-            if e.status_code != 409:
-                await notify_hrms_role(
-                    company_id, ["HR"],
-                    f"Pre-joiner case NOT created: {doc.get('candidate_name')}",
-                    (f"{doc.get('candidate_name')} accepted {doc['offer_no']}, but their "
-                     f"onboarding could not be opened automatically ({e.detail}). "
-                     f"Start it by hand from the onboarding board."),
-                    kind="error", link="/hrms/onboarding", email=True)
-        except Exception as e:                      # pragma: no cover - defensive
-            # The offer is already Accepted at this point; a failure here must never make
-            # the candidate's acceptance look like it did not work.
-            logger.warning("Auto onboarding failed for %s: %s", doc.get("uk"), e)
-            await notify_hrms_role(
-                company_id, ["HR"],
-                f"Pre-joiner case NOT created: {doc.get('candidate_name')}",
-                (f"{doc.get('candidate_name')} accepted {doc['offer_no']}, but their onboarding "
-                 f"could not be opened automatically. Start it by hand from the "
-                 f"onboarding board."),
-                kind="error", link="/hrms/onboarding", email=True)
+        # The appointment letter is MANDATORY before onboarding, so accepting the offer no
+        # longer opens the onboarding case: sending the appointment letter does (see
+        # hrms_appointment_service.send_appointment). HR is told what is next.
+        await notify_hrms_role(
+            company_id, ["HR"],
+            f"Next: send the appointment letter — {doc.get('candidate_name')}",
+            (f"{doc.get('candidate_name')} accepted {doc['offer_no']}. Generate and send "
+             f"their appointment letter; onboarding opens automatically once it is sent."),
+            kind="info", link="/hrms/appointments")
 
     return {
         "ok": True,

@@ -71,8 +71,11 @@ async def main() -> None:
     check("Assessment Failed -> Interview is REFUSED",
           not M.can_transition(S.ASSESSMENT_FAILED, S.INTERVIEW_SCHEDULED))
     check("Selected -> Offer Generated legal", M.can_transition(S.SELECTED, S.OFFER_GENERATED))
-    check("Offer Accepted -> Pre-Onboarding legal",
-          M.can_transition(S.OFFER_ACCEPTED, S.PRE_ONBOARDING))
+    # The appointment letter sits in between and is mandatory.
+    check("Offer Accepted -> Appointment Letter Sent legal",
+          M.can_transition(S.OFFER_ACCEPTED, S.APPOINTMENT_LETTER_SENT))
+    check("Offer Accepted -> Pre-Onboarding is NOT (the letter comes first)",
+          not M.can_transition(S.OFFER_ACCEPTED, S.PRE_ONBOARDING))
     check("Joined -> Employee Created legal", M.can_transition(S.JOINED, S.EMPLOYEE_CREATED))
 
     section("Always-available and terminal stages")

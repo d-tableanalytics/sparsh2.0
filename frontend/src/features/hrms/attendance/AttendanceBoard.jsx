@@ -9,6 +9,7 @@ import SelfEmployeeChip from '../common/SelfEmployeeChip';
 import HrmsScopeBar from '../common/HrmsScopeBar';
 import { ProcessGuide } from '../common/ProcessGuide';
 import { ATTENDANCE_GUIDE } from '../common/processGuides';
+import { SelfPunchCard, OfficeLocationsTab } from './SelfPunch';
 import { HrmsLoading, HrmsError, HrmsEmpty } from '../common/HrmsStates';
 import { useNotification } from '../../../context/NotificationContext';
 import {
@@ -17,6 +18,7 @@ import {
   requestOd, getOdRequests, actOnOd,
   getClosureDashboard, lockPeriod, unlockPeriod,
   getLateComingSummary,
+  getShiftPolicy, saveShiftPolicy, getFlexiRequests, requestFlexi, actOnFlexi, importBiometric,
 } from '../../../services/hrmsApi';
 import { FIELD, LABEL, TEXTAREA, day, attLeaveToneFor } from '../internal/internalKit';
 import { Btn, Chip, Facts, Modal, RecordList } from '../internal/internalKit.jsx';
@@ -31,7 +33,14 @@ import { Btn, Chip, Facts, Modal, RecordList } from '../internal/internalKit.jsx
  * views onto the same rolling operational data.
  */
 
-const TABS = ['Attendance', 'Regularizations', 'Outdoor Duty', 'Late Coming', 'Monthly Closure'];
+// Where a day's punches came from.
+const SOURCE_LABEL = {
+  biometric: 'Biometric', self: 'Self check-in', manual: 'Marked by HR',
+  regularization: 'Regularised', od: 'Outdoor duty', leave: 'Leave',
+};
+
+const TABS = ['Attendance', 'Regularizations', 'Outdoor Duty', 'Flexible Timing', 'Late Coming',
+  'Monthly Closure', 'Settings'];
 
 const EXCEPTION_TYPES = ['Missing Punch', 'Wrong Time', 'Forgot to Mark', 'System Error', 'Other'];
 
@@ -128,7 +137,10 @@ const AttendanceBoard = () => {
   const { scope, companyId, can, role } = useHrms();
   const { showSuccess, showError } = useNotification();
   const [tab, setTab] = useState('Attendance');
-  const tabs = TABS.filter((t) => t !== 'Monthly Closure' || can(CAP.ATTENDANCE_CLOSURE_READ));
+  const tabs = TABS.filter((t) => (t !== 'Monthly Closure' || can(CAP.ATTENDANCE_CLOSURE_READ))
+    && (t !== 'Settings' || can(CAP.LEAVE_POLICY_MANAGE)));
+  // Re-reads the attendance list after a self punch (the tab remounts on a new key).
+  const [punchTick, setPunchTick] = useState(0);
 
   return (
     <div className="space-y-6">
@@ -144,12 +156,16 @@ const AttendanceBoard = () => {
           {' '}{'HR (attendance, closure) and managers (approvals)'}.
         </div>
       )}
+      {can(CAP.ATTENDANCE_SELF_PUNCH) && (
+        <SelfPunchCard scope={scope} showSuccess={showSuccess} showError={showError}
+          onPunched={() => setPunchTick((n) => n + 1)} />
+      )}
       <ProcessGuide guide={ATTENDANCE_GUIDE} />
 
       <BoardTabs tabs={tabs} value={tab} onChange={setTab} label="Attendance sections" />
 
       {tab === 'Attendance' && (
-        <AttendanceTab scope={scope} companyId={companyId} can={can}
+        <AttendanceTab key={punchTick} scope={scope} companyId={companyId} can={can}
           showSuccess={showSuccess} showError={showError} />
       )}
       {tab === 'Regularizations' && (
@@ -162,6 +178,21 @@ const AttendanceBoard = () => {
       )}
       {tab === 'Late Coming' && (
         <LateComingTab scope={scope} companyId={companyId} />
+      )}
+      {tab === 'Settings' && (
+        <div className="space-y-5">
+          <TimingRulesCard scope={scope} companyId={companyId}
+            showSuccess={showSuccess} showError={showError} />
+          <section className="rounded-xl border border-[var(--border)] bg-[var(--bg-card)] p-4 space-y-3">
+            <h3 className="text-[14px] font-bold text-[var(--text-main)]">Office locations (for self check-in)</h3>
+            <OfficeLocationsTab scope={scope} companyId={companyId}
+              showSuccess={showSuccess} showError={showError} />
+          </section>
+        </div>
+      )}
+      {tab === 'Flexible Timing' && (
+        <FlexiTab scope={scope} companyId={companyId} can={can}
+          showSuccess={showSuccess} showError={showError} />
       )}
       {tab === 'Monthly Closure' && (
         <ClosureTab scope={scope} companyId={companyId} can={can}
@@ -300,7 +331,9 @@ const LateComingTab = ({ scope, companyId }) => {
           )}
           {employeeRows.length > 0 && (
             <div>
-              <p className={LABEL}>By Employee</p>
+              <p className={LABEL}>
+                By Employee · grace {summary.grace_minutes ?? 0} min/day · buffer {summary.buffer_minutes ?? 0} min/month
+              </p>
               <div className="space-y-1.5">
                 {employeeRows.map(([code, { count, minutes, name }]) => (
                   <button key={code} type="button" onClick={() => setFocusEmployee(code)}
@@ -313,7 +346,16 @@ const LateComingTab = ({ scope, companyId }) => {
                         {name ? `${code} · ` : ''}{lateLabel(minutes)} late in total
                       </span>
                     </span>
-                    <Chip tone={count >= 5 ? 'bad' : count >= 2 ? 'warn' : 'neutral'}>{count} day(s)</Chip>
+                    <span className="flex items-center gap-1.5 shrink-0">
+                      {(() => {
+                        const m = (summary.monthly || []).find((x) => x.employee_code === code && x.month === period);
+                        if (!m) return null;
+                        return m.beyond_buffer > 0
+                          ? <Chip tone="bad" title={`${m.within_buffer} min within the ${m.buffer_minutes}-min buffer`}>{m.beyond_buffer} min beyond buffer</Chip>
+                          : <Chip tone="good" title={`Buffer ${m.buffer_minutes} min`}>within buffer</Chip>;
+                      })()}
+                      <Chip tone={count >= 5 ? 'bad' : count >= 2 ? 'warn' : 'neutral'}>{count} day(s)</Chip>
+                    </span>
                   </button>
                 ))}
               </div>
@@ -336,6 +378,7 @@ const AttendanceTab = ({ scope, companyId, can, showSuccess, showError }) => {
   const [error, setError] = useState(null);
   const [marking, setMarking] = useState(false);
   const [regularizing, setRegularizing] = useState(false);
+  const [importing, setImporting] = useState(false);
 
   const load = useCallback(async () => {
     if (!companyId) { setLoading(false); return; }
@@ -368,6 +411,11 @@ const AttendanceTab = ({ scope, companyId, can, showSuccess, showError }) => {
     { key: 'late', label: 'Late', render: (r) => (
       <span className="text-[var(--text-main)]">{r.late_minutes ? `${r.late_minutes}m` : '—'}</span>
     ) },
+    { key: 'source', label: 'Source', render: (r) => (
+      <span className="text-[11.5px] text-[var(--text-muted)]" title={r.flexi_no ? `Judged against flexible timing ${r.flexi_no}` : undefined}>
+        {SOURCE_LABEL[r.source] || r.source || '—'}{r.flexi_no ? ' · flexi' : ''}
+      </span>
+    ) },
     { key: 'status', label: 'Status', align: 'right', render: (r) => (
       <Chip tone={attLeaveToneFor(r.status)}>{r.status}{r.locked ? ' · Locked' : ''}</Chip>
     ) },
@@ -396,6 +444,9 @@ const AttendanceTab = ({ scope, companyId, can, showSuccess, showError }) => {
         {can(CAP.ATTENDANCE_REGULARIZE_REQUEST) && (
           <Btn onClick={() => setRegularizing(true)}>Request Regularisation</Btn>
         )}
+        {can(CAP.ATTENDANCE_IMPORT) && (
+          <Btn onClick={() => setImporting(true)}>Import biometric file</Btn>
+        )}
         {can(CAP.ATTENDANCE_MARK) && (
           <Btn tone="primary" onClick={() => setMarking(true)}>
             <Clock size={14} /> Mark Attendance
@@ -417,6 +468,10 @@ const AttendanceTab = ({ scope, companyId, can, showSuccess, showError }) => {
         <MarkModal scope={scope} onClose={() => setMarking(false)}
           onDone={() => { setMarking(false); load(); }}
           showSuccess={showSuccess} showError={showError} />
+      )}
+      {importing && (
+        <BiometricImportModal scope={scope} onClose={() => setImporting(false)}
+          onDone={load} showSuccess={showSuccess} showError={showError} />
       )}
       {regularizing && (
         <RegularizeModal scope={scope} onClose={() => setRegularizing(false)}
@@ -982,6 +1037,270 @@ const UnlockModal = ({ period, scope, onClose, onDone, showSuccess, showError })
         <textarea id="unlock-reason" rows={2} value={reason} className={TEXTAREA}
           onChange={(e) => setReason(e.target.value)} />
       </div>
+    </Modal>
+  );
+};
+
+// ── Settings: office timing, grace, buffer (the shift policy) ──
+const TimingRulesCard = ({ scope, companyId, showSuccess, showError }) => {
+  const [p, setP] = useState(null);
+  const [saving, setSaving] = useState(false);
+  useEffect(() => {
+    if (!companyId) return;
+    getShiftPolicy(scope).then(({ data }) => setP(data)).catch(() => setP({}));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [companyId]);
+  if (!p) return <HrmsLoading label="Loading timing rules…" />;
+  const set = (k) => (e) => setP((x) => ({ ...x, [k]: e.target.value }));
+  const save = async () => {
+    setSaving(true);
+    try {
+      const { data } = await saveShiftPolicy({
+        shift_start: p.shift_start, shift_end: p.shift_end,
+        daily_grace_minutes: Number(p.daily_grace_minutes),
+        monthly_buffer_minutes: Number(p.monthly_buffer_minutes),
+        half_day_threshold_minutes: Number(p.half_day_threshold_minutes),
+      }, scope);
+      setP(data);
+      showSuccess('Timing rules saved. New punches are judged against them.');
+    } catch (err) {
+      showError(err?.response?.data?.detail || 'Could not save the timing rules.');
+    } finally { setSaving(false); }
+  };
+  return (
+    <section className="rounded-xl border border-[var(--border)] bg-[var(--bg-card)] p-4 space-y-3">
+      <div>
+        <h3 className="text-[14px] font-bold text-[var(--text-main)]">Office timing, grace & buffer</h3>
+        <p className="text-[12px] text-[var(--text-muted)]">
+          Every punch — biometric, self check-in or marked by HR — is judged against these. An
+          approved flexible timing replaces the office hours for that person on those dates.
+        </p>
+      </div>
+      <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+        <div><label className={LABEL}>Office opens</label>
+          <input type="time" className={FIELD} value={p.shift_start || ''} onChange={set('shift_start')} /></div>
+        <div><label className={LABEL}>Office closes</label>
+          <input type="time" className={FIELD} value={p.shift_end || ''} onChange={set('shift_end')} /></div>
+        <div><label className={LABEL}>Daily grace (min)</label>
+          <input type="number" min="0" max="120" className={FIELD} value={p.daily_grace_minutes ?? ''} onChange={set('daily_grace_minutes')} /></div>
+        <div><label className={LABEL}>Monthly buffer (min)</label>
+          <input type="number" min="0" max="1000" className={FIELD} value={p.monthly_buffer_minutes ?? ''} onChange={set('monthly_buffer_minutes')} /></div>
+        <div><label className={LABEL}>Half day below (min)</label>
+          <input type="number" min="0" max="720" className={FIELD} value={p.half_day_threshold_minutes ?? ''} onChange={set('half_day_threshold_minutes')} /></div>
+      </div>
+      <p className="text-[11.5px] text-[var(--text-muted)]">
+        <b>Grace</b>: minutes after opening before a day counts as late. <b>Buffer</b>: total late
+        minutes a person may use in a month; the Late Coming view shows what goes beyond it.
+      </p>
+      <div className="flex justify-end">
+        <Btn tone="primary" disabled={saving} onClick={save}>{saving ? 'Saving…' : 'Save timing rules'}</Btn>
+      </div>
+    </section>
+  );
+};
+
+// ── Flexible timing ──
+const FLEXI_TONE = { Pending: 'warn', Approved: 'good', Rejected: 'bad', Cancelled: 'neutral' };
+const FlexiTab = ({ scope, companyId, can, showSuccess, showError }) => {
+  const [rows, setRows] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [requesting, setRequesting] = useState(false);
+  const [acting, setActing] = useState(null);
+  const load = useCallback(async () => {
+    if (!companyId) { setLoading(false); return; }
+    setLoading(true); setError(null);
+    try {
+      const { data } = await getFlexiRequests(scope);
+      setRows(data?.requests || []);
+    } catch (err) {
+      setError(err?.response?.data?.detail || 'Could not load flexible timing.');
+    } finally { setLoading(false); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [companyId]);
+  useEffect(() => { load(); }, [load]);
+
+  const columns = [
+    { key: 'who', label: 'Employee', render: (r) => (
+      <>
+        <span className="font-semibold text-[var(--text-main)]">{r.employee_name || r.employee_code}</span>
+        <span className="block text-[11px] text-[var(--text-muted)]">{r.flexi_no}</span>
+      </>
+    ) },
+    { key: 'dates', label: 'Dates', render: (r) => (
+      <span className="text-[var(--text-main)]">{day(r.from_date)}{r.to_date !== r.from_date ? ` – ${day(r.to_date)}` : ''}</span>
+    ) },
+    { key: 'hours', label: 'Hours', render: (r) => (
+      <span className="font-semibold text-[var(--text-main)]">{r.shift_start} – {r.shift_end}</span>
+    ) },
+    { key: 'why', label: 'Reason', render: (r) => (
+      <span className="text-[12px] text-[var(--text-muted)]">{r.reason}{r.remarks ? ` · “${r.remarks}”` : ''}</span>
+    ) },
+    { key: 'status', label: 'Status', align: 'right', render: (r) => (
+      <div className="flex items-center justify-end gap-2">
+        <Chip tone={FLEXI_TONE[r.status] || 'neutral'}>{r.status}</Chip>
+        {r.status === 'Pending' && can(CAP.ATTENDANCE_FLEXI_APPROVE) && (
+          <Btn onClick={() => setActing(r)}>Decide</Btn>
+        )}
+      </div>
+    ) },
+  ];
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="text-[12.5px] text-[var(--text-muted)]">
+          Different working hours for some dates (e.g. 10:30–19:30). Once approved, those days are
+          judged against the approved hours instead of the office timing.
+        </p>
+        {can(CAP.ATTENDANCE_FLEXI_REQUEST) && (
+          <Btn tone="primary" onClick={() => setRequesting(true)}>Request flexible timing</Btn>
+        )}
+      </div>
+      {loading && <HrmsLoading label="Loading flexible timing…" />}
+      {error && !loading && <HrmsError message={error} onRetry={load} />}
+      {!loading && !error && (rows.length ? (
+        <RecordList rows={rows} columns={columns} keyOf={(r) => r.flexi_no}
+          renderCard={(r) => (
+            <div className="space-y-2">
+              <div className="flex items-start justify-between gap-2">
+                <p className="text-[13px] font-bold text-[var(--text-main)]">{r.employee_name || r.employee_code}</p>
+                <Chip tone={FLEXI_TONE[r.status] || 'neutral'}>{r.status}</Chip>
+              </div>
+              <Facts items={[
+                { label: 'Dates', value: `${day(r.from_date)} – ${day(r.to_date)}` },
+                { label: 'Hours', value: `${r.shift_start} – ${r.shift_end}` },
+              ]} />
+              {r.status === 'Pending' && can(CAP.ATTENDANCE_FLEXI_APPROVE) && (
+                <Btn onClick={() => setActing(r)}>Decide</Btn>
+              )}
+            </div>
+          )} />
+      ) : <HrmsEmpty icon={Clock} title="No flexible timing requests" />)}
+      {requesting && (
+        <FlexiModal scope={scope} onClose={() => setRequesting(false)}
+          onDone={() => { setRequesting(false); load(); }} showSuccess={showSuccess} showError={showError} />
+      )}
+      {acting && (
+        <FlexiActionModal row={acting} scope={scope} onClose={() => setActing(null)}
+          onDone={() => { setActing(null); load(); }} showSuccess={showSuccess} showError={showError} />
+      )}
+    </div>
+  );
+};
+
+const FlexiModal = ({ scope, onClose, onDone, showSuccess, showError }) => {
+  const today = new Date().toISOString().slice(0, 10);
+  const [employee, setEmployee] = useState(null);
+  const [f, setF] = useState({ from_date: today, to_date: today, shift_start: '10:30', shift_end: '19:30', reason: '' });
+  const set = (k) => (e) => setF((x) => ({ ...x, [k]: e.target.value }));
+  const { busy, run } = useSubmit(showSuccess, showError, onDone);
+  const submit = () => {
+    if (!employee || !f.reason.trim()) { showError('Select the employee and give the reason.'); return; }
+    run(() => requestFlexi({ employee_code: employee.employee_code, ...f, reason: f.reason.trim() }, scope),
+      'Flexible timing requested — it goes to the manager / HR.');
+  };
+  return (
+    <Modal title="Request flexible timing" labelledBy="flexi-title" onClose={onClose}
+      footer={(<>
+        <Btn onClick={onClose} disabled={busy}>Cancel</Btn>
+        <Btn tone="primary" onClick={submit} disabled={busy || !employee}>{busy ? 'Working…' : 'Submit'}</Btn>
+      </>)}>
+      <div><label className={LABEL}>Employee *</label>
+        <EmployeePicker scope={scope} value={employee} onChange={setEmployee} /></div>
+      <div className="grid grid-cols-2 gap-3">
+        <div><label className={LABEL}>From *</label><input type="date" className={FIELD} value={f.from_date} onChange={set('from_date')} /></div>
+        <div><label className={LABEL}>To *</label><input type="date" className={FIELD} value={f.to_date} onChange={set('to_date')} /></div>
+        <div><label className={LABEL}>Start *</label><input type="time" className={FIELD} value={f.shift_start} onChange={set('shift_start')} /></div>
+        <div><label className={LABEL}>End *</label><input type="time" className={FIELD} value={f.shift_end} onChange={set('shift_end')} /></div>
+      </div>
+      <div><label className={LABEL}>Reason *</label>
+        <textarea rows={2} className={TEXTAREA} value={f.reason} onChange={set('reason')}
+          placeholder="e.g. Hospital visits this week; will cover the full hours." /></div>
+    </Modal>
+  );
+};
+
+const FlexiActionModal = ({ row, scope, onClose, onDone, showSuccess, showError }) => {
+  const [remarks, setRemarks] = useState('');
+  const { busy, run } = useSubmit(showSuccess, showError, onDone);
+  const decide = (approved) => {
+    if (!approved && !remarks.trim()) { showError('Say why it is not approved.'); return; }
+    run(() => actOnFlexi(row.flexi_no, { approved, remarks: remarks.trim() || undefined }, scope),
+      approved ? 'Approved — those days are now judged against the flexible hours.' : 'Not approved.');
+  };
+  return (
+    <Modal title={`Flexible timing — ${row.employee_name || row.employee_code}`} labelledBy="flexi-act" onClose={onClose}
+      footer={(<>
+        <Btn onClick={onClose} disabled={busy}>Cancel</Btn>
+        <Btn tone="danger" onClick={() => decide(false)} disabled={busy}>Reject</Btn>
+        <Btn tone="primary" onClick={() => decide(true)} disabled={busy}>Approve</Btn>
+      </>)}>
+      <Facts items={[
+        { label: 'Dates', value: `${day(row.from_date)} – ${day(row.to_date)}` },
+        { label: 'Hours', value: `${row.shift_start} – ${row.shift_end}` },
+        { label: 'Reason', value: row.reason },
+      ]} />
+      <div><label className={LABEL}>Remarks {''}(required to reject)</label>
+        <textarea rows={2} className={TEXTAREA} value={remarks} onChange={(e) => setRemarks(e.target.value)} /></div>
+    </Modal>
+  );
+};
+
+// ── Biometric import ──
+const BiometricImportModal = ({ scope, onClose, onDone, showSuccess, showError }) => {
+  const [file, setFile] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [report, setReport] = useState(null);
+  const go = async () => {
+    setBusy(true);
+    try {
+      const { data } = await importBiometric(file, scope);
+      setReport(data);
+      showSuccess(`Imported: ${data.days_created} new day(s), ${data.days_updated} updated.`);
+      onDone();
+    } catch (err) {
+      showError(err?.response?.data?.detail || 'Could not import that file.');
+    } finally { setBusy(false); }
+  };
+  const template = () => {
+    const blob = new Blob(['Employee Code,Date,Time\nEMP-2026-007,2026-10-01,09:28\nEMP-2026-007,2026-10-01,18:36\n'], { type: 'text/csv' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob); a.download = 'biometric-template.csv';
+    document.body.appendChild(a); a.click(); a.remove();
+  };
+  return (
+    <Modal title="Import the biometric file" labelledBy="bio-title" onClose={onClose}
+      footer={(<>
+        <Btn onClick={onClose} disabled={busy}>{report ? 'Close' : 'Cancel'}</Btn>
+        {!report && <Btn tone="primary" onClick={go} disabled={busy || !file}>{busy ? 'Importing…' : 'Import'}</Btn>}
+      </>)}>
+      <p className="text-[12.5px] text-[var(--text-muted)]">
+        Upload the machine's export (CSV or Excel). For each person and day the <b>first punch is
+        check-in</b> and the <b>last is check-out</b>. Columns: <b>Employee Code</b> (or Biometric ID),
+        <b> Date</b>, and <b>Time</b> — or <b>In Time</b> / <b>Out Time</b>, or one <b>Date Time</b> column.
+        Locked days, leave, OD, holidays and regularised days are never overwritten.
+      </p>
+      <button type="button" onClick={template} className="text-[12px] font-semibold text-[var(--accent-indigo)] hover:underline">
+        Download a sample file
+      </button>
+      {!report && (
+        <input type="file" accept=".csv,.xlsx,.xlsm,.txt" onChange={(e) => setFile(e.target.files?.[0] || null)}
+          className="block w-full text-[12.5px] text-[var(--text-main)]" />
+      )}
+      {report && (
+        <div className="rounded-lg border border-[var(--border)] bg-[var(--input-bg)] p-3 text-[12.5px] space-y-1">
+          <p><b>{report.days_created}</b> new day(s), <b>{report.days_updated}</b> updated.</p>
+          {!!report.skipped?.length && (
+            <p className="text-[var(--accent-orange)]">{report.skipped.length} skipped: {report.skipped.slice(0, 6).map((s) => `${s.employee_code} ${s.work_date} (${s.reason})`).join('; ')}{report.skipped.length > 6 ? '…' : ''}</p>
+          )}
+          {!!report.unknown_codes?.length && (
+            <p className="text-[var(--accent-red)]">Unknown code(s): {report.unknown_codes.join(', ')} — add them to the employee's Biometric ID or check the code.</p>
+          )}
+          {!!report.unreadable_rows?.length && (
+            <p className="text-[var(--text-muted)]">{report.unreadable_rows.length} unreadable row(s), e.g. row {report.unreadable_rows[0].row}.</p>
+          )}
+        </div>
+      )}
     </Modal>
   );
 };

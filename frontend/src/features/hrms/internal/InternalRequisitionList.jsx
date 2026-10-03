@@ -19,12 +19,13 @@ import {
 import { REQUISITION_SOP_LABEL, sopLabelFor } from './sopLabels';
 
 /**
- * HRMS ▸ internal track — Headcount & Budget Approval.
+ * HRMS ▸ internal track — Headcount Approval.
  *
  * Raising a new requisition happens on the Overview screen now (its own "+ Raise" button);
  * this screen's job is narrower and comes after that: answer "what is this waiting on, and
- * can I clear it", with the budget figures a Management/Finance reviewer needs to answer it
- * shown plainly rather than buried in the detail page. `ApprovalDialog` is REUSED rather than
+ * can I clear it". There is no budget-approval step: after HR verification a requisition goes
+ * straight to the scorecard, unless it is over the sanctioned headcount, in which case it
+ * waits here for Management's Headcount Approval. `ApprovalDialog` is REUSED rather than
  * cloned — the chain differs in its states, not in what an approval dialog is.
  *
  * The action offered on each row is derived from the requisition's own state and the caller's
@@ -43,31 +44,52 @@ const GATES = {
   'Pending HR Verification': {
     action: 'hr-verify', reject: 'hr-reject', cap: CAP.REQUISITION_REVIEW_HR,
     label: 'Verify', who: 'HR',
-    blurb: 'HR checks the role and its justification are complete.',
+    // No headcount / band fields: the server takes them automatically (headcount = the
+    // vacancies, band = the standing salary band for the role, when one exists).
+    blurb: 'HR checks the role and its justification are complete. Next: the scorecard, or '
+      + 'Headcount Approval if it is over the sanctioned headcount.',
     // Decided on its own page. See ownsDecision below.
     page: { to: '/hrms/hr-verification', label: 'HR Verification' },
   },
-  'Pending Budget Approval': {
-    action: 'budget-approve', reject: 'budget-reject',
-    cap: CAP.REQUISITION_APPROVE_BUDGET, label: 'Approve budget',
-    who: 'Management or Finance', band: true,
-    blurb: 'Nothing may be sourced until the headcount and salary band are approved.',
-  },
   'Pending Escalation': {
     action: 'escalate-approve', reject: 'escalate-reject', cap: CAP.REQUISITION_ESCALATE,
-    label: 'Clear escalation', who: 'the reporting line',
-    blurb: 'Raised above the sanctioned headcount, so it routes up the reporting line.',
+    // Named for what it is to the person deciding: Management approving a headcount above
+    // the sanctioned strength (the stored status stays "Pending Escalation").
+    label: 'Management Approval', who: 'Management',
+    blurb: 'Raised above the sanctioned headcount, so Management must approve it before it moves on.',
   },
   'Pending Scorecard Approval': {
     action: 'scorecard-approve', reject: 'scorecard-reject', cap: CAP.SCORECARD_APPROVE,
     // "Approve" alone read as "approve the scorecard", which is a different action on a
     // different screen and is already done by the time a requisition reaches this gate.
     label: 'Approve requisition', who: 'the hiring manager',
-    blurb: 'The last gate. The position scorecard is already signed off; approving here '
-      + 'approves the requisition itself and makes its JD publishable.',
-    page: { to: '/hrms/final-approval', label: 'Final Requisition Approval' },
+    // Normally nobody clicks this any more: when the HOD signs off the position scorecard,
+    // the requisition is approved automatically and goes to job posting. The button stays
+    // only for a requisition whose scorecard was signed before that rule existed.
+    blurb: 'Approved automatically once the HOD signs off the position scorecard — it then '
+      + 'goes straight to job posting. Use this only if the scorecard is already signed and '
+      + 'the requisition is still waiting here.',
   },
 };
+
+// At the scorecard gate there is nothing to click until the HOD has signed the position
+// scorecard -- and once they have, the requisition approves itself and goes to job posting.
+// So while the scorecard is unsigned, point at it instead of offering a button that 409s.
+const awaitingScorecard = (r) => r.approval_status === 'Pending Scorecard Approval'
+  && r.scorecard_status !== 'Approved';
+
+const ScorecardWait = ({ row }) => (
+  <Link to="/hrms/scorecards"
+    title="The requisition is approved automatically the moment its scorecard is approved."
+    className="text-[11.5px] font-semibold text-[var(--accent-indigo)] hover:underline whitespace-nowrap">
+    {row.scorecard_no
+      ? `Waiting for the HOD to approve ${row.scorecard_no} →`
+      : 'No scorecard yet — create it →'}
+  </Link>
+);
+
+// The stored status is "Pending Escalation"; on screen it is Management Approval.
+const statusLabel = (s) => (s === 'Pending Escalation' ? 'Pending Management Approval' : s);
 
 /**
  * What a single-gate page calls itself.
@@ -170,10 +192,9 @@ const InternalRequisitionList = ({ stage = null }) => {
    * Whether THIS screen takes the decision on a gate, or points at the screen that does.
    *
    * A single-gate page owns its gate by definition — it exists for nothing else. The full
-   * board owns only the gates with no page of their own: the budget gate it is named after,
-   * and the escalation detour that hangs off it. Handing a hiring manager "Approve
-   * requisition" from a screen titled "Headcount & Budget Approval" is what made the two
-   * scorecard approvals hard to tell apart in the first place.
+   * board owns only the gates with no page of their own: the Headcount Approval it is named
+   * after. Handing a hiring manager "Approve requisition" from a screen titled "Headcount
+   * Approval" is what made the two scorecard approvals hard to tell apart in the first place.
    */
   const ownsDecision = (gate) => !!gate && (!!stage || !gate.page);
 
@@ -234,13 +255,20 @@ const InternalRequisitionList = ({ stage = null }) => {
         const sop = sopLabelFor(r.approval_status, REQUISITION_SOP_LABEL);
         return (
           <>
-            <Chip tone={toneFor(r.approval_status)}>{r.approval_status}</Chip>
+            <Chip tone={toneFor(r.approval_status)}>{statusLabel(r.approval_status)}</Chip>
             {/* An escalation that was BYPASSED — over sanction, but nobody above the raiser
                 resolved, so it routed straight on. The server records why precisely so this
                 is visible; until this line, nothing showed it. */}
-            {r.escalation_note && (
+            {/* Once the MD (or the superadmin, with the MD's authority) has cleared an
+                over-sanction requisition, say so — the "routed directly to MD" note alone read as
+                if it were still waiting on the MD. */}
+            {r.md_clearance ? (
+              <span className="block text-[10.5px] text-[var(--accent-green,#16a34a)] font-semibold mt-0.5">
+                Over-sanction — cleared by {r.md_clearance.by || 'the MD'} ({r.md_clearance.how})
+              </span>
+            ) : r.escalation_note && (
               <span className="block text-[10.5px] text-[var(--accent-orange)] mt-0.5">
-                {r.escalation_note}
+                Over-sanction — not cleared by the MD (no escalation chain could be built when the budget was approved)
               </span>
             )}
             {sop && (
@@ -261,7 +289,8 @@ const InternalRequisitionList = ({ stage = null }) => {
         const gate = gateFor(r);
         return (
           <div className="flex flex-col items-end gap-1.5">
-            {ownsDecision(gate) && (
+            {awaitingScorecard(r) && <ScorecardWait row={r} />}
+            {ownsDecision(gate) && !awaitingScorecard(r) && (
               <Btn tone="primary" onClick={() => setDeciding({ row: r, gate })}>
                 {gate.label}
               </Btn>
@@ -293,15 +322,22 @@ const InternalRequisitionList = ({ stage = null }) => {
             <p className="text-[11.5px] text-[var(--text-muted)]">{r.request_no}</p>
           </div>
           <div className="text-right">
-            <Chip tone={toneFor(r.approval_status)}>{r.approval_status}</Chip>
+            <Chip tone={toneFor(r.approval_status)}>{statusLabel(r.approval_status)}</Chip>
             {sopLabelFor(r.approval_status, REQUISITION_SOP_LABEL) && (
               <span className="block text-[10.5px] text-[var(--text-muted)] italic mt-0.5">
                 SOP: {sopLabelFor(r.approval_status, REQUISITION_SOP_LABEL)}
               </span>
             )}
-            {r.escalation_note && (
+            {/* Once the MD (or the superadmin, with the MD's authority) has cleared an
+                over-sanction requisition, say so — the "routed directly to MD" note alone read as
+                if it were still waiting on the MD. */}
+            {r.md_clearance ? (
+              <span className="block text-[10.5px] text-[var(--accent-green,#16a34a)] font-semibold mt-0.5">
+                Over-sanction — cleared by {r.md_clearance.by || 'the MD'} ({r.md_clearance.how})
+              </span>
+            ) : r.escalation_note && (
               <span className="block text-[10.5px] text-[var(--accent-orange)] mt-0.5">
-                {r.escalation_note}
+                Over-sanction — not cleared by the MD (no escalation chain could be built when the budget was approved)
               </span>
             )}
           </div>
@@ -319,7 +355,8 @@ const InternalRequisitionList = ({ stage = null }) => {
         <div className="flex gap-2 flex-wrap">
           {/* Same rule as the table: this screen acts on its own gate, and points at the
               page that owns the others. Without it the buttons come back on mobile. */}
-          {ownsDecision(gate) && (
+          {awaitingScorecard(r) && <ScorecardWait row={r} />}
+            {ownsDecision(gate) && !awaitingScorecard(r) && (
             <Btn tone="primary" onClick={() => setDeciding({ row: r, gate })}>
               {gate.label}
             </Btn>
@@ -346,13 +383,14 @@ const InternalRequisitionList = ({ stage = null }) => {
       <HrmsPageHeader
         icon={stage ? ClipboardCheck : Wallet}
         title={stagePage?.title
-          || (stage ? `${stageGate?.label || stage} queue` : 'Headcount & Budget Approval')}
+          || (stage ? `${stageGate?.label || stage} queue` : 'Headcount Approval')}
         subtitle={stage
           ? (stagePage?.lead
              || `${stageGate?.blurb || ''} Cleared here, the requisition moves on to the next gate.`)
-          : `${companyName || 'This company'}'s open requisitions — what was `
-            + 'requested against what Management or Finance has sanctioned. Raise a new '
-            + 'request from the Overview screen.'}
+          : `${companyName || 'This company'}'s open requisitions. After HR verification a `
+            + 'requisition goes straight to the scorecard — one raised above the sanctioned '
+            + 'headcount waits here for Management to approve the extra headcount first. '
+            + 'Raise a new request from the Overview screen.'}
       />
       <HrmsScopeBar />
 

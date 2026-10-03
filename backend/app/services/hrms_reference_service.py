@@ -248,6 +248,57 @@ async def _notify_if_not_cleared(company_id: str, doc: dict) -> None:
         kind="warning", link="/hrms/reference-checks", email=False)
 
 
+# Candidates in the selection stretch -- interviewed or being interviewed, up to the offer.
+# Both a reference check and a salary negotiation happen here, before the offer goes out.
+_SELECTION_STAGES = [
+    "Interview Scheduled", "Technical Round", "MD Round", "Final Interview Required",
+    "Selected", "Offer Generated",
+]
+
+
+async def _selection_candidates(company_id: str) -> list:
+    """Internal-track candidates in the selection stretch, with their requisition."""
+    rows = await get_collection(COLL_CANDIDATES).find(
+        {"company_id": str(company_id), "application_status": {"$in": _SELECTION_STAGES}},
+        {"uk": 1, "candidate_name": 1, "request_no": 1, "application_status": 1,
+         "current_company": 1, "current_ctc": 1, "expected_ctc": 1, "notice_period": 1,
+         "designation_name": 1}).to_list(500)
+    reqs, out = {}, []
+    for c in rows:
+        no = c.get("request_no")
+        if no not in reqs:
+            reqs[no] = await get_collection(COLL_REQUISITIONS).find_one(
+                {"request_no": no, "company_id": str(company_id)}) or {}
+        req = reqs[no]
+        if req.get("requisition_track") != REQUISITION_TRACK_INTERNAL:
+            continue
+        out.append((c, req))
+    return out
+
+
+async def eligible_candidates(company_id: str) -> list:
+    """Who a reference check can be recorded for, with what the system already knows.
+
+    The ones still waiting for a clearing reference come first -- they are the ones the
+    offer gate is holding up.
+    """
+    out = []
+    for c, req in await _selection_candidates(company_id):
+        refs = await get_collection(COLL_REFERENCE_CHECKS).find(
+            {"company_id": str(company_id), "uk": c["uk"]}, {"outcome": 1}).to_list(50)
+        out.append({
+            "uk": c["uk"], "candidate_name": c.get("candidate_name"),
+            "request_no": c.get("request_no"),
+            "designation_name": req.get("designation_name"),
+            "application_status": c.get("application_status"),
+            "current_company": c.get("current_company"),
+            "references_on_record": len(refs),
+            "cleared": any(r.get("outcome") in REFERENCE_CLEARS_OFFER for r in refs),
+        })
+    out.sort(key=lambda x: (x["cleared"], (x["candidate_name"] or "").lower()))
+    return out
+
+
 # -------------------------------------------------------------
 # Write
 # -------------------------------------------------------------

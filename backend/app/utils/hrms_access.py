@@ -404,6 +404,14 @@ def capabilities_for(user: dict) -> Set[Cap]:
     if role == HrmsRole.MD:
         caps -= MD_REVIEW_ONLY_WITHHELD
 
+    # -- Dynamic Roles & Permissions -------------------------------------------------
+    # The company's own rules (set by its MD / Admin on the Roles & Permissions page) sit on
+    # top of every default above, so an explicit choice wins. The superadmin is exempt: the
+    # module owner always holds everything.
+    if role != HrmsRole.ADMIN:
+        from app.utils.hrms_permission_policy import apply as apply_permission_rules
+        caps = apply_permission_rules(user, role, caps)
+
     return caps - CLIENT_DECISION_CAPS - CLIENT_OWNED_CAPS
 
 
@@ -414,6 +422,7 @@ STAFF_SELF_SERVICE_CAPS = frozenset({
     Cap.MODULE_ACCESS,
     Cap.LEAVE_READ, Cap.LEAVE_APPLY, Cap.COFF_EARN_REQUEST,
     Cap.ATTENDANCE_READ, Cap.ATTENDANCE_REGULARIZE_REQUEST, Cap.OD_REQUEST,
+    Cap.ATTENDANCE_SELF_PUNCH, Cap.ATTENDANCE_FLEXI_REQUEST,
     Cap.PAYROLL_READ, Cap.ADVANCE_REQUEST,
     Cap.PIP_READ, Cap.PIP_ACKNOWLEDGE,
 })
@@ -425,6 +434,8 @@ STAFF_SELF_SERVICE_CAPS = frozenset({
 # attendance requests — so nothing becomes impossible to do.
 MD_REVIEW_ONLY_WITHHELD = frozenset({
     Cap.ATTENDANCE_MARK, Cap.ATTENDANCE_REGULARIZE_REQUEST, Cap.ATTENDANCE_REGULARIZE_APPROVE,
+    Cap.ATTENDANCE_SELF_PUNCH, Cap.ATTENDANCE_FLEXI_REQUEST, Cap.ATTENDANCE_FLEXI_APPROVE,
+    Cap.ATTENDANCE_IMPORT,
     Cap.ATTENDANCE_LOCK, Cap.OD_REQUEST, Cap.OD_APPROVE,
     Cap.PAYROLL_PROCESS, Cap.PAYROLL_APPROVE, Cap.SALARY_STRUCTURE_MANAGE,
     Cap.ADVANCE_REQUEST, Cap.ADVANCE_APPROVE, Cap.ADVANCE_APPROVE_EMERGENCY,

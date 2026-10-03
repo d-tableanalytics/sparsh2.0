@@ -218,9 +218,11 @@ async def main() -> None:
         # The negative property this file exists for. CAN-002 has one stale touchpoint and
         # CAN-001 one fresh one; neither fact may change what the pipeline allows.
         from app.models.hrms import ONBOARDABLE_STATUSES
-        check("onboarding is startable from the same statuses it always was",
-              ONBOARDABLE_STATUSES == {M.AppStatus.OFFER_ACCEPTED,
-                                       M.AppStatus.APPOINTMENT_LETTER_SENT})
+        # The appointment letter is mandatory before onboarding (the business rule), so the
+        # only onboardable stage is Appointment Letter Sent -- pre-boarding touchpoints change
+        # nothing about it, which is what this file checks.
+        check("onboarding is startable only after the appointment letter is sent",
+              ONBOARDABLE_STATUSES == {M.AppStatus.APPOINTMENT_LETTER_SENT})
         check("the onboarding service does not read pre-boarding at all",
               "COLL_PREBOARDING" not in ON.__dict__
               and "preboarding" not in ON.__doc__.lower())

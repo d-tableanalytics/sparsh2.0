@@ -7,7 +7,7 @@ import {
   Settings, Building2,
   MessageSquare, LogOut, Layers, Copy, Calendar, Sparkles, PlayCircle, Target, BarChart3, Library, X,
   Forward, Bell, Trash2, ChevronDown, Activity, CalendarDays, Database, LayoutGrid,
-  Gauge, GitBranch, AlertTriangle, UserCog, ListChecks, ScrollText, UserCircle, ClipboardList, ClipboardCheck, Link2,
+  Gauge, GitBranch, AlertTriangle, UserCog, KeyRound, ListChecks, ScrollText, UserCircle, ClipboardList, ClipboardCheck, Link2,
   Award, SlidersHorizontal, FolderOpen, FileCog, CalendarClock, ShieldAlert,
   // ── Phase INT-2 ── the remaining Internal Recruitment SOP surfaces.
   HeartHandshake, Bookmark, Scale, Mail,
@@ -194,6 +194,14 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
   // the API would refuse those screens anyway (see utils/hrms_access.ROLE_CAPABILITIES).
   const isHrmsAdminUser = ['superadmin', 'admin', 'clientadmin'].includes(user?.role)
     || ['MD', 'HR'].includes((user?.governance_role || '').trim().toUpperCase());
+  // The available-candidate pool is a recruiter's sourcing tool: reading it AND sourcing
+  // from it need client_candidate.write, which only HR and the superadmin hold (a client_*
+  // capability, so Roles & Permissions cannot hand it to anybody else). Offering the link
+  // to MD, HODs or other staff only led them to a 403.
+  const canUseCandidatePool = user?.role === 'superadmin'
+    || (user?.governance_role || '').trim().toUpperCase() === 'HR';
+  const canManagePermissions = ['superadmin', 'admin', 'clientadmin'].includes(user?.role)
+    || (user?.governance_role || '').trim().toUpperCase() === 'MD';
   // The hiring pipeline's ten stages are deliberately ABSENT here — they live in the
   // workspace tab strip (features/hrms/common/HrmsWorkspaceBar). Listing them in both
   // places put the same links twice and made HRMS the longest group in the sidebar.
@@ -280,10 +288,10 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
     // ── Rejected & available candidates ── people a client passed on, kept for the next
     // role that suits them. Its own entry because it is not part of any one client's
     // flow; Sparsh-side only, and the endpoint refuses a client-side caller anyway.
-    {
+    ...(canUseCandidatePool ? [{
       name: 'Available Candidates', path: '/hrms/client-candidate-pool', icon: Archive,
       roles: ['superadmin', 'admin', 'coach', 'staff'],
-    },
+    }] : []),
     // ── Phase INT-2 ── a search across candidates rather than a step in one hire, so it
     // is not a tab on the hiring strip and keeps its own entry.
     { name: 'Talent Pool', path: '/hrms/talent-pool', icon: Bookmark },
@@ -361,6 +369,11 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
       // stage, so it stays out of the workspace tab strip. The `settings.write`
       // capability is the real control -- this list only decides visibility.
       { name: 'HRMS Settings', path: '/hrms/settings', icon: SlidersHorizontal },
+      // Dynamic Roles & Permissions. Shown to those who can change it (MD, Super Admin,
+      // Admin); the `permissions.manage` capability is the real control.
+      ...(canManagePermissions ? [
+        { name: 'Roles & Permissions', path: '/hrms/permissions', icon: KeyRound },
+      ] : []),
       // Policy Register, HR Policy Library, Audit Viewer and Role & Access were removed
       // from this list on 2026-09-23 at the user's request. Their ROUTES are untouched
       // (/hrms/policies, /hrms/policy-library, /hrms/audit, /hrms/access) and their

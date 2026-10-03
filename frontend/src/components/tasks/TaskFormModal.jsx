@@ -103,6 +103,7 @@ const TaskFormModal = ({ isOpen, onClose, onSaved, task = null, categories = [],
   const [attachments, setAttachments] = useState([]);
   const [pendingFiles, setPendingFiles] = useState([]);
   const [uploading, setUploading] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
 
   const [pickerOpen, setPickerOpen] = useState(null); // 'assignee' | 'inLoop' | 'category' | null
   const [deadlinePickerOpen, setDeadlinePickerOpen] = useState(false);
@@ -281,10 +282,17 @@ const TaskFormModal = ({ isOpen, onClose, onSaved, task = null, categories = [],
   };
 
   const handleFileChosen = async (e) => {
-    const file = e.target.files?.[0];
+    const files = Array.from(e.target.files || []);
     e.target.value = '';
-    if (!file) return;
-    await attachFile(file);
+    for (const file of files) await attachFile(file);
+  };
+
+  // The box says "Click or drag files to attach"; dropping used to do nothing at all.
+  const handleDrop = async (e) => {
+    e.preventDefault();
+    setDragOver(false);
+    if (uploading) return;
+    for (const file of Array.from(e.dataTransfer?.files || [])) await attachFile(file);
   };
 
   const removePendingFile = (idx) => setPendingFiles(p => p.filter((_, i) => i !== idx));
@@ -399,15 +407,32 @@ const TaskFormModal = ({ isOpen, onClose, onSaved, task = null, categories = [],
         payload.assignment_mode = form.target_staff_id.length > 1 ? (form.assignment_mode || 'combined') : 'combined';
         const res = await createTask(payload);
         const newIds = res.data?.ids || (res.data?.id ? [res.data.id] : []);
+        // The files go up only once the task exists. A failure here used to be swallowed, so
+        // the task showed as created while its attachment had silently not been saved.
+        const failed = [];
+        if (pendingFiles.length && !newIds.length) {
+          failed.push('the task id was not returned, so nothing could be attached');
+        }
         if (newIds.length && pendingFiles.length) {
           // Each separate task is independent, so attachment(s) go onto every created task.
           for (const id of newIds) {
             for (const file of pendingFiles) {
-              await uploadTaskAttachment(id, file).catch(() => {});
+              try {
+                await uploadTaskAttachment(id, file);
+              } catch (err) {
+                failed.push(`${file.name} (${err.response?.data?.detail || err.message || 'upload failed'})`);
+              }
             }
           }
         }
-        showSuccess(newIds.length > 1 ? `Created ${newIds.length} tasks` : 'Task created');
+        const created = newIds.length > 1 ? `Created ${newIds.length} tasks` : 'Task created';
+        if (failed.length) {
+          showError(`${created}, but the attachment could not be saved: ${[...new Set(failed)].join('; ')}. Open the task and attach it again.`);
+        } else {
+          showSuccess(pendingFiles.length
+            ? `${created} with ${pendingFiles.length} attachment${pendingFiles.length === 1 ? '' : 's'}`
+            : created);
+        }
       }
       onSaved?.();
       onClose();
@@ -564,10 +589,14 @@ const TaskFormModal = ({ isOpen, onClose, onSaved, task = null, categories = [],
                   })}
                 </div>
               )}
-              <label className="flex flex-col items-center justify-center gap-1.5 py-6 border-2 border-dashed border-[var(--border)] rounded-2xl cursor-pointer hover:border-[var(--accent-indigo)] transition-colors">
+              <label
+                onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+                onDragLeave={() => setDragOver(false)}
+                onDrop={handleDrop}
+                className={`flex flex-col items-center justify-center gap-1.5 py-6 border-2 border-dashed rounded-2xl cursor-pointer hover:border-[var(--accent-indigo)] transition-colors ${dragOver ? 'border-[var(--accent-indigo)] bg-[var(--accent-indigo-bg)]' : 'border-[var(--border)]'}`}>
                 <Paperclip size={20} className="text-[var(--text-muted)] opacity-50" />
-                <span className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest">{uploading ? 'Uploading...' : 'Click or drag files to attach'}</span>
-                <input type="file" className="hidden" onChange={handleFileChosen} disabled={uploading} />
+                <span className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest">{uploading ? 'Uploading...' : dragOver ? 'Drop to attach' : 'Click or drag files to attach'}</span>
+                <input type="file" multiple className="hidden" onChange={handleFileChosen} disabled={uploading} />
               </label>
             </div>
 

@@ -1244,3 +1244,163 @@ def render_xlsx(payload: dict) -> bytes:
 
 def export_filename(entity: str, fmt: str, date_range: tuple) -> str:
     return f"hrms_{entity}_{date_range[0]}_to_{date_range[1]}.{fmt}"
+
+
+
+
+# ─────────────────────────────────────────────────────────────
+# Source Analytics (internal hiring)
+# ─────────────────────────────────────────────────────────────
+# Job Portal -> Applied -> Shortlisted -> Connected -> Interviewed -> Selected -> Hired.
+#
+# The platform is the candidate's `source_platform` (tracked link, the form's "which
+# portal", or HR's pick); older candidates fall back to their `source` answer through the
+# same platform_for_candidate rule. Every stage is EVIDENCE, and each one implies the ones
+# before it, so the funnel only ever narrows:
+#   Shortlisted -- cleared CV screening (stage rank 2+, the funnel's own rule)
+#   Connected   -- HR actually spoke to them: a phone screen with a verdict (Passed or
+#                  Rejected -- "No Answer" is not a conversation), or anything later
+#   Interviewed -- an interview that took place (Completed, or given an outcome), or later
+#   Selected    -- stage rank 5+
+#   Hired       -- joined
+# Shortlisting comes BEFORE the phone screen in the internal SOP (CV screen -> shortlist ->
+# telephonic), so Connected sits after Shortlisted here.
+SRC_STAGES = ["applied", "shortlisted", "connected", "interviewed", "selected", "hired"]
+SRC_JOINED_STATUSES = {AppStatus.JOINED.value, AppStatus.EMPLOYEE_CREATED.value,
+                       AppStatus.PROBATION_CONFIRMED.value}
+SRC_UNSPECIFIED = "unspecified"
+SRC_UNSPECIFIED_LABEL = "Not specified"
+
+
+def _src_bucket(when, weekly: bool):
+    """The trend bucket a date falls in: the Monday of its week, or the 1st of its month."""
+    d = when.date() if isinstance(when, datetime) else when
+    return d - timedelta(days=d.weekday()) if weekly else d.replace(day=1)
+
+
+def _src_buckets(start, end, weekly: bool) -> list:
+    out, d, last = [], _src_bucket(start, weekly), _src_bucket(end, weekly)
+    while d <= last:
+        out.append(d)
+        d = d + timedelta(days=7) if weekly else (d.replace(day=28) + timedelta(days=4)).replace(day=1)
+    return out
+
+
+async def _contact_evidence(scope: dict, uks: list) -> tuple:
+    """(connected uks, interviewed uks) from the phone screens and interviews themselves."""
+    from app.models.hrms import COLL_TELEPHONIC, Outcome, TelephonicOutcome
+    if not uks:
+        return set(), set()
+    q = {**scope, "uk": {"$in": uks}}
+    spoke = {TelephonicOutcome.PASSED.value, TelephonicOutcome.REJECTED.value}
+    connected = {r["uk"] for r in await get_collection(COLL_TELEPHONIC).find(
+        {**q, "outcome": {"$in": sorted(spoke)}}, {"uk": 1}).to_list(SCAN_CAP) if r.get("uk")}
+    held = await get_collection(COLL_INTERVIEWS).find(
+        {**q, "$or": [{"status": InterviewStatus.COMPLETED.value},
+                      {"outcome": {"$in": [o.value for o in Outcome]}}]}, {"uk": 1}).to_list(SCAN_CAP)
+    interviewed = {r["uk"] for r in held if r.get("uk")}
+    return connected, interviewed
+
+
+async def source_analytics(actor: dict, company_id: str, *, date_from: str = None,
+                           date_to: str = None, request_no: str = None, department: str = None,
+                           position: str = None, platform: str = None) -> dict:
+    from app.models.hrms import JOB_PLATFORM_LABEL, JOB_PLATFORMS, platform_for_candidate
+
+    start, end = parse_range(date_from, date_to)
+    scope = await _scope(actor, company_id)
+    cands = await get_collection(COLL_CANDIDATES).find(
+        {**scope, **_window("applied_at", start, end)},
+        {"uk": 1, "source": 1, "source_platform": 1, "is_referral": 1, "application_status": 1,
+         "applied_at": 1, "created_at": 1, "joined_at": 1, "request_no": 1,
+         "department_name": 1, "applied_position": 1}).to_list(SCAN_CAP)
+    for c in cands:
+        c["_platform"] = platform_for_candidate(
+            c.get("source_platform"), c.get("source"), c.get("is_referral")) or SRC_UNSPECIFIED
+
+    # Filter choices come from the whole period, BEFORE the filters narrow it, so picking a
+    # department does not make every other department vanish from its own dropdown.
+    req_titles = {}
+    for c in cands:
+        if c.get("request_no"):
+            req_titles.setdefault(c["request_no"], c.get("applied_position"))
+    options = {
+        "requisitions": [{"request_no": k, "label": v} for k, v in sorted(req_titles.items())],
+        "departments": sorted({c["department_name"] for c in cands if c.get("department_name")}),
+        "positions": sorted({c["applied_position"] for c in cands if c.get("applied_position")}),
+        "platforms": [{"key": k, "label": v} for k, v in JOB_PLATFORMS]
+                     + [{"key": SRC_UNSPECIFIED, "label": SRC_UNSPECIFIED_LABEL}],
+    }
+
+    if request_no:
+        cands = [c for c in cands if c.get("request_no") == request_no]
+    if department:
+        cands = [c for c in cands if c.get("department_name") == department]
+    if position:
+        cands = [c for c in cands if c.get("applied_position") == position]
+    if platform:
+        cands = [c for c in cands if c["_platform"] == platform]
+
+    evidence = await _evidence_ranks(scope)
+    uks = [c["uk"] for c in cands if c.get("uk")]
+    spoke, held = await _contact_evidence(scope, uks)
+
+    weekly = (end - start).days <= 120
+    trend = {b: {} for b in _src_buckets(start, end, weekly)}
+    order = {k: i for i, (k, _) in enumerate(JOB_PLATFORMS)}
+
+    rows = {}
+    for c in cands:
+        key = c["_platform"]
+        label = SRC_UNSPECIFIED_LABEL if key == SRC_UNSPECIFIED else JOB_PLATFORM_LABEL.get(key, key)
+        r = rows.setdefault(key, {"platform": key, "source": label, **{k: 0 for k in SRC_STAGES}})
+        rank = _effective(c, evidence)
+        hired = c.get("application_status") in SRC_JOINED_STATUSES or bool(c.get("joined_at"))
+        selected = rank >= 5 or hired
+        interviewed = selected or c.get("uk") in held
+        connected = interviewed or c.get("uk") in spoke
+        shortlisted = connected or rank >= 2
+        for stage, hit in (("applied", True), ("shortlisted", shortlisted), ("connected", connected),
+                           ("interviewed", interviewed), ("selected", selected), ("hired", hired)):
+            r[stage] += int(hit)
+        born = c.get("applied_at") or c.get("created_at")
+        if born:
+            bucket = trend.setdefault(_src_bucket(born, weekly), {})
+            bucket[label] = bucket.get(label, 0) + 1
+
+    def rate(n, d):
+        return round(100 * n / d, 1) if d else None
+
+    out = []
+    for r in rows.values():
+        out.append({**r,
+                    "shortlist_rate": rate(r["shortlisted"], r["applied"]),
+                    "connect_rate": rate(r["connected"], r["applied"]),
+                    "interview_rate": rate(r["interviewed"], r["applied"]),
+                    "hire_rate": rate(r["hired"], r["applied"])})
+    out.sort(key=lambda x: (-x["applied"], order.get(x["platform"], 99)))
+
+    known = [x for x in out if x["platform"] != SRC_UNSPECIFIED]
+
+    def leader(stage):
+        top = max(known, key=lambda x: (x[stage], x["applied"]), default=None)
+        return {"source": top["source"], "count": top[stage], "applied": top["applied"]} \
+            if top and top[stage] else None
+
+    totals = {k: sum(x[k] for x in out) for k in SRC_STAGES}
+    return {
+        "range": {"from": start.strftime("%Y-%m-%d"), "to": end.strftime("%Y-%m-%d")},
+        "scoped_to_own_requisitions": hrms_role(actor) == HrmsRole.MANAGER,
+        "stages": SRC_STAGES,
+        "sources": out, "totals": totals,
+        "leaders": {"applied": leader("applied"), "shortlisted": leader("shortlisted"),
+                    "interviewed": leader("interviewed"), "hired": leader("hired")},
+        "not_specified": next((x["applied"] for x in out if x["platform"] == SRC_UNSPECIFIED), 0),
+        "options": options,
+        "trend": {
+            "interval": "week" if weekly else "month",
+            "points": [{"period": b.strftime("%Y-%m-%d"),
+                        "label": b.strftime("%d %b") if weekly else b.strftime("%b %Y"),
+                        "counts": trend[b]} for b in sorted(trend)],
+        },
+    }

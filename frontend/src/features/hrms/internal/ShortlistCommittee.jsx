@@ -67,7 +67,8 @@ const ShortlistCommittee = () => {
   const [forMd, setForMd] = useState([]);
   const [busy, setBusy] = useState(false);
 
-  const canWrite = can(CAP.SHORTLIST_WRITE);
+  // Only HR sends the committee approval request; everyone else answers the ones sent to them.
+  const canConvene = can(CAP.SHORTLIST_CONVENE);
 
   const load = useCallback(async () => {
     if (!companyId) { setLoading(false); return; }
@@ -164,7 +165,7 @@ const ShortlistCommittee = () => {
         icon={Users2}
         title="Shortlisting committee"
         subtitle="Junior / mid roles: after the panel interview, HR and the HOD decide together. Senior / managerial roles skip the committee — the MD decides after the Management interview."
-        actions={canWrite && (
+        actions={canConvene && (
           <Btn tone="primary" onClick={() => setConvening(true)}>
             <Plus size={14} /> Convene
           </Btn>
@@ -225,10 +226,12 @@ const ShortlistCommittee = () => {
                   <Chip tone="warn" title="A sitting naming this candidate is convened and not yet decided">
                     in {c.pending_slr_no} — decide it below
                   </Chip>
-                ) : canWrite && (
+                ) : canConvene ? (
                   <Btn tone="primary" onClick={() => setConvening({ requestNo: c.request_no, uks: [c.uk] })}>
                     Convene committee
                   </Btn>
+                ) : (
+                  <span className="text-[11px] text-[var(--text-muted)]">HR will send the approval request</span>
                 )}
               </li>
             ))}

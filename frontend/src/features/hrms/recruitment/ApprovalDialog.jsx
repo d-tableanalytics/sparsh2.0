@@ -111,7 +111,7 @@ const ApprovalDialog = ({
               different world from the one the routing decision was made in. */}
           {snapshot && (
             <div className={`rounded-lg border px-3.5 py-3 ${
-              snapshot.is_over_sanction
+              snapshot.is_over_sanction && !requisition?.md_clearance
                 ? 'border-[var(--accent-amber,var(--accent-red))] bg-[var(--accent-amber-bg,var(--accent-red-bg))]'
                 : 'border-[var(--border)] bg-[var(--input-bg)]'
             }`}>
@@ -127,13 +127,21 @@ const ApprovalDialog = ({
                 <span>This request: <b className="text-[var(--text-main)]">
                   {snapshot.requested}</b></span>
               </div>
-              {snapshot.is_over_sanction && (
+              {snapshot.is_over_sanction && (requisition?.md_clearance ? (
+                // The MD (or the superadmin, with the MD's authority) already cleared it.
+                // Repeating "MD approval remains mandatory" here read as a send-back.
+                <p className="flex items-start gap-1.5 mt-2 text-[12px] font-semibold text-[var(--accent-green,#16a34a)]">
+                  <CheckCircle2 size={13} className="shrink-0 mt-0.5" />
+                  Over sanctioned strength — already cleared by {requisition.md_clearance.by || 'the MD'}
+                  {' '}({requisition.md_clearance.how}). Approving moves it on to the next step.
+                </p>
+              ) : (
                 <p className="flex items-start gap-1.5 mt-2 text-[12px] font-semibold text-[var(--accent-amber,var(--accent-red))]">
                   <AlertTriangle size={13} className="shrink-0 mt-0.5" />
                   Over sanctioned strength. MD approval remains mandatory whatever the
                   escalation chain decides.
                 </p>
-              )}
+              ))}
             </div>
           )}
 
@@ -141,7 +149,7 @@ const ApprovalDialog = ({
           {chain.length > 0 && (
             <div className="rounded-lg border border-[var(--border)] bg-[var(--input-bg)] px-3.5 py-3">
               <p className="text-[11px] font-bold uppercase tracking-widest text-[var(--text-muted)]">
-                Escalation chain
+                Management approval
               </p>
               <ol className="mt-2 space-y-1.5">
                 {chain.map((step) => (

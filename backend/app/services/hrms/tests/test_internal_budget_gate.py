@@ -166,13 +166,17 @@ async def main() -> None:
         await expect_http(
             "adding a candidate to an unverified internal requisition",
             CS.create_candidate(HR, COMPANY, candidate(request_no=REQ)),
-            409, "has not cleared budget approval")
+            409, "has not been verified by HR")
 
+        # No budget step any more: HR verification is what opens sourcing.
         await RS.act_on_requisition(HR, COMPANY, REQ, "hr-verify")
-        await expect_http(
-            "adding a candidate after HR verification but before the budget",
-            CS.create_candidate(HR, COMPANY, candidate(request_no=REQ)),
-            409, "no internal role may be sourced")
+        verified = await store[M.COLL_REQUISITIONS].find_one({"request_no": REQ})
+        try:
+            RS.assert_sourcing_allowed(verified)
+            opened = True
+        except Exception:
+            opened = False
+        check("HR verification alone opens sourcing (no budget-approval step)", opened)
 
         # The JD is not APPROVED yet either, so publishing is refused for TWO independent
         # reasons. Asserting the JD reason here would not prove the budget gate works, so the
@@ -185,10 +189,10 @@ async def main() -> None:
         # =================================================================
         section("A funded requisition sources normally")
         # =================================================================
-        await RS.act_on_requisition(
-            FIN, COMPANY, REQ, "budget-approve",
-            budget={"approved_headcount": 2, "approved_salary_band_min": 300000,
-                    "approved_salary_band_max": 600000})
+        # Over-sanction (none is seeded here) -> Management's Headcount Approval first.
+        while (await store[M.COLL_REQUISITIONS].find_one({"request_no": REQ}))[
+                "approval_status"] == M.ReqApproval.PENDING_ESCALATION.value:
+            await RS.act_on_requisition(MD, COMPANY, REQ, "escalate-approve")
         await approved_scorecard_for(REQ)
         state = await RS.act_on_requisition(HOD, COMPANY, REQ, "scorecard-approve")
         check("the requisition is approved", state["approval_status"] == "Approved")
@@ -217,11 +221,11 @@ async def main() -> None:
         await expect_http(
             "publishing an APPROVED JD whose requisition lost budget approval",
             PS.create_posting(HR, COMPANY, {"jd_no": JD}),
-            409, "has not cleared budget approval")
+            409, "has not been verified by HR")
         await expect_http(
             "adding a candidate to it",
             CS.create_candidate(HR, COMPANY, candidate(request_no=REQ)),
-            409, "has not cleared budget approval")
+            409, "has not been verified by HR")
 
         # =================================================================
         section("A legacy row with no track field is left alone")

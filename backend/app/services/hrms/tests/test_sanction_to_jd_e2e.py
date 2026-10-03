@@ -135,8 +135,10 @@ async def main() -> int:
             "approved_salary_band_max": 700000}
 
     async def budget(req_no, actor=MD):
-        return await RS.act_on_requisition(actor, COMPANY, req_no, "budget-approve",
-                                           budget=BAND)
+        # There is no budget-approval step any more: HR verification already routed the
+        # requisition (scorecard, or Headcount Approval when over sanction). This reads
+        # where it landed so the steps below are unchanged.
+        return await RS.get_requisition(actor, COMPANY, req_no)
 
     async def approved_scorecard(req_no, title):
         """A scorecard signed off, which the final gate requires before it will pass."""
@@ -174,10 +176,10 @@ async def main() -> int:
            r1["sanction_snapshot"]["requested"]) == (4, 1, 2))
 
     s = await RS.act_on_requisition(HR, COMPANY, req1, "hr-verify")
-    check("HR verification moves it to the budget gate",
-          s["approval_status"] == M.ReqApproval.PENDING_BUDGET.value)
+    check("HR verification no longer stops at a budget gate",
+          s["approval_status"] != M.ReqApproval.PENDING_BUDGET.value)
     s = await budget(req1)
-    check("budget approval goes STRAIGHT to the scorecard gate — no escalation",
+    check("within sanction, HR verification goes STRAIGHT to the scorecard gate — no escalation",
           s["approval_status"] == M.ReqApproval.PENDING_SCORECARD.value)
     check("no escalation chain was built", not (s.get("escalation_chain") or []))
 
@@ -200,6 +202,11 @@ async def main() -> int:
                       409, "still waiting on")
     await SC.approve_scorecard(HOD, COMPANY, draft["scr_no"],
                                {"decision": "Pass", "signature": "Hari HOD"})
+    # The HOD's scorecard sign-off IS the final approval now: no separate click needed.
+    auto = await store[M.COLL_REQUISITIONS].find_one({"request_no": req1, "company_id": COMPANY})
+    check("signing the scorecard approves the requisition by itself (straight to job posting)",
+          auto["approval_status"] == M.ReqApproval.APPROVED.value)
+    # A final click from a screen opened before that is harmless -- it is already there.
     s = await RS.act_on_requisition(HOD, COMPANY, req1, "scorecard-approve")
     check("the final gate approves the requisition",
           s["approval_status"] == M.ReqApproval.APPROVED.value)
@@ -232,7 +239,7 @@ async def main() -> int:
 
     await RS.act_on_requisition(HR, COMPANY, req2, "hr-verify")
     s = await budget(req2)
-    check("budget approval routes it to ESCALATION, not to the scorecard gate",
+    check("over sanction, HR verification routes it to Headcount Approval (escalation), not the scorecard",
           s["approval_status"] == M.ReqApproval.PENDING_ESCALATION.value)
     chain = s.get("escalation_chain") or []
     check("a chain was built from the raiser's reporting line", len(chain) >= 1)
@@ -299,7 +306,8 @@ async def main() -> int:
     s = await RS.act_on_requisition(MD, COMPANY, req4, "escalate-approve")
     check("both rungs cleared, so it reaches the scorecard gate",
           s["approval_status"] == M.ReqApproval.PENDING_SCORECARD.value)
-    await approved_scorecard(req4, "Backend Engineer (4)")
+    # The final gate runs by itself once the scorecard is signed off, so a rejection there
+    # is made BEFORE the scorecard is approved (after it, the requisition is already approved).
     s = await RS.act_on_requisition(HOD, COMPANY, req4, "scorecard-reject",
                                     "The bar is wrong for this level.")
     check("rejecting at the FINAL gate also closes it",

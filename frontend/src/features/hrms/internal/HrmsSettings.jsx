@@ -176,7 +176,7 @@ const HrmsSettings = () => {
                   + '“Follow defaults” to go back to tracking it.'}
             </p>
             <p className="mt-2 text-[11.5px] text-[var(--text-muted)]">
-              <b>Nothing here switches a control off.</b> The budget approval, the reference
+              <b>Nothing here switches a control off.</b> HR verification, the reference
               check, the scorecard sign-off and the telephonic screen are the process itself —
               a departure from one is logged as an exception, where it is attributable.
             </p>

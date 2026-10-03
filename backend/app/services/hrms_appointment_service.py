@@ -460,6 +460,32 @@ async def send_appointment(actor: dict, company_id: str, appointment_no: str,
     # it by hand.
     await _file_letter_document(actor, company_id, current, status_verified=False)
 
+    # ── The letter is sent: onboarding opens now (Offer Accepted -> Appointment Letter ->
+    # Onboarding). It used to open on offer acceptance, which let a candidate reach
+    # onboarding with no letter at all. Best-effort: the letter is already sent, and a
+    # problem here must not make sending it look like it failed.
+    try:
+        from app.services.hrms_onboarding_service import start_onboarding
+        await start_onboarding(actor, company_id, {
+            "uk": current["uk"], "joining_date": current.get("joining_date")})
+    except HTTPException as e:
+        # 409 is the expected case when HR already started it by hand.
+        if e.status_code != 409:
+            await notify_hrms_role(
+                company_id, ["HR"],
+                f"Onboarding NOT opened: {current.get('candidate_name')}",
+                (f"The appointment letter {appointment_no} was sent, but onboarding could not "
+                 f"be opened automatically ({e.detail}). Start it from the onboarding board."),
+                kind="error", link="/hrms/onboarding", email=True)
+    except Exception as e:                          # pragma: no cover - defensive
+        print(f"[WARN] auto onboarding after {appointment_no} failed: {e}")
+        await notify_hrms_role(
+            company_id, ["HR"],
+            f"Onboarding NOT opened: {current.get('candidate_name')}",
+            (f"The appointment letter {appointment_no} was sent, but onboarding could not be "
+             f"opened automatically. Start it from the onboarding board."),
+            kind="error", link="/hrms/onboarding", email=True)
+
     await audit(actor, AUDIT_APPOINTMENT_SENT, ENTITY_APPOINTMENT, appointment_no,
                 f"sent to {current.get('candidate_name')}", company_id)
     await audit(actor, AUDIT_APPOINTMENT_SENT, ENTITY_CANDIDATE, current["uk"],

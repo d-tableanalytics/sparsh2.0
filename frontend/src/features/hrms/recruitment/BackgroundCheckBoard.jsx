@@ -8,7 +8,7 @@ import { HrmsLoading, HrmsError, HrmsEmpty } from '../common/HrmsStates';
 import { useNotification } from '../../../context/NotificationContext';
 import {
   getPendingVerifications, getCandidateVerification, recordBackgroundCheck,
-  decideVerification,
+  decideVerification, updateBackgroundCheck,
 } from '../../../services/hrmsApi';
 import { FIELD, LABEL, TEXTAREA, day } from '../internal/internalKit';
 import { Btn, Chip, Facts, Modal, SignatureField } from '../internal/internalKit.jsx';
@@ -48,6 +48,7 @@ const BackgroundCheckBoard = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [detail, setDetail] = useState(null);
+  const [detailRow, setDetailRow] = useState(null);
   const [recording, setRecording] = useState(null);
   const [signing, setSigning] = useState(null);
 
@@ -73,6 +74,7 @@ const BackgroundCheckBoard = () => {
   const openDetail = async (row) => {
     try {
       const { data } = await getCandidateVerification(row.uk, scope);
+      setDetailRow(row);
       setDetail(data);
     } catch (e) {
       showError(e?.response?.data?.detail || 'Could not open that file.');
@@ -133,7 +135,7 @@ const BackgroundCheckBoard = () => {
                 <Btn onClick={() => openDetail(row)}>View file</Btn>
                 {canWrite && (
                   <Btn onClick={() => setRecording(row)}>
-                    <Plus size={13} /> Record a check
+                    <Plus size={13} /> Record or update a check
                   </Btn>
                 )}
                 {canApprove && row.checks_complete && !row.cleared_for_offer
@@ -199,7 +201,14 @@ const BackgroundCheckBoard = () => {
                     <p className="text-[12.5px] font-semibold text-[var(--text-main)]">
                       {c.check_type}
                     </p>
-                    <Chip tone={STATUS_TONE[c.status] || 'neutral'}>{c.status}</Chip>
+                    <div className="flex items-center gap-1.5">
+                      <Chip tone={STATUS_TONE[c.status] || 'neutral'}>{c.status}</Chip>
+                      {canWrite && (
+                        <Btn onClick={() => { setRecording({ ...detailRow, editing: c }); setDetail(null); }}>
+                          Update
+                        </Btn>
+                      )}
+                    </div>
                   </div>
                   <p className="text-[11px] text-[var(--text-muted)] font-mono">
                     {c.bgv_no}{c.agency ? ` · ${c.agency}` : ''}
@@ -245,12 +254,36 @@ const BackgroundCheckBoard = () => {
 };
 
 const RecordModal = ({ scope, candidate, onClose, onDone, onError }) => {
-  const [form, setForm] = useState({
+  const blank = {
     check_type: 'Identity / Document', status: 'Pending', agency: '', reference: '',
     findings: '', completed_on: '',
+  };
+  const fromCheck = (c) => ({
+    check_type: c.check_type, status: c.status, agency: c.agency || '',
+    reference: c.reference || '', findings: c.findings || '', completed_on: c.completed_on || '',
   });
+  const [form, setForm] = useState(candidate.editing ? fromCheck(candidate.editing) : blank);
+  // The candidate's checks already on file. Picking a type that is already there UPDATES that
+  // check -- moving "In Progress" to "Cleared" used to mean recording the whole check again.
+  const [existing, setExisting] = useState(candidate.editing ? [candidate.editing] : []);
+  useEffect(() => {
+    getCandidateVerification(candidate.uk, scope)
+      .then(({ data }) => setExisting(data?.checks || []))
+      .catch(() => {});
+  }, [candidate.uk, scope]);
+  // More than one of a type can exist (recorded twice before this form could update):
+  // the OPEN one is the one to move on, otherwise the latest.
+  const ofType = (t) => {
+    const same = existing.filter((c) => c.check_type === t);
+    return same.find((c) => ['Pending', 'In Progress'].includes(c.status)) || same[same.length - 1] || null;
+  };
+  const current = candidate.editing || ofType(form.check_type);
   const [saving, setSaving] = useState(false);
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
+  const pickType = (e) => {
+    const match = ofType(e.target.value);
+    setForm(match ? fromCheck(match) : { ...blank, check_type: e.target.value });
+  };
   // The server demands findings on a conclusion; asked for here so the refusal is not a
   // 422 the user has to decode.
   const needsFindings = ['Cleared', 'Flagged'].includes(form.status);
@@ -259,12 +292,20 @@ const RecordModal = ({ scope, candidate, onClose, onDone, onError }) => {
     e.preventDefault();
     setSaving(true);
     try {
-      await recordBackgroundCheck({
-        uk: candidate.uk, ...form, completed_on: form.completed_on || null,
-      }, scope);
-      await onDone(`${form.check_type} recorded for ${candidate.candidate_name}`);
+      if (current) {
+        await updateBackgroundCheck(current.bgv_no, {
+          status: form.status, agency: form.agency, reference: form.reference,
+          findings: form.findings, completed_on: form.completed_on || null,
+        }, scope);
+        await onDone(`${form.check_type} for ${candidate.candidate_name} is now ${form.status}`);
+      } else {
+        await recordBackgroundCheck({
+          uk: candidate.uk, ...form, completed_on: form.completed_on || null,
+        }, scope);
+        await onDone(`${form.check_type} recorded for ${candidate.candidate_name}`);
+      }
     } catch (err) {
-      onError(err?.response?.data?.detail || 'Could not record that check.');
+      onError(err?.response?.data?.detail || 'Could not save that check.');
     } finally {
       setSaving(false);
     }
@@ -272,15 +313,19 @@ const RecordModal = ({ scope, candidate, onClose, onDone, onError }) => {
 
   return (
     <Modal
-      title={`Record a check — ${candidate.candidate_name}`}
-      subtitle="Identity, education and prior employment must all clear before an offer."
+      title={current
+        ? `Update check — ${candidate.candidate_name}`
+        : `Record a check — ${candidate.candidate_name}`}
+      subtitle={current
+        ? `${current.check_type} (${current.bgv_no}) is ${current.status}. Change its result here — no need to record it again.`
+        : 'Identity, education and prior employment must all clear before an offer.'}
       onClose={onClose}
       footer={(
         <>
           <Btn onClick={onClose}>Cancel</Btn>
           <Btn tone="primary" onClick={submit}
                disabled={saving || (needsFindings && !form.findings.trim())}>
-            {saving ? 'Saving…' : 'Record check'}
+            {saving ? 'Saving…' : current ? 'Update check' : 'Record check'}
           </Btn>
         </>
       )}
@@ -290,15 +335,18 @@ const RecordModal = ({ scope, candidate, onClose, onDone, onError }) => {
           <div>
             <label className={LABEL} htmlFor="bg-type">Check *</label>
             <select id="bg-type" className={FIELD} value={form.check_type}
-                    onChange={set('check_type')}>
-              {CHECK_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
+                    onChange={pickType} disabled={Boolean(candidate.editing)}>
+              {CHECK_TYPES.map((t) => {
+                const on = ofType(t);
+                return <option key={t} value={t}>{t}{on ? ` — ${on.status}` : ''}</option>;
+              })}
             </select>
           </div>
           <div>
             <label className={LABEL} htmlFor="bg-status">Result *</label>
             <select id="bg-status" className={FIELD} value={form.status}
                     onChange={set('status')}>
-              {STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
+              {STATUSES.map((st) => <option key={st} value={st}>{st}</option>)}
             </select>
           </div>
           <div>

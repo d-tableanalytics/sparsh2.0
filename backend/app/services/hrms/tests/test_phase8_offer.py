@@ -300,13 +300,12 @@ async def main() -> None:
             issued["access_code"], {"action": "accept", "signature": "Cand CAN-001"})
         check("accepted", accepted["status"] == M.OfferStatus.ACCEPTED.value)
         got = (await candidates.find_one({"uk": "CAN-001"}))["application_status"]
-        # BA Functional Design §7.5: onboarding opens automatically the moment an offer is
-        # accepted (trigger: "Offer accepted"), which itself advances the candidate straight
-        # on to Pre-Onboarding -- accepting no longer leaves them resting at Offer Accepted.
-        check("candidate advances to Pre-Onboarding (onboarding auto-starts on acceptance)",
-              got == S.PRE_ONBOARDING.value)
+        # The appointment letter is mandatory before onboarding, so accepting the offer leaves
+        # the candidate at Offer Accepted; onboarding opens once the letter is SENT.
+        check("candidate rests at Offer Accepted (the appointment letter comes next)",
+              got == S.OFFER_ACCEPTED.value)
         onb = await mongo.get_collection(M.COLL_ONBOARDING).find_one({"uk": "CAN-001"})
-        check("an onboarding case was actually opened", onb is not None)
+        check("no onboarding case is opened on acceptance", onb is None)
         check("HR notified", any(s[0] == "role" for s in sent))
         check("acceptance audited",
               any(x["action"] == M.AUDIT_OFFER_ACCEPTED for x in audit_log.docs))
@@ -417,8 +416,9 @@ async def main() -> None:
               M.can_transition(S.OFFER_GENERATED, S.OFFER_ACCEPTED))
         check("Offer Generated -> Declined",
               M.can_transition(S.OFFER_GENERATED, S.OFFER_DECLINED))
-        check("Offer Accepted -> Pre-Onboarding (Phase 9's entry point)",
-              M.can_transition(S.OFFER_ACCEPTED, S.PRE_ONBOARDING))
+        check("Offer Accepted -> Appointment Letter Sent (the letter comes before onboarding)",
+              M.can_transition(S.OFFER_ACCEPTED, S.APPOINTMENT_LETTER_SENT)
+              and not M.can_transition(S.OFFER_ACCEPTED, S.PRE_ONBOARDING))
     finally:
         mongo.get_collection = original
 

@@ -220,12 +220,9 @@ async def mark_attendance(actor: dict, company_id: str, payload: dict) -> dict:
     if override:
         computed = {"status": override, "worked_minutes": None, "late_minutes": 0}
     else:
-        policy = await get_shift_policy(company_id)
-        computed = compute_daily_status(
-            scheduled_in=policy["shift_start"], scheduled_out=policy["shift_end"],
-            actual_in=actual_in, actual_out=actual_out,
-            daily_grace_minutes=policy["daily_grace_minutes"],
-            half_day_threshold_minutes=policy["half_day_threshold_minutes"])
+        # Against the day's EFFECTIVE hours (an approved flexible timing, else office timing).
+        from app.services.hrms_attendance_rules_service import compute_day
+        computed = await compute_day(company_id, employee_code, work_date, actual_in, actual_out)
 
     now = datetime.now(timezone.utc)
     doc = {
@@ -377,12 +374,9 @@ async def act_on_regularization(actor: dict, company_id: str, req_no: str, paylo
                 detail=f"{req_no} needs the manager's approval before HR's final sign-off.")
         # HR-final: recalculate attendance, preserving the original record (the update, not a
         # second row) — §7.9 step 69.
-        policy = await get_shift_policy(company_id)
-        computed = compute_daily_status(
-            scheduled_in=policy["shift_start"], scheduled_out=policy["shift_end"],
-            actual_in=doc.get("proposed_in"), actual_out=doc.get("proposed_out"),
-            daily_grace_minutes=policy["daily_grace_minutes"],
-            half_day_threshold_minutes=policy["half_day_threshold_minutes"])
+        from app.services.hrms_attendance_rules_service import compute_day
+        computed = await compute_day(company_id, doc["employee_code"], doc["work_date"],
+                                     doc.get("proposed_in"), doc.get("proposed_out"))
         await get_collection(COLL_ATTENDANCE).update_one(
             {"company_id": str(company_id), "employee_code": doc["employee_code"],
              "work_date": doc["work_date"]},
@@ -627,10 +621,17 @@ async def late_coming_summary(actor: dict, company_id: str, *, employee_code: Op
         user_names = await _employee_names(profiles)
         names = {p["employee_code"]: _name_of(p, user_names) for p in profiles}
 
+    dates = [{"work_date": r["work_date"], "employee_code": r["employee_code"],
+              "employee_name": names.get(r["employee_code"]),
+              "late_minutes": r["late_minutes"],
+              "department": departments.get(r["employee_code"])} for r in rows]
+    # The monthly buffer: late minutes tolerated per person per month (shift policy).
+    from app.services.hrms_attendance_rules_service import monthly_buffer
+    policy = await get_shift_policy(company_id)
     return {
         "total_late_days": len(rows),
-        "dates": [{"work_date": r["work_date"], "employee_code": r["employee_code"],
-                   "employee_name": names.get(r["employee_code"]),
-                   "late_minutes": r["late_minutes"],
-                   "department": departments.get(r["employee_code"])} for r in rows],
+        "dates": dates,
+        "buffer_minutes": policy.get("monthly_buffer_minutes") or 0,
+        "grace_minutes": policy.get("daily_grace_minutes") or 0,
+        "monthly": monthly_buffer(dates, policy.get("monthly_buffer_minutes") or 0),
     }

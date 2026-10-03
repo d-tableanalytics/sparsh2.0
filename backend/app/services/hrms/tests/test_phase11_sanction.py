@@ -252,15 +252,10 @@ async def main() -> None:
         check("it records what was requested", snap["requested"] == 1)
         check("it is stamped", snap["evaluated_at"] is not None)
 
-        # The band Management records at the budget gate -- the step the over-sanction
-        # ladder hangs off.
-        BAND = {"approved_headcount": 1, "approved_salary_band_min": 500000,
-                "approved_salary_band_max": 900000}
-
+        # There is no budget-approval step any more: the over-sanction ladder now hangs
+        # off HR verification itself.
         async def to_budget_gate(request_no):
-            await RS.act_on_requisition(HR, COMPANY, request_no, "hr-verify")
-            return await RS.act_on_requisition(MD, COMPANY, request_no, "budget-approve",
-                                               budget=BAND)
+            return await RS.act_on_requisition(HR, COMPANY, request_no, "hr-verify")
 
         # =================================================================
         section("IN-SANCTION requisitions go straight to the scorecard gate")
@@ -271,13 +266,9 @@ async def main() -> None:
         check("it is not over sanction",
               in_sanction["sanction_snapshot"]["is_over_sanction"] is False)
 
-        step1 = await RS.act_on_requisition(HR, COMPANY, in_sanction["request_no"],
+        step2 = await RS.act_on_requisition(HR, COMPANY, in_sanction["request_no"],
                                             "hr-verify")
-        check("HR verification goes to the budget gate",
-              step1["approval_status"] == M.ReqApproval.PENDING_BUDGET.value)
-        step2 = await RS.act_on_requisition(MD, COMPANY, in_sanction["request_no"],
-                                            "budget-approve", budget=BAND)
-        check("budget approval goes STRAIGHT to the scorecard gate",
+        check("HR verification goes STRAIGHT to the scorecard gate (no budget step)",
               step2["approval_status"] == M.ReqApproval.PENDING_SCORECARD.value)
         check("no escalation chain is built", step2["escalation_chain"] == [])
 
@@ -344,8 +335,8 @@ async def main() -> None:
         section("test_over_sanction_cannot_reach_approved_without_md")
         # =================================================================
         # The named assertion the phase prompt demands, checked three ways.
-        check("the budget gate cannot be skipped, asserted from the table",
-              M.budget_approval_is_mandatory())
+        check("the approval chain is sound, asserted from the table",
+              M.approval_chain_is_sound())
         approving = [a for a, spec in M.INTERNAL_REQ_TRANSITIONS.items()
                      if spec[1] is M.ReqApproval.APPROVED]
         check("no escalation action can result in APPROVED",
@@ -431,7 +422,7 @@ async def main() -> None:
         # =================================================================
         check("the ladder is capped", M.MAX_ESCALATION_LEVELS == 5)
         check("escalation routing is declared beside the transition table",
-              M.INTERNAL_ESCALATION_ROUTING["budget-approve"]
+              M.INTERNAL_ESCALATION_ROUTING["hr-verify"]
               is M.ReqApproval.PENDING_ESCALATION)
         check("every action still has an audit label",
               set(M.INTERNAL_REQ_TRANSITIONS) <= set(M.REQ_AUDIT_ACTIONS))

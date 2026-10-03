@@ -4,7 +4,7 @@ import {
   BadgeCheck, Target, PhoneCall, Users2, Phone, Scale,
   ShieldCheck, Briefcase, LayoutDashboard,
   HeartHandshake, GraduationCap, HeartPulse, CalendarClock,
-  Building2,
+  Building2, Radar,
 } from 'lucide-react';
 import { CAP } from '../access';
 
@@ -33,8 +33,8 @@ import { CAP } from '../access';
  * no visible tabs disappears rather than showing an empty heading. This is a UX kindness on
  * top of a check the API already enforces, never a new security boundary.
  *
- * Each tab's label is the same words as the page title it opens (Pre-Joiners, Onboarding
- * Cases, Appointment & Agreements, Induction & Training, 30/90-Day Surveys, Probation).
+ * Each tab's label is the same words as the page title it opens (Pre-Joiners, Appointment
+ * & Agreements, Onboarding Cases, Induction & Training, 30/90-Day Surveys, Probation).
  * Clicking "Pre-Joiners" and landing on a screen headed "Pre-boarding" makes somebody
  * wonder whether they arrived where they meant to.
  *
@@ -55,24 +55,23 @@ export const HIRING_WORKSPACE = {
       tabs: [
         // The way in: what is waiting on whom, across every open position.
         { label: 'Overview', to: '/hrms/internal-hiring', icon: LayoutDashboard, cap: CAP.REQUISITION_READ },
-        // In chain order: HR verifies the requisition is complete BEFORE anyone is asked to
-        // pay for it (Pending HR Verification -> Pending Budget Approval -> ...), so the tab
-        // that clears the first gate sits before the board that clears the second.
+        // In chain order: HR verifies the requisition first. There is no budget-approval
+        // step: it then goes straight to the scorecard, or -- only when it is over the
+        // sanctioned headcount -- to Management for Headcount Approval on the board beside it.
         //
         // Gated on the capability that CLEARS it rather than on REQUISITION_READ: a tab
         // nobody on it can act in is a tab that only takes up room — everybody else still
         // sees the same rows on the board beside it.
         { label: 'HR Verification', to: '/hrms/hr-verification', icon: ClipboardCheck, cap: CAP.REQUISITION_REVIEW_HR },
-        { label: 'Headcount & Budget Approval', to: '/hrms/internal-requisitions', icon: ClipboardList, cap: CAP.REQUISITION_READ },
+        { label: 'Headcount Approval', to: '/hrms/internal-requisitions', icon: ClipboardList, cap: CAP.REQUISITION_READ },
         // The order the work is actually done in: the JD describes the role, the scorecard
         // sets the bar it will be hired against, and the final gate approves the requisition
         // — which approves that JD in the same step. The gate is last because it is what
         // releases everything above it, not something done alongside them.
         { label: 'Job Descriptions', to: '/hrms/jd', icon: ScrollText, cap: CAP.JD_READ },
         { label: 'Scorecards', to: '/hrms/scorecards', icon: Target, cap: CAP.SCORECARD_READ },
-        // Gated on the capability that CLEARS it, like HR Verification: the hiring manager
-        // and Management. Everyone else still sees these rows on the board above.
-        { label: 'Final Requisition Approval', to: '/hrms/final-approval', icon: ShieldCheck, cap: CAP.SCORECARD_APPROVE },
+        // No "Final Requisition Approval" tab: the HOD's scorecard sign-off approves the
+        // requisition by itself and sends it straight to job posting.
       ],
     },
     {
@@ -125,6 +124,9 @@ export const HIRING_WORKSPACE = {
       hint: 'How hiring is going, across every open position.',
       tabs: [
         { label: 'Reports', to: '/hrms/reports', icon: PieChart, cap: CAP.ANALYTICS_READ },
+        // Where candidates come from: hiring outcomes per source, and reach per job portal
+        // (two views of one page -- see analytics/SourceAnalytics.jsx).
+        { label: 'Source Analytics', to: '/hrms/source-analytics', icon: Radar, cap: CAP.ANALYTICS_READ },
       ],
     },
   ],
@@ -146,10 +148,11 @@ export const ONBOARDING_WORKSPACE = {
         // onboarding case, and five tabs opening the same record from different angles
         // would be five doors into one room.
         { label: 'Pre-Joiners', to: '/hrms/preboarding', icon: HeartHandshake, cap: CAP.PREBOARDING_READ },
-        { label: 'Onboarding Cases', to: '/hrms/onboarding', icon: UserPlus, cap: CAP.ONBOARDING_READ },
-        // The letter is issued after the offer is accepted and before joining, and it is
-        // where the NDA, Code of Conduct and policies are signed (§7.5 Stage 7).
+        // The letter is MANDATORY after the offer is accepted and BEFORE onboarding (sending
+        // it is what opens the onboarding case), so its tab comes first. It is also where the
+        // NDA, Code of Conduct and policies are signed (§7.5 Stage 7).
         { label: 'Appointment & Agreements', to: '/hrms/appointments', icon: BadgeCheck, cap: CAP.APPOINTMENT_READ },
+        { label: 'Onboarding Cases', to: '/hrms/onboarding', icon: UserPlus, cap: CAP.ONBOARDING_READ },
       ],
     },
     {
