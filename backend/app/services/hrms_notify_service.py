@@ -130,17 +130,22 @@ async def notify_hrms_role(
     if not company_id or not governance_roles:
         return
     try:
+        from app.utils.hrms_access import tenant_identity_source
         wanted = {r.strip().upper() for r in governance_roles if r}
-        query = {"company_id": str(company_id), "governance_role": {"$in": list(wanted)}}
-        if "MD" in wanted:
+        # Whichever collection holds this company's people: Sparsh Magic's own staff live in
+        # `staff` (no company_id), every other company's people are `learners`. A hard-coded
+        # `learners` lookup meant no internal MD or HR ever got a role notification.
+        source, base = await tenant_identity_source(str(company_id))
+        query = {**base, "governance_role": {"$in": list(wanted)}}
+        if "MD" in wanted and source == "learners":
             query = {
-                "company_id": str(company_id),
+                **base,
                 "$or": [
                     {"governance_role": {"$in": list(wanted)}},
                     {"role": "clientadmin"},
                 ],
             }
-        rows = await get_collection("learners").find(query, {"_id": 1}).to_list(500)
+        rows = await get_collection(source).find(query, {"_id": 1}).to_list(500)
         # `exclude_user_ids` exists for the caller that has ALREADY addressed somebody
         # directly and is now broadcasting to their role: without it, an HR drafter told
         # "your scorecard was sent back" by name is told again by the HR fan-out --

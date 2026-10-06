@@ -652,6 +652,9 @@ async def list_documents(cycle: Optional[str] = Query(None),
     if cycle:
         query["cycle"] = str(cycle)
     rows = await get_collection(COLL_LS_DOCUMENTS).find(query).sort("uploaded_at", -1).to_list(500)
+    from app.services.s3_service import with_fresh_url
+    # The link stored at upload expires after an hour; re-sign it from the key on every read.
+    rows = [with_fresh_url(r) for r in rows]
     return {"company_id": cid, "documents": [{
         "id": str(r["_id"]),
         "cycle": r.get("cycle"),

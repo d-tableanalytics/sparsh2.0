@@ -20,7 +20,7 @@ from app.controllers.auth_controller import (
 )
 from app.utils.calendar_utils import CALENDAR_COLLECTIONS, find_event_across_collections
 from app.services.activity_log_service import log_activity
-from app.services.s3_service import upload_file_to_s3_with_key
+from app.services.s3_service import upload_file_to_s3_with_key, with_fresh_url
 from app.routes.group import _is_member_or_manager
 from app.services import task_events
 from app.services.task_logs_service import get_task_logs_report
@@ -414,8 +414,10 @@ def _serialize_task_detail(doc: dict, current_user_id: str) -> dict:
         "verificationRequired": doc.get("verification_required", False),
         "color": doc.get("color"),
         "checklist": doc.get("checklist") or [],
-        "attachments": doc.get("attachments") or [],
-        "completionAttachments": doc.get("completion_attachments") or [],
+        # Re-signed on every read: the link saved at upload expires after an hour, and an
+        # expired link opens as S3's "Request has expired" instead of the file.
+        "attachments": [with_fresh_url(a) for a in (doc.get("attachments") or [])],
+        "completionAttachments": [with_fresh_url(a) for a in (doc.get("completion_attachments") or [])],
         "remarks": doc.get("remarks") or [],
         "statusHistory": doc.get("status_history") or [],
         # Who actually closed the task out, and when. On a verification-required task that is
