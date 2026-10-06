@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import {
   Users2, Search, Plus, LayoutGrid, List as ListIcon, Columns3, X, Route, AlertTriangle,
   Mail, Phone, Save, Trash2, FileText, Download, Link2, Globe, Paperclip,
-  Image as ImageIcon, Check, Minus, Bookmark,
+  Image as ImageIcon, Check, Minus, Bookmark, Lock,
 } from 'lucide-react';
 import { useNotification } from '../../../context/NotificationContext';
 import { useHrms } from '../HrmsContext';
@@ -30,6 +30,43 @@ import { CANDIDATE_SOP_LABEL, sopLabelFor } from '../internal/sopLabels';
  * what this candidate may legally become. There is no drag-and-drop: dropping a card into
  * an arbitrary column implies every move is legal, and most are not.
  */
+
+/** The application source as HR should read it. The stored value is what the applicant
+ *  chose on the form ("Where did you find this job?") or what HR picked when adding a CV;
+ *  a few stored values are internal shorthand, so they are spelled out here. */
+const SOURCE_LABELS = {
+  Employee: 'Employee Referral', Referral: 'Employee Referral',
+  'Ex-Employee': 'Ex-employee Referral', Manual: 'Added by HR (source not given)',
+};
+/** "Candidate Source": the ONE most specific answer to "where did this candidate come
+ *  from" -- the named platform (Naukri, LinkedIn, Company Website...) when we know it, a
+ *  referral when it was one, otherwise the channel they gave. */
+const candidateSource = (c) => {
+  if (c?.is_referral || ['Employee', 'Referral'].includes(c?.source) || c?.source_platform === 'referral') {
+    return c?.referral_source === 'Ex-Employee' || c?.source === 'Ex-Employee'
+      ? 'Ex-employee Referral' : 'Employee Referral';
+  }
+  const platform = platformLabel(c?.source_platform);
+  if (platform && platform !== 'Other') return platform;
+  if (c?.source === 'Job Portal') return 'Job Portal (portal not named)';
+  if (c?.source === 'Social Media') return 'Social Media (platform not named)';
+  return SOURCE_LABELS[c?.source] || c?.source || 'Not recorded';
+};
+/** The candidate's own application recorded the platform -> HR may not change it. */
+const sourceLocked = (c) => {
+  if (!c?.source_platform) return false;
+  if (c.source_platform_by) return c.source_platform_by === 'applicant';
+  return !c.created_by && !!c.posting_code;   // rows from before the marker existed
+};
+
+/** How the candidate reached us: through the posting's application link, or added by HR.
+ *  A public application has no `created_by`; anything HR adds does. */
+const appliedVia = (c) => {
+  if (c?.source === 'Talent Pool') return 'Re-sourced from the talent pool';
+  if (c?.created_by) return 'Added by HR';
+  if (c?.posting_code) return `Applied through the job application link (${c.posting_code})`;
+  return null;
+};
 
 /** Mirrors backend ReferralSource (models/hrms.py) — the values a candidate's `source` may
  *  hold. `Referral` is the label a declared employee referral is filed under. */
@@ -206,12 +243,10 @@ const CandidateCard = ({ candidate: c, onOpen }) => (
     )}
     <div className="mt-2 flex items-center gap-1.5 flex-wrap">
       <StageBadge status={c.application_status} />
-      {c.source && (
-        <span className="text-[10.5px] text-[var(--text-muted)]">
-          {c.source}{platformLabel(c.source_platform) && platformLabel(c.source_platform) !== c.source
-            ? ` · ${platformLabel(c.source_platform)}` : ''}
-        </span>
-      )}
+      <span title="Application source"
+        className="px-1.5 py-0.5 rounded-md bg-[var(--input-bg)] border border-[var(--border)] text-[10.5px] text-[var(--text-main)]">
+        <span className="text-[var(--text-muted)]">Candidate Source:</span> {candidateSource(c)}
+      </span>
     </div>
   </button>
 );
@@ -604,20 +639,46 @@ const Drawer = ({ uk, onClose, onChanged }) => {
               </div>
             </Section>
 
+            {/* Candidate Source -- where this candidate came from, shown first and plainly. */}
+            <div className="p-3.5 rounded-xl border border-[var(--accent-indigo)]/30 bg-[var(--accent-indigo-bg)]">
+              <p className="text-[10px] font-bold uppercase tracking-widest text-[var(--accent-indigo)]">
+                Candidate Source
+              </p>
+              <p className="mt-0.5 text-[17px] font-bold text-[var(--text-main)]">{candidateSource(c)}</p>
+              {appliedVia(c) && (
+                <p className="text-[11.5px] text-[var(--text-muted)]">{appliedVia(c)}</p>
+              )}
+              {c.is_referral && c.referred_by && (
+                <p className="mt-1 text-[12px] text-[var(--text-main)]">
+                  Referred by <b>{c.referred_by}</b>
+                  {c.referrer_employee_code ? ` (${c.referrer_employee_code})` : ''}
+                </p>
+              )}
+              {/* Locked once the candidate's own application recorded the platform; HR can
+                  only fill in a missing one, or correct one on a candidate HR added. */}
+              {canWrite && sourceLocked(c) && (
+                <p className="mt-2 inline-flex items-center gap-1.5 text-[11px] text-[var(--text-muted)]">
+                  <Lock size={11} /> Recorded from the candidate&apos;s application — it can&apos;t be changed.
+                </p>
+              )}
+              {canWrite && !sourceLocked(c) && (
+                <label className="mt-2.5 flex flex-wrap items-center gap-2 text-[11px] text-[var(--text-muted)]">
+                  {c.source_platform ? 'Correct the source:' : 'Set the source:'}
+                  <select aria-label="Candidate source" disabled={saving}
+                    value={c.source_platform || ''} onChange={(e) => savePlatform(e.target.value)}
+                    className="h-7 px-2 rounded-md border border-[var(--border)] bg-[var(--bg-card)] text-[12px] text-[var(--text-main)]">
+                    <option value="">Not specified</option>
+                    {JOB_PLATFORMS.map(([k, label]) => <option key={k} value={k}>{label}</option>)}
+                  </select>
+                </label>
+              )}
+            </div>
+
             <Section title="Application">
               <Facts rows={[
                 ['Applied position', c.applied_position],
                 ['Department', c.department_name],
                 ['Applied on', c.applied_at ? new Date(c.applied_at).toLocaleDateString() : null],
-                ['Source', c.source],
-                ['Job portal / platform', canWrite ? (
-                  <select aria-label="Job portal / platform" disabled={saving}
-                    value={c.source_platform || ''} onChange={(e) => savePlatform(e.target.value)}
-                    className="h-7 px-2 rounded-md border border-[var(--border)] bg-[var(--input-bg)] text-[12px] text-[var(--text-main)]">
-                    <option value="">Not specified</option>
-                    {JOB_PLATFORMS.map(([k, label]) => <option key={k} value={k}>{label}</option>)}
-                  </select>
-                ) : platformLabel(c.source_platform)],
                 ['Requisition', c.request_no],
                 ['Job posting', c.posting_code],
                 ['Job description', c.jd_no],
@@ -1202,7 +1263,7 @@ const CandidatePipeline = () => {
           <table className="w-full text-[13px] min-w-[900px]">
             <thead className="bg-[var(--input-bg)] text-[var(--text-muted)]">
               <tr>
-                {['Candidate Name', 'Position', 'Applied Date', 'Source', 'Experience',
+                {['Candidate Name', 'Position', 'Applied Date', 'Candidate Source', 'Experience',
                   'Location', 'Status', 'Actions'].map((h) => (
                   <th key={h} className="text-left px-4 py-2.5 text-[10.5px] font-bold uppercase tracking-widest">{h}</th>
                 ))}
@@ -1240,9 +1301,9 @@ const CandidatePipeline = () => {
                     {c.applied_at ? new Date(c.applied_at).toLocaleDateString() : '—'}
                   </td>
                   <td className="px-4 py-2.5 text-[var(--text-main)]">
-                    {c.source || '—'}
-                    {platformLabel(c.source_platform) && platformLabel(c.source_platform) !== c.source && (
-                      <span className="block text-[11px] text-[var(--text-muted)]">{platformLabel(c.source_platform)}</span>
+                    {candidateSource(c)}
+                    {appliedVia(c) && (
+                      <span className="block text-[11px] text-[var(--text-muted)]">{appliedVia(c)}</span>
                     )}
                   </td>
                   <td className="px-4 py-2.5 text-[var(--text-muted)]">{c.total_experience || '—'}</td>

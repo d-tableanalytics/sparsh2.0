@@ -378,6 +378,7 @@ async def create_candidate(actor: dict, company_id: str, payload: dict) -> dict:
     from app.models.hrms import platform_for_candidate
     doc["source_platform"] = platform_for_candidate(
         payload.get("source_platform"), doc.get("source"), doc.get("is_referral"))
+    doc["source_platform_by"] = "hr" if doc["source_platform"] else None
 
     # ── Phase 12 ── the CV itself.
     #
@@ -517,6 +518,18 @@ async def assert_stage_has_backing_record(
                 detail="This candidate's probation has not actually been confirmed.")
 
 
+def source_recorded_by_applicant(c: dict) -> bool:
+    """True when the platform came from the candidate's own application (and is locked).
+    Rows from before `source_platform_by` existed: an online application (no `created_by`,
+    a posting) that carries a platform is taken as the applicant's."""
+    if not c.get("source_platform"):
+        return False
+    by = c.get("source_platform_by")
+    if by:
+        return by == "applicant"
+    return not c.get("created_by") and bool(c.get("posting_code"))
+
+
 async def update_candidate(actor: dict, company_id: str, uk: str, payload: dict) -> dict:
     """Edit a candidate, including moving their stage.
 
@@ -542,7 +555,17 @@ async def update_candidate(actor: dict, company_id: str, uk: str, payload: dict)
         key = normalise_platform(raw) if raw else None
         if raw and not key:
             raise HTTPException(status_code=422, detail="Choose a job portal / platform from the list.")
+        # A platform the candidate's OWN application recorded (tracked link or their "which
+        # job portal" answer) is a fact about how they found us, not HR's opinion -- it is
+        # locked. HR may still fill one in when it is missing, and may correct the platform
+        # on a candidate HR added by hand (HR chose it in the first place).
+        if source_recorded_by_applicant(current) and key != current.get("source_platform"):
+            raise HTTPException(
+                status_code=409,
+                detail=("This candidate's source was recorded from their own application and "
+                        "cannot be changed."))
         updates["source_platform"] = key
+        updates["source_platform_by"] = "hr" if key else None
 
     if "can_email" in payload:
         email = clean_text(payload["can_email"], limit=180)

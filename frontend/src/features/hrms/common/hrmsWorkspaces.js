@@ -4,7 +4,7 @@ import {
   BadgeCheck, Target, PhoneCall, Users2, Phone, Scale,
   ShieldCheck, Briefcase, LayoutDashboard,
   HeartHandshake, GraduationCap, HeartPulse, CalendarClock,
-  Building2, Radar,
+  Building2,
 } from 'lucide-react';
 import { CAP } from '../access';
 
@@ -124,9 +124,6 @@ export const HIRING_WORKSPACE = {
       hint: 'How hiring is going, across every open position.',
       tabs: [
         { label: 'Reports', to: '/hrms/reports', icon: PieChart, cap: CAP.ANALYTICS_READ },
-        // Where candidates come from: hiring outcomes per source, and reach per job portal
-        // (two views of one page -- see analytics/SourceAnalytics.jsx).
-        { label: 'Source Analytics', to: '/hrms/source-analytics', icon: Radar, cap: CAP.ANALYTICS_READ },
       ],
     },
   ],

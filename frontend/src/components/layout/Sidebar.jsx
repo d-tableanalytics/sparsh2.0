@@ -36,6 +36,8 @@ import {
   GraduationCap,
   // ── Phase PULSE-1 ── 30/90-Day Pulse Survey.
   HeartPulse,
+  // Source Analytics (candidates by platform).
+  Radar,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { canAccessTaskManagement } from '../../utils/taskAccess';
@@ -198,6 +200,10 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
   // from it need client_candidate.write, which only HR and the superadmin hold (a client_*
   // capability, so Roles & Permissions cannot hand it to anybody else). Offering the link
   // to MD, HODs or other staff only led them to a 403.
+  // HR Letters needs letter.read, which HODs and Finance do not hold (HR and MD manage
+  // letters; an employee reads their own). Offering them the link only led to a 403.
+  const canSeeLetters = !['HOD', 'FINANCE'].includes(
+    (user?.governance_role || '').trim().toUpperCase());
   const canUseCandidatePool = user?.role === 'superadmin'
     || (user?.governance_role || '').trim().toUpperCase() === 'HR';
   const canManagePermissions = ['superadmin', 'admin', 'clientadmin'].includes(user?.role)
@@ -295,6 +301,9 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
     // ── Phase INT-2 ── a search across candidates rather than a step in one hire, so it
     // is not a tab on the hiring strip and keeps its own entry.
     { name: 'Talent Pool', path: '/hrms/talent-pool', icon: Bookmark },
+    // Which platform (Naukri, LinkedIn, Indeed, Apna, Referral...) brings the candidates.
+    // Its own entry -- a report across all hiring, not a step in one hire.
+    { name: 'Source Analytics', path: '/hrms/source-analytics', icon: Radar },
 
     { section: 'Joining' },
     // ── Onboarding ── ONE entry for the whole joining journey, the same shape as the two
@@ -339,7 +348,7 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
     // ── Cross-cutting reference, used throughout Active Employment/Growth ──
     // ── Phase LETTER-1 ── controlled correspondence (confirmation, revision, warning, etc.)
     // — HR manages the template register and issues letters, an employee reads their own.
-    { name: 'Letters', path: '/hrms/letters', icon: FileCog },
+    ...(canSeeLetters ? [{ name: 'Letters', path: '/hrms/letters', icon: FileCog }] : []),
 
     // ── Stages 12-15: Exit Initiation -> Notice/Handover -> F&F -> Closure ──
     { section: 'Exit & Exceptions' },

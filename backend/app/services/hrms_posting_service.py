@@ -292,7 +292,20 @@ async def create_posting(actor: dict, company_id: str, payload: dict) -> dict:
     # own history -- the one place it most obviously belongs.
     await audit(actor, AUDIT_POSTING_CREATED, ENTITY_POSTING, code,
                 f"{jd_no} · {', '.join(channels)}", company_id)
+    if needs_exec_approval:
+        await _notify_exec_search_pending(company_id, code, doc.get("title"))
     return {"posting": _out(doc), "created": 1}
+
+
+async def _notify_exec_search_pending(company_id: str, code: str, title: str = None) -> None:
+    """Tell the MD an Executive Search posting is waiting for them -- otherwise it sits in
+    Pending Management Approval until somebody happens to open Job Postings."""
+    await notify_hrms_role(
+        company_id, ["MD"],
+        f"Executive Search posting {code} needs your approval.",
+        (f"{title or 'A posting'} ({code}) uses Executive Search and cannot be published "
+         f"until you approve it. Open Job Postings and click Approve Executive Search."),
+        kind="warning", link="/hrms/postings", email=True)
 
 
 async def publish_posting(actor: dict, company_id: str, code: str) -> dict:
@@ -395,6 +408,16 @@ async def approve_exec_search(actor: dict, company_id: str, code: str,
                   "exec_search_approved_at": now}})
     await audit(actor, AUDIT_POSTING_EXEC_APPROVED, ENTITY_POSTING, code,
                 clean_text(remarks) or None, company_id)
+    # Tell HR it is cleared, so the posting does not sit unpublished. The HR who created it
+    # is addressed by name; the role fan-out skips them so nobody gets two bells.
+    title = f"Executive Search posting {code} has been approved. You can now publish it."
+    body = (f"{current.get('title') or 'The posting'} ({code}) was approved for Executive "
+            f"Search. It is back in Draft - open Job Postings and click Publish.")
+    creator = current.get("posted_by")
+    if creator:
+        await notify_user(creator, title, body, kind="success", link="/hrms/postings", email=True)
+    await notify_hrms_role(company_id, ["HR"], title, body, kind="success",
+                           link="/hrms/postings", exclude_user_ids=[creator] if creator else None)
     doc = await coll.find_one({"posting_code": code, "company_id": str(company_id)})
     return _out(doc)
 
@@ -544,6 +567,10 @@ async def update_posting(actor: dict, company_id: str, code: str, payload: dict)
                           {"$set": updates})
     await audit(actor, AUDIT_POSTING_UPDATED, ENTITY_POSTING, code,
                 ", ".join(sorted(k for k in updates if k != "updated_at")), company_id)
+    # Executive Search added to an existing draft -> it now waits for the MD as well.
+    if (updates.get("live_status") == LiveStatus.PENDING_APPROVAL.value
+            and current.get("live_status") != LiveStatus.PENDING_APPROVAL.value):
+        await _notify_exec_search_pending(company_id, code, current.get("title"))
 
     doc = await coll.find_one({"posting_code": code})
     item = _out(doc)
@@ -910,6 +937,8 @@ async def submit_application(code: str, payload: dict) -> dict:
     doc["source_platform"] = platform_for_candidate(
         normalise_platform(payload.get("src")) or payload.get("platform"),
         doc.get("source"), doc.get("is_referral"))
+    # Recorded by the applicant's own application -> locked against later edits.
+    doc["source_platform_by"] = "applicant" if doc["source_platform"] else None
     await get_collection(COLL_CANDIDATES).insert_one(dict(doc))
 
     channel = doc.get("source") or "the application form"

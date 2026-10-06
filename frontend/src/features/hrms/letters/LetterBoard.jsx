@@ -123,7 +123,7 @@ const useSubmit = (showSuccess, showError, onDone) => {
 };
 
 const LetterBoard = () => {
-  const { scope, companyId, can } = useHrms();
+  const { scope, companyId, can, loading: accessLoading } = useHrms();
   const { showSuccess, showError } = useNotification();
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -133,9 +133,14 @@ const LetterBoard = () => {
   const [openLetterNo, setOpenLetterNo] = useState(null);
 
   const canManage = can(CAP.LETTER_MANAGE);
+  // Without letter.read (HODs and Finance by default) say so plainly rather than calling
+  // the API for a 403.
+  const canRead = can(CAP.LETTER_READ);
+  const noAccess = !accessLoading && !canRead;
 
   const load = useCallback(async () => {
-    if (!companyId) { setLoading(false); return; }
+    if (accessLoading) return;
+    if (!companyId || !canRead) { setLoading(false); return; }
     setLoading(true); setError(null);
     try {
       const { data } = await listLetters({ ...scope, limit: 100 });
@@ -146,7 +151,7 @@ const LetterBoard = () => {
       setLoading(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [companyId]);
+  }, [companyId, accessLoading, canRead]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -188,9 +193,13 @@ const LetterBoard = () => {
       />
       <HrmsScopeBar />
 
-      {loading && <HrmsLoading label="Loading correspondence…" />}
-      {error && !loading && <HrmsError message={error} onRetry={load} />}
-      {!loading && !error && (
+      {noAccess && (
+        <HrmsEmpty icon={FileCog} title="HR Letters are managed by HR"
+          hint="Your role doesn't have access to HR letters. HR and the MD issue them, and each employee sees their own. Ask HR if you need a letter." />
+      )}
+      {!noAccess && loading && <HrmsLoading label="Loading correspondence…" />}
+      {!noAccess && error && !loading && <HrmsError message={error} onRetry={load} />}
+      {!noAccess && !loading && !error && (
         rows.length ? (
           <RecordList rows={rows} columns={columns}
             renderCard={(r) => (

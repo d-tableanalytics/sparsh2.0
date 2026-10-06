@@ -55,6 +55,48 @@ def get_signed_url(s3_key: str, expires_in: int = 3600, download_as: str = None)
         print(f"Error generating signed URL: {e}")
         return ""
 
+def key_from_signed_url(url: str):
+    """The object key inside one of OUR presigned S3 links, or None.
+
+    For files saved before their key was stored alongside the URL: the key is the link's
+    path (virtual-hosted style) or the path after the bucket name (path style). Anything
+    that is not a presigned link to our bucket returns None and is left alone.
+    """
+    from urllib.parse import unquote, urlparse
+    if not url or "X-Amz-" not in url:
+        return None
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return None
+    bucket = settings.S3_BUCKET_NAME or ""
+    path = unquote(parsed.path or "").lstrip("/")
+    if not bucket or not path:
+        return None
+    if parsed.netloc.startswith(bucket + "."):
+        return path
+    if path.startswith(bucket + "/"):
+        return path[len(bucket) + 1:]
+    return None
+
+
+def with_fresh_url(entry: dict, expires_in: int = 3600) -> dict:
+    """A stored file record ({name, key, url, ...}) with a link that works NOW.
+
+    Presigned links expire (an hour by default), so a link saved at upload time is dead by
+    the next day -- S3 answers "Request has expired". The key is what is permanent; the
+    link is re-signed from it on every read. Records without a usable key are returned as
+    they are.
+    """
+    if not isinstance(entry, dict):
+        return entry
+    key = entry.get("key") or entry.get("s3_key") or key_from_signed_url(entry.get("url"))
+    if not key:
+        return entry
+    url = get_signed_url(key, expires_in=expires_in)
+    return {**entry, "url": url} if url else entry
+
+
 def upload_file_to_s3(file_obj, filename: str, content_type: str) -> str:
     s3_client = get_s3_client()
     bucket_name = settings.S3_BUCKET_NAME
