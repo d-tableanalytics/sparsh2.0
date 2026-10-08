@@ -451,12 +451,31 @@ async def _attach_people(rows: list, docs: list) -> None:
     staff for an internal user. An internal admin overseeing a client task would otherwise see
     its client creator/assignees as "Someone"/raw ids. One lookup for the whole page."""
     per_doc = [_people_ids(d) for d in docs]
-    names = await _user_names(list(set().union(*per_doc))) if per_doc else {}
+    all_ids = set().union(*per_doc) if per_doc else set()
+    names = await _user_names(list(all_ids))
+    # An id found in neither directory belongs to an account that has since been deleted (some
+    # were re-created under a new id, leaving their old tasks pointing at the old one). The
+    # activity log still records the name each id acted under, so recover it from there.
+    gone = [i for i in all_ids if i not in names and ObjectId.is_valid(i)]
+    if gone:
+        names.update(await _logged_names(gone))
     for row, ids in zip(rows, per_doc):
-        # A well-formed id found in neither directory is an account that has since been
-        # deleted — say so, rather than letting the UI fall back to "Someone"/"Unknown".
+        # Still nothing: say so, rather than letting the UI fall back to "Someone"/"Unknown".
         row["people"] = {i: names.get(i, "Deleted user") for i in ids
                          if i in names or ObjectId.is_valid(i)}
+
+
+async def _logged_names(user_ids: list) -> dict:
+    """user_id -> the most recent name activity_logs recorded for it (deleted accounts only)."""
+    out = {}
+    cursor = get_collection("activity_logs").aggregate([
+        {"$match": {"user_id": {"$in": user_ids}, "user_name": {"$nin": [None, ""]}}},
+        {"$sort": {"timestamp": -1}},
+        {"$group": {"_id": "$user_id", "name": {"$first": "$user_name"}}},
+    ])
+    async for d in cursor:
+        out[str(d["_id"])] = d["name"]
+    return out
 
 
 async def _fetch_subtasks(parent_id: str, current_user_id: str, admin_company_id: str = None):
