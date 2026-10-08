@@ -72,6 +72,9 @@ const TaskDashboard = () => {
   const [users, setUsers] = useState([]);
   const [dashboard, setDashboard] = useState({ summary: null, monthly: [] });
   const [tabTasks, setTabTasks] = useState([]);
+  // Bar Chart view data (see below) — declared here because userMap reads its names.
+  const [chartAllTasks, setChartAllTasks] = useState([]);
+  const [chartDelegatedTasks, setChartDelegatedTasks] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [modalOpen, setModalOpen] = useState(false);
@@ -82,10 +85,13 @@ const TaskDashboard = () => {
   }, []);
 
   const userMap = useMemo(() => {
+    // Each task also carries its own participants' names (`people`), which covers client users
+    // outside the viewer's directory — e.g. an internal admin looking at client tasks.
     const m = {};
+    [tabTasks, chartAllTasks, chartDelegatedTasks].forEach(list => list.forEach(t => Object.assign(m, t.people)));
     users.forEach(u => { m[u._id] = u.full_name || u.email; });
     return m;
-  }, [users]);
+  }, [users, tabTasks, chartAllTasks, chartDelegatedTasks]);
 
   // Display-name → designation, used to render the role subtitle under each employee bar.
   const designationByName = useMemo(() => {
@@ -207,8 +213,6 @@ const TaskDashboard = () => {
 
   // ─── Bar Chart view: multi-panel stacked reports (Employee/Category/Daily/Monthly/Delegated) ───
   const isAdminRole = ADMIN_ROLES.includes(user?.role?.toLowerCase());
-  const [chartAllTasks, setChartAllTasks] = useState([]);
-  const [chartDelegatedTasks, setChartDelegatedTasks] = useState([]);
   const [chartLoading, setChartLoading] = useState(false);
 
   // Bar and Line views both derive their series from the same fetched task lists; Pie uses

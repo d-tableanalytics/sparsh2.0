@@ -92,10 +92,12 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, scope, onChanged, onEdit })
   const [savingChecklist, setSavingChecklist] = useState(false);
 
   const userMap = React.useMemo(() => {
-    const m = {};
+    // The task carries its own participants' names (`people`), which covers client users
+    // outside the viewer's directory — e.g. an internal admin viewing a client task.
+    const m = { ...task?.people };
     users.forEach(u => { m[u._id] = u.full_name || u.email; });
     return m;
-  }, [users]);
+  }, [users, task]);
 
   // `silent` refetches update the data in place WITHOUT flipping `loading` — so the modal
   // never flashes its "Loading task details..." state after in-modal actions (status
@@ -418,7 +420,11 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, scope, onChanged, onEdit })
   // of an admin, so it unlocks the same actions. A client MD's role is "clientadmin", which is
   // deliberately NOT in the role list above — the backend decides, and sends this flag.
   const isCompanyAdmin = !!task?.isCompanyAdmin;
-  const canManage = !!task && (task.isCreator || isCompanyAdmin || ['superadmin', 'admin'].includes(user?.role));
+  // Oversight-only access (backend-decided): Super Admin / Sparsh Admin opening a task they are
+  // not part of — e.g. any client task. They see everything but every action is withdrawn.
+  const isViewOnly = !!task?.isViewOnly;
+  const canManage = !!task && !isViewOnly
+    && (task.isCreator || isCompanyAdmin || ['superadmin', 'admin'].includes(user?.role));
   // Reporting Manager of an assignee (backend-scoped to only their reports): has the SAME task
   // workflow as an admin on this task — drive the working status, finalize/verify, reopen,
   // revise, edit, delete. Folded into the gating booleans below.
@@ -452,6 +458,9 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, scope, onChanged, onEdit })
   // however they came to it.
   const isPureWatcher = !!task && isInLoop && !isAssignee && !task.isCreator
     && !isReportingManager && !isCompanyAdmin;
+  // Anyone who may only look: a pure watcher, or a view-only admin. Gates the collaboration
+  // controls (check points, attachments, evidence).
+  const isObserver = isPureWatcher || isViewOnly;
   // Who drives the working-status dropdown: the assignee, the creator of a self-task, the
   // reporting manager, or the company MD (same workflow as an admin on this task).
   const canWork = ((isAssignee || isSelfTask) && !isPureWatcher) || isReportingManager || isCompanyAdmin;
@@ -659,7 +668,20 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, scope, onChanged, onEdit })
             </div>
             {task && (
               <div className="flex items-center gap-2 flex-wrap mt-3">
-                {isPureWatcher ? (
+                {isViewOnly ? (
+                  // Super Admin / Sparsh Admin oversight of a task they're not part of (e.g. a
+                  // client task): status frozen, no actions — only the task's own side drives it.
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <select value={curDisplayStatus} disabled title="View only — you can see this task but not act on it"
+                      className="px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider border outline-none opacity-60 cursor-not-allowed"
+                      style={{ background: curCfg.bg, color: curCfg.color, borderColor: curCfg.border }}>
+                      <option value={curDisplayStatus}>{curLabel}</option>
+                    </select>
+                    <span className="px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider border bg-[var(--input-bg)] text-[var(--text-muted)] border-[var(--border)]">
+                      {task.isClientTask ? 'Client Task · View Only' : 'View Only'}
+                    </span>
+                  </div>
+                ) : isPureWatcher ? (
                   // Pure In-Loop member (watcher, not the doer or the assigner) — including admins:
                   // observers only. The status control is shown but frozen, so it's clear the task's
                   // workflow isn't theirs to drive; their actions are Follow Up + Add Subtask.
@@ -1082,12 +1104,12 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, scope, onChanged, onEdit })
                     {localChecklist.map(item => (
                       <div key={item.id} className="flex items-center gap-2 bg-[var(--bg-card)] rounded-lg px-3 py-2">
                         {/* In-Loop members observe the check points; they can't tick or remove them. */}
-                        <button type="button" onClick={() => handleToggleSubtask(item)} disabled={isPureWatcher}
+                        <button type="button" onClick={() => handleToggleSubtask(item)} disabled={isObserver}
                           className="text-[var(--accent-indigo)] shrink-0 disabled:opacity-40 disabled:cursor-not-allowed">
                           {item.completed ? <CheckSquare size={16} /> : <Square size={16} />}
                         </button>
                         <span className={`flex-1 text-[12px] font-bold text-[var(--text-main)] ${item.completed ? 'line-through opacity-50' : ''}`}>{item.title}</span>
-                        {!isPureWatcher && (
+                        {!isObserver && (
                           <button type="button" onClick={() => handleRemoveSubtask(item)} className="text-[var(--text-muted)] hover:text-[var(--accent-red)]"><X size={13} /></button>
                         )}
                       </div>
@@ -1095,7 +1117,7 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, scope, onChanged, onEdit })
                   </div>
                 )}
                 {/* Save appears only when there are unsaved tick/remove changes. */}
-                {checklistDirty && !isPureWatcher && (
+                {checklistDirty && !isObserver && (
                   <div className="flex justify-end">
                     <button type="button" onClick={handleSaveChecklist} disabled={savingChecklist}
                       className="flex items-center gap-1.5 px-4 py-2 rounded-lg text-[10px] font-black uppercase tracking-widest bg-[var(--accent-indigo)] text-white shadow-sm hover:opacity-90 disabled:opacity-60">
@@ -1111,16 +1133,18 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, scope, onChanged, onEdit })
                   <p className="flex items-center gap-1.5 text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest">
                     <Layers size={13} /> Subtasks ({(task.subtasks || []).length})
                   </p>
-                  <button type="button" onClick={() => setSubtaskFormOpen(true)}
-                    className="flex items-center gap-1.5 px-3 py-1.5 bg-[var(--accent-indigo)] text-white rounded-lg text-[10px] font-black uppercase tracking-widest">
-                    <Plus size={13} /> Add Subtask
-                  </button>
+                  {!isViewOnly && (
+                    <button type="button" onClick={() => setSubtaskFormOpen(true)}
+                      className="flex items-center gap-1.5 px-3 py-1.5 bg-[var(--accent-indigo)] text-white rounded-lg text-[10px] font-black uppercase tracking-widest">
+                      <Plus size={13} /> Add Subtask
+                    </button>
+                  )}
                 </div>
                 {(task.subtasks || []).length === 0 ? (
-                  <button type="button" onClick={() => setSubtaskFormOpen(true)}
-                    className="w-full py-6 flex flex-col items-center justify-center border-2 border-dashed border-[var(--border)] rounded-xl gap-2 hover:border-[var(--accent-indigo)] transition-colors">
+                  <button type="button" onClick={() => setSubtaskFormOpen(true)} disabled={isViewOnly}
+                    className="w-full py-6 flex flex-col items-center justify-center border-2 border-dashed border-[var(--border)] rounded-xl gap-2 hover:border-[var(--accent-indigo)] transition-colors disabled:cursor-default disabled:hover:border-[var(--border)]">
                     <Layers size={24} className="text-[var(--text-muted)] opacity-30" />
-                    <p className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest opacity-70">No subtasks yet — tap to add</p>
+                    <p className="text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest opacity-70">{isViewOnly ? 'No subtasks' : 'No subtasks yet — tap to add'}</p>
                   </button>
                 ) : (
                   <div className="space-y-1.5">
@@ -1150,7 +1174,7 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, scope, onChanged, onEdit })
                   <p className="flex items-center gap-1.5 text-[10px] font-black text-[var(--text-muted)] uppercase tracking-widest">
                     <Paperclip size={13} /> Assignment Attachments ({task.attachments?.length || 0})
                   </p>
-                  {!isPureWatcher && (
+                  {!isObserver && (
                     <label className="flex items-center gap-1.5 px-3 py-1.5 bg-[var(--accent-indigo)] text-white rounded-lg text-[10px] font-black uppercase tracking-widest cursor-pointer">
                       Attach File
                       <input type="file" className="hidden" onChange={handleAttach} />
@@ -1179,7 +1203,7 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, scope, onChanged, onEdit })
                       <span className="px-1.5 py-0.5 rounded text-[8px] font-black uppercase tracking-wider bg-[var(--accent-red-bg)] text-[var(--accent-red)] border border-[var(--accent-red-border)]">Required</span>
                     )}
                   </p>
-                  {!isPureWatcher && (
+                  {!isObserver && (
                     <label className="flex items-center gap-1.5 px-3 py-1.5 bg-[var(--accent-green)] text-white rounded-lg text-[10px] font-black uppercase tracking-widest cursor-pointer">
                       {uploadingEvidence ? 'Uploading...' : 'Upload Evidence'}
                       <input type="file" className="hidden" onChange={handleEvidenceAttach} disabled={uploadingEvidence} />
@@ -1192,7 +1216,7 @@ const TaskDetailsModal = ({ isOpen, onClose, taskId, scope, onChanged, onEdit })
                 {(task.completionAttachments || []).length > 0 ? (
                   <div className="space-y-2">
                     {task.completionAttachments.map(a => (
-                      <AttachmentItem key={a.id} attachment={a} onRemove={isPureWatcher ? undefined : () => handleRemoveEvidence(a.id)}
+                      <AttachmentItem key={a.id} attachment={a} onRemove={isObserver ? undefined : () => handleRemoveEvidence(a.id)}
                         icon={FileCheck2} iconClass="text-[var(--accent-green)]" linkHover="hover:text-[var(--accent-green)]" />
                     ))}
                   </div>

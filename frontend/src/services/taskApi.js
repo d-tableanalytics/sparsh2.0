@@ -8,6 +8,8 @@ export const getTasks = (params) => api.get('/tasks', { params });
 export const getTaskDashboard = (params) => api.get('/tasks/dashboard', { params });
 export const getTaskActivity = (params) => api.get('/tasks/activity', { params });
 export const getTaskDetail = (taskId) => api.get(`/tasks/${taskId}`);
+// Company dropdown options for All Tasks (Super Admin / Admin only).
+export const getTaskCompanies = () => api.get('/tasks/companies');
 // `doerName`/`doerId` are required (with `reason`) for Dependent on Other / Blocked; ignored
 // otherwise. For Dependent on Other, a `doerId` reassigns the task to that doer (backend rule).
 export const updateTaskStatus = (taskId, workflow_status, reason, doerName, doerId) =>
