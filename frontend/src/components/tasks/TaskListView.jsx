@@ -2,10 +2,10 @@ import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import {
   ListChecks, CirclePlus, Filter as FilterIcon, Search, RefreshCw, Download,
   List as ListIcon, LayoutGrid, ArrowUpDown, Trash2, RotateCcw,
-  Eye, X, Check, ChevronDown, ChevronLeft, ChevronRight, Repeat, Forward,
+  Eye, X, Check, ChevronDown, ChevronLeft, ChevronRight, Repeat, Forward, Building2,
 } from 'lucide-react';
 import api from '../../services/api';
-import { getTasks, softDeleteTask, restoreTask, updateTaskStatus, reviseTaskDeadline } from '../../services/taskApi';
+import { getTasks, getTaskCompanies, softDeleteTask, restoreTask, updateTaskStatus, reviseTaskDeadline } from '../../services/taskApi';
 import { getTaskCategories, getTaskTags, uniqueNames } from '../../services/taskMetaApi';
 import { openTaskEventStream } from '../../services/taskEventsApi';
 import { getHolidays } from '../../services/holidayApi';
@@ -54,9 +54,14 @@ const filterToCardKey = (filter) => {
 // each just passes a different `scope` to GET /api/tasks. Visual design follows the
 // reference "My Tasks" screenshot: dot-style summary cards, toolbar, scrollable status
 // tabs, and avatar/badge row cards.
-const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = true, groupId = null, embedded = false, splitByRecurrence = false }) => {
+const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = true, groupId = null, embedded = false, splitByRecurrence = false, companyFilter = false }) => {
   const { user } = useAuth();
   const isAdmin = ['superadmin', 'admin'].includes(user?.role);
+  // Company dropdown (All Tasks): only Super Admin / Admin, who are the only ones seeing client
+  // tasks. '' = every company, 'internal' = Sparsh's own tasks, otherwise a company id.
+  const showCompanyFilter = companyFilter && isAdmin;
+  const [companyId, setCompanyId] = useState('');
+  const [companies, setCompanies] = useState([]);
   const { showSuccess, showError } = useNotification();
   const [tasks, setTasks] = useState([]);
   const [users, setUsers] = useState([]);
@@ -101,10 +106,13 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
   const WEEKLY_OFFS = [0];
 
   const userMap = useMemo(() => {
+    // Each task also carries its own participants' names (`people`), which covers client users
+    // outside the viewer's directory — e.g. an internal admin looking at client tasks.
     const m = {};
+    tasks.forEach(t => Object.assign(m, t.people));
     users.forEach(u => { m[u._id] = u.full_name || u.email; });
     return m;
-  }, [users]);
+  }, [users, tasks]);
 
   const fetchTasks = useCallback(async () => {
     setLoading(true);
@@ -121,6 +129,7 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
         frequency: frequency || undefined,
         search: search || undefined,
         groupId: groupId || undefined,
+        companyId: (showCompanyFilter && companyId) || undefined,
       });
       setTasks(res.data || []);
     } catch (err) {
@@ -128,7 +137,12 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
     } finally {
       setLoading(false);
     }
-  }, [scope, period, startDate, endDate, assignedTo, category, tag, frequency, search, groupId]);
+  }, [scope, period, startDate, endDate, assignedTo, category, tag, frequency, search, groupId, showCompanyFilter, companyId]);
+
+  useEffect(() => {
+    if (!showCompanyFilter) return;
+    getTaskCompanies().then(res => setCompanies(res.data || [])).catch(() => setCompanies([]));
+  }, [showCompanyFilter]);
 
   const [categories, setCategories] = useState([]);
   const [tagOptions, setTagOptions] = useState([]);
@@ -156,7 +170,7 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
 
   useEffect(() => { fetchTasks(); }, [fetchTasks]);
   useEffect(() => { fetchTaxonomy(); }, [fetchTaxonomy]);
-  useEffect(() => { setSelected(new Set()); }, [scope, statusFilter]);
+  useEffect(() => { setSelected(new Set()); }, [scope, statusFilter, companyId]);
   // Switching Recurring ↔ Delegated swaps the whole underlying list, so a status filter,
   // selection or expanded series carried over from the other tab would apply to rows that are
   // no longer there. The frequency filter goes too: it's only offered on the Recurring tab, so
@@ -322,6 +336,12 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
     && !(t.assignedTo || []).includes(currentUserId)
     && (t.watchers || []).includes(currentUserId);
 
+  // A client task seen by an internal Super Admin / Sparsh Admin who isn't on it: oversight
+  // only — the client company drives it, and the backend refuses internal writes on it.
+  const isClientViewOnly = (t) => isAdmin && t.isClientTask && !t.isCreator
+    && !(t.assignedTo || []).includes(currentUserId)
+    && !(t.watchers || []).includes(currentUserId);
+
   // Dependency doer: the task was handed to them via "Dependent on Other". They hold ONLY the
   // dependency, so their options are limited to Complete / Dependent on Other (see statusConfig).
   const isDependencyDoer = (t) => !!t.dependencyDoerId && t.dependencyDoerId === currentUserId;
@@ -332,6 +352,7 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
     && (t.assignedTo || []).includes(currentUserId);
   // Why a row's status control is frozen, or null when it's live.
   const frozenReason = (t) => {
+    if (isClientViewOnly(t)) return 'View only — client tasks are managed by the client company';
     if (isWatcherOnly(t)) return "Read-only — In-Loop members can't change the task status";
     if (isAwaitingDependency(t)) return 'Waiting on the dependency doer to complete their part';
     return null;
@@ -414,7 +435,13 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
   };
 
   const handleBulkAction = async () => {
-    const ids = Array.from(selected);
+    // Client tasks an internal admin only oversees are skipped — the backend refuses them.
+    const viewOnlyIds = new Set(tasks.filter(isClientViewOnly).map(t => t.id));
+    const ids = Array.from(selected).filter(id => !viewOnlyIds.has(id));
+    if (!ids.length) {
+      showError('Client tasks are view only');
+      return;
+    }
     try {
       if (scope === 'deleted') {
         await Promise.all(ids.map(id => restoreTask(id)));
@@ -442,7 +469,7 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
   // a row risks operating on a partial copy of it. Restore is the exception and stays, because
   // it is the Deleted Tasks page's only action; without it a deleted task can't be recovered.
   // Both cases are a single action, so RowActionsMenu renders them as a plain button.
-  const rowActions = (task) => (scope === 'deleted'
+  const rowActions = (task) => (scope === 'deleted' && !isClientViewOnly(task)
     ? [{ label: 'Restore Task', icon: RotateCcw, onClick: () => handleRestore(task) }]
     : [{ label: 'View', icon: Eye, onClick: () => setDetailsTaskId(task.id) }]);
 
@@ -508,10 +535,18 @@ const TaskListView = ({ scope, heading, subheading, emptyMessage, allowCreate = 
             <div className="w-11 h-11 rounded-2xl bg-[var(--accent-indigo)] text-white flex items-center justify-center shadow-lg shadow-[var(--accent-indigo)]/20">
               <ListChecks size={20} />
             </div>
-            <div className="min-w-0">
+            <div className="min-w-0 flex-1">
               <h1 className="text-xl font-black text-[var(--text-main)] tracking-tight">{heading}</h1>
               <p className="text-[12px] text-[var(--text-muted)] font-bold">{subheading}</p>
             </div>
+            {showCompanyFilter && (
+              <div className="flex items-center gap-2 shrink-0 max-w-[50%]">
+                <Building2 size={16} className="text-[var(--text-muted)] shrink-0" />
+                <SelectField value={companyId} onChange={setCompanyId} className="min-w-[180px]"
+                  options={[{ id: '', name: 'All Companies' }, { id: 'internal', name: 'Sparsh Internal' },
+                            ...companies.map(c => ({ id: c.id, name: c.name }))]} />
+              </div>
+            )}
           </div>
 
           {/* ─── Recurring vs one-time delegation split ─── */}

@@ -47,13 +47,22 @@ def _can_view_all_tasks(user: dict) -> bool:
 
 
 # ── Internal vs client task separation ───────────────────────────────────────────
-# The two environments are fully independent: an internal Sparsh task is never visible to
-# client users, and a client task is never visible to internal Sparsh users (not even an
-# internal Super Admin/Admin). Client-created tasks carry notification_scope='company' (and
-# usually a company_id); internal tasks are 'staff'/unset with no company_id.
+# An internal Sparsh task is never visible to client users. The reverse is one-way oversight:
+# internal Super Admin + Sparsh Admin can SEE every client task (list, dashboard, detail), but
+# never act on one — verify/finalize/reopen/edit/delete stays with the client company. Every
+# other internal user still never sees client tasks. Client-created tasks carry
+# notification_scope='company' (and usually a company_id); internal tasks are 'staff'/unset
+# with no company_id.
 def _is_client_task(task: dict) -> bool:
     return (task.get("notification_scope") == "company"
             or bool(str(task.get("company_id") or "").strip()))
+
+
+def _can_view_client_tasks(user: dict) -> bool:
+    """Internal Super Admin / Sparsh Admin: read-only oversight of every client task.
+    Role-based only (not the view_all_tasks grant), and never a client-side user."""
+    return ((user.get("role") or "").lower() in VIEW_ALL_ROLES
+            and not is_client_side_user(user))
 
 # Mongo clause selecting ONLY internal tasks (no company scope, no company_id) — used to keep
 # the internal "all tasks" view from ever returning client-company tasks.
@@ -197,6 +206,26 @@ def _visibility_clauses(user_id: str):
     ]
 
 
+async def _company_task_clause(company_id: str) -> dict:
+    """Mongo clause selecting one company's tasks, or Sparsh's own for "internal".
+
+    A client task is stamped with its creator's company_id at insert, but older ones predate
+    that stamp — those are attributed through their creator's company instead, so they don't
+    vanish from every company's view."""
+    if company_id == "internal":
+        return _INTERNAL_TASK_CLAUSE
+    id_forms = [company_id]
+    if ObjectId.is_valid(company_id):
+        id_forms.append(ObjectId(company_id))
+    members = await get_collection("learners").find(
+        {"company_id": {"$in": id_forms}}, {"_id": 1}).to_list(None)
+    return {"$or": [
+        {"company_id": company_id},
+        {"company_id": {"$in": [None, ""]}, "notification_scope": "company",
+         "user_id": {"$in": [str(m["_id"]) for m in members]}},
+    ]}
+
+
 async def _fetch_tasks(
     current_user: dict,
     scope: str,
@@ -208,10 +237,16 @@ async def _fetch_tasks(
     start_iso: Optional[str] = None,
     end_iso: Optional[str] = None,
     group_id: Optional[str] = None,
+    company_id: Optional[str] = None,
 ):
     user_id = str(current_user["_id"])
 
     clauses = [{"type": "task"}]
+
+    # Company filter (All Tasks' company dropdown). Only narrows whatever the scope below allows,
+    # so it can never widen anyone's visibility.
+    if company_id:
+        clauses.append(await _company_task_clause(company_id))
 
     if start_iso and end_iso:
         clauses.append({"start": {"$gte": start_iso, "$lte": end_iso}})
@@ -245,10 +280,10 @@ async def _fetch_tasks(
             # rules above — see _company_admin_clauses.
             vis = vis + _company_admin_clauses(current_user)
             clauses.append({"$or": vis})
-        else:
-            # Internal admins see every INTERNAL task, but NEVER client-company tasks — the two
-            # environments stay fully separate.
+        elif not _can_view_client_tasks(current_user):
+            # A view_all_tasks grant covers every INTERNAL task, but never client-company tasks.
             clauses.append(_INTERNAL_TASK_CLAUSE)
+        # else: Super Admin / Sparsh Admin — every task, internal and client, no clause.
     elif scope == "group":
         if not group_id:
             raise HTTPException(status_code=400, detail="group_id is required for group scope")
@@ -264,7 +299,7 @@ async def _fetch_tasks(
             # An MD may restore any of their company's tasks, so the Deleted view has to show
             # them — otherwise they hold the authority with nothing to use it on.
             clauses.append({"$or": _visibility_clauses(user_id) + _company_admin_clauses(current_user)})
-        else:
+        elif not _can_view_client_tasks(current_user):
             clauses.append(_INTERNAL_TASK_CLAUSE)
     else:
         raise HTTPException(status_code=400, detail="Invalid scope")
@@ -348,6 +383,9 @@ def _serialize_task(doc: dict, current_user_id: str, report_ids: set = None,
         "parentTaskId": doc.get("parent_task_id"),
         "recurringGroupId": doc.get("recurring_group_id"),
         "isCreator": doc.get("user_id") == current_user_id,
+        # Lets the UI freeze a client task's controls for an internal admin, who may view it
+        # but never act on it (see _can_view_client_tasks).
+        "isClientTask": _is_client_task(doc),
         # True when the viewer is the reporting manager of one of this task's assignees — so the
         # list dropdown shows them the VERIFIER options (Complete / Approve), not "Request for
         # Verification". Uses a pre-fetched report_ids set, so there's no per-row DB query.
@@ -385,13 +423,40 @@ async def _user_names(user_ids: list) -> dict:
         return {}
     names = {}
     for col_name in ("staff", "learners"):
-        docs = await get_collection(col_name).find({"_id": {"$in": oids}}).to_list(1000)
+        docs = await get_collection(col_name).find({"_id": {"$in": oids}}).to_list(None)
         for d in docs:
             names.setdefault(
                 str(d["_id"]),
-                d.get("full_name") or d.get("first_name") or d.get("email") or "Unknown",
+                d.get("full_name")
+                or f"{d.get('first_name') or ''} {d.get('last_name') or ''}".strip()
+                or d.get("email") or "Unknown",
             )
     return names
+
+
+def _people_ids(doc: dict) -> set:
+    """Everyone a task row/detail names: creator, assignees, in-loop, dependency doers, closer."""
+    ids = {doc.get("user_id"), doc.get("dependency_doer_id"), doc.get("completed_by")}
+    ids.update(doc.get("target_staff_id") or [])
+    ids.update(doc.get("watchers") or [])
+    ids.update(h.get("doer_id") for h in (doc.get("dependency_stack") or []) if isinstance(h, dict))
+    ids.update(h.get("doer_id") for h in (doc.get("status_history") or []) if isinstance(h, dict))
+    return {str(i) for i in ids if i}
+
+
+async def _attach_people(rows: list, docs: list) -> None:
+    """Give each serialized task a `people` {id: name} map for its own participants.
+
+    The UI resolves names from /assignable-users?all=true, which is the VIEWER's directory —
+    staff for an internal user. An internal admin overseeing a client task would otherwise see
+    its client creator/assignees as "Someone"/raw ids. One lookup for the whole page."""
+    per_doc = [_people_ids(d) for d in docs]
+    names = await _user_names(list(set().union(*per_doc))) if per_doc else {}
+    for row, ids in zip(rows, per_doc):
+        # A well-formed id found in neither directory is an account that has since been
+        # deleted — say so, rather than letting the UI fall back to "Someone"/"Unknown".
+        row["people"] = {i: names.get(i, "Deleted user") for i in ids
+                         if i in names or ObjectId.is_valid(i)}
 
 
 async def _fetch_subtasks(parent_id: str, current_user_id: str, admin_company_id: str = None):
@@ -449,8 +514,9 @@ def _is_participant(existing: dict, current_user: dict) -> bool:
     on a task (add checklist items, comment, attach files), broader than who can edit
     the core task fields or change its status."""
     user_id = str(current_user["_id"])
-    # The Super Admin oversight bypass applies to INTERNAL tasks only — a client task is never
-    # visible to internal Sparsh, so it must fall through to genuine participant membership.
+    # The Super Admin oversight bypass applies to INTERNAL tasks only — on a client task internal
+    # Sparsh may view (see get_task_detail) but not collaborate, so it falls through to genuine
+    # participant membership.
     if current_user.get("role") == "superadmin" and not _is_client_task(existing):
         return True
     # The client-side equivalent: a company's MD participates in every task of that company.
@@ -572,6 +638,7 @@ async def tasks_dashboard(
     search: Optional[str] = None,
     viewType: Optional[str] = None,
     reportType: Optional[str] = None,
+    companyId: Optional[str] = None,
     current_user: dict = Depends(require_task_access),
 ):
     # reportType picks which visibility scope backs the numbers. Only Super Admin + Sparsh
@@ -581,7 +648,8 @@ async def tasks_dashboard(
     scope = scope_map.get(reportType, "all" if _can_view_all_tasks(current_user) else "own")
 
     start_iso, end_iso = _period_to_range(period, startDate, endDate)
-    docs = await _fetch_tasks(current_user, scope, category, tag, frequency, assignedTo, search, start_iso, end_iso)
+    docs = await _fetch_tasks(current_user, scope, category, tag, frequency, assignedTo, search, start_iso, end_iso,
+                              company_id=companyId)
 
     now = datetime.utcnow()
     summary = {
@@ -660,6 +728,7 @@ async def list_tasks(
     startDate: Optional[str] = None,
     endDate: Optional[str] = None,
     groupId: Optional[str] = None,
+    companyId: Optional[str] = None,
     skip: int = Query(0, ge=0),
     limit: Optional[int] = Query(None, ge=1, le=200),
     current_user: dict = Depends(require_task_access),
@@ -677,7 +746,8 @@ async def list_tasks(
     skip/limit would page each one independently and interleave them wrongly.
     """
     start_iso, end_iso = _period_to_range(period, startDate, endDate)
-    docs = await _fetch_tasks(current_user, scope, category, tag, frequency, assignedTo, search, start_iso, end_iso, groupId)
+    docs = await _fetch_tasks(current_user, scope, category, tag, frequency, assignedTo, search, start_iso, end_iso, groupId,
+                              companyId)
     user_id = str(current_user["_id"])
     # Which of these tasks belong to the viewer's direct reports (computed once) — so the list
     # can flag them and show the manager the verifier controls instead of "Request for Verification".
@@ -686,15 +756,16 @@ async def list_tasks(
     admin_company_id = company_admin_company_id(current_user)
 
     if limit is None:
-        return [_serialize_task(d, user_id, report_ids, admin_company_id) for d in docs]
+        rows = [_serialize_task(d, user_id, report_ids, admin_company_id) for d in docs]
+        await _attach_people(rows, docs)
+        return rows
 
     total = len(docs)
     # Serialize only the page — the expensive per-row work is skipped for everything else.
     page = docs[skip:skip + limit]
-    return {
-        "tasks": [_serialize_task(d, user_id, report_ids, admin_company_id) for d in page],
-        "total": total,
-    }
+    rows = [_serialize_task(d, user_id, report_ids, admin_company_id) for d in page]
+    await _attach_people(rows, page)
+    return {"tasks": rows, "total": total}
 
 
 # Actions written to `activity_logs` that represent task lifecycle events (see log_activity
@@ -902,6 +973,19 @@ async def list_assignable_users(
     } for u in docs]
 
 
+@router.get("/companies")
+async def list_task_companies(current_user: dict = Depends(require_task_access)):
+    """Options for All Tasks' company dropdown — Super Admin / Sparsh Admin only, the same
+    people who can see client tasks at all. Sparsh's own company record is left out: its tasks
+    are the "Sparsh Internal" option, which the UI adds itself."""
+    if not _can_view_client_tasks(current_user):
+        raise HTTPException(status_code=403, detail="Admin only")
+    docs = await get_collection("companies").find(
+        {"is_internal": {"$ne": True}}, {"name": 1}).to_list(None)
+    companies = [{"id": str(d["_id"]), "name": d.get("name") or "Unnamed company"} for d in docs]
+    return sorted(companies, key=lambda c: c["name"].lower())
+
+
 @router.get("/{task_id}")
 async def get_task_detail(task_id: str, current_user: dict = Depends(require_task_access)):
     existing, _ = await _get_task_or_404(task_id)
@@ -909,12 +993,20 @@ async def get_task_detail(task_id: str, current_user: dict = Depends(require_tas
     # response carries status, progress, comments, attachments and both histories).
     is_mgr = await _is_manager_of_assignee(existing, current_user)
     # A company MD passes _is_participant on any of their company's tasks, so no extra arm here.
-    if not _is_participant(existing, current_user) and not is_mgr:
+    is_participant = _is_participant(existing, current_user)
+    # Super Admin / Sparsh Admin may open any task they can see in All Tasks, client ones
+    # included — but only to view it when that is their sole route in.
+    is_view_only = not (is_participant or is_mgr) and _can_view_client_tasks(current_user)
+    if not (is_participant or is_mgr or is_view_only):
         raise HTTPException(status_code=403, detail="Not authorized to view this task")
     uid = str(current_user["_id"])
     admin_company_id = company_admin_company_id(current_user)
     detail = _serialize_task_detail(existing, uid)
     detail["subtasks"] = await _fetch_subtasks(task_id, uid, admin_company_id)
+    await _attach_people([detail], [existing])
+    # Subtask rows name their assignees too — fold those into the same map.
+    sub_ids = {str(a) for st in detail["subtasks"] for a in (st.get("assignedTo") or []) if a}
+    detail["people"].update(await _user_names(list(sub_ids - set(detail["people"]))))
     # Lets the UI show the reporting manager the same task-action controls as an admin —
     # scoped to only their reports' tasks (status, Complete, Block, Dependent, Verify, Reopen).
     detail["isReportingManager"] = is_mgr
@@ -922,6 +1014,8 @@ async def get_task_detail(task_id: str, current_user: dict = Depends(require_tas
     # UI gates on role names that a client MD ("clientadmin") is not part of, so it needs this
     # flag to unlock Edit / Delete / Verify / Reopen.
     detail["isCompanyAdmin"] = is_company_task_admin(existing, current_user)
+    # Oversight-only access: the UI hides every action, which the write endpoints refuse anyway.
+    detail["isViewOnly"] = is_view_only
     return detail
 
 
@@ -1469,7 +1563,7 @@ async def revise_task_deadline(task_id: str, body: dict, current_user: dict = De
 
     existing, col_name = await _get_task_or_404(task_id)
 
-    is_admin = (current_user.get("role") == "superadmin"
+    is_admin = ((current_user.get("role") == "superadmin" and not _is_client_task(existing))
                 or is_company_task_admin(existing, current_user))
     is_creator = existing.get("user_id") == str(current_user["_id"])
     is_assignee = str(current_user["_id"]) in (existing.get("target_staff_id") or [])
@@ -1579,7 +1673,7 @@ async def _can_decide_deadline_request(existing: dict, current_user: dict) -> bo
     if user_id in (existing.get("target_staff_id") or []) and existing.get("user_id") != user_id:
         return False
     return bool(
-        current_user.get("role") == "superadmin"
+        (current_user.get("role") == "superadmin" and not _is_client_task(existing))
         or is_company_task_admin(existing, current_user)
         or existing.get("user_id") == user_id
         or await _is_manager_of_assignee(existing, current_user)
@@ -1776,7 +1870,7 @@ async def soft_delete_task(task_id: str, current_user: dict = Depends(require_ta
     if not existing or existing.get("type") != "task":
         raise HTTPException(status_code=404, detail="Task not found")
 
-    is_admin = (current_user.get("role") == "superadmin"
+    is_admin = ((current_user.get("role") == "superadmin" and not _is_client_task(existing))
                 or is_company_task_admin(existing, current_user))
     is_creator = existing.get("user_id") == str(current_user["_id"])
     if not (is_admin or is_creator):
@@ -1810,7 +1904,7 @@ async def restore_task(task_id: str, current_user: dict = Depends(require_task_a
     if not existing or existing.get("type") != "task":
         raise HTTPException(status_code=404, detail="Task not found")
 
-    is_admin = (current_user.get("role") == "superadmin"
+    is_admin = ((current_user.get("role") == "superadmin" and not _is_client_task(existing))
                 or is_company_task_admin(existing, current_user))
     is_creator = existing.get("user_id") == str(current_user["_id"])
     if not (is_admin or is_creator):
