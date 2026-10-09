@@ -291,13 +291,20 @@ async def _company_label(company_id) -> str:
 @router.post("/token", response_model=Token)
 async def login_for_access_token(
     form_data: OAuth2PasswordRequestForm = Depends(),
+    account_id: Optional[str] = Form(None),
     company_id: Optional[str] = Form(None),
 ):
     """Sign in with a username or an email address.
 
-    `company_id` is only needed to break a tie: when one address belongs to accounts in
-    several companies the first attempt comes back with the list, and the client re-submits
-    naming one. A username never needs it.
+    Neither extra field is needed in the ordinary case. They break a tie: when one address
+    belongs to several accounts the first attempt comes back 409 with the list, and the client
+    re-submits naming the one they picked. A username never needs either.
+
+    `account_id` is the one to send — it names the account outright. `company_id` is kept for
+    older clients, but it CANNOT express every choice: an internal staff account has no company
+    at all, so two accounts can both answer to "no company" and picking one of them that way is
+    impossible. That is a real case here (the same address on a staff account and on a client
+    company's roster), and it is why the identifier the chooser sends back is the account.
     """
     identifier = (form_data.username or "").strip()
     logger.info(f"Login attempt for identifier: {identifier}")
@@ -309,7 +316,9 @@ async def login_for_access_token(
     matched = [u for u in candidates if u.get("password")
                and verify_password(form_data.password, u["password"])]
 
-    if company_id:
+    if account_id:
+        matched = [u for u in matched if str(u.get("_id")) == str(account_id)]
+    elif company_id:
         matched = [u for u in matched if str(u.get("company_id") or "") == str(company_id)]
 
     if not matched:
@@ -323,7 +332,11 @@ async def login_for_access_token(
     if len(matched) > 1:
         # One address, several accounts. Answer with the choices rather than picking: guessing
         # here signs somebody into the wrong company's data with no sign anything went wrong.
+        # The password has already been verified against every account listed here, so the
+        # caller has proven they hold all of them — the ids disclose nothing they could not
+        # already reach.
         choices = [{
+            "account_id": str(u.get("_id")),
             "company_id": str(u.get("company_id") or ""),
             "company_name": await _company_label(u.get("company_id")),
             "username": u.get("username"),

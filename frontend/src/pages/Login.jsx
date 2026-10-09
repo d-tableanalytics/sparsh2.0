@@ -48,11 +48,11 @@ const Login = () => {
     }
   }, [user, navigate, redirectTo]);
 
-  const attempt = async (companyId) => {
+  const attempt = async (account) => {
     setIsLoading(true);
     setError('');
     try {
-      await login(identifier, password, companyId);
+      await login(identifier, password, account);
     } catch (err) {
       const status = err.response?.status;
       const detail = err.response?.data?.detail;
@@ -113,14 +113,16 @@ const Login = () => {
               <div className="account-choices">
                 {accounts.map((a) => (
                   <button
-                    key={a.company_id || a.username}
+                    key={a.account_id || a.company_id || a.username}
                     type="button"
                     className="account-choice"
                     disabled={isLoading}
-                    onClick={() => attempt(a.company_id)}
+                    onClick={() => attempt(a)}
                   >
                     <span className="account-choice-name">{a.company_name}</span>
-                    <span className="account-choice-meta">{a.username}</span>
+                    <span className="account-choice-meta">
+                      {a.username || a.role || 'Account'}
+                    </span>
                   </button>
                 ))}
               </div>
