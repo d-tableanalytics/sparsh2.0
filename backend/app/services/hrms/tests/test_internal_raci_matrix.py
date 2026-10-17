@@ -43,6 +43,10 @@ import asyncio
 import re
 from datetime import datetime, timedelta, timezone
 
+# A joining date that is always in the future: a hard-coded one silently turned into
+# "the joining date cannot be in the past" the day after it passed.
+JOINING = (datetime.now(timezone.utc) + timedelta(days=30)).strftime("%Y-%m-%d")
+
 results: list[bool] = []
 findings: list[str] = []
 
@@ -689,7 +693,7 @@ async def main() -> None:
         await expect_http(
             "an offer BEFORE the reference check (the mandatory gate)",
             OF.create_offer(HR, COMPANY, {"uk": UK, "ctc": float(ANNUAL),
-                                          "joining_date": "2026-10-15"}),
+                                          "joining_date": JOINING}),
             409, "reference")
         await RC.create_reference_check(HR, COMPANY, {
             "uk": UK, "referee_name": "Former Manager",
@@ -717,7 +721,7 @@ async def main() -> None:
         section("STAGE 13/14 -- Offer approval (Mgmt/Finance=A) then release (HR=R)")
         # =================================================================
         offer = await OF.create_offer(HR, COMPANY, {
-            "uk": UK, "ctc": float(ANNUAL), "joining_date": "2026-10-15"})
+            "uk": UK, "ctc": float(ANNUAL), "joining_date": JOINING})
         OFFER = offer["offer_no"]
         check("HR (C) and the HOD (C) do not hold offer.approve -- the gate the route "
               "enforces",

@@ -38,9 +38,12 @@ from fastapi import HTTPException
 
 from app.db.mongodb import get_collection
 from app.models.hrms import (
-    AADHAAR_RE, AUDIT_EMPLOYEE_CREATED, AUDIT_EMPLOYEE_UPDATED, AUDIT_SALARY_CHANGED,
-    AUDIT_EMPLOYEE_LINKED, COLL_DEPARTMENTS, COLL_DESIGNATIONS,
-    COLL_EMPLOYEE_PROFILES, ENTITY_EMPLOYEE,
+    AADHAAR_RE, ADDRESS_KEYS, AUDIT_EMPLOYEE_CHANGE_SCHEDULED, AUDIT_EMPLOYEE_CREATED,
+    AUDIT_EMPLOYEE_UPDATED, AUDIT_SALARY_CHANGED,
+    AUDIT_EMPLOYEE_LINKED, BANK_ACCOUNT_TYPES, COLL_DEPARTMENTS, COLL_DESIGNATIONS,
+    COLL_EMPLOYEE_PROFILES, EMAIL_FIELDS, EMPLOYEE_DATE_FIELDS, EMPLOYEE_DUPLICATE_FIELDS,
+    EMPLOYEE_TEXT_FIELDS, EMPLOYEE_TRACKED_FIELDS, ENTITY_EMPLOYEE, HISTORY_APPLIED,
+    HISTORY_SCHEDULED, MARITAL_STATUSES, MASTER_LIST_FIELDS, MOBILE_FIELDS,
     IFSC_RE, PAN_RE, UAN_RE, Cap, EmploymentStatus, EmploymentType, HrmsRole, is_iso_date,
 )
 from app.services.hrms_audit_service import audit
@@ -85,6 +88,9 @@ async def _validate_profile(payload: dict, company_id: str, *, partial: bool) ->
     technicality.
     """
     out = {}
+    # A masked value coming back from a read-only view (XXXX1234) means "unchanged".
+    from app.services.hrms_employee_master_service import is_masked
+    payload = {k: v for k, v in payload.items() if not is_masked(v)}
 
     # -- Salary --
     if "base_salary" in payload and payload["base_salary"] is not None:
@@ -147,6 +153,9 @@ async def _validate_profile(payload: dict, company_id: str, *, partial: bool) ->
         if field in payload:
             out[field] = (payload[field] or "").strip() or None
 
+    # -- Phase 1 FRD §3: the rest of the Employee Master --
+    _validate_master_fields(payload, out)
+
     # -- Master references must exist AND belong to this company --
     for field, coll_name, label in (("department_id", COLL_DEPARTMENTS, "Department"),
                                     ("designation_id", COLL_DESIGNATIONS, "Designation")):
@@ -164,7 +173,113 @@ async def _validate_profile(payload: dict, company_id: str, *, partial: bool) ->
                     detail=f"{label} does not exist for this company.")
             out[field] = str(raw)
 
+    # -- Reporting / functional manager: a person in this company, never yourself --
+    from app.utils.hrms_access import tenant_member
+    for field, label in (("reporting_manager_id", "Reporting manager"),
+                         ("functional_manager_id", "Functional manager")):
+        if field in payload:
+            raw = str(payload[field] or "").strip()
+            if not raw:
+                out[field] = None
+                continue
+            _oid(raw, label.lower())
+            if not await tenant_member(company_id, raw, {"_id": 1}):
+                raise HTTPException(status_code=422,
+                                    detail=f"{label} must be a person in this company.")
+            out[field] = raw
+
+    if "custom_fields" in payload and payload["custom_fields"] is not None:
+        if not isinstance(payload["custom_fields"], dict):
+            raise HTTPException(status_code=422, detail="custom_fields must be an object.")
+        out["custom_fields"] = payload["custom_fields"]
+
     return out
+
+
+_EMAIL_RE = __import__("re").compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+_MOBILE_RE = __import__("re").compile(r"^\+?\d{10,15}$")
+_PIN_RE = __import__("re").compile(r"^\d{6}$")
+
+
+def _clean_address(value, label: str) -> Optional[dict]:
+    if not value:
+        return None
+    if not isinstance(value, dict):
+        raise HTTPException(status_code=422, detail=f"{label} must be an object.")
+    out = {k: (str(value.get(k) or "").strip()[:200] or None) for k in ADDRESS_KEYS}
+    if not any(out.values()):
+        return None
+    country = (out.get("country") or "India").lower()
+    if out.get("pin_code") and country == "india" and not _PIN_RE.match(out["pin_code"]):
+        raise HTTPException(status_code=422, detail=f"{label}: PIN code must be 6 digits.")
+    return out
+
+
+def _validate_master_fields(payload: dict, out: dict) -> None:
+    """Formats for the FRD §3 fields. Pure -- list membership and duplicates are checked
+    by the caller against the database."""
+    from app.services.hrms_shift_service import _validate_pattern
+
+    for field in EMPLOYEE_TEXT_FIELDS + tuple(MASTER_LIST_FIELDS):
+        if field in payload:
+            out[field] = (str(payload[field] or "")).strip()[:200] or None
+    for field in ("passport", "driving_license"):
+        if out.get(field):
+            out[field] = out[field].upper().replace(" ", "")
+    if "shift_code" in payload:
+        out["shift_code"] = (str(payload["shift_code"] or "")).strip().upper() or None
+
+    for field, label in EMAIL_FIELDS:
+        if field in payload:
+            value = (payload[field] or "").strip().lower()
+            if value and not _EMAIL_RE.match(value):
+                raise HTTPException(status_code=422, detail=f"{label} is not a valid email.")
+            out[field] = value or None
+    for field, label in MOBILE_FIELDS:
+        if field in payload:
+            value = "".join(ch for ch in str(payload[field] or "") if ch.isdigit() or ch == "+")
+            if value and not _MOBILE_RE.match(value):
+                raise HTTPException(status_code=422,
+                                    detail=f"{label} must be 10-15 digits.")
+            out[field] = value or None
+
+    for field, choices, label in (("marital_status", MARITAL_STATUSES, "Marital status"),
+                                  ("bank_account_type", BANK_ACCOUNT_TYPES, "Account type")):
+        if field in payload:
+            value = (payload[field] or "").strip()
+            if value and value not in choices:
+                raise HTTPException(status_code=422,
+                                    detail=f"{label} must be one of: {', '.join(choices)}.")
+            out[field] = value or None
+
+    for field, label in EMPLOYEE_DATE_FIELDS:
+        if field in payload:
+            value = payload[field]
+            if value and not is_iso_date(value):
+                raise HTTPException(status_code=422,
+                                    detail=f"{label} must be a valid date in YYYY-MM-DD format.")
+            out[field] = value or None
+
+    for field, label in (("current_address", "Current address"),
+                         ("permanent_address", "Permanent address")):
+        if field in payload:
+            out[field] = _clean_address(payload[field], label)
+    if "permanent_same_as_current" in payload:
+        out["permanent_same_as_current"] = bool(payload["permanent_same_as_current"])
+    if out.get("permanent_same_as_current") and out.get("current_address"):
+        out["permanent_address"] = dict(out["current_address"])
+
+    if "weekly_off_pattern" in payload:
+        out["weekly_off_pattern"] = _validate_pattern(payload["weekly_off_pattern"]) or None
+
+    start, end = out.get("probation_start"), out.get("probation_end")
+    if start and end and start > end:
+        raise HTTPException(status_code=422,
+                            detail="Probation end cannot be before probation start.")
+    confirm = out.get("confirmation_date")
+    if confirm and start and confirm < start:
+        raise HTTPException(status_code=422,
+                            detail="Confirmation date cannot be before probation start.")
 
 
 def _check_date_order(joined_on, resigned_on) -> None:
@@ -240,8 +355,15 @@ def _compose(user: Optional[dict], profile: Optional[dict], *, departments: dict
         "legacy_department": (user or {}).get("department"),
         "legacy_designation": (user or {}).get("designation"),
 
-        "reporting_manager_id": (user or {}).get("reporting_manager"),
-        "reporting_manager": managers.get(str((user or {}).get("reporting_manager") or "")),
+        # The user document owns the reporting line; a profile without a login (created at
+        # onboarding) carries its own until it is linked.
+        "reporting_manager_id": ((user or {}).get("reporting_manager")
+                                 if user else profile.get("reporting_manager_id")),
+        "reporting_manager": managers.get(str(((user or {}).get("reporting_manager")
+                                               if user else profile.get("reporting_manager_id"))
+                                              or "")),
+        "functional_manager_id": profile.get("functional_manager_id"),
+        "functional_manager": managers.get(str(profile.get("functional_manager_id") or "")),
 
         "pan": profile.get("pan"),
         "aadhaar": profile.get("aadhaar"),
@@ -257,11 +379,43 @@ def _compose(user: Optional[dict], profile: Optional[dict], *, departments: dict
         "emergency_contact_phone": (profile.get("emergency_contact_phone")
                                     or (user or {}).get("emergency_mobile")),
         "emergency_contact_relation": profile.get("emergency_contact_relation"),
+        "custom_fields": profile.get("custom_fields") or {},
+        "created_at": profile.get("created_at"),
+        "created_by": profile.get("created_by"),
+        "updated_at": profile.get("updated_at"),
+        "updated_by": profile.get("updated_by"),
     }
+    # Phase 1 FRD §3 fields, read straight off the profile. Name parts fall back to the
+    # user document so a profile created before these existed still shows them.
+    for field in (EMPLOYEE_TEXT_FIELDS + tuple(MASTER_LIST_FIELDS)
+                  + tuple(f for f, _ in EMPLOYEE_DATE_FIELDS)
+                  + tuple(f for f, _ in EMAIL_FIELDS) + tuple(f for f, _ in MOBILE_FIELDS)
+                  + ("marital_status", "bank_account_type", "current_address",
+                     "permanent_address", "permanent_same_as_current", "shift_code",
+                     "weekly_off_pattern", "unit")):
+        view.setdefault(field, profile.get(field))
+    for field in ("first_name", "last_name"):
+        if not view.get(field):
+            view[field] = (user or {}).get(field)
+    if not view.get("official_email") and user:
+        view["official_email"] = user.get("email")
+    if not view.get("business_unit") and profile.get("unit"):
+        view["business_unit"] = profile.get("unit")
+    if view.get("display_name"):
+        view["name"] = view["display_name"]
+    # Active/Inactive (FRD §3 System): the login is active AND the person is still payable.
+    from app.models.hrms import PAYABLE_STATUSES
+    view["active"] = bool(view["is_active"]) and (
+        view.get("employment_status") in {s.value for s in PAYABLE_STATUSES}
+        or not view.get("employment_status"))
     # Salary is OMITTED entirely rather than nulled, so a client cannot confuse "you may not
     # see this" with "this employee has no salary set".
     if include_salary:
         view["base_salary"] = profile.get("base_salary")
+    else:
+        # Bank / identity numbers are sensitive too (FRD §18): shown masked, never in full.
+        from app.services.hrms_employee_master_service import mask_view
+        mask_view(view)
     return view
 
 
@@ -277,7 +431,7 @@ async def _identity_source(company_id: str) -> tuple:
     return await tenant_identity_source(company_id)
 
 
-async def _resolve_lookups(company_id: str, users: list) -> tuple:
+async def _resolve_lookups(company_id: str, users: list, profiles: list = None) -> tuple:
     """Batch-resolve department names, designation names and manager names.
 
     One query per lookup regardless of result size -- the alternative (resolving per row)
@@ -295,6 +449,10 @@ async def _resolve_lookups(company_id: str, users: list) -> tuple:
     }
 
     manager_ids = {str(u.get("reporting_manager")) for u in users if u.get("reporting_manager")}
+    for p in profiles or []:
+        for key in ("functional_manager_id", "reporting_manager_id"):
+            if p and p.get(key):
+                manager_ids.add(str(p[key]))
     managers = {}
     if manager_ids:
         oids = []
@@ -355,6 +513,10 @@ async def list_employees(actor: dict, company_id: str, *, search: str = None,
             status_code=400,
             detail="A company must be selected to list employees.")
 
+    # Effective-dated changes whose day has come are applied before anyone reads them.
+    from app.services.hrms_employee_master_service import apply_due_changes
+    await apply_due_changes(company_id)
+
     source, query = await _identity_source(company_id)
     if not include_inactive:
         query["is_active"] = {"$ne": False}
@@ -413,7 +575,15 @@ async def list_employees(actor: dict, company_id: str, *, search: str = None,
                 {"user_id": {"$in": ids}}).to_list(len(ids)):
             profiles[p["user_id"]] = p
 
-    departments, designations, managers = await _resolve_lookups(company_id, users)
+    # Employees created by onboarding have no login yet, so they are absent from the user
+    # query above. Fetch them separately rather than leaving a new hire invisible in the
+    # directory the moment their Employee ID is issued.
+    unlinked = await _unlinked_profiles(
+        company_id, search=search, department_id=department_id,
+        designation_id=designation_id, status=status)
+
+    departments, designations, managers = await _resolve_lookups(
+        company_id, users, list(profiles.values()) + list(unlinked))
     include_salary = can(actor, Cap.EMPLOYEE_SALARY_READ)
 
     rows = [
@@ -422,13 +592,6 @@ async def list_employees(actor: dict, company_id: str, *, search: str = None,
                  include_salary=include_salary)
         for u in users
     ]
-
-    # Employees created by onboarding have no login yet, so they are absent from the user
-    # query above. Fetch them separately rather than leaving a new hire invisible in the
-    # directory the moment their Employee ID is issued.
-    unlinked = await _unlinked_profiles(
-        company_id, search=search, department_id=department_id,
-        designation_id=designation_id, status=status)
     for profile in unlinked:
         rows.append(_compose(None, profile, departments=departments,
                              designations=designations, managers=managers,
@@ -551,20 +714,60 @@ async def get_employee(actor: dict, user_id: str, *, company_id: str = None,
         raise HTTPException(status_code=403, detail="You may only view your own profile.")
 
     if not is_self and hrms_role(actor) == HrmsRole.MANAGER:
-        scope = await _manager_scope(actor, user_company)
-        visible = await get_collection("learners").find_one(
+        # The collection the person was FOUND in: Sparsh Magic's own people are `staff`
+        # (no company_id), a client's are `learners`. Checking learners only 404'd every
+        # Sparsh manager opening their own direct report.
+        scope = await _manager_scope(actor, company_id or user_company)
+        visible = await get_collection(_coll).find_one(
             {"$and": [{"_id": _oid(user_id)}, scope]}, {"_id": 1})
         if not visible:
             raise HTTPException(status_code=404, detail="Employee not found.")
 
+    if user_company or company_id:
+        from app.services.hrms_employee_master_service import apply_due_changes
+        await apply_due_changes(company_id or user_company)
     profile = await get_collection(COLL_EMPLOYEE_PROFILES).find_one({"user_id": str(user_id)})
-    departments, designations, managers = await _resolve_lookups(user_company, [user])
+    departments, designations, managers = await _resolve_lookups(
+        (profile or {}).get("company_id") or user_company, [user], [profile])
 
     # You may always see your own pay; otherwise it takes the capability.
     include_salary = (force_salary if force_salary is not None
                       else (is_self or can(actor, Cap.EMPLOYEE_SALARY_READ)))
-    return _compose(user, profile, departments=departments, designations=designations,
+    view = _compose(user, profile, departments=departments, designations=designations,
                     managers=managers, include_salary=include_salary)
+    return await _finish_view(actor, view, profile, is_self=is_self,
+                              include_salary=include_salary)
+
+
+async def _finish_view(actor: dict, view: dict, profile: Optional[dict], *, is_self: bool,
+                       include_salary: bool) -> dict:
+    """The parts of a single-employee view that need more reads: field-level visibility of
+    custom fields, scheduled (future-dated) changes, the reporting manager's employee code
+    and the current salary structure's CTC / gross (FRD §3 Reporting, Salary linkage)."""
+    from app.services import hrms_employee_master_service as master
+    company_id = (profile or {}).get("company_id") or view.get("company_id")
+    if not profile or not company_id:
+        view["custom_fields"] = {}
+        return view
+    defs = await master.list_field_definitions(company_id, "employee")
+    is_hr = can(actor, Cap.EMPLOYEE_WRITE)
+    view["custom_fields"] = master.visible_custom_fields(
+        defs, profile.get("custom_fields"), is_hr=is_hr, is_self=is_self,
+        is_manager=hrms_role(actor) == HrmsRole.MANAGER,
+        is_payroll=can(actor, Cap.PAYROLL_PROCESS))
+    if is_hr and profile.get("employee_code"):
+        view["scheduled_changes"] = await master.scheduled_for(company_id,
+                                                                profile["employee_code"])
+    for key in ("reporting_manager_id", "functional_manager_id"):
+        manager_id = view.get(key)
+        if manager_id:
+            mp = await get_collection(COLL_EMPLOYEE_PROFILES).find_one(
+                {"user_id": str(manager_id)}, {"employee_code": 1})
+            view[key.replace("_id", "_code")] = (mp or {}).get("employee_code")
+    if include_salary and profile.get("employee_code"):
+        from app.services.hrms_payroll_service import structure_summary
+        view["salary_summary"] = await structure_summary(company_id, profile["employee_code"])
+    return view
 
 
 async def get_employee_by_code(actor: dict, company_id: str,
@@ -592,10 +795,12 @@ async def get_employee_by_code(actor: dict, company_id: str,
     if profile.get("user_id"):
         user, _coll = await _find_user(profile["user_id"])
     departments, designations, managers = await _resolve_lookups(
-        company_id, [user] if user else [])
-    return _compose(user, profile, departments=departments, designations=designations,
-                    managers=managers,
-                    include_salary=can(actor, Cap.EMPLOYEE_SALARY_READ))
+        company_id, [user] if user else [], [profile])
+    include_salary = can(actor, Cap.EMPLOYEE_SALARY_READ)
+    view = _compose(user, profile, departments=departments, designations=designations,
+                    managers=managers, include_salary=include_salary)
+    return await _finish_view(actor, view, profile, is_self=False,
+                              include_salary=include_salary)
 
 
 async def create_profile(actor: dict, company_id: str, payload: dict) -> dict:
@@ -628,6 +833,18 @@ async def create_profile(actor: dict, company_id: str, payload: dict) -> dict:
     clean = await _validate_profile(payload, company_id, partial=False)
     _check_date_order(clean.get("joined_on"), clean.get("resigned_on"))
 
+    # FRD §4: identity / duplicate validation BEFORE the record is committed, list values
+    # checked against the company's masters, custom fields against their definitions.
+    from app.services import hrms_employee_master_service as master
+    await master.assert_no_duplicates(company_id, clean, exclude_user_id=user_id)
+    await master.validate_master_values(company_id, clean)
+    clean["custom_fields"] = await master.validate_custom_values(
+        company_id, "employee", clean.get("custom_fields"), context=clean,
+        enforce_mandatory=True)
+    reporting_manager = clean.pop("reporting_manager_id", None)
+    if reporting_manager == user_id:
+        raise HTTPException(status_code=422, detail="Nobody reports to themselves.")
+
     code = clean.get("employee_code")
     if code:
         if await profiles.find_one({"company_id": str(company_id), "employee_code": code}):
@@ -643,6 +860,8 @@ async def create_profile(actor: dict, company_id: str, payload: dict) -> dict:
         "employment_type": clean.get("employment_type"),
         "created_at": datetime.now(timezone.utc),
         "created_by": str(actor.get("_id")) if actor.get("_id") else None,
+        "updated_at": datetime.now(timezone.utc),
+        "updated_by": str(actor.get("_id")) if actor.get("_id") else None,
     }
     for field, value in clean.items():
         doc.setdefault(field, value)
@@ -654,6 +873,18 @@ async def create_profile(actor: dict, company_id: str, payload: dict) -> dict:
         if "duplicate" in str(e).lower() or "E11000" in str(e):
             raise HTTPException(status_code=409, detail="This user already has an employee profile.")
         raise
+
+    if reporting_manager:
+        await master.set_user_reporting_manager(user_id, reporting_manager)
+    # The starting values are the first history rows, so the timeline begins at joining.
+    initial = {f: (None, doc.get(f)) for f in EMPLOYEE_TRACKED_FIELDS
+               if doc.get(f) not in (None, "", [])}
+    if reporting_manager:
+        initial["reporting_manager_id"] = (user.get("reporting_manager"), reporting_manager)
+    await master.record_changes(
+        actor, company_id, doc, initial,
+        effective_from=clean.get("joined_on") or datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        reason="Employee created", status=HISTORY_APPLIED)
 
     await audit(actor, AUDIT_EMPLOYEE_CREATED, ENTITY_EMPLOYEE, user_id,
                 f"{_display_name(user)} ({code})", company_id)
@@ -692,6 +923,12 @@ async def update_profile(actor: dict, user_id: str, payload: dict, company_id: s
     salary_changing = (salary_write_attempted
                        and float(payload["base_salary"]) != current.get("base_salary"))
 
+    effective_from = str(payload.get("effective_from") or "").strip() or \
+        datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    if not is_iso_date(effective_from):
+        raise HTTPException(status_code=422, detail="Effective from must be YYYY-MM-DD.")
+    reason = payload.get("change_reason")
+
     clean = await _validate_profile(payload, company_id, partial=True)
     if not clean:
         raise HTTPException(status_code=400, detail="No fields to update.")
@@ -710,25 +947,81 @@ async def update_profile(actor: dict, user_id: str, payload: dict, company_id: s
         if clash:
             raise HTTPException(status_code=409, detail=f"Employee code '{code}' is already in use.")
 
-    clean["updated_at"] = datetime.now(timezone.utc)
-    await profiles.update_one(
-        {"user_id": str(user_id)},
-        {"$set": clean,
-         "$setOnInsert": {"user_id": str(user_id), "company_id": str(company_id),
-                          "created_at": datetime.now(timezone.utc)}},
-        upsert=True,
-    )
+    from app.services import hrms_employee_master_service as master
+    await master.assert_no_duplicates(company_id, clean, exclude_user_id=str(user_id))
+    await master.validate_master_values(company_id, clean)
+    if "custom_fields" in clean:
+        clean["custom_fields"] = await master.validate_custom_values(
+            company_id, "employee", clean["custom_fields"],
+            current=current.get("custom_fields"), context={**current, **clean},
+            enforce_mandatory=True, record_filter={"user_id": {"$ne": str(user_id)}})
+    if clean.get("reporting_manager_id") == str(user_id) or \
+            clean.get("functional_manager_id") == str(user_id):
+        raise HTTPException(status_code=422, detail="Nobody reports to themselves.")
 
-    changed = sorted(k for k in clean if k != "updated_at")
-    await audit(actor, AUDIT_EMPLOYEE_UPDATED, ENTITY_EMPLOYEE, str(user_id),
-                ", ".join(changed), company_id)
-    if salary_changing:
+    # Effective-dated fields (FRD §4, §18): what actually changes is recorded with its date;
+    # a FUTURE date schedules it instead of applying it now.
+    before = dict(current)
+    before["reporting_manager_id"] = user.get("reporting_manager") or current.get(
+        "reporting_manager_id")
+    tracked = {f: (before.get(f), clean[f]) for f in EMPLOYEE_TRACKED_FIELDS
+               if f in clean and clean[f] != before.get(f)
+               and not (clean[f] in (None, "", []) and before.get(f) in (None, "", []))}
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    scheduled = effective_from > today
+    if scheduled:
+        for f in tracked:
+            clean.pop(f, None)
+
+    now = datetime.now(timezone.utc)
+    if clean:
+        clean["updated_at"] = now
+        clean["updated_by"] = str(actor.get("_id") or "") or None
+        await profiles.update_one(
+            {"user_id": str(user_id)},
+            {"$set": clean,
+             "$setOnInsert": {"user_id": str(user_id), "company_id": str(company_id),
+                              "created_at": now}},
+            upsert=True,
+        )
+    if "reporting_manager_id" in clean and "reporting_manager_id" in tracked:
+        await master.set_user_reporting_manager(str(user_id), clean["reporting_manager_id"])
+
+    saved = await profiles.find_one({"user_id": str(user_id)}) or {"user_id": str(user_id)}
+    await master.record_changes(actor, company_id, saved, tracked,
+                                effective_from=effective_from, reason=reason,
+                                status=HISTORY_SCHEDULED if scheduled else HISTORY_APPLIED)
+    if scheduled and tracked:
+        await audit(actor, AUDIT_EMPLOYEE_CHANGE_SCHEDULED, ENTITY_EMPLOYEE, str(user_id),
+                    f"{', '.join(sorted(tracked))} from {effective_from}", company_id)
+
+    changed = sorted(k for k in clean if k not in ("updated_at", "updated_by"))
+    if changed:
+        await audit(actor, AUDIT_EMPLOYEE_UPDATED, ENTITY_EMPLOYEE, str(user_id),
+                    ", ".join(changed), company_id)
+    if salary_changing and "base_salary" in clean:
         # Pay changes get their own audit line so a payroll dispute can be traced without
         # reading every field-level update row.
         await audit(actor, AUDIT_SALARY_CHANGED, ENTITY_EMPLOYEE, str(user_id),
                     f"{current.get('base_salary')} -> {clean.get('base_salary')}", company_id)
 
     return await get_employee(actor, user_id, company_id=company_id)
+
+
+async def employee_history(actor: dict, company_id: str, user_id: str = None,
+                           employee_code: str = None) -> dict:
+    """The effective-dated change timeline for one employee (FRD §4, §20)."""
+    from app.services import hrms_employee_master_service as master
+    if not employee_code:
+        profile = await get_collection(COLL_EMPLOYEE_PROFILES).find_one(
+            {"user_id": str(user_id), "company_id": str(company_id)})
+        employee_code = (profile or {}).get("employee_code")
+    if not employee_code:
+        return {"history": [], "employee_code": None}
+    return {"employee_code": employee_code,
+            "history": await master.list_history(
+                company_id, employee_code,
+                include_sensitive=can(actor, Cap.EMPLOYEE_SALARY_READ))}
 
 
 async def get_hierarchy(actor: dict, user_id: str, company_id: str) -> dict:
@@ -758,9 +1051,10 @@ async def get_hierarchy(actor: dict, user_id: str, company_id: str) -> dict:
         cursor = manager.get("reporting_manager")
         depth += 1
 
-    reports = await get_collection("learners").find(
-        {"company_id": str(company_id), "reporting_manager": str(user_id),
-         "is_active": {"$ne": False}},
+    # Resolved per tenant, like the directory: a Sparsh staff manager's reports are staff.
+    source, tenant_query = await _identity_source(company_id)
+    reports = await get_collection(source).find(
+        {**tenant_query, "reporting_manager": str(user_id), "is_active": {"$ne": False}},
         {"full_name": 1, "first_name": 1, "last_name": 1, "email": 1, "governance_role": 1},
     ).sort("full_name", 1).to_list(500)
 
@@ -892,6 +1186,11 @@ async def link_user(actor: dict, company_id: str, employee_code: str, user_id: s
     await profiles.update_one(
         {"company_id": str(company_id), "employee_code": employee_code},
         {"$set": {"user_id": str(user_id), "linked_at": datetime.now(timezone.utc)}})
+    # From now on the user document owns the reporting line; carry over the one HR chose
+    # at joining if the account has none yet.
+    if profile.get("reporting_manager_id") and not user.get("reporting_manager"):
+        from app.services.hrms_employee_master_service import set_user_reporting_manager
+        await set_user_reporting_manager(str(user_id), profile["reporting_manager_id"])
     await audit(actor, AUDIT_EMPLOYEE_LINKED, ENTITY_EMPLOYEE, employee_code,
                 f"linked to {_display_name(user)}", company_id)
     return await get_employee(actor, user_id, company_id=company_id)

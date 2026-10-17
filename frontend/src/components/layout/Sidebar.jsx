@@ -38,6 +38,8 @@ import {
   HeartPulse,
   // Source Analytics (candidates by platform).
   Radar,
+  // ── Phase 1 FRD ── Employee Master Setup (dropdown lists + configurable fields).
+  ListTree,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { canAccessTaskManagement } from '../../utils/taskAccess';
@@ -364,6 +366,7 @@ const Sidebar = ({ isMobileOpen, setIsMobileOpen, onWidthChange }) => {
       { section: 'Setup' },
       { name: 'Departments', path: '/hrms/departments', icon: Building2 },
       { name: 'Designations', path: '/hrms/designations', icon: Briefcase },
+      { name: 'Employee Master Setup', path: '/hrms/employee-master-setup', icon: ListTree },
       // No 'Clients' entry: a recruitment client IS a company, so it is maintained in the
       // Companies section. A second master here is the duplication this replaced.
       { name: 'Document Types', path: '/hrms/document-types', icon: FileCog },

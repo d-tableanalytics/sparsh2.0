@@ -254,10 +254,10 @@ const EmployeeDirectory = () => {
       ) : (
         <>
           <div className="rounded-xl border border-[var(--border)] overflow-x-auto">
-            <table className="w-full text-[13px] min-w-[720px]">
+            <table className="w-full text-[13px] min-w-[900px]">
               <thead className="bg-[var(--input-bg)] text-[var(--text-muted)]">
                 <tr>
-                  {['Employee', 'Code', 'Department', 'Designation', 'Status'].map((h) => (
+                  {['Employee', 'Code', 'Department', 'Designation', 'Location', 'Grade', 'Status'].map((h) => (
                     <th key={h} className="text-left px-4 py-2.5 text-[10.5px] font-bold uppercase tracking-widest">{h}</th>
                   ))}
                   {data.salary_visible && (
@@ -312,6 +312,12 @@ const EmployeeDirectory = () => {
                     </td>
                     <td className="px-4 py-2.5 text-[var(--text-main)]">
                       {e.designation || <span className="text-[var(--text-muted)]">{e.legacy_designation || '—'}</span>}
+                    </td>
+                    <td className="px-4 py-2.5 text-[var(--text-main)]">
+                      {e.work_location || <span className="text-[var(--text-muted)]">—</span>}
+                    </td>
+                    <td className="px-4 py-2.5 text-[var(--text-main)]">
+                      {e.grade || <span className="text-[var(--text-muted)]">—</span>}
                     </td>
                     <td className="px-4 py-2.5"><StatusPill value={e.employment_status} /></td>
                     {data.salary_visible && (

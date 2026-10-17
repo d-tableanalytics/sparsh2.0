@@ -81,7 +81,7 @@ from app.models.hrms import (
 )
 # ── Phase ATT-1 — Attendance & Leave (§7.8-7.12, §22.8-22.9) ──
 from app.models.hrms import (
-    AttendanceLockIn, AttendanceMarkIn, AttendanceUnlockIn,
+    AttendanceLockIn, AttendanceLockOverrideIn, AttendanceMarkIn, AttendanceUnlockIn,
     CoffEarnActionIn, CoffEarnIn,
     LeaveActionIn, LeaveApplyIn, LeaveBalanceAdjustIn, LeaveCancelIn, LeaveTypeConfigIn,
     OdActionIn, OdRequestIn,
@@ -2290,7 +2290,7 @@ async def list_hrms_holidays(
     company_id: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user),
 ):
-    _require(current_user, Cap.SETTINGS_READ)
+    _require_any(current_user, Cap.SETTINGS_READ, Cap.ATTENDANCE_READ)
     return await holidays_svc.list_holidays(
         _company(current_user, company_id), year=year)
 
@@ -2301,7 +2301,7 @@ async def add_hrms_holiday(
     company_id: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user),
 ):
-    _require(current_user, Cap.SETTINGS_WRITE)
+    _require_any(current_user, Cap.SETTINGS_WRITE, Cap.LEAVE_POLICY_MANAGE)
     return await holidays_svc.add_holiday(
         current_user, _company(current_user, company_id), body.model_dump())
 
@@ -2314,7 +2314,7 @@ async def import_hrms_holidays(
 ):
     """Adopt one year of the ERP's global calendar. Safe to run twice — dates already on
     this calendar are reported as skipped rather than refused."""
-    _require(current_user, Cap.SETTINGS_WRITE)
+    _require_any(current_user, Cap.SETTINGS_WRITE, Cap.LEAVE_POLICY_MANAGE)
     return await holidays_svc.import_from_erp(
         current_user, _company(current_user, company_id), year=body.year)
 
@@ -2325,7 +2325,7 @@ async def remove_hrms_holiday(
     company_id: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user),
 ):
-    _require(current_user, Cap.SETTINGS_WRITE)
+    _require_any(current_user, Cap.SETTINGS_WRITE, Cap.LEAVE_POLICY_MANAGE)
     return await holidays_svc.remove_holiday(
         current_user, _company(current_user, company_id), holiday_date)
 
@@ -4328,12 +4328,14 @@ async def closure_dashboard(
 @router.post("/attendance/closure/{period}/lock")
 async def lock_period(
     period: str,
+    body: Optional[AttendanceLockOverrideIn] = None,
     company_id: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user),
 ):
     _require(current_user, Cap.ATTENDANCE_LOCK)
     return await attendance_mgmt.lock_period(
-        current_user, _company(current_user, company_id), period)
+        current_user, _company(current_user, company_id), period,
+        override_reason=(body.override_reason if body else None))
 
 
 @router.post("/attendance/closure/{period}/unlock")
@@ -4932,7 +4934,8 @@ async def decide_payroll_run(
     company_id: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user),
 ):
-    """§7.13 steps 97-98: the checker's approval also locks the run."""
+    """FRD §12 stage 8: the checker approves, rejects or returns a SUBMITTED payroll
+    (never the maker who submitted it). Locking is Finance's separate step."""
     _require(current_user, Cap.PAYROLL_APPROVE)
     return await payroll_mgmt.decide_run(
         current_user, _company(current_user, company_id), period, body.model_dump())
@@ -6461,3 +6464,398 @@ async def client_record_history(
         entity=entity, entity_id=record_no, limit=limit)
     return {"entity": entity, "record_no": record_no, "history": rows,
             "total": len(rows)}
+
+
+# =============================================================
+# Phase 1 FRD -- Configurable Employee, Attendance & Payroll
+# (Employee Master §3-4, Attendance §5-8, Salary §9, Payroll §10-12, Disbursal §13,
+#  Payslip §14, configurable fields §21-22)
+# =============================================================
+from fastapi.responses import Response as _Response  # noqa: E402
+
+from app.models.hrms import (  # noqa: E402
+    EmployeeMasterListsIn, FieldDefinitionIn, FieldStatusIn, PaymentBatchIn,
+    PaymentStatusImportIn, PaymentStatusIn, PayrollPolicyIn, PayrollRemarksIn,
+    PostLockAdjustmentIn, StructureDecisionIn,
+)
+from app.services import hrms_disbursal_service as disbursal_mgmt  # noqa: E402
+from app.services import hrms_employee_master_service as master_mgmt  # noqa: E402
+from app.services import hrms_shift_service as shift_mgmt  # noqa: E402
+
+
+# ── Employee Master ──
+@router.get("/employee-master/lists")
+async def get_employee_master_lists(
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """The company's dropdown sources: legal entity, business unit, location, grade, ..."""
+    _require(current_user, Cap.EMPLOYEE_READ)
+    return await master_mgmt.get_master_lists(_company(current_user, company_id))
+
+
+@router.put("/employee-master/lists")
+async def save_employee_master_lists(
+    body: EmployeeMasterListsIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.EMPLOYEE_WRITE)
+    return await master_mgmt.save_master_lists(
+        current_user, _company(current_user, company_id), body.model_dump())
+
+
+@router.post("/employee-master/duplicate-check")
+async def employee_duplicate_check(
+    body: dict = Body(...),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """FRD §4: tell HR, before saving, if a PAN / Aadhaar / email / mobile / account is
+    already on another employee."""
+    _require(current_user, Cap.EMPLOYEE_WRITE)
+    return {"duplicates": await master_mgmt.find_duplicates(
+        _company(current_user, company_id), body,
+        exclude_user_id=body.get("exclude_user_id"), exclude_code=body.get("exclude_code"))}
+
+
+@router.get("/employees/{user_id}/history")
+async def employee_change_history(
+    user_id: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """FRD §4/§20: the effective-dated change timeline (applied and scheduled)."""
+    _require(current_user, Cap.EMPLOYEE_READ)
+    return await employees.employee_history(
+        current_user, _company(current_user, company_id), user_id=user_id)
+
+
+@router.post("/employee-master/history/{history_id}/cancel")
+async def cancel_scheduled_employee_change(
+    history_id: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.EMPLOYEE_WRITE)
+    return await master_mgmt.cancel_scheduled(
+        current_user, _company(current_user, company_id), history_id)
+
+
+# ── Configurable fields (FRD §21-22) ──
+@router.get("/field-definitions")
+async def list_field_definitions(
+    module: Optional[str] = Query(None),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require_any(current_user, Cap.EMPLOYEE_READ, Cap.ATTENDANCE_READ)
+    return await master_mgmt.list_field_definitions(_company(current_user, company_id), module)
+
+
+@router.put("/field-definitions")
+async def save_field_definition(
+    body: FieldDefinitionIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Add or change a configurable field. A new field starts as Draft; changes keep the old
+    definition in its history (FRD §22 Audit)."""
+    _require(current_user, Cap.EMPLOYEE_WRITE)
+    return await master_mgmt.save_field_definition(
+        current_user, _company(current_user, company_id), body.model_dump())
+
+
+@router.post("/field-definitions/{module}/{code}/status")
+async def set_field_definition_status(
+    module: str,
+    code: str,
+    body: FieldStatusIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.EMPLOYEE_WRITE)
+    return await master_mgmt.set_field_status(
+        current_user, _company(current_user, company_id), module, code, body.model_dump())
+
+
+@router.delete("/field-definitions/{module}/{code}")
+async def delete_field_definition(
+    module: str,
+    code: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Only an unused Draft can be deleted; anything used is retired (FRD §21)."""
+    _require(current_user, Cap.EMPLOYEE_WRITE)
+    return await master_mgmt.set_field_status(
+        current_user, _company(current_user, company_id), module, code, {"status": "Deleted"})
+
+
+@router.get("/field-definitions/{module}/{code}/usage")
+async def field_definition_usage(
+    module: str,
+    code: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Impact check before a field is retired (FRD §22, §30)."""
+    _require(current_user, Cap.EMPLOYEE_READ)
+    return await master_mgmt.field_usage(_company(current_user, company_id), module, code)
+
+
+# ── Shift master & employee calendar (FRD §5, §23) ──
+@router.get("/attendance/shifts")
+async def list_shifts(
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.ATTENDANCE_READ)
+    return await shift_mgmt.list_shifts(_company(current_user, company_id))
+
+
+@router.put("/attendance/shifts")
+async def save_shift(
+    body: dict = Body(...),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Create a shift or add a new effective-dated version of its rules."""
+    _require(current_user, Cap.LEAVE_POLICY_MANAGE)
+    return await shift_mgmt.save_shift(current_user, _company(current_user, company_id), body)
+
+
+@router.get("/attendance/calendar/{employee_code}/{period}")
+async def employee_month_calendar(
+    employee_code: str,
+    period: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """The person's schedule for a month: weekly offs, holidays and the rules in force."""
+    _require(current_user, Cap.ATTENDANCE_READ)
+    cid = _company(current_user, company_id)
+    profile = await shift_mgmt.profile_for(cid, employee_code)
+    if not profile:
+        raise HTTPException(status_code=404, detail="No employee with that code.")
+    cal = await shift_mgmt.month_calendar(cid, profile, period)
+    cal["rules"] = await shift_mgmt.resolve_rules(cid, profile, f"{period}-01")
+    return cal
+
+
+# ── Payroll policy, structure approval, run lifecycle (FRD §9, §12) ──
+@router.get("/payroll/policy")
+async def get_payroll_policy(
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.PAYROLL_READ)
+    return await payroll_mgmt.get_payroll_policy(_company(current_user, company_id))
+
+
+@router.put("/payroll/policy")
+async def save_payroll_policy(
+    body: PayrollPolicyIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.PAYROLL_PROCESS)
+    return await payroll_mgmt.save_payroll_policy(
+        current_user, _company(current_user, company_id), body.model_dump(exclude_unset=True))
+
+
+@router.post("/salary-structures/{structure_id}/decision")
+async def decide_salary_structure(
+    structure_id: str,
+    body: StructureDecisionIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Checker approval of a salary structure, when the payroll policy requires it."""
+    _require(current_user, Cap.PAYROLL_APPROVE)
+    return await payroll_mgmt.decide_structure(
+        current_user, _company(current_user, company_id), structure_id, body.model_dump())
+
+
+@router.post("/payroll/runs/{period}/submit")
+async def submit_payroll_run(
+    period: str,
+    body: Optional[PayrollRemarksIn] = None,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """FRD §12 stage 7: the maker submits the calculated payroll for checking."""
+    _require(current_user, Cap.PAYROLL_PROCESS)
+    return await payroll_mgmt.submit_run(
+        current_user, _company(current_user, company_id), period,
+        body.model_dump() if body else {})
+
+
+@router.post("/payroll/runs/{period}/lock")
+async def lock_payroll_run(
+    period: str,
+    body: Optional[PayrollRemarksIn] = None,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """FRD §12 stage 9: Finance locks the approved payroll."""
+    _require(current_user, Cap.PAYROLL_APPROVE)
+    return await payroll_mgmt.lock_run(
+        current_user, _company(current_user, company_id), period,
+        body.model_dump() if body else {})
+
+
+@router.post("/payroll/runs/{period}/close")
+async def close_payroll_run(
+    period: str,
+    body: Optional[PayrollRemarksIn] = None,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """FRD §12 stage 13: close the period after payment."""
+    _require(current_user, Cap.PAYROLL_APPROVE)
+    return await payroll_mgmt.close_run(
+        current_user, _company(current_user, company_id), period,
+        body.model_dump() if body else {})
+
+
+@router.get("/payroll/runs/{period}/register")
+async def payroll_register(
+    period: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """FRD §20: the payroll register, component-wise, as CSV."""
+    _require(current_user, Cap.PAYROLL_READ)
+    text = await payroll_mgmt.payroll_register_csv(
+        current_user, _company(current_user, company_id), period)
+    return _Response(content=text, media_type="text/csv",
+                     headers={"Content-Disposition":
+                              f'attachment; filename="payroll_register_{period}.csv"'})
+
+
+@router.get("/payroll/runs/{period}/post-lock-adjustments")
+async def list_post_lock_adjustments(
+    period: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.PAYROLL_READ)
+    return await payroll_mgmt.list_post_lock_adjustments(
+        current_user, _company(current_user, company_id), period)
+
+
+@router.post("/payroll/runs/{period}/post-lock-adjustments", status_code=201)
+async def create_post_lock_adjustment(
+    period: str,
+    body: PostLockAdjustmentIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """FRD §18: locked payroll is corrected by an arrear / recovery / reversal carried into
+    a later period, never edited in place."""
+    _require(current_user, Cap.PAYROLL_PROCESS)
+    return await payroll_mgmt.create_post_lock_adjustment(
+        current_user, _company(current_user, company_id), period, body.model_dump())
+
+
+@router.get("/payslip-template/versions")
+async def payslip_template_versions(
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.PAYROLL_READ)
+    return await payslip_mgmt.list_template_versions(_company(current_user, company_id))
+
+
+# ── Salary disbursal (FRD §13) ──
+@router.get("/payroll/runs/{period}/payment-batches")
+async def list_payment_batches(
+    period: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.PAYROLL_READ)
+    return await disbursal_mgmt.list_batches(
+        current_user, _company(current_user, company_id), period)
+
+
+@router.post("/payroll/runs/{period}/payment-batches", status_code=201)
+async def generate_payment_batch(
+    period: str,
+    body: PaymentBatchIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Generate the bank payment batch from a LOCKED payroll (or retry a batch's failures)."""
+    _require(current_user, Cap.PAYROLL_APPROVE)
+    return await disbursal_mgmt.generate_batch(
+        current_user, _company(current_user, company_id), period, body.model_dump())
+
+
+@router.get("/payment-batches/{batch_no}")
+async def get_payment_batch(
+    batch_no: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.PAYROLL_READ)
+    return await disbursal_mgmt.get_batch(
+        current_user, _company(current_user, company_id), batch_no)
+
+
+@router.get("/payment-batches/{batch_no}/bank-file")
+async def download_bank_file(
+    batch_no: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """The bank upload / advice file -- the one place full account numbers leave HRMS."""
+    _require(current_user, Cap.PAYROLL_APPROVE)
+    name, text = await disbursal_mgmt.bank_file(
+        current_user, _company(current_user, company_id), batch_no)
+    return _Response(content=text, media_type="text/csv",
+                     headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
+
+@router.patch("/payment-batches/{batch_no}/payments/{employee_code}")
+async def update_payment_status(
+    batch_no: str,
+    employee_code: str,
+    body: PaymentStatusIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Record one employee's bank outcome: Processed (with UTR and date) or Failed /
+    Rejected (with the reason)."""
+    _require(current_user, Cap.PAYROLL_APPROVE)
+    return await disbursal_mgmt.update_payment(
+        current_user, _company(current_user, company_id), batch_no, employee_code,
+        body.model_dump())
+
+
+@router.post("/payment-batches/{batch_no}/import")
+async def import_payment_statuses(
+    batch_no: str,
+    body: PaymentStatusImportIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Import the bank's response: UTR and status per employee."""
+    _require(current_user, Cap.PAYROLL_APPROVE)
+    return await disbursal_mgmt.import_statuses(
+        current_user, _company(current_user, company_id), batch_no, body.rows)
+
+
+@router.post("/salary-components/{code}/simulate")
+async def simulate_salary_component(
+    code: str,
+    body: dict = Body(...),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """FRD §25 Simulation: the old result versus the proposed rule for every affected
+    employee, plus the components that depend on this one. Writes nothing."""
+    _require(current_user, Cap.SALARY_STRUCTURE_MANAGE)
+    return await payroll_mgmt.simulate_component(
+        current_user, _company(current_user, company_id), code, body)

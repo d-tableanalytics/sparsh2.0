@@ -176,13 +176,48 @@ async def _assert_may_decide(actor: dict, company_id: str, employee_code: str, w
 # models/hrms.py for why these numbers are adjustable defaults, not frozen constants)
 # ─────────────────────────────────────────────────────────────
 async def get_shift_policy(company_id: str) -> dict:
+    from app.models.hrms import DEFAULT_ATTENDANCE_RULES
     doc = await get_collection(COLL_SETTINGS).find_one({"company_id": str(company_id)})
     stored = (doc or {}).get("shift_policy") or {}
-    return {**DEFAULT_SHIFT_POLICY, **stored}
+    return {**DEFAULT_SHIFT_POLICY, **DEFAULT_ATTENDANCE_RULES, **stored}
+
+
+def _validate_policy(payload: dict) -> dict:
+    from app.services.hrms_attendance_rules_service import _hhmm
+    from app.services.hrms_shift_service import _validate_pattern
+    clean = {}
+    for key, value in payload.items():
+        if value is None:
+            continue
+        if key in ("shift_start", "shift_end"):
+            clean[key] = _hhmm(value, key.replace("_", " ").title())
+        elif key == "weekly_off_pattern":
+            clean[key] = _validate_pattern(value)
+        elif key == "regularisation_evidence_required":
+            clean[key] = bool(value)
+        elif key == "min_hours":
+            clean[key] = float(value) if value != "" else None
+        elif key in ("daily_grace_minutes", "monthly_buffer_minutes",
+                     "half_day_threshold_minutes", "regularisation_window_days",
+                     "attendance_closing_day", "early_going_grace_minutes", "break_minutes",
+                     "absent_threshold_minutes"):
+            try:
+                clean[key] = int(value) if value != "" else None
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=422, detail=f"{key} must be a whole number.")
+            if clean[key] is not None and clean[key] < 0:
+                raise HTTPException(status_code=422, detail=f"{key} cannot be negative.")
+        else:
+            clean[key] = value
+    if clean.get("attendance_closing_day") and not 1 <= clean["attendance_closing_day"] <= 31:
+        raise HTTPException(status_code=422, detail="Closing day must be 1-31.")
+    return clean
 
 
 async def save_shift_policy(actor: dict, company_id: str, payload: dict) -> dict:
-    merged = {**await get_shift_policy(company_id), **{k: v for k, v in payload.items() if v is not None}}
+    merged = {**await get_shift_policy(company_id), **_validate_policy(payload)}
+    if merged["shift_end"] <= merged["shift_start"]:
+        raise HTTPException(status_code=422, detail="The end time must be after the start time.")
     await get_collection(COLL_SETTINGS).update_one(
         {"company_id": str(company_id)},
         {"$set": {"shift_policy": merged, "updated_at": datetime.now(timezone.utc)},
@@ -192,6 +227,30 @@ async def save_shift_policy(actor: dict, company_id: str, payload: dict) -> dict
     await audit(actor, "shift policy updated", ENTITY_ATTENDANCE, "policy",
                ", ".join(sorted(payload.keys())), company_id)
     return merged
+
+
+async def _month_locked(company_id: str, work_date: str) -> bool:
+    """A new row in a locked month would slip past the lock (only existing rows carry
+    `locked`), so writers check the period itself too."""
+    lock = await get_collection(COLL_ATTENDANCE_LOCKS).find_one(
+        {"company_id": str(company_id), "period": str(work_date)[:7]})
+    return (lock or {}).get("status") == LockStatus.LOCKED.value
+
+
+_PAYABLE_BY_STATUS = {
+    AttendanceStatus.PRESENT.value: 1.0, AttendanceStatus.HALF_DAY.value: 0.5,
+    AttendanceStatus.ON_LEAVE.value: 1.0, AttendanceStatus.ON_OD.value: 1.0,
+    AttendanceStatus.WEEKLY_OFF.value: 1.0, AttendanceStatus.HOLIDAY.value: 1.0,
+    AttendanceStatus.ABSENT.value: 0.0, AttendanceStatus.PENDING.value: 0.0,
+}
+
+
+def _status_only(status: str) -> dict:
+    """A day decided by its status alone (an override, a weekly off, a holiday)."""
+    payable = _PAYABLE_BY_STATUS.get(status, 0.0)
+    return {"status": status, "worked_minutes": None, "late_minutes": 0, "early_minutes": 0,
+            "payable_day": payable, "lop_fraction": round(1 - payable, 2),
+            "missing_out_punch": False}
 
 
 # ─────────────────────────────────────────────────────────────
@@ -207,22 +266,41 @@ async def mark_attendance(actor: dict, company_id: str, payload: dict) -> dict:
 
     existing = await get_collection(COLL_ATTENDANCE).find_one(
         {"company_id": str(company_id), "employee_code": employee_code, "work_date": work_date})
-    if existing and existing.get("locked"):
+    if (existing and existing.get("locked")) or await _month_locked(company_id, work_date):
         raise HTTPException(
             status_code=409,
             detail=f"{work_date} is inside a locked attendance period; use an authorised "
                    f"unlock before changing it.")
 
-    override = payload.get("override_status")
+    override = getattr(payload.get("override_status"), "value", payload.get("override_status"))
     actual_in = payload.get("actual_in")
     actual_out = payload.get("actual_out")
+    from app.services.hrms_attendance_rules_service import compute_day, derived_fields
 
     if override:
-        computed = {"status": override, "worked_minutes": None, "late_minutes": 0}
+        computed = _status_only(override)
+    elif not actual_in and not actual_out:
+        # FRD §5: weekly off and holidays come from the employee's own calendar, so a blank
+        # Sunday is a Weekly Off, not an Absence.
+        from app.services.hrms_shift_service import day_type, profile_for
+        kind = await day_type(company_id, await profile_for(company_id, employee_code), work_date)
+        computed = _status_only(kind) if kind else await compute_day(
+            company_id, employee_code, work_date, actual_in, actual_out)
     else:
-        # Against the day's EFFECTIVE hours (an approved flexible timing, else office timing).
-        from app.services.hrms_attendance_rules_service import compute_day
+        # Against the day's EFFECTIVE hours (an approved flexible timing, else the shift).
         computed = await compute_day(company_id, employee_code, work_date, actual_in, actual_out)
+
+    source = payload.get("source") or "Manual"
+    from app.models.hrms import ATTENDANCE_SOURCES
+    if source not in ATTENDANCE_SOURCES:
+        raise HTTPException(status_code=422,
+                            detail=f"Source must be one of: {', '.join(ATTENDANCE_SOURCES)}.")
+    custom = None
+    if payload.get("custom_fields") is not None:
+        from app.services.hrms_employee_master_service import validate_custom_values
+        custom = await validate_custom_values(
+            company_id, "attendance", payload["custom_fields"],
+            current=(existing or {}).get("custom_fields"), enforce_mandatory=True)
 
     now = datetime.now(timezone.utc)
     doc = {
@@ -234,16 +312,31 @@ async def mark_attendance(actor: dict, company_id: str, payload: dict) -> dict:
         "status": computed["status"],
         "worked_minutes": computed["worked_minutes"],
         "late_minutes": computed["late_minutes"],
-        "source": "manual",
+        "flexi_no": computed.get("flexi_no"),
+        **derived_fields(computed),
+        "source": source.lower() if source == "Manual" else source,
+        "source_reference": payload.get("source_reference"),
         "notes": payload.get("notes"),
         "locked": False,
         "updated_at": now,
         "updated_by": str(actor.get("_id") or ""),
     }
+    if custom is not None:
+        doc["custom_fields"] = custom
+    update = {"$set": doc,
+              "$setOnInsert": {"created_at": now, "original_in": actual_in,
+                               "original_out": actual_out, "original_status": computed["status"],
+                               "original_source": doc["source"]}}
+    if existing:
+        # FRD §6 Audit: original/raw values stay; every later change is appended.
+        update["$push"] = {"modification_history": {
+            "at": now, "by": str(actor.get("_id") or ""), "via": "mark",
+            "old": {k: existing.get(k) for k in ("actual_in", "actual_out", "status", "source")},
+            "new": {"actual_in": actual_in, "actual_out": actual_out,
+                    "status": computed["status"], "source": doc["source"]}}}
     await get_collection(COLL_ATTENDANCE).update_one(
         {"company_id": str(company_id), "employee_code": employee_code, "work_date": work_date},
-        {"$set": doc, "$setOnInsert": {"created_at": now}},
-        upsert=True,
+        update, upsert=True,
     )
     # Raw punches are preserved as their own append-only record, never overwritten by a later
     # correction — §7.8's own BR ("Raw attendance data should not be overwritten...").
@@ -279,7 +372,34 @@ async def list_attendance(actor: dict, company_id: str, *, employee_code: Option
     query = await _scope_query(actor, company_id, query)
     rows = await get_collection(COLL_ATTENDANCE).find(query).sort(
         "work_date", -1).to_list(min(limit, MAX_ATTENDANCE_LIST_PAGE))
-    return [_out(r) for r in rows]
+    return await _with_identity(company_id, [_out(r) for r in rows])
+
+
+async def _with_identity(company_id: str, rows: list) -> list:
+    """FRD §6 Identity / Date: employee name, department, location and weekday on each
+    day, joined once for the whole page rather than once per row."""
+    codes = {r["employee_code"] for r in rows if r.get("employee_code")}
+    if not codes:
+        return rows
+    from datetime import date as _date
+    from app.models.hrms import COLL_DEPARTMENTS, WEEKDAYS
+    profiles = await get_collection(COLL_EMPLOYEE_PROFILES).find(
+        {"company_id": str(company_id), "employee_code": {"$in": list(codes)}}).to_list(len(codes))
+    depts = {str(d["_id"]): d.get("name") for d in await get_collection(COLL_DEPARTMENTS).find(
+        {"company_id": str(company_id)}, {"name": 1}).to_list(1000)}
+    from app.services.hrms_payroll_service import _employee_names, _name_of
+    names = await _employee_names(profiles)
+    by_code = {p["employee_code"]: p for p in profiles}
+    for r in rows:
+        p = by_code.get(r.get("employee_code")) or {}
+        r.setdefault("employee_name", _name_of(p, names))
+        r["department"] = depts.get(p.get("department_id"))
+        r["work_location"] = p.get("work_location")
+        try:
+            r["day"] = WEEKDAYS[_date.fromisoformat(r["work_date"]).weekday()]
+        except (KeyError, ValueError, TypeError):
+            r["day"] = None
+    return rows
 
 
 # ─────────────────────────────────────────────────────────────
@@ -295,11 +415,29 @@ async def request_regularization(actor: dict, company_id: str, payload: dict) ->
 
     attendance = await get_collection(COLL_ATTENDANCE).find_one(
         {"company_id": str(company_id), "employee_code": employee_code, "work_date": work_date})
-    if attendance and attendance.get("locked"):
+    if (attendance and attendance.get("locked")) or await _month_locked(company_id, work_date):
         raise HTTPException(
             status_code=409,
             detail=f"{work_date} is inside a locked attendance period — no regularisation "
                    f"without an authorised unlock (§7.9 BR).")
+    # FRD §5 Regularisation: the allowed request window, and evidence where policy needs it.
+    policy = await get_shift_policy(company_id)
+    window = policy.get("regularisation_window_days")
+    today = _today()
+    if work_date > today:
+        raise HTTPException(status_code=422, detail="You cannot regularise a future date.")
+    if window:
+        from datetime import date as _date, timedelta as _td
+        earliest = (_date.fromisoformat(today) - _td(days=int(window))).isoformat()
+        if work_date < earliest:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Regularisation can be requested up to {window} day(s) back "
+                       f"(from {earliest}).")
+    if policy.get("regularisation_evidence_required") and not (payload.get("evidence") or "").strip():
+        raise HTTPException(status_code=422,
+                            detail="Attach supporting evidence (a link or reference) — company "
+                                   "policy requires it for regularisation.")
 
     year = datetime.now(timezone.utc).year
     req_no = await next_business_id("regularization", str(company_id), year)
@@ -372,20 +510,44 @@ async def act_on_regularization(actor: dict, company_id: str, req_no: str, paylo
             raise HTTPException(
                 status_code=409,
                 detail=f"{req_no} needs the manager's approval before HR's final sign-off.")
+        # The final sign-off is HR's (FRD §17): a reporting manager records the manager step
+        # only, never both.
+        if hrms_role(actor) not in (HrmsRole.HR, HrmsRole.MD, HrmsRole.ADMIN, None):
+            raise HTTPException(status_code=403,
+                                detail="HR gives the final sign-off on a regularisation.")
+        if await _month_locked(company_id, doc["work_date"]):
+            raise HTTPException(status_code=409,
+                                detail=f"{doc['work_date']} is in a locked month — unlock it first.")
         # HR-final: recalculate attendance, preserving the original record (the update, not a
-        # second row) — §7.9 step 69.
-        from app.services.hrms_attendance_rules_service import compute_day
+        # second row) — §7.9 step 69. The raw punches stay as original_in/out (FRD §18).
+        from app.services.hrms_attendance_rules_service import compute_day, derived_fields
         computed = await compute_day(company_id, doc["employee_code"], doc["work_date"],
                                      doc.get("proposed_in"), doc.get("proposed_out"))
+        key = {"company_id": str(company_id), "employee_code": doc["employee_code"],
+               "work_date": doc["work_date"]}
+        before = await get_collection(COLL_ATTENDANCE).find_one(key) or {}
         await get_collection(COLL_ATTENDANCE).update_one(
-            {"company_id": str(company_id), "employee_code": doc["employee_code"],
-             "work_date": doc["work_date"]},
+            key,
             {"$set": {"actual_in": doc.get("proposed_in"), "actual_out": doc.get("proposed_out"),
                       "status": computed["status"], "worked_minutes": computed["worked_minutes"],
                       "late_minutes": computed["late_minutes"], "source": "regularization",
-                      "regularized_from": req_no, "updated_at": now},
-             "$setOnInsert": {"company_id": str(company_id), "employee_code": doc["employee_code"],
-                              "work_date": doc["work_date"], "created_at": now, "locked": False}},
+                      **derived_fields(computed), "flexi_no": computed.get("flexi_no"),
+                      "regularized_from": req_no, "regularization_flag": True,
+                      "corrected_in": doc.get("proposed_in"),
+                      "corrected_out": doc.get("proposed_out"),
+                      "manager_status": CorrectionStatus.MANAGER_APPROVED.value,
+                      "hr_status": CorrectionStatus.APPROVED.value,
+                      "approver_comments": payload.get("remarks"), "updated_at": now},
+             "$setOnInsert": {"created_at": now, "locked": False, "original_in": None,
+                              "original_out": None, "original_status": None,
+                              "original_source": None},
+             "$push": {"modification_history": {
+                 "at": now, "by": str(actor.get("_id") or ""), "via": req_no,
+                 "old": {k: before.get(k) for k in ("actual_in", "actual_out", "status",
+                                                    "source")},
+                 "new": {"actual_in": doc.get("proposed_in"),
+                         "actual_out": doc.get("proposed_out"),
+                         "status": computed["status"], "source": "regularization"}}}},
             upsert=True,
         )
         updates.update({"status": CorrectionStatus.APPROVED.value,
@@ -459,6 +621,10 @@ async def act_on_od(actor: dict, company_id: str, od_no: str, payload: dict) -> 
     await _assert_may_decide(actor, company_id, doc["employee_code"], "Outdoor Duty request")
 
     approved = bool(payload.get("approved"))
+    if approved and await _month_locked(company_id, doc["od_date"]):
+        raise HTTPException(status_code=409,
+                            detail=f"{doc['od_date']} is in a locked month — an OD cannot change "
+                                   f"it without an authorised unlock.")
     now = datetime.now(timezone.utc)
     new_status = OdStatus.APPROVED.value if approved else OdStatus.REJECTED.value
     await get_collection(COLL_OD_REQUESTS).update_one(
@@ -472,7 +638,8 @@ async def act_on_od(actor: dict, company_id: str, od_no: str, payload: dict) -> 
             {"company_id": str(company_id), "employee_code": doc["employee_code"],
              "work_date": doc["od_date"]},
             {"$set": {"status": AttendanceStatus.ON_OD.value, "source": "od",
-                      "od_ref": od_no, "updated_at": now},
+                      "od_ref": od_no, "payable_day": 1.0, "lop_fraction": 0.0,
+                      "updated_at": now},
              "$setOnInsert": {"company_id": str(company_id), "employee_code": doc["employee_code"],
                               "work_date": doc["od_date"], "created_at": now, "locked": False,
                               "worked_minutes": None, "late_minutes": 0}},
@@ -502,34 +669,65 @@ async def closure_dashboard(actor: dict, company_id: str, period: str) -> dict:
     unexplained_absence = await get_collection(COLL_ATTENDANCE).count_documents(
         {"company_id": str(company_id), "work_date": {"$gte": start, "$lte": end},
          "status": AttendanceStatus.ABSENT.value})
+    # A day with a check-in and no check-out (before today) is an open exception too.
+    missing_out_punches = await get_collection(COLL_ATTENDANCE).count_documents(
+        {"company_id": str(company_id), "work_date": {"$gte": start, "$lte": end, "$lt": _today()},
+         "missing_out_punch": True})
+    from app.models.hrms import COLL_LEAVES, OPEN_LEAVE_STATUSES
+    pending_leaves = await get_collection(COLL_LEAVES).count_documents(
+        {"company_id": str(company_id), "status": {"$in": list(OPEN_LEAVE_STATUSES)},
+         "start_date": {"$lte": end}, "end_date": {"$gte": start}})
     lock = await get_collection(COLL_ATTENDANCE_LOCKS).find_one(
         {"company_id": str(company_id), "period": period})
+    policy = await get_shift_policy(company_id)
     return {
         "period": period,
         "status": (lock or {}).get("status", LockStatus.OPEN.value),
         "missing_punches": missing_punches,
+        "missing_out_punches": missing_out_punches,
         "pending_regularizations": pending_regularizations,
         "pending_od": pending_od,
+        "pending_leaves": pending_leaves,
         "unexplained_absence": unexplained_absence,
-        "ready_to_lock": not (missing_punches or pending_regularizations or pending_od),
+        "ready_to_lock": not (missing_punches or missing_out_punches or pending_regularizations
+                              or pending_od or pending_leaves),
+        "closing_day": policy.get("attendance_closing_day"),
         "locked_by": (lock or {}).get("locked_by"),
+        "locked_by_name": (lock or {}).get("locked_by_name"),
         "locked_at": (lock or {}).get("locked_at"),
+        "override_reason": (lock or {}).get("override_reason"),
     }
 
 
-async def lock_period(actor: dict, company_id: str, period: str) -> dict:
+async def lock_period(actor: dict, company_id: str, period: str,
+                      override_reason: Optional[str] = None) -> dict:
     existing = await get_collection(COLL_ATTENDANCE_LOCKS).find_one(
         {"company_id": str(company_id), "period": period})
     if existing and existing.get("status") == LockStatus.LOCKED.value:
         raise HTTPException(status_code=409, detail=f"{period} is already locked.")
 
     snapshot = await closure_dashboard(actor, company_id, period)
+    # FRD §8: HR resolves pending exceptions BEFORE locking. Locking with some still open is
+    # the lock authority's explicit, reasoned decision -- enforced here, not just shown.
+    reason = (override_reason or "").strip()
+    if not snapshot["ready_to_lock"] and not reason:
+        open_items = ", ".join(f"{snapshot[k]} {label}" for k, label in (
+            ("missing_punches", "pending day(s)"), ("missing_out_punches", "missing out-punch(es)"),
+            ("pending_regularizations", "open regularisation(s)"), ("pending_od", "open OD(s)"),
+            ("pending_leaves", "open leave request(s)")) if snapshot.get(k))
+        raise HTTPException(
+            status_code=409,
+            detail=f"{period} still has {open_items}. Resolve them, or lock with a reason.")
     now = datetime.now(timezone.utc)
+    actor_name = (actor.get("full_name") or f"{actor.get('first_name') or ''} "
+                  f"{actor.get('last_name') or ''}".strip() or actor.get("email"))
     doc = {
         "company_id": str(company_id), "period": period, "status": LockStatus.LOCKED.value,
         "locked_by": str(actor.get("_id") or ""), "locked_at": now,
+        "locked_by_name": actor_name, "override_reason": reason or None,
         "exceptions_at_lock": {k: snapshot[k] for k in (
-            "missing_punches", "pending_regularizations", "pending_od", "unexplained_absence")},
+            "missing_punches", "missing_out_punches", "pending_regularizations", "pending_od",
+            "pending_leaves", "unexplained_absence")},
         "unlock_history": (existing or {}).get("unlock_history", []),
         "updated_at": now,
     }
@@ -543,7 +741,7 @@ async def lock_period(actor: dict, company_id: str, period: str) -> dict:
     start, end = f"{period}-01", f"{period}-31"
     await get_collection(COLL_ATTENDANCE).update_many(
         {"company_id": str(company_id), "work_date": {"$gte": start, "$lte": end}},
-        {"$set": {"locked": True}})
+        {"$set": {"locked": True, "locked_by": doc["locked_by"], "locked_at": now}})
     await audit(actor, AUDIT_ATTENDANCE_LOCKED, ENTITY_ATT_LOCK, period,
                f"exceptions at lock: {doc['exceptions_at_lock']}", company_id)
     return _out(doc)
@@ -554,6 +752,16 @@ async def unlock_period(actor: dict, company_id: str, period: str, reason: str) 
         {"company_id": str(company_id), "period": period})
     if not existing or existing.get("status") != LockStatus.LOCKED.value:
         raise HTTPException(status_code=409, detail=f"{period} is not locked.")
+    # Once payroll has locked on this snapshot, attendance stays closed: a correction is a
+    # payroll adjustment in a later month (FRD §8, §18), not a reopened month.
+    from app.models.hrms import COLL_PAYROLL_RUNS, PAYROLL_FINAL_STATUSES
+    run = await get_collection(COLL_PAYROLL_RUNS).find_one(
+        {"company_id": str(company_id), "period": period}, {"status": 1})
+    if (run or {}).get("status") in PAYROLL_FINAL_STATUSES:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Payroll for {period} is already {run['status']} on this attendance. Record "
+                   f"the correction as a post-lock payroll adjustment instead.")
 
     now = datetime.now(timezone.utc)
     entry = {"by": str(actor.get("_id") or ""), "at": now, "reason": reason}
@@ -565,7 +773,7 @@ async def unlock_period(actor: dict, company_id: str, period: str, reason: str) 
     start, end = f"{period}-01", f"{period}-31"
     await get_collection(COLL_ATTENDANCE).update_many(
         {"company_id": str(company_id), "work_date": {"$gte": start, "$lte": end}},
-        {"$set": {"locked": False}})
+        {"$set": {"locked": False, "locked_by": None, "locked_at": None}})
     await audit(actor, AUDIT_ATTENDANCE_UNLOCKED, ENTITY_ATT_LOCK, period, reason, company_id)
     saved = await get_collection(COLL_ATTENDANCE_LOCKS).find_one(
         {"company_id": str(company_id), "period": period})

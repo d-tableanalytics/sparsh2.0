@@ -198,7 +198,7 @@ async def punch(actor: dict, company_id: str, payload: dict) -> dict:
 
     actual_in = hhmm if action == "in" else rec.get("actual_in")
     actual_out = hhmm if action == "out" else rec.get("actual_out")
-    from app.services.hrms_attendance_rules_service import compute_day
+    from app.services.hrms_attendance_rules_service import compute_day, derived_fields
     computed = await compute_day(company_id, code, day, actual_in, actual_out)
     where = {"lat": round(lat, 6), "lng": round(lng, 6),
              "accuracy_m": round(accuracy) if accuracy is not None else None,
@@ -211,9 +211,10 @@ async def punch(actor: dict, company_id: str, payload: dict) -> dict:
                   "actual_in": actual_in, "actual_out": actual_out,
                   "status": computed["status"], "worked_minutes": computed["worked_minutes"],
                   "late_minutes": computed["late_minutes"], "source": "self",
+                  "flexi_no": computed.get("flexi_no"), **derived_fields(computed),
                   f"self_{action}": where, "locked": False, "updated_at": now_utc,
                   "updated_by": str(actor.get("_id") or "")},
-         "$setOnInsert": {"created_at": now_utc}},
+         "$setOnInsert": {"created_at": now_utc, "original_source": "self"}},
         upsert=True)
     await get_collection(COLL_PUNCH_SEGMENTS).insert_one({
         "company_id": str(company_id), "employee_code": code, "work_date": day,

@@ -8,10 +8,13 @@ import React from 'react';
  * variables (--text-main, --text-muted, --border …) so it inherits light/dark theming
  * rather than carrying its own palette.
  */
-const HrmsPageHeader = ({ icon: Icon, title, subtitle, actions }) => (
+const HrmsPageHeader = ({ icon: Icon, title, subtitle, actions, avatarUrl }) => (
   <div className="flex items-start justify-between flex-wrap gap-4 pb-5 border-b border-[var(--border)]">
     <div className="flex items-center gap-3.5">
-      {Icon && (
+      {/* A person's photograph, when the page is about one person and one is on file. */}
+      {avatarUrl ? (
+        <img src={avatarUrl} alt="" className="h-12 w-12 rounded-xl object-cover shrink-0 border border-[var(--border)]" />
+      ) : Icon && (
         <div className="h-10 w-10 rounded-xl bg-[var(--accent-indigo-bg)] text-[var(--accent-indigo)] flex items-center justify-center shrink-0">
           <Icon size={19} />
         </div>

@@ -80,28 +80,61 @@ async def effective_hours(company_id: str, employee_code: str, work_date: str,
         "company_id": str(company_id), "employee_code": employee_code,
         "status": FLEXI_APPROVED, "from_date": {"$lte": work_date},
         "to_date": {"$gte": work_date}})
+    # FRD §5 / §23: the employee's own shift (or the policy that applies to them), in the
+    # version in force on this date -- falling back to the company timing.
+    from app.services.hrms_shift_service import profile_for, resolve_rules
+    profile = await profile_for(company_id, employee_code)
+    rules = await resolve_rules(company_id, profile, work_date, policy=policy)
+    merged = {**policy, **{k: v for k, v in rules.items() if v is not None}}
     if flexi:
         return {"start": flexi["shift_start"], "end": flexi["shift_end"],
-                "flexi_no": flexi.get("flexi_no"), "policy": policy}
-    return {"start": policy["shift_start"], "end": policy["shift_end"], "flexi_no": None,
-            "policy": policy}
+                "flexi_no": flexi.get("flexi_no"), "policy": merged, "rules": rules}
+    return {"start": rules["shift_start"], "end": rules["shift_end"], "flexi_no": None,
+            "policy": merged, "rules": rules}
 
 
 async def compute_day(company_id: str, employee_code: str, work_date: str,
                       actual_in: Optional[str], actual_out: Optional[str],
                       policy: dict = None) -> dict:
     """compute_daily_status against the day's EFFECTIVE hours. Adds `flexi_no` when a
-    flexible timing decided them."""
+    flexible timing decided them, and the shift / rule version that judged the day."""
     hours = await effective_hours(company_id, employee_code, work_date, policy)
     p = hours["policy"]
     out = compute_daily_status(
         scheduled_in=hours["start"], scheduled_out=hours["end"],
         actual_in=actual_in, actual_out=actual_out,
         daily_grace_minutes=p["daily_grace_minutes"],
-        half_day_threshold_minutes=p["half_day_threshold_minutes"])
+        half_day_threshold_minutes=p["half_day_threshold_minutes"],
+        early_going_grace_minutes=p.get("early_going_grace_minutes") or 0,
+        break_minutes=p.get("break_minutes") or 0,
+        min_hours=p.get("min_hours"),
+        absent_threshold_minutes=p.get("absent_threshold_minutes"))
     out["flexi_no"] = hours["flexi_no"]
     out["scheduled_in"], out["scheduled_out"] = hours["start"], hours["end"]
+    rules = hours.get("rules") or {}
+    # A FLEXIBLE shift has core hours, not a start bell: the day is judged by the hours
+    # worked (half-day / minimum-hours rules above still apply), never as late or early.
+    if rules.get("flexible") and not hours["flexi_no"]:
+        out["late_minutes"] = 0
+        out["early_minutes"] = 0
+        out["grace_applied_minutes"] = 0
+        out["flexible"] = True
+    out["shift_code"] = rules.get("shift_code")
+    out["rule_source"] = "flexible timing" if hours["flexi_no"] else rules.get("rule_source")
+    out["rule_version"] = rules.get("shift_version")
     return out
+
+
+DERIVED_DAY_FIELDS = ("scheduled_in", "scheduled_out", "early_minutes", "grace_applied_minutes",
+                      "payable_minutes", "payable_hours", "scheduled_minutes", "payable_day",
+                      "lop_fraction", "missing_out_punch", "shift_code", "rule_source",
+                      "rule_version")
+
+
+def derived_fields(computed: dict) -> dict:
+    """The FRD §6 'Calculated' / 'Payroll' fields every writer of a day stores alongside
+    status / worked / late minutes."""
+    return {k: computed.get(k) for k in DERIVED_DAY_FIELDS if k in computed}
 
 
 # ─────────────────────────────────────────────────────────────
@@ -210,7 +243,7 @@ async def _rejudge_range(company_id: str, code: str, start_d: str, end_d: str) -
             {"company_id": str(company_id), "employee_code": code, "work_date": r["work_date"]},
             {"$set": {"status": c["status"], "late_minutes": c["late_minutes"],
                       "worked_minutes": c["worked_minutes"], "flexi_no": c["flexi_no"],
-                      "updated_at": datetime.now(timezone.utc)}})
+                      **derived_fields(c), "updated_at": datetime.now(timezone.utc)}})
         n += 1
     return n
 
@@ -370,15 +403,21 @@ async def import_biometric(actor: dict, company_id: str, filename: str, raw: byt
             report["skipped"].append({"employee_code": code, "work_date": d,
                                       "reason": f"already {existing.get('status') or existing.get('source')}"})
             continue
+        if not existing and await _month_locked(company_id, d):
+            report["skipped"].append({"employee_code": code, "work_date": d, "reason": "locked"})
+            continue
         c = await compute_day(company_id, code, d, actual_in, actual_out, policy)
         await get_collection(COLL_ATTENDANCE).update_one(
             key,
             {"$set": {**key, "actual_in": actual_in, "actual_out": actual_out,
                       "status": c["status"], "worked_minutes": c["worked_minutes"],
                       "late_minutes": c["late_minutes"], "flexi_no": c["flexi_no"],
-                      "source": "biometric", "locked": False, "updated_at": now,
+                      **derived_fields(c),
+                      "source": "biometric", "source_reference": filename,
+                      "locked": False, "updated_at": now,
                       "updated_by": str(actor.get("_id") or "")},
-             "$setOnInsert": {"created_at": now}},
+             "$setOnInsert": {"created_at": now, "original_in": actual_in,
+                              "original_out": actual_out, "original_source": "biometric"}},
             upsert=True)
         await get_collection(COLL_PUNCH_SEGMENTS).insert_one({
             **key, "punch_in": actual_in, "punch_out": actual_out, "all_punches": times,
@@ -390,6 +429,13 @@ async def import_biometric(actor: dict, company_id: str, filename: str, raw: byt
                 f"{report['days_created']} new, {report['days_updated']} updated, "
                 f"{len(report['skipped'])} skipped, {len(unknown)} unknown code(s)", company_id)
     return report
+
+
+async def _month_locked(company_id: str, work_date: str) -> bool:
+    from app.models.hrms import COLL_ATTENDANCE_LOCKS
+    lock = await get_collection(COLL_ATTENDANCE_LOCKS).find_one(
+        {"company_id": str(company_id), "period": str(work_date)[:7]})
+    return (lock or {}).get("status") == "Locked"
 
 
 # ─────────────────────────────────────────────────────────────

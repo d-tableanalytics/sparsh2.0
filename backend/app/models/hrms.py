@@ -3258,6 +3258,52 @@ class EmployeeProfileIn(BaseModel):
     emergency_contact_name: Optional[str] = None
     emergency_contact_phone: Optional[str] = None
     emergency_contact_relation: Optional[str] = None
+    # Phase 1 FRD §3 -- the rest of the Employee Master. See EmployeeMasterFields below.
+    first_name: Optional[str] = None
+    middle_name: Optional[str] = None
+    last_name: Optional[str] = None
+    display_name: Optional[str] = None
+    marital_status: Optional[str] = None
+    nationality: Optional[str] = None
+    personal_mobile: Optional[str] = None
+    official_mobile: Optional[str] = None
+    personal_email: Optional[str] = None
+    official_email: Optional[str] = None
+    current_address: Optional[dict] = None
+    permanent_address: Optional[dict] = None
+    permanent_same_as_current: Optional[bool] = None
+    emergency_contact_alt_phone: Optional[str] = None
+    employee_category: Optional[str] = None
+    probation_start: Optional[str] = None
+    probation_end: Optional[str] = None
+    confirmation_date: Optional[str] = None
+    legal_entity: Optional[str] = None
+    business_unit: Optional[str] = None
+    work_location: Optional[str] = None
+    sub_department: Optional[str] = None
+    grade: Optional[str] = None
+    level: Optional[str] = None
+    job_title: Optional[str] = None
+    cost_centre: Optional[str] = None
+    reporting_manager_id: Optional[str] = None
+    functional_manager_id: Optional[str] = None
+    shift_code: Optional[str] = None
+    attendance_policy_group: Optional[str] = None
+    weekly_off_pattern: Optional[list[str]] = None
+    holiday_calendar: Optional[str] = None
+    bank_branch: Optional[str] = None
+    bank_account_holder: Optional[str] = None
+    bank_account_type: Optional[str] = None
+    bank_effective_from: Optional[str] = None
+    passport: Optional[str] = None
+    driving_license: Optional[str] = None
+    payroll_group: Optional[str] = None
+    salary_template: Optional[str] = None
+    custom_fields: Optional[dict] = None
+    # When an organisation / reporting / pay-linkage change takes effect, and why. Not
+    # stored on the profile: they go on the history row (FRD §4, last bullet).
+    effective_from: Optional[str] = None
+    change_reason: Optional[str] = None
 
 
 class EmployeeProfileUpdate(BaseModel):
@@ -3286,6 +3332,200 @@ class EmployeeProfileUpdate(BaseModel):
     emergency_contact_name: Optional[str] = None
     emergency_contact_phone: Optional[str] = None
     emergency_contact_relation: Optional[str] = None
+    first_name: Optional[str] = None
+    middle_name: Optional[str] = None
+    last_name: Optional[str] = None
+    display_name: Optional[str] = None
+    marital_status: Optional[str] = None
+    nationality: Optional[str] = None
+    personal_mobile: Optional[str] = None
+    official_mobile: Optional[str] = None
+    personal_email: Optional[str] = None
+    official_email: Optional[str] = None
+    current_address: Optional[dict] = None
+    permanent_address: Optional[dict] = None
+    permanent_same_as_current: Optional[bool] = None
+    emergency_contact_alt_phone: Optional[str] = None
+    employee_category: Optional[str] = None
+    probation_start: Optional[str] = None
+    probation_end: Optional[str] = None
+    confirmation_date: Optional[str] = None
+    legal_entity: Optional[str] = None
+    business_unit: Optional[str] = None
+    work_location: Optional[str] = None
+    sub_department: Optional[str] = None
+    grade: Optional[str] = None
+    level: Optional[str] = None
+    job_title: Optional[str] = None
+    cost_centre: Optional[str] = None
+    reporting_manager_id: Optional[str] = None
+    functional_manager_id: Optional[str] = None
+    shift_code: Optional[str] = None
+    attendance_policy_group: Optional[str] = None
+    weekly_off_pattern: Optional[list[str]] = None
+    holiday_calendar: Optional[str] = None
+    bank_branch: Optional[str] = None
+    bank_account_holder: Optional[str] = None
+    bank_account_type: Optional[str] = None
+    bank_effective_from: Optional[str] = None
+    passport: Optional[str] = None
+    driving_license: Optional[str] = None
+    payroll_group: Optional[str] = None
+    salary_template: Optional[str] = None
+    custom_fields: Optional[dict] = None
+    effective_from: Optional[str] = None
+    change_reason: Optional[str] = None
+
+
+# ── Phase 1 FRD §3/§4 -- Employee Master field groups ──
+# One place that says which profile fields are plain text, which are dates, which come from
+# a company-configured dropdown, and which are effective-dated. The service, the history
+# writer and the duplicate check all read these, so adding a field is a one-line change.
+COLL_EMPLOYEE_HISTORY  = "hrms_employee_history"
+COLL_FIELD_DEFINITIONS = "hrms_field_definitions"
+COLL_SHIFTS            = "hrms_shifts"
+
+MARITAL_STATUSES  = ("Single", "Married", "Divorced", "Widowed", "Separated")
+BANK_ACCOUNT_TYPES = ("Savings", "Current", "Salary", "NRE", "NRO")
+WEEKDAYS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+ADDRESS_KEYS = ("line1", "line2", "city", "district", "state", "pin_code", "country")
+
+EMPLOYEE_TEXT_FIELDS = (
+    "first_name", "middle_name", "last_name", "display_name", "nationality",
+    "emergency_contact_alt_phone", "job_title", "bank_branch", "bank_account_holder",
+    "passport", "driving_license",
+)
+EMPLOYEE_DATE_FIELDS = (
+    ("probation_start", "Probation start"), ("probation_end", "Probation end"),
+    ("confirmation_date", "Confirmation date"), ("bank_effective_from", "Bank effective from"),
+)
+EMAIL_FIELDS  = (("personal_email", "Personal email"), ("official_email", "Official email"))
+MOBILE_FIELDS = (("personal_mobile", "Personal mobile"), ("official_mobile", "Official mobile"),
+                 ("emergency_contact_alt_phone", "Alternate emergency number"))
+
+# Fields whose values come from a company-maintained list (Employee Master settings). An
+# empty list means "not configured yet", and then any text is accepted -- a company that has
+# not set up its locations must still be able to save an employee.
+MASTER_LIST_FIELDS = {
+    "legal_entity":            ("legal_entities", "Company / legal entity"),
+    "business_unit":           ("business_units", "Business unit / branch"),
+    "work_location":           ("locations", "Location"),
+    "sub_department":          ("sub_departments", "Sub-department"),
+    "grade":                   ("grades", "Grade"),
+    "level":                   ("levels", "Level"),
+    "cost_centre":             ("cost_centres", "Cost centre"),
+    "employee_category":       ("employee_categories", "Employee category"),
+    "payroll_group":           ("payroll_groups", "Payroll group"),
+    "salary_template":         ("salary_templates", "Salary structure template"),
+    "attendance_policy_group": ("attendance_policy_groups", "Attendance policy group"),
+    "holiday_calendar":        ("holiday_calendars", "Holiday calendar"),
+}
+MASTER_LIST_KEYS = tuple(sorted({v[0] for v in MASTER_LIST_FIELDS.values()}))
+
+# Changes to these are effective-dated and written to hrms_employee_history; a future
+# effective date SCHEDULES the change instead of applying it (FRD §4, §18).
+EMPLOYEE_TRACKED_FIELDS = (
+    "department_id", "designation_id", "sub_department", "grade", "level", "job_title",
+    "legal_entity", "business_unit", "work_location", "cost_centre", "employee_category",
+    "employment_type", "employment_status", "reporting_manager_id", "functional_manager_id",
+    "payroll_group", "salary_template", "shift_code", "attendance_policy_group",
+    "weekly_off_pattern", "holiday_calendar", "base_salary",
+    "bank_name", "bank_account", "bank_ifsc", "bank_branch", "bank_account_holder",
+    "bank_account_type",
+)
+# Never echoed in full to someone without sensitive-data access (FRD §18).
+EMPLOYEE_MASKED_FIELDS = ("bank_account", "pan", "aadhaar", "passport")
+# Values that identify one person; a second employee carrying one is a duplicate (FRD §4).
+EMPLOYEE_DUPLICATE_FIELDS = (
+    ("pan", "PAN"), ("aadhaar", "Aadhaar"), ("uan", "UAN"), ("passport", "Passport"),
+    ("personal_email", "Personal email"), ("official_email", "Official email"),
+    ("personal_mobile", "Personal mobile"), ("bank_account", "Bank account"),
+)
+HISTORY_APPLIED, HISTORY_SCHEDULED, HISTORY_CANCELLED = "Applied", "Scheduled", "Cancelled"
+AUDIT_EMPLOYEE_CHANGE_SCHEDULED = "employee change scheduled"
+AUDIT_EMPLOYEE_CHANGE_CANCELLED = "employee change cancelled"
+AUDIT_MASTER_LISTS_SAVED = "employee master lists saved"
+
+
+class EmployeeMasterListsIn(BaseModel):
+    """The dropdown sources for the Employee Master (FRD §3 Organisation / Work setup)."""
+    lists: dict[str, list[str]]
+
+
+# ── FRD §21-22 -- configurable fields ──
+class FieldDataType(str, Enum):
+    TEXT = "text"
+    LONG_TEXT = "long_text"
+    NUMBER = "number"
+    DECIMAL = "decimal"
+    CURRENCY = "currency"
+    DATE = "date"
+    DATETIME = "datetime"
+    BOOLEAN = "boolean"
+    SINGLE_SELECT = "single_select"
+    MULTI_SELECT = "multi_select"
+    EMPLOYEE_LOOKUP = "employee_lookup"
+    MASTER_LOOKUP = "master_lookup"
+    DOCUMENT = "document"
+
+
+class FieldStatus(str, Enum):
+    DRAFT = "Draft"
+    ACTIVE = "Active"
+    RETIRED = "Retired"
+
+
+FIELD_MODULES = ("employee", "attendance")
+AUDIT_FIELD_DEFINITION_SAVED = "configurable field saved"
+AUDIT_FIELD_DEFINITION_STATUS = "configurable field status changed"
+ENTITY_FIELD_DEFINITION = "field_definition"
+
+
+class FieldOptionIn(BaseModel):
+    value: str
+    label: Optional[str] = None
+    active: bool = True
+
+
+class FieldDefinitionIn(BaseModel):
+    module: str = "employee"
+    code: str
+    label: str
+    section: Optional[str] = None
+    help_text: Optional[str] = None
+    data_type: FieldDataType = FieldDataType.TEXT
+    options: list[FieldOptionIn] = []
+    master_list: Optional[str] = None          # MASTER_LOOKUP source (a MASTER_LIST_KEYS key)
+    mandatory: bool = False
+    read_only: bool = False
+    default_value: Optional[str] = None
+    unique: bool = False
+    searchable: bool = False
+    filterable: bool = False
+    exportable: bool = True
+    show_in_list: bool = False
+    sensitive: bool = False
+    visible_to_self: bool = True
+    visible_to_manager: bool = True
+    visible_to_payroll: bool = False
+    min_length: Optional[int] = None
+    max_length: Optional[int] = None
+    min_value: Optional[float] = None
+    max_value: Optional[float] = None
+    pattern: Optional[str] = None
+    pattern_message: Optional[str] = None
+    min_date: Optional[str] = None
+    max_date: Optional[str] = None
+    display_order: int = 100
+    applicability: dict = {}                   # {departments, locations, grades, ...: [values]}
+    effective_from: Optional[str] = None
+    effective_to: Optional[str] = None
+    change_reason: Optional[str] = None
+
+
+class FieldStatusIn(BaseModel):
+    status: FieldStatus
+    reason: Optional[str] = None
 
 
 # =============================================================
@@ -5054,6 +5294,17 @@ class PublicOnboardIn(BaseModel):
     emergency_contact_name: Optional[str] = None
     emergency_contact_phone: Optional[str] = None
     emergency_contact_relation: Optional[str] = None
+    # Declared so they reach the validator: without these Pydantic dropped them at the
+    # public route, and the statutory / permanent-address details never arrived.
+    permanent_address: Optional[str] = None
+    personal_email: Optional[str] = None
+    personal_phone: Optional[str] = None
+    bank_branch: Optional[str] = None
+    bank_account_name: Optional[str] = None
+    uan: Optional[str] = None
+    esic_number: Optional[str] = None
+    pf_number: Optional[str] = None
+    previous_employer: Optional[str] = None
     references: List[dict] = Field(default_factory=list)   # [{name, relation, phone}]
     asset_requirements: Optional[str] = None
     documents: List[UploadIn] = Field(default_factory=list)
@@ -6290,6 +6541,10 @@ class HolidayIn(BaseModel):
     """One non-working day on this company's HRMS calendar (Phase INT-6)."""
     holiday_date: str                              # YYYY-MM-DD
     holiday_name: str
+    # Phase 1 FRD §5: applicability. Both empty = a holiday for everyone. `calendar` names a
+    # holiday calendar from the Employee Master lists; `locations` limits it to those places.
+    calendar: Optional[str] = None
+    locations: list[str] = []
 
 
 class HolidayImportIn(BaseModel):
@@ -8390,7 +8645,10 @@ DEFAULT_LEAVE_TYPES = [
 
 def compute_daily_status(*, scheduled_in: str, scheduled_out: str,
                           actual_in: Optional[str], actual_out: Optional[str],
-                          daily_grace_minutes: int, half_day_threshold_minutes: int) -> dict:
+                          daily_grace_minutes: int, half_day_threshold_minutes: int,
+                          early_going_grace_minutes: int = 0, break_minutes: int = 0,
+                          min_hours: Optional[float] = None,
+                          absent_threshold_minutes: Optional[int] = None) -> dict:
     """The §7.8 daily engine's arithmetic, pure — no DB, no clock, testable standalone
     (matches notice_days_for's discipline in Phase EXIT-1). All timing PARAMETERS come from
     the caller's policy lookup; nothing here is a hardcoded company number.
@@ -8402,24 +8660,49 @@ def compute_daily_status(*, scheduled_in: str, scheduled_out: str,
         h, m = hhmm.split(":")
         return int(h) * 60 + int(m)
 
-    if not actual_in:
-        return {"status": AttendanceStatus.ABSENT.value, "worked_minutes": 0, "late_minutes": 0}
+    sched_in_m, sched_out_m = _mins(scheduled_in), _mins(scheduled_out)
+    scheduled_minutes = max(0, sched_out_m - sched_in_m - (break_minutes or 0))
 
-    sched_in_m = _mins(scheduled_in)
+    def _result(status, worked, late, early, grace_applied, missing_out=False):
+        payable_day = {AttendanceStatus.PRESENT.value: 1.0,
+                       AttendanceStatus.HALF_DAY.value: 0.5}.get(status, 0.0)
+        payable_minutes = max(0, min(worked - (break_minutes or 0), scheduled_minutes)) \
+            if worked else 0
+        return {"status": status, "worked_minutes": worked, "late_minutes": late,
+                "early_minutes": early, "grace_applied_minutes": grace_applied,
+                "payable_minutes": payable_minutes,
+                "payable_hours": round(payable_minutes / 60.0, 2),
+                "scheduled_minutes": scheduled_minutes,
+                "payable_day": payable_day, "lop_fraction": round(1 - payable_day, 2),
+                "missing_out_punch": missing_out}
+
+    if not actual_in:
+        return _result(AttendanceStatus.ABSENT.value, 0, 0, 0, 0)
+
     in_m = _mins(actual_in)
-    late_minutes = max(0, in_m - sched_in_m - daily_grace_minutes)
+    arrived_after = max(0, in_m - sched_in_m)
+    grace_applied = min(arrived_after, daily_grace_minutes or 0)
+    late_minutes = max(0, arrived_after - (daily_grace_minutes or 0))
 
     if not actual_out:
         # Present with an open/missing out-punch — the daily status still resolves; the
-        # missing out-punch itself becomes a regularisation candidate (§7.8 step 61).
-        return {"status": AttendanceStatus.PRESENT.value, "worked_minutes": 0,
-                "late_minutes": late_minutes}
+        # missing out-punch itself becomes a regularisation candidate (§7.8 step 61) and is
+        # counted as an exception at month-end closure.
+        return _result(AttendanceStatus.PRESENT.value, 0, late_minutes, 0, grace_applied,
+                       missing_out=True)
 
     out_m = _mins(actual_out)
     worked_minutes = max(0, out_m - in_m)
-    status = (AttendanceStatus.HALF_DAY.value if worked_minutes < half_day_threshold_minutes
-              else AttendanceStatus.PRESENT.value)
-    return {"status": status, "worked_minutes": worked_minutes, "late_minutes": late_minutes}
+    early_minutes = max(0, sched_out_m - out_m - (early_going_grace_minutes or 0))
+    if absent_threshold_minutes and worked_minutes < absent_threshold_minutes:
+        status = AttendanceStatus.ABSENT.value
+    elif worked_minutes < half_day_threshold_minutes:
+        status = AttendanceStatus.HALF_DAY.value
+    elif min_hours and worked_minutes < float(min_hours) * 60:
+        status = AttendanceStatus.HALF_DAY.value
+    else:
+        status = AttendanceStatus.PRESENT.value
+    return _result(status, worked_minutes, late_minutes, early_minutes, grace_applied)
 
 
 ENTITY_ATTENDANCE   = "attendance"
@@ -8461,6 +8744,10 @@ class AttendanceMarkIn(BaseModel):
     actual_out: Optional[str] = None
     override_status: Optional[AttendanceStatus] = None   # explicit Weekly Off / Holiday / Leave
     notes: Optional[str] = None
+    # FRD §5 Attendance Source / §6 Identity: where the punch came from, and its reference.
+    source: Optional[str] = None                 # Manual / Google / API / Biometric / Import
+    source_reference: Optional[str] = None
+    custom_fields: Optional[dict] = None         # configurable attendance fields (FRD §21)
 
 
 class RegularizationIn(BaseModel):
@@ -8493,6 +8780,26 @@ class OdActionIn(BaseModel):
 
 class AttendanceLockIn(BaseModel):
     period: str                                   # YYYY-MM
+
+
+class AttendanceLockOverrideIn(BaseModel):
+    """Locking with exceptions still open is the lock authority's call (FRD §5 Monthly
+    Cut-off), and it is recorded with a reason -- never silent."""
+    override_reason: Optional[str] = None
+
+
+ATTENDANCE_SOURCES = ("Manual", "Google", "API", "Biometric", "Import", "Self")
+# Extra attendance rules stored with the company shift policy (FRD §5, §23).
+DEFAULT_ATTENDANCE_RULES = {
+    "regularisation_window_days": 7,          # how far back a correction may be requested
+    "regularisation_evidence_required": False,
+    "attendance_closing_day": 26,              # month-end cut-off (informational)
+    "weekly_off_pattern": ["Sunday"],
+    "early_going_grace_minutes": 0,
+    "break_minutes": 0,
+    "min_hours": None,
+    "absent_threshold_minutes": None,
+}
 
 
 class AttendanceUnlockIn(BaseModel):
@@ -8823,14 +9130,68 @@ class NomineeDetailsIn(BaseModel):
 class ComponentType(str, Enum):
     EARNING   = "Earning"
     DEDUCTION = "Deduction"
+    # Phase 1 FRD §24 -- the rest of the component types.
+    EMPLOYER_CONTRIBUTION = "Employer Contribution"   # cost to company, never in net pay
+    REIMBURSEMENT = "Reimbursement"                   # paid, not prorated by default
+    RECOVERY      = "Recovery"                        # deducted, like a deduction
+    INFORMATIONAL = "Informational"                   # shown, never summed
+
+
+# How each type moves money. Earnings and reimbursements add to gross; deductions and
+# recoveries reduce net; employer contributions are reported beside net, never in it.
+EARNING_TYPES   = {ComponentType.EARNING.value, ComponentType.REIMBURSEMENT.value}
+DEDUCTING_TYPES = {ComponentType.DEDUCTION.value, ComponentType.RECOVERY.value}
+
+
+class CalculationMethod(str, Enum):
+    FIXED      = "Fixed"
+    PERCENTAGE = "Percentage"      # of a base: another component, GROSS or CTC
+    MANUAL     = "Manual Input"    # entered per payroll run
+    FORMULA    = "Formula"         # a controlled expression (hrms_formula_engine)
+    SLAB       = "Slab"            # a slab / table on a base value, e.g. Professional Tax
+
+
+class ProrationRule(str, Enum):
+    PAYABLE_DAYS = "Payable Days"
+    NONE         = "None"
+
+
+class RoundingRule(str, Enum):
+    NONE    = "None"
+    NEAREST = "Nearest"
+    FLOOR   = "Floor"
+    CEILING = "Ceiling"
+
+
+class PayslipSection(str, Enum):
+    REGULAR_EARNINGS = "Regular Earnings"
+    OTHER_EARNINGS   = "Other Earnings"
+    DEDUCTIONS       = "Deductions"
+    EMPLOYER         = "Employer Contribution"
+    HIDDEN           = "Hidden"
+
+
+class StructureStatus(str, Enum):
+    PENDING  = "Pending Approval"
+    ACTIVE   = "Active"
+    REJECTED = "Rejected"
 
 
 class PayrollRunStatus(str, Enum):
     DRAFT      = "Draft"
     CALCULATED = "Calculated"
-    APPROVED   = "Approved"
+    SUBMITTED  = "Submitted"    # maker -> checker (FRD §12 stage 7)
+    APPROVED   = "Approved"     # checker approved; Finance still to lock
     LOCKED     = "Locked"
     REJECTED   = "Rejected"     # sent back to the maker with a comment
+    RETURNED   = "Returned"     # returned for correction (FRD §12 stage 8)
+    PAID       = "Paid"         # every payable employee's payment confirmed
+    CLOSED     = "Closed"       # period closed after payment (FRD §12 stage 13)
+
+
+# The maker may change inputs only while the run is in their hands.
+PAYROLL_EDITABLE_STATUSES = {"Draft", "Calculated", "Returned", "Rejected"}
+PAYROLL_FINAL_STATUSES = {"Locked", "Paid", "Closed"}
 
 
 class AdvanceStatus(str, Enum):
@@ -8923,11 +9284,28 @@ class SalaryComponentIn(BaseModel):
     component_type: ComponentType
     statutory: bool = False
     active: bool = True
+    # Phase 1 FRD §24 -- component behaviour, configured rather than coded.
+    calculation_method: Optional[CalculationMethod] = None
+    calculation_base: Optional[str] = None         # a component code, GROSS or CTC
+    percentage: Optional[float] = None
+    proration: Optional[ProrationRule] = None
+    rounding: Optional[RoundingRule] = None
+    min_amount: Optional[float] = None
+    max_amount: Optional[float] = None
+    sequence: Optional[int] = None
+    payslip_section: Optional[PayslipSection] = None
+    frequency: Optional[str] = None                # Monthly / One-time / Quarterly / Annual / Ad hoc
+    accounting_code: Optional[str] = None
+    description: Optional[str] = None
+    formula: Optional[str] = None                  # method Formula
+    slabs: Optional[list[dict]] = None             # method Slab: [{upto, amount | percent}]
+    change_reason: Optional[str] = None
 
 
 class SalaryStructureComponentIn(BaseModel):
     code: str
-    amount: float
+    amount: float = 0
+    percentage: Optional[float] = None             # overrides the component's own percentage
 
 
 class SalaryStructureIn(BaseModel):
@@ -8938,14 +9316,32 @@ class SalaryStructureIn(BaseModel):
     employee_code: str
     effective_from: str                            # YYYY-MM-DD
     components: list[SalaryStructureComponentIn]
+    # Phase 1 FRD §9
+    structure_name: Optional[str] = None           # template / structure name
+    revision_reason: Optional[str] = None
+    annual_ctc: Optional[float] = None
+    payroll_group: Optional[str] = None
+    comments: Optional[str] = None
+
+
+class StructureDecisionIn(BaseModel):
+    approved: bool
+    comments: Optional[str] = None
 
 
 class PayslipTemplateIn(BaseModel):
-    """SM-HR-064 — deliberately thin; see hrms_payslip_service.py's module docstring for
-    why full statutory/component theming waits on the payroll workshop §7.13 itself names."""
+    """SM-HR-064, extended for FRD §14: the layout options a company signs off on. Every
+    save is a new VERSION, and a locked payroll keeps the version it was released with."""
     company_name: Optional[str] = None
     header_note: Optional[str] = None
     footer_note: Optional[str] = None
+    company_address: Optional[str] = None
+    show_lop_days: Optional[bool] = None
+    show_identifiers: Optional[bool] = None
+    show_bank: Optional[bool] = None
+    show_employer_contributions: Optional[bool] = None
+    hide_zero_lines: Optional[bool] = None
+    show_net_in_words: Optional[bool] = None
 
 
 class PayrollRunCreateIn(BaseModel):
@@ -8963,6 +9359,7 @@ class PayrollRecordAdjustIn(BaseModel):
     arrears: Optional[float] = None
     reimbursements: Optional[float] = None
     other_earnings: Optional[float] = None
+    bonus: Optional[float] = None                  # FRD §10 "Bonus where applicable"
     other_deductions: Optional[float] = None
     notice_recovery: Optional[float] = None
     remarks: Optional[str] = None
@@ -8974,6 +9371,9 @@ class PayrollAdjustmentItemIn(BaseModel):
     buckets PayrollRecordAdjustIn still covers alongside this."""
     code: str
     amount: float
+    # FRD §10 Manual Adjustment: type comes from the component; these say why and from where.
+    reason: Optional[str] = None
+    reference: Optional[str] = None
 
 
 class PayrollAdjustmentsIn(BaseModel):
@@ -8984,8 +9384,77 @@ class PayrollAdjustmentsIn(BaseModel):
 
 
 class PayrollApprovalIn(BaseModel):
-    approved: bool
+    # FRD §12 stage 8: approve, reject or RETURN. `approved` is kept for older clients.
+    approved: Optional[bool] = None
+    action: Optional[str] = None                   # approve / reject / return
     remarks: Optional[str] = None
+
+
+class PayrollRemarksIn(BaseModel):
+    remarks: Optional[str] = None
+
+
+class PayrollPolicyIn(BaseModel):
+    """Payroll controls (FRD §19, §24 Payroll Policy). Adjustable, not frozen."""
+    require_attendance_lock: Optional[bool] = None
+    variance_threshold_percent: Optional[float] = None
+    structure_approval_required: Optional[bool] = None
+    payslip_release: Optional[str] = None          # on_lock / after_payment
+    input_cutoff_day: Optional[int] = None
+    net_rounding: Optional[RoundingRule] = None
+    # LOP "sandwich" rule (FRD §23 LOP): a weekly off / holiday between LOP days is LOP.
+    sandwich_weekly_off: Optional[bool] = None
+
+
+class PostLockAdjustmentIn(BaseModel):
+    """FRD §18: locked payroll is never edited in place -- a correction is an arrear,
+    recovery or reversal carried into a later period."""
+    employee_code: str
+    adjustment_type: str                           # Arrear / Recovery / Reversal
+    amount: float
+    reason: str
+    target_period: Optional[str] = None            # defaults to the next period
+
+
+DEFAULT_PAYROLL_POLICY = {
+    "require_attendance_lock": True,
+    "variance_threshold_percent": 10.0,
+    "structure_approval_required": False,
+    "payslip_release": "on_lock",
+    "input_cutoff_day": 25,
+    "net_rounding": "None",
+    "sandwich_weekly_off": True,
+}
+COLL_PAYROLL_CARRY_FORWARD = "hrms_payroll_carry_forwards"
+COLL_PAYSLIP_TEMPLATE_VERSIONS = "hrms_payslip_template_versions"
+COLL_PAYMENT_BATCHES = "hrms_payment_batches"
+COLL_PAYMENTS = "hrms_payments"
+AUDIT_PAYROLL_SUBMITTED = "payroll submitted for approval"
+AUDIT_PAYROLL_LOCKED = "payroll locked"
+AUDIT_PAYROLL_CLOSED = "payroll period closed"
+AUDIT_PAYROLL_POLICY_SAVED = "payroll policy saved"
+AUDIT_POST_LOCK_ADJUSTMENT = "post-lock payroll adjustment recorded"
+AUDIT_STRUCTURE_DECIDED = "salary structure decided"
+AUDIT_PAYMENT_BATCH = "salary payment batch generated"
+AUDIT_PAYMENT_FILE = "bank payment file downloaded"
+AUDIT_PAYMENT_STATUS = "salary payment status recorded"
+ENTITY_PAYMENT_BATCH = "payment_batch"
+
+
+class PaymentBatchIn(BaseModel):
+    payment_mode: Optional[str] = None             # NEFT / RTGS / IMPS / Cheque / Cash / Manual advice
+    retry_of: Optional[str] = None                 # a batch whose FAILED payments are reprocessed
+
+
+class PaymentStatusIn(BaseModel):
+    status: str                                    # Pending / Processed / Failed / Rejected
+    utr: Optional[str] = None
+    payment_date: Optional[str] = None
+    failure_reason: Optional[str] = None
+
+
+class PaymentStatusImportIn(BaseModel):
+    rows: list[dict]                               # [{employee_code, status, utr, payment_date, failure_reason}]
 
 
 class AdvancePolicyIn(BaseModel):
@@ -9415,3 +9884,29 @@ class PulseSubmitIn(BaseModel):
 _seed_client_track_caps()
 _seed_client_decision_caps()
 _seed_client_owned_caps()
+
+
+# =============================================================
+# Phase 1 FRD (Configurable Employee, Attendance & Payroll) -- indexes and numbering
+# =============================================================
+HRMS_INDEXES.extend([
+    (COLL_EMPLOYEE_HISTORY, [("company_id", 1), ("employee_code", 1), ("changed_at", -1)],
+     {"name": "by_employee_changed"}),
+    (COLL_EMPLOYEE_HISTORY, [("company_id", 1), ("status", 1), ("effective_from", 1)],
+     {"name": "by_status_effective"}),
+    (COLL_FIELD_DEFINITIONS, [("company_id", 1), ("module", 1), ("code", 1)],
+     {"unique": True, "name": "uniq_field_code"}),
+    (COLL_SHIFTS, [("company_id", 1), ("code", 1)], {"unique": True, "name": "uniq_shift_code"}),
+    (COLL_PAYROLL_CARRY_FORWARD, [("company_id", 1), ("target_period", 1), ("status", 1)],
+     {"name": "by_target_status"}),
+    (COLL_PAYSLIP_TEMPLATE_VERSIONS, [("company_id", 1), ("version", 1)],
+     {"unique": True, "name": "uniq_template_version"}),
+    (COLL_PAYMENT_BATCHES, [("company_id", 1), ("batch_no", 1)],
+     {"unique": True, "name": "uniq_batch_no"}),
+    (COLL_PAYMENT_BATCHES, [("company_id", 1), ("period", 1)], {"name": "by_period"}),
+    (COLL_PAYMENTS, [("company_id", 1), ("batch_no", 1), ("employee_code", 1)],
+     {"unique": True, "name": "uniq_batch_employee"}),
+    (COLL_PAYMENTS, [("company_id", 1), ("period", 1), ("employee_code", 1)],
+     {"name": "by_period_employee"}),
+])
+ID_FORMATS["payment_batch"] = ("PAYB", True, 3)   # PAYB-2026-001

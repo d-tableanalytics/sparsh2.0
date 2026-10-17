@@ -85,6 +85,8 @@ import EmployeeProfile from './features/hrms/people/EmployeeProfile';
 // ── Phase 360-1 — Employee 360° (§6) ──
 import Employee360 from './features/hrms/people/Employee360';
 import MasterManager from './features/hrms/people/MasterManager';
+// Phase 1 FRD — Employee Master Setup: dropdown lists + configurable fields (§3, §21-22).
+import EmployeeMasterSetup from './features/hrms/people/EmployeeMasterSetup';
 import JdLibrary from './features/hrms/recruitment/JdLibrary';
 import PostingList from './features/hrms/recruitment/PostingList';
 import CandidatePipeline from './features/hrms/recruitment/CandidatePipeline';
@@ -379,6 +381,7 @@ const AppRoutes = () => {
         <Route path="employees/:userId/360" element={<Employee360 />} />
         <Route path="departments"        element={<MasterManager kind="department" />} />
         <Route path="designations"       element={<MasterManager kind="designation" />} />
+        <Route path="employee-master-setup" element={<EmployeeMasterSetup />} />
         {/* Recruitment — requisitions + their co-approved job descriptions (Phase 3). */}
         {/* The generic "both tracks" requisition list is superseded by the internal
             requisition experience (gates, SLA, escalation) now that every requisition runs

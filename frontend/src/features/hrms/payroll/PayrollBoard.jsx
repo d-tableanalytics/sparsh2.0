@@ -1,40 +1,45 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Wallet, Search, Landmark, HandCoins, TrendingUp, X } from 'lucide-react';
+import { Wallet, Search, Landmark, HandCoins, TrendingUp, Settings2, Plus } from 'lucide-react';
 import { useHrms } from '../HrmsContext';
 import { CAP, HRMS_ROLE } from '../access';
 import HrmsPageHeader from '../common/HrmsPageHeader';
 import BoardTabs from '../common/BoardTabs';
 import HrmsScopeBar from '../common/HrmsScopeBar';
-import { ProcessGuide, NextStep, NextStepBanner } from '../common/ProcessGuide';
+import { ProcessGuide, NextStep } from '../common/ProcessGuide';
 import { PAYROLL_GUIDE, payrollNextStep } from '../common/processGuides';
 import { HrmsLoading, HrmsError, HrmsEmpty } from '../common/HrmsStates';
 import { useNotification } from '../../../context/NotificationContext';
 import {
   getEmployees,
   listSalaryComponents, saveSalaryComponent,
-  createPayrollRun, listPayrollRuns, getPayrollRun, calculatePayroll, listPayrollRecords,
-  adjustPayrollRecord, decidePayrollRun,
+  createPayrollRun, listPayrollRuns,
   getAdvancePolicy, saveAdvancePolicy, checkAdvanceEligibility, getMyAdvanceEligibility,
   requestAdvance, listAdvances,
   actOnAdvance, actOnAdvanceEmergency,
   getVariablePayPolicy, saveVariablePayPolicy, createVariablePayQuarter, listVariablePayQuarters,
   saveVariablePayRecord, listVariablePayRecords, calculateVariablePay, decideVariablePayQuarter,
   listVariablePayHoldLedger, actOnVariablePayHold,
-  getPayslipTemplate, savePayslipTemplate, listPayslips, setPayrollAdjustments,
 } from '../../../services/hrmsApi';
-import Payslip, { PayslipDocument } from './Payslip';
+import Payslip from './Payslip';
 import EmployeeSalaryStructure from './EmployeeSalaryStructure';
+import RunDetailModal from './RunDetail';
+import PayrollPolicyModal from './PayrollPolicy';
+import PayslipTemplateTab from './PayslipTemplate';
+import { ComponentList, ComponentEditorModal } from './ComponentEditor';
+import { runTone, componentPayload, errText, useSubmit } from './payrollKit';
 import { FIELD, LABEL, TEXTAREA, money, attLeaveToneFor } from '../internal/internalKit';
 import { Btn, Chip, Facts, Modal, RecordList } from '../internal/internalKit.jsx';
 
 /**
- * HRMS ▸ Payroll, Salary Advance & Variable Pay (BA/Functional Design §7.13-7.15, §22.7).
+ * HRMS ▸ Payroll, Salary Advance & Variable Pay (BA/Functional Design §7.13-7.15, §22.7;
+ * Phase 1 FRD §9-§14, §18, §24).
  *
- * Four tabs, the same shape every Phase-N board in this module uses. Payroll is
- * component-driven (§22.7): a small configurable component master plus a per-employee
- * structure, not a fixed set of fields. No statutory engine exists (§7.13 BR: "requires
- * payroll workshop"), so PF/ESI/PT/TDS are always hand-entered per run, the same honesty
- * FnfInput already models for the missing payroll engine elsewhere in this module.
+ * Tabs, the same shape every Phase-N board in this module uses. Payroll is component-driven
+ * (§22.7, FRD §24): a configurable component master — fixed, percentage or typed-in lines —
+ * plus an effective-dated structure per employee. A month moves through maker-checker
+ * stages (calculate → submit → check → lock → pay → close); the run itself, its
+ * disbursal and its post-lock corrections live in RunDetail.jsx and its siblings. No
+ * statutory engine exists (§7.13 BR), so PF/ESI/PT/TDS are still hand-entered per run.
  */
 
 const TABS = ['Payroll Runs', 'Salary Structure', 'Salary Advance', 'Variable Pay',
@@ -103,23 +108,6 @@ const EmployeePicker = ({ scope, value, onChange, placeholder }) => {
   );
 };
 
-const useSubmit = (showSuccess, showError, onDone) => {
-  const [busy, setBusy] = useState(false);
-  const run = async (fn, successMsg) => {
-    setBusy(true);
-    try {
-      await fn();
-      if (successMsg) showSuccess(successMsg);
-      onDone();
-    } catch (err) {
-      showError(err?.response?.data?.detail || 'That action could not be completed.');
-    } finally {
-      setBusy(false);
-    }
-  };
-  return { busy, run };
-};
-
 const PayrollBoard = () => {
   const { scope, companyId, can, role } = useHrms();
   const { showSuccess, showError } = useNotification();
@@ -185,11 +173,16 @@ const PayrollBoard = () => {
 
 // ── Payroll Runs tab ──
 const PayrollRunsTab = ({ scope, companyId, can, showSuccess, showError }) => {
+  const { role } = useHrms();
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [creating, setCreating] = useState(false);
   const [openPeriod, setOpenPeriod] = useState(null);
+  const [policyOpen, setPolicyOpen] = useState(false);
+
+  const canApprove = can(CAP.PAYROLL_APPROVE);
+  const nextStep = (r) => payrollNextStep(r, { canApprove });
 
   const load = useCallback(async () => {
     if (!companyId) { setLoading(false); return; }
@@ -198,7 +191,7 @@ const PayrollRunsTab = ({ scope, companyId, can, showSuccess, showError }) => {
       const { data } = await listPayrollRuns(scope);
       setRows(data || []);
     } catch (err) {
-      setError(err?.response?.data?.detail || 'Could not load payroll runs.');
+      setError(errText(err, 'Could not load payroll runs.'));
     } finally {
       setLoading(false);
     }
@@ -207,17 +200,40 @@ const PayrollRunsTab = ({ scope, companyId, can, showSuccess, showError }) => {
 
   useEffect(() => { load(); }, [load]);
 
+  const exceptionsNote = (r) => {
+    const t = r.totals;
+    if (!t?.exceptions) return null;
+    return (
+      <span className={`block text-[11px] ${t.critical_exceptions ? 'text-[var(--accent-red)] font-bold' : 'text-[var(--accent-orange)]'}`}>
+        {t.critical_exceptions ? `${t.critical_exceptions} critical · ` : ''}{t.exceptions} exception(s)
+      </span>
+    );
+  };
+
   const columns = [
     { key: 'period', label: 'Period', render: (r) => (
       <>
         <span className="font-semibold text-[var(--text-main)]">{r.period}</span>
-        <NextStep step={payrollNextStep(r)} className="mt-1.5" />
+        <NextStep step={nextStep(r)} className="mt-1.5" />
       </>
     ) },
-    { key: 'eligible', label: 'Eligible', render: (r) => <span>{r.eligible_count}</span> },
+    { key: 'headcount', label: 'Employees', render: (r) => (
+      <>
+        <span>{r.totals?.headcount ?? r.eligible_count}</span>
+        {exceptionsNote(r)}
+      </>
+    ) },
+    { key: 'net', label: 'Net pay', render: (r) => (
+      <>
+        <span className="font-semibold">{money(r.totals?.net)}</span>
+        {r.totals && (
+          <span className="block text-[11px] text-[var(--text-muted)]">Gross {money(r.totals.gross)}</span>
+        )}
+      </>
+    ) },
     { key: 'status', label: 'Status', align: 'right', render: (r) => (
       <div className="flex flex-col items-end gap-1.5">
-        <Chip tone={attLeaveToneFor(r.status)}>{r.status}</Chip>
+        <Chip tone={runTone(r.status)}>{r.status}</Chip>
         <Btn tone="ghost" onClick={() => setOpenPeriod(r.period)}>Open</Btn>
       </div>
     ) },
@@ -225,7 +241,10 @@ const PayrollRunsTab = ({ scope, companyId, can, showSuccess, showError }) => {
 
   return (
     <div className="space-y-4">
-      <div className="flex justify-end">
+      <div className="flex flex-wrap justify-end gap-2">
+        {(can(CAP.PAYROLL_PROCESS) || canApprove || role === HRMS_ROLE.MD) && (
+          <Btn onClick={() => setPolicyOpen(true)}><Settings2 size={14} /> Payroll Policy</Btn>
+        )}
         {can(CAP.PAYROLL_PROCESS) && (
           <Btn tone="primary" onClick={() => setCreating(true)}><Landmark size={14} /> Create Run</Btn>
         )}
@@ -239,10 +258,16 @@ const PayrollRunsTab = ({ scope, companyId, can, showSuccess, showError }) => {
               <div className="space-y-2">
                 <div className="flex items-start justify-between gap-2">
                   <p className="text-[13px] font-bold text-[var(--text-main)]">{r.period}</p>
-                  <Chip tone={attLeaveToneFor(r.status)}>{r.status}</Chip>
+                  <Chip tone={runTone(r.status)}>{r.status}</Chip>
                 </div>
-                <Facts items={[{ label: 'Eligible', value: r.eligible_count }]} />
-                <NextStep step={payrollNextStep(r)} />
+                <Facts items={[
+                  { label: 'Employees', value: r.totals?.headcount ?? r.eligible_count },
+                  { label: 'Net pay', value: r.totals ? money(r.totals.net) : null },
+                  { label: 'Exceptions', value: r.totals?.exceptions
+                    ? `${r.totals.exceptions}${r.totals.critical_exceptions ? ` (${r.totals.critical_exceptions} critical)` : ''}`
+                    : null },
+                ]} />
+                <NextStep step={nextStep(r)} />
                 <Btn tone="ghost" onClick={() => setOpenPeriod(r.period)}>Open</Btn>
               </div>
             )}
@@ -260,6 +285,11 @@ const PayrollRunsTab = ({ scope, companyId, can, showSuccess, showError }) => {
       {openPeriod && (
         <RunDetailModal period={openPeriod} scope={scope} can={can}
           onClose={() => setOpenPeriod(null)} onDone={() => load()}
+          showSuccess={showSuccess} showError={showError} />
+      )}
+      {policyOpen && (
+        <PayrollPolicyModal scope={scope} canEdit={can(CAP.PAYROLL_PROCESS)}
+          onClose={() => setPolicyOpen(false)} onDone={() => setPolicyOpen(false)}
           showSuccess={showSuccess} showError={showError} />
       )}
     </div>
@@ -290,302 +320,18 @@ const CreateRunModal = ({ scope, onClose, onDone, showSuccess, showError }) => {
   );
 };
 
-const RunDetailModal = ({ period, scope, can, onClose, onDone, showSuccess, showError }) => {
-  const [runInfo, setRunInfo] = useState(null);
-  const [records, setRecords] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
-  const [adjusting, setAdjusting] = useState(null);
-  const [viewingPayslip, setViewingPayslip] = useState(null);
-  const [allPayslips, setAllPayslips] = useState(null);
-  const [loadingAll, setLoadingAll] = useState(false);
-  const [decisionRemarks, setDecisionRemarks] = useState('');
-  const { busy, run } = useSubmit(showSuccess, showError, () => { load(); onDone(); });
-
-  const openAllPayslips = async () => {
-    setLoadingAll(true);
-    try {
-      const { data } = await listPayslips(period, scope);
-      setAllPayslips(data || []);
-    } catch (err) {
-      showError(err?.response?.data?.detail || 'Could not load payslips for this run.');
-    } finally {
-      setLoadingAll(false);
-    }
-  };
-
-  const load = useCallback(async () => {
-    setLoading(true); setError(null);
-    try {
-      const [{ data: ri }, { data: recs }] = await Promise.all([
-        getPayrollRun(period, scope), listPayrollRecords(period, scope),
-      ]);
-      setRunInfo(ri);
-      setRecords(recs || []);
-    } catch (err) {
-      setError(err?.response?.data?.detail || 'Could not load this run.');
-    } finally {
-      setLoading(false);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [period]);
-
-  useEffect(() => { load(); }, [load]);
-
-  return (
-    <Modal title={`Payroll Run · ${period}`} labelledBy="run-detail-title" onClose={onClose}
-      footer={<Btn onClick={onClose}>Close</Btn>}
-    >
-      {loading && <HrmsLoading label="Loading run…" />}
-      {error && !loading && <HrmsError message={error} onRetry={load} />}
-      {!loading && !error && runInfo && (
-        <div className="space-y-4">
-          <NextStepBanner step={payrollNextStep(runInfo)} />
-          <div className="flex items-center justify-between">
-            <Chip tone={attLeaveToneFor(runInfo.status)}>{runInfo.status}</Chip>
-            <div className="flex gap-2">
-              {records.length > 0 && (
-                <Btn disabled={loadingAll} onClick={openAllPayslips}>
-                  {loadingAll ? 'Loading…' : 'All Payslips'}
-                </Btn>
-              )}
-              {can(CAP.PAYROLL_PROCESS) && runInfo.status !== 'Locked' && (
-                <Btn disabled={busy} onClick={() => run(
-                  () => calculatePayroll(period, scope), 'Payroll calculated.')}>
-                  {busy ? 'Working…' : 'Calculate'}
-                </Btn>
-              )}
-            </div>
-          </div>
-
-          {records.length > 0 && (
-            <div className="overflow-x-auto">
-              <table className="w-full text-[11.5px]">
-                <thead>
-                  <tr className="text-left text-[10px] font-bold uppercase tracking-widest text-[var(--text-muted)]">
-                    <th className="py-1.5 pr-2">Employee</th>
-                    <th className="py-1.5 pr-2">Payable/LOP</th>
-                    <th className="py-1.5 pr-2">Gross</th>
-                    <th className="py-1.5 pr-2">Deductions</th>
-                    <th className="py-1.5 pr-2">Net Pay</th>
-                    <th className="py-1.5"></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {records.map((r) => (
-                    <tr key={r.employee_code} className="border-t border-[var(--border)]">
-                      <td className="py-1.5 pr-2">
-                        <span className="font-semibold text-[var(--text-main)]">{r.employee_name || r.employee_code}</span>
-                        {r.exceptions?.length > 0 && (
-                          <span className="block text-[10px] text-[var(--accent-orange)]">
-                            {r.exceptions.join('; ')}
-                          </span>
-                        )}
-                      </td>
-                      <td className="py-1.5 pr-2">{r.payable_days}/{r.lop_days}</td>
-                      <td className="py-1.5 pr-2">{money(r.gross_earnings)}</td>
-                      <td className="py-1.5 pr-2">{money(r.total_deductions)}</td>
-                      <td className="py-1.5 pr-2 font-bold">{money(r.net_pay)}</td>
-                      <td className="py-1.5">
-                        <div className="flex justify-end gap-1.5">
-                          <Btn tone="ghost" onClick={() => setViewingPayslip(r)}>Payslip</Btn>
-                          {can(CAP.PAYROLL_PROCESS) && runInfo.status !== 'Locked' && (
-                            <Btn tone="ghost" onClick={() => setAdjusting(r)}>Adjust</Btn>
-                          )}
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-          {!records.length && (
-            <p className="text-[12px] text-[var(--text-muted)] py-2">
-              Nobody in this run yet — click Calculate to add every eligible employee and work out their pay.
-            </p>
-          )}
-
-          {can(CAP.PAYROLL_APPROVE) && runInfo.status === 'Calculated' && (
-            <div className="rounded-xl border border-[var(--border)] p-3.5 space-y-2.5">
-              <p className={LABEL}>Decision</p>
-              <textarea rows={2} value={decisionRemarks} className={TEXTAREA} placeholder="Remarks"
-                onChange={(e) => setDecisionRemarks(e.target.value)} />
-              <div className="flex gap-2">
-                <Btn tone="danger" disabled={busy} onClick={() => run(
-                  () => decidePayrollRun(period, { approved: false, remarks: decisionRemarks.trim() || undefined }, scope),
-                  'Payroll sent back to the maker.')}>
-                  Reject
-                </Btn>
-                <Btn tone="primary" disabled={busy} onClick={() => run(
-                  () => decidePayrollRun(period, { approved: true, remarks: decisionRemarks.trim() || undefined }, scope),
-                  'Payroll approved and locked.')}>
-                  {busy ? 'Working…' : 'Approve & Lock'}
-                </Btn>
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-      {adjusting && (
-        <AdjustRecordModal period={period} record={adjusting} scope={scope}
-          onClose={() => setAdjusting(null)} onDone={() => { setAdjusting(null); load(); }}
-          showSuccess={showSuccess} showError={showError} />
-      )}
-      {viewingPayslip && (
-        <Modal title={`Payslip · ${viewingPayslip.employee_name || viewingPayslip.employee_code}`}
-          labelledBy="hr-payslip-title" onClose={() => setViewingPayslip(null)}
-          footer={<Btn onClick={() => setViewingPayslip(null)}>Close</Btn>}
-        >
-          <Payslip embedded employeeCode={viewingPayslip.employee_code} initialPeriod={period} />
-        </Modal>
-      )}
-      {allPayslips && (
-        <div className="fixed inset-0 z-50 bg-black/60 overflow-y-auto py-8 px-4">
-          <div className="max-w-3xl mx-auto space-y-6 print:space-y-0">
-            <div className="flex justify-end gap-2 print:hidden">
-              <button type="button" onClick={() => window.print()}
-                className="h-9 px-3.5 rounded-lg bg-white text-[12px] font-bold text-slate-900">
-                Print / Save all as PDF
-              </button>
-              <button type="button" onClick={() => setAllPayslips(null)}
-                className="h-9 w-9 rounded-lg bg-white text-slate-900 flex items-center justify-center">
-                <X size={16} />
-              </button>
-            </div>
-            {allPayslips.length === 0 && (
-              <p className="text-center text-[13px] text-white">No payslips in this run yet.</p>
-            )}
-            {allPayslips.map((slip, i) => (
-              <div key={slip.employee_code}
-                style={i > 0 ? { breakBefore: 'page' } : undefined}>
-                <PayslipDocument slip={slip} />
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-    </Modal>
-  );
-};
-
-const AdjustRecordModal = ({ period, record, scope, onClose, onDone, showSuccess, showError }) => {
-  const [pf, setPf] = useState(record.pf ?? 0);
-  const [esi, setEsi] = useState(record.esi ?? 0);
-  const [pt, setPt] = useState(record.pt ?? 0);
-  const [tds, setTds] = useState(record.tds ?? 0);
-  const [arrears, setArrears] = useState(record.arrears ?? 0);
-  const [reimbursements, setReimbursements] = useState(record.reimbursements ?? 0);
-  const [otherEarnings, setOtherEarnings] = useState(record.other_earnings ?? 0);
-  const [otherDeductions, setOtherDeductions] = useState(record.other_deductions ?? 0);
-  const [noticeRecovery, setNoticeRecovery] = useState(record.notice_recovery ?? 0);
-  const [remarks, setRemarks] = useState(record.remarks || '');
-  const [components, setComponents] = useState([]);
-  const [adjustments, setAdjustments] = useState(
-    (record.adjustments || []).map((a) => ({ code: a.code, amount: a.amount })));
-  const { busy, run } = useSubmit(showSuccess, showError, onDone);
-
-  useEffect(() => {
-    listSalaryComponents(scope).then(({ data }) => setComponents(data || [])).catch(() => {});
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  const addAdjustment = () => setAdjustments((a) => [
-    ...a, { code: components[0]?.code || '', amount: 0 },
-  ]);
-  const updateAdjustment = (i, key, value) =>
-    setAdjustments((a) => a.map((row, idx) => (idx === i ? { ...row, [key]: value } : row)));
-  const removeAdjustment = (i) => setAdjustments((a) => a.filter((_, idx) => idx !== i));
-
-  const submit = () => run(async () => {
-    await adjustPayrollRecord(period, record.employee_code, {
-      pf: Number(pf), esi: Number(esi), pt: Number(pt), tds: Number(tds),
-      arrears: Number(arrears), reimbursements: Number(reimbursements),
-      other_earnings: Number(otherEarnings), other_deductions: Number(otherDeductions),
-      notice_recovery: Number(noticeRecovery), remarks: remarks.trim() || undefined,
-    }, scope);
-    await setPayrollAdjustments(period, record.employee_code,
-      adjustments.filter((a) => a.code).map((a) => ({ code: a.code, amount: Number(a.amount) })),
-      scope);
-  }, 'Record adjusted.');
-
-  const field = (label, value, setter) => (
-    <div>
-      <label className={LABEL}>{label}</label>
-      <input type="number" value={value} className={FIELD} onChange={(e) => setter(e.target.value)} />
-    </div>
-  );
-
-  return (
-    <Modal title={`Adjust ${record.employee_code}`} labelledBy="adjust-title"
-      subtitle="PF, tax and other one-off amounts are not calculated automatically yet — type them in here."
-      onClose={onClose}
-      footer={(
-        <>
-          <Btn onClick={onClose} disabled={busy}>Cancel</Btn>
-          <Btn tone="primary" onClick={submit} disabled={busy}>{busy ? 'Saving…' : 'Save'}</Btn>
-        </>
-      )}
-    >
-      <div className="grid grid-cols-2 gap-3">
-        {field('PF', pf, setPf)}
-        {field('ESI', esi, setEsi)}
-        {field('PT', pt, setPt)}
-        {field('TDS', tds, setTds)}
-        {field('Arrears', arrears, setArrears)}
-        {field('Reimbursements', reimbursements, setReimbursements)}
-        {field('Other Earnings', otherEarnings, setOtherEarnings)}
-        {field('Other Deductions', otherDeductions, setOtherDeductions)}
-        {field('Notice Recovery', noticeRecovery, setNoticeRecovery)}
-      </div>
-
-      <div>
-        <div className="flex items-center justify-between mb-1.5">
-          <label className={LABEL}>One-off pay items</label>
-          <Btn onClick={addAdjustment} disabled={!components.length}>Add line</Btn>
-        </div>
-        {!adjustments.length && (
-          <p className="text-[12px] text-[var(--text-muted)]">
-            Any earning/deduction beyond the fields above — against the same component
-            master the salary structure uses.
-          </p>
-        )}
-        <div className="space-y-2">
-          {adjustments.map((row, i) => (
-            <div key={i} className="grid grid-cols-[1fr_120px_auto] gap-2 items-center">
-              <select className={FIELD} value={row.code}
-                onChange={(e) => updateAdjustment(i, 'code', e.target.value)}>
-                {components.map((c) => (
-                  <option key={c.code} value={c.code}>{c.name} ({c.component_type})</option>
-                ))}
-              </select>
-              <input type="number" className={FIELD} value={row.amount}
-                onChange={(e) => updateAdjustment(i, 'amount', e.target.value)} />
-              <button type="button" onClick={() => removeAdjustment(i)}
-                className="h-9 w-9 rounded-lg border border-[var(--border)] flex items-center justify-center text-[var(--accent-red)]">
-                ×
-              </button>
-            </div>
-          ))}
-        </div>
-      </div>
-
-      <div>
-        <label className={LABEL} htmlFor="adjust-remarks">Remarks</label>
-        <textarea id="adjust-remarks" rows={2} value={remarks} className={TEXTAREA}
-          onChange={(e) => setRemarks(e.target.value)} />
-      </div>
-    </Modal>
-  );
-};
-
 // ── Salary Structure tab ──
 const SalaryStructureTab = ({ scope, companyId, can, showSuccess, showError }) => {
   const [components, setComponents] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [addingComponent, setAddingComponent] = useState(false);
+  // null = closed, {} = adding, a component = editing it.
+  const [editing, setEditing] = useState(null);
+  const [toggling, setToggling] = useState(null);
+  const [showRetired, setShowRetired] = useState(false);
   const [employee, setEmployee] = useState(null);
+
+  const canManage = can(CAP.SALARY_STRUCTURE_MANAGE);
 
   const load = useCallback(async () => {
     if (!companyId) { setLoading(false); return; }
@@ -594,7 +340,7 @@ const SalaryStructureTab = ({ scope, companyId, can, showSuccess, showError }) =
       const { data } = await listSalaryComponents(scope);
       setComponents(data || []);
     } catch (err) {
-      setError(err?.response?.data?.detail || 'Could not load salary components.');
+      setError(errText(err, 'Could not load salary components.'));
     } finally {
       setLoading(false);
     }
@@ -603,26 +349,46 @@ const SalaryStructureTab = ({ scope, companyId, can, showSuccess, showError }) =
 
   useEffect(() => { load(); }, [load]);
 
+  // Retire / activate: the whole component re-saved with `active` flipped — nothing is deleted.
+  const toggleActive = async (c) => {
+    setToggling(c.code);
+    try {
+      await saveSalaryComponent(c.code, componentPayload({ ...c, active: c.active === false }), scope);
+      showSuccess(c.active === false ? `${c.code} is active again.` : `${c.code} retired.`);
+      load();
+    } catch (err) {
+      showError(errText(err, 'Could not change this component.'));
+    } finally {
+      setToggling(null);
+    }
+  };
+
+  const retired = components.filter((c) => c.active === false).length;
+  const listed = showRetired ? components : components.filter((c) => c.active !== false);
+
   return (
     <div className="space-y-6">
       <div>
-        <div className="flex items-center justify-between mb-2">
+        <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
           <p className="text-[12.5px] font-bold text-[var(--text-main)]">Pay components (the building blocks of a salary)</p>
-          {can(CAP.SALARY_STRUCTURE_MANAGE) && (
-            <Btn tone="ghost" onClick={() => setAddingComponent(true)}>Add Component</Btn>
-          )}
+          <div className="flex flex-wrap items-center gap-3">
+            {retired > 0 && (
+              <label className="flex items-center gap-2 text-[12px] text-[var(--text-muted)]">
+                <input type="checkbox" checked={showRetired} onChange={(e) => setShowRetired(e.target.checked)} />
+                Show retired ({retired})
+              </label>
+            )}
+            {canManage && (
+              <Btn tone="ghost" onClick={() => setEditing({})}><Plus size={14} /> Add Component</Btn>
+            )}
+          </div>
         </div>
         {loading && <HrmsLoading label="Loading components…" />}
         {error && !loading && <HrmsError message={error} onRetry={load} />}
         {!loading && !error && (
-          components.length ? (
-            <div className="flex flex-wrap gap-2">
-              {components.map((c) => (
-                <Chip key={c.code} tone={c.component_type === 'Earning' ? 'good' : 'warn'}>
-                  {c.name} ({c.code})
-                </Chip>
-              ))}
-            </div>
+          listed.length ? (
+            <ComponentList components={listed} canManage={canManage} busyCode={toggling}
+              onEdit={setEditing} onToggle={toggleActive} />
           ) : (
             <p className="text-[12px] text-[var(--text-muted)]">No components configured yet.</p>
           )
@@ -647,66 +413,13 @@ const SalaryStructureTab = ({ scope, companyId, can, showSuccess, showError }) =
         )}
       </div>
 
-      {addingComponent && (
-        <ComponentModal scope={scope} onClose={() => setAddingComponent(false)}
-          onDone={() => { setAddingComponent(false); load(); }}
+      {editing && (
+        <ComponentEditorModal component={editing.code ? editing : null} components={components}
+          scope={scope} onClose={() => setEditing(null)}
+          onDone={() => { setEditing(null); load(); }}
           showSuccess={showSuccess} showError={showError} />
       )}
     </div>
-  );
-};
-
-const ComponentModal = ({ scope, onClose, onDone, showSuccess, showError }) => {
-  const [code, setCode] = useState('');
-  const [name, setName] = useState('');
-  const [componentType, setComponentType] = useState('Earning');
-  const [statutory, setStatutory] = useState(false);
-  const { busy, run } = useSubmit(showSuccess, showError, onDone);
-
-  const submit = () => {
-    if (!code.trim() || !name.trim()) { showError('Code and name are required.'); return; }
-    const upperCode = code.trim().toUpperCase();
-    // The route overrides `code` from the URL anyway, but SalaryComponentIn still requires
-    // it in the body — the same shape LeaveTypeConfigIn/saveLeaveType already use.
-    run(() => saveSalaryComponent(upperCode, {
-      code: upperCode, name: name.trim(), component_type: componentType, statutory, active: true,
-    }, scope), 'Component saved.');
-  };
-
-  return (
-    <Modal title="Add Salary Component" labelledBy="component-title" onClose={onClose}
-      footer={(
-        <>
-          <Btn onClick={onClose} disabled={busy}>Cancel</Btn>
-          <Btn tone="primary" onClick={submit} disabled={busy}>{busy ? 'Saving…' : 'Save'}</Btn>
-        </>
-      )}
-    >
-      <div className="grid grid-cols-2 gap-3">
-        <div>
-          <label className={LABEL} htmlFor="comp-code">Code</label>
-          <input id="comp-code" value={code} className={FIELD} placeholder="e.g. BASIC"
-            onChange={(e) => setCode(e.target.value)} />
-        </div>
-        <div>
-          <label className={LABEL} htmlFor="comp-type">Type</label>
-          <select id="comp-type" value={componentType} className={FIELD}
-            onChange={(e) => setComponentType(e.target.value)}>
-            <option value="Earning">Earning</option>
-            <option value="Deduction">Deduction</option>
-          </select>
-        </div>
-      </div>
-      <div>
-        <label className={LABEL} htmlFor="comp-name">Name</label>
-        <input id="comp-name" value={name} className={FIELD}
-          onChange={(e) => setName(e.target.value)} />
-      </div>
-      <label className="flex items-center gap-2 text-[12px] text-[var(--text-muted)]">
-        <input type="checkbox" checked={statutory} onChange={(e) => setStatutory(e.target.checked)} />
-        Statutory component
-      </label>
-    </Modal>
   );
 };
 
@@ -1391,81 +1104,6 @@ const VariablePayPolicyModal = ({ policy, scope, onClose, onDone, showSuccess, s
         </div>
       </div>
     </Modal>
-  );
-};
-
-// ── Payslip Template tab (SM-HR-064) ──
-const PayslipTemplateTab = ({ scope, companyId, can, showSuccess, showError }) => {
-  const [companyName, setCompanyName] = useState('');
-  const [headerNote, setHeaderNote] = useState('');
-  const [footerNote, setFooterNote] = useState('');
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-
-  const canWrite = can(CAP.PAYROLL_PROCESS);
-
-  const load = useCallback(async () => {
-    if (!companyId) { setLoading(false); return; }
-    setLoading(true);
-    try {
-      const { data } = await getPayslipTemplate(scope);
-      setCompanyName(data?.company_name || '');
-      setHeaderNote(data?.header_note || '');
-      setFooterNote(data?.footer_note || '');
-    } catch {
-      // A never-configured template is a 200 with nulls, not an error — nothing to show here.
-    } finally {
-      setLoading(false);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [companyId]);
-
-  useEffect(() => { load(); }, [load]);
-
-  const save = async () => {
-    setSaving(true);
-    try {
-      await savePayslipTemplate({
-        company_name: companyName.trim() || undefined,
-        header_note: headerNote.trim() || undefined,
-        footer_note: footerNote.trim() || undefined,
-      }, scope);
-      showSuccess('Payslip template saved.');
-    } catch (err) {
-      showError(err?.response?.data?.detail || 'Could not save the template.');
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  if (loading) return <HrmsLoading label="Loading the payslip template…" />;
-
-  return (
-    <div className="space-y-4 max-w-xl">
-      <p className="text-[12.5px] text-[var(--text-muted)]">
-        The full payslip layout is still being designed. For now you can set the company
-        name and a note at the top and bottom of every payslip.
-      </p>
-      <div>
-        <label className={LABEL} htmlFor="pt-name">Company name on payslip</label>
-        <input id="pt-name" value={companyName} className={FIELD} disabled={!canWrite}
-          onChange={(e) => setCompanyName(e.target.value)} placeholder="Sparsh Magic LLP" />
-      </div>
-      <div>
-        <label className={LABEL} htmlFor="pt-header">Header note</label>
-        <textarea id="pt-header" rows={2} value={headerNote} className={TEXTAREA} disabled={!canWrite}
-          onChange={(e) => setHeaderNote(e.target.value)} />
-      </div>
-      <div>
-        <label className={LABEL} htmlFor="pt-footer">Footer note</label>
-        <textarea id="pt-footer" rows={2} value={footerNote} className={TEXTAREA} disabled={!canWrite}
-          onChange={(e) => setFooterNote(e.target.value)}
-          placeholder="This is a system-generated payslip and does not require a signature." />
-      </div>
-      {canWrite && (
-        <Btn tone="primary" onClick={save} disabled={saving}>{saving ? 'Saving…' : 'Save'}</Btn>
-      )}
-    </div>
   );
 };
 
