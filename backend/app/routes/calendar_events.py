@@ -492,6 +492,18 @@ def _apply_todo_due_end_of_day(doc: dict) -> None:
     doc["all_day"] = False
 
 
+def _ist_day(value):
+    """The IST calendar DAY a stored date or instant falls on, or None.
+
+    Recurrence is decided on IST days, and the same day reaches us in several spellings — a
+    bare "2026-07-01", "2026-07-01T00:00:00.000Z" from the date picker, a microsecond
+    "+00:00" string from the engine. Comparing those as strings made an unchanged date look
+    changed; comparing their IST day does not.
+    """
+    cutoff = _series_end_cutoff(value)
+    return cutoff.astimezone(IST_TZ).date() if cutoff else None
+
+
 def _series_end_cutoff(value):
     """A Repeat End Date as the LAST INSTANT that date may hold an occurrence — 23:59:59.999 IST
     on the chosen day, returned in UTC.
@@ -981,6 +993,51 @@ async def update_event(event_id: str, updates: dict, background_tasks: Backgroun
         updates["status"] = TODO_OVERDUE_STATUS if is_todo_overdue({**existing, **updates}) else TODO_PENDING_STATUS
         updates["completed_at"] = None
 
+    # ─── Moving ONE occurrence of a recurring series to another date ───
+    # The whole series is written up front, so almost every date in its range already holds an
+    # occurrence. Moving one onto such a date used to save a SECOND occurrence on that day —
+    # two identical rows — while its own day was left empty. It is refused instead, naming the
+    # day, and the user edits or deletes that occurrence rather than stacking a duplicate.
+    #
+    # The occurrence also keeps its natural cadence date: `recurrence_anchor` is what the
+    # nightly engine steps the series forward from, and the first occurrence of a series has
+    # none (the engine falls back to `start`). Moving that one without an anchor would have
+    # restarted the cadence from the new date and skipped the days in between.
+    if (existing.get("type") == TASK_TYPE and existing.get("recurring_group_id")
+            and updates.get("start")):
+        new_day, old_day = _ist_day(updates["start"]), _ist_day(existing.get("start"))
+        if new_day and old_day and new_day != old_day:
+            siblings = await get_collection(col_name).find(
+                {"recurring_group_id": existing["recurring_group_id"], "deleted_at": None,
+                 "_id": {"$ne": existing["_id"]}}, {"start": 1}).to_list(5000)
+            if any(_ist_day(sib.get("start")) == new_day for sib in siblings):
+                raise HTTPException(
+                    status_code=409,
+                    detail=(f"{new_day.strftime('%d/%m/%Y')} already has an occurrence of this "
+                            f"recurring task. Edit or delete that occurrence instead — moving "
+                            f"this one there would create a duplicate."))
+            if not existing.get("recurrence_anchor") and existing.get("start"):
+                updates["recurrence_anchor"] = existing["start"]
+
+    # ─── An occurrence of a recurring series keeps the series' cadence ───
+    # Editing ONE occurrence used to be able to save it as "Does not repeat": it stayed in the
+    # series (same recurring_group_id, still listed under it) but lost its cadence, so its
+    # Edit form no longer showed the Occurrence dropdown. A series is ended with its Repeat
+    # End Date, not by blanking one occurrence -- so a blank / "Does not repeat" value sent
+    # for a series member is replaced by the series' own cadence instead of being stored.
+    if (existing.get("type") == TASK_TYPE and existing.get("recurring_group_id")
+            and "repeat" in updates
+            and str(updates.get("repeat") or "").strip().lower() in ("", "does not repeat", "none", "null")):
+        from app.routes.tasks import _series_cadence, has_cadence
+        series_repeat = existing.get("repeat") if has_cadence(existing.get("repeat")) else (
+            (await _series_cadence([{**existing, "repeat": None}])
+             ).get(existing["recurring_group_id"], {}).get("repeat"))
+        if series_repeat:
+            updates["repeat"] = series_repeat
+            for key in ("repeat_interval", "repeat_data", "repeat_end_date"):
+                if updates.get(key) in (None, "", {}) and existing.get(key) not in (None, "", {}):
+                    updates.pop(key, None)
+
     # ─── Switching a task to/from Repeat re-resolves its day window ───
     # Turning Repeat ON drops whatever deadline the task had — a Recurring Checklist has
     # none — and turning it OFF hands the deadline back to the user. Resolved from the
@@ -1078,12 +1135,37 @@ async def update_event(event_id: str, updates: dict, background_tasks: Backgroun
     else:
         background_tasks.add_task(notify_users_instant, final_doc, "updated", creator_name)
 
+    # ─── Series settings belong to the whole series ───
+    # The end date and the repeat pattern describe the SERIES, but the edit form saves them
+    # on the one occurrence that was opened. The siblings kept the old values, so the list
+    # showed a new end date while the nightly engine -- which reads the LATEST occurrence --
+    # kept the old one and never extended the series. Copy them to every occurrence.
+    if existing.get("type") == TASK_TYPE and existing.get("recurring_group_id"):
+        series_changes = {}
+        for key in ("repeat", "repeat_interval", "repeat_data", "repeat_end_date"):
+            if key not in updates or updates[key] in (None, ""):
+                continue
+            if key == "repeat_end_date":
+                if _ist_day(updates[key]) != _ist_day(existing.get(key)):
+                    series_changes[key] = updates[key]
+            elif updates[key] != existing.get(key):
+                series_changes[key] = updates[key]
+        if series_changes:
+            await get_collection(new_col_name).update_many(
+                {"recurring_group_id": existing["recurring_group_id"],
+                 "_id": {"$ne": existing["_id"]}},
+                {"$set": series_changes})
+
     # ─── Recurring Series Timeline Sync ───
     if updates.get("repeat_end_date") and existing.get("recurring_group_id"):
         new_end_str = updates["repeat_end_date"]
         old_end_str = existing.get("repeat_end_date")
         
-        if new_end_str != old_end_str:
+        # Compared as IST DAYS, not strings: the edit form re-sends the same end date in its
+        # own spelling ("2026-07-01" stored, "2026-07-01T00:00:00.000Z" sent back), and the
+        # string compare read that as a change -- silently deleting the occurrence on the
+        # series' last day on every ordinary edit.
+        if _ist_day(new_end_str) != _ist_day(old_end_str):
             try:
                 gid = existing["recurring_group_id"]
                 # Standardize parsing
@@ -1098,17 +1180,21 @@ async def update_event(event_id: str, updates: dict, background_tasks: Backgroun
                 # the chosen IST day, or shortening a series would also delete the occurrence
                 # falling on the very date the user just chose as the end.
                 is_todo_series = existing.get("type") == TODO_TYPE
-                cutoff_dt = (_series_end_cutoff(new_end_str) or new_end_dt) if is_todo_series else new_end_dt
+                # A task series runs THROUGH its end date too (build_series_occurrences
+                # generates the end date's own occurrence), so it keeps that occurrence on a
+                # shortened end date exactly like a todo series does. Sessions are unchanged.
+                keeps_end_day = is_todo_series or existing.get("type") == TASK_TYPE
+                cutoff_dt = (_series_end_cutoff(new_end_str) or new_end_dt) if keeps_end_day else new_end_dt
                 await get_collection(new_col_name).delete_many({
                     "recurring_group_id": gid,
                     "start": {"$gt": cutoff_dt.isoformat()}
                 })
 
-                # 2a. TODOS: rebuild forward from whatever occurrence is now last in the series,
+                # 2a. TODOS and TASKS: rebuild forward from whatever occurrence is now last in the series,
                 # through the shared builder — so an extended todo series keeps the holiday /
                 # weekly-off and anti-drift rules its original dates were generated under. The
                 # naive walk below would ignore them and put todos on Sundays and holidays.
-                if is_todo_series:
+                if keeps_end_day:
                     from app.services.recurring_task_service import (
                         build_series_occurrences, MAX_SERIES_OCCURRENCES,
                     )

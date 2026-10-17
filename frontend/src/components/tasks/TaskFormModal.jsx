@@ -36,6 +36,30 @@ const REPEAT_OPTIONS = [
   { value: 'Custom', label: 'Custom' },
 ];
 
+const NO_REPEAT = 'Does not repeat';
+
+// The stored `repeat` is not always one of REPEAT_OPTIONS' exact values: older rows hold
+// "daily" / "Annually" / "none" / "" and the like. Matched case-insensitively onto the
+// dropdown so the Edit form shows the SAVED cadence instead of silently reading "Daily".
+const REPEAT_ALIASES = { annually: 'Yearly', yearly: 'Yearly', periodically: 'periodic' };
+const normalizeRepeat = (value) => {
+  const raw = String(value ?? '').trim();
+  const key = raw.toLowerCase();
+  if (!key || key === 'does not repeat' || key === 'none' || key === 'null') return NO_REPEAT;
+  const hit = REPEAT_OPTIONS.find((o) => o.value.toLowerCase() === key)
+    || REPEAT_OPTIONS.find((o) => o.value === REPEAT_ALIASES[key]);
+  return hit ? hit.value : raw;   // unknown: keep it (shown as-is) rather than rewrite it
+};
+
+// Same rule as the list's isRecurringTask: an occurrence of a series is recurring even if
+// its own row lost its cadence. The backend now serialises the series' cadence for such an
+// occurrence; 'Daily' is only the last resort for a series with no cadence anywhere.
+const initialRepeat = (task) => {
+  const own = normalizeRepeat(task.frequency || task.repeat);
+  if (own !== NO_REPEAT) return own;
+  return task.recurringGroupId ? 'Daily' : NO_REPEAT;
+};
+
 const emptyForm = {
   title: '',
   description: '',
@@ -120,6 +144,9 @@ const TaskFormModal = ({ isOpen, onClose, onSaved, task = null, categories = [],
   // Repeat ON turns the task into a Recurring Checklist: it renews itself every day at
   // 12:00 AM, each occurrence is live until 11:59 PM, and it carries no deadline at all.
   const isRecurring = form.repeat !== 'Does not repeat';
+  // An occurrence of an existing series: its cadence can be changed, but Repeat cannot be
+  // switched off from one occurrence — the series is ended with its Repeat End Date.
+  const isSeriesOccurrence = !!(task && (task.recurringGroupId || task.isSeriesOccurrence));
   const [customIntervalOpen, setCustomIntervalOpen] = useState(false);
   const [customUnitOpen, setCustomUnitOpen] = useState(false);
   const [tagsModalOpen, setTagsModalOpen] = useState(false);
@@ -147,7 +174,7 @@ const TaskFormModal = ({ isOpen, onClose, onSaved, task = null, categories = [],
         category: task.category || '',
         tags: task.tags || [],
         end: task.end || '',
-        repeat: task.frequency || task.repeat || 'Does not repeat',
+        repeat: initialRepeat(task),
         start: task.start || '',
         repeat_end_date: task.repeatEndDate || '',
         repeat_interval: task.repeatInterval || 1,
@@ -685,7 +712,10 @@ const TaskFormModal = ({ isOpen, onClose, onSaved, task = null, categories = [],
             {/* Repeat — a Recurring Checklist */}
             <div className="px-6 pt-4">
               <div className="flex items-center gap-2 flex-wrap p-3 bg-[var(--input-bg)] rounded-xl">
-                <button type="button" onClick={() => setForm(f => (f.repeat === 'Does not repeat'
+                <button type="button" disabled={isSeriesOccurrence && isRecurring}
+                  title={isSeriesOccurrence && isRecurring
+                    ? 'Part of a recurring series — set a Repeat End Date to stop it.' : undefined}
+                  onClick={() => setForm(f => (f.repeat === 'Does not repeat'
                   // Switching to a Recurring Checklist drops the deadline: the backend
                   // discards it anyway, so leaving it in the form would only mislead.
                   ? { ...f, repeat: 'Daily', end: '' }
@@ -703,7 +733,7 @@ const TaskFormModal = ({ isOpen, onClose, onSaved, task = null, categories = [],
                     <div className="relative" onClick={e => e.stopPropagation()}>
                       <button type="button" onClick={() => setRepeatDropdownOpen(o => !o)}
                         className="flex items-center gap-1.5 px-3 py-1.5 bg-[var(--bg-card)] border border-[var(--border)] rounded-full text-[10px] font-black uppercase tracking-wider text-[var(--text-main)]">
-                        {REPEAT_OPTIONS.find(o => o.value === form.repeat)?.label || 'Daily'}
+                        {REPEAT_OPTIONS.find(o => o.value === form.repeat)?.label || form.repeat}
                         <ChevronDown size={12} className={`transition-transform ${repeatDropdownOpen ? 'rotate-180' : ''}`} />
                       </button>
                       {repeatDropdownOpen && (

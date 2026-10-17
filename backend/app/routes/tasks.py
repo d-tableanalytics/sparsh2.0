@@ -354,6 +354,57 @@ def _deadline_revision_count(doc: dict) -> int:
     ])
 
 
+# Values that mean "this document carries no cadence of its own". `none` and a blank string
+# exist in stored data alongside the form's own "Does not repeat".
+NO_REPEAT_VALUES = {"", "does not repeat", "none", "null"}
+
+
+def has_cadence(value) -> bool:
+    return str(value or "").strip().lower() not in NO_REPEAT_VALUES
+
+
+async def _series_cadence(docs: list) -> dict:
+    """recurring_group_id -> the series' repeat settings, for occurrences that lost their own.
+
+    Every occurrence of a series normally carries the series' `repeat`, but an occurrence
+    edited on its own could be saved as "Does not repeat". It still belongs to the series
+    (same recurring_group_id, listed under it), yet its Edit form then showed no Occurrence
+    dropdown. One query for the whole page, and only when such a row is actually present.
+    """
+    need = {d.get("recurring_group_id") for d in docs
+            if d.get("recurring_group_id") and not has_cadence(d.get("repeat"))}
+    if not need:
+        return {}
+    out = {}
+    for col_name in TASK_COLLECTIONS:
+        async for sib in get_collection(col_name).find(
+                {"recurring_group_id": {"$in": list(need)},
+                 "repeat": {"$nin": [None, "", "Does not repeat", "none"]},
+                 "deleted_at": None},
+                {"recurring_group_id": 1, "repeat": 1, "repeat_interval": 1,
+                 "repeat_data": 1, "repeat_end_date": 1, "start": 1}):
+            gid = sib["recurring_group_id"]
+            # The latest occurrence is what the recurrence engine generates from.
+            if gid not in out or str(sib.get("start") or "") > str(out[gid].get("start") or ""):
+                out[gid] = sib
+    return out
+
+
+def _with_series_cadence(row: dict, doc: dict, cadence: dict) -> dict:
+    """Fill a series occurrence's missing cadence from its series (display only -- the
+    stored document is not touched here)."""
+    sib = cadence.get(doc.get("recurring_group_id"))
+    if sib and not has_cadence(doc.get("repeat")):
+        row["frequency"] = sib.get("repeat")
+        row["repeatInterval"] = sib.get("repeat_interval") or 1
+        if not doc.get("repeat_data"):
+            row["repeatData"] = sib.get("repeat_data")
+        if not doc.get("repeat_end_date"):
+            row["repeatEndDate"] = sib.get("repeat_end_date")
+        row["frequencyFromSeries"] = True
+    return row
+
+
 def _serialize_task(doc: dict, current_user_id: str, report_ids: set = None,
                     admin_company_id: str = None) -> dict:
     ws = _resolve_workflow_status(doc)
@@ -382,6 +433,9 @@ def _serialize_task(doc: dict, current_user_id: str, report_ids: set = None,
         "groupId": doc.get("group_id"),
         "parentTaskId": doc.get("parent_task_id"),
         "recurringGroupId": doc.get("recurring_group_id"),
+        # An occurrence of a recurring series, whatever its own `repeat` says -- the same rule
+        # the list uses (isRecurringTask), so the Edit form and the list never disagree.
+        "isSeriesOccurrence": bool(doc.get("recurring_group_id")),
         "isCreator": doc.get("user_id") == current_user_id,
         # Lets the UI freeze a client task's controls for an internal admin, who may view it
         # but never act on it (see _can_view_client_tasks).
@@ -485,8 +539,10 @@ async def _fetch_subtasks(parent_id: str, current_user_id: str, admin_company_id
         docs = await get_collection(col_name).find({
             "type": "task", "parent_task_id": parent_id, "deleted_at": None,
         }).to_list(500)
+        cadence = await _series_cadence(docs)
         for d in docs:
-            out.append(_serialize_task(d, current_user_id, None, admin_company_id))
+            out.append(_with_series_cadence(
+                _serialize_task(d, current_user_id, None, admin_company_id), d, cadence))
     out.sort(key=lambda t: str(t.get("createdAt") or ""))
     return out
 
@@ -775,14 +831,18 @@ async def list_tasks(
     admin_company_id = company_admin_company_id(current_user)
 
     if limit is None:
-        rows = [_serialize_task(d, user_id, report_ids, admin_company_id) for d in docs]
+        cadence = await _series_cadence(docs)
+        rows = [_with_series_cadence(_serialize_task(d, user_id, report_ids, admin_company_id),
+                                     d, cadence) for d in docs]
         await _attach_people(rows, docs)
         return rows
 
     total = len(docs)
     # Serialize only the page — the expensive per-row work is skipped for everything else.
     page = docs[skip:skip + limit]
-    rows = [_serialize_task(d, user_id, report_ids, admin_company_id) for d in page]
+    cadence = await _series_cadence(page)
+    rows = [_with_series_cadence(_serialize_task(d, user_id, report_ids, admin_company_id),
+                                 d, cadence) for d in page]
     await _attach_people(rows, page)
     return {"tasks": rows, "total": total}
 
@@ -1020,7 +1080,8 @@ async def get_task_detail(task_id: str, current_user: dict = Depends(require_tas
         raise HTTPException(status_code=403, detail="Not authorized to view this task")
     uid = str(current_user["_id"])
     admin_company_id = company_admin_company_id(current_user)
-    detail = _serialize_task_detail(existing, uid)
+    detail = _with_series_cadence(_serialize_task_detail(existing, uid), existing,
+                                  await _series_cadence([existing]))
     detail["subtasks"] = await _fetch_subtasks(task_id, uid, admin_company_id)
     await _attach_people([detail], [existing])
     # Subtask rows name their assignees too — fold those into the same map.
