@@ -116,6 +116,9 @@ export const assignPolicyScope = (code, versionNo, payload, params) =>
   api.put(`/hrms/config/policies/${code}/versions/${versionNo}/scope`, payload, { params });
 export const resolvePolicyForEmployee = (code, params) =>
   api.get(`/hrms/config/policies/${code}/resolve`, { params });
+/** FRD §23/§25 — re-judge a recorded month under a DRAFT rule. Writes nothing. */
+export const simulateAttendancePolicy = (code, versionNo, params) =>
+  api.post(`/hrms/config/policies/${code}/versions/${versionNo}/simulate`, null, { params });
 
 export const listConfigChangeRequests = (params) =>
   api.get('/hrms/config/change-requests', { params });

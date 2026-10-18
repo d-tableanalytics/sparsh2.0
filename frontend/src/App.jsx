@@ -153,6 +153,7 @@ import PipBoard from './features/hrms/pip/PipBoard';
 // ── SM-HR-052 — Audit Viewer ──
 import AuditViewer from './features/hrms/admin/AuditViewer';
 import ConfigApprovalInbox from './features/hrms/admin/ConfigApprovalInbox';
+import AttendancePolicyDesigner from './features/hrms/attendance/AttendancePolicyDesigner';
 // ── SM-HR-051 — User / Role / Permission Administration ──
 import RoleAccessAdmin from './features/hrms/admin/RoleAccessAdmin';
 import RolesPermissions from './features/hrms/admin/RolesPermissions';
@@ -495,6 +496,9 @@ const AppRoutes = () => {
             the 2026-09-23 decision that governance screens keep their routes without a
             nav entry; reachable at /hrms/config-approvals. */}
         <Route path="config-approvals"     element={<ConfigApprovalInbox />} />
+        {/* FRD §23/§29 — Attendance Policy Designer. Same nav decision as above:
+            routed at /hrms/attendance-policies, not advertised in the sidebar. */}
+        <Route path="attendance-policies"  element={<AttendancePolicyDesigner />} />
         {/* SM-HR-051 — User / Role / Permission Administration. */}
         <Route path="access"               element={<RoleAccessAdmin />} />
         {/* Dynamic Roles & Permissions — MD / Super Admin / Admin decide who does what. */}

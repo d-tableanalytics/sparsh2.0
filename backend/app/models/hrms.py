@@ -3644,6 +3644,71 @@ POLICY_SCOPE_KEYS = {
 # administrative screen filters by.
 POLICY_MODULES = ("attendance", "payroll")
 
+# ── FRD §23's rule categories, as policy codes ────────────────────────────────────────
+#
+# §23 tables TEN rule categories (Shift/Timing, Late Coming, Early Going, Half Day, Absent,
+# Weekly Off/Holiday, OD/Regularisation, LOP, Monthly Closure, Applicability). Those are
+# categories of PARAMETER, not ten records: Applicability is the assignment that every
+# policy already carries, Shift/Timing and Weekly Off/Holiday are the shift master's (which
+# is already versioned, and moving it would be churn for no gain), and the rest divide by
+# WHEN they are read.
+#
+# So three policies, by read pattern rather than by table row:
+#
+#   ATT_DAY            every rule that judges ONE DAY -- late, early, half day, absent,
+#                      LOP fraction. Resolved per employee per date, which is the hot path
+#                      (payroll resolves it for every employee for every day of a month),
+#                      so splitting it into five policies would mean five lookups per day
+#                      to answer one question.
+#   ATT_REGULARISATION the correction and OD workflow -- window, evidence, approval levels.
+#                      Resolved once per REQUEST.
+#   ATT_CLOSURE        month-end -- cut-off, pending handling, unlock authority. Resolved
+#                      once per CLOSURE.
+#
+# Rule keys deliberately match the §23 vocabulary so the mapping back to the document is
+# readable without this comment.
+POLICY_ATT_DAY            = "ATT_DAY"
+POLICY_ATT_REGULARISATION = "ATT_REGULARISATION"
+POLICY_ATT_CLOSURE        = "ATT_CLOSURE"
+
+ATTENDANCE_POLICY_CODES = (POLICY_ATT_DAY, POLICY_ATT_REGULARISATION, POLICY_ATT_CLOSURE)
+
+# What each policy may carry, and what the system does when it carries nothing. Every
+# default here is TODAY'S BEHAVIOUR, which is what makes an unconfigured company identical
+# after this phase as before it.
+ATTENDANCE_POLICY_RULES = {
+    POLICY_ATT_DAY: {
+        # §23 Late Coming
+        "daily_grace_minutes": None,            # None = inherit the shift / company policy
+        "monthly_buffer_minutes": None,
+        # §23 Early Going
+        "early_going_grace_minutes": None,
+        # §23 Half Day
+        "half_day_threshold_minutes": None,
+        "half_day_late_minutes": None,          # the §23 "late/early combination" rule
+        "half_day_early_minutes": None,
+        # §23 Absent
+        "absent_threshold_minutes": None,
+        "absent_on_no_out_punch": False,
+        # §23 LOP
+        "half_day_fraction": 0.5,               # "fraction/full-day rule"
+        "unpaid_leave_is_lop": True,            # "approved leave interaction"
+        "sandwich_weekly_off": None,            # inherit the payroll policy when unset
+    },
+    POLICY_ATT_REGULARISATION: {
+        "window_days": None,
+        "evidence_required": None,
+        "max_requests_per_month": None,
+        "approval_levels": None,                # 1 = manager only, 2 = manager then HR
+        "request_types": None,                  # e.g. ["Missing punch", "Late approval"]
+    },
+    POLICY_ATT_CLOSURE: {
+        "closing_day": None,                    # the day of the month attendance closes
+        "enforce_cutoff": False,                # §19 leaves this unconfirmed -> default off
+        "block_pending_requests": False,        # refuse to lock with requests outstanding
+    },
+}
+
 AUDIT_POLICY_VERSION_SAVED    = "policy version saved"
 AUDIT_POLICY_VERSION_STATUS   = "policy version status changed"
 AUDIT_POLICY_ASSIGNMENT_SAVED = "policy scope assigned"
@@ -8881,13 +8946,33 @@ def compute_daily_status(*, scheduled_in: str, scheduled_out: str,
                           daily_grace_minutes: int, half_day_threshold_minutes: int,
                           early_going_grace_minutes: int = 0, break_minutes: int = 0,
                           min_hours: Optional[float] = None,
-                          absent_threshold_minutes: Optional[int] = None) -> dict:
+                          absent_threshold_minutes: Optional[int] = None,
+                          half_day_fraction: float = 0.5,
+                          half_day_late_minutes: Optional[int] = None,
+                          half_day_early_minutes: Optional[int] = None,
+                          absent_on_no_out_punch: bool = False) -> dict:
     """The §7.8 daily engine's arithmetic, pure — no DB, no clock, testable standalone
     (matches notice_days_for's discipline in Phase EXIT-1). All timing PARAMETERS come from
     the caller's policy lookup; nothing here is a hardcoded company number.
 
     Times are "HH:MM" 24-hour strings. Returns worked_minutes/late_minutes/status; never
     raises on missing punches — that is a legitimate day-state (Absent), not an error.
+
+    FRD §23 adds four parameters the engine previously decided for itself:
+
+      half_day_fraction        — §23 LOP "fraction/full-day rule". A Half Day cost half a
+                                 day's pay because the engine said so; some companies
+                                 deduct a quarter, some a whole day. 0.5 keeps today's
+                                 behaviour for anyone who does not configure it.
+      half_day_late_minutes    — §23 Half Day "late/early COMBINATIONS". Arriving very late
+                                 or leaving very early can make a day a half day even when
+                                 the hours worked would otherwise pass, which no amount of
+                                 worked-minutes thresholding expresses.
+      half_day_early_minutes     (Both are None by default, i.e. the rule is off.)
+      absent_on_no_out_punch   — §23 Absent "no-punch/minimum-hours conditions". Whether a
+                                 missing out-punch is Present-pending-correction (today's
+                                 behaviour, and the default) or Absent until someone fixes
+                                 it.
     """
     def _mins(hhmm: str) -> int:
         h, m = hhmm.split(":")
@@ -8896,9 +8981,13 @@ def compute_daily_status(*, scheduled_in: str, scheduled_out: str,
     sched_in_m, sched_out_m = _mins(scheduled_in), _mins(scheduled_out)
     scheduled_minutes = max(0, sched_out_m - sched_in_m - (break_minutes or 0))
 
-    def _result(status, worked, late, early, grace_applied, missing_out=False):
+    half_pay = min(1.0, max(0.0, float(half_day_fraction if half_day_fraction is not None
+                                       else 0.5)))
+
+    def _result(status, worked, late, early, grace_applied, missing_out=False,
+                half_day_reason=None):
         payable_day = {AttendanceStatus.PRESENT.value: 1.0,
-                       AttendanceStatus.HALF_DAY.value: 0.5}.get(status, 0.0)
+                       AttendanceStatus.HALF_DAY.value: half_pay}.get(status, 0.0)
         payable_minutes = max(0, min(worked - (break_minutes or 0), scheduled_minutes)) \
             if worked else 0
         return {"status": status, "worked_minutes": worked, "late_minutes": late,
@@ -8907,7 +8996,11 @@ def compute_daily_status(*, scheduled_in: str, scheduled_out: str,
                 "payable_hours": round(payable_minutes / 60.0, 2),
                 "scheduled_minutes": scheduled_minutes,
                 "payable_day": payable_day, "lop_fraction": round(1 - payable_day, 2),
-                "missing_out_punch": missing_out}
+                "missing_out_punch": missing_out,
+                # WHY a day was cut to half, when a combination rule did it. Without this
+                # the employee sees a half day they cannot account for: the hours worked
+                # look fine, because they were.
+                "half_day_reason": half_day_reason}
 
     if not actual_in:
         return _result(AttendanceStatus.ABSENT.value, 0, 0, 0, 0)
@@ -8920,22 +9013,38 @@ def compute_daily_status(*, scheduled_in: str, scheduled_out: str,
     if not actual_out:
         # Present with an open/missing out-punch — the daily status still resolves; the
         # missing out-punch itself becomes a regularisation candidate (§7.8 step 61) and is
-        # counted as an exception at month-end closure.
-        return _result(AttendanceStatus.PRESENT.value, 0, late_minutes, 0, grace_applied,
-                       missing_out=True)
+        # counted as an exception at month-end closure. §23 lets a company treat it as
+        # Absent instead; Present stays the default because it is what this engine has
+        # always done and because somebody who punched in was, in fact, at work.
+        return _result(
+            AttendanceStatus.ABSENT.value if absent_on_no_out_punch
+            else AttendanceStatus.PRESENT.value,
+            0, late_minutes, 0, grace_applied, missing_out=True)
 
     out_m = _mins(actual_out)
     worked_minutes = max(0, out_m - in_m)
     early_minutes = max(0, sched_out_m - out_m - (early_going_grace_minutes or 0))
+    reason = None
     if absent_threshold_minutes and worked_minutes < absent_threshold_minutes:
         status = AttendanceStatus.ABSENT.value
     elif worked_minutes < half_day_threshold_minutes:
         status = AttendanceStatus.HALF_DAY.value
+        reason = "worked less than the half-day threshold"
     elif min_hours and worked_minutes < float(min_hours) * 60:
         status = AttendanceStatus.HALF_DAY.value
+        reason = "worked less than the minimum hours"
+    # §23 Half Day, "late/early combinations": checked AFTER the hours tests, so a day that
+    # already failed on hours keeps that reason — the more specific explanation wins.
+    elif half_day_late_minutes and late_minutes >= int(half_day_late_minutes):
+        status = AttendanceStatus.HALF_DAY.value
+        reason = f"arrived {late_minutes} min late (half day at {half_day_late_minutes})"
+    elif half_day_early_minutes and early_minutes >= int(half_day_early_minutes):
+        status = AttendanceStatus.HALF_DAY.value
+        reason = f"left {early_minutes} min early (half day at {half_day_early_minutes})"
     else:
         status = AttendanceStatus.PRESENT.value
-    return _result(status, worked_minutes, late_minutes, early_minutes, grace_applied)
+    return _result(status, worked_minutes, late_minutes, early_minutes, grace_applied,
+                   half_day_reason=reason)
 
 
 ENTITY_ATTENDANCE   = "attendance"

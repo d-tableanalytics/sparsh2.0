@@ -27,7 +27,7 @@ from fastapi import HTTPException
 
 from app.db.mongodb import get_collection
 from app.models.hrms import (
-    AUDIT_ATTENDANCE_LOCKED, AUDIT_ATTENDANCE_MARKED, AUDIT_ATTENDANCE_UNLOCKED,
+    AUDIT_ATTENDANCE_LOCKED, AUDIT_ATTENDANCE_MARKED, AUDIT_ATTENDANCE_UNLOCKED, Cap,
     AUDIT_CORRECTION_ACTIONED, AUDIT_CORRECTION_REQUESTED,
     AUDIT_OD_ACTIONED, AUDIT_OD_REQUESTED,
     COLL_ATTENDANCE, COLL_ATTENDANCE_CORRECTIONS, COLL_ATTENDANCE_LOCKS,
@@ -40,7 +40,7 @@ from app.models.hrms import (
 )
 from app.services.hrms_audit_service import audit
 from app.services.hrms_id_service import next_business_id
-from app.utils.hrms_access import hrms_role
+from app.utils.hrms_access import can, hrms_role
 from app.utils.hrms_access import sees_all_people
 
 USER_COLLECTIONS = ("learners", "staff")
@@ -237,6 +237,67 @@ async def _month_locked(company_id: str, work_date: str) -> bool:
     return (lock or {}).get("status") == LockStatus.LOCKED.value
 
 
+async def closure_rules(company_id: str, profile: Optional[dict] = None,
+                        on_date: Optional[str] = None) -> dict:
+    """The ATT_CLOSURE policy in force, over the company's stored attendance rules.
+
+    Falls back to the settings dict every company already has, so this answers identically
+    for a company that has configured no closure policy.
+    """
+    from app.models.hrms import DEFAULT_ATTENDANCE_RULES, POLICY_ATT_CLOSURE
+    from app.services import hrms_policy_version_service as PV
+    settings = await get_shift_policy(company_id)
+    default = {"closing_day": settings.get("attendance_closing_day")
+               or DEFAULT_ATTENDANCE_RULES["attendance_closing_day"],
+               "enforce_cutoff": bool(settings.get("enforce_attendance_cutoff")),
+               "block_pending_requests": bool(settings.get("block_pending_at_lock"))}
+    return await PV.resolve_rules(company_id, POLICY_ATT_CLOSURE, profile or {}, on_date,
+                                  default=default)
+
+
+async def _assert_within_cutoff(actor: dict, company_id: str, work_date: str) -> None:
+    """FRD §23 Monthly Closure -- the cut-off, enforced.
+
+    `attendance_closing_day` has been stored since the FRD's first pass and commented
+    "(informational)": nothing read it, so a company could set a cut-off of the 26th and
+    still have days added to the previous month in the middle of March. §5 calls it the
+    "attendance closing date" and §23 makes it a configurable rule, which means it has to
+    actually stop something.
+
+    What it stops: writing to a month whose cut-off has passed. What it does NOT stop:
+    anyone holding the unlock capability (ATTENDANCE_LOCK) -- the cut-off is a routine
+    control, not a wall, and the authority that can reopen a LOCKED month can certainly
+    correct one that is merely past its cut-off. Default is OFF: §19 lists the cut-off as
+    unconfirmed, so no company gets a new refusal it did not ask for.
+    """
+    from datetime import date as _date
+    rules = await closure_rules(company_id)
+    if not rules.get("enforce_cutoff"):
+        return
+    closing_day = int(rules.get("closing_day") or 0)
+    if not 1 <= closing_day <= 31:
+        return
+    period = str(work_date)[:7]
+    today = datetime.now(timezone.utc).date()
+    if today.strftime("%Y-%m") <= period:
+        return                      # the current month or a future one: nothing to enforce
+    # The cut-off falls in the month AFTER the one being written to.
+    year, month = int(period[:4]), int(period[5:7])
+    nxt_y, nxt_m = (year + 1, 1) if month == 12 else (year, month + 1)
+    try:
+        cutoff = _date(nxt_y, nxt_m, closing_day)
+    except ValueError:              # e.g. the 31st of a 30-day month
+        cutoff = _date(nxt_y, nxt_m, 28)
+    if today <= cutoff:
+        return
+    if can(actor, Cap.ATTENDANCE_LOCK):
+        return
+    raise HTTPException(
+        status_code=409,
+        detail=f"Attendance for {period} closed on {cutoff.isoformat()}. Ask HR to reopen "
+               f"the month if this day still needs correcting.")
+
+
 _PAYABLE_BY_STATUS = {
     AttendanceStatus.PRESENT.value: 1.0, AttendanceStatus.HALF_DAY.value: 0.5,
     AttendanceStatus.ON_LEAVE.value: 1.0, AttendanceStatus.ON_OD.value: 1.0,
@@ -271,6 +332,7 @@ async def mark_attendance(actor: dict, company_id: str, payload: dict) -> dict:
             status_code=409,
             detail=f"{work_date} is inside a locked attendance period; use an authorised "
                    f"unlock before changing it.")
+    await _assert_within_cutoff(actor, company_id, work_date)
 
     override = getattr(payload.get("override_status"), "value", payload.get("override_status"))
     actual_in = payload.get("actual_in")
@@ -420,6 +482,7 @@ async def request_regularization(actor: dict, company_id: str, payload: dict) ->
             status_code=409,
             detail=f"{work_date} is inside a locked attendance period — no regularisation "
                    f"without an authorised unlock (§7.9 BR).")
+    await _assert_within_cutoff(actor, company_id, work_date)
     # FRD §5 Regularisation: the allowed request window, and evidence where policy needs it.
     policy = await get_shift_policy(company_id)
     window = policy.get("regularisation_window_days")

@@ -6521,6 +6521,7 @@ from app.services import hrms_employee_master_service as master_mgmt  # noqa: E4
 from app.services import hrms_shift_service as shift_mgmt  # noqa: E402
 from app.services import hrms_policy_version_service as policy_versions  # noqa: E402
 from app.services import hrms_config_change_service as config_changes  # noqa: E402
+from app.services import hrms_attendance_simulation_service as att_sim  # noqa: E402
 
 
 # ── Employee Master ──
@@ -7175,3 +7176,26 @@ async def withdraw_config_change_request(
     _require(current_user, Cap.CONFIG_DRAFT)
     return await config_changes.withdraw(
         current_user, _company(current_user, company_id), request_no, body.comments or "")
+
+
+# ── Attendance policy simulation (FRD §23, §25, §29 "Rule Simulation") ──
+@router.post("/config/policies/{policy_code}/versions/{version_no}/simulate")
+async def simulate_attendance_policy(
+    policy_code: str,
+    version_no: int,
+    period: str = Query(..., description="YYYY-MM"),
+    employee_codes: Optional[str] = Query(None, description="Comma-separated; all if absent"),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """What a DRAFT attendance rule would have done to a month already recorded.
+
+    Re-judges real punches under the draft and reports only the days that move — the §25
+    "old result versus proposed new rule" comparison. Writes nothing.
+    """
+    _require(current_user, Cap.CONFIG_READ)
+    codes = [c.strip() for c in (employee_codes or "").split(",") if c.strip()] or None
+    return await att_sim.simulate_day_policy(
+        _company(current_user, company_id), period,
+        version_no=version_no, employee_codes=codes,
+        policy_code=policy_code.upper())

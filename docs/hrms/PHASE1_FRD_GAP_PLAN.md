@@ -34,8 +34,8 @@ what the §-text asks · **MISSING** = no implementation exists.
 | 12 (part) | Employee master finish (§3, §4) | **Done** — photograph as a first-class field; effective-dated changes registered as a scheduled job |
 | 2 | Policy version spine (§26, §28) | **Done** — definition/version/assignment collections, documented priority rule, `config.*` capability family, `/config/policies` endpoints, 28-check suite |
 | 3 | Config change approval flow (§27, §30) | **Done** — request/impact/simulate/submit/decide/activate, `config.*` gates, Approval Inbox screen, 29-check suite |
-| 4 | Attendance policy migration + designer | Not started |
-| 5 | Attendance simulation | Not started |
+| 4 | Attendance policy migration + designer (§23) | **Done** — ATT_DAY/ATT_REGULARISATION/ATT_CLOSURE on the spine, configurable half-day combination + LOP fraction, cut-off enforced, Policy Designer screen |
+| 5 | Attendance simulation (§23, §25) | **Done** — re-judges recorded punches under a draft, old-vs-proposed comparison, writes nothing; built into the designer |
 | 6 | Component lifecycle & proration | Not started |
 | 7 | Formula variables & versioning | Not started |
 | 8 | Payroll policy versioning | Not started |
@@ -43,7 +43,7 @@ what the §-text asks · **MISSING** = no implementation exists.
 | 10 | Configurable bank file | Not started |
 | 11 | Impact + config audit viewers | Not started |
 
-Phase 1 suite now **92/92**. Full HRMS suite: 94 modules pass; 10 fail on a missing `httpx`
+Phase 1 suite now **92/92**, attendance policy suite **27/27**. Full HRMS suite: 94 modules pass; 10 fail on a missing `httpx`
 in the backend venv and failed identically before this work began.
 
 ---
