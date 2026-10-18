@@ -3441,6 +3441,24 @@ COLL_POLICY_DEFINITIONS = "hrms_policy_definitions"
 COLL_POLICY_VERSIONS    = "hrms_policy_versions"
 COLL_POLICY_ASSIGNMENTS = "hrms_policy_assignments"
 
+# ── Phase 1 FRD §27 — the configuration change approval flow ──
+#
+# §27 puts seven stages between wanting a rule changed and the rule being live:
+#   Request -> Draft -> Impact Analysis -> Test/Simulation -> Approval -> Effective Dating
+#   -> Activation.
+#
+# The REQUEST is the governance wrapper; the DRAFT it points at is the real artefact (a
+# policy version today, a salary component or field definition later). Keeping them
+# separate is what lets the same flow govern several kinds of configuration without each
+# one growing its own approval columns -- and what lets a request record the business
+# REASON, which the artefact has no natural place for.
+#
+# Approvals are their own collection rather than an array on the request for the same
+# reason payroll's approval_trail is append-only: a decision is a fact about a moment, and
+# a later decision must not be able to rewrite an earlier one.
+COLL_CONFIG_CHANGE_REQUESTS = "hrms_config_change_requests"
+COLL_CONFIG_APPROVALS       = "hrms_config_approvals"
+
 MARITAL_STATUSES  = ("Single", "Married", "Divorced", "Widowed", "Separated")
 BANK_ACCOUNT_TYPES = ("Savings", "Current", "Salary", "NRE", "NRO")
 WEEKDAYS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
@@ -3667,6 +3685,54 @@ class PolicyAssignmentIn(BaseModel):
     scope: dict = {}                             # POLICY_SCOPE_KEYS -> [values]
     priority: int = 0
     active: bool = True
+
+
+class ConfigChangeStatus(str, Enum):
+    """§27's stages, as states a request moves through.
+
+    IMPACT_ANALYSED and SIMULATED are separate states rather than booleans because §27
+    lists them as distinct stages with distinct outputs, and because "has anyone actually
+    looked at what this breaks" is a question an approver needs answered before deciding,
+    not a flag somebody may or may not have set.
+    """
+    DRAFT           = "Draft"
+    IMPACT_ANALYSED = "Impact Analysed"
+    SIMULATED       = "Simulated"
+    PENDING         = "Pending Approval"
+    APPROVED        = "Approved"
+    REJECTED        = "Rejected"
+    RETURNED        = "Returned"       # sent back to the drafter with a comment
+    ACTIVE          = "Active"         # the change has been applied
+    WITHDRAWN       = "Withdrawn"
+
+
+# Which kinds of configuration this flow governs. A registry rather than a hard-coded list
+# so a later phase adds a kind by naming it here and giving it a handler in
+# hrms_config_change_service.ENTITY_HANDLERS -- the §27 machinery itself does not change.
+CONFIG_ENTITY_POLICY_VERSION = "policy_version"
+CONFIG_ENTITY_TYPES = (CONFIG_ENTITY_POLICY_VERSION,)
+
+AUDIT_CONFIG_REQUESTED = "configuration change requested"
+AUDIT_CONFIG_DECIDED   = "configuration change decided"
+AUDIT_CONFIG_ACTIVATED = "configuration change activated"
+ENTITY_CONFIG_CHANGE = "config_change_request"
+
+
+class ConfigChangeRequestIn(BaseModel):
+    """§28 CONFIG_CHANGE_REQUEST. `reason` is mandatory in the service, not here: §27's
+    Request stage is "records requested change and BUSINESS REASON", and a blank reason
+    makes the audit trail §30 asks for worthless."""
+    entity_type: str = CONFIG_ENTITY_POLICY_VERSION
+    entity_code: str                              # e.g. the policy code
+    version_no: Optional[int] = None
+    title: Optional[str] = None
+    reason: Optional[str] = None
+    effective_from: Optional[str] = None
+
+
+class ConfigDecisionIn(BaseModel):
+    action: str                                   # approve / reject / return
+    comments: Optional[str] = None
 
 
 class PhotographIn(BaseModel):
@@ -10100,6 +10166,13 @@ HRMS_INDEXES.extend([
      {"name": "by_policy_status_effective"}),
     (COLL_POLICY_ASSIGNMENTS, [("company_id", 1), ("policy_code", 1), ("version_no", 1)],
      {"name": "by_policy_version"}),
+    # ── §27 change approval flow ──
+    (COLL_CONFIG_CHANGE_REQUESTS, [("company_id", 1), ("request_no", 1)],
+     {"unique": True, "name": "uniq_config_request_no"}),
+    (COLL_CONFIG_CHANGE_REQUESTS, [("company_id", 1), ("status", 1), ("created_at", -1)],
+     {"name": "by_status_created"}),
+    (COLL_CONFIG_APPROVALS, [("company_id", 1), ("request_no", 1), ("decided_at", -1)],
+     {"name": "by_request_decided"}),
     (COLL_PAYROLL_CARRY_FORWARD, [("company_id", 1), ("target_period", 1), ("status", 1)],
      {"name": "by_target_status"}),
     (COLL_PAYSLIP_TEMPLATE_VERSIONS, [("company_id", 1), ("version", 1)],
@@ -10113,3 +10186,4 @@ HRMS_INDEXES.extend([
      {"name": "by_period_employee"}),
 ])
 ID_FORMATS["payment_batch"] = ("PAYB", True, 3)   # PAYB-2026-001
+ID_FORMATS["config_change"] = ("CFG", True, 3)    # CFG-2026-001

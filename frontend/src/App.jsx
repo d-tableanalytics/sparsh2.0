@@ -152,6 +152,7 @@ import PayrollBoard from './features/hrms/payroll/PayrollBoard';
 import PipBoard from './features/hrms/pip/PipBoard';
 // ── SM-HR-052 — Audit Viewer ──
 import AuditViewer from './features/hrms/admin/AuditViewer';
+import ConfigApprovalInbox from './features/hrms/admin/ConfigApprovalInbox';
 // ── SM-HR-051 — User / Role / Permission Administration ──
 import RoleAccessAdmin from './features/hrms/admin/RoleAccessAdmin';
 import RolesPermissions from './features/hrms/admin/RolesPermissions';
@@ -490,6 +491,10 @@ const AppRoutes = () => {
         {/* SM-HR-052 — Audit Viewer. The read API and Cap.AUDIT_READ gate already existed;
             this is the first screen to call it. */}
         <Route path="audit"                element={<AuditViewer />} />
+        {/* FRD §29 — Configuration Approval Inbox. Not advertised in the sidebar, matching
+            the 2026-09-23 decision that governance screens keep their routes without a
+            nav entry; reachable at /hrms/config-approvals. */}
+        <Route path="config-approvals"     element={<ConfigApprovalInbox />} />
         {/* SM-HR-051 — User / Role / Permission Administration. */}
         <Route path="access"               element={<RoleAccessAdmin />} />
         {/* Dynamic Roles & Permissions — MD / Super Admin / Admin decide who does what. */}

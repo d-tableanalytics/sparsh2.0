@@ -102,6 +102,36 @@ export const saveEmployeePhotograph = (userId, payload, params) =>
   api.put(`/hrms/employees/${userId}/photograph`, payload, { params });
 export const deleteEmployeePhotograph = (userId, params) =>
   api.delete(`/hrms/employees/${userId}/photograph`, { params });
+// ── Configuration: versioned policies and the §27 change approval flow ──
+export const listPolicyDefinitions = (params) => api.get('/hrms/config/policies', { params });
+export const savePolicyDefinition = (payload, params) =>
+  api.put('/hrms/config/policies', payload, { params });
+export const listPolicyVersions = (code, params) =>
+  api.get(`/hrms/config/policies/${code}/versions`, { params });
+export const savePolicyVersion = (code, payload, params) =>
+  api.put(`/hrms/config/policies/${code}/versions`, payload, { params });
+export const setPolicyVersionStatus = (code, versionNo, payload, params) =>
+  api.post(`/hrms/config/policies/${code}/versions/${versionNo}/status`, payload, { params });
+export const assignPolicyScope = (code, versionNo, payload, params) =>
+  api.put(`/hrms/config/policies/${code}/versions/${versionNo}/scope`, payload, { params });
+export const resolvePolicyForEmployee = (code, params) =>
+  api.get(`/hrms/config/policies/${code}/resolve`, { params });
+
+export const listConfigChangeRequests = (params) =>
+  api.get('/hrms/config/change-requests', { params });
+export const createConfigChangeRequest = (payload, params) =>
+  api.post('/hrms/config/change-requests', payload, { params });
+export const getConfigChangeRequest = (requestNo, params) =>
+  api.get(`/hrms/config/change-requests/${requestNo}`, { params });
+export const analyseConfigChangeImpact = (requestNo, params) =>
+  api.post(`/hrms/config/change-requests/${requestNo}/impact`, null, { params });
+export const submitConfigChangeRequest = (requestNo, params) =>
+  api.post(`/hrms/config/change-requests/${requestNo}/submit`, null, { params });
+export const decideConfigChangeRequest = (requestNo, payload, params) =>
+  api.post(`/hrms/config/change-requests/${requestNo}/decision`, payload, { params });
+export const activateConfigChangeRequest = (requestNo, params) =>
+  api.post(`/hrms/config/change-requests/${requestNo}/activate`, null, { params });
+
 /** A short-lived signed link — re-fetch rather than caching the URL. */
 export const getEmployeePhotographUrl = (userId, params) =>
   api.get(`/hrms/employees/${userId}/photograph`, { params });

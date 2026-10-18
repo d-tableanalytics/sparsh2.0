@@ -6510,6 +6510,7 @@ from fastapi.responses import Response as _Response  # noqa: E402
 
 from app.models.hrms import (  # noqa: E402
     EmployeeMasterListsIn, FieldDefinitionIn, FieldStatusIn, PaymentBatchIn,
+    ConfigChangeRequestIn, ConfigDecisionIn,
     PhotographIn, PolicyAssignmentIn, PolicyDefinitionIn, PolicyVersionIn,
     PolicyVersionStatusIn,
     PaymentStatusImportIn, PaymentStatusIn, PayrollPolicyIn, PayrollRemarksIn,
@@ -6519,6 +6520,7 @@ from app.services import hrms_disbursal_service as disbursal_mgmt  # noqa: E402
 from app.services import hrms_employee_master_service as master_mgmt  # noqa: E402
 from app.services import hrms_shift_service as shift_mgmt  # noqa: E402
 from app.services import hrms_policy_version_service as policy_versions  # noqa: E402
+from app.services import hrms_config_change_service as config_changes  # noqa: E402
 
 
 # ── Employee Master ──
@@ -7061,3 +7063,115 @@ async def resolve_policy_for_employee(
     version = await policy_versions.resolve(company, policy_code, profile, on_date)
     return {"policy_code": policy_code.upper(), "employee_code": employee_code,
             "on_date": on_date, "version": version}
+
+
+# ── Configuration change approval flow (FRD §27, §29, §30) ──
+@router.get("/config/change-requests")
+async def list_config_change_requests(
+    status: Optional[str] = Query(None),
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """The Configuration Approval Inbox (FRD §29). Filter by status to see what is waiting."""
+    _require(current_user, Cap.CONFIG_READ)
+    return await config_changes.list_requests(
+        _company(current_user, company_id), status=status)
+
+
+@router.post("/config/change-requests", status_code=201)
+async def create_config_change_request(
+    body: ConfigChangeRequestIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """FRD §27 Request — records the requested change and its business reason."""
+    _require(current_user, Cap.CONFIG_DRAFT)
+    return await config_changes.create_request(
+        current_user, _company(current_user, company_id), body.model_dump())
+
+
+@router.get("/config/change-requests/{request_no}")
+async def get_config_change_request(
+    request_no: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """One request with its decision trail — the Configuration Audit Viewer's row (§29)."""
+    _require(current_user, Cap.CONFIG_READ)
+    return await config_changes.get_request(
+        _company(current_user, company_id), request_no)
+
+
+@router.post("/config/change-requests/{request_no}/impact")
+async def analyse_config_change_impact(
+    request_no: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """FRD §27 Impact Analysis — which employees, which periods, and whether the change is
+    retroactive. Stored on the request so the approver reads what the drafter saw."""
+    _require(current_user, Cap.CONFIG_DRAFT)
+    return await config_changes.analyse_impact(
+        current_user, _company(current_user, company_id), request_no)
+
+
+@router.post("/config/change-requests/{request_no}/simulation")
+async def record_config_change_simulation(
+    request_no: str,
+    body: dict,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """FRD §27 Test/Simulation — record that the rule was previewed, and what it showed."""
+    _require(current_user, Cap.CONFIG_DRAFT)
+    return await config_changes.record_simulation(
+        current_user, _company(current_user, company_id), request_no, body or {})
+
+
+@router.post("/config/change-requests/{request_no}/submit")
+async def submit_config_change_request(
+    request_no: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """Hand it to an approver. Refused until the impact analysis has run."""
+    _require(current_user, Cap.CONFIG_DRAFT)
+    return await config_changes.submit(
+        current_user, _company(current_user, company_id), request_no)
+
+
+@router.post("/config/change-requests/{request_no}/decision")
+async def decide_config_change_request(
+    request_no: str,
+    body: ConfigDecisionIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """FRD §27 Approval — approve, reject or return. Never the person who raised it."""
+    _require(current_user, Cap.CONFIG_APPROVE)
+    return await config_changes.decide(
+        current_user, _company(current_user, company_id), request_no, body.model_dump())
+
+
+@router.post("/config/change-requests/{request_no}/activate")
+async def activate_config_change_request(
+    request_no: str,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    """FRD §27 Activation — the only route from an approved change to live configuration."""
+    _require(current_user, Cap.CONFIG_APPROVE)
+    return await config_changes.activate(
+        current_user, _company(current_user, company_id), request_no)
+
+
+@router.post("/config/change-requests/{request_no}/withdraw")
+async def withdraw_config_change_request(
+    request_no: str,
+    body: ConfigDecisionIn,
+    company_id: Optional[str] = Query(None),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, Cap.CONFIG_DRAFT)
+    return await config_changes.withdraw(
+        current_user, _company(current_user, company_id), request_no, body.comments or "")

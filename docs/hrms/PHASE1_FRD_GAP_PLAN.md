@@ -33,7 +33,7 @@ what the §-text asks · **MISSING** = no implementation exists.
 | 1 | Payroll approval matrix (§12, §17, §20) | **Done** — `Cap.PAYROLL_CHECK`, `PayrollRunStatus.CHECKED`, `check_run`/`decide_run` split, configurable matrix, `/payroll/runs/{period}/check`, three-stage UI |
 | 12 (part) | Employee master finish (§3, §4) | **Done** — photograph as a first-class field; effective-dated changes registered as a scheduled job |
 | 2 | Policy version spine (§26, §28) | **Done** — definition/version/assignment collections, documented priority rule, `config.*` capability family, `/config/policies` endpoints, 28-check suite |
-| 3 | Config change approval flow | Not started |
+| 3 | Config change approval flow (§27, §30) | **Done** — request/impact/simulate/submit/decide/activate, `config.*` gates, Approval Inbox screen, 29-check suite |
 | 4 | Attendance policy migration + designer | Not started |
 | 5 | Attendance simulation | Not started |
 | 6 | Component lifecycle & proration | Not started |
