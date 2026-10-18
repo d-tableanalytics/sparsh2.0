@@ -278,6 +278,39 @@ async def main() -> int:
           r1["tds"] == 1000 and r1["reimbursements"] == 500
           and r1["adjustments"][0]["reason"] == "Spot award")
     check("net = 50,000 + 500 + 750 - 200 - 1,000 = 50,050", r1["net_pay"] == 50050)
+
+    # -- FRD §18: the basis is FROZEN onto the record, and the run names the lock it used --
+    basis = r1.get("basis") or []
+    check("every in-service day is recorded in the basis, not just the totals",
+          len(basis) == r1["days_in_period"]
+          and {b["date"] for b in basis} == {f"{P}-{d:02d}" for d in range(1, 29)})
+    check("the basis sums back to the payable and LOP days it produced",
+          round(sum(b["lop"] for b in basis), 2) == r1["lop_days"])
+    r2b = recs["E2"].get("basis") or []
+    check("E2's two absences are named in the basis, with their dates",
+          sorted(b["date"] for b in r2b if b["bucket"] == "absent")
+          == [f"{P}-03", f"{P}-04"])
+    run_now = await PR.get_run(HR, CO, P)
+    check("the run records which attendance lock it consumed",
+          (run_now.get("attendance_basis") or {}).get("locked") is True
+          and not run_now.get("attendance_basis_stale"))
+
+    # Unlock the month under a calculated run: the figures no longer rest on a locked
+    # snapshot, so §18 says the run may not go forward until it is recalculated.
+    store[M.COLL_ATTENDANCE_LOCKS].docs.clear()
+    stale = await PR.get_run(HR, CO, P)
+    check("unlocking attendance marks the calculated run stale",
+          bool(stale.get("attendance_basis_stale")))
+    await expect("a stale run cannot be submitted", PR.submit_run(HR, CO, P, {}),
+                 409, "unlocked")
+    store[M.COLL_ATTENDANCE_LOCKS].docs.append(
+        {"company_id": CO, "period": P, "status": "Locked"})
+    await PR.calculate_payroll(HR, CO, P)
+    check("recalculating against the new lock clears it",
+          not (await PR.get_run(HR, CO, P)).get("attendance_basis_stale"))
+    recs = {r["employee_code"]: r for r in store[M.COLL_PAYROLL_RECORDS].docs}
+    r1 = recs["E1"]
+
     await expect("checker checks before submission", PR.check_run(
         CHECKER, CO, P, {"action": "check"}), 409, "submitted")
     await PR.submit_run(HR, CO, P, {})

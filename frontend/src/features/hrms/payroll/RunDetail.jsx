@@ -202,6 +202,17 @@ export const RunDetailModal = ({ period, scope, can, onClose, onDone, showSucces
                 </p>
               </div>
             )}
+            {/* FRD §18 — the run was calculated against a locked month that has since
+                moved. Shown while they are looking at it, not only when Submit is clicked. */}
+            {runInfo.attendance_basis_stale && (
+              <div className="rounded-lg px-3.5 py-2.5 flex items-start gap-2 bg-[var(--accent-red-bg)]">
+                <AlertTriangle size={16} className="shrink-0 mt-0.5 text-[var(--accent-red)]" />
+                <p className="text-[12.5px] text-[var(--text-main)]">
+                  <span className="font-bold">This payroll no longer matches attendance.</span>{' '}
+                  {runInfo.attendance_basis_stale} Recalculate before submitting it.
+                </p>
+              </div>
+            )}
             {calcError && (
               <div className="rounded-lg px-3.5 py-2.5 flex items-start gap-2 bg-[var(--accent-red-bg)]">
                 <AlertTriangle size={16} className="shrink-0 mt-0.5 text-[var(--accent-red)]" />

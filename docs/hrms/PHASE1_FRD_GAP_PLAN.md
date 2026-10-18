@@ -39,11 +39,11 @@ what the §-text asks · **MISSING** = no implementation exists.
 | 6 | Component lifecycle & proration | Not started |
 | 7 | Formula variables & versioning | Not started |
 | 8 | Payroll policy versioning | Not started |
-| 9 | Attendance snapshot | Not started |
+| 9 | Attendance snapshot (§8, §18) | **Done** — per-day basis frozen onto each record, lock identity on the run, submit refused when the basis moved, stale banner |
 | 10 | Configurable bank file | Not started |
 | 11 | Impact + config audit viewers | Not started |
 
-Phase 1 suite now **85/85**. Full HRMS suite: 94 modules pass; 10 fail on a missing `httpx`
+Phase 1 suite now **92/92**. Full HRMS suite: 94 modules pass; 10 fail on a missing `httpx`
 in the backend venv and failed identically before this work began.
 
 ---

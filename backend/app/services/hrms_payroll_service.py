@@ -734,6 +734,24 @@ async def _payable_days(company_id: str, employee_code: str, period: str,
     leave_days = sum(1 for d in days if d[3] == "leave")
     in_service = days_in_period - out_of_service
     payable = round(in_service - lop, 2)
+
+    # FRD §18: "Payroll must use the LOCKED attendance snapshot, not live editable
+    # attendance." The month lock already stops attendance being written, so the figures
+    # above were correct when they were computed -- but nothing RECORDED what they were
+    # computed from, so an unlock, an edit and a recalculation would move an employee's pay
+    # with no trace of which basis produced which number. This is that trace: one entry per
+    # in-service day, exactly as the sum above counted it, sandwich rule included.
+    basis = []
+    cursor = 0
+    for d in range(1, days_in_period + 1):
+        ds = f"{period}-{d:02d}"
+        if (doj and ds < doj) or (lwd and ds > lwd):
+            continue
+        kind, lop_share, present_share, bucket = days[cursor]
+        cursor += 1
+        basis.append({"date": ds, "kind": kind, "bucket": bucket,
+                      "lop": round(lop_share, 2), "present": round(present_share, 2)})
+
     return {
         "days_in_period": days_in_period, "payable_days": payable,
         "lop_days": round(lop, 2), "present_days": round(present, 2),
@@ -741,6 +759,7 @@ async def _payable_days(company_id: str, employee_code: str, period: str,
         "working_days": (calendar or {}).get("working_days"),
         "out_of_service_days": out_of_service, "unrecorded_days": unrecorded,
         "pending_days": pending, "sandwiched_off_days": sandwiched,
+        "basis": basis,
     }
 
 
@@ -798,6 +817,10 @@ async def get_run(actor: dict, company_id: str, period: str) -> dict:
         {"company_id": str(company_id), "period": period})
     run["attendance_locked"] = (lock or {}).get("status") == "Locked"
     run["policy"] = await get_payroll_policy(company_id)
+    # FRD §18 — told to the screen BEFORE anyone clicks Submit, rather than only refusing
+    # the click. A maker who unlocked the month to fix one day should see that the run is
+    # stale while they are looking at it.
+    run["attendance_basis_stale"] = await attendance_basis_moved(company_id, period, run)
     return run
 
 
@@ -862,6 +885,16 @@ async def calculate_payroll(actor: dict, company_id: str, period: str) -> dict:
     lock = await get_collection(COLL_ATTENDANCE_LOCKS).find_one(
         {"company_id": str(company_id), "period": period})
     attendance_locked = (lock or {}).get("status") == "Locked"
+    # The identity of the lock this run consumed. `locked_at` is the version marker: HR
+    # unlocking and re-locking produces a NEW stamp on the same row, which is what lets
+    # submit_run below notice that the basis moved under a calculated run.
+    attendance_basis_ref = {
+        "locked": attendance_locked,
+        "lock_id": str((lock or {}).get("_id") or "") or None,
+        "locked_at": (lock or {}).get("locked_at"),
+        "locked_by": (lock or {}).get("locked_by"),
+        "locked_by_name": (lock or {}).get("locked_by_name"),
+    }
     if policy.get("require_attendance_lock") and not attendance_locked:
         raise HTTPException(
             status_code=409,
@@ -992,9 +1025,7 @@ async def calculate_payroll(actor: dict, company_id: str, period: str) -> dict:
         {"_id": run["_id"]},
         {"$set": {"status": PayrollRunStatus.CALCULATED.value, "eligible_count": len(profiles),
                   "calculated_at": now, "updated_at": now, "totals": totals,
-                  "attendance_basis": {"locked": attendance_locked,
-                                       "locked_at": (lock or {}).get("locked_at"),
-                                       "locked_by": (lock or {}).get("locked_by")}},
+                  "attendance_basis": attendance_basis_ref},
          "$push": {"approval_trail": _trail(actor, "Maker", "Calculated",
                                             f"{len(profiles)} employee(s)")}},
     )
@@ -1233,10 +1264,43 @@ async def _store_run_totals(company_id: str, period: str) -> None:
                   "updated_at": datetime.now(timezone.utc)}})
 
 
+async def attendance_basis_moved(company_id: str, period: str, run: dict) -> Optional[str]:
+    """Has the attendance lock changed since this run was calculated? The reason, or None.
+
+    FRD §18 requires payroll to rest on the LOCKED attendance snapshot. The lock gate at
+    calculate time is only half of that promise: HR can unlock a month afterwards, correct
+    a day and leave a calculated run quietly resting on figures that no longer match the
+    attendance it claims to come from. Comparing the stored lock identity against the
+    current one is what closes it.
+
+    Returns a sentence for the operator rather than a bool, because WHICH way it moved
+    (unlocked, re-locked, or locked for a different reason) is what tells them what to do.
+    """
+    basis = run.get("attendance_basis") or {}
+    if not basis.get("locked"):
+        return None            # never claimed a locked basis; the calculate gate owns this
+    lock = await get_collection(COLL_ATTENDANCE_LOCKS).find_one(
+        {"company_id": str(company_id), "period": period})
+    if not lock or lock.get("status") != "Locked":
+        return (f"Attendance for {period} has been unlocked since this payroll was "
+                f"calculated, so the figures no longer rest on a locked month.")
+    if basis.get("lock_id") and str(lock.get("_id")) != basis["lock_id"]:
+        return (f"Attendance for {period} was re-locked after this payroll was calculated.")
+    if basis.get("locked_at") and lock.get("locked_at") != basis["locked_at"]:
+        return (f"Attendance for {period} was unlocked and locked again after this payroll "
+                f"was calculated, so a day may have changed.")
+    return None
+
+
 async def submit_run(actor: dict, company_id: str, period: str, payload: dict) -> dict:
     """FRD §12 stage 7: the maker submits the batch for approval. Critical exceptions block
-    it (§25 Failure handling: payroll cannot be approved while critical errors remain)."""
+    it (§25 Failure handling: payroll cannot be approved while critical errors remain), and
+    so does an attendance basis that has moved since the run was calculated (§18)."""
     run = await _get_run(company_id, period)
+    moved = await attendance_basis_moved(company_id, period, run)
+    if moved:
+        raise HTTPException(status_code=409,
+                            detail=f"{moved} Recalculate {period} before submitting it.")
     if run["status"] not in (PayrollRunStatus.CALCULATED.value, PayrollRunStatus.RETURNED.value,
                              PayrollRunStatus.REJECTED.value):
         raise HTTPException(status_code=409,
